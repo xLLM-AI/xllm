@@ -1,8 +1,8 @@
 import argparse
 
 import tilelang
-from tilelang import language as T
 import torch
+from tilelang import language as T
 
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 from .utils import detect_vec_core_num
@@ -43,9 +43,7 @@ def _prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
 
 
-def _prepare_chunk_offsets(
-    cu_seqlens: torch.LongTensor, chunk_size: int
-) -> torch.LongTensor:
+def _prepare_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
     lens = _prepare_lens(cu_seqlens)
     nt_per_seq = (lens + chunk_size - 1) // chunk_size
     return torch.cat(
@@ -105,12 +103,8 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
             total_pairs = N_sym * H
             pairs_per_core = T.ceildiv(total_pairs, total_tasks)
             pair_start = cid * pairs_per_core
-            pairs_left = T.if_then_else(
-                total_pairs > pair_start, total_pairs - pair_start, 0
-            )
-            num_pairs = T.if_then_else(
-                pairs_left < pairs_per_core, pairs_left, pairs_per_core
-            )
+            pairs_left = T.if_then_else(total_pairs > pair_start, total_pairs - pair_start, 0)
+            num_pairs = T.if_then_else(pairs_left < pairs_per_core, pairs_left, pairs_per_core)
 
             h_state_ub = T.alloc_ub([2, K // 2, V_half], input_dtype)
             h_state_ub_float = T.alloc_ub([2, K // 2, V_half], accum_dtype)
@@ -160,14 +154,10 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                         next_pid = (i + 1) % 2
                         chunk_start_next = bos + (i + 1) * bt
 
-                        chunk_len = T.if_then_else(
-                            i * bt + bt > T_len, T_len - i * bt, bt
-                        )
+                        chunk_len = T.if_then_else(i * bt + bt > T_len, T_len - i * bt, bt)
 
                         if i + 1 < NT_i:
-                            next_len = T.if_then_else(
-                                (i + 1) * bt + bt > T_len, T_len - (i + 1) * bt, bt
-                            )
+                            next_len = T.if_then_else((i + 1) * bt + bt > T_len, T_len - (i + 1) * bt, bt)
                             T.copy(
                                 w[
                                     chunk_start_next : chunk_start_next + next_len,
@@ -207,9 +197,7 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                         # k @ v_new
                         for j in T.serial(2):
                             T.wait_cross_flag(SEM_VNEW_V2C + j)
-                            T.copy(
-                                ws_vnew[i_n, i_h, j, :chunk_len, :], v_new_l1[j, :, :]
-                            )
+                            T.copy(ws_vnew[i_n, i_h, j, :chunk_len, :], v_new_l1[j, :, :])
                             T.set_flag("mte2", "m", 4)
                             T.wait_flag("mte2", "m", 4)
                             T.gemm_v0(
@@ -274,9 +262,7 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                         g_start = bos + i * bt
                         g_start_next = bos + (i + 1) * bt
 
-                        chunk_len = T.if_then_else(
-                            i * bt + bt > T_len, T_len - i * bt, bt
-                        )
+                        chunk_len = T.if_then_else(i * bt + bt > T_len, T_len - i * bt, bt)
                         vec_chunk_len = T.if_then_else(
                             vid == 0,
                             T.min(bt // 2, chunk_len),
@@ -286,26 +272,19 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
 
                         # v[t+1], g[t+1]
                         if i + 1 < NT_i:
-                            next_chunk_len = T.if_then_else(
-                                (i + 1) * bt + bt > T_len, T_len - (i + 1) * bt, bt
-                            )
-                            next_vec_start_in_chunk = T.if_then_else(
-                                vid == 0, 0, bt // 2
-                            )
+                            next_chunk_len = T.if_then_else((i + 1) * bt + bt > T_len, T_len - (i + 1) * bt, bt)
+                            next_vec_start_in_chunk = T.if_then_else(vid == 0, 0, bt // 2)
                             next_vec_chunk_len = T.if_then_else(
                                 vid == 0,
                                 T.min(bt // 2, next_chunk_len),
                                 T.max(next_chunk_len - bt // 2, 0),
                             )
-                            next_vec_global_start = (
-                                g_start_next + next_vec_start_in_chunk
-                            )
+                            next_vec_global_start = g_start_next + next_vec_start_in_chunk
 
                             for j in T.serial(2):
                                 T.copy(
                                     v[
-                                        next_vec_global_start : next_vec_global_start
-                                        + next_vec_chunk_len,
+                                        next_vec_global_start : next_vec_global_start + next_vec_chunk_len,
                                         i_h,
                                         j * V_half : (j + 1) * V_half,
                                     ],
@@ -315,8 +294,7 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                                 T.copy(
                                     g[
                                         i_h,
-                                        next_vec_global_start : next_vec_global_start
-                                        + next_vec_chunk_len,
+                                        next_vec_global_start : next_vec_global_start + next_vec_chunk_len,
                                     ],
                                     g_chunk_ub[next_pid, :],
                                 )
@@ -331,9 +309,7 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                             T.wait_flag("v", "mte3", 11)
                             T.copy(
                                 h_state_ub[j, :, :],
-                                ws_h[
-                                    i_n, i_h, j, K // 2 * vid : K // 2 * vid + K // 2, :
-                                ],
+                                ws_h[i_n, i_h, j, K // 2 * vid : K // 2 * vid + K // 2, :],
                             )
                             T.set_cross_flag("MTE3", SEM_H_V2C + j)
                             # save h[t]
@@ -368,9 +344,7 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                             T.wait_flag("mte2", "v", 4)
                             T.tile.sub(g_exp_ub, g_exp_ub, g_chunk_ub[pid, :])
                             T.copy(g_exp_ub, g_exp_ub_pad[0 : bt // 2])
-                            T.tile.compare(
-                                g_mask_ub_pad, g_exp_ub_pad, T.float32(0), "LE"
-                            )
+                            T.tile.compare(g_mask_ub_pad, g_exp_ub_pad, T.float32(0), "LE")
                             T.tile.select(
                                 g_exp_ub_pad,
                                 g_mask_ub_pad,
@@ -410,17 +384,13 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                             )
 
                             if save_new_value:
-                                T.copy(
-                                    v_chunk_ub_float[j, :, :], v_chunk_ub[pid, j, :, :]
-                                )
+                                T.copy(v_chunk_ub_float[j, :, :], v_chunk_ub[pid, j, :, :])
                                 T.set_flag("v", "mte3", 6)
                                 T.wait_flag("v", "mte3", 6)
                                 T.copy(
                                     v_chunk_ub[pid, j, :vec_chunk_len, :],
                                     v_new[
-                                        g_start + vec_start_in_chunk : g_start
-                                        + vec_start_in_chunk
-                                        + vec_chunk_len,
+                                        g_start + vec_start_in_chunk : g_start + vec_start_in_chunk + vec_chunk_len,
                                         i_h,
                                         j * V_half : j * V_half + V_half,
                                     ],
@@ -461,9 +431,7 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                             # h += k @ v_new
                             T.wait_cross_flag(SEM_HUPD_C2V + j)
                             T.copy(
-                                ws_hupd[
-                                    i_n, i_h, j, K // 2 * vid : K // 2 * vid + K // 2, :
-                                ],
+                                ws_hupd[i_n, i_h, j, K // 2 * vid : K // 2 * vid + K // 2, :],
                                 hupd_ub_float[j, :, :],
                             )
                             T.set_flag("mte2", "v", 9)
@@ -527,9 +495,7 @@ class ChunkGatedDeltaRuleFwdHKernel(TilelangKernel):
     @staticmethod
     def generate_source(H: int, Hg: int, K: int, V: int, dtype: str) -> str:
         if dtype != DEFAULT_DTYPE:
-            raise ValueError(
-                f"chunk_gated_delta_rule_fwd_h only supports dtype={DEFAULT_DTYPE}, got {dtype}"
-            )
+            raise ValueError(f"chunk_gated_delta_rule_fwd_h only supports dtype={DEFAULT_DTYPE}, got {dtype}")
         tilelang.disable_cache()
         tilelang_kernel = _build_chunk_gated_delta_rule_fwd_h_kernel(
             H=H,
@@ -596,9 +562,7 @@ def chunk_gated_delta_rule_fwd_h(
         H = u.shape[-2]
         V = u.shape[-1]
         N = B
-        cu_seqlens = torch.tensor(
-            [i * T for i in range(B + 1)], dtype=torch.int32, device=k.device
-        )
+        cu_seqlens = torch.tensor([i * T for i in range(B + 1)], dtype=torch.int32, device=k.device)
         k_flat = k.reshape(B * T, Hg, K)
         w_flat = w.reshape(B * T, H, K)
         u_flat = u.reshape(B * T, H, V)
@@ -685,25 +649,17 @@ def _ref_chunk_gated_delta_rule_fwd_h(
     w = w.float().squeeze(0)  # [T_total, H, K]
     u = u.float().squeeze(0)  # [T_total, H, V]
     g = g.float().squeeze(0) if g is not None else None  # [T_total, H]
-    initial_state = (
-        initial_state.float().squeeze(0) if initial_state is not None else None
-    )  # [N, H, K, V]
+    initial_state = initial_state.float().squeeze(0) if initial_state is not None else None  # [N, H, K, V]
 
     T_total, Hg, K = k.shape
     _, H, V = u.shape
     N = len(cu_seqlens) - 1
 
-    NT_total = sum(
-        [(int(cu_seqlens[i + 1]) - int(cu_seqlens[i]) + BT - 1) // BT for i in range(N)]
-    )
+    NT_total = sum([(int(cu_seqlens[i + 1]) - int(cu_seqlens[i]) + BT - 1) // BT for i in range(N)])
 
     h = torch.zeros(NT_total, H, K, V, dtype=torch.float32, device=k.device)
     v_new = torch.zeros(T_total, H, V, dtype=torch.float32, device=k.device)
-    final_state = (
-        torch.zeros(N, H, K, V, dtype=torch.float32, device=k.device)
-        if output_final_state
-        else None
-    )
+    final_state = torch.zeros(N, H, K, V, dtype=torch.float32, device=k.device) if output_final_state else None
 
     chunk_offset = 0
     for i_n in range(N):
@@ -736,14 +692,7 @@ def _ref_chunk_gated_delta_rule_fwd_h(
                 if g is not None:
                     g_chunk = g[bos + t_start : bos + t_end, i_h]
                     g_last = g_chunk[-1].item()
-                    v_n = (
-                        v_n
-                        * torch.exp(
-                            torch.where(
-                                g_last - g_chunk <= 0, g_last - g_chunk, float("-inf")
-                            )
-                        )[:, None]
-                    )
+                    v_n = v_n * torch.exp(torch.where(g_last - g_chunk <= 0, g_last - g_chunk, float("-inf")))[:, None]
                     h_state = h_state * torch.exp(torch.tensor(g_last, device=k.device))
 
                 h_state = h_state + torch.matmul(k_chunk.transpose(-1, -2), v_n)
@@ -787,26 +736,18 @@ def test_chunk_gated_delta_rule(
 
     T_total = sum(seqlens)
     N = len(seqlens)
-    cu_seqlens = torch.tensor(
-        [0] + [sum(seqlens[: i + 1]) for i in range(len(seqlens))], dtype=torch.int32
-    ).npu()
+    cu_seqlens = torch.tensor([0] + [sum(seqlens[: i + 1]) for i in range(len(seqlens))], dtype=torch.int32).npu()
 
     torch.manual_seed(41)
     k = torch.randn(1, T_total, Hg, K, dtype=dtype).npu() * INPUT_SCALE
     w = torch.randn(1, T_total, H, K, dtype=dtype).npu() * INPUT_SCALE
     u = torch.randn(1, T_total, H, V, dtype=dtype).npu() * INPUT_SCALE
     g = (
-        _chunk_local_cumsum_cpu(
-            torch.randn((1, T_total, H), dtype=torch.float32) * GATE_SCALE, CHUNK_SIZE
-        ).npu()
+        _chunk_local_cumsum_cpu(torch.randn((1, T_total, H), dtype=torch.float32) * GATE_SCALE, CHUNK_SIZE).npu()
         if use_g
         else None
     )
-    initial_state = (
-        torch.randn(1, N, H, K, V, dtype=torch.float32).npu() * INPUT_SCALE
-        if use_initial_state
-        else None
-    )
+    initial_state = torch.randn(1, N, H, K, V, dtype=torch.float32).npu() * INPUT_SCALE if use_initial_state else None
 
     torch.npu.synchronize()
 
@@ -838,9 +779,7 @@ def test_chunk_gated_delta_rule(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Test chunk gated delta rule (varlen mode only: [1, T_total])"
-    )
+    parser = argparse.ArgumentParser(description="Test chunk gated delta rule (varlen mode only: [1, T_total])")
     parser.add_argument(
         "--use_g",
         type=lambda x: x.lower() == "true",
@@ -860,9 +799,7 @@ if __name__ == "__main__":
         help="Sequence lengths for varlen mode (comma-separated)",
     )
     parser.add_argument("--H", type=int, default=32, help="Number of heads")
-    parser.add_argument(
-        "--Hg", type=int, default=16, help="Number of grouped heads (must be <= H)"
-    )
+    parser.add_argument("--Hg", type=int, default=16, help="Number of grouped heads (must be <= H)")
     parser.add_argument("--K", type=int, default=128, help="Key dimension")
     parser.add_argument("--V", type=int, default=128, help="Value dimension")
     args = parser.parse_args()

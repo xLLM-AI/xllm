@@ -74,10 +74,7 @@ def lightning_indexer(
         next_tokens,
         return_value,
     )
-    raise NotImplementedError(
-        "lightning_indexer has no CUDA kernel; sparse attention on CUDA is not "
-        "supported yet"
-    )
+    raise NotImplementedError("lightning_indexer has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
 def lightning_indexer_out(
@@ -115,10 +112,7 @@ def lightning_indexer_out(
         sparse_indices_out,
         sparse_values_out,
     )
-    raise NotImplementedError(
-        "lightning_indexer_out has no CUDA kernel; sparse attention on CUDA is "
-        "not supported yet"
-    )
+    raise NotImplementedError("lightning_indexer_out has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
 def scatter_nd_update(
@@ -134,10 +128,7 @@ def scatter_nd_update(
         updates: Rows written into ``value``.
     """
     del value, indices, updates
-    raise NotImplementedError(
-        "scatter_nd_update has no CUDA kernel; sparse attention on CUDA is not "
-        "supported yet"
-    )
+    raise NotImplementedError("scatter_nd_update has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
 def sparse_flash_attention(
@@ -194,8 +185,7 @@ def sparse_flash_attention(
         sparse_mode,
     )
     raise NotImplementedError(
-        "sparse_flash_attention has no CUDA kernel; sparse attention on CUDA "
-        "is not supported yet"
+        "sparse_flash_attention has no CUDA kernel; sparse attention on CUDA is not supported yet"
     )
 
 
@@ -235,8 +225,7 @@ def sparse_flash_attention_out(
         output,
     )
     raise NotImplementedError(
-        "sparse_flash_attention_out has no CUDA kernel; sparse attention on "
-        "CUDA is not supported yet"
+        "sparse_flash_attention_out has no CUDA kernel; sparse attention on CUDA is not supported yet"
     )
 
 

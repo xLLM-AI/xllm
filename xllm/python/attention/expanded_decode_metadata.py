@@ -63,14 +63,10 @@ def resolve_expanded_decode_metadata(
     }
     missing = [name for name, tensor in required.items() if tensor is None]
     if missing:
-        raise RuntimeError(
-            "expanded decode metadata is missing: " + ", ".join(missing)
-        )
+        raise RuntimeError("expanded decode metadata is missing: " + ", ".join(missing))
 
     host_values_source = getattr(expanded, "kv_seq_lens_host_values", None)
-    host_values = (
-        list(host_values_source) if host_values_source is not None else None
-    )
+    host_values = list(host_values_source) if host_values_source is not None else None
     resolved = ExpandedDecodeMetadata(
         kv_seq_lens=expanded.kv_seq_lens.to(torch.int32),
         block_table=expanded.block_table.to(torch.int32),
@@ -98,50 +94,25 @@ def _validate_expanded_decode_metadata(
     if metadata.block_table.dim() != 2:
         raise RuntimeError("expanded decode block_table must be two-dimensional")
     sequence_count = metadata.block_table.shape[0]
-    if (
-        slot_mapping is None
-        or slot_mapping.dim() != 1
-        or slot_mapping.numel() != sequence_count
-    ):
-        raise RuntimeError(
-            "expanded decode slot_mapping must contain one slot per token"
-        )
+    if slot_mapping is None or slot_mapping.dim() != 1 or slot_mapping.numel() != sequence_count:
+        raise RuntimeError("expanded decode slot_mapping must contain one slot per token")
     per_sequence_tensors = (
         ("kv_seq_lens", metadata.kv_seq_lens),
         ("paged_kv_last_page_len", metadata.paged_kv_last_page_len),
     )
     if metadata.kv_seq_lens_host is not None:
-        per_sequence_tensors += (
-            ("kv_seq_lens_host", metadata.kv_seq_lens_host),
-        )
+        per_sequence_tensors += (("kv_seq_lens_host", metadata.kv_seq_lens_host),)
     for name, tensor in per_sequence_tensors:
         if tensor.dim() != 1 or tensor.numel() != sequence_count:
-            raise RuntimeError(
-                f"expanded decode {name} must contain one value per sequence"
-            )
-    if (
-        metadata.kv_seq_lens_host_values is not None
-        and len(metadata.kv_seq_lens_host_values) != sequence_count
-    ):
+            raise RuntimeError(f"expanded decode {name} must contain one value per sequence")
+    if metadata.kv_seq_lens_host_values is not None and len(metadata.kv_seq_lens_host_values) != sequence_count:
+        raise RuntimeError("expanded decode kv_seq_lens_host_values must contain one value per sequence")
+    if metadata.paged_kv_indptr.dim() != 1 or metadata.paged_kv_indptr.numel() != sequence_count + 1:
         raise RuntimeError(
-            "expanded decode kv_seq_lens_host_values must contain one value "
-            "per sequence"
+            "expanded decode paged_kv_indptr must contain one offset per sequence plus the terminal offset"
         )
-    if (
-        metadata.paged_kv_indptr.dim() != 1
-        or metadata.paged_kv_indptr.numel() != sequence_count + 1
-    ):
-        raise RuntimeError(
-            "expanded decode paged_kv_indptr must contain one offset per "
-            "sequence plus the terminal offset"
-        )
-    if (
-        metadata.paged_kv_indices.dim() != 1
-        or metadata.paged_kv_indices.numel() == 0
-    ):
-        raise RuntimeError(
-            "expanded decode paged_kv_indices must be a non-empty flat page list"
-        )
+    if metadata.paged_kv_indices.dim() != 1 or metadata.paged_kv_indices.numel() == 0:
+        raise RuntimeError("expanded decode paged_kv_indices must be a non-empty flat page list")
 
     if metadata.paged_kv_indptr.device.type == "cpu":
         indptr = metadata.paged_kv_indptr
@@ -150,28 +121,18 @@ def _validate_expanded_decode_metadata(
         if not bool(torch.all(indptr[1:] >= indptr[:-1])):
             raise RuntimeError("expanded decode paged_kv_indptr must be monotonic")
         if int(indptr[-1]) != metadata.paged_kv_indices.numel():
-            raise RuntimeError(
-                "expanded decode terminal page offset must match page count"
-            )
+            raise RuntimeError("expanded decode terminal page offset must match page count")
     if metadata.paged_kv_last_page_len.device.type == "cpu":
         last_page_lens = metadata.paged_kv_last_page_len
         if not bool(torch.all(last_page_lens >= 1)):
-            raise RuntimeError(
-                "expanded decode last-page lengths must be positive"
-            )
+            raise RuntimeError("expanded decode last-page lengths must be positive")
         if block_size > 0 and not bool(torch.all(last_page_lens <= block_size)):
-            raise RuntimeError(
-                "expanded decode last-page lengths must not exceed block size"
-            )
+            raise RuntimeError("expanded decode last-page lengths must not exceed block size")
     if metadata.kv_seq_lens_host_values is not None and block_size > 0:
         block_table_capacity = metadata.block_table.shape[1]
         for kv_seq_len in metadata.kv_seq_lens_host_values:
             if kv_seq_len < 0:
-                raise RuntimeError(
-                    "expanded decode host KV lengths must be non-negative"
-                )
+                raise RuntimeError("expanded decode host KV lengths must be non-negative")
             page_count = (max(kv_seq_len, 1) + block_size - 1) // block_size
             if page_count > block_table_capacity:
-                raise RuntimeError(
-                    "expanded decode page count exceeds block-table capacity"
-                )
+                raise RuntimeError("expanded decode page count exceeds block-table capacity")

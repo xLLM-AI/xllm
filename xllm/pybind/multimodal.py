@@ -13,11 +13,13 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Any, Dict, List, cast
 from functools import lru_cache
 from io import BytesIO
-from PIL import Image
+from typing import Any, cast
+
 import torch
+from PIL import Image
+
 
 @lru_cache(maxsize=1)
 def __cache_image_processor(
@@ -34,10 +36,8 @@ def __cache_image_processor(
 
     try:
         processor = AutoImageProcessor.from_pretrained(
-            processor_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            **kwargs)
+            processor_name, *args, trust_remote_code=trust_remote_code, **kwargs
+        )
     except ValueError as e:
         if not trust_remote_code:
             err_msg = (
@@ -45,12 +45,14 @@ def __cache_image_processor(
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
 
     return cast(BaseImageProcessor, processor)
+
 
 def try_cat_feature(item):
     if isinstance(item, torch.Tensor):
@@ -75,17 +77,16 @@ def try_cat_feature(item):
 
     return torch.cat(lst)
 
-def preprocess(lst: List[str], model: str) -> Dict[str, Any]:
 
+def preprocess(lst: list[str], model: str) -> dict[str, Any]:
     images = [Image.open(BytesIO(item)) for item in lst]
     image_processor = __cache_image_processor(model, trust_remote_code=True)
 
     data = image_processor.preprocess(images, return_tensors="pt").data
-    return { key: try_cat_feature(val)
-            for key, val in data.items()
-            }
+    return {key: try_cat_feature(val) for key, val in data.items()}
 
-def preprocess_tensors(tensors, model: str) -> Dict[str, Any]:
+
+def preprocess_tensors(tensors, model: str) -> dict[str, Any]:
     """Preprocess already-decoded images (uint8 [C,H,W] RGB torch tensors).
 
     Used by the Python model-executor online path: the C++ side decodes
@@ -94,6 +95,7 @@ def preprocess_tensors(tensors, model: str) -> Dict[str, Any]:
     AutoImageProcessor, so no per-model C++ image processor is needed.
     """
     import numpy as np
+
     images = []
     for t in tensors:
         arr = t.permute(1, 2, 0).contiguous().numpy()  # [H, W, C] RGB

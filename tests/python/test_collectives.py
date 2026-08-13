@@ -25,13 +25,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-
-_MODULE_PATH = (
-    Path(__file__).parents[2] / "xllm" / "python" / "distributed" / "collectives.py"
-)
-_SPEC = importlib.util.spec_from_file_location(
-    "_xllm_collectives_under_test", _MODULE_PATH
-)
+_MODULE_PATH = Path(__file__).parents[2] / "xllm" / "python" / "distributed" / "collectives.py"
+_SPEC = importlib.util.spec_from_file_location("_xllm_collectives_under_test", _MODULE_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 collectives = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(collectives)
@@ -69,9 +64,7 @@ class _FakeStore:
         self.values: dict[str, bytes] = {}
         if topology is not None:
             for rank, entry in enumerate(topology):
-                self.values[
-                    f"xllm/python_collectives/topology/v1/{rank}"
-                ] = json.dumps(entry).encode("utf-8")
+                self.values[f"xllm/python_collectives/topology/v1/{rank}"] = json.dumps(entry).encode("utf-8")
 
     def set(self, key: str, value: str) -> None:
         self.values[key] = value.encode("utf-8")
@@ -91,9 +84,7 @@ def _mock_process_groups(
     handed, which is what the module checks its caller's rank against.
     """
     if topology is None:
-        topology = [
-            {"hostname": "node-0", "device_index": rank} for rank in range(16)
-        ]
+        topology = [{"hostname": "node-0", "device_index": rank} for rank in range(16)]
     base_store = _FakeStore(topology)
     tcp_store = MagicMock(return_value=base_store)
     init_world = MagicMock()
@@ -111,16 +102,10 @@ def _mock_process_groups(
 
 
 def test_parallel_groups_share_one_multitenant_tcp_store(monkeypatch):
-    base_store, tcp_store, init_world, new_group = _mock_process_groups(
-        monkeypatch, global_rank=0
-    )
+    base_store, tcp_store, init_world, new_group = _mock_process_groups(monkeypatch, global_rank=0)
 
-    collectives.init_process_group(
-        "tp", "127.0.0.1", 46001, 0, 2, "cuda:0", 0, 2, 0
-    )
-    collectives.init_process_group(
-        "moe_tp", "127.0.0.1", 46001, 0, 2, "cuda:0", 0, 2, 0
-    )
+    collectives.init_process_group("tp", "127.0.0.1", 46001, 0, 2, "cuda:0", 0, 2, 0)
+    collectives.init_process_group("moe_tp", "127.0.0.1", 46001, 0, 2, "cuda:0", 0, 2, 0)
 
     tcp_store.assert_called_once()
     assert tcp_store.call_args.args[:4] == ("127.0.0.1", 46001, 2, True)
@@ -142,9 +127,7 @@ def test_parallel_groups_share_one_multitenant_tcp_store(monkeypatch):
 def test_tcp_store_master_is_global_rank_zero_not_group_rank_zero(monkeypatch):
     _, tcp_store, _, _ = _mock_process_groups(monkeypatch, global_rank=2)
 
-    collectives.init_process_group(
-        "tp", "127.0.0.1", 46001, 0, 2, "cuda:0", 2, 4, 1
-    )
+    collectives.init_process_group("tp", "127.0.0.1", 46001, 0, 2, "cuda:0", 2, 4, 1)
 
     assert tcp_store.call_args.args[:4] == ("127.0.0.1", 46001, 4, False)
 
@@ -157,9 +140,7 @@ def test_symmetric_memory_rejects_cross_host_group(monkeypatch):
     can_access_peer = MagicMock(return_value=True)
     monkeypatch.setattr(torch.cuda, "can_device_access_peer", can_access_peer)
 
-    assert not collectives._supports_symmetric_memory(
-        torch.device("cuda:0"), [0, 1]
-    )
+    assert not collectives._supports_symmetric_memory(torch.device("cuda:0"), [0, 1])
     can_access_peer.assert_not_called()
 
 
@@ -174,9 +155,7 @@ def test_symmetric_memory_rejects_incomplete_peer_domain(monkeypatch):
         lambda source, destination: (source, destination) != (1, 0),
     )
 
-    assert not collectives._supports_symmetric_memory(
-        torch.device("cuda:0"), [0, 1]
-    )
+    assert not collectives._supports_symmetric_memory(torch.device("cuda:0"), [0, 1])
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])

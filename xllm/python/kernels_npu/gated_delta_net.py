@@ -42,8 +42,7 @@ def resolve_gdn_prefill_backend(
     """
     del capability
     raise NotImplementedError(
-        "resolve_gdn_prefill_backend has no NPU implementation; gated delta "
-        "networks are not supported on NPU yet"
+        "resolve_gdn_prefill_backend has no NPU implementation; gated delta networks are not supported on NPU yet"
     )
 
 
@@ -145,8 +144,7 @@ def chunk_gated_delta_rule(
     """
     del q, k, v, g, beta, initial_state, cu_seqlens, backend
     raise NotImplementedError(
-        "chunk_gated_delta_rule has no NPU kernel; see kernels_cuda/triton/fla/ "
-        "for the reference implementation"
+        "chunk_gated_delta_rule has no NPU kernel; see kernels_cuda/triton/fla/ for the reference implementation"
     )
 
 

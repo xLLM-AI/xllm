@@ -24,7 +24,6 @@ The model does not import FlashInfer, own wrappers, or call plan.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -39,13 +38,11 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
+from xllm.python.model_executor.cp_utils import cp_merge_rows, cp_shard_positions, cp_shard_rows
 from xllm.python.model_executor.forward_context import (
-    ForwardContext,
-    forward_context,
     get_forward_context,
     record_layer_event,
 )  # noqa: F401
-from xllm.python.model_executor.cp_utils import cp_merge_rows, cp_shard_positions, cp_shard_rows
 from xllm.python.models.base import PyModelBase
 
 
@@ -70,7 +67,7 @@ class Qwen3Config:
     dp_rank: int = 0
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Qwen3Config":
+    def from_dict(cls, d: dict) -> Qwen3Config:
         def pick(*keys, default=None):
             for k in keys:
                 if k in d and d[k] is not None:
@@ -88,9 +85,7 @@ class Qwen3Config:
             intermediate_size=int(pick("intermediate_size", default=3072)),
             rms_norm_eps=float(pick("rms_norm_eps", default=1e-6)),
             rope_theta=float(pick("rope_theta", default=1e6)),
-            max_position_embeddings=int(
-                pick("max_position_embeddings", default=40960)
-            ),
+            max_position_embeddings=int(pick("max_position_embeddings", default=40960)),
             vocab_size=int(pick("vocab_size", default=151936)),
             tie_word_embeddings=bool(pick("tie_word_embeddings", default=True)),
             sliding_window=int(pick("sliding_window", default=0)),
@@ -101,32 +96,24 @@ class Qwen3Config:
             dp_rank=int(pick("dp_rank", default=0)),
         )
 
-    def head_split(self) -> Tuple[int, int, int]:
+    def head_split(self) -> tuple[int, int, int]:
         """Per-rank ``(num_heads, num_kv_heads, num_kv_head_replicas)``."""
         tp = self.tp_size
-        assert self.n_heads % tp == 0, (
-            f"n_heads {self.n_heads} not divisible by tp_size {tp}"
-        )
+        assert self.n_heads % tp == 0, f"n_heads {self.n_heads} not divisible by tp_size {tp}"
         num_heads = self.n_heads // tp
         if self.n_kv_heads >= tp:
-            assert self.n_kv_heads % tp == 0, (
-                f"n_kv_heads {self.n_kv_heads} not divisible by tp_size {tp}"
-            )
+            assert self.n_kv_heads % tp == 0, f"n_kv_heads {self.n_kv_heads} not divisible by tp_size {tp}"
             num_kv_heads = self.n_kv_heads // tp
             replicas = 1
         else:
-            assert tp % self.n_kv_heads == 0, (
-                f"tp_size {tp} not divisible by n_kv_heads {self.n_kv_heads}"
-            )
+            assert tp % self.n_kv_heads == 0, f"tp_size {tp} not divisible by n_kv_heads {self.n_kv_heads}"
             num_kv_heads = 1
             replicas = tp // self.n_kv_heads
         return num_heads, num_kv_heads, replicas
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(
-        self, cfg: Qwen3Config, layer_id: int, dtype: torch.dtype, device: torch.device
-    ) -> None:
+    def __init__(self, cfg: Qwen3Config, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.layer_id = layer_id
         num_heads, num_kv_heads, replicas = cfg.head_split()
@@ -153,12 +140,8 @@ class Qwen3Attention(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.q_norm = RMSNorm(
-            self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
-        self.k_norm = RMSNorm(
-            self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.q_norm = RMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.k_norm = RMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.attn = Attention(
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
@@ -175,7 +158,7 @@ class Qwen3Attention(nn.Module):
         cos_sin_cache: torch.Tensor,
         cos: torch.Tensor | None,
         sin: torch.Tensor | None,
-        mrope_section: Optional[List[int]] = None,
+        mrope_section: list[int] | None = None,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
@@ -187,16 +170,12 @@ class Qwen3Attention(nn.Module):
             # table; q/k stay 2D [N, num_heads*head_dim] as npu_mrope requires.
             num_tokens = qkv.size(0)
             q = torch.ops.xllm_ops.rms_norm(
-                qkv[:, : self.q_size].reshape(
-                    num_tokens * self.num_heads, self.head_dim
-                ),
+                qkv[:, : self.q_size].reshape(num_tokens * self.num_heads, self.head_dim),
                 self.q_norm.weight,
                 self.q_norm.eps,
             ).view(num_tokens, self.q_size)
             k = torch.ops.xllm_ops.rms_norm(
-                qkv[:, self.q_size : self.q_size + self.kv_size].reshape(
-                    num_tokens * self.num_kv_heads, self.head_dim
-                ),
+                qkv[:, self.q_size : self.q_size + self.kv_size].reshape(num_tokens * self.num_kv_heads, self.head_dim),
                 self.k_norm.weight,
                 self.k_norm.eps,
             ).view(num_tokens, self.kv_size)
@@ -241,13 +220,9 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
-        self.input_layernorm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.self_attn = Qwen3Attention(cfg, layer_id, dtype, device)
-        self.post_attention_layernorm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.mlp = GatedMLP(
             cfg.hidden_size,
             cfg.intermediate_size,
@@ -259,22 +234,20 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         positions: torch.Tensor,
         cos_sin_cache: torch.Tensor,
         cos: torch.Tensor | None,
         sin: torch.Tensor | None,
-        mrope_section: Optional[List[int]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        mrope_section: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden
             hidden = self.input_layernorm(hidden)
         else:
             hidden, residual = self.input_layernorm(hidden, residual)
 
-        hidden = self.self_attn(
-            positions, hidden, cos_sin_cache, cos, sin, mrope_section
-        )
+        hidden = self.self_attn(positions, hidden, cos_sin_cache, cos, sin, mrope_section)
 
         hidden, residual = self.post_attention_layernorm(hidden, residual)
         hidden = self.mlp(hidden)
@@ -282,9 +255,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
-    def __init__(
-        self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device
-    ) -> None:
+    def __init__(self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         tp = cfg.tp_size
         assert cfg.hidden_size % tp == 0
@@ -298,21 +269,14 @@ class Qwen3Model(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.layers = nn.ModuleList(
-            [
-                Qwen3DecoderLayer(cfg, i, dtype, device)
-                for i in range(cfg.n_layers)
-            ]
-        )
-        self.norm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.layers = nn.ModuleList([Qwen3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
+        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mrope_section: Optional[List[int]] = None,
+        mrope_section: list[int] | None = None,
     ) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
         # The fused QK-norm+RoPE kernel requires int64 position ids, but C++
@@ -328,7 +292,7 @@ class Qwen3Model(nn.Module):
         if cp_context is not None:
             hidden = cp_shard_rows(hidden, cp_context)
             positions = cp_shard_positions(positions, cp_context).contiguous()
-        residual: Optional[torch.Tensor] = None
+        residual: torch.Tensor | None = None
         for i, layer in enumerate(self.layers):
             hidden, residual = layer(
                 hidden,
@@ -394,12 +358,12 @@ class Qwen3ForCausalLM(PyModelBase):
                     return sd
             return None
 
-        def load_tensor(name: str) -> "torch.Tensor":
+        def load_tensor(name: str) -> torch.Tensor:
             sd = find(name)
             assert sd is not None, f"checkpoint tensor not found: {name}"
             return sd.get_tensor(name)
 
-        def shard(name: str, dim: int, kv: bool = False) -> "torch.Tensor":
+        def shard(name: str, dim: int, kv: bool = False) -> torch.Tensor:
             sd = find(name)
             assert sd is not None, f"checkpoint tensor not found: {name}"
             r = kv_rank if kv else tp_rank
@@ -410,7 +374,7 @@ class Qwen3ForCausalLM(PyModelBase):
             chunk_size = t.size(dim) // w
             return t.narrow(dim, r * chunk_size, chunk_size).contiguous()
 
-        def copy_in(param_name: str, tensor: "torch.Tensor") -> None:
+        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
             param = self.get_parameter(param_name)
             param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
 
@@ -422,40 +386,32 @@ class Qwen3ForCausalLM(PyModelBase):
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
 
-            copy_in(p + "input_layernorm.weight",
-                    load_tensor(p + "input_layernorm.weight"))
-            copy_in(p + "post_attention_layernorm.weight",
-                    load_tensor(p + "post_attention_layernorm.weight"))
-            copy_in(p + "self_attn.q_norm.weight",
-                    load_tensor(p + "self_attn.q_norm.weight"))
-            copy_in(p + "self_attn.k_norm.weight",
-                    load_tensor(p + "self_attn.k_norm.weight"))
+            copy_in(p + "input_layernorm.weight", load_tensor(p + "input_layernorm.weight"))
+            copy_in(p + "post_attention_layernorm.weight", load_tensor(p + "post_attention_layernorm.weight"))
+            copy_in(p + "self_attn.q_norm.weight", load_tensor(p + "self_attn.q_norm.weight"))
+            copy_in(p + "self_attn.k_norm.weight", load_tensor(p + "self_attn.k_norm.weight"))
 
             q = shard(p + "self_attn.q_proj.weight", dim=0)
             k = shard(p + "self_attn.k_proj.weight", dim=0, kv=True)
             v = shard(p + "self_attn.v_proj.weight", dim=0, kv=True)
             copy_in(p + "self_attn.qkv_proj.weight", torch.cat([q, k, v], dim=0))
 
-            copy_in(p + "self_attn.o_proj.weight",
-                    shard(p + "self_attn.o_proj.weight", dim=1))
+            copy_in(p + "self_attn.o_proj.weight", shard(p + "self_attn.o_proj.weight", dim=1))
 
             if cfg.attention_bias:
                 qb = shard(p + "self_attn.q_proj.bias", dim=0)
                 kb = shard(p + "self_attn.k_proj.bias", dim=0, kv=True)
                 vb = shard(p + "self_attn.v_proj.bias", dim=0, kv=True)
-                copy_in(p + "self_attn.qkv_proj.bias",
-                        torch.cat([qb, kb, vb], dim=0))
+                copy_in(p + "self_attn.qkv_proj.bias", torch.cat([qb, kb, vb], dim=0))
                 # o_proj bias is replicated and added after the all-reduce, so
                 # every rank loads the full (unsharded) bias.
-                copy_in(p + "self_attn.o_proj.bias",
-                        load_tensor(p + "self_attn.o_proj.bias"))
+                copy_in(p + "self_attn.o_proj.bias", load_tensor(p + "self_attn.o_proj.bias"))
 
             gate = shard(p + "mlp.gate_proj.weight", dim=0)
             up = shard(p + "mlp.up_proj.weight", dim=0)
             copy_in(p + "mlp.gate_up_proj.weight", torch.cat([gate, up], dim=0))
 
-            copy_in(p + "mlp.down_proj.weight",
-                    shard(p + "mlp.down_proj.weight", dim=1))
+            copy_in(p + "mlp.down_proj.weight", shard(p + "mlp.down_proj.weight", dim=1))
 
             layer = self.model.layers[i]
             layer.self_attn.o_proj.process_weights_after_loading()

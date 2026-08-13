@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
+
 class ValidationError(Exception):
     def __init__(self, code: int, message: str) -> None:
         super().__init__(f"[{code}] {message}")

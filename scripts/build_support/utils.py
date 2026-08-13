@@ -1,19 +1,19 @@
 import base64
 import os
-import sys
 import platform
-import subprocess
-import sysconfig
-import io
 import shlex
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
-from typing import Optional
 
 from scripts.build_support.env import set_npu_envs
 from scripts.logger import logger
 
+
 def _b64(s: str) -> str:
     return base64.b64decode(s).decode()
+
 
 # get cpu architecture
 def get_cpu_arch() -> str:
@@ -25,10 +25,12 @@ def get_cpu_arch() -> str:
     else:
         raise ValueError(f"❌ Unsupported architecture: {arch}")
 
+
 def get_ascend_platform() -> str:
     if not hasattr(get_ascend_platform, "_cached_platform"):
         set_npu_envs()
         import acl
+
         acl.init()
         soc_name = acl.get_soc_name().upper()
         if _b64("OTEwQg==") in soc_name:
@@ -52,6 +54,7 @@ def get_device_type() -> str:
     if torch.cuda.is_available():
         try:
             from torch.utils.cpp_extension import HIP_HOME
+
             if HIP_HOME and "dtk" in HIP_HOME.lower():
                 return "dcu"
         except Exception:
@@ -60,12 +63,14 @@ def get_device_type() -> str:
     if torch.cuda.is_available():
         try:
             import ixformer
+
             return "ilu"
         except ImportError:
             return "cuda"
 
     try:
         import torch_musa
+
         if torch.musa.is_available():
             return "musa"
     except ImportError:
@@ -73,6 +78,7 @@ def get_device_type() -> str:
 
     try:
         import torch_mlu
+
         if torch.mlu.is_available():
             return "mlu"
     except ImportError:
@@ -80,6 +86,7 @@ def get_device_type() -> str:
 
     try:
         import torch_npu
+
         if torch.npu.is_available():
             return "npu"
     except ImportError:
@@ -87,6 +94,7 @@ def get_device_type() -> str:
 
     logger.error("❌ Unsupported device type, please check what device you are using.")
     exit(1)
+
 
 def get_base_dir() -> str:
     helper_path = Path(__file__).resolve()
@@ -97,33 +105,39 @@ def get_base_dir() -> str:
     fallback_index = min(2, len(helper_path.parents) - 1)
     return str(helper_path.parents[fallback_index])
 
+
 def _join_path(*paths: str) -> str:
     return os.path.join(get_base_dir(), *paths)
+
 
 # return the python version as a string like "310" or "311" etc
 def get_python_version() -> str:
     return sysconfig.get_python_version().replace(".", "")
 
-def get_torch_version(device: str) -> Optional[str]:
+
+def get_torch_version(device: str) -> str | None:
     try:
         import torch
+
         if device == "cuda":
             return torch.__version__
-        return torch.__version__.split('+')[0]
+        return torch.__version__.split("+")[0]
     except ImportError:
         return None
+
 
 def get_torch_cmake_prefix_path() -> str:
     import torch
 
     return torch.utils.cmake_prefix_path
 
+
 def get_version() -> str:
     # first read from environment variable
-    version: Optional[str] = os.getenv("XLLM_VERSION")
+    version: str | None = os.getenv("XLLM_VERSION")
     if not version:
         # then read from version file
-        with open(_join_path("version.txt"), "r") as f:
+        with open(_join_path("version.txt")) as f:
             version = f.read().strip()
 
     # strip the leading 'v' if present
@@ -138,12 +152,14 @@ def get_version() -> str:
         version += version_suffix
     return version
 
+
 def read_readme() -> str:
     p = _join_path("README.md")
     if os.path.isfile(p):
-        return io.open(p, "r", encoding="utf-8").read()
+        return open(p, encoding="utf-8").read()
     else:
         return ""
+
 
 def get_cmake_dir() -> str:
     plat_name = sysconfig.get_platform()
@@ -152,6 +168,7 @@ def get_cmake_dir() -> str:
     cmake_dir = os.path.join(get_base_dir(), "build", dir_name)
     os.makedirs(cmake_dir, exist_ok=True)
     return cmake_dir
+
 
 def check_and_install_pre_commit() -> None:
     # check if .git is a directory
@@ -164,11 +181,12 @@ def check_and_install_pre_commit() -> None:
             logger.error("❌ Run 'pre-commit install' failed. Please install pre-commit: pip install pre-commit")
             exit(1)
 
+
 def _run_command(
     args: list[str],
-    cwd: Optional[str] = None,
+    cwd: str | None = None,
     check: bool = True,
-    input_text: Optional[str] = None,
+    input_text: str | None = None,
     passthrough_output: bool = False,
 ) -> tuple[bool, str, str]:
     try:
@@ -202,14 +220,16 @@ def _run_command(
 
     return result.returncode == 0, result.stdout.strip(), (result.stderr or "").strip()
 
+
 def _print_manual_check_commands(commands: list[str]) -> None:
     logger.info("🔎 You can run these commands to inspect manually:")
     for cmd in commands:
         logger.info(f"   {cmd}")
 
+
 def _run_shell_command(
     command: str,
-    cwd: Optional[str] = None,
+    cwd: str | None = None,
     check: bool = True,
     passthrough_output: bool = False,
 ) -> bool:
@@ -224,6 +244,7 @@ def _run_shell_command(
         return False
     return True
 
+
 def _run_git_command(repo_root: str, args: list[str]) -> tuple[bool, str]:
     ok, output, err = _run_command(["git"] + args, cwd=repo_root, check=True)
     if not ok and "No such file or directory" in err:
@@ -237,15 +258,18 @@ def _run_git_command(repo_root: str, args: list[str]) -> tuple[bool, str]:
         return False, ""
     return True, output
 
+
 def _collect_submodule_init_issues(repo_root: str) -> dict[str, str]:
     ok, output = _run_git_command(repo_root, ["submodule", "status", "--recursive"])
     if not ok:
         logger.error("❌ Failed to inspect submodule status.")
-        _print_manual_check_commands([
-            f"cd {repo_root}",
-            "git submodule status --recursive",
-            "git submodule update --init --recursive",
-        ])
+        _print_manual_check_commands(
+            [
+                f"cd {repo_root}",
+                "git submodule status --recursive",
+                "git submodule update --init --recursive",
+            ]
+        )
         exit(1)
 
     issues: dict[str, str] = {}
@@ -269,21 +293,15 @@ def _collect_submodule_init_issues(repo_root: str) -> dict[str, str]:
 
     return issues
 
+
 def _is_dependency_installed(candidate_files: list[str]) -> bool:
     """Return whether any distribution-specific dependency marker exists."""
-    normalized_candidates = [
-        os.path.abspath(os.path.expanduser(file_path))
-        for file_path in candidate_files
-    ]
+    normalized_candidates = [os.path.abspath(os.path.expanduser(file_path)) for file_path in candidate_files]
     return any(os.path.isfile(file_path) for file_path in normalized_candidates)
 
 
 def _get_yalantinglibs_prefix() -> str:
-    return os.path.abspath(
-        os.path.expanduser(
-            os.getenv("YALANTINGLIBS_PREFIX", "/usr/local/yalantinglibs")
-        )
-    )
+    return os.path.abspath(os.path.expanduser(os.getenv("YALANTINGLIBS_PREFIX", "/usr/local/yalantinglibs")))
 
 
 def _get_required_dependency_files() -> dict[str, list[str]]:
@@ -317,16 +335,12 @@ def _get_required_dependency_files() -> dict[str, list[str]]:
             "/usr/include/zstd.h",
             "/usr/local/include/zstd.h",
         ],
-        "zstd-library": [
-            os.path.join(path, "libzstd.so") for path in library_dirs
-        ],
+        "zstd-library": [os.path.join(path, "libzstd.so") for path in library_dirs],
         "xxhash-header": [
             "/usr/include/xxhash.h",
             "/usr/local/include/xxhash.h",
         ],
-        "xxhash-library": [
-            os.path.join(path, "libxxhash.so") for path in library_dirs
-        ],
+        "xxhash-library": [os.path.join(path, "libxxhash.so") for path in library_dirs],
         "msgpack-cxx": [
             "/usr/include/msgpack.hpp",
             "/usr/local/include/msgpack.hpp",
@@ -339,10 +353,7 @@ def _collect_missing_dependencies(
 ) -> dict[str, list[str]]:
     missing: dict[str, list[str]] = {}
     for name, candidate_files in dependency_files.items():
-        normalized_candidates = [
-            os.path.abspath(os.path.expanduser(file_path))
-            for file_path in candidate_files
-        ]
+        normalized_candidates = [os.path.abspath(os.path.expanduser(file_path)) for file_path in candidate_files]
         if not _is_dependency_installed(normalized_candidates):
             missing[name] = normalized_candidates
     return missing
@@ -380,10 +391,12 @@ def _run_dependencies_script_or_exit(script_path: str) -> None:
         passthrough_output=True,
     ):
         logger.error("❌ Run shell command 'bash third_party/dependencies.sh' failed!")
-        _print_manual_check_commands([
-            f"cd {script_path}",
-            "bash third_party/dependencies.sh",
-        ])
+        _print_manual_check_commands(
+            [
+                f"cd {script_path}",
+                "bash third_party/dependencies.sh",
+            ]
+        )
         exit(1)
 
 
@@ -409,10 +422,12 @@ def _ensure_prebuild_dependencies_installed(
         passthrough_output=True,
     ):
         logger.error("❌ Failed to install Go required by Mooncake HA.")
-        _print_manual_check_commands([
-            f"cd {script_path}",
-            "bash third_party/dependencies.sh --ensure-go",
-        ])
+        _print_manual_check_commands(
+            [
+                f"cd {script_path}",
+                "bash third_party/dependencies.sh --ensure-go",
+            ]
+        )
         exit(1)
 
     dependency_files = _get_required_dependency_files()
@@ -457,11 +472,7 @@ def _get_xllm_ops_marker_path() -> str:
     # write paths diverge and the incremental-build cache never hits. Detection
     # mirrors CMakeLists.txt exactly (same ASCEND_OPP_PATH root and probe path).
     vendor = "xllm"
-    if os.path.isdir(
-        os.path.join(
-            opp_root, "vendors", "custom_xllm_math", "op_api", "include", "aclnnop"
-        )
-    ):
+    if os.path.isdir(os.path.join(opp_root, "vendors", "custom_xllm_math", "op_api", "include", "aclnnop")):
         vendor = "custom_xllm_math"
     return os.path.join(opp_root, "vendors", vendor, ".xllm_ops_git_head")
 
@@ -471,7 +482,7 @@ def _clear_xllm_ops_cache_git_head(cache_path: str) -> bool:
         return False
 
     cache_prefix = "XLLM_OPS_GIT_HEAD_CACHED:"
-    with open(cache_path, "r", encoding="utf-8") as cache_file:
+    with open(cache_path, encoding="utf-8") as cache_file:
         old_lines = cache_file.readlines()
 
     new_lines = [line for line in old_lines if not line.startswith(cache_prefix)]
@@ -485,7 +496,7 @@ def _clear_xllm_ops_cache_git_head(cache_path: str) -> bool:
     return True
 
 
-def _get_xllm_ops_source_git_head() -> Optional[str]:
+def _get_xllm_ops_source_git_head() -> str | None:
     repo_root = _join_path("third_party", "xllm_ops")
     ok, output, err = _run_command(
         ["git", "-c", f"safe.directory={repo_root}", "rev-parse", "HEAD"],
@@ -500,11 +511,11 @@ def _get_xllm_ops_source_git_head() -> Optional[str]:
     return None
 
 
-def _read_version_info(file_path: str) -> Optional[str]:
+def _read_version_info(file_path: str) -> str | None:
     if not os.path.isfile(file_path):
         return None
 
-    with open(file_path, "r", encoding="utf-8") as version_info:
+    with open(file_path, encoding="utf-8") as version_info:
         for line in version_info:
             if line.startswith("Version="):
                 version = line.split("=", 1)[1].strip()
@@ -512,7 +523,7 @@ def _read_version_info(file_path: str) -> Optional[str]:
     return None
 
 
-def _get_cann_version_info() -> tuple[str, Optional[str]]:
+def _get_cann_version_info() -> tuple[str, str | None]:
     marker_path = _get_xllm_ops_marker_path()
     opp_root = os.path.dirname(os.path.dirname(os.path.dirname(marker_path)))
     version_info_path = os.path.join(
@@ -523,7 +534,7 @@ def _get_cann_version_info() -> tuple[str, Optional[str]]:
     return version_info_path, _read_version_info(version_info_path)
 
 
-def _parse_major_minor_version(version: str) -> Optional[tuple[int, int]]:
+def _parse_major_minor_version(version: str) -> tuple[int, int] | None:
     version_parts = version.strip().split(".")
     if len(version_parts) < 2:
         return None
@@ -542,22 +553,17 @@ def _ensure_xllm_ops_rebuild_state(device: str) -> None:
     source_git_head = _get_xllm_ops_source_git_head()
     if source_git_head is None:
         logger.error("❌ Failed to determine third_party/xllm_ops git HEAD.")
-        _print_manual_check_commands(
-            [f"git -C {_join_path('third_party', 'xllm_ops')} rev-parse HEAD"]
-        )
+        _print_manual_check_commands([f"git -C {_join_path('third_party', 'xllm_ops')} rev-parse HEAD"])
         exit(1)
 
     marker_path = _get_xllm_ops_marker_path()
     installed_git_head = None
     if os.path.isfile(marker_path):
-        with open(marker_path, "r", encoding="utf-8") as marker_file:
+        with open(marker_path, encoding="utf-8") as marker_file:
             installed_git_head = marker_file.readline().strip() or None
     if installed_git_head == source_git_head:
         os.environ["XLLM_OPS_GIT_HEAD_CACHED"] = source_git_head
-        logger.info(
-            f"✅ xllm_ops is already installed in {os.path.dirname(marker_path)} "
-            "with a matching git HEAD."
-        )
+        logger.info(f"✅ xllm_ops is already installed in {os.path.dirname(marker_path)} with a matching git HEAD.")
         return
 
     os.environ.pop("XLLM_OPS_GIT_HEAD_CACHED", None)
@@ -567,10 +573,7 @@ def _ensure_xllm_ops_rebuild_state(device: str) -> None:
     if installed_git_head is None:
         logger.info(f"ℹ️ xllm_ops marker not found at {marker_path}. A rebuild is required.")
     else:
-        logger.info(
-            "ℹ️ Installed xllm_ops marker does not match "
-            "third_party/xllm_ops HEAD. A rebuild is required."
-        )
+        logger.info("ℹ️ Installed xllm_ops marker does not match third_party/xllm_ops HEAD. A rebuild is required.")
         logger.info(f"   installed git HEAD: {installed_git_head}")
         logger.info(f"   source git HEAD:    {source_git_head}")
 

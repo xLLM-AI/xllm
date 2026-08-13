@@ -1,6 +1,6 @@
-import tilelang
-import tilelang.language as T
 from typing import Any
+
+import tilelang.language as T
 
 from ....common.manifest import KernelAbi, KernelVariantManifest
 from ....common.spec import DispatchField
@@ -82,20 +82,14 @@ def _dispatch_field_cpp_type(field: DispatchField) -> str:
 def _render_dispatch_value_literal(*, field: DispatchField, value: Any) -> str:
     if field.kind == "int32":
         if not isinstance(value, int) or isinstance(value, bool):
-            raise TypeError(
-                f"Unsupported int32 dispatch value for {field.name!r}: {value!r}"
-            )
+            raise TypeError(f"Unsupported int32 dispatch value for {field.name!r}: {value!r}")
         return str(value)
     if field.kind == "dtype":
         if not isinstance(value, str):
-            raise TypeError(
-                f"Unsupported dtype dispatch value for {field.name!r}: {value!r}"
-            )
+            raise TypeError(f"Unsupported dtype dispatch value for {field.name!r}: {value!r}")
         dtype_suffix = _dtype_enum_suffix(value)
         return f"TilelangDType::k{dtype_suffix}"
-    raise TypeError(
-        f"Unsupported dispatch field kind {field.kind!r} for {field.name!r}"
-    )
+    raise TypeError(f"Unsupported dispatch field kind {field.kind!r} for {field.name!r}")
 
 
 def _validate_dispatch_values(
@@ -122,9 +116,7 @@ def render_family_variants_inc(
         return ""
 
     if not dispatch_schema:
-        raise ValueError(
-            f"TileLang kernel family {kernel_name!r} has empty dispatch schema"
-        )
+        raise ValueError(f"TileLang kernel family {kernel_name!r} has empty dispatch schema")
 
     macro_name = f"XLLM_TL_{kernel_name.upper()}_VARIANT"
     lines: list[str] = []
@@ -142,7 +134,7 @@ def render_family_variants_inc(
             )
             for field in dispatch_schema
         ]
-        variant_args.append(f"\"{variant.variant_key}\"")
+        variant_args.append(f'"{variant.variant_key}"')
         variant_args.append(variant.entry_symbol)
         lines.append(f"{macro_name}({', '.join(variant_args)})")
 
@@ -160,9 +152,7 @@ def render_family_registry_inc(
         return ""
 
     if not dispatch_schema:
-        raise ValueError(
-            f"TileLang kernel family {kernel_name!r} has empty dispatch schema"
-        )
+        raise ValueError(f"TileLang kernel family {kernel_name!r} has empty dispatch schema")
 
     family_prefix = _snake_to_pascal(kernel_name)
     specialization_type = f"{family_prefix}Specialization"
@@ -170,8 +160,7 @@ def render_family_registry_inc(
     registry_name = f"k{family_prefix}Registry"
     entry_type = f"KernelEntry<{specialization_type}, {kernel_fn_type}>"
     field_wrapper_types = {
-        field.name: f"{family_prefix}{_dispatch_field_suffix(field.name)}"
-        for field in dispatch_schema
+        field.name: f"{family_prefix}{_dispatch_field_suffix(field.name)}" for field in dispatch_schema
     }
 
     symbol_declarations: list[str] = []
@@ -188,25 +177,17 @@ def render_family_registry_inc(
             f"}}"
             for field in dispatch_schema
         )
-        symbol_declarations.append(
-            f'extern "C" function_type_t<{kernel_fn_type}> {variant.entry_symbol};'
-        )
+        symbol_declarations.append(f'extern "C" function_type_t<{kernel_fn_type}> {variant.entry_symbol};')
         registry_entries.append(
-            f'    {entry_type}{{make_{kernel_name}_specialization({specialization_args}), '
+            f"    {entry_type}{{make_{kernel_name}_specialization({specialization_args}), "
             f'"{variant.variant_key}", &{variant.entry_symbol}}},'
         )
 
-    struct_fields = [
-        f"  {_dispatch_field_cpp_type(field)} {field.name};" for field in dispatch_schema
-    ]
+    struct_fields = [f"  {_dispatch_field_cpp_type(field)} {field.name};" for field in dispatch_schema]
     equality_terms = [f"lhs.{field.name} == rhs.{field.name}" for field in dispatch_schema]
-    builder_params = [
-        f"{field_wrapper_types[field.name]} {field.name}" for field in dispatch_schema
-    ]
+    builder_params = [f"{field_wrapper_types[field.name]} {field.name}" for field in dispatch_schema]
     builder_values = ", ".join(f"{field.name}.value" for field in dispatch_schema)
-    function_params = ", ".join(
-        f"{parameter.cpp_type} {parameter.name}" for parameter in kernel_abi.parameters
-    )
+    function_params = ", ".join(f"{parameter.cpp_type} {parameter.name}" for parameter in kernel_abi.parameters)
 
     lines = [
         f"struct {specialization_type} {{",

@@ -86,9 +86,7 @@ def _config(**overrides) -> Qwen3_5Config:
     return Qwen3_5Config.from_dict(values)
 
 
-def _make_moe_layer(
-    cfg: Qwen3_5Config, device: torch.device | None = None
-) -> FusedMoE:
+def _make_moe_layer(cfg: Qwen3_5Config, device: torch.device | None = None) -> FusedMoE:
     return FusedMoE(
         hidden_size=cfg.hidden_size,
         intermediate_size=cfg.moe_intermediate_size,
@@ -196,9 +194,7 @@ def test_attention_biases_are_loaded() -> None:
             tensors["model.layers.0.self_attn.v_proj.bias"],
         )
     )
-    torch.testing.assert_close(
-        model.model.layers[0].self_attn.qkv_proj.bias, expected_qkv_bias
-    )
+    torch.testing.assert_close(model.model.layers[0].self_attn.qkv_proj.bias, expected_qkv_bias)
     torch.testing.assert_close(
         model.model.layers[0].self_attn.o_proj.bias,
         tensors["model.layers.0.self_attn.o_proj.bias"],
@@ -224,9 +220,7 @@ def test_full_attention_layers_share_rotary_table() -> None:
 
 def test_pre_sm90_moe_uses_triton_fallback(monkeypatch) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        torch.cuda, "get_device_capability", lambda _device=None: (8, 0)
-    )
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device=None: (8, 0))
     assert not kernels.supports_cutlass_moe(torch.device("cuda:0"))
     cfg = _config(
         tp_size=1,
@@ -341,12 +335,8 @@ def test_gemma_rms_norm_matches_fp32_weight_reference():
     with torch.no_grad():
         layer.weight.copy_(torch.tensor([0.3242, -0.8164, 2.4844, -0.2383]))
 
-    hidden = torch.tensor(
-        [[0.4258, -0.2656, 1.4922, -0.7344]], dtype=torch.bfloat16
-    )
-    residual = torch.tensor(
-        [[-0.1064, 0.9844, -0.3789, 0.5469]], dtype=torch.bfloat16
-    )
+    hidden = torch.tensor([[0.4258, -0.2656, 1.4922, -0.7344]], dtype=torch.bfloat16)
+    residual = torch.tensor([[-0.1064, 0.9844, -0.3789, 0.5469]], dtype=torch.bfloat16)
     actual, actual_residual = layer(hidden, residual)
 
     summed = hidden.float() + residual.float()

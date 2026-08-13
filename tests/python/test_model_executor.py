@@ -22,9 +22,7 @@ from __future__ import annotations
 
 import sys
 import types
-from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,14 +42,13 @@ from xllm.python.model_executor.executor import (  # noqa: E402
     _create_attention_backend,
     _resolve_graph_backend,
 )
+from xllm.python.model_executor.runners.decode_acl_graph import (  # noqa: E402
+    DecodeAclGraphRunner,
+)
 from xllm.python.model_executor.runners.decode_cuda_graph import (  # noqa: E402
     DecodeCudaGraphRunner,
     _decode_graph_buckets,
 )
-from xllm.python.model_executor.runners.decode_acl_graph import (  # noqa: E402
-    DecodeAclGraphRunner,
-)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -91,7 +88,12 @@ class _PagedStubAttentionBackend(StubAttentionBackend):
 
 
 def _make_attention_layer(
-    num_heads=8, num_kv_heads=2, head_dim=64, scale=0.125, sliding_window=0, layer_id=0,
+    num_heads=8,
+    num_kv_heads=2,
+    head_dim=64,
+    scale=0.125,
+    sliding_window=0,
+    layer_id=0,
 ) -> Attention:
     return Attention(
         num_heads=num_heads,
@@ -109,9 +111,7 @@ class _FakeModel(nn.Module):
     def __init__(self, num_layers: int = 2, device: str = "cpu", **attn_kwargs):
         super().__init__()
         self.model = nn.Linear(1, 1)  # execution_model placeholder
-        self.layers = nn.ModuleList(
-            [_make_attention_layer(layer_id=i, **attn_kwargs) for i in range(num_layers)]
-        )
+        self.layers = nn.ModuleList([_make_attention_layer(layer_id=i, **attn_kwargs) for i in range(num_layers)])
         self._param = nn.Parameter(torch.zeros(1, device=device))
 
     def forward(self, input_ids, positions):
@@ -169,9 +169,7 @@ class TestCreateAttentionBackend:
     )
     def test_npu_device_creates_npu_backend(self, _mock_is_npu):
         attn = _make_attention_layer()
-        backend = _create_attention_backend(
-            attn, torch.device("npu"), torch.float16
-        )
+        backend = _create_attention_backend(attn, torch.device("npu"), torch.float16)
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["num_heads"] == 8
         assert backend.init_kwargs["num_kv_heads"] == 2
@@ -185,16 +183,12 @@ class TestCreateAttentionBackend:
         "xllm.python.model_executor.executor.current_platform.is_cuda",
         return_value=True,
     )
-    def test_cuda_device_creates_flashinfer_backend(
-        self, _mock_is_cuda, _mock_is_npu
-    ):
+    def test_cuda_device_creates_flashinfer_backend(self, _mock_is_cuda, _mock_is_npu):
         attn = _make_attention_layer()
         module = types.ModuleType("xllm.python.attention.flashinfer")
         module.FlashInferBackend = StubAttentionBackend
         with patch.dict(sys.modules, {module.__name__: module}):
-            backend = _create_attention_backend(
-                attn, torch.device("cuda"), torch.float16
-            )
+            backend = _create_attention_backend(attn, torch.device("cuda"), torch.float16)
         assert isinstance(backend, StubAttentionBackend)
 
 
@@ -242,20 +236,13 @@ class TestModelExecutorConstruction:
     def test_graph_backend_off_variants(self, _mock_backend):
         for off_value in ("off", "", "none", "0"):
             model = _FakeModel(num_layers=1)
-            executor = ModelExecutor(
-                model, {"python_graph_backend": off_value}, max_seqs_per_batch=4
-            )
+            executor = ModelExecutor(model, {"python_graph_backend": off_value}, max_seqs_per_batch=4)
             assert executor.decode_graph_runner is None
             assert executor.inductor_runner is None
 
-    @patch(
-        "xllm.python.model_executor.runners.decode_cuda_graph."
-        "DecodeCudaGraphRunner"
-    )
+    @patch("xllm.python.model_executor.runners.decode_cuda_graph.DecodeCudaGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
-    def test_data_parallel_cuda_graph_is_supported(
-        self, mock_create, mock_graph_runner
-    ):
+    def test_data_parallel_cuda_graph_is_supported(self, mock_create, mock_graph_runner):
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
 
@@ -334,12 +321,8 @@ class TestDecodeCudaGraphDataParallelKeys:
         runner.dp_size = 1
         runner.dp_rank = 0
 
-        first = runner._graph_key(
-            torch.zeros(3, dtype=torch.int32), self._metadata([3])
-        )
-        second = runner._graph_key(
-            torch.zeros(4, dtype=torch.int32), self._metadata([4])
-        )
+        first = runner._graph_key(torch.zeros(3, dtype=torch.int32), self._metadata([3]))
+        second = runner._graph_key(torch.zeros(4, dtype=torch.int32), self._metadata([4]))
 
         assert first == (4, (4,))
         assert second == first
@@ -370,9 +353,7 @@ class TestDecodeCudaGraphDataParallelKeys:
         assert runner.can_execute(input_ids, metadata)
 
     @pytest.mark.parametrize("token_counts", ([3], [3, -1], [3, 2]))
-    def test_graph_key_rejects_invalid_data_parallel_metadata(
-        self, token_counts
-    ):
+    def test_graph_key_rejects_invalid_data_parallel_metadata(self, token_counts):
         runner = self._runner(dp_rank=1)
         input_ids = torch.zeros(1, dtype=torch.int32)
 
@@ -399,46 +380,28 @@ class TestDecodeAclGraphSpeculativeMetadata:
     def _metadata() -> SimpleNamespace:
         return SimpleNamespace(
             slot_mapping=torch.arange(4, dtype=torch.int32),
-            paged_kv_indptr=torch.tensor(
-                [0, 1, 2, 4, 6], dtype=torch.int32
-            ),
-            paged_kv_indices=torch.tensor(
-                [10, 10, 20, 21, 20, 21], dtype=torch.int32
-            ),
-            paged_kv_last_page_len=torch.tensor(
-                [3, 4, 3, 4], dtype=torch.int32
-            ),
+            paged_kv_indptr=torch.tensor([0, 1, 2, 4, 6], dtype=torch.int32),
+            paged_kv_indices=torch.tensor([10, 10, 20, 21, 20, 21], dtype=torch.int32),
+            paged_kv_last_page_len=torch.tensor([3, 4, 3, 4], dtype=torch.int32),
             q_cu_seq_lens=torch.tensor([0, 2, 4], dtype=torch.int32),
             kv_cu_seq_lens=torch.tensor([0, 4, 12], dtype=torch.int32),
             kv_seq_lens_host=torch.tensor([4, 8], dtype=torch.int32),
             kv_seq_lens_host_values=[4, 8],
-            block_table=torch.tensor(
-                [[10, 11], [20, 21]], dtype=torch.int32
-            ),
+            block_table=torch.tensor([[10, 11], [20, 21]], dtype=torch.int32),
             kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
             expanded_decode_metadata=SimpleNamespace(
                 enabled=True,
-                kv_seq_lens=torch.tensor(
-                    [3, 4, 7, 8], dtype=torch.int32
-                ),
+                kv_seq_lens=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
                 block_table=torch.tensor(
                     [[10, 11], [10, 11], [20, 21], [20, 21]],
                     dtype=torch.int32,
                 ),
-                paged_kv_indptr=torch.tensor(
-                    [0, 1, 2, 4, 6], dtype=torch.int32
-                ),
-                paged_kv_indices=torch.tensor(
-                    [10, 10, 20, 21, 20, 21], dtype=torch.int32
-                ),
-                paged_kv_last_page_len=torch.tensor(
-                    [3, 4, 3, 4], dtype=torch.int32
-                ),
+                paged_kv_indptr=torch.tensor([0, 1, 2, 4, 6], dtype=torch.int32),
+                paged_kv_indices=torch.tensor([10, 10, 20, 21, 20, 21], dtype=torch.int32),
+                paged_kv_last_page_len=torch.tensor([3, 4, 3, 4], dtype=torch.int32),
                 paged_attention_tiling_data=None,
-                kv_seq_lens_host=torch.tensor(
-                    [3, 4, 7, 8], dtype=torch.int32
-                ),
+                kv_seq_lens_host=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
                 kv_seq_lens_host_values=[3, 4, 7, 8],
             ),
             is_prefill=False,

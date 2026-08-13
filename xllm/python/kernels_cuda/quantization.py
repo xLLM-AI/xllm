@@ -50,10 +50,7 @@ def quant_matmul(
         The product with shape ``[..., N]`` in ``output_dtype``.
     """
     del x1, x2, transpose2, scale, offset, pertoken_scale, bias, output_dtype
-    raise NotImplementedError(
-        "quant_matmul has no CUDA kernel; quantized linear layers on CUDA are "
-        "not supported yet"
-    )
+    raise NotImplementedError("quant_matmul has no CUDA kernel; quantized linear layers on CUDA are not supported yet")
 
 
 def quantize_per_tensor(
@@ -77,8 +74,7 @@ def quantize_per_tensor(
     """
     del value, scales, zero_points, dtype, axis
     raise NotImplementedError(
-        "quantize_per_tensor has no CUDA kernel; quantized linear layers on "
-        "CUDA are not supported yet"
+        "quantize_per_tensor has no CUDA kernel; quantized linear layers on CUDA are not supported yet"
     )
 
 
@@ -100,10 +96,7 @@ def dynamic_quant(
         The quantized tensor and its per-token scale.
     """
     del value, smooth_scales, group_index, dst_type
-    raise NotImplementedError(
-        "dynamic_quant has no CUDA kernel; quantized linear layers on CUDA are "
-        "not supported yet"
-    )
+    raise NotImplementedError("dynamic_quant has no CUDA kernel; quantized linear layers on CUDA are not supported yet")
 
 
 __all__ = ["quant_matmul", "quantize_per_tensor", "dynamic_quant"]

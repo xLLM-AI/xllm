@@ -62,61 +62,36 @@ def _fused_recurrent_gated_delta_rule_packed_decode_kernel(
     value_mask = value_offsets < VALUE_DIM
     state_mask = value_mask[:, None] & key_mask[None, :]
 
-    state_index = tl.load(
-        state_indices + sequence * stride_indices_sequence
-    ).to(tl.int64)
-    output_ptr = (
-        output
-        + (sequence * NUM_VALUE_HEADS + value_head) * VALUE_DIM
-        + value_offsets
-    )
+    state_index = tl.load(state_indices + sequence * stride_indices_sequence).to(tl.int64)
+    output_ptr = output + (sequence * NUM_VALUE_HEADS + value_head) * VALUE_DIM + value_offsets
 
     # xLLM and vLLM both reserve cache row 0 as NULL_BLOCK_ID.
     if state_index <= 0:
-        zeros = tl.zeros([BLOCK_VALUE], dtype=tl.float32).to(
-            output_ptr.dtype.element_ty
-        )
+        zeros = tl.zeros([BLOCK_VALUE], dtype=tl.float32).to(output_ptr.dtype.element_ty)
         tl.store(output_ptr, zeros, mask=value_mask)
         return
 
     initial_state_ptr = initial_state + state_index * stride_initial_state_token
     initial_state_ptr = (
-        initial_state_ptr
-        + value_head * VALUE_DIM * KEY_DIM
-        + value_offsets[:, None] * KEY_DIM
-        + key_offsets[None, :]
+        initial_state_ptr + value_head * VALUE_DIM * KEY_DIM + value_offsets[:, None] * KEY_DIM + key_offsets[None, :]
     )
-    recurrent_state = tl.load(
-        initial_state_ptr, mask=state_mask, other=0
-    ).to(tl.float32)
+    recurrent_state = tl.load(initial_state_ptr, mask=state_mask, other=0).to(tl.float32)
 
     mixed_ptr = mixed_qkv + sequence * stride_mixed_qkv_token
     query_offsets = key_head * KEY_DIM + key_offsets
     key_offsets_packed = NUM_KEY_HEADS * KEY_DIM + query_offsets
-    value_offsets_packed = (
-        2 * NUM_KEY_HEADS * KEY_DIM + value_head * VALUE_DIM + value_offsets
-    )
-    query = tl.load(mixed_ptr + query_offsets, mask=key_mask, other=0).to(
-        tl.float32
-    )
-    key = tl.load(mixed_ptr + key_offsets_packed, mask=key_mask, other=0).to(
-        tl.float32
-    )
-    value = tl.load(
-        mixed_ptr + value_offsets_packed, mask=value_mask, other=0
-    ).to(tl.float32)
+    value_offsets_packed = 2 * NUM_KEY_HEADS * KEY_DIM + value_head * VALUE_DIM + value_offsets
+    query = tl.load(mixed_ptr + query_offsets, mask=key_mask, other=0).to(tl.float32)
+    key = tl.load(mixed_ptr + key_offsets_packed, mask=key_mask, other=0).to(tl.float32)
+    value = tl.load(mixed_ptr + value_offsets_packed, mask=value_mask, other=0).to(tl.float32)
 
     if USE_QK_L2NORM:
         query = query / tl.sqrt(tl.sum(query * query) + 1e-6)
         key = key / tl.sqrt(tl.sum(key * key) + 1e-6)
     query = query * scale
 
-    a_value = tl.load(a + sequence * stride_a_token + value_head).to(
-        tl.float32
-    )
-    b_value = tl.load(b + sequence * stride_b_token + value_head).to(
-        tl.float32
-    )
+    a_value = tl.load(a + sequence * stride_a_token + value_head).to(tl.float32)
+    b_value = tl.load(b + sequence * stride_b_token + value_head).to(tl.float32)
     a_log_value = tl.load(a_log + value_head).to(tl.float32)
     dt_bias_value = tl.load(dt_bias + value_head).to(tl.float32)
     softplus_input = a_value + dt_bias_value
@@ -137,10 +112,7 @@ def _fused_recurrent_gated_delta_rule_packed_decode_kernel(
 
     final_state_ptr = final_state + state_index * stride_final_state_token
     final_state_ptr = (
-        final_state_ptr
-        + value_head * VALUE_DIM * KEY_DIM
-        + value_offsets[:, None] * KEY_DIM
-        + key_offsets[None, :]
+        final_state_ptr + value_head * VALUE_DIM * KEY_DIM + value_offsets[:, None] * KEY_DIM + key_offsets[None, :]
     )
     tl.store(
         final_state_ptr,

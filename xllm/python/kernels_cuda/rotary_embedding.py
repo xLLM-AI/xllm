@@ -116,9 +116,7 @@ def mrope(
     """Apply multi-dimensional RoPE (mRoPE) to query and key tensors."""
     del positions, q, k, cos_sin_cache, head_dim, mrope_section
     del rotary_mode, cache_mode
-    raise NotImplementedError(
-        "mrope has no CUDA kernel; models on CUDA use the standard RoPE path"
-    )
+    raise NotImplementedError("mrope has no CUDA kernel; models on CUDA use the standard RoPE path")
 
 
 def vision_rotary_mul(
@@ -128,9 +126,7 @@ def vision_rotary_mul(
 ) -> torch.Tensor:
     """Apply RoPE via npu_rotary_mul (neox/half mode)."""
     del value, cos_full, sin_full
-    raise NotImplementedError(
-        "vision_rotary_mul has no CUDA kernel; CUDA models use FlashInfer RoPE"
-    )
+    raise NotImplementedError("vision_rotary_mul has no CUDA kernel; CUDA models use FlashInfer RoPE")
 
 
 __all__ = [

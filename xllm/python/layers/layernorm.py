@@ -65,9 +65,7 @@ class GemmaRMSNorm(nn.Module):
     ) -> None:
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(
-            torch.zeros(dim, dtype=torch.float32, device=device)
-        )
+        self.weight = nn.Parameter(torch.zeros(dim, dtype=torch.float32, device=device))
 
     def forward(
         self, x: torch.Tensor, residual: torch.Tensor | None = None

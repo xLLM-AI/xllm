@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
-from pathlib import Path
 import math
+from pathlib import Path
 
 import tilelang
 import tilelang.language as T
 
-from .utils import DEFAULT_ASCEND_PASS_CONFIGS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
 # Per-kernel pass_configs matching the original tuned kernel.
@@ -170,7 +169,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                                 v_offset : v_offset + vec_block_v,
                             ],
                             # h_load_vec,
-                            h_vec
+                            h_vec,
                         )
                         # T.set_flag("mte2", "v", 1)
                         # T.wait_flag("mte2", "v", 1)
@@ -193,9 +192,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                     if seq_len > 0:
                         q_offset = seq_start * query_stride_t + k_head_idx * dk
                         k_offset = seq_start * key_stride_t + k_head_idx * dk
-                        v_offset_gm = (
-                            seq_start * value_stride_t + v_head_idx * dv + v_offset
-                        )
+                        v_offset_gm = seq_start * value_stride_t + v_head_idx * dv + v_offset
                         T.copy(query[0, q_offset], q_buf[0, :])
                         T.copy(key[0, k_offset], k_buf[0, :])
                         T.copy(
@@ -211,9 +208,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         T.wait_flag("mte2", "v", 6)
 
                         T.copy(a[token_idx, v_head_idx : v_head_idx + 1], scalar_fp16)
-                        T.copy(
-                            beta[token_idx, v_head_idx : v_head_idx + 1], scalar2_fp16
-                        )
+                        T.copy(beta[token_idx, v_head_idx : v_head_idx + 1], scalar2_fp16)
                         T.set_flag("mte2", "v", 5)
                         T.wait_flag("mte2", "v", 5)
                         T.tile.cast(scalar_fp32, scalar_fp16, "CAST_NONE", 1)
@@ -247,17 +242,9 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         if t + 1 < seq_len:
                             next_token_idx = seq_start + t + 1
                             next_buf_idx = (t + 1) % 2
-                            q_offset = (
-                                next_token_idx * query_stride_t + k_head_idx * dk
-                            )
-                            k_offset = (
-                                next_token_idx * key_stride_t + k_head_idx * dk
-                            )
-                            v_offset_gm = (
-                                next_token_idx * value_stride_t
-                                + v_head_idx * dv
-                                + v_offset
-                            )
+                            q_offset = next_token_idx * query_stride_t + k_head_idx * dk
+                            k_offset = next_token_idx * key_stride_t + k_head_idx * dk
+                            v_offset_gm = next_token_idx * value_stride_t + v_head_idx * dv + v_offset
                             T.copy(query[0, q_offset], q_buf[next_buf_idx, :])
                             T.copy(key[0, k_offset], k_buf[next_buf_idx, :])
                             T.copy(value[0, v_offset_gm], v_buf[next_buf_idx, :])
@@ -310,9 +297,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         T.wait_flag("v", "mte3", 0)
                         T.copy(
                             o_half_buf[buf_idx, :],
-                            out[
-                                token_idx, v_head_idx, v_offset : v_offset + vec_block_v
-                            ],
+                            out[token_idx, v_head_idx, v_offset : v_offset + vec_block_v],
                         )
 
                     T.set_flag("v", "mte3", 5)
@@ -375,10 +360,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
     ]
     SPECIALIZATIONS = [
         {
-            "variant_key": (
-                f"ns{num_seqs}_nk{nk}_nv{nv}_dk{dk}_dv{dv}"
-                f"_bv{block_v}_l2{int(use_qk_l2norm)}_bf16"
-            ),
+            "variant_key": (f"ns{num_seqs}_nk{nk}_nv{nv}_dk{dk}_dv{dv}_bv{block_v}_l2{int(use_qk_l2norm)}_bf16"),
             "max_num_seqs": num_seqs,
             "nk": nk,
             "nv": nv,
@@ -417,10 +399,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
         dtype: str,
     ) -> str:
         if dtype != DEFAULT_DTYPE:
-            raise ValueError(
-                f"fused_sigmoid_gating_delta_rule only supports dtype={DEFAULT_DTYPE}, "
-                f"got {dtype}"
-            )
+            raise ValueError(f"fused_sigmoid_gating_delta_rule only supports dtype={DEFAULT_DTYPE}, got {dtype}")
         tilelang.disable_cache()
         tilelang_kernel = build_fused_sigmoid_gating_delta_rule_kernel(
             nk=nk,
@@ -435,9 +414,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
             accum_dtype=DEFAULT_ACCUM_DTYPE,
             num_cores=DEFAULT_NUM_CORES,
         )
-        with tilelang.tvm.transform.PassContext(
-            opt_level=3, config=_SIGMOID_PASS_CONFIGS
-        ):
+        with tilelang.tvm.transform.PassContext(opt_level=3, config=_SIGMOID_PASS_CONFIGS):
             kernel = tilelang.engine.lower(tilelang_kernel)
         return kernel.kernel_source
 
@@ -465,16 +442,12 @@ def golden(
     scale = dk**-0.5 if scale is None else scale
     v_per_k = nv // nk
 
-    state = torch.zeros(
-        (num_seqs, nv, dk, dv), dtype=torch.float32, device=query.device
-    )
+    state = torch.zeros((num_seqs, nv, dk, dv), dtype=torch.float32, device=query.device)
     for i in range(num_seqs):
         state_idx = ssm_state_indices[i].item()
         if state_idx >= 0:
             state[i] = init_state[state_idx].float().clone()
-    out = torch.empty(
-        (1, total_tokens, nv, dv), dtype=torch.float32, device=query.device
-    )
+    out = torch.empty((1, total_tokens, nv, dv), dtype=torch.float32, device=query.device)
 
     exp_A = torch.exp(A_log.float())
     for seq_idx in range(num_seqs):
@@ -532,9 +505,7 @@ def main(
     if seqlens:
         total_tokens = sum(seqlens)
         num_seqs = len(seqlens)
-        cu_seqlens_cpu = torch.tensor(
-            [0] + [sum(seqlens[: i + 1]) for i in range(num_seqs)], dtype=torch.int32
-        )
+        cu_seqlens_cpu = torch.tensor([0] + [sum(seqlens[: i + 1]) for i in range(num_seqs)], dtype=torch.int32)
         query_cpu = torch.randn((1, total_tokens, nk, dk), dtype=torch.float16)
         key_cpu = torch.randn((1, total_tokens, nk, dk), dtype=torch.float16)
         value_cpu = torch.randn((1, total_tokens, nv, dv), dtype=torch.float16)
@@ -624,10 +595,9 @@ def main(
     )
 
     torch.testing.assert_close(out.cpu(), out_golden, rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(
-        final_state.cpu(), final_state_golden, rtol=2e-2, atol=2e-2
-    )
+    torch.testing.assert_close(final_state.cpu(), final_state_golden, rtol=2e-2, atol=2e-2)
     from scripts.logger import logger
+
     logger.info("Kernel Output Match!")
 
 
@@ -635,17 +605,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate TileLang AscendC source for fused_sigmoid_gating_delta_rule AOT kernel."
     )
-    parser.add_argument(
-        "--output", type=Path, required=True, help="Output AscendC .cpp file"
-    )
+    parser.add_argument("--output", type=Path, required=True, help="Output AscendC .cpp file")
     parser.add_argument("--nk", type=int, default=DEFAULT_NK)
     parser.add_argument("--nv", type=int, default=DEFAULT_NV)
     parser.add_argument("--dk", type=int, default=DEFAULT_DK)
     parser.add_argument("--dv", type=int, default=DEFAULT_DV)
     parser.add_argument("--block-v", type=int, default=None)
-    parser.add_argument(
-        "--max-num-seqs", type=int, default=NUM_SEQS_SPECIALIZATIONS[-1]
-    )
+    parser.add_argument("--max-num-seqs", type=int, default=NUM_SEQS_SPECIALIZATIONS[-1])
     parser.add_argument("--use-qk-l2norm", type=int, default=DEFAULT_USE_QK_L2NORM)
     parser.add_argument("--dtype", type=str, default=DEFAULT_DTYPE)
     parser.add_argument(

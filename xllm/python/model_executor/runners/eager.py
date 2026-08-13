@@ -60,9 +60,7 @@ class EagerRunner(BaseRunner):
         if self.cp_size > 1 and metadata.is_prefill:
             seq_lens = _per_seq_lens_from_metadata(metadata)
             if seq_lens is not None:
-                cp_context = build_cp_context(
-                    seq_lens, self.cp_size, self.cp_rank, self.device
-                )
+                cp_context = build_cp_context(seq_lens, self.cp_size, self.cp_rank, self.device)
 
         with forward_context(
             ForwardContext(

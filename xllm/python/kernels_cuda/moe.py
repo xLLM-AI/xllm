@@ -56,9 +56,7 @@ def moe_fused_topk(
     Returns:
         Routing weights and expert indices, both ``[num_tokens, topk]``.
     """
-    return torch.ops.xllm_ops.moe_fused_topk(
-        gating_output, topk, renormalize, scoring_func
-    )
+    return torch.ops.xllm_ops.moe_fused_topk(gating_output, topk, renormalize, scoring_func)
 
 
 def cutlass_fused_moe(
@@ -199,8 +197,7 @@ def grouped_moe(
         active_expert_range,
     )
     raise NotImplementedError(
-        "grouped_moe has no CUDA kernel; the equivalent CUDA path is "
-        "moe_fused_topk followed by cutlass_fused_moe"
+        "grouped_moe has no CUDA kernel; the equivalent CUDA path is moe_fused_topk followed by cutlass_fused_moe"
     )
 
 

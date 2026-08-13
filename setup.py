@@ -1,12 +1,11 @@
+import argparse
 import glob
-import io
 import os
 import re
 import shutil
 import subprocess
 import sys
-import argparse
-from typing import Any, Optional
+from typing import Any
 
 from setuptools import Command, Extension, find_namespace_packages, setup
 from setuptools.command.build_ext import build_ext
@@ -21,12 +20,12 @@ from scripts.build_support.env import (
     get_cxx_abi,
     get_torch_root_path,
     set_cuda_envs,
+    set_dcu_envs,
     set_ilu_envs,
     set_maca_envs,
     set_mlu_envs,
     set_musa_envs,
     set_npu_envs,
-    set_dcu_envs,
 )
 from scripts.build_support.utils import (
     check_and_install_pre_commit,
@@ -108,10 +107,9 @@ def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) 
     source = os.path.join(py_pkg_src, f"kernels_{device}")
     if not os.path.isdir(source):
         available = sorted(
-            name[len("kernels_"):]
+            name[len("kernels_") :]
             for name in os.listdir(py_pkg_src)
-            if name.startswith("kernels_")
-            and os.path.isdir(os.path.join(py_pkg_src, name))
+            if name.startswith("kernels_") and os.path.isdir(os.path.join(py_pkg_src, name))
         )
         logger.info(
             f"No Python kernel package for --device {device}; the Python model "
@@ -167,9 +165,7 @@ def _stage_triton_npu_runtime_binaries(base_dir: str, extdir: str, device: str) 
         copied_count += 1
 
     if copied_count == 0:
-        raise RuntimeError(
-            f"No Triton NPU runtime binaries were found under: {source_dir}"
-        )
+        raise RuntimeError(f"No Triton NPU runtime binaries were found under: {source_dir}")
     logger.info(f"Staged {copied_count} Triton NPU runtime asset(s) into {dest_dir}")
 
 
@@ -177,9 +173,7 @@ def _stage_mlu_triton_kernels(base_dir: str, extdir: str, device: str) -> None:
     if device != "mlu":
         return
 
-    source_dir = os.path.join(
-        base_dir, "xllm", "core", "kernels", "mlu", "triton_kernel"
-    )
+    source_dir = os.path.join(base_dir, "xllm", "core", "kernels", "mlu", "triton_kernel")
     if not os.path.isdir(source_dir):
         raise RuntimeError(
             f"MLU triton_kernel directory does not exist: {source_dir}\n"
@@ -193,9 +187,7 @@ def _stage_mlu_triton_kernels(base_dir: str, extdir: str, device: str) -> None:
     # triton_kernel.<name>``. Do NOT add another ``xllm`` segment here -- the
     # CMake ``xllm`` product is written into extdir itself as a *file*, and
     # ``extdir/xllm`` would collide with it (NotADirectoryError).
-    dest_dir = os.path.join(
-        extdir, "core", "kernels", "mlu", "triton_kernel"
-    )
+    dest_dir = os.path.join(extdir, "core", "kernels", "mlu", "triton_kernel")
     if os.path.isdir(dest_dir):
         shutil.rmtree(dest_dir)
     os.makedirs(dest_dir, exist_ok=True)
@@ -211,9 +203,7 @@ def _stage_mlu_triton_kernels(base_dir: str, extdir: str, device: str) -> None:
         copied_count += 1
 
     if copied_count == 0:
-        raise RuntimeError(
-            f"No MLU triton kernel .py files were found under: {source_dir}"
-        )
+        raise RuntimeError(f"No MLU triton kernel .py files were found under: {source_dir}")
     logger.info(f"Staged {copied_count} MLU triton kernel(s) into {dest_dir}")
 
 
@@ -226,9 +216,7 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
     installed xllm package -- instead of baking a build-tree ``__FILE__`` path
     -- keeps the script resolvable after ``pip install``.
     """
-    source_dir = os.path.join(
-        base_dir, "xllm", "core", "triton_jit", "scripts"
-    )
+    source_dir = os.path.join(base_dir, "xllm", "core", "triton_jit", "scripts")
     source_script = os.path.join(source_dir, "triton_compile.py")
     if not os.path.isfile(source_script):
         raise RuntimeError(
@@ -244,17 +232,15 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
     # extdir already points at the installed ``xllm`` package dir, so the
     # scripts package lands directly under it. Do NOT add another ``xllm``
     # segment (see _stage_mlu_triton_kernels for the collision rationale).
-    dest_dir = os.path.join(
-        extdir, "core", "triton_jit", "scripts"
-    )
+    dest_dir = os.path.join(extdir, "core", "triton_jit", "scripts")
     os.makedirs(dest_dir, exist_ok=True)
     shutil.copy2(source_script, os.path.join(dest_dir, "triton_compile.py"))
 
     pkg_init = (
         "# Copyright 2026 The xLLM Authors. All Rights Reserved.\n"
-        "# Licensed under the Apache License, Version 2.0 (the \"License\").\n"
+        '# Licensed under the Apache License, Version 2.0 (the "License").\n'
         "# See LICENSE for details.\n"
-        "\"\"\"xllm internal package marker.\"\"\"\n"
+        '"""xllm internal package marker."""\n'
     )
     for pkg_dir in (
         os.path.join(extdir, "core"),
@@ -268,6 +254,7 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
                 f.write(pkg_init)
 
     logger.info(f"Staged triton_jit compile script into {dest_dir}")
+
 
 def _stage_auto_tuning_config(base_dir: str, extdir: str) -> None:
     """Stage the per-model-type auto-tuning profiles into the wheel.
@@ -298,11 +285,13 @@ def _stage_auto_tuning_config(base_dir: str, extdir: str) -> None:
 
     logger.info(f"Staged auto-tuning config into {dest_dir}")
 
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
         self.sourcedir = os.path.realpath(os.path.abspath(sourcedir))
         self.path = path
+
 
 class ExtBuild(build_ext):
     user_options = build_ext.user_options + [
@@ -317,8 +306,8 @@ class ExtBuild(build_ext):
     def initialize_options(self) -> None:
         build_ext.initialize_options(self)
         self.base_dir = get_base_dir()
-        self.device: Optional[str] = None
-        self.arch: Optional[str] = None
+        self.device: str | None = None
+        self.arch: str | None = None
         self.generate_so: bool = False
         self.enable_ha: bool = False
         self.tilelang_jobs: int | str | None = None
@@ -337,9 +326,7 @@ class ExtBuild(build_ext):
             )
             exit(1)
 
-        match = re.search(
-            r"version\s*(?P<major>\d+)\.(?P<minor>\d+)([\d.]+)?", out.decode()
-        )
+        match = re.search(r"version\s*(?P<major>\d+)\.(?P<minor>\d+)([\d.]+)?", out.decode())
         if match is None:
             raise RuntimeError(f"Failed to parse CMake version from: {out!r}")
         cmake_major, cmake_minor = int(match.group("major")), int(match.group("minor"))
@@ -393,14 +380,14 @@ class ExtBuild(build_ext):
             "-DUSE_CCACHE=ON",
             f"-DPython_EXECUTABLE:FILEPATH={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
-            f"-DBUILD_SHARED_LIBS=OFF",
+            "-DBUILD_SHARED_LIBS=OFF",
             f"-DDEVICE_TYPE=USE_{self.device.upper()}",
             f"-DDEVICE_ARCH={self.arch.upper()}",
             f"-DENABLE_HA={'ON' if self.enable_ha else 'OFF'}",
             f"-DXLLM_ATB_LAYERS_SOURCE_DIR={os.path.join(self.base_dir, 'third_party', 'xllm_atb_layers')}",
             f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
-        if self.device != 'maca':
+        if self.device != "maca":
             cmake_args += ["-DUSE_CCACHE=ON"]
 
         if self.device == "npu":
@@ -426,9 +413,10 @@ class ExtBuild(build_ext):
         elif self.device == "cuda":
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
             if not torch_cuda_architectures:
-                raise ValueError("Please set TORCH_CUDA_ARCH_LIST environment variable, e.g. export TORCH_CUDA_ARCH_LIST=\"8.0 8.9 9.0 10.0 12.0\"")
-            cmake_args += ["-DUSE_CUDA=ON",
-                           f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
+                raise ValueError(
+                    'Please set TORCH_CUDA_ARCH_LIST environment variable, e.g. export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"'
+                )
+            cmake_args += ["-DUSE_CUDA=ON", f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
             set_cuda_envs()
 
         elif self.device == "dcu":
@@ -466,9 +454,7 @@ class ExtBuild(build_ext):
 
                 aiter_moe_c_kernel_lib = os.getenv("AITER_MOE_C_KERNEL_LIB")
                 if aiter_moe_c_kernel_lib:
-                    cmake_args += [
-                        f"-DAITER_MOE_C_KERNEL_LIB={aiter_moe_c_kernel_lib}"
-                    ]
+                    cmake_args += [f"-DAITER_MOE_C_KERNEL_LIB={aiter_moe_c_kernel_lib}"]
             else:
                 raise RuntimeError(
                     "DCU build requires a HIP/ROCm PyTorch environment. "
@@ -479,11 +465,13 @@ class ExtBuild(build_ext):
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
             if not torch_cuda_architectures:
                 torch_cuda_architectures = "8.0 8.6+PTX"
-            cmake_args += ["-DUSE_CUDA=ON",
-                           "-DUSE_MACA=ON",
-                           "-DCMAKE_CUDA_STANDARD=17",
-                           "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-                           f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
+            cmake_args += [
+                "-DUSE_CUDA=ON",
+                "-DUSE_MACA=ON",
+                "-DCMAKE_CUDA_STANDARD=17",
+                "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
+            ]
             set_maca_envs()
         elif self.device == "ilu":
             cmake_args += ["-DUSE_ILU=ON"]
@@ -538,9 +526,7 @@ class ExtBuild(build_ext):
         build_args += ["--target", ext.name, "xllm"]
         subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
 
-        server_output_dir = os.path.join(
-            os.path.dirname(cmake_dir), "xllm/core/server/"
-        )
+        server_output_dir = os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/")
         os.makedirs(server_output_dir, exist_ok=True)
         shutil.copy(
             os.path.join(extdir, product),
@@ -549,9 +535,7 @@ class ExtBuild(build_ext):
         if self.enable_ha:
             etcd_wrapper = os.path.join(extdir, "libetcd_wrapper.so")
             if not os.path.isfile(etcd_wrapper):
-                raise RuntimeError(
-                    f"Mooncake HA runtime library was not staged: {etcd_wrapper}"
-                )
+                raise RuntimeError(f"Mooncake HA runtime library was not staged: {etcd_wrapper}")
             shutil.copy(etcd_wrapper, server_output_dir)
 
         # Stage the Python model-executor package into the wheel as the
@@ -592,15 +576,17 @@ class ExtBuild(build_ext):
             build_args = base_build_args + ["--target all_tests"]
             subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
 
+
 class ExtBuildSingleTest(ExtBuild):
     """Inherit ExtBuild, used to build and run a single test"""
+
     user_options = ExtBuild.user_options + [
         ("test-name=", None, "name of the test target to build and run"),
     ]
 
     def initialize_options(self) -> None:
         ExtBuild.initialize_options(self)
-        self.test_name: Optional[str] = None
+        self.test_name: str | None = None
 
     def finalize_options(self) -> None:
         ExtBuild.finalize_options(self)
@@ -627,7 +613,7 @@ class ExtBuildSingleTest(ExtBuild):
 
         # Find test executable
         # CMake usually places executables in CMAKE_RUNTIME_OUTPUT_DIRECTORY or build directory
-        test_executable: Optional[str] = None
+        test_executable: str | None = None
         possible_paths: list[str] = [
             os.path.join(cmake_dir, self.test_name),
             os.path.join(extdir, self.test_name),
@@ -653,11 +639,7 @@ class ExtBuildSingleTest(ExtBuild):
             # If not found, try using ctest to run
             logger.warning(f"⚠️  Could not find test executable {self.test_name}, trying ctest...")
             try:
-                subprocess.check_call(
-                    ["ctest", "-R", self.test_name, "--verbose"],
-                    cwd=cmake_dir,
-                    env=env
-                )
+                subprocess.check_call(["ctest", "-R", self.test_name, "--verbose"], cwd=cmake_dir, env=env)
                 logger.info(f"✅ Test {self.test_name} passed!")
             except subprocess.CalledProcessError:
                 logger.exception(f"❌ Failed to run test {self.test_name}")
@@ -671,6 +653,7 @@ class ExtBuildSingleTest(ExtBuild):
                 logger.exception(f"❌ Test {self.test_name} failed with exit code {e.returncode}")
                 raise
 
+
 class BuildDistWheel(bdist_wheel):
     user_options = bdist_wheel.user_options + [
         ("device=", None, "target device type (npu or mlu or cuda or ilu or musa)"),
@@ -681,8 +664,8 @@ class BuildDistWheel(bdist_wheel):
 
     def initialize_options(self) -> None:
         super().initialize_options()
-        self.device: Optional[str] = None
-        self.arch: Optional[str] = None
+        self.device: str | None = None
+        self.arch: str | None = None
         self.enable_ha: bool = False
         self.tilelang_jobs: int | str | None = None
         # Cache the original dist name early so finalize_options is idempotent
@@ -708,33 +691,33 @@ class BuildDistWheel(bdist_wheel):
         super().finalize_options()
 
     def run(self) -> None:
-        build_ext_cmd = self.get_finalized_command('build_ext')
+        build_ext_cmd = self.get_finalized_command("build_ext")
         build_ext_cmd.device = self.device
         build_ext_cmd.arch = self.arch
         build_ext_cmd.enable_ha = self.enable_ha
         build_ext_cmd.tilelang_jobs = self.tilelang_jobs
 
         logger.info("🔨 build project...")
-        self.run_command('build')
+        self.run_command("build")
 
         if "SKIP_TEST" in os.environ:
             logger.info("⏭️ skipping UT because SKIP_TEST is set")
         else:
             logger.info("🧪 testing UT...")
-            self.run_command('test')
+            self.run_command("test")
 
-        if self.arch == 'arm':
+        if self.arch == "arm":
             ext_path = get_base_dir() + f"/build/lib.linux-aarch64-cpython-{get_python_version()}/"
         else:
             ext_path = get_base_dir() + f"/build/lib.linux-x86_64-cpython-{get_python_version()}/"
         if len(ext_path) == 0:
             logger.error("❌ Build wheel failed, not found path.")
             exit(1)
-        tmp_path = os.path.join(ext_path, 'xllm')
+        tmp_path = os.path.join(ext_path, "xllm")
         for root, dirs, files in os.walk(tmp_path):
             for item in files:
                 path = os.path.join(root, item)
-                if '_test' in item and os.path.isfile(path):
+                if "_test" in item and os.path.isfile(path):
                     os.remove(path)
         global BUILD_TEST_FILE
         BUILD_TEST_FILE = False
@@ -746,6 +729,7 @@ class BuildDistWheel(bdist_wheel):
         finally:
             InstallWheel._building_wheel = False
 
+
 class InstallWheel(install):
     """`python setup.py install` builds the wheel, then pip-installs it.
 
@@ -753,6 +737,7 @@ class InstallWheel(install):
     its own build directory; the _building_wheel guard makes that re-entrant
     call fall back to the standard install behavior to avoid infinite recursion.
     """
+
     _building_wheel = False
 
     def run(self) -> None:
@@ -774,16 +759,23 @@ class InstallWheel(install):
 
         logger.info(f"⬇️  installing wheel: {wheel_path}")
         try:
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                "--force-reinstall", "--no-deps", wheel_path,
-            ])
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--force-reinstall",
+                    "--no-deps",
+                    wheel_path,
+                ]
+            )
         except subprocess.CalledProcessError:
             logger.exception(f"❌ Failed to install wheel: {wheel_path}")
             exit(1)
         logger.info(f"✅ Installed {os.path.basename(wheel_path)}")
 
-    def _locate_built_wheel(self) -> Optional[str]:
+    def _locate_built_wheel(self) -> str | None:
         # bdist_wheel records produced artifacts in distribution.dist_files.
         wheels = [
             path
@@ -801,6 +793,7 @@ class InstallWheel(install):
             return max(candidates, key=os.path.getmtime)
         return None
 
+
 class TestUT(Command):
     description = "Run all testing binary."
     user_options = []
@@ -809,11 +802,11 @@ class TestUT(Command):
     # Add test names here if they use fork() or have device initialization conflicts
     # Note: Use test case name patterns (from gtest), not executable names
     SEQUENTIAL_TESTS = [
-        'ReduceScatterMultiDeviceTest',
-        'BroadcastMultiDeviceTest',
-        'DeepEPMultiDeviceTest',
-        'AttentionMultiDeviceTest',
-        'FusedMoEAll2AllMultiDeviceTest',
+        "ReduceScatterMultiDeviceTest",
+        "BroadcastMultiDeviceTest",
+        "DeepEPMultiDeviceTest",
+        "AttentionMultiDeviceTest",
+        "FusedMoEAll2AllMultiDeviceTest",
     ]
 
     def initialize_options(self) -> None:
@@ -846,7 +839,7 @@ class TestUT(Command):
                 raise RuntimeError("Failed to capture subprocess stdout for streaming.")
 
             output_lines: list[str] = []
-            for line in iter(process.stdout.readline, ''):
+            for line in iter(process.stdout.readline, ""):
                 # Stream raw subprocess output as-is to preserve ctest formatting.
                 sys.stdout.write(line)
                 sys.stdout.flush()
@@ -856,8 +849,8 @@ class TestUT(Command):
 
             # Warn if no tests were found, but don't fail (some backends may not compile certain tests)
             if warn_if_no_tests and return_code == 0:
-                output_text: str = ''.join(output_lines)
-                if 'No tests were found' in output_text:
+                output_text: str = "".join(output_lines)
+                if "No tests were found" in output_text:
                     logger.warning("No tests matched the pattern (this is OK for some backends).")
                     return
 
@@ -868,21 +861,20 @@ class TestUT(Command):
         try:
             # Step 1: Run all tests EXCEPT sequential ones in parallel
             if self.SEQUENTIAL_TESTS:
-                exclude_pattern = '|'.join(self.SEQUENTIAL_TESTS)
+                exclude_pattern = "|".join(self.SEQUENTIAL_TESTS)
                 logger.info("=" * 80)
                 logger.info(f"Running tests in parallel (excluding: {', '.join(self.SEQUENTIAL_TESTS)})...")
                 logger.info("=" * 80)
                 run_subprocess_with_streaming(
-                    ['ctest', '--parallel', test_parallel, '--repeat', 'until-pass:5', '-E', exclude_pattern],
-                    "Parallel tests failed."
+                    ["ctest", "--parallel", test_parallel, "--repeat", "until-pass:5", "-E", exclude_pattern],
+                    "Parallel tests failed.",
                 )
             else:
                 logger.info("=" * 80)
                 logger.info("Running all tests in parallel...")
                 logger.info("=" * 80)
                 run_subprocess_with_streaming(
-                    ['ctest', '--parallel', test_parallel, '--repeat', 'until-pass:5'],
-                    "Parallel tests failed."
+                    ["ctest", "--parallel", test_parallel, "--repeat", "until-pass:5"], "Parallel tests failed."
                 )
 
             # Step 2: Run sequential tests one by one
@@ -893,9 +885,9 @@ class TestUT(Command):
                 # Use pattern matching to include all test cases under the test class
                 # e.g., ReduceScatterMultiDeviceTest matches ReduceScatterMultiDeviceTest.BasicTest, etc.
                 run_subprocess_with_streaming(
-                    ['ctest', '--repeat', 'until-pass:5', '-R', test_name],
+                    ["ctest", "--repeat", "until-pass:5", "-R", test_name],
                     f"Sequential test {test_name} failed.",
-                    warn_if_no_tests=True
+                    warn_if_no_tests=True,
                 )
 
             logger.info("=" * 80)
@@ -909,8 +901,10 @@ class TestUT(Command):
     def run(self) -> None:
         self.run_ctest(get_cmake_dir())
 
+
 class SingleTest(Command):
     """Command to build and run a single test"""
+
     description = "Build and run a single test target."
     # test_name should match a CMake/CTest target name, for example:
     #   python setup.py test --test-name common_test
@@ -924,9 +918,9 @@ class SingleTest(Command):
     ]
 
     def initialize_options(self) -> None:
-        self.test_name: Optional[str] = None
-        self.device: Optional[str] = None
-        self.arch: Optional[str] = None
+        self.test_name: str | None = None
+        self.device: str | None = None
+        self.arch: str | None = None
         self.generate_so: bool = False
         self.enable_ha: bool = False
         self.tilelang_jobs: int | str | None = None
@@ -948,97 +942,93 @@ class SingleTest(Command):
         build_ext.finalize_options()
 
         # Ensure extension modules are set
-        if not hasattr(build_ext, 'extensions') or not build_ext.extensions:
+        if not hasattr(build_ext, "extensions") or not build_ext.extensions:
             build_ext.extensions = self.distribution.ext_modules
 
         # Run build
         build_ext.run()
 
+
 def parse_arguments() -> dict[str, Any]:
     parser = argparse.ArgumentParser(
-        description='Setup helper for building xllm',
-        epilog='Example: python setup.py build',
-        usage='%(prog)s [COMMAND] [OPTIONS]'
+        description="Setup helper for building xllm",
+        epilog="Example: python setup.py build",
+        usage="%(prog)s [COMMAND] [OPTIONS]",
     )
 
     parser.add_argument(
-        'setup_args',
-        nargs='*',
-        metavar='argparse.REMAINDER',
-        help='setup command (build, test, bdist_wheel, etc.)'
+        "setup_args", nargs="*", metavar="argparse.REMAINDER", help="setup command (build, test, bdist_wheel, etc.)"
     )
 
     parser.add_argument(
-        '--device',
+        "--device",
         type=str.lower,
-        choices=['auto', 'npu', 'mlu', 'cuda', 'ilu', 'musa', 'dcu', 'maca'],
-        default='auto',
-        help='Device type: npu, mlu, ilu, cuda or musa or maca (case-insensitive)'
+        choices=["auto", "npu", "mlu", "cuda", "ilu", "musa", "dcu", "maca"],
+        default="auto",
+        help="Device type: npu, mlu, ilu, cuda or musa or maca (case-insensitive)",
     )
     parser.add_argument(
-        '--generate-so',
+        "--generate-so",
         type=str.lower,
-        choices=['true', 'false', '1', '0', 'yes', 'no', 'y', 'n', 'on', 'off'],
-        default='false',
-        help='Whether to generate so or binary'
+        choices=["true", "false", "1", "0", "yes", "no", "y", "n", "on", "off"],
+        default="false",
+        help="Whether to generate so or binary",
     )
     parser.add_argument(
-        '--enable-ha',
+        "--enable-ha",
         type=str.lower,
-        choices=['true', 'false', '1', '0', 'yes', 'no', 'y', 'n', 'on', 'off'],
-        default='false',
-        help='Whether to enable Mooncake etcd high availability support'
+        choices=["true", "false", "1", "0", "yes", "no", "y", "n", "on", "off"],
+        default="false",
+        help="Whether to enable Mooncake etcd high availability support",
     )
 
     parser.add_argument(
-        '--test-name',
+        "--test-name",
         type=str,
         default=None,
-        help='Name of the test target to build and run; when omitted, all tests run'
+        help="Name of the test target to build and run; when omitted, all tests run",
     )
     parser.add_argument(
-        '--tilelang-jobs',
+        "--tilelang-jobs",
         type=int,
         default=None,
-        help='Maximum parallel TileLang compile workers, e.g. --tilelang-jobs 16; auto-selects a safe default when omitted'
+        help="Maximum parallel TileLang compile workers, e.g. --tilelang-jobs 16; auto-selects a safe default when omitted",
     )
 
     args = parser.parse_args()
 
     sys.argv = [sys.argv[0]] + args.setup_args
 
-    generate_so = args.generate_so.lower() in ('true', '1', 'yes', 'y', 'on')
-    enable_ha = args.enable_ha.lower() in ('true', '1', 'yes', 'y', 'on')
+    generate_so = args.generate_so.lower() in ("true", "1", "yes", "y", "on")
+    enable_ha = args.enable_ha.lower() in ("true", "1", "yes", "y", "on")
 
     return {
-        'device': args.device,
-        'generate_so': generate_so,
-        'enable_ha': enable_ha,
-        'test_name': args.test_name,
-        'tilelang_jobs': args.tilelang_jobs,
+        "device": args.device,
+        "generate_so": generate_so,
+        "enable_ha": enable_ha,
+        "test_name": args.test_name,
+        "tilelang_jobs": args.tilelang_jobs,
     }
+
 
 if __name__ == "__main__":
     config = parse_arguments()
 
     arch = get_cpu_arch()
-    device = config['device']
-    if device == 'auto':
+    device = config["device"]
+    if device == "auto":
         device = get_device_type()
     target_platform = get_ascend_platform() if device == "npu" else None
-    enable_ha = config['enable_ha']
-    logger.info(
-        f"🚀 Build xllm with CPU arch: {arch}, target device: {device}, "
-        f"enable_ha: {enable_ha}"
-    )
+    enable_ha = config["enable_ha"]
+    logger.info(f"🚀 Build xllm with CPU arch: {arch}, target device: {device}, enable_ha: {enable_ha}")
     if device == "npu":
         _ensure_torch_npu_ready()
         _ensure_tilelang_ascend_ready(target_platform, arch)
     pre_build(device, enable_ha)
 
-    generate_so = config['generate_so']
-    test_name = config.get('test_name')
-    tilelang_jobs = config.get('tilelang_jobs')
+    generate_so = config["generate_so"]
+    test_name = config.get("test_name")
+    tilelang_jobs = config.get("tilelang_jobs")
 
     if "SKIP_TEST" in os.environ:
         BUILD_TEST_FILE = False
@@ -1052,28 +1042,28 @@ if __name__ == "__main__":
 
     test_cmd = SingleTest if test_name else TestUT
     options = {
-        'build_ext': {
-            'device': device,
-            'arch': arch,
-            'generate_so': generate_so,
-            'enable_ha': enable_ha,
-            'tilelang_jobs': tilelang_jobs,
+        "build_ext": {
+            "device": device,
+            "arch": arch,
+            "generate_so": generate_so,
+            "enable_ha": enable_ha,
+            "tilelang_jobs": tilelang_jobs,
         },
-        'bdist_wheel': {
-            'device': device,
-            'arch': arch,
-            'enable_ha': enable_ha,
-            'tilelang_jobs': tilelang_jobs,
-        }
+        "bdist_wheel": {
+            "device": device,
+            "arch": arch,
+            "enable_ha": enable_ha,
+            "tilelang_jobs": tilelang_jobs,
+        },
     }
     if test_name:
-        options['test'] = {
-            'device': device,
-            'arch': arch,
-            'generate_so': generate_so,
-            'enable_ha': enable_ha,
-            'test_name': test_name,
-            'tilelang_jobs': tilelang_jobs,
+        options["test"] = {
+            "device": device,
+            "arch": arch,
+            "generate_so": generate_so,
+            "enable_ha": enable_ha,
+            "test_name": test_name,
+            "tilelang_jobs": tilelang_jobs,
         }
 
     setup(
@@ -1104,17 +1094,21 @@ if __name__ == "__main__":
             "Topic :: Scientific/Engineering :: Artificial Intelligence",
         ],
         ext_modules=[CMakeExtension("xllm", "xllm/")],
-        cmdclass={"build_ext": ExtBuild,
-                  "test": test_cmd,
-                  "install": InstallWheel,
-                  'bdist_wheel': BuildDistWheel},
+        cmdclass={"build_ext": ExtBuild, "test": test_cmd, "install": InstallWheel, "bdist_wheel": BuildDistWheel},
         options=options,
         packages=find_namespace_packages(include=["scripts", "scripts.*"]),
         zip_safe=False,
-        py_modules=["xllm/launch_server", "xllm/__init__",
-                    "xllm/pybind/llm", "xllm/pybind/vlm",
-                    "xllm/pybind/embedding", "xllm/pybind/utils",
-                    "xllm/pybind/args", "xllm/pybind/params",
-                    "xllm/pybind/errors", "xllm/pybind/mm_utils"],
+        py_modules=[
+            "xllm/launch_server",
+            "xllm/__init__",
+            "xllm/pybind/llm",
+            "xllm/pybind/vlm",
+            "xllm/pybind/embedding",
+            "xllm/pybind/utils",
+            "xllm/pybind/args",
+            "xllm/pybind/params",
+            "xllm/pybind/errors",
+            "xllm/pybind/mm_utils",
+        ],
         python_requires=">=3.10",
     )

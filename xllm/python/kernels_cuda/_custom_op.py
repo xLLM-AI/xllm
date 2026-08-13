@@ -204,9 +204,7 @@ register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::fused_qk_norm_rope", _fused_qk_norm_rope_fake)
 register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
-register_fake(
-    "xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake
-)
+register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake)
 
 # Registered by a separate translation unit that is compiled only for the
 # architectures with native expert GEMMs.

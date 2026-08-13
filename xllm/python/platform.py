@@ -47,7 +47,6 @@ import functools
 import platform as platform_module
 import re
 import subprocess
-from typing import Dict, Optional
 
 from scripts.logger import logger
 
@@ -75,7 +74,7 @@ class CpuArchEnum(enum.Enum):
 _CUDA_LIKE = (PlatformEnum.CUDA, PlatformEnum.DCU, PlatformEnum.ILU)
 
 
-def _torch_device_type() -> Optional[PlatformEnum]:
+def _torch_device_type() -> PlatformEnum | None:
     """Detect the accelerator via the framework runtime, or None if absent.
 
     Follows the same probing order as
@@ -123,7 +122,7 @@ def _torch_device_type() -> Optional[PlatformEnum]:
     return None
 
 
-def _npu_chip_from_smi() -> Optional[str]:
+def _npu_chip_from_smi() -> str | None:
     """Best-effort lowercase Ascend chip name from ``npu-smi info``, or None.
 
     ``npu-smi`` may be absent or permission-blocked, so this never raises. The
@@ -146,7 +145,7 @@ def _npu_chip_from_smi() -> Optional[str]:
     return match.group(0).lower()
 
 
-def _npu_chip_from_acl() -> Optional[str]:
+def _npu_chip_from_acl() -> str | None:
     """Best-effort lowercase Ascend chip name via ``acl``, or None.
 
     ``acl`` is often unavailable in the launcher's import path and may already
@@ -185,9 +184,7 @@ class Platform:
         if detected is not None:
             return detected
 
-        logger.warning(
-            "Platform: could not detect an accelerator; treating host as CPU."
-        )
+        logger.warning("Platform: could not detect an accelerator; treating host as CPU.")
         return PlatformEnum.CPU
 
     @classmethod
@@ -256,7 +253,7 @@ class Platform:
 
     @classmethod
     @functools.lru_cache(maxsize=1)
-    def get_ascend_soc_generation(cls) -> Optional[str]:
+    def get_ascend_soc_generation(cls) -> str | None:
         """Ascend SoC generation (``a2``/``a3``/``a5``), or None if not an NPU.
 
         Derived from the chip name so it does not require a second ``acl.init``.
@@ -277,7 +274,7 @@ class Platform:
         return None
 
     @classmethod
-    def get_device_count(cls) -> Optional[int]:
+    def get_device_count(cls) -> int | None:
         """Number of usable devices from the framework runtime, or None.
 
         Returns None when ``torch`` is absent (as in the launcher) or reports no
@@ -292,9 +289,7 @@ class Platform:
             if cls.enum() in _CUDA_LIKE:
                 return torch.cuda.device_count()
             device_module = getattr(torch, cls.device_type(), None)
-            if device_module is not None and hasattr(
-                device_module, "device_count"
-            ):
+            if device_module is not None and hasattr(device_module, "device_count"):
                 return device_module.device_count()
         except Exception:
             pass
@@ -313,9 +308,7 @@ class Platform:
             if cls.enum() in _CUDA_LIKE:
                 return torch.cuda.get_device_name(device_id)
             device_module = getattr(torch, cls.device_type(), None)
-            if device_module is not None and hasattr(
-                device_module, "get_device_name"
-            ):
+            if device_module is not None and hasattr(device_module, "get_device_name"):
                 return device_module.get_device_name(device_id)
         except Exception:
             pass
@@ -331,7 +324,7 @@ class Platform:
 current_platform = Platform()
 
 
-def detect_hardware() -> Dict[str, str]:
+def detect_hardware() -> dict[str, str]:
     """Return the current hardware descriptor: CPU arch, device type, NPU chip.
 
     Backed by ``Platform`` so detection stays consistent across profiles. Every

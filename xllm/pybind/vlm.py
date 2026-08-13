@@ -17,10 +17,12 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Callable
+from typing import Any
+
+from xllm_export import Options, RequestOutput, VLMMaster
+
 from . import utils
-from typing import Any, Callable, Dict, List, Optional, Union
-from xllm_export import (VLMMaster, Options, RequestOutput,
-                         RequestParams, MMData)
 from .errors import ValidationError
 from .params import (
     SamplingParams,
@@ -29,8 +31,8 @@ from .params import (
 
 
 def _get_tqdm(
-    use_tqdm: Union[bool, Callable[..., Any]],
-) -> Optional[Callable[..., Any]]:
+    use_tqdm: bool | Callable[..., Any],
+) -> Callable[..., Any] | None:
     if not use_tqdm:
         return None
     if callable(use_tqdm):
@@ -39,8 +41,7 @@ def _get_tqdm(
         from tqdm import tqdm
     except ImportError as exc:
         raise ImportError(
-            "tqdm is required when use_tqdm=True. "
-            "Set use_tqdm=False to disable the progress bar."
+            "tqdm is required when use_tqdm=True. Set use_tqdm=False to disable the progress bar."
         ) from exc
     return tqdm
 
@@ -50,7 +51,7 @@ class VLM:
         self,
         model: str,
         task: str = "generate",
-        draft_model: Optional[str] = '',
+        draft_model: str | None = "",
         limit_image_per_prompt: int = 8,
         block_size: int = 128,
         max_cache_size: int = 0,
@@ -62,23 +63,23 @@ class VLM:
         max_seqs_per_batch: int = 1024,
         max_tokens_per_chunk_for_prefill: int = -1,
         num_speculative_tokens: int = 0,
-        speculative_algorithm: str = 'MTP',
+        speculative_algorithm: str = "MTP",
         num_request_handling_threads: int = 4,
-        communication_backend: str = 'hccl',
-        rank_tablefile: str = '',
+        communication_backend: str = "hccl",
+        rank_tablefile: str = "",
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
-        instance_role: str = 'DEFAULT',
+        instance_role: str = "DEFAULT",
         transfer_listen_port: int = 26000,
         nnodes: int = 1,
         node_rank: int = 0,
         dp_size: int = 1,
         cp_size: int = 1,
         ep_size: int = 1,
-        instance_name: str = '',
+        instance_name: str = "",
         enable_disagg_pd: bool = False,
         enable_schedule_overlap: bool = False,
-        kv_cache_transfer_mode: str = 'PUSH',
+        kv_cache_transfer_mode: str = "PUSH",
         enable_graph: bool = False,
         enable_graph_mode_decode_no_padding: bool = False,
         enable_prefill_piecewise_graph: bool = False,
@@ -107,7 +108,7 @@ class VLM:
         options.model_path = model
         options.task_type = task
         options.draft_model_path = draft_model
-        options.backend ="vlm"
+        options.backend = "vlm"
         options.limit_image_per_prompt = limit_image_per_prompt
         options.block_size = block_size
         options.max_cache_size = max_cache_size
@@ -153,29 +154,22 @@ class VLM:
 
     def finish(self) -> None:
         try:
-            #os.kill(os.getpid(), signal.SIGTERM)
-            #os.kill(os.getpid(), signal.SIGKILL)
+            # os.kill(os.getpid(), signal.SIGTERM)
+            # os.kill(os.getpid(), signal.SIGKILL)
             utils.terminate_process(os.getpid())
-        except Exception as e:
+        except Exception:
             pass
 
     def generate(
         self,
-        prompts: Union[
-            str,
-            List[str],
-            Dict[str, Any],
-            List[Dict[str, Any]],
-        ],
-        sampling_params: Optional[Union[
-            SamplingParams,
-            List[SamplingParams],
-        ]] = None,
+        prompts: str | list[str] | dict[str, Any] | list[dict[str, Any]],
+        sampling_params: SamplingParams | list[SamplingParams] | None = None,
         wait_for_schedule: bool = True,
-        use_tqdm: Union[bool, Callable[..., Any]] = True,
+        use_tqdm: bool | Callable[..., Any] = True,
         **kwargs: Any,
-    ) -> List[RequestOutput]:
+    ) -> list[RequestOutput]:
         from . import mm_utils
+
         prompts, mm_datas, image_urls = mm_utils.normalize_vllm_style_inputs(prompts)
 
         request_params = kwargs.pop("request_params", None)
@@ -187,13 +181,9 @@ class VLM:
         elif sampling_params is not None:
             raise ValueError("sampling_params and request_params cannot both be set")
 
-        request_params_list = to_request_params_list(
-            request_params, default_cls=SamplingParams
-        )
+        request_params_list = to_request_params_list(request_params, default_cls=SamplingParams)
         if len(request_params_list) not in (1, len(prompts)):
-            raise ValueError(
-                "The number of request_params must be 1 or equal to the number of prompts."
-            )
+            raise ValueError("The number of request_params must be 1 or equal to the number of prompts.")
 
         outputs = [None] * len(prompts)
         progress_bar = None
@@ -212,19 +202,15 @@ class VLM:
         try:
             # schedule the batch requests
             if image_urls is not None:
-                self.master.handle_batch_request_with_image_urls(
-                    prompts, image_urls, request_params_list, callback
-                )
+                self.master.handle_batch_request_with_image_urls(prompts, image_urls, request_params_list, callback)
             else:
-                self.master.handle_batch_request(
-                    prompts, mm_datas, request_params_list, callback
-                )
+                self.master.handle_batch_request(prompts, mm_datas, request_params_list, callback)
 
             # wait for batch request to be scheduled
             if wait_for_schedule:
                 pass
 
-            # run until all scheduled requsts complete
+            # run until all scheduled requests complete
             self.master.generate()
 
             # throw an exception if there is any error

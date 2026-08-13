@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
 import importlib
 import multiprocessing
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...common.cache import compute_cache_key, is_cache_hit
@@ -16,7 +16,6 @@ from .kernel_registry import RegisteredKernelFamily
 from .kernels import utils as kernel_utils
 from .kernels.utils import render_family_registry_inc, render_family_variants_inc
 from .toolchain import AscendBuildContext
-
 
 # TileLang variant compilation is much heavier than ordinary C++ compilation:
 # each worker may lower Python/TVM IR and launch bisheng.  Keep the automatic
@@ -99,9 +98,7 @@ def _run_variant_worker(args: _VariantWorkerArgs) -> _VariantBuildResult:
 
     source = kernel_cls.generate_source(**compile_spec.specialization)
     rendered_source = abi_entry.rename_variant_internal_symbols(
-        abi_entry.rename_entry_symbol(
-            source, compile_spec.source_entry_symbol, args.entry_symbol
-        ),
+        abi_entry.rename_entry_symbol(source, compile_spec.source_entry_symbol, args.entry_symbol),
         compile_spec.variant_key,
     )
     kernel_abi = abi_entry.parse_kernel_abi(rendered_source, args.entry_symbol)
@@ -129,9 +126,7 @@ def _run_variant_worker(args: _VariantWorkerArgs) -> _VariantBuildResult:
         cache_key=plan.cache_key,
         toolchain_options=dict(args.toolchain_options),
         fingerprint=dict(args.fingerprint),
-        compile_definitions=kernel_spec.render_compile_definitions(
-            entry_symbol=args.entry_symbol
-        ),
+        compile_definitions=kernel_spec.render_compile_definitions(entry_symbol=args.entry_symbol),
     )
     return _VariantBuildResult(manifest=manifest, kernel_abi=kernel_abi)
 
@@ -159,16 +154,10 @@ def _render_variants_inc(
             variants=variants,
         )
     if not callable(renderer):
-        raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' defines "
-            "non-callable render_variants_inc"
-        )
+        raise TypeError(f"registered kernel class '{kernel_cls.__name__}' defines non-callable render_variants_inc")
     rendered = renderer(variants, dispatch_schema)
     if not isinstance(rendered, str):
-        raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' "
-            "render_variants_inc(...) must return str"
-        )
+        raise TypeError(f"registered kernel class '{kernel_cls.__name__}' render_variants_inc(...) must return str")
     return rendered
 
 
@@ -188,16 +177,10 @@ def _render_registry_inc(
             variants=variants,
         )
     if not callable(renderer):
-        raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' defines "
-            "non-callable render_registry_inc"
-        )
+        raise TypeError(f"registered kernel class '{kernel_cls.__name__}' defines non-callable render_registry_inc")
     rendered = renderer(variants, dispatch_schema, kernel_abi)
     if not isinstance(rendered, str):
-        raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' "
-            "render_registry_inc(...) must return str"
-        )
+        raise TypeError(f"registered kernel class '{kernel_cls.__name__}' render_registry_inc(...) must return str")
     return rendered
 
 
@@ -241,20 +224,12 @@ def build_kernel_family(
 
     for compile_spec, kernel_spec in family.spec_pairs:
         if compile_spec.target != "ascend":
-            raise ValueError(
-                f"Unsupported target for Ascend build.py: {compile_spec.target}"
-            )
+            raise ValueError(f"Unsupported target for Ascend build.py: {compile_spec.target}")
 
         variant_output_dir = family_output_dir / compile_spec.variant_key
         variant_output_dir.mkdir(parents=True, exist_ok=True)
-        generated_source = (
-            variant_output_dir
-            / f"{compile_spec.kernel_name}_{compile_spec.variant_key}_kernel.cpp"
-        )
-        compiled_binary = (
-            variant_output_dir
-            / f"{compile_spec.kernel_name}_{compile_spec.variant_key}_kernel.o"
-        )
+        generated_source = variant_output_dir / f"{compile_spec.kernel_name}_{compile_spec.variant_key}_kernel.cpp"
+        compiled_binary = variant_output_dir / f"{compile_spec.kernel_name}_{compile_spec.variant_key}_kernel.o"
 
         cache_key = compute_cache_key(
             compile_spec,
@@ -263,9 +238,7 @@ def build_kernel_family(
         )
 
         cached_variant = (
-            existing_manifest.get_variant(compile_spec.variant_key)
-            if existing_manifest is not None
-            else None
+            existing_manifest.get_variant(compile_spec.variant_key) if existing_manifest is not None else None
         )
         if (
             not force
@@ -274,12 +247,8 @@ def build_kernel_family(
             and Path(cached_variant.compiled_binary).is_file()
             and is_cache_hit(manifest_path, compile_spec.variant_key, cache_key)
         ):
-            cached_source = Path(cached_variant.generated_source).read_text(
-                encoding="utf-8"
-            )
-            kernel_abi = abi_entry.parse_kernel_abi(
-                cached_source, cached_variant.entry_symbol
-            )
+            cached_source = Path(cached_variant.generated_source).read_text(encoding="utf-8")
+            kernel_abi = abi_entry.parse_kernel_abi(cached_source, cached_variant.entry_symbol)
             if family_kernel_abi is None:
                 family_kernel_abi = kernel_abi
             elif kernel_abi != family_kernel_abi:
@@ -297,9 +266,7 @@ def build_kernel_family(
                 cache_key=cached_variant.cache_key,
                 toolchain_options=dict(context.toolchain_options),
                 fingerprint=dict(context.fingerprint),
-                compile_definitions=kernel_spec.render_compile_definitions(
-                    entry_symbol=cached_variant.entry_symbol
-                ),
+                compile_definitions=kernel_spec.render_compile_definitions(entry_symbol=cached_variant.entry_symbol),
             )
             continue
 
@@ -346,18 +313,14 @@ def build_kernel_family(
             max_workers=max_workers,
             mp_context=multiprocessing_context,
         ) as executor:
-            future_to_args = {
-                executor.submit(_run_variant_worker, args): args
-                for args in worker_args_list
-            }
+            future_to_args = {executor.submit(_run_variant_worker, args): args for args in worker_args_list}
             for future in as_completed(future_to_args):
                 args = future_to_args[future]
                 try:
                     result = future.result()
                 except Exception as exc:
                     raise RuntimeError(
-                        "Ascend variant build failed for variant "
-                        f"{args.plan.compile_spec.variant_key!r}"
+                        f"Ascend variant build failed for variant {args.plan.compile_spec.variant_key!r}"
                     ) from exc
                 if family_kernel_abi is None:
                     family_kernel_abi = result.kernel_abi
@@ -370,14 +333,11 @@ def build_kernel_family(
                 variant_manifest_by_key[result.manifest.variant_key] = result.manifest
 
     variant_manifests: list[KernelVariantManifest] = [
-        variant_manifest_by_key[compile_spec.variant_key]
-        for compile_spec, _ in family.spec_pairs
+        variant_manifest_by_key[compile_spec.variant_key] for compile_spec, _ in family.spec_pairs
     ]
 
     if family_kernel_abi is None:
-        raise ValueError(
-            f"TileLang kernel {family.kernel_name!r} produced no exported kernel ABI"
-        )
+        raise ValueError(f"TileLang kernel {family.kernel_name!r} produced no exported kernel ABI")
 
     variants_inc_path = family_output_dir / "variants.inc"
     _write_text_if_changed(

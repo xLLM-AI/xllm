@@ -33,9 +33,7 @@ def resolve_gdn_prefill_backend(
     return "flashinfer" if capability[0] in _FLASHINFER_ARCHITECTURES else "triton"
 
 
-@torch.library.custom_op(
-    "xllm_triton::fused_gdn_prefill_post_conv", mutates_args=()
-)
+@torch.library.custom_op("xllm_triton::fused_gdn_prefill_post_conv", mutates_args=())
 def fused_gdn_prefill_post_conv(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
@@ -150,9 +148,7 @@ def _fused_recurrent_gated_delta_rule_packed_decode_fake(
     )
 
 
-@torch.library.custom_op(
-    "xllm_kernels::chunk_gated_delta_rule", mutates_args=()
-)
+@torch.library.custom_op("xllm_kernels::chunk_gated_delta_rule", mutates_args=())
 def chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

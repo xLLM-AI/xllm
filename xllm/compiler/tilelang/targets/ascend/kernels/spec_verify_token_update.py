@@ -17,8 +17,8 @@
 import tilelang
 import tilelang.language as T
 
-from .utils import DEFAULT_ASCEND_PASS_CONFIGS, SUPPORTED_SPEC_VERIFY_WIDTHS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
+from .utils import DEFAULT_ASCEND_PASS_CONFIGS, SUPPORTED_SPEC_VERIFY_WIDTHS
 
 SYMBOL_BUFFER_CAPACITY = T.symbolic("buffer_capacity")
 
@@ -66,23 +66,13 @@ def build_spec_verify_token_update_kernel(spec_width: int):
                 for batch_idx in T.serial(batch_size):
                     output_offset = batch_idx * spec_width
                     persistent_tokens[output_offset] = base_tokens[output_offset]
-                    persistent_tokens[output_offset + 1] = T.Cast(
-                        "int32", draft_token_0[batch_idx]
-                    )
-                    persistent_tokens[output_offset + 2] = T.Cast(
-                        "int32", draft_token_1[batch_idx]
-                    )
-                    persistent_tokens[output_offset + 3] = T.Cast(
-                        "int32", draft_token_2[batch_idx]
-                    )
+                    persistent_tokens[output_offset + 1] = T.Cast("int32", draft_token_0[batch_idx])
+                    persistent_tokens[output_offset + 2] = T.Cast("int32", draft_token_1[batch_idx])
+                    persistent_tokens[output_offset + 3] = T.Cast("int32", draft_token_2[batch_idx])
                     if spec_width >= 5:
-                        persistent_tokens[output_offset + 4] = T.Cast(
-                            "int32", draft_token_3[batch_idx]
-                        )
+                        persistent_tokens[output_offset + 4] = T.Cast("int32", draft_token_3[batch_idx])
                     if spec_width >= 6:
-                        persistent_tokens[output_offset + 5] = T.Cast(
-                            "int32", draft_token_4[batch_idx]
-                        )
+                        persistent_tokens[output_offset + 5] = T.Cast("int32", draft_token_4[batch_idx])
 
     return spec_verify_token_update
 
@@ -91,16 +81,13 @@ def build_spec_verify_token_update_kernel(spec_width: int):
 class SpecVerifyTokenUpdateKernel(TilelangKernel):
     DISPATCH_SCHEMA = [DispatchField("spec_width", "int32")]
     SPECIALIZATIONS = [
-        {"variant_key": f"token_w{spec_width}", "spec_width": spec_width}
-        for spec_width in SUPPORTED_SPEC_VERIFY_WIDTHS
+        {"variant_key": f"token_w{spec_width}", "spec_width": spec_width} for spec_width in SUPPORTED_SPEC_VERIFY_WIDTHS
     ]
 
     @staticmethod
     def generate_source(spec_width: int) -> str:
         tilelang.disable_cache()
         kernel = build_spec_verify_token_update_kernel(spec_width)
-        with tilelang.tvm.transform.PassContext(
-            opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS
-        ):
+        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
             lowered = tilelang.engine.lower(kernel)
         return lowered.kernel_source

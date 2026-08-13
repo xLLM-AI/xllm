@@ -62,9 +62,7 @@ class ColumnParallelLinear(nn.Module):
             )
         )
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features_per_partition, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features_per_partition, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
 
@@ -101,9 +99,7 @@ class RowParallelLinear(nn.Module):
         if bias and not reduce_results:
             # The bias is replicated and must be added exactly once, which is
             # only possible here when this layer owns the reduction.
-            raise ValueError(
-                "a deferred reduction cannot be combined with a replicated bias"
-            )
+            raise ValueError("a deferred reduction cannot be combined with a replicated bias")
         self.weight = nn.Parameter(
             torch.empty(
                 out_features,
@@ -113,9 +109,7 @@ class RowParallelLinear(nn.Module):
             )
         )
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
 

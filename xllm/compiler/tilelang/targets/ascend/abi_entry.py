@@ -18,9 +18,7 @@ def rename_variant_internal_symbols(source: str, variant_key: str) -> str:
             source,
         )
     )
-    symbol_names.update(
-        re.findall(r"\bvoid\s+([A-Za-z_][A-Za-z0-9_]*_tiling)\s*\(", source)
-    )
+    symbol_names.update(re.findall(r"\bvoid\s+([A-Za-z_][A-Za-z0-9_]*_tiling)\s*\(", source))
 
     renamed_source = source
     for symbol_name in sorted(symbol_names, key=len, reverse=True):
@@ -48,9 +46,7 @@ def parse_kernel_abi(source: str, entry_symbol: str) -> KernelAbi:
     )
     match = pattern.search(source)
     if match is None:
-        raise ValueError(
-            f"Failed to parse exported entry ABI for symbol {entry_symbol!r}"
-        )
+        raise ValueError(f"Failed to parse exported entry ABI for symbol {entry_symbol!r}")
 
     return_type = normalize_cpp_type(match.group("return_type"))
     params_text = match.group("params").strip()
@@ -62,10 +58,7 @@ def parse_kernel_abi(source: str, entry_symbol: str) -> KernelAbi:
                 param,
             )
             if parsed is None:
-                raise ValueError(
-                    "Failed to parse kernel ABI parameter "
-                    f"{param!r} for symbol {entry_symbol!r}"
-                )
+                raise ValueError(f"Failed to parse kernel ABI parameter {param!r} for symbol {entry_symbol!r}")
             parameters.append(
                 KernelAbiParameter(
                     cpp_type=normalize_cpp_type(parsed.group("type")),

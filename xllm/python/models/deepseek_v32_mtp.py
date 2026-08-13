@@ -22,7 +22,7 @@ the next MTP step.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -39,15 +39,13 @@ from xllm.python.models.deepseek_v32 import (
 class DeepseekV32MtpModel(nn.Module):
     """MTP body matching ``MtpModelImplBase`` and ``DeepseekV32MtpModel``."""
 
-    def __init__(
-        self, cfg: DeepseekV3Config, dtype: torch.dtype, device: torch.device
-    ) -> None:
+    def __init__(self, cfg: DeepseekV3Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         tp = cfg.tp_size
         assert cfg.hidden_size % tp == 0
 
         self.cfg = cfg
-        self.embed_tokens: Optional[nn.Module] = None
+        self.embed_tokens: nn.Module | None = None
         self.eh_proj = ColumnParallelLinear(
             2 * cfg.hidden_size,
             cfg.hidden_size // tp,
@@ -66,12 +64,7 @@ class DeepseekV32MtpModel(nn.Module):
         )
         self.enorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.hnorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
-        self.layers = nn.ModuleList(
-            [
-                DeepseekV3DecoderLayer(cfg, i, dtype, device)
-                for i in range(cfg.n_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([DeepseekV3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.rotary = DeepseekYarnRotaryEmbedding(
             cfg.qk_rope_head_dim,
@@ -91,22 +84,18 @@ class DeepseekV32MtpModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_embedding: Optional[torch.Tensor] = None,
+        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.embed_tokens is not None
         token_hidden = self.embed_tokens(input_ids)
         if input_embedding is None:
             input_embedding = token_hidden
 
-        rotated_embedding = (
-            self.rot(input_embedding) if self.enable_rot else input_embedding
-        )
-        h = self.eh_proj(
-            torch.cat((self.enorm(token_hidden), self.hnorm(rotated_embedding)), dim=-1)
-        )
+        rotated_embedding = self.rot(input_embedding) if self.enable_rot else input_embedding
+        h = self.eh_proj(torch.cat((self.enorm(token_hidden), self.hnorm(rotated_embedding)), dim=-1))
         positions = positions.to(torch.int64).contiguous()
         cos_sin_cache = self.rotary.cos_sin_cache
-        residual: Optional[torch.Tensor] = None
+        residual: torch.Tensor | None = None
         for layer in self.layers:
             h, residual = layer(h, residual, positions, cos_sin_cache)
         h, _ = self.norm(h, residual)
@@ -166,9 +155,7 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
                     return state_dict
             return None
 
-        def copy_if_present(
-            module_name: str, *aliases: str, required: bool = False
-        ) -> bool:
+        def copy_if_present(module_name: str, *aliases: str, required: bool = False) -> bool:
             state_dict = find(module_name + ".weight")
             if state_dict is None:
                 for alias in aliases:
@@ -177,9 +164,7 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
                         break
             if state_dict is None:
                 if required:
-                    raise KeyError(
-                        f"missing required MTP weight: {module_name}.weight"
-                    )
+                    raise KeyError(f"missing required MTP weight: {module_name}.weight")
                 return False
             tensor = state_dict.get_tensor(module_name + ".weight")
             parameter = self.get_parameter("model." + module_name + ".weight")

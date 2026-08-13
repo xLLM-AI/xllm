@@ -20,21 +20,21 @@ class by the model's architecture (or model_type) string.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib import import_module
-from typing import Callable, Dict, Type
 
 import torch.nn as nn
 
 _ModelPath = tuple[str, str]
-_REGISTRY: Dict[str, _ModelPath] = {}
+_REGISTRY: dict[str, _ModelPath] = {}
 
 
 def register_model(
     *names: str,
-) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
+) -> Callable[[type[nn.Module]], type[nn.Module]]:
     """Register a model class for callers that already imported its module."""
 
-    def deco(cls: Type[nn.Module]) -> Type[nn.Module]:
+    def deco(cls: type[nn.Module]) -> type[nn.Module]:
         path = (cls.__module__, cls.__name__)
         for name in names:
             _REGISTRY[name] = path
@@ -49,11 +49,9 @@ def _register_model_path(module_name: str, class_name: str, *names: str) -> None
         _REGISTRY[name] = path
 
 
-def get_model_class(name: str) -> Type[nn.Module]:
+def get_model_class(name: str) -> type[nn.Module]:
     if name not in _REGISTRY:
-        raise KeyError(
-            f"model '{name}' not registered; available: {sorted(_REGISTRY)}"
-        )
+        raise KeyError(f"model '{name}' not registered; available: {sorted(_REGISTRY)}")
     module_name, class_name = _REGISTRY[name]
     model_cls = getattr(import_module(module_name), class_name)
     return model_cls

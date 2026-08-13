@@ -20,8 +20,6 @@ graph can replay them without re-planning.
 
 from __future__ import annotations
 
-from typing import List
-
 import torch
 
 reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
@@ -33,8 +31,8 @@ def vision_fusion_attention(
     k: torch.Tensor,
     v: torch.Tensor,
     *,
-    actual_seq_qlen: List[int],
-    actual_seq_kvlen: List[int],
+    actual_seq_qlen: list[int],
+    actual_seq_kvlen: list[int],
     num_heads: int,
     scale: float,
     input_layout: str = "TND",
@@ -43,8 +41,7 @@ def vision_fusion_attention(
     del q, k, v, actual_seq_qlen, actual_seq_kvlen, num_heads, scale
     del input_layout
     raise NotImplementedError(
-        "vision_fusion_attention has no CUDA kernel; CUDA models use "
-        "FlashAttention for ViT blocks"
+        "vision_fusion_attention has no CUDA kernel; CUDA models use FlashAttention for ViT blocks"
     )
 
 

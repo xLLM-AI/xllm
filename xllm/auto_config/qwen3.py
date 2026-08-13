@@ -29,9 +29,8 @@ the qwen3 tuning policy.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
-from scripts.logger import logger
 from xllm.auto_config.utils import BaseTuner, CpuArchEnum, Platform
 
 
@@ -39,7 +38,7 @@ class Qwen3Tuner(BaseTuner):
     """qwen3 auto-tuning policy.
 
     Only the two mandatory hooks are implemented: `tune_common` (topology and
-    ARM adjustments) and `tune_npu`. Other platforms fall back to `BaseTuner`'s 
+    ARM adjustments) and `tune_npu`. Other platforms fall back to `BaseTuner`'s
     no-op defaults until qwen3 has validated tuning for them.
     """
 
@@ -47,8 +46,8 @@ class Qwen3Tuner(BaseTuner):
 
     def tune_common(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         # Align the launch topology with the devices visible on this host.
         visible_device_count = context.get("visible_device_count")
@@ -57,19 +56,17 @@ class Qwen3Tuner(BaseTuner):
 
         # ARM hosts get a smaller prefill batch regardless of accelerator.
         if Platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            config["max_tokens_per_batch"] = min(
-                config.get("max_tokens_per_batch", 8192), 4096
-            )
+            config["max_tokens_per_batch"] = min(config.get("max_tokens_per_batch", 8192), 4096)
 
     def tune_npu(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         # TODO
         pass
 
 
-def tune(base_config: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+def tune(base_config: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """Launcher entry point: adapt the base qwen3 config to this machine."""
     return Qwen3Tuner().tune(base_config, context)

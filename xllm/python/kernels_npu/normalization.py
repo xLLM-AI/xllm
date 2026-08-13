@@ -34,8 +34,7 @@ def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
     del value, eps
     raise NotImplementedError(
-        "l2_norm has no NPU kernel; see kernels_cuda/triton/l2_norm.py for the "
-        "reference implementation"
+        "l2_norm has no NPU kernel; see kernels_cuda/triton/l2_norm.py for the reference implementation"
     )
 
 
@@ -58,8 +57,7 @@ def rms_norm_gated(
     """
     del value, gate, weight, eps
     raise NotImplementedError(
-        "rms_norm_gated has no NPU kernel; see kernels_cuda/triton/rms_norm.py "
-        "for the reference implementation"
+        "rms_norm_gated has no NPU kernel; see kernels_cuda/triton/rms_norm.py for the reference implementation"
     )
 
 

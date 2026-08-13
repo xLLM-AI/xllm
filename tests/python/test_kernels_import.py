@@ -31,8 +31,7 @@ _PYTHON_ROOT = _REPO_ROOT / "xllm" / "python"
 
 _COMMON_SCHEMAS = (
     "rms_norm(Tensor input, Tensor weight, float eps) -> Tensor",
-    "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor weight, "
-    "float eps) -> (Tensor, Tensor)",
+    "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor weight, float eps) -> (Tensor, Tensor)",
     "silu_and_mul(Tensor input) -> Tensor",
     "reshape_paged_cache(Tensor slot_mapping, Tensor keys, Tensor values, "
     "Tensor(a!) key_cache, Tensor(b!) value_cache) -> Tensor",
@@ -55,8 +54,7 @@ _NPU_SCHEMAS = (
     "quant_matmul(Tensor x1, Tensor x2, bool transpose2, Tensor scale, "
     "Tensor? offset, Tensor? pertoken_scale, Tensor? bias, ScalarType? "
     "output_dtype) -> Tensor",
-    "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, "
-    "ScalarType dtype, int axis) -> Tensor",
+    "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, ScalarType dtype, int axis) -> Tensor",
     "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
     "ScalarType? dst_type) -> (Tensor, Tensor?)",
     "lightning_indexer(Tensor query, Tensor key, Tensor weights, Tensor? "
@@ -128,9 +126,7 @@ def _run_isolated_python(
         definitions.append(_package_stub(kernel_package))
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        value for value in (str(_REPO_ROOT), env.get("PYTHONPATH", "")) if value
-    )
+    env["PYTHONPATH"] = os.pathsep.join(value for value in (str(_REPO_ROOT), env.get("PYTHONPATH", "")) if value)
     result = subprocess.run(
         [sys.executable, "-c", "\n".join((*definitions, textwrap.dedent(script)))],
         cwd=_REPO_ROOT,
@@ -143,13 +139,9 @@ def _run_isolated_python(
 
 def test_platform_queries_are_no_argument(monkeypatch: pytest.MonkeyPatch) -> None:
     current_platform = platform.current_platform
-    monkeypatch.setattr(
-        type(current_platform), "enum", classmethod(lambda cls: platform.PlatformEnum.NPU)
-    )
+    monkeypatch.setattr(type(current_platform), "enum", classmethod(lambda cls: platform.PlatformEnum.NPU))
     assert current_platform.is_npu() and not current_platform.is_cuda()
-    monkeypatch.setattr(
-        type(current_platform), "enum", classmethod(lambda cls: platform.PlatformEnum.CUDA)
-    )
+    monkeypatch.setattr(type(current_platform), "enum", classmethod(lambda cls: platform.PlatformEnum.CUDA))
     assert current_platform.is_cuda() and not current_platform.is_npu()
 
 

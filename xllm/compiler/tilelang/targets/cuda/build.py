@@ -11,8 +11,5 @@ def build_kernels(
     force: bool = False,
 ) -> list[KernelFamilyManifest]:
     if kernel_names:
-        raise NotImplementedError(
-            "CUDA TileLang AOT build pipeline is scaffolded but no kernels are "
-            "registered yet."
-        )
+        raise NotImplementedError("CUDA TileLang AOT build pipeline is scaffolded but no kernels are registered yet.")
     return []

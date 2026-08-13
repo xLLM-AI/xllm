@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
@@ -76,9 +77,7 @@ class ForwardContext:
     cp_context: object | None = None
 
 
-_current_context: ContextVar[ForwardContext | None] = ContextVar(
-    "_current_context", default=None
-)
+_current_context: ContextVar[ForwardContext | None] = ContextVar("_current_context", default=None)
 
 
 @contextmanager
@@ -103,9 +102,7 @@ def record_layer_event(layer_id: int) -> None:
         ctx.layer_synchronizer.record_event(layer_id)
 
 
-def get_execution_buffer(
-    key: tuple[object, ...], factory: Callable[[], torch.Tensor]
-) -> torch.Tensor:
+def get_execution_buffer(key: tuple[object, ...], factory: Callable[[], torch.Tensor]) -> torch.Tensor:
     """Get a tensor owned by the active model execution graph entry."""
     state = get_forward_context().execution_state
     if state is None:

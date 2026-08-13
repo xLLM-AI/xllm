@@ -83,10 +83,7 @@ def _exports(package: str) -> tuple[str, ...]:
     for node in _NODES[path]:
         if not isinstance(node, ast.Assign):
             continue
-        defines_all = any(
-            isinstance(target, ast.Name) and target.id == "__all__"
-            for target in node.targets
-        )
+        defines_all = any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
         if defines_all:
             exports = ast.literal_eval(node.value)
             return tuple(exports)

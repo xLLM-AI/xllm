@@ -168,9 +168,7 @@ def _dynamic_quant_fake(
     del smooth_scales, group_index
     if dst_type == torch.quint4x2:
         if input.shape[-1] % 8:
-            raise ValueError(
-                "dynamic_quant int4 input's last dimension must be divisible by 8"
-            )
+            raise ValueError("dynamic_quant int4 input's last dimension must be divisible by 8")
         output_shape = (*input.shape[:-1], input.shape[-1] // 8)
         output_dtype = torch.int32
     else:
@@ -332,9 +330,7 @@ register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
-register_fake(
-    "xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake
-)
+register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake)
 register_fake("xllm_ops::quant_matmul", _quant_matmul_fake)
 register_fake("xllm_ops::quantize_per_tensor", _quantize_per_tensor_fake)
 register_fake("xllm_ops::dynamic_quant", _dynamic_quant_fake)
@@ -342,6 +338,4 @@ register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
 register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
 register_fake("xllm_ops::sparse_flash_attention", _sparse_flash_attention_fake)
-register_fake(
-    "xllm_ops::sparse_flash_attention_out", _sparse_flash_attention_out_fake
-)
+register_fake("xllm_ops::sparse_flash_attention_out", _sparse_flash_attention_out_fake)

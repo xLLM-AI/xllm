@@ -72,30 +72,34 @@ def tmo_causal_conv1d_update_decode_kernel(
     num_n = (dim + BLOCK_N - 1) // BLOCK_N
 
     NEED_MASK_N = dim % BLOCK_N != 0
-    total_blocks = batch* ((dim + BLOCK_N - 1) // BLOCK_N)
-    
+    total_blocks = batch * ((dim + BLOCK_N - 1) // BLOCK_N)
+
     arange_batch = tl.arange(0, BLOCK_B)
     mask_batch = arange_batch < batch
     # Pre-load weights outside the persistent loop
     if IS_APC_ENABLED:
-        conv_state_inits = tl.load(initial_state_idx + arange_batch, mask = mask_batch)
-        current_last_indexs = tl.load(block_idx_last_scheduled_token + arange_batch, mask = mask_batch)
+        conv_state_inits = tl.load(initial_state_idx + arange_batch, mask=mask_batch)
+        current_last_indexs = tl.load(block_idx_last_scheduled_token + arange_batch, mask=mask_batch)
     else:
         conv_state_inits = 0
         current_last_indexs = 0
-    
+
     # conv_state_init = 0
     # current_last_index = 0
     if IS_APC_ENABLED:
         pass
     else:
         conv_states_input_coords = tl.load(
-                conv_state_indices_ptr + arange_batch * stride_state_indices, 
-                mask = mask_batch,
-                cache_modifier=".cg",
-            ).to(tl.int64)
-    w_base = w_ptr + (tl.arange(0, ((dim + BLOCK_N - 1) // BLOCK_N)*BLOCK_N) * stride_w_dim)[:, None] + tl.arange(0, KERNEL_WIDTH)[None, :]  # [BLOCK_N, KERNEL_WIDTH]
-    mask_wraw = (tl.arange(0, ((dim + BLOCK_N - 1) // BLOCK_N)*BLOCK_N) < dim)[:, None]
+            conv_state_indices_ptr + arange_batch * stride_state_indices,
+            mask=mask_batch,
+            cache_modifier=".cg",
+        ).to(tl.int64)
+    w_base = (
+        w_ptr
+        + (tl.arange(0, ((dim + BLOCK_N - 1) // BLOCK_N) * BLOCK_N) * stride_w_dim)[:, None]
+        + tl.arange(0, KERNEL_WIDTH)[None, :]
+    )  # [BLOCK_N, KERNEL_WIDTH]
+    mask_wraw = (tl.arange(0, ((dim + BLOCK_N - 1) // BLOCK_N) * BLOCK_N) < dim)[:, None]
     w_raw = tl.load(w_base, mask_wraw, other=0.0, cache_modifier=".cg")
     ws = tl.trans(w_raw)  # [KERNEL_WIDTH, BLOCK_N*num_n]
     # mask_w = (tl.arange(0, BLOCK_N) < dim)[:, None]
@@ -146,9 +150,7 @@ def tmo_causal_conv1d_update_decode_kernel(
 
             if query_start_index != query_end_index:
                 if IS_SPEC_DECODING:
-                    conv_state_token_offset = (
-                        tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
-                    )
+                    conv_state_token_offset = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
                 else:
                     conv_state_token_offset = 0
 
@@ -166,17 +168,24 @@ def tmo_causal_conv1d_update_decode_kernel(
                 oldState = tl.trans(oldState_raw)
 
                 # STEP 2: assume state_len > seqlen
-                x_ptrs = x_ptr + x_offset + (idx_feats * stride_x_dim)[None, :] + (tl.arange(0, seqlen)* stride_x_token)[:, None]  # [seqlen, BLOCK_N]
-                xs = tl.load(x_ptrs, (tl.arange(0, seqlen)<actual_seqlen)[:, None]&mask_bias[None, :], 0.0, cache_modifier=".cg")
+                x_ptrs = (
+                    x_ptr
+                    + x_offset
+                    + (idx_feats * stride_x_dim)[None, :]
+                    + (tl.arange(0, seqlen) * stride_x_token)[:, None]
+                )  # [seqlen, BLOCK_N]
+                xs = tl.load(
+                    x_ptrs,
+                    (tl.arange(0, seqlen) < actual_seqlen)[:, None] & mask_bias[None, :],
+                    0.0,
+                    cache_modifier=".cg",
+                )
 
                 tl.debug_barrier()
 
-
-
-
                 FULL_LEN: tl.constexpr = KERNEL_WIDTH - 1 + seqlen
                 new_conv_state = tl.empty((FULL_LEN, BLOCK_N), dtype=conv_states_base.dtype.element_ty)
-                new_conv_state[0:KERNEL_WIDTH - 1, :] = oldState
+                new_conv_state[0 : KERNEL_WIDTH - 1, :] = oldState
                 new_conv_state[KERNEL_WIDTH - 1 : FULL_LEN, :] = xs
 
                 # STEP 3: init accumulator
@@ -190,9 +199,7 @@ def tmo_causal_conv1d_update_decode_kernel(
 
                 # STEP 5: compute each token
                 for idx_token in range(actual_seqlen):
-                    mask_1d = (idx_token < actual_seqlen) & (
-                        idx_feats < dim
-                    )
+                    mask_1d = (idx_token < actual_seqlen) & (idx_feats < dim)
 
                     acc = acc_preload
 
@@ -203,22 +210,16 @@ def tmo_causal_conv1d_update_decode_kernel(
                             matrix_x = x_cur
                         else:
                             matrix_x = oldState[idx_width, :]
-                        acc += (
-                            ws[idx_width, pid_n * BLOCK_N:(pid_n + 1) * BLOCK_N]
-                            * matrix_x
-                        )
+                        acc += ws[idx_width, pid_n * BLOCK_N : (pid_n + 1) * BLOCK_N] * matrix_x
 
                     if KERNEL_WIDTH > 2:
-                        oldState[0:KERNEL_WIDTH - 2, :] = oldState[1:KERNEL_WIDTH - 1, :]
+                        oldState[0 : KERNEL_WIDTH - 2, :] = oldState[1 : KERNEL_WIDTH - 1, :]
                     oldState[KERNEL_WIDTH - 2, :] = x_cur
                     if SILU_ACTIVATION:
                         acc = acc / (1 + tl.exp(-acc))
-                    o_ptrs = (
-                        o_ptr + o_offset + idx_token * stride_o_token + (idx_feats * stride_o_dim)
-                    )
+                    o_ptrs = o_ptr + o_offset + idx_token * stride_o_token + (idx_feats * stride_o_dim)
 
                     tl.store(o_ptrs, acc, mask=mask_1d)
-
 
                 if IS_SPEC_DECODING:
                     oldstart = 1
@@ -242,16 +243,10 @@ def tmo_causal_conv1d_update_decode_kernel(
 
                 idx_tokens_store = tl.arange(0, state_len)
                 conv_state_ptrs_target = (
-                    conv_state_ptr
-                    + (conv_states_offset * stride_conv_state_seq)
-                    + (idx_feats * stride_conv_state_dim)
-                )[:, None] + (
-                    idx_tokens_store * stride_conv_state_tok
-                )[None, :]
+                    conv_state_ptr + (conv_states_offset * stride_conv_state_seq) + (idx_feats * stride_conv_state_dim)
+                )[:, None] + (idx_tokens_store * stride_conv_state_tok)[None, :]
                 mask_store = (idx_tokens_store < actual_state_len)[None, :] & mask_bias[:, None]
                 if NEED_MASK_N:
                     tl.store(conv_state_ptrs_target, new_state_data, mask_store)
                 else:
-                    tl.store(conv_state_ptrs_target, new_state_data,
-                             mask=idx_tokens_store[None, :] < actual_state_len)
-
+                    tl.store(conv_state_ptrs_target, new_state_data, mask=idx_tokens_store[None, :] < actual_state_len)

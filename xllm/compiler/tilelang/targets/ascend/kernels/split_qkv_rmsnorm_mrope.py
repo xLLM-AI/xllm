@@ -20,9 +20,6 @@ from pathlib import Path
 
 import tilelang
 import tilelang.language as T
-
-from scripts.logger import logger
-
 from compiler.tilelang.common.spec import (
     DispatchField,
     TilelangKernel,
@@ -35,28 +32,23 @@ from compiler.tilelang.targets.ascend.kernels.utils import (
     mte2_wait_mte3,
     mte2_wait_v,
     mte3_notify_mte2,
-    mte3_notify_v,
     mte3_wait_mte2,
     mte3_wait_v,
     v_notify_mte2,
     v_notify_mte3,
     v_wait_mte2,
-    v_wait_mte3,
 )
 
+from scripts.logger import logger
 
 COS_SIN_MERGED_LAYOUT = "token_3rope"
 DEFAULT_DTYPE = "bf16"
-SUPPORTED_HEAD_SPECS = (
-    (256, 64),
-)
+SUPPORTED_HEAD_SPECS = ((256, 64),)
 COMPILE_MAX_TOKENS = 100_000_000
 VEC_NUM = 2
 MAX_VEC_CORE_NUM = detect_vec_core_num()
 MAX_LAUNCH_NUM_TOKENS = (MAX_VEC_CORE_NUM // VEC_NUM) * VEC_NUM
-NUM_TOKEN_SPECIALIZATIONS = tuple(
-    range(VEC_NUM, MAX_LAUNCH_NUM_TOKENS + 1, VEC_NUM)
-)
+NUM_TOKEN_SPECIALIZATIONS = tuple(range(VEC_NUM, MAX_LAUNCH_NUM_TOKENS + 1, VEC_NUM))
 REF_CHECK_NUM_TOKENS = 16
 REF_CHECK_EPS = 1e-6
 DEFAULT_MROPE_SECTION = (11, 11, 10)
@@ -125,7 +117,6 @@ ALL_HEAD_CONFIGS = compute_tp_split_head_configs(MODEL_HEAD_CONFIGS, SUPPORTED_T
 REF_CHECK_HEAD_CONFIGS = tuple(ALL_HEAD_CONFIGS)
 
 
-
 class SyncEvent(enum.IntEnum):
     """Event IDs for manual pipeline sync in the fused kernel."""
 
@@ -176,10 +167,7 @@ def _validate_head_spec(head_size: int, rope_dim: int) -> None:
     if rope_dim % 2 != 0:
         raise ValueError(f"rope_dim({rope_dim}) must be even")
     if rope_dim > head_size:
-        raise ValueError(
-            f"rope_dim({rope_dim}) must be <= head_size({head_size})"
-        )
-
+        raise ValueError(f"rope_dim({rope_dim}) must be <= head_size({head_size})")
 
 
 def build_split_qkv_rmsnorm_mrope_kernel(
@@ -195,9 +183,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
     if vec_core_num <= 0:
         raise ValueError(f"vec_core_num({vec_core_num}) must be > 0")
     if vec_core_num % VEC_NUM != 0:
-        raise ValueError(
-            f"vec_core_num({vec_core_num}) must be divisible by VEC_NUM({VEC_NUM})"
-        )
+        raise ValueError(f"vec_core_num({vec_core_num}) must be divisible by VEC_NUM({VEC_NUM})")
     if num_q_heads <= 0:
         raise ValueError(f"num_q_heads({num_q_heads}) must be > 0")
     if num_kv_heads <= 0:
@@ -212,9 +198,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
 
     acc_dtype = "float32"
     input_dtype = "bfloat16"
-    task_num = _select_task_num(
-        max_num_tokens=max_num_tokens, vec_core_num=vec_core_num
-    )
+    task_num = _select_task_num(max_num_tokens=max_num_tokens, vec_core_num=vec_core_num)
     m_num = task_num // VEC_NUM
     gather_pad_dim = ((3 * rope_dim + 127) // 128) * 128
     E = SyncEvent
@@ -253,9 +237,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
         """V-pipe: gather from axes_ub then construct cos/sin."""
         v_wait_mte2(E.COS_SIN_AXES)
         T.tile.gather(gathered_ub, axes_ub, gather_offset_ub, 0)
-        T.tile.cast(
-            assembled_cos_sin_ub, gathered_ub, "CAST_NONE", rope_dim
-        )
+        T.tile.cast(assembled_cos_sin_ub, gathered_ub, "CAST_NONE", rope_dim)
         # cos_full = [cos, cos]
         T.copy(assembled_cos_sin_ub[0, 0], cos_full_ub[0, 0:half_rope_dim])
         T.copy(
@@ -302,7 +284,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
 
     @T.prim_func
     def split_qkv_rmsnorm_mrope_kernel(
-        # Re-declare the flat QKVG input row as (total_heads, head_size) so
+        # Redeclare the flat QKVG input row as (total_heads, head_size) so
         # T.copy can issue per-tensor bulk DMA instead of treating the first
         # UB dimension as a cross-token repeat.
         qkvg_in: T.Tensor((COMPILE_MAX_TOKENS, qkv_head_slots, head_size), input_dtype),
@@ -321,9 +303,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
             task_id = cid * VEC_NUM + vid
             block_m = (num_tokens + task_num - 1) // task_num
             row_start = task_id * block_m
-            rows_left = T.if_then_else(
-                num_tokens > row_start, num_tokens - row_start, 0
-            )
+            rows_left = T.if_then_else(num_tokens > row_start, num_tokens - row_start, 0)
             num_rows_per_vec = T.if_then_else(
                 rows_left < block_m,
                 rows_left,
@@ -353,12 +333,8 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                 # loads right after Q/K loads (while V is still doing Q/K
                 # compute), so the passthrough DMA is fully hidden behind
                 # V-pipe work.
-                gate_heads_half_ub = T.alloc_shared(
-                    (num_q_heads, head_size), input_dtype
-                )
-                v_heads_half_ub = T.alloc_shared(
-                    (num_kv_heads, head_size), input_dtype
-                )
+                gate_heads_half_ub = T.alloc_shared((num_q_heads, head_size), input_dtype)
+                v_heads_half_ub = T.alloc_shared((num_kv_heads, head_size), input_dtype)
 
                 # Gather buffers for merged cos+sin assembly.
                 axes_ub = T.alloc_shared((1, gather_pad_dim), input_dtype)
@@ -393,24 +369,21 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                     row = row_start + row_local
                     # === Load phase: cos_sin load needs axes_ub free (skip
                     # wait on first iter since axes_ub starts free).
-                    with T.If(row_local > 0):
-                        with T.Then():
-                            mte2_wait_v(E.AXES_FREE)
-                    T.copy(cos_sin[row, 0], axes_ub[0, 0:3 * rope_dim])
+                    with T.If(row_local > 0), T.Then():
+                        mte2_wait_v(E.AXES_FREE)
+                    T.copy(cos_sin[row, 0], axes_ub[0, 0 : 3 * rope_dim])
                     mte2_notify_v(E.COS_SIN_AXES)
 
                     # Load/store order: Q→G→K→V (matches [Q|G|K|V] layout).
 
                     # load q
-                    with T.If(row_local > 0):
-                        with T.Then():
-                            mte2_wait_mte3(E.Q_FREE)
+                    with T.If(row_local > 0), T.Then():
+                        mte2_wait_mte3(E.Q_FREE)
                     T.copy(qkvg_in[row, 0:num_q_heads, 0:head_size], q_heads_half_ub)
                     mte2_notify_v(E.HEAD_ROW_Q)
                     # load g
-                    with T.If(row_local > 0):
-                        with T.Then():
-                            mte2_wait_mte3(E.G_FREE)
+                    with T.If(row_local > 0), T.Then():
+                        mte2_wait_mte3(E.G_FREE)
                     T.copy(
                         qkvg_in[
                             row,
@@ -422,9 +395,8 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                     mte2_notify_mte3(E.GATE_READY)
 
                     # load k
-                    with T.If(row_local > 0):
-                        with T.Then():
-                            mte2_wait_mte3(E.K_FREE)
+                    with T.If(row_local > 0), T.Then():
+                        mte2_wait_mte3(E.K_FREE)
                     T.copy(
                         qkvg_in[
                             row,
@@ -436,9 +408,8 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                     mte2_notify_v(E.HEAD_ROW_K)
 
                     # load v
-                    with T.If(row_local > 0):
-                        with T.Then():
-                            mte2_wait_mte3(E.V_FREE)
+                    with T.If(row_local > 0), T.Then():
+                        mte2_wait_mte3(E.V_FREE)
                     T.copy(
                         qkvg_in[
                             row,
@@ -464,9 +435,8 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                     )
                     # Release axes_ub after gather (skip on last iter —
                     # keeps SetFlag/WaitFlag counts balanced).
-                    with T.If(row_local < num_rows_per_vec - 1):
-                        with T.Then():
-                            v_notify_mte2(E.AXES_FREE)
+                    with T.If(row_local < num_rows_per_vec - 1), T.Then():
+                        v_notify_mte2(E.AXES_FREE)
 
                     # === Q compute (V pipe) ===
                     v_wait_mte2(E.HEAD_ROW_Q)
@@ -522,27 +492,23 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                     # load order). Each store signals buffer free immediately.
                     mte3_wait_v(E.Q_CAST)
                     T.copy(q_heads_half_ub, q_out[row, 0, 0])
-                    with T.If(row_local < num_rows_per_vec - 1):
-                        with T.Then():
-                            mte3_notify_mte2(E.Q_FREE)
+                    with T.If(row_local < num_rows_per_vec - 1), T.Then():
+                        mte3_notify_mte2(E.Q_FREE)
 
                     mte3_wait_mte2(E.GATE_READY)
                     T.copy(gate_heads_half_ub, gate_out[row, 0, 0])
-                    with T.If(row_local < num_rows_per_vec - 1):
-                        with T.Then():
-                            mte3_notify_mte2(E.G_FREE)
+                    with T.If(row_local < num_rows_per_vec - 1), T.Then():
+                        mte3_notify_mte2(E.G_FREE)
 
                     mte3_wait_v(E.K_CAST)
                     T.copy(k_heads_half_ub, k_out[row, 0, 0])
-                    with T.If(row_local < num_rows_per_vec - 1):
-                        with T.Then():
-                            mte3_notify_mte2(E.K_FREE)
+                    with T.If(row_local < num_rows_per_vec - 1), T.Then():
+                        mte3_notify_mte2(E.K_FREE)
 
                     mte3_wait_mte2(E.V_READY)
                     T.copy(v_heads_half_ub, v_out[row, 0, 0])
-                    with T.If(row_local < num_rows_per_vec - 1):
-                        with T.Then():
-                            mte3_notify_mte2(E.V_FREE)
+                    with T.If(row_local < num_rows_per_vec - 1), T.Then():
+                        mte3_notify_mte2(E.V_FREE)
 
     return split_qkv_rmsnorm_mrope_kernel
 
@@ -573,6 +539,7 @@ def _validate_specialization_num_tokens(num_tokens: int) -> None:
             f"{NUM_TOKEN_SPECIALIZATIONS}, got {num_tokens}"
         )
 
+
 @register_kernel
 class SplitQkvRmsnormMropeKernel(TilelangKernel):
     KERNEL_NAME = "split_qkv_rmsnorm_mrope"
@@ -586,10 +553,7 @@ class SplitQkvRmsnormMropeKernel(TilelangKernel):
     ]
     SPECIALIZATIONS = [
         {
-            "variant_key": (
-                f"hs{head_size}_rd{rope_dim}_nt{num_tokens}_"
-                f"qh{num_q_heads}_kvh{num_kv_heads}_bf16"
-            ),
+            "variant_key": (f"hs{head_size}_rd{rope_dim}_nt{num_tokens}_qh{num_q_heads}_kvh{num_kv_heads}_bf16"),
             "head_size": head_size,
             "rope_dim": rope_dim,
             "num_tokens": num_tokens,
@@ -612,10 +576,7 @@ class SplitQkvRmsnormMropeKernel(TilelangKernel):
         dtype: str,
     ) -> str:
         if dtype != DEFAULT_DTYPE:
-            raise ValueError(
-                "split_qkv_rmsnorm_mrope only supports "
-                f"dtype={DEFAULT_DTYPE}, got {dtype}"
-            )
+            raise ValueError(f"split_qkv_rmsnorm_mrope only supports dtype={DEFAULT_DTYPE}, got {dtype}")
         _validate_head_spec(head_size=head_size, rope_dim=rope_dim)
         _validate_specialization_num_tokens(num_tokens)
         tilelang.disable_cache()
@@ -628,12 +589,9 @@ class SplitQkvRmsnormMropeKernel(TilelangKernel):
             vec_core_num=vec_core_num,
             max_num_tokens=num_tokens,
         )
-        with tilelang.tvm.transform.PassContext(
-            opt_level=3, config=KERNEL_PASS_CONFIGS
-        ):
+        with tilelang.tvm.transform.PassContext(opt_level=3, config=KERNEL_PASS_CONFIGS):
             kernel = tilelang.engine.lower(tilelang_kernel)
         return kernel.kernel_source
-
 
 
 def _validate_mrope_section(
@@ -642,15 +600,12 @@ def _validate_mrope_section(
     mrope_section: tuple[int, int, int],
 ) -> None:
     if len(mrope_section) != 3:
-        raise ValueError(
-            f"mrope_section must have 3 items [t, h, w], got {mrope_section}"
-        )
+        raise ValueError(f"mrope_section must have 3 items [t, h, w], got {mrope_section}")
     if any(section < 0 for section in mrope_section):
         raise ValueError(f"mrope_section values must be >= 0, got {mrope_section}")
     if sum(mrope_section) != rope_dim // 2:
         raise ValueError(
-            "sum(mrope_section) must equal rope_dim // 2, got "
-            f"mrope_section={mrope_section}, rope_dim={rope_dim}"
+            f"sum(mrope_section) must equal rope_dim // 2, got mrope_section={mrope_section}, rope_dim={rope_dim}"
         )
 
 
@@ -669,18 +624,12 @@ def _validate_runtime_config(
     if num_tokens <= 0:
         raise ValueError(f"num_tokens({num_tokens}) must be > 0")
     if num_tokens > COMPILE_MAX_TOKENS:
-        raise ValueError(
-            "num_tokens("
-            f"{num_tokens}) must be <= COMPILE_MAX_TOKENS({COMPILE_MAX_TOKENS})"
-        )
+        raise ValueError(f"num_tokens({num_tokens}) must be <= COMPILE_MAX_TOKENS({COMPILE_MAX_TOKENS})")
     if num_q_heads <= 0:
         raise ValueError(f"num_q_heads({num_q_heads}) must be > 0")
     if num_kv_heads <= 0:
         raise ValueError(f"num_kv_heads({num_kv_heads}) must be > 0")
     _validate_mrope_section(rope_dim=rope_dim, mrope_section=mrope_section)
-
-
-
 
 
 def _torch_rms_norm(
@@ -710,12 +659,8 @@ def _assemble_non_interleaved_mrope_rows(
     cos_axes = cos_sin[:, :, :half_rope_dim].to(torch.float32)
     sin_axes = cos_sin[:, :, half_rope_dim:].to(torch.float32)
     num_tokens = cos_sin.shape[1]
-    cos_rows = torch.zeros(
-        (num_tokens, half_rope_dim), device=cos_sin.device, dtype=torch.float32
-    )
-    sin_rows = torch.zeros(
-        (num_tokens, half_rope_dim), device=cos_sin.device, dtype=torch.float32
-    )
+    cos_rows = torch.zeros((num_tokens, half_rope_dim), device=cos_sin.device, dtype=torch.float32)
+    sin_rows = torch.zeros((num_tokens, half_rope_dim), device=cos_sin.device, dtype=torch.float32)
 
     if t_len > 0:
         cos_rows[:, :t_len] = cos_axes[0, :, :t_len]
@@ -801,21 +746,15 @@ def _torch_split_qkv_rmsnorm_mrope(
     kv_width = num_kv_heads * head_size
     q = qkv[:, :q_width].reshape(qkv.shape[0], num_q_heads, head_size)
     gate = qkv[:, q_width : q_width * 2]
-    k = qkv[:, q_width * 2 : q_width * 2 + kv_width].reshape(
-        qkv.shape[0], num_kv_heads, head_size
-    )
+    k = qkv[:, q_width * 2 : q_width * 2 + kv_width].reshape(qkv.shape[0], num_kv_heads, head_size)
     v = qkv[:, q_width * 2 + kv_width : q_width * 2 + kv_width * 2]
 
     q_norm = _torch_rms_norm(q, q_weight[0], eps)
     k_norm = _torch_rms_norm(k, k_weight[0], eps)
     if is_interleaved:
-        cos_rows, sin_rows = _assemble_interleaved_mrope_rows(
-            cos_sin, mrope_section
-        )
+        cos_rows, sin_rows = _assemble_interleaved_mrope_rows(cos_sin, mrope_section)
     else:
-        cos_rows, sin_rows = _assemble_non_interleaved_mrope_rows(
-            cos_sin, mrope_section
-        )
+        cos_rows, sin_rows = _assemble_non_interleaved_mrope_rows(cos_sin, mrope_section)
 
     q_out = _apply_partial_mrope(q_norm, cos_rows, sin_rows, rope_dim)
     k_out = _apply_partial_mrope(k_norm, cos_rows, sin_rows, rope_dim)
@@ -830,15 +769,11 @@ def _torch_split_qkv_rmsnorm_mrope(
 def _parse_head_config(text: str) -> tuple[int, int]:
     q_heads_text, sep, kv_heads_text = text.partition(":")
     if sep != ":":
-        raise argparse.ArgumentTypeError(
-            f"Invalid head config '{text}'. Expected format <num_q_heads>:<num_kv_heads>."
-        )
+        raise argparse.ArgumentTypeError(f"Invalid head config '{text}'. Expected format <num_q_heads>:<num_kv_heads>.")
     try:
         return int(q_heads_text), int(kv_heads_text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"Invalid head config '{text}'. Expected integer pair."
-        ) from exc
+        raise argparse.ArgumentTypeError(f"Invalid head config '{text}'. Expected integer pair.") from exc
 
 
 def build_mrope_gather_pattern_merged(
@@ -884,9 +819,7 @@ def build_mrope_gather_pattern_merged(
         # cos part: output[i] reads from axis_id[i]'s cos segment position i
         pattern[i] = (axis_id[i] * rope_dim + i) * elem_bytes
         # sin part: output[half_rope_dim + i] reads from axis_id[i]'s sin segment
-        pattern[half_rope_dim + i] = (
-            axis_id[i] * rope_dim + half_rope_dim + i
-        ) * elem_bytes
+        pattern[half_rope_dim + i] = (axis_id[i] * rope_dim + half_rope_dim + i) * elem_bytes
     return pattern.to(device).view(torch.uint32)
 
 
@@ -904,10 +837,7 @@ def _run_ref_check(
     import torch
 
     if not hasattr(torch, "npu") or not torch.npu.is_available():
-        logger.warning(
-            "Skip split_qkv_rmsnorm_mrope reference check: "
-            "NPU is not available"
-        )
+        logger.warning("Skip split_qkv_rmsnorm_mrope reference check: NPU is not available")
         return
 
     _validate_runtime_config(
@@ -931,9 +861,7 @@ def _run_ref_check(
     q_weight = torch.randn((1, head_size), device=device, dtype=torch.bfloat16)
     k_weight = torch.randn((1, head_size), device=device, dtype=torch.bfloat16)
     phase = torch.randn((3, num_tokens, half_rope_dim), device=device)
-    cos_sin = torch.cat((torch.cos(phase), torch.sin(phase)), dim=-1).to(
-        torch.bfloat16
-    )
+    cos_sin = torch.cat((torch.cos(phase), torch.sin(phase)), dim=-1).to(torch.bfloat16)
 
     q_out = torch.empty((num_tokens, q_width), device=device, dtype=torch.bfloat16)
     k_out = torch.empty((num_tokens, kv_width), device=device, dtype=torch.bfloat16)
@@ -1035,10 +963,7 @@ def _run_ref_suite(
 def parse_args() -> argparse.Namespace:
     default_head_size, default_rope_dim = SUPPORTED_HEAD_SPECS[0]
     parser = argparse.ArgumentParser(
-        description=(
-            "Generate TileLang AscendC source for split_qkv_rmsnorm_mrope "
-            "AOT kernel."
-        )
+        description=("Generate TileLang AscendC source for split_qkv_rmsnorm_mrope AOT kernel.")
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--head-size", type=int, default=default_head_size)

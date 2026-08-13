@@ -76,9 +76,7 @@ def fused_qk_norm_rope(
     )
 
 
-@torch.library.custom_op(
-    "xllm_python::interleaved_rotary_embedding", mutates_args=()
-)
+@torch.library.custom_op("xllm_python::interleaved_rotary_embedding", mutates_args=())
 def interleaved_rotary_embedding(
     value: torch.Tensor,
     cosine: torch.Tensor,
@@ -95,9 +93,7 @@ def interleaved_rotary_embedding(
         A tensor with the shape and dtype of ``value``.
     """
     num_tokens, num_heads, head_dim = value.shape
-    output = torch_npu.npu_interleave_rope(
-        value.view(num_tokens, num_heads, 1, head_dim), cosine, sine
-    )
+    output = torch_npu.npu_interleave_rope(value.view(num_tokens, num_heads, 1, head_dim), cosine, sine)
     return output.view(num_tokens, num_heads, head_dim)
 
 
@@ -170,9 +166,7 @@ def vision_rotary_mul(
     """
     import torch_npu
 
-    return torch_npu.npu_rotary_mul(
-        value.unsqueeze(0).contiguous(), cos_full, sin_full
-    ).squeeze(0)
+    return torch_npu.npu_rotary_mul(value.unsqueeze(0).contiguous(), cos_full, sin_full).squeeze(0)
 
 
 __all__ = [

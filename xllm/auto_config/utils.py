@@ -33,8 +33,9 @@ import copy
 import importlib.util
 import json
 import os
+from collections.abc import Sequence
 from types import ModuleType
-from typing import Any, Dict, Optional, Sequence
+from typing import Any
 
 from scripts.logger import logger
 
@@ -52,9 +53,7 @@ def _load_platform_module() -> ModuleType:
         "python",
         "platform.py",
     )
-    spec = importlib.util.spec_from_file_location(
-        "xllm.auto_config._platform", platform_path
-    )
+    spec = importlib.util.spec_from_file_location("xllm.auto_config._platform", platform_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"failed to load platform module: {platform_path}")
     module = importlib.util.module_from_spec(spec)
@@ -75,8 +74,8 @@ detect_hardware = _platform_module.detect_hardware
 
 def check_device_count(
     model_type: str,
-    base_config: Dict[str, Any],
-    context: Dict[str, Any],
+    base_config: dict[str, Any],
+    context: dict[str, Any],
 ) -> bool:
     """Check the visible device count against the profile's optimal `nnodes`.
 
@@ -89,8 +88,7 @@ def check_device_count(
 
     if optimal_nnodes is None or visible_device_count is None:
         logger.warning(
-            "%s auto-tuning: cannot verify device count "
-            "(optimal nnodes=%s, visible devices=%s)",
+            "%s auto-tuning: cannot verify device count (optimal nnodes=%s, visible devices=%s)",
             model_type,
             optimal_nnodes,
             visible_device_count,
@@ -144,9 +142,9 @@ class BaseTuner:
 
     def tune(
         self,
-        base_config: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        base_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         tuned_config = copy.deepcopy(base_config)
 
         hardware = context.get("hardware") or detect_hardware()
@@ -166,8 +164,8 @@ class BaseTuner:
 
     def _dispatch_platform(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         dispatch = {
             PlatformEnum.NPU: self.tune_npu,
@@ -180,8 +178,7 @@ class BaseTuner:
         hook = dispatch.get(Platform.enum())
         if hook is None:
             logger.warning(
-                "%s auto-tuning: no tuning hook for platform %s; using base "
-                "config unchanged.",
+                "%s auto-tuning: no tuning hook for platform %s; using base config unchanged.",
                 self.MODEL_TYPE,
                 Platform.enum(),
             )
@@ -190,8 +187,8 @@ class BaseTuner:
 
     def tune_common(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Cross-platform adjustments applied before the platform hook.
 
@@ -202,48 +199,48 @@ class BaseTuner:
 
     def tune_npu(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Tune for Ascend NPU. Mutate `config` in place."""
         pass
 
     def tune_cuda(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Tune for NVIDIA CUDA. Base default: no change. Override as needed."""
         pass
 
     def tune_mlu(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Tune for Cambricon MLU. Base default: no change. Override as needed."""
         pass
 
     def tune_musa(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Tune for Moore Threads MUSA. Base default: no change. Override as needed."""
         pass
 
     def tune_dcu(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Tune for Hygon DCU. Base default: no change. Override as needed."""
         pass
 
     def tune_ilu(
         self,
-        config: Dict[str, Any],
-        context: Dict[str, Any],
+        config: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         """Tune for Iluvatar GPU. Base default: no change. Override as needed."""
         pass
@@ -262,7 +259,7 @@ def auto_tuning_config_dir() -> str:
     return os.path.dirname(os.path.realpath(__file__))
 
 
-def extract_model_path(extra_args: Sequence[str]) -> Optional[str]:
+def extract_model_path(extra_args: Sequence[str]) -> str | None:
     """Recover `--model` from the launcher's passthrough args.
 
     `--model` is forwarded to the binary rather than parsed by the launcher, so
@@ -284,11 +281,9 @@ def read_model_type(model_path: str) -> str:
 
     Mirrors C++ `util::get_model_type`. Raises `AutoTuningError` on any problem.
     """
-    config_path = os.path.join(
-        os.path.realpath(os.path.expanduser(model_path)), "config.json"
-    )
+    config_path = os.path.join(os.path.realpath(os.path.expanduser(model_path)), "config.json")
     try:
-        with open(config_path, "r", encoding="utf-8") as config_file:
+        with open(config_path, encoding="utf-8") as config_file:
             model_config = json.load(config_file)
     except FileNotFoundError:
         raise AutoTuningError(f"model config.json not found: {config_path}")
@@ -302,9 +297,7 @@ def read_model_type(model_path: str) -> str:
 
     model_type = model_config.get("model_type") or model_config.get("model_name")
     if not isinstance(model_type, str) or not model_type:
-        raise AutoTuningError(
-            f"{config_path} must contain a string `model_type` or `model_name`"
-        )
+        raise AutoTuningError(f"{config_path} must contain a string `model_type` or `model_name`")
     return model_type
 
 
@@ -315,9 +308,7 @@ def load_tuning_module(py_path: str, model_type: str) -> ModuleType:
     load. Raises `AutoTuningError` if the module cannot be imported or does not
     expose a callable `tune`.
     """
-    spec = importlib.util.spec_from_file_location(
-        f"xllm.auto_config.{model_type}", py_path
-    )
+    spec = importlib.util.spec_from_file_location(f"xllm.auto_config.{model_type}", py_path)
     if spec is None or spec.loader is None:
         raise AutoTuningError(f"failed to load tuning module: {py_path}")
     module = importlib.util.module_from_spec(spec)
@@ -326,9 +317,7 @@ def load_tuning_module(py_path: str, model_type: str) -> ModuleType:
     except Exception as error:
         raise AutoTuningError(f"failed to import {py_path}: {error}")
     if not callable(getattr(module, "tune", None)):
-        raise AutoTuningError(
-            f"{py_path} must define a callable `tune(base_config, context)`"
-        )
+        raise AutoTuningError(f"{py_path} must define a callable `tune(base_config, context)`")
     return module
 
 
@@ -356,7 +345,7 @@ def generate_tuned_config(extra_args: Sequence[str], output_dir: str) -> str:
         )
 
     try:
-        with open(base_json_path, "r", encoding="utf-8") as base_file:
+        with open(base_json_path, encoding="utf-8") as base_file:
             base_config = json.load(base_file)
     except (OSError, json.JSONDecodeError) as error:
         raise AutoTuningError(f"failed to read {base_json_path}: {error}")
@@ -389,7 +378,5 @@ def generate_tuned_config(extra_args: Sequence[str], output_dir: str) -> str:
     except OSError as error:
         raise AutoTuningError(f"failed to write tuned config {output_path}: {error}")
 
-    logger.info(
-        "auto-tuning: wrote tuned config for %s to %s", model_type, output_path
-    )
+    logger.info("auto-tuning: wrote tuned config for %s to %s", model_type, output_path)
     return output_path

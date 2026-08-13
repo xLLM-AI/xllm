@@ -94,15 +94,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 device=device,
             )
         )
-        self.A_log = nn.Parameter(
-            torch.empty(self.num_v_heads, dtype=torch.float32, device=device)
-        )
-        self.dt_bias = nn.Parameter(
-            torch.empty(self.num_v_heads, dtype=dtype, device=device)
-        )
-        self.norm_weight = nn.Parameter(
-            torch.ones(self.value_head_dim, dtype=dtype, device=device)
-        )
+        self.A_log = nn.Parameter(torch.empty(self.num_v_heads, dtype=torch.float32, device=device))
+        self.dt_bias = nn.Parameter(torch.empty(self.num_v_heads, dtype=dtype, device=device))
+        self.norm_weight = nn.Parameter(torch.ones(self.value_head_dim, dtype=dtype, device=device))
         self.out_proj = RowParallelLinear(
             self.value_dim,
             cfg.hidden_size,
@@ -114,9 +108,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     def _cache(self):
         cache = get_forward_context().layer_caches[self.layer_id]
         if cache.conv is None or cache.ssm is None:
-            raise RuntimeError(
-                f"linear-attention cache is missing for layer {self.layer_id}"
-            )
+            raise RuntimeError(f"linear-attention cache is missing for layer {self.layer_id}")
         return cache.conv, cache.ssm
 
     def _conv_state_dim_first(self, conv_state: torch.Tensor) -> bool:
@@ -254,24 +246,16 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
         conv_state, ssm_state = self._cache()
         mixed_qkv = self.in_proj_qkv(hidden)
-        z = self.in_proj_z(hidden).view(
-            -1, self.num_v_heads, self.value_head_dim
-        )
+        z = self.in_proj_z(hidden).view(-1, self.num_v_heads, self.value_head_dim)
         b = self.in_proj_b(hidden)
         a = self.in_proj_a(hidden)
         is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
         if is_prefill:
             if has_initial_state is None:
-                raise RuntimeError(
-                    "has_initial_state is required by Qwen3.5 prefill"
-                )
-            has_initial_state = has_initial_state.to(
-                device=hidden.device, dtype=torch.bool
-            )
+                raise RuntimeError("has_initial_state is required by Qwen3.5 prefill")
+            has_initial_state = has_initial_state.to(device=hidden.device, dtype=torch.bool)
             if has_initial_state.shape != state_indices.shape:
-                raise ValueError(
-                    "has_initial_state must match linear_state_indices"
-                )
+                raise ValueError("has_initial_state must match linear_state_indices")
             mixed_qkv = self._conv_prefill(
                 mixed_qkv,
                 conv_state,
@@ -280,9 +264,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 cu_seqlens,
             )
         else:
-            mixed_qkv = self._conv_decode(
-                mixed_qkv, conv_state, state_indices
-            )
+            mixed_qkv = self._conv_decode(mixed_qkv, conv_state, state_indices)
 
         if is_prefill:
             output = self._gdn_prefill(
@@ -295,8 +277,6 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 cu_seqlens,
             )
         else:
-            output = self._gdn_decode(
-                mixed_qkv, a, b, ssm_state, state_indices
-            )
+            output = self._gdn_decode(mixed_qkv, a, b, ssm_state, state_indices)
         output = kernels.rms_norm_gated(output, z, self.norm_weight, self.norm_eps)
         return self.out_proj(output.reshape(-1, self.value_dim))

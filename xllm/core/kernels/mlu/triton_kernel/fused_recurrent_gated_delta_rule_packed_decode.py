@@ -17,7 +17,6 @@
 # Upstream license: Apache License, Version 2.0.
 # Modified for xLLM MLU TMO integration.
 
-import torch
 import triton
 import triton.language as tl
 
@@ -65,14 +64,14 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
     else:
         TOTAL_BLOCKS = num_v * N
 
-    A_log_vals = tl.load(A_log + tl.arange(0,HV)).to(tl.float32)
-    dt_bias_vals = tl.load(dt_bias + tl.arange(0,HV)).to(tl.float32)
+    A_log_vals = tl.load(A_log + tl.arange(0, HV)).to(tl.float32)
+    dt_bias_vals = tl.load(dt_bias + tl.arange(0, HV)).to(tl.float32)
 
     HEADS_PER_Q: tl.constexpr = HV // H
-    BH: tl.constexpr = (BLOCK_HV+HEADS_PER_Q-1) // HEADS_PER_Q
+    BH: tl.constexpr = (BLOCK_HV + HEADS_PER_Q - 1) // HEADS_PER_Q
 
-    ones = tl.full((1,BLOCK_K),1,tl.float32)
-    neg_ones = tl.full((1,BLOCK_K),-1,tl.float32)
+    ones = tl.full((1, BLOCK_K), 1, tl.float32)
+    neg_ones = tl.full((1, BLOCK_K), -1, tl.float32)
 
     # Split N into per-core segments (persistent loop); last core takes the remainder.
     num_percore = TOTAL_BLOCKS // num_jobs
@@ -144,8 +143,12 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
                 # indices that fit int32. (Upstream uses int64; int32 is the xllm convention and halves the
                 # per-element load width of the [BLOCK_N, HV] scalar tables.)
                 state_idxs = tl.load(ssm_state_indices + n_blk * stride_indices_seq, mask=mask_n_blk).to(tl.int32)
-                a_vals = tl.load(a + (n_blk * stride_a_tok)[:, None] + tl.arange(0,HV)[None, :], mask=mask_n_blk[:, None])
-                b_vals = tl.load(b + (n_blk * stride_b_tok)[:, None] + tl.arange(0,HV)[None, :], mask=mask_n_blk[:, None]).to(tl.float32)
+                a_vals = tl.load(
+                    a + (n_blk * stride_a_tok)[:, None] + tl.arange(0, HV)[None, :], mask=mask_n_blk[:, None]
+                )
+                b_vals = tl.load(
+                    b + (n_blk * stride_b_tok)[:, None] + tl.arange(0, HV)[None, :], mask=mask_n_blk[:, None]
+                ).to(tl.float32)
 
                 # Precompute scalar tables [BLOCK_N, HV]; inner loop indexes [i_n, i_hv] (aligned with fused_sigmoid_gating's b_gs/b_beta)
                 xs = a_vals + dt_bias_vals[None, :]
@@ -170,8 +173,19 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
                     mask_hvb = o_hv_block < HV
                     o_h_block = tl.arange(0, BH) + (hv_start // HEADS_PER_Q)  # [BH] global Q/K head offset
                     mask_hb = o_h_block < H
-                    p_qs = mixed_qkv + n_blk[:, None, None] * stride_mixed_qkv_tok + o_h_block[None, :, None] * K + o_k[None, None, :]
-                    p_ks = mixed_qkv + n_blk[:, None, None] * stride_mixed_qkv_tok + (H * K) + o_h_block[None, :, None] * K + o_k[None, None, :]
+                    p_qs = (
+                        mixed_qkv
+                        + n_blk[:, None, None] * stride_mixed_qkv_tok
+                        + o_h_block[None, :, None] * K
+                        + o_k[None, None, :]
+                    )
+                    p_ks = (
+                        mixed_qkv
+                        + n_blk[:, None, None] * stride_mixed_qkv_tok
+                        + (H * K)
+                        + o_h_block[None, :, None] * K
+                        + o_k[None, None, :]
+                    )
                     mask_qks = mask_n_blk[:, None, None] & (o_k[None, None, :] < K) & mask_hb[None, :, None]
                     qs = tl.load(p_qs, mask=mask_qks, other=0).to(tl.float32)  # [BLOCK_N, BH, BK]
                     ks = tl.load(p_ks, mask=mask_qks, other=0).to(tl.float32)  # [BLOCK_N, BH, BK]
@@ -186,7 +200,13 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
                         qs = qs.reshape((BLOCK_N, BH, BLOCK_K))
                         ks = ks.reshape((BLOCK_N, BH, BLOCK_K))
                     qs = qs * scale
-                    p_vs = mixed_qkv + n_blk[:, None, None] * stride_mixed_qkv_tok + (2 * H * K) + o_hv_block[None, :, None] * V + o_v[None, None, :]
+                    p_vs = (
+                        mixed_qkv
+                        + n_blk[:, None, None] * stride_mixed_qkv_tok
+                        + (2 * H * K)
+                        + o_hv_block[None, :, None] * V
+                        + o_v[None, None, :]
+                    )
                     mask_vs_blk = mask_n_blk[:, None, None] & (o_v[None, None, :] < V) & mask_hvb[None, :, None]
                     vs = tl.load(p_vs, mask=mask_vs_blk, other=0).to(tl.float32)  # [BLOCK_N, BLOCK_HV, BLOCK_V]
                     b_os = tl.empty((BLOCK_N, BLOCK_HV, BLOCK_V), dtype=tl.float32)
@@ -195,8 +215,12 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
                     for i_n_off in range(0, numN, 1):
                         state_idx = state_idxs[i_n_off]
                         for local_i_hv in range(0, BLOCK_HV, 1):
-                            gi_hv = hv_start + local_i_hv  # global V-head index (indexes full-HV scalar tables / state ptr)
-                            i_h = local_i_hv // HEADS_PER_Q  # Q/K head index within block, [0,BH) (matches qs/ks BH dim)
+                            gi_hv = (
+                                hv_start + local_i_hv
+                            )  # global V-head index (indexes full-HV scalar tables / state ptr)
+                            i_h = (
+                                local_i_hv // HEADS_PER_Q
+                            )  # Q/K head index within block, [0,BH) (matches qs/ks BH dim)
 
                             if gi_hv < HV:
                                 # output_offsets = (i_n * HV + i_hv) * V + o_v
@@ -216,10 +240,16 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
                                     b_v = vs[i_n_off, local_i_hv, :]
 
                                     b_h *= exp_g_vals[i_n_off, gi_hv]
-                                    b_v += tl.dot(neg_ones,(b_h * b_k[None, :]).trans(), allow_tf32=False)
+                                    b_v += tl.dot(neg_ones, (b_h * b_k[None, :]).trans(), allow_tf32=False)
                                     b_v *= beta_vals[i_n_off, gi_hv]
-                                    b_h += tl.dot(b_v.reshape([BLOCK_V,1]),ones,allow_tf32=False) * b_k[None, :]
-                                    b_os[i_n_off, local_i_hv, :] = (tl.dot(ones,(b_h * b_q[None, :]).trans(),allow_tf32=False)).reshape([BLOCK_V,])
+                                    b_h += tl.dot(b_v.reshape([BLOCK_V, 1]), ones, allow_tf32=False) * b_k[None, :]
+                                    b_os[i_n_off, local_i_hv, :] = (
+                                        tl.dot(ones, (b_h * b_q[None, :]).trans(), allow_tf32=False)
+                                    ).reshape(
+                                        [
+                                            BLOCK_V,
+                                        ]
+                                    )
 
                                     p_ht = ht + state_idx * stride_final_state_token
                                     p_ht = p_ht + state_offsets
@@ -228,7 +258,5 @@ def tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
                                 b_os[i_n_off, local_i_hv, :] = zeros
 
                     # n_blk * (HV*V) + o_hv_block * V + i_v*BLOCK_V + o_v_block
-                    p_os = o + n_blk[:,None,None]*(HV*V) + o_hv_block[None,:,None]*V + o_v[None,None,:]
+                    p_os = o + n_blk[:, None, None] * (HV * V) + o_hv_block[None, :, None] * V + o_v[None, None, :]
                     tl.store(p_os, b_os.to(p_os.dtype.element_ty), mask=mask_vs_blk)
-
-

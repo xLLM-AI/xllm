@@ -15,8 +15,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
@@ -26,6 +27,7 @@ from xllm.python.attention.expanded_decode_metadata import (
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
+
 
 @dataclass(frozen=True, slots=True)
 class LayerCache:
@@ -58,12 +60,8 @@ def normalize_layer_caches(caches: Sequence[LayerCacheInput]) -> list[LayerCache
             normalized.append(cache)
             continue
         if not 2 <= len(cache) <= len(_LAYER_CACHE_SLOTS):
-            raise ValueError(
-                "layer cache must hold between K/V and "
-                f"{'/'.join(_LAYER_CACHE_SLOTS)} tensors"
-            )
-        slots = [None if tensor is None or not tensor.numel() else tensor
-                 for tensor in cache]
+            raise ValueError(f"layer cache must hold between K/V and {'/'.join(_LAYER_CACHE_SLOTS)} tensors")
+        slots = [None if tensor is None or not tensor.numel() else tensor for tensor in cache]
         slots.extend([None] * (len(_LAYER_CACHE_SLOTS) - len(slots)))
         normalized.append(LayerCache(*slots))
     return normalized
@@ -131,7 +129,7 @@ class AttentionBackend(ABC):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer: "Attention",
+        layer: Attention,
     ) -> torch.Tensor:
         pass
 
@@ -151,7 +149,7 @@ class AttentionBackend(ABC):
         q_pe: torch.Tensor,
         k_latent: torch.Tensor,
         k_pe: torch.Tensor,
-        layer: "Attention",
+        layer: Attention,
         topk: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Absorbed-MLA attention over paged latent (nope) + rope caches.
@@ -161,11 +159,9 @@ class AttentionBackend(ABC):
         LightningIndexer; otherwise a dense MLA path is requested. Backends
         that do not implement MLA raise.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support MLA"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support MLA")
 
-    def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
+    def mla_index_context(self, layer: Attention) -> MlaIndexContext:
         """Public hook for an optional LightningIndexer.
 
         Hands out the paged index cache view (``LayerCache.index``) plus the
@@ -173,6 +169,4 @@ class AttentionBackend(ABC):
         touches ``backend._metadata`` / ``backend._kv_caches`` directly.
         Backends that do not support the sparse MLA indexer raise.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support MLA indexer"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support MLA indexer")

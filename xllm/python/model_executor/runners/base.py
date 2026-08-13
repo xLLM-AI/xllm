@@ -29,7 +29,10 @@ from xllm.python.model_executor.forward_context import LayerSynchronizer
 
 class BaseRunner(ABC):
     def __init__(
-        self, model: nn.Module, attention_backend: AttentionBackend, device: torch.device,
+        self,
+        model: nn.Module,
+        attention_backend: AttentionBackend,
+        device: torch.device,
     ) -> None:
         self.model = model
         self.attention_backend = attention_backend

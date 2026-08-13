@@ -21,9 +21,7 @@ from scripts.build_support import utils
 
 class BuildDependenciesTest(unittest.TestCase):
     def test_ubuntu_paths_are_supported(self) -> None:
-        with mock.patch.object(
-            utils.sysconfig, "get_config_var", return_value="x86_64-linux-gnu"
-        ):
+        with mock.patch.object(utils.sysconfig, "get_config_var", return_value="x86_64-linux-gnu"):
             dependencies = utils._get_required_dependency_files()
 
         self.assertIn("/usr/include/msgpack.hpp", dependencies["msgpack-cxx"])
@@ -70,9 +68,7 @@ class BuildDependenciesTest(unittest.TestCase):
     def test_ha_prebuild_installs_go(self) -> None:
         with (
             mock.patch.object(utils, "_run_shell_command", return_value=True) as run,
-            mock.patch.object(
-                utils, "_get_required_dependency_files", return_value={}
-            ),
+            mock.patch.object(utils, "_get_required_dependency_files", return_value={}),
             mock.patch.object(utils, "_export_cmake_prefix_paths"),
         ):
             utils._ensure_prebuild_dependencies_installed(

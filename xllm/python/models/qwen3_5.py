@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -76,7 +75,7 @@ class Qwen3_5Config:
     ep_rank: int
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Qwen3_5Config":
+    def from_dict(cls, d: dict) -> Qwen3_5Config:
         def pick(*keys, default=None):
             for key in keys:
                 if key in d and d[key] is not None:
@@ -87,10 +86,7 @@ class Qwen3_5Config:
         interval = int(pick("full_attention_interval", default=4))
         layer_types = list(pick("layer_types", default=[]))
         if not layer_types:
-            layer_types = [
-                "full_attention" if (i + 1) % interval == 0 else "linear_attention"
-                for i in range(n_layers)
-            ]
+            layer_types = ["full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(n_layers)]
         if len(layer_types) != n_layers:
             raise ValueError("layer_types must contain one entry per hidden layer")
 
@@ -110,9 +106,7 @@ class Qwen3_5Config:
             rms_norm_eps=float(pick("rms_norm_eps", default=1e-6)),
             rope_theta=float(pick("rope_theta", default=1e7)),
             partial_rotary_factor=float(pick("partial_rotary_factor", default=0.25)),
-            max_position_embeddings=int(
-                pick("max_position_embeddings", default=262144)
-            ),
+            max_position_embeddings=int(pick("max_position_embeddings", default=262144)),
             vocab_size=int(pick("vocab_size", default=248320)),
             layer_types=layer_types,
             linear_conv_kernel_dim=int(pick("linear_conv_kernel_dim", default=4)),
@@ -126,23 +120,16 @@ class Qwen3_5Config:
             num_experts=int(pick("num_experts", "n_routed_experts", default=0)),
             num_experts_per_tok=int(pick("num_experts_per_tok", default=0)),
             decoder_sparse_step=int(pick("decoder_sparse_step", default=1)),
-            mlp_only_layers=[
-                int(layer_id)
-                for layer_id in pick("mlp_only_layers", default=[])
-            ],
+            mlp_only_layers=[int(layer_id) for layer_id in pick("mlp_only_layers", default=[])],
             norm_topk_prob=bool(pick("norm_topk_prob", default=True)),
             moe_intermediate_size=int(pick("moe_intermediate_size", default=0)),
-            shared_expert_intermediate_size=int(
-                pick("shared_expert_intermediate_size", default=0)
-            ),
+            shared_expert_intermediate_size=int(pick("shared_expert_intermediate_size", default=0)),
             tp_size=tp_size,
             tp_rank=int(pick("tp_rank", default=0)),
             dp_size=dp_size,
             dp_rank=int(pick("dp_rank", default=0)),
             world_size=world_size,
-            moe_tp_size=int(
-                pick("moe_tp_size", default=world_size // max(ep_size, 1))
-            ),
+            moe_tp_size=int(pick("moe_tp_size", default=world_size // max(ep_size, 1))),
             moe_tp_rank=int(pick("moe_tp_rank", default=0)),
             ep_size=ep_size,
             ep_rank=int(pick("ep_rank", default=0)),
@@ -184,13 +171,9 @@ class Qwen3_5Config:
             if self.moe_intermediate_size <= 0:
                 raise ValueError("moe_intermediate_size must be positive for MoE")
             if self.moe_intermediate_size % self.moe_tp_size:
-                raise ValueError(
-                    "moe_intermediate_size must be divisible by moe_tp_size"
-                )
+                raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
             if self.shared_expert_intermediate_size <= 0:
-                raise ValueError(
-                    "shared_expert_intermediate_size must be positive for Qwen3.5 MoE"
-                )
+                raise ValueError("shared_expert_intermediate_size must be positive for Qwen3.5 MoE")
 
     def is_moe_layer(self, layer_id: int) -> bool:
         return (
@@ -199,7 +182,7 @@ class Qwen3_5Config:
             and layer_id not in self.mlp_only_layers
         )
 
-    def full_head_split(self) -> Tuple[int, int, int]:
+    def full_head_split(self) -> tuple[int, int, int]:
         num_heads = self.n_heads // self.tp_size
         if self.n_kv_heads >= self.tp_size:
             if self.n_kv_heads % self.tp_size:
@@ -211,9 +194,7 @@ class Qwen3_5Config:
 
 
 class Qwen3_5SparseMoEBlock(nn.Module):
-    def __init__(
-        self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device
-    ) -> None:
+    def __init__(self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         # The routed and shared branches each produce a partial sum over the same
         # set of ranks whenever every group spans the whole world, and the gate is
@@ -247,9 +228,7 @@ class Qwen3_5SparseMoEBlock(nn.Module):
             device,
             reduce_results=not self.fuse_reductions,
         )
-        self.shared_expert_gate = nn.Linear(
-            cfg.hidden_size, 1, bias=False, dtype=dtype, device=device
-        )
+        self.shared_expert_gate = nn.Linear(cfg.hidden_size, 1, bias=False, dtype=dtype, device=device)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         routed = self.experts(hidden)
@@ -277,15 +256,9 @@ class PartialRotaryEmbedding(nn.Module):
         self.head_dim = head_dim
         self.rotary_dim = rotary_dim
         inv_freq = 1.0 / (
-            rope_theta
-            ** (
-                torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
-                / rotary_dim
-            )
+            rope_theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim)
         )
-        freqs = torch.outer(
-            torch.arange(max_position, dtype=torch.float32, device=device), inv_freq
-        )
+        freqs = torch.outer(torch.arange(max_position, dtype=torch.float32, device=device), inv_freq)
         self.register_buffer("cos", freqs.cos().to(dtype), persistent=False)
         self.register_buffer("sin", freqs.sin().to(dtype), persistent=False)
 
@@ -295,9 +268,7 @@ class PartialRotaryEmbedding(nn.Module):
         return torch.cat((-second, first), dim=-1)
 
     def forward(self, positions: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        rotary, passthrough = x.split(
-            [self.rotary_dim, self.head_dim - self.rotary_dim], dim=-1
-        )
+        rotary, passthrough = x.split([self.rotary_dim, self.head_dim - self.rotary_dim], dim=-1)
         pos = positions.to(torch.long)
         cos = torch.cat((self.cos[pos], self.cos[pos]), dim=-1).unsqueeze(1)
         sin = torch.cat((self.sin[pos], self.sin[pos]), dim=-1).unsqueeze(1)
@@ -338,12 +309,8 @@ class Qwen3_5Attention(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.q_norm = GemmaRMSNorm(
-            self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
-        self.k_norm = GemmaRMSNorm(
-            self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.q_norm = GemmaRMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.k_norm = GemmaRMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.rotary = rotary
         self.attn = Attention(
             self.num_heads,
@@ -357,15 +324,11 @@ class Qwen3_5Attention(nn.Module):
     def forward(self, positions: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
         if self.attn_output_gate:
-            q_gate, k, v = qkv.split(
-                [2 * self.q_size, self.kv_size, self.kv_size], dim=-1
-            )
+            q_gate, k, v = qkv.split([2 * self.q_size, self.kv_size, self.kv_size], dim=-1)
             q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_dim)
             q, gate = q_gate.chunk(2, dim=-1)
         else:
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1
-            )
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q = q.view(-1, self.num_heads, self.head_dim)
             gate = None
         k = k.view(-1, self.num_kv_heads, self.head_dim)
@@ -390,20 +353,14 @@ class Qwen3_5DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_type = cfg.layer_types[layer_id]
-        self.input_layernorm = GemmaRMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.input_layernorm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         if self.layer_type == "full_attention":
-            self.self_attn = Qwen3_5Attention(
-                cfg, layer_id, dtype, device, rotary
-            )
+            self.self_attn = Qwen3_5Attention(cfg, layer_id, dtype, device, rotary)
         elif self.layer_type == "linear_attention":
             self.linear_attn = Qwen3_5GatedDeltaNet(cfg, layer_id, dtype, device)
         else:
             raise ValueError(f"unsupported Qwen3.5 layer type: {self.layer_type}")
-        self.post_attention_layernorm = GemmaRMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.post_attention_layernorm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         if cfg.is_moe_layer(layer_id):
             self.mlp = Qwen3_5SparseMoEBlock(cfg, dtype, device)
         else:
@@ -418,9 +375,9 @@ class Qwen3_5DecoderLayer(nn.Module):
     def forward(
         self,
         hidden: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         positions: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden
             hidden = self.input_layernorm(hidden)
@@ -435,9 +392,7 @@ class Qwen3_5DecoderLayer(nn.Module):
 
 
 class Qwen3_5Model(nn.Module):
-    def __init__(
-        self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device
-    ) -> None:
+    def __init__(self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         if cfg.hidden_size % cfg.tp_size:
             raise ValueError("hidden_size must be divisible by tp_size")
@@ -458,16 +413,13 @@ class Qwen3_5Model(nn.Module):
             device,
         )
         self.layers = nn.ModuleList(
-            Qwen3_5DecoderLayer(cfg, i, dtype, device, self.rotary)
-            for i in range(cfg.n_layers)
+            Qwen3_5DecoderLayer(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers)
         )
-        self.norm = GemmaRMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.norm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
-        residual: Optional[torch.Tensor] = None
+        residual: torch.Tensor | None = None
         for layer in self.layers:
             hidden, residual = layer(hidden, residual, positions)
         hidden, _ = self.norm(hidden, residual)
@@ -518,9 +470,7 @@ class Qwen3_5ForCausalLM(PyModelBase):
                 raise KeyError(f"checkpoint tensor not found: {name}")
             return state_dict.get_tensor(name)
 
-        def shard_tensor(
-            name: str, dim: int, rank: int = tp_rank, world: int = tp_size
-        ) -> torch.Tensor:
+        def shard_tensor(name: str, dim: int, rank: int = tp_rank, world: int = tp_size) -> torch.Tensor:
             value = tensor(name)
             if world == 1:
                 return value
@@ -586,18 +536,14 @@ class Qwen3_5ForCausalLM(PyModelBase):
                 q = q.chunk(tp_size, dim=0)[tp_rank]
                 k = k.chunk(tp_size, dim=0)[tp_rank]
                 v = v.chunk(tp_size, dim=0)[tp_rank]
-                copy_in(
-                    target + "linear_attn.in_proj_qkv.weight", torch.cat((q, k, v))
-                )
+                copy_in(target + "linear_attn.in_proj_qkv.weight", torch.cat((q, k, v)))
                 for projection in ("in_proj_z", "in_proj_b", "in_proj_a"):
                     copy_in(
                         target + f"linear_attn.{projection}.weight",
                         shard_tensor(linear + f"{projection}.weight", 0),
                     )
                 conv = tensor(linear + "conv1d.weight").squeeze(1)
-                cq, ck, cv = conv.split(
-                    (global_key, global_key, global_value), dim=0
-                )
+                cq, ck, cv = conv.split((global_key, global_key, global_value), dim=0)
                 copy_in(
                     target + "linear_attn.conv1d_weight",
                     torch.cat(
@@ -624,9 +570,7 @@ class Qwen3_5ForCausalLM(PyModelBase):
 
             if cfg.is_moe_layer(layer_id):
                 moe = source + "mlp."
-                copy_in(
-                    target + "mlp.experts.gate.weight", tensor(moe + "gate.weight")
-                )
+                copy_in(target + "mlp.experts.gate.weight", tensor(moe + "gate.weight"))
                 copy_in(
                     target + "mlp.shared_expert_gate.weight",
                     tensor(moe + "shared_expert_gate.weight"),
@@ -634,21 +578,15 @@ class Qwen3_5ForCausalLM(PyModelBase):
 
                 gate_up = tensor(moe + "experts.gate_up_proj")
                 start_expert = cfg.ep_rank * (cfg.num_experts // cfg.ep_size)
-                gate_up = gate_up.narrow(
-                    0, start_expert, cfg.num_experts // cfg.ep_size
-                )
+                gate_up = gate_up.narrow(0, start_expert, cfg.num_experts // cfg.ep_size)
                 gate, up = gate_up.chunk(2, dim=1)
                 gate = gate.chunk(cfg.moe_tp_size, dim=1)[cfg.moe_tp_rank]
                 up = up.chunk(cfg.moe_tp_size, dim=1)[cfg.moe_tp_rank]
                 # The checkpoint is [gate, up]; xLLM CUTLASS SwiGLU
                 # consumes [linear/up, gate].
-                copy_in(
-                    target + "mlp.experts.w13", torch.cat((up, gate), dim=1)
-                )
+                copy_in(target + "mlp.experts.w13", torch.cat((up, gate), dim=1))
 
-                down = tensor(moe + "experts.down_proj").narrow(
-                    0, start_expert, cfg.num_experts // cfg.ep_size
-                )
+                down = tensor(moe + "experts.down_proj").narrow(0, start_expert, cfg.num_experts // cfg.ep_size)
                 copy_in(
                     target + "mlp.experts.w2",
                     down.chunk(cfg.moe_tp_size, dim=2)[cfg.moe_tp_rank],

@@ -58,9 +58,7 @@ class FusedMoE(nn.Module):
             # The DP path slices the gathered output down to this rank's tokens,
             # which is only meaningful once every rank's partial sums have been
             # combined, so the reduction cannot be deferred past this layer.
-            raise ValueError(
-                "a deferred reduction cannot be combined with data parallelism"
-            )
+            raise ValueError("a deferred reduction cannot be combined with data parallelism")
 
         num_experts_per_rank = num_experts // ep_size
         local_intermediate_size = intermediate_size // moe_tp_size
@@ -110,9 +108,7 @@ class FusedMoE(nn.Module):
         if self.dp_size > 1:
             token_counts = list(get_forward_context().metadata.dp_token_counts)
             if len(token_counts) != self.dp_size:
-                raise RuntimeError(
-                    f"expected {self.dp_size} DP token counts, got {token_counts}"
-                )
+                raise RuntimeError(f"expected {self.dp_size} DP token counts, got {token_counts}")
             hidden_states = distributed.all_gather_variable(
                 hidden_states,
                 token_counts,
@@ -148,9 +144,7 @@ class FusedMoE(nn.Module):
                 self.w2,
             )
         else:
-            raise NotImplementedError(
-                "pre-SM90 Python MoE fallback does not support TP or EP"
-            )
+            raise NotImplementedError("pre-SM90 Python MoE fallback does not support TP or EP")
         if self.reduce_results:
             if self.moe_tp_size > 1:
                 distributed.all_reduce_(output, "moe_tp")
@@ -166,7 +160,5 @@ class FusedMoE(nn.Module):
                 return local_output
             padding_shape = list(local_hidden_states.shape)
             padding_shape[0] -= local_tokens
-            return torch.cat(
-                [local_output, local_hidden_states.new_zeros(padding_shape)], dim=0
-            )
+            return torch.cat([local_output, local_hidden_states.new_zeros(padding_shape)], dim=0)
         return output

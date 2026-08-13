@@ -52,9 +52,7 @@ def _fused_gdn_prefill_post_conv_kernel(
     head = tl.program_id(1)
     key_size: tl.constexpr = NUM_KEY_HEADS * KEY_HEAD_DIM
 
-    tokens = (
-        token_block * BLOCK_TOKEN + tl.arange(0, BLOCK_TOKEN)
-    ).to(tl.int64)
+    tokens = (token_block * BLOCK_TOKEN + tl.arange(0, BLOCK_TOKEN)).to(tl.int64)
     token_mask = tokens < num_tokens
 
     if head < NUM_KEY_HEADS:
@@ -62,18 +60,10 @@ def _fused_gdn_prefill_post_conv_kernel(
         feature_mask = features < KEY_HEAD_DIM
         mask = token_mask[:, None] & feature_mask[None, :]
 
-        q_offsets = (
-            tokens[:, None] * stride_mixed_qkv_token
-            + head * KEY_HEAD_DIM
-            + features[None, :]
-        )
-        q = tl.load(mixed_qkv_ptr + q_offsets, mask=mask, other=0).to(
-            tl.float32
-        )
+        q_offsets = tokens[:, None] * stride_mixed_qkv_token + head * KEY_HEAD_DIM + features[None, :]
+        q = tl.load(mixed_qkv_ptr + q_offsets, mask=mask, other=0).to(tl.float32)
         k_offsets = q_offsets + key_size
-        k = tl.load(mixed_qkv_ptr + k_offsets, mask=mask, other=0).to(
-            tl.float32
-        )
+        k = tl.load(mixed_qkv_ptr + k_offsets, mask=mask, other=0).to(tl.float32)
 
         q_square_sum = tl.sum(q * q, axis=1)
         q_inverse_norm = 1.0 / tl.sqrt(q_square_sum + L2_NORM_EPS)
@@ -82,16 +72,8 @@ def _fused_gdn_prefill_post_conv_kernel(
         k_inverse_norm = 1.0 / tl.sqrt(k_square_sum + L2_NORM_EPS)
         k *= k_inverse_norm[:, None]
 
-        q_output_offsets = (
-            tokens[:, None] * stride_q_token
-            + head * KEY_HEAD_DIM
-            + features[None, :]
-        )
-        k_output_offsets = (
-            tokens[:, None] * stride_k_token
-            + head * KEY_HEAD_DIM
-            + features[None, :]
-        )
+        q_output_offsets = tokens[:, None] * stride_q_token + head * KEY_HEAD_DIM + features[None, :]
+        k_output_offsets = tokens[:, None] * stride_k_token + head * KEY_HEAD_DIM + features[None, :]
         tl.store(
             q_ptr + q_output_offsets,
             q.to(q_ptr.dtype.element_ty),
@@ -109,17 +91,10 @@ def _fused_gdn_prefill_post_conv_kernel(
         mask = token_mask[:, None] & feature_mask[None, :]
         value_offset: tl.constexpr = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM
         v_offsets = (
-            tokens[:, None] * stride_mixed_qkv_token
-            + value_offset
-            + value_head * VALUE_HEAD_DIM
-            + features[None, :]
+            tokens[:, None] * stride_mixed_qkv_token + value_offset + value_head * VALUE_HEAD_DIM + features[None, :]
         )
         v = tl.load(mixed_qkv_ptr + v_offsets, mask=mask, other=0)
-        v_output_offsets = (
-            tokens[:, None] * stride_v_token
-            + value_head * VALUE_HEAD_DIM
-            + features[None, :]
-        )
+        v_output_offsets = tokens[:, None] * stride_v_token + value_head * VALUE_HEAD_DIM + features[None, :]
         tl.store(v_ptr + v_output_offsets, v, mask=mask)
 
         a_log = tl.load(a_log_ptr + value_head).to(tl.float32)
@@ -132,8 +107,7 @@ def _fused_gdn_prefill_post_conv_kernel(
         softplus_input = a + dt_bias
         softplus = tl.where(
             softplus_input > 0,
-            softplus_input
-            + tl.log(1.0 + tl.exp(-softplus_input)),
+            softplus_input + tl.log(1.0 + tl.exp(-softplus_input)),
             tl.log(1.0 + tl.exp(softplus_input)),
         )
         softplus = tl.where(
@@ -174,10 +148,7 @@ def fused_gdn_prefill_post_conv(
 
     num_tokens = mixed_qkv.shape[0]
     num_value_heads = a_log.numel()
-    expected_qkv_dim = (
-        2 * num_key_heads * key_head_dim
-        + num_value_heads * value_head_dim
-    )
+    expected_qkv_dim = 2 * num_key_heads * key_head_dim + num_value_heads * value_head_dim
     if mixed_qkv.ndim != 2 or mixed_qkv.shape[1] != expected_qkv_dim:
         raise ValueError("mixed_qkv has an unexpected shape")
     expected_gate_shape = (num_tokens, num_value_heads)

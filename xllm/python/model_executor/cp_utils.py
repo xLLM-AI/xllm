@@ -43,8 +43,8 @@ index ops so ``merge(all_gather(shard(x))) == x`` holds by construction.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Sequence
 
 import torch
 
@@ -84,7 +84,7 @@ class CpContext:
     query_index: torch.Tensor
     # FIA actual_seq_lengths: real query count of each non-empty (sequence,
     # half) segment, cumulative.
-    q_cu_seqlens: List[int]
+    q_cu_seqlens: list[int]
     # [sum(kv_cu_seqlens)] index into the global-order KV selecting each
     # segment's causal prefix [0, prefix_len), packed in the same segment order
     # as query_index.
@@ -92,7 +92,7 @@ class CpContext:
     # FIA actual_seq_lengths_kv: causal-prefix length of each segment,
     # cumulative. prefix_len == segment_start + query_count, so with
     # sparse_mode=3 query row i attends KV [0, segment_start + i] exactly.
-    kv_cu_seqlens: List[int]
+    kv_cu_seqlens: list[int]
 
 
 def build_cp_context(
@@ -119,9 +119,7 @@ def build_cp_context(
         q_cu_seqlens,
         kv_cu_seqlens,
         total_local,
-    ) = torch.ops.xllm_ops.build_cp_context(
-        [int(length) for length in seq_lens], cp_size, cp_rank, device
-    )
+    ) = torch.ops.xllm_ops.build_cp_context([int(length) for length in seq_lens], cp_size, cp_rank, device)
 
     return CpContext(
         cp_size=cp_size,

@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
 import shlex
 import signal
 import subprocess
@@ -27,7 +26,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import NoReturn, Sequence, TextIO
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import NoReturn, TextIO
 
 from scripts.logger import logger
 
@@ -69,15 +70,13 @@ def _resolve_binary_path(binary_path: str | None) -> str:
             fallback = _installed_binary_path()
             if fallback is not None:
                 logger.info(
-                    "xllm binary not found next to the source-tree package; "
-                    "using the installed binary at %s.",
+                    "xllm binary not found next to the source-tree package; using the installed binary at %s.",
                     fallback,
                 )
                 path = fallback
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"xllm server binary was not found: {path}. "
-            "Build and install the wheel before using `xllm serve`."
+            f"xllm server binary was not found: {path}. Build and install the wheel before using `xllm serve`."
         )
     if not os.access(path, os.X_OK):
         raise PermissionError(f"xllm server binary is not executable: {path}")
@@ -106,8 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=f"{os.path.basename(sys.argv[0]) or 'xllm'} serve",
         description=(
-            "Launch the packaged xLLM server binary. Unknown arguments are "
-            "forwarded to the xllm binary unchanged."
+            "Launch the packaged xLLM server binary. Unknown arguments are forwarded to the xllm binary unchanged."
         ),
         allow_abbrev=False,
         # Handle -h/--help ourselves so we can also print the server binary's
@@ -126,10 +124,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config-json-file",
         dest="config_json_file",
         default=None,
-        help=(
-            "JSON config file forwarded to xllm. port and nnodes are used by "
-            "this launcher."
-        ),
+        help=("JSON config file forwarded to xllm. port and nnodes are used by this launcher."),
     )
     parser.add_argument(
         "--enable-auto-tuning-gflags",
@@ -211,7 +206,7 @@ def _load_config_json(
 
     config_path = os.path.realpath(os.path.expanduser(args.config_json_file))
     try:
-        with open(config_path, "r", encoding="utf-8") as config_file:
+        with open(config_path, encoding="utf-8") as config_file:
             config_json = json.load(config_file)
     except FileNotFoundError:
         parser.error(f"--config_json_file does not exist: {config_path}")
@@ -323,10 +318,7 @@ def _validate_machine_topology(
             f"device count."
         )
     if args.start_port + device_count - 1 > 65535:
-        parser.error(
-            "--port plus the number of local nodes minus 1 must be less than "
-            "or equal to 65535"
-        )
+        parser.error("--port plus the number of local nodes minus 1 must be less than or equal to 65535")
 
 
 def _resolve_launch_targets(
@@ -346,10 +338,7 @@ def _resolve_launch_targets(
         device_count = _detect_device_count(parser)
         _validate_machine_topology(parser, args, device_count)
         base_rank = args.machine_rank * device_count
-        return [
-            (base_rank + local_index, args.start_port + local_index)
-            for local_index in range(device_count)
-        ]
+        return [(base_rank + local_index, args.start_port + local_index) for local_index in range(device_count)]
     return [(rank, args.start_port + rank) for rank in range(args.nnodes)]
 
 
@@ -433,8 +422,7 @@ def _probe_server_ready(
             with urllib.request.urlopen(health_url, timeout=2) as response:
                 if response.status == 200:
                     logger.info(
-                        "xllm server started successfully, serving on port %s "
-                        "(health: %s).",
+                        "xllm server started successfully, serving on port %s (health: %s).",
                         port,
                         health_url,
                     )
@@ -467,8 +455,7 @@ def _wait_for_processes(processes: Sequence[ServerProcess]) -> int:
                     continue
                 if len(processes) > 1:
                     logger.warning(
-                        "xllm rank %s exited with code %s; terminating "
-                        "remaining ranks.",
+                        "xllm rank %s exited with code %s; terminating remaining ranks.",
                         server_process.rank,
                         return_code,
                     )
@@ -517,10 +504,7 @@ def launch_server(argv: Sequence[str] | None = None) -> int:
 
     if args.enable_auto_tuning:
         if args.config_json_file:
-            parser.error(
-                "--enable-auto-tuning-gflags and --config_json_file are "
-                "mutually exclusive"
-            )
+            parser.error("--enable-auto-tuning-gflags and --config_json_file are mutually exclusive")
         # Imported lazily so the common launch path keeps a light import
         # surface and never touches the auto_config package.
         from xllm.auto_config.utils import AutoTuningError, generate_tuned_config
@@ -540,10 +524,7 @@ def launch_server(argv: Sequence[str] | None = None) -> int:
     _ensure_python_model_path()
 
     targets = _resolve_launch_targets(parser, args)
-    commands = [
-        _build_command(binary_path, args, rank, port, extra_args)
-        for rank, port in targets
-    ]
+    commands = [_build_command(binary_path, args, rank, port, extra_args) for rank, port in targets]
 
     for (rank, port), command in zip(targets, commands):
         logger.info("rank %s (port %s): %s", rank, port, _format_command(command))

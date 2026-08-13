@@ -23,9 +23,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 
 def _load_setup_module():
     """Import ``setup.py`` as a module; its side effects sit under __main__."""
-    spec = importlib.util.spec_from_file_location(
-        "xllm_setup", os.path.join(_REPO_ROOT, "setup.py")
-    )
+    spec = importlib.util.spec_from_file_location("xllm_setup", os.path.join(_REPO_ROOT, "setup.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -45,15 +43,11 @@ class PythonKernelStagingTest(unittest.TestCase):
                     encoding="utf-8",
                 ).close()
             with tempfile.TemporaryDirectory() as dest_root:
-                self.setup._stage_python_kernel_package(
-                    source_root, dest_root, device
-                )
+                self.setup._stage_python_kernel_package(source_root, dest_root, device)
                 return sorted(os.listdir(dest_root))
 
     def test_only_the_devices_own_package_is_staged(self) -> None:
-        self.assertEqual(
-            self._stage("cuda", peers=("cuda", "npu")), ["kernels_cuda"]
-        )
+        self.assertEqual(self._stage("cuda", peers=("cuda", "npu")), ["kernels_cuda"])
 
     def test_device_without_a_package_stages_none(self) -> None:
         # xLLM builds for more devices than the Python model executor covers,
