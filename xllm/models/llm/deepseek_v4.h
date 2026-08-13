@@ -1640,7 +1640,7 @@ class DeepseekV4ModelImpl
         !dsa.block_tables[layer_id][cache_id].defined()) {
       return;
     }
-    dsa.dspark_swa_indices =
+    dsa.explicit_swa_indices =
         layer::build_dspark_swa_indices(dsa.block_tables[layer_id][cache_id],
                                         dsa.actual_seq_lengths_query,
                                         dsa.actual_seq_lengths_kv,
@@ -1664,7 +1664,7 @@ class DeepseekV4ModelImpl
     dsa.c128_metadata = torch::Tensor();
     dsa.qli_metadata = torch::Tensor();
     dsa.sparse_metadata_ori_win_left = -1;
-    dsa.dspark_swa_indices = torch::Tensor();
+    dsa.explicit_swa_indices = torch::Tensor();
 
     torch::Device metadata_device(torch::kCPU);
     if (dsa.input_positions.defined()) {
@@ -2088,10 +2088,7 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   LOAD_ARG_OR_FUNC(dspark_num_layers, "n_mtp_layers", [&] {
     return json.value_or<int32_t>("dspark_num_mtp_layers", /*default=*/3);
   });
-  // Do not copy dspark_block_size into the shared target args. The draft
-  // worker sets it from the runtime speculative-token count after swapping to
-  // deepseek_v4_dspark; setting it here would enable non-causal DSpark
-  // attention in the target model as well.
+  LOAD_ARG_OR(dspark_block_size, "dspark_block_size", 0);
 
   // Token ids
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);

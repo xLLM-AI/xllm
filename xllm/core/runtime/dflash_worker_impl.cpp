@@ -357,10 +357,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     if (uses_own_head_and_embedding) {
       CHECK_EQ(parallel_args_.cp_size(), 1)
           << "DeepSeek-V4 DSpark does not support context parallelism yet.";
-      CHECK_EQ(draft_args.dspark_block_size(),
-               options_.num_speculative_tokens())
-          << "DeepSeek-V4 DSpark draft block size must match "
-             "--num_speculative_tokens.";
       LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
                 << draft_args.dspark_block_size();
       LOG(INFO) << "Configured DeepSeek-V4 DSpark SAS mode: "
@@ -399,18 +395,13 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     const std::string config_path = model_weights_path + "/config.json";
     CHECK(reader.parse(config_path))
         << "Failed to parse block-diffusion draft config: " << config_path;
-    std::optional<int32_t> mask_token_id =
-        reader.value<int32_t>("dflash_config.mask_token_id");
-    if (!mask_token_id.has_value()) {
-      mask_token_id = reader.value<int32_t>("mask_token_id");
-    }
-    if (!mask_token_id.has_value()) {
-      mask_token_id = reader.value<int32_t>("dspark_noise_token_id");
-    }
-    CHECK(mask_token_id.has_value())
+    mask_token_id_ = reader.value_or<int32_t>({"dflash_config.mask_token_id",
+                                               "mask_token_id",
+                                               "dspark_noise_token_id"},
+                                              /*default=*/-1);
+    CHECK_GE(mask_token_id_, 0)
         << "Block-diffusion draft config requires mask_token_id, "
            "dflash_config.mask_token_id, or dspark_noise_token_id.";
-    mask_token_id_ = mask_token_id.value();
 
     const int64_t draft_vocab_size = draft_args.vocab_size();
     CHECK_GT(draft_vocab_size, 0)

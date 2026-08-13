@@ -26,6 +26,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
 #include "runtime/speculative_worker_impl.h"
+#include "util/utils.h"
 
 namespace xllm {
 
@@ -45,10 +46,10 @@ inline void invalidate_draft_model_geometry(ModelInputParams& input_params) {
 }
 
 inline bool is_deepseek_v4_dspark_draft(const std::string& model_type) {
-  // Also gates head/embedding sharing: DeepSeek-V4 DSpark checkpoints carry
-  // trained mtp.0.embed / mtp.<last>.head tensors (with the draft-side QuaRot
+  // Gates head/embedding sharing: DeepSeek-V4 DSpark checkpoints carry trained
+  // mtp.0.embed / mtp.<last>.head tensors (with the draft-side QuaRot
   // transform) that must not be aliased to the target modules.
-  return model_type == "deepseek_v4_dspark";
+  return util::is_deepseek_v4_dspark_model_type(model_type);
 }
 
 enum class DSparkSasMode : uint8_t {

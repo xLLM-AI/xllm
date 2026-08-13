@@ -174,7 +174,19 @@ void configure_deepseek_v4_dspark_args(ModelArgs& args,
       << "DeepSeek-V4 DSpark requires at least one draft layer.";
   args.n_layers(args.dspark_num_layers());
   args.n_hash_layers(0);
-  args.dspark_block_size(options.num_speculative_tokens());
+
+  // --num_speculative_tokens overrides the checkpoint's dspark_block_size.
+  const int32_t ckpt_block_size = args.dspark_block_size();
+  const int32_t user_num_spec = options.num_speculative_tokens();
+  if (user_num_spec > 0) {
+    if (user_num_spec != ckpt_block_size) {
+      LOG(WARNING) << "--num_speculative_tokens=" << user_num_spec
+                   << " overrides DSpark checkpoint dspark_block_size="
+                   << ckpt_block_size << ".";
+    }
+    args.dspark_block_size(user_num_spec);
+  }
+
   // DSpark stages are all standard SWA layers. Their stage ids are not target
   // model layer ids, so target compress_ratios[0..N) must not be reused.
   args.compress_ratios(
@@ -1597,7 +1609,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       std::string draft_model_type =
           is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
       if (is_deepseek_v4_dspark) {
-        draft_model_type = "deepseek_v4_dspark";
+        draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
       }
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type

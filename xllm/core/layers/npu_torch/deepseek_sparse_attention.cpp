@@ -979,9 +979,9 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
   if (dspark_use_native_sas_ && dspark_block_size_ > 0 &&
       compress_ratio_i == 1) {
-    CHECK(attn_metadata.dspark_swa_indices.defined())
+    CHECK(attn_metadata.explicit_swa_indices.defined())
         << "Native DeepSeek-V4 DSpark requires precomputed SWA indices.";
-    ori_sparse_indices = as_optional(attn_metadata.dspark_swa_indices);
+    ori_sparse_indices = as_optional(attn_metadata.explicit_swa_indices);
   }
 
   const int64_t ori_win_left = deepseek_v4_ori_window_left(

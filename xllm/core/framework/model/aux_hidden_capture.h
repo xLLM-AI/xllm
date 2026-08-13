@@ -62,8 +62,7 @@ class AuxHiddenCapture final {
     const int64_t hidden_size = h.size(-1);
     const int64_t slot_idx =
         static_cast<int64_t>(std::distance(layers_to_capture_.begin(), it));
-    // add_out fuses the residual add into the preallocated slice, avoiding a
-    // fresh [tokens, hidden] sum tensor per captured layer.
+    // Fuse residual into preallocated slice.
     torch::Tensor slot =
         buffer_.slice(0, 0, num_tokens)
             .slice(1, slot_idx * hidden_size, (slot_idx + 1) * hidden_size);
