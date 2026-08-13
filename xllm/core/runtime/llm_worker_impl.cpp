@@ -337,10 +337,21 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       logits = model_->logits(
           model_output.hidden_states, selected_token_idxes, selected_hidden);
       if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
-        // ATB lm_head backend does not expose a second output tensor; gather
-        // the hidden ourselves so ConfidenceHead is not silently disabled.
-        selected_hidden = model_output.hidden_states.index_select(
-            /*dim=*/0, selected_token_idxes.to(torch::kLong));
+        // ATB lm_head backend does not expose a second output tensor
+        // (LmHeadParam::outputHidden is false), so we surface the hidden here.
+        // return_selected_hidden is a DSpark-only request, and DSpark selects
+        // every draft row in order (sample_from_anchor keeps slot 0), i.e. the
+        // idxes are the identity 0..N-1. In that case index_select is a full
+        // redundant copy — alias the hidden directly. The numel guard is exact:
+        // it only fires when the selection covers all rows, which for DSpark's
+        // in-order construction is the identity permutation.
+        if (selected_token_idxes.numel() ==
+            model_output.hidden_states.size(0)) {
+          selected_hidden = model_output.hidden_states;
+        } else {
+          selected_hidden = model_output.hidden_states.index_select(
+              /*dim=*/0, selected_token_idxes.to(torch::kLong));
+        }
       }
     } else {
       logits = model_->logits(model_output.hidden_states, selected_token_idxes);
