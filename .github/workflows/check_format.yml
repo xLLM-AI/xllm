@@ -106,14 +106,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install ruff
+      - name: Verify Ruff
         run: |
-          command -v ruff && ruff --version && exit 0
-          pip install --timeout 120 --retries 5 ruff || \
-          pip install --user --timeout 120 --retries 5 ruff
+          command -v ruff
+          test "$(ruff --version)" = "ruff 0.14.0"
 
-      - name: Run ruff format check
+      - name: Check Python formatting
         run: ruff format --check --diff .
 
-      - name: Run ruff lint check
+      - name: Check Python lint
         run: ruff check --output-format github .
