@@ -22,6 +22,7 @@ limitations under the License.
 #include <cctype>
 
 #include "kernels/ops_api.h"
+#include "core/layers/deepseek_v4_numeric_debug.h"
 
 namespace xllm {
 namespace layer {
@@ -76,6 +77,7 @@ DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelContext& context,
 DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelArgs& args,
                                        int32_t layer_id,
                                        const torch::TensorOptions& options) {
+  layer_id_ = layer_id;
   hidden_size_ = args.hidden_size();
   n_routed_experts_ = args.n_routed_experts();
   topk_ = args.n_activated_experts();
@@ -135,6 +137,17 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
     gate_input = gate_input.to(torch::kFloat32);
   }
   auto logits = at_npu::native::custom_ops::npu_linear(gate_input, weight_);
+  if (deepseek_v4_numeric_debug_enabled() &&
+      deepseek_v4_numeric_debug_layer(layer_id_) &&
+      hidden_states.size(0) > 1) {
+    const std::string prefix = "layer_" + std::to_string(layer_id_) + "_gate_";
+    deepseek_v4_log_numeric_tensor((prefix + "input").c_str(), gate_input);
+    deepseek_v4_log_numeric_tensor((prefix + "weight").c_str(), weight_);
+    if (!hash_layer_ && bias_.defined()) {
+      deepseek_v4_log_numeric_tensor((prefix + "bias").c_str(), bias_);
+    }
+    deepseek_v4_log_numeric_tensor((prefix + "logits").c_str(), logits);
+  }
 
   constexpr bool renormalize = true;
   const int64_t norm_type = score_func_to_norm_type(score_func_);

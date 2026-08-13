@@ -50,7 +50,14 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
                   std::vector<KVCache>& kv_caches,
                   const ModelInputParams& params) override;
 
+  void prepare_graph_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelInputParams& params) override;
+
  private:
+  void bind_kv_caches(std::vector<KVCache>& kv_caches);
+
   PyCausalLM* py_causal_lm_;
   ModelArgs args_;
   torch::Device device_;

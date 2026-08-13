@@ -19,6 +19,7 @@ limitations under the License.
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -26,6 +27,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "models/py_model_helper.h"
 
@@ -52,67 +54,28 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
       << "Python models support only ep_size=1 or ep_size=world_size.";
 
   CHECK(parallel_args.moe_tp_group_ != nullptr);
-  ProcessGroup* moe_tp_group = parallel_args.moe_tp_group_;
-  ProcessGroup* ep_group = nullptr;
+  moe_tp_group_ = parallel_args.moe_tp_group_;
   if (ep_size_ > 1) {
     CHECK(parallel_args.moe_ep_group_ != nullptr);
-    ep_group = parallel_args.moe_ep_group_;
+    moe_ep_group_ = parallel_args.moe_ep_group_;
   }
-  moe_tp_size_ = (moe_tp_group != nullptr) ? moe_tp_group->world_size() : 1;
-  moe_tp_rank_ = (moe_tp_group != nullptr) ? moe_tp_group->rank() : 0;
-  ep_rank_ = (ep_group != nullptr) ? ep_group->rank() : 0;
+  moe_tp_size_ =
+      (moe_tp_group_ != nullptr) ? moe_tp_group_->world_size() : 1;
+  moe_tp_rank_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->rank() : 0;
+  ep_rank_ = (moe_ep_group_ != nullptr) ? moe_ep_group_->rank() : 0;
+  cp_group_ = parallel_args.cp_group_;
+  cp_size_ = std::max<int64_t>(parallel_args.cp_size(), 1);
+  cp_rank_ = (cp_group_ != nullptr) ? cp_group_->rank() : 0;
 
   py::gil_scoped_acquire gil;
-  py::object init_process_group =
-      py::module_::import("xllm.python.distributed").attr("init_process_group");
-  CHECK(!parallel_args.python_rendezvous_host_.empty());
-  CHECK_GT(parallel_args.python_rendezvous_port_, 0);
-  const int32_t global_rank = parallel_args.rank();
-  const int32_t global_world_size = parallel_args.world_size();
-  if (tp_size_ > 1) {
-    init_process_group("tp",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       tp_rank_,
-                       tp_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank / tp_size_);
-  }
-  if (dp_size_ > 1) {
-    init_process_group("dp",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       dp_rank_,
-                       dp_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank % tp_size_);
-  }
-  if (moe_tp_size_ > 1) {
-    init_process_group("moe_tp",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       moe_tp_rank_,
-                       moe_tp_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank / moe_tp_size_);
-  }
-  if (ep_size_ > 1) {
-    init_process_group("moe_ep",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       ep_rank_,
-                       ep_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank % moe_tp_size_);
-  }
+  // Skip Python dist.init_process_group — the C++ ProcessGroup (tp_group_,
+  // moe_tp_group_, etc.) is already initialized by collective_communicator.cpp
+  // and we expose its collectives via xllm_runtime.tp_all_reduce /
+  // tp_all_gather. A second HCCL communicator from Python would conflict with
+  // the C++ one on the same device (HCCL watchdog timeout 507015).
+  // The python_rendezvous check is relaxed: if the host is empty, the Python
+  // distributed module simply has no groups — all collectives go through C++.
+  (void)parallel_args;
   const std::string module_name = context.get_model_args().model_type().empty()
                                       ? std::string("Qwen3ForCausalLM")
                                       : context.get_model_args().model_type();
@@ -146,7 +109,11 @@ py::dict PyCausalLM::build_config_dict(
   d["moe_tp_rank"] = moe_tp_rank_;
   d["ep_size"] = ep_size_;
   d["ep_rank"] = ep_rank_;
+  d["cp_size"] = cp_size_;
+  d["cp_rank"] = cp_rank_;
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
+  d["enable_graph_double_buffer"] =
+      ExecutionConfig::get_instance().enable_graph_double_buffer();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
   return d;
@@ -186,6 +153,79 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                             : py::object(py::none());
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
+}
+
+void PyCausalLM::tp_all_reduce(torch::Tensor& tensor) {
+  if (tp_group_ != nullptr) {
+    tp_group_->allreduce(tensor);
+  }
+}
+
+torch::Tensor PyCausalLM::tp_all_gather(const torch::Tensor& tensor, int64_t dim) {
+  if (tp_group_ == nullptr) {
+    return tensor;
+  }
+  // allgather_base_sync returns [world_size, *input_shape].
+  // We want to concat along `dim`: the result should have shape input_shape
+  // but with dim multiplied by world_size.
+  auto gathered = tp_group_->allgather_base_sync(tensor);
+  int64_t ws = tp_group_->world_size();
+  auto in_shape = tensor.sizes().vec();
+  int64_t ndim = static_cast<int64_t>(in_shape.size());
+  if (dim < 0) {
+    dim += ndim;
+  }
+  // gathered shape: [ws, in_shape...]. Move ws dim to position dim+1, then
+  // merge dims dim and dim+1.
+  // gathered.transpose(0, dim+1) puts ws at dim+1, in_shape[dim] at 0.
+  // But that's complex; simpler: reshape [ws, *in_shape] to [ws, ..., in_dim, ...]
+  // then transpose(0, dim+1) then flatten dim and dim+1.
+  // For the common 2D case [ws, T, H] with dim=1 (last):
+  //   transpose(0,2) -> [H, T, ws] -> permute to [T, ws, H] -> reshape [T, ws*H]
+  // General approach: move ws to dim+1, then merge.
+  std::vector<int64_t> perm;
+  perm.push_back(0);  // will be overwritten
+  // Build permutation: [dim, 1, 2, ..., dim-1, 0(ws), dim+1, ...]
+  // Actually simplest: contiguous reshape won't work because ws is at front.
+  // Use: gathered.reshape({ws, -1}) then transpose(0,1) then reshape.
+  // No -- let's do it properly:
+  // gathered: [ws, s0, s1, ..., s_{dim}, ..., s_{n-1}]
+  // Target: [s0, ..., s_{dim}*ws, ..., s_{n-1}]
+  // Step 1: transpose(0, dim+1) -> [s_{dim}, s1, ..., ws, ..., s_{n-1}] -- no
+  // Step 2: Actually, just transpose ws to dim+1 position:
+  // perm = [1, 2, ..., dim, 0, dim+1, ..., n]  (move 0 to position dim+1)
+  perm.clear();
+  for (int64_t i = 1; i <= dim; ++i) {
+    perm.push_back(i);
+  }
+  perm.push_back(0);  // ws goes to position dim+1 (0-indexed: dim)
+  for (int64_t i = dim + 1; i < ndim + 1; ++i) {  // ndim+1 because gathered has ndim+1 dims
+    perm.push_back(i);
+  }
+  gathered = gathered.permute(perm);
+  // Now shape: [s0, ..., s_dim, ws, s_{dim+1}, ...]
+  // Merge dim and dim+1 (ws):
+  auto out_shape = in_shape;
+  out_shape[dim] *= ws;
+  return gathered.reshape(out_shape).contiguous();
+}
+
+void PyCausalLM::moe_tp_all_reduce(torch::Tensor& tensor) {
+  if (moe_tp_group_ != nullptr) {
+    moe_tp_group_->allreduce(tensor);
+  }
+}
+
+void PyCausalLM::moe_ep_all_reduce(torch::Tensor& tensor) {
+  if (moe_ep_group_ != nullptr) {
+    moe_ep_group_->allreduce(tensor);
+  }
+}
+
+torch::Tensor PyCausalLM::cp_gather(
+    const torch::Tensor& tensor,
+    const std::vector<int32_t>& tokens_per_rank) {
+  return parallel_state::gather(tensor, cp_group_, tokens_per_rank);
 }
 
 }  // namespace xllm

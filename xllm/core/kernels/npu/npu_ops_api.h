@@ -445,4 +445,25 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     int64_t dispatch_quant_out_dtype = 0,
     int64_t topo_type = 0,
     int64_t rank_num_per_server = 2);
+
+// Python-facing single-tensor wrapper around apply_npu_grouped_matmul for the
+// W8A8 MoE expert GEMMs. Mirrors the C++ FusedMoEImpl W8A8 path
+// (fused_moe.cpp:1028-1073): GEMM1 (int8 x int8 -> int32) omits scale and
+// per_token_scale so apply_npu_grouped_matmul forwards a genuinely *empty*
+// TensorList (zero tensors, not a None-shaped placeholder), which is the
+// contract the op-plugin aclnnGroupedMatmulV5 PerTokenScaleOptional check
+// expects; GEMM2 (int8 x int8 -> hidden dtype) supplies a 1-element scale and
+// per_token_scale. Calling torch.ops.npu.npu_grouped_matmul directly from
+// Python instead forwards an empty list that the binding coerces into a 2-dim
+// tensor, tripping error 161002. Routing through this wrapper reproduces the
+// exact C++ argument contract.
+torch::Tensor group_gemm(const torch::Tensor& x,
+                         const torch::Tensor& weight,
+                         const std::optional<torch::Tensor>& scale,
+                         const std::optional<torch::Tensor>& per_token_scale,
+                         const torch::Tensor& group_list,
+                         int64_t split_item,
+                         int64_t group_type,
+                         int64_t group_list_type,
+                         std::optional<at::ScalarType> output_dtype);
 }  // namespace xllm::kernel::npu

@@ -20,6 +20,8 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "common/metrics.h"
+
 namespace xllm {
 namespace {
 
@@ -396,8 +398,10 @@ uint32_t HierarchyKVCacheTransfer::offload(
   Slice<BlockTransferInfo> slice(block_transfer_info);
   if (!offload_to_host(slice)) {
     LOG(ERROR) << "Offload to host failed.";
+    COUNTER_ADD(host_kv_offload_failures_total, block_transfer_info.size());
     return 0;
   }
+  COUNTER_ADD(host_kv_offload_blocks_total, block_transfer_info.size());
   return block_transfer_info.size();
 }
 
@@ -476,6 +480,9 @@ bool HierarchyKVCacheTransfer::load_from_host(
   // (aborting the forward) instead of hanging or reading uncopied KV cache.
   if (!success) {
     synchronizer->abort();
+    COUNTER_ADD(host_kv_restore_failures_total, block_transfer_info.size());
+  } else {
+    COUNTER_ADD(host_kv_restore_blocks_total, block_transfer_info.size());
   }
   return success;
 }

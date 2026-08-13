@@ -287,6 +287,47 @@ TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
   EXPECT_EQ(output.outputs[1].finish_reason.value(), "empty_logprobs");
 }
 
+TEST(SampleSlotTest, OverlapOutputCountsReplacedSingleToken) {
+  CharTokenizer tokenizer;
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(1);
+
+  RequestState request_state(
+      "abc",
+      std::vector<int32_t>{1, 'a', 'b', 'c'},
+      sampling_param,
+      SchedulerParam{},
+      stopping_checker,
+      /*seq_capacity=*/8,
+      /*n=*/1,
+      /*best_of=*/1,
+      /*logprobs=*/false,
+      /*stream=*/false,
+      /*echo=*/false,
+      /*skip_special_tokens=*/true,
+      /*enable_schedule_overlap=*/true,
+      [](const RequestOutput&) { return true; },
+      OutputsFunc{});
+
+  Request request("overlap-single-token", "", "", request_state);
+  Sequence* sequence = request.sequences()[0].get();
+  sequence->kv_state().set_kv_cache_tokens_num(
+      sequence->num_prompt_tokens());
+  sequence->append_token(Token(-1));
+  sequence->update_last_step_token(Token('X'), /*token_offset=*/0);
+
+  RequestOutput output = request.generate_output(tokenizer);
+
+  ASSERT_TRUE(output.usage.has_value());
+  EXPECT_EQ(output.usage->num_generated_tokens, 1);
+  EXPECT_EQ(output.usage->num_total_tokens,
+            output.usage->num_prompt_tokens + 1);
+  ASSERT_EQ(output.outputs.size(), 1);
+  EXPECT_EQ(output.outputs[0].text, "X");
+  EXPECT_EQ(output.outputs[0].finish_reason, "length");
+}
+
 TEST(SampleSlotTest, RequestOutputStableSortsOutOfOrderSampleIds) {
   torch::Device device(Platform::type_torch(), 0);
   BlockManager::Options options;

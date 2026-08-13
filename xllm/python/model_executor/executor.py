@@ -42,7 +42,27 @@ def _create_attention_backend(
     first_attention: Attention,
     device: torch.device,
     dtype: torch.dtype,
+    config: dict,
 ) -> AttentionBackend:
+    model_type = config.get("model_type", "")
+    if model_type == "deepseek_v4" and current_platform.is_npu():
+        from xllm.python.attention.dsa_attention import DsaAttentionBackend
+
+        return DsaAttentionBackend(
+            compress_ratios=list(config.get("compress_ratios", [])),
+            window_size=int(config.get("window_size", 128)),
+            n_layers=int(config.get("n_layers", config.get("num_hidden_layers", 0))),
+            num_heads=first_attention.num_heads,
+            attn_head_dim=first_attention.head_dim,
+            metadata_head_dim=int(config.get("o_lora_rank", 1024))
+            + int(config.get("qk_rope_head_dim", 64)),
+            index_topk=int(config.get("index_topk", 512)),
+            index_n_heads=int(config.get("index_n_heads", 64)),
+            index_head_dim=int(config.get("index_head_dim", 128)),
+            rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
+            device=device,
+            dtype=dtype,
+        )
     if current_platform.is_npu():
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
@@ -101,7 +121,7 @@ class ModelExecutor:
         device = first_parameter.device
         self._num_attention_layers = len(attention_layers)
         self.attention_backend = _create_attention_backend(
-            first_attention, device, first_parameter.dtype
+            first_attention, device, first_parameter.dtype, config
         )
 
         execution_model = model.model
@@ -147,6 +167,7 @@ class ModelExecutor:
                 device,
                 max_seqs_per_batch,
                 int(config["max_position_embeddings"]),
+                bool(config.get("enable_graph_double_buffer", False)),
             )
         else:
             from xllm.python.model_executor.runners.inductor import InductorRunner
@@ -211,3 +232,17 @@ class ModelExecutor:
         return self.eager_runner.execute(
             input_ids, positions, metadata, layer_synchronizer
         )
+
+    @torch.inference_mode()
+    def prepare_graph_input(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: AttentionMetadata,
+    ) -> None:
+        graph_runner = self.decode_graph_runner
+        if graph_runner is None or not graph_runner.can_execute(
+            input_ids, metadata
+        ):
+            return
+        graph_runner.prepare_graph_input(input_ids, positions, metadata)

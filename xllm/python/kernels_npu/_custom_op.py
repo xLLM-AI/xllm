@@ -256,6 +256,300 @@ def _sparse_flash_attention_fake(
     return query.new_empty(query.shape, dtype=query.dtype)
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek-V4 DSA kernel fakes
+# ---------------------------------------------------------------------------
+
+# Metadata buffer filled by the AICPU tiling kernels. A fixed upper bound is
+# sufficient for fake propagation; the real size is computed by the op.
+_DSA_METADATA_BUFFER_BYTES = 1024
+
+
+def _hc_pre_fake(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_mult: int,
+    hc_sinkhorn_iters: int,
+    norm_eps: float,
+    hc_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del hc_fn, hc_scale, hc_base, hc_sinkhorn_iters, norm_eps, hc_eps
+    # hc_pre returns (attn_input [T, hidden], post [T, hc_mult], comb [T, hc_mult]).
+    # x is [T, hc_mult, hidden]; the C++ flattens, mixes, and reduces.
+    t = x.size(0)
+    hidden = x.size(-1)
+    attn_input = x.new_empty((t, hidden), dtype=x.dtype)
+    post = x.new_empty((t, hc_mult), dtype=torch.float32)
+    comb = x.new_empty((t, hc_mult), dtype=torch.float32)
+    return attn_input, post, comb
+
+
+def _hc_post_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor:
+    del post, comb
+    # hc_post returns [T, hc_mult, hidden] (the merged residual streams).
+    return residual.new_empty(residual.shape, dtype=residual.dtype)
+
+
+def _compressor_fake(
+    x: torch.Tensor,
+    wkv: torch.Tensor,
+    wgate: torch.Tensor,
+    kv_state: torch.Tensor,
+    score_state: torch.Tensor,
+    ape: torch.Tensor,
+    norm_weight: torch.Tensor,
+    rope_sin: torch.Tensor,
+    rope_cos: torch.Tensor,
+    kv_block_table: torch.Tensor | None,
+    score_block_table: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None,
+    seqused: torch.Tensor | None,
+    start_pos: torch.Tensor | None,
+    rope_head_dim: int,
+    cmp_ratio: int,
+    coff: int,
+    norm_eps: float,
+    rotary_mode: int,
+    enable_grad: bool,
+) -> torch.Tensor:
+    del (
+        wkv,
+        wgate,
+        kv_state,
+        score_state,
+        ape,
+        norm_weight,
+        rope_sin,
+        rope_cos,
+        kv_block_table,
+        score_block_table,
+        cu_seqlens,
+        seqused,
+        start_pos,
+        rope_head_dim,
+        cmp_ratio,
+        coff,
+        norm_eps,
+        rotary_mode,
+        enable_grad,
+    )
+    # x: [B, S, ...]; compressed seq len = ceil(S / cmp_ratio). The op derives
+    # HEAD_DIM from wkv; here we use x's last dim as a safe placeholder shape.
+    batch = x.size(0)
+    seq_len = x.size(1)
+    compressed_seq = (seq_len + cmp_ratio - 1) // cmp_ratio
+    head_dim = x.size(-1)
+    cmp_kv = x.new_empty((batch, compressed_seq, head_dim), dtype=x.dtype)
+    # The C++ op returns (cmp_kv, wkv_proj, softmax_res, norm_x, norm_rstd);
+    # only cmp_kv is consumed by the DSA path, the rest are {1} placeholders
+    # when enable_grad is False.
+    placeholder = x.new_empty((1,), dtype=x.dtype)
+    return cmp_kv, placeholder, placeholder, placeholder, placeholder
+
+
+def _sparse_attn_sharedkv_fake(
+    q: torch.Tensor,
+    ori_kv: torch.Tensor | None,
+    cmp_kv: torch.Tensor | None,
+    ori_sparse_indices: torch.Tensor | None,
+    cmp_sparse_indices: torch.Tensor | None,
+    ori_block_table: torch.Tensor | None,
+    cmp_block_table: torch.Tensor | None,
+    cu_seqlens_q: torch.Tensor | None,
+    cu_seqlens_ori_kv: torch.Tensor | None,
+    cu_seqlens_cmp_kv: torch.Tensor | None,
+    seqused_q: torch.Tensor | None,
+    seqused_kv: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+    metadata: torch.Tensor | None,
+    softmax_scale: float,
+    cmp_ratio: int,
+    ori_mask_mode: int,
+    cmp_mask_mode: int,
+    ori_win_left: int,
+    ori_win_right: int,
+    layout_q: str,
+    layout_kv: str,
+    return_softmax_lse: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del (
+        ori_kv,
+        cmp_kv,
+        ori_sparse_indices,
+        cmp_sparse_indices,
+        ori_block_table,
+        cmp_block_table,
+        cu_seqlens_q,
+        cu_seqlens_ori_kv,
+        cu_seqlens_cmp_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        metadata,
+        softmax_scale,
+        cmp_ratio,
+        ori_mask_mode,
+        cmp_mask_mode,
+        ori_win_left,
+        ori_win_right,
+        layout_q,
+        layout_kv,
+        return_softmax_lse,
+    )
+    out = q.new_empty(q.shape, dtype=q.dtype)
+    lse = q.new_empty((0,), dtype=q.dtype)
+    return out, lse
+
+
+def _sparse_attn_sharedkv_metadata_fake(
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
+    cu_seqlens_q: torch.Tensor | None,
+    cu_seqlens_ori_kv: torch.Tensor | None,
+    cu_seqlens_cmp_kv: torch.Tensor | None,
+    seqused_q: torch.Tensor | None,
+    seqused_kv: torch.Tensor | None,
+    batch_size: int,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    ori_topk: int,
+    cmp_topk: int,
+    cmp_ratio: int,
+    ori_mask_mode: int,
+    cmp_mask_mode: int,
+    ori_win_left: int,
+    ori_win_right: int,
+    layout_q: str,
+    layout_kv: str,
+    has_ori_kv: bool,
+    has_cmp_kv: bool,
+) -> torch.Tensor:
+    del (
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        cu_seqlens_q,
+        cu_seqlens_ori_kv,
+        cu_seqlens_cmp_kv,
+        seqused_q,
+        seqused_kv,
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_kv,
+        ori_topk,
+        cmp_topk,
+        cmp_ratio,
+        ori_mask_mode,
+        cmp_mask_mode,
+        ori_win_left,
+        ori_win_right,
+        layout_q,
+        layout_kv,
+        has_ori_kv,
+        has_cmp_kv,
+    )
+    return torch.empty(_DSA_METADATA_BUFFER_BYTES, dtype=torch.uint8, device="npu")
+
+
+def _quant_lightning_indexer_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_dequant_scale: torch.Tensor,
+    key_dequant_scale: torch.Tensor,
+    query_quant_mode: int,
+    key_quant_mode: int,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_key: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    metadata: torch.Tensor | None,
+    layout_query: str,
+    layout_key: str,
+    sparse_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    cmp_ratio: int,
+    return_value: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del (
+        key,
+        weights,
+        query_dequant_scale,
+        key_dequant_scale,
+        query_quant_mode,
+        key_quant_mode,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        block_table,
+        metadata,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        cmp_ratio,
+        return_value,
+    )
+    key_head_num = key.size(1) if layout_key == "TND" else key.size(2)
+    if layout_query == "BSND":
+        out_shape = (query.size(0), query.size(1), key_head_num, sparse_count)
+    else:
+        out_shape = (query.size(0), key_head_num, sparse_count)
+    out = query.new_zeros(out_shape, dtype=torch.int32)
+    val = query.new_empty(out_shape, dtype=query.dtype)
+    return out, val
+
+
+def _quant_lightning_indexer_metadata_fake(
+    num_heads_q: int,
+    num_heads_k: int,
+    head_dim: int,
+    query_quant_mode: int,
+    key_quant_mode: int,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_key: torch.Tensor | None,
+    batch_size: int,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    layout_query: str,
+    layout_key: str,
+    sparse_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    cmp_ratio: int,
+    device: str,
+) -> torch.Tensor:
+    del (
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        query_quant_mode,
+        key_quant_mode,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        layout_query,
+        layout_key,
+        sparse_count,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        cmp_ratio,
+        device,
+    )
+    return torch.empty(_DSA_METADATA_BUFFER_BYTES, dtype=torch.uint8, device="npu")
+
+
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
@@ -269,3 +563,70 @@ register_fake("xllm_ops::dynamic_quant", _dynamic_quant_fake)
 register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
 register_fake("xllm_ops::sparse_flash_attention", _sparse_flash_attention_fake)
+register_fake("xllm_ops::compressor", _compressor_fake)
+
+
+def _moe_gating_top_k_hash_fake(
+    x: torch.Tensor,
+    k: int,
+    bias: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    tid2eid: torch.Tensor | None,
+    k_group: int,
+    group_count: int,
+    routed_scaling_factor: float,
+    eps: float,
+    group_select_mode: int,
+    renorm: int,
+    norm_type: int,
+    out_flag: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del bias, input_ids, tid2eid, k_group, group_count, routed_scaling_factor
+    del eps, group_select_mode, renorm, norm_type, out_flag
+    num_tokens = x.size(0)
+    out = x.new_empty((num_tokens, x.size(1)), dtype=x.dtype)
+    expert_idx = x.new_zeros((num_tokens, k), dtype=torch.int32)
+    token_unpermute = x.new_zeros((num_tokens,), dtype=torch.int32)
+    return out, expert_idx, token_unpermute
+
+
+register_fake("xllm_ops::moe_gating_top_k_hash", _moe_gating_top_k_hash_fake)
+
+
+def _dequant_swiglu_quant_fake(
+    x: torch.Tensor,
+    weight_scale: torch.Tensor | None,
+    activation_scale: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    quant_scale: torch.Tensor | None,
+    quant_offset: torch.Tensor | None,
+    group_index: torch.Tensor | None,
+    activate_left: bool,
+    quant_mode: int,
+    swiglu_mode: int,
+    clamp_limit: float,
+    glu_alpha: float,
+    glu_bias: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del weight_scale, activation_scale, bias, quant_scale, quant_offset
+    del group_index, activate_left, quant_mode, swiglu_mode
+    del clamp_limit, glu_alpha, glu_bias
+    # Output is half of input's last dim (SwiGLU splits gate/up).
+    out_dim = x.size(-1) // 2
+    act_quantized = x.new_empty(x.size(0), out_dim, dtype=torch.int8)
+    act_scale = x.new_empty(x.size(0), 1, dtype=torch.float32)
+    return act_quantized, act_scale
+
+
+register_fake("xllm_ops::dequant_swiglu_quant", _dequant_swiglu_quant_fake)
+register_fake("xllm_ops::hc_pre", _hc_pre_fake)
+register_fake("xllm_ops::hc_post", _hc_post_fake)
+register_fake("xllm_ops::sparse_attn_sharedkv", _sparse_attn_sharedkv_fake)
+register_fake(
+    "xllm_ops::sparse_attn_sharedkv_metadata", _sparse_attn_sharedkv_metadata_fake
+)
+register_fake("xllm_ops::quant_lightning_indexer", _quant_lightning_indexer_fake)
+register_fake(
+    "xllm_ops::quant_lightning_indexer_metadata",
+    _quant_lightning_indexer_metadata_fake,
+)

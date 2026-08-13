@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <vector>
 
@@ -412,16 +414,28 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
   CHECK(index_cache.defined())
       << "DeepseekV4Indexer::select_qli: index_cache is undefined";
 
+  static std::atomic<bool> dumped_prefill_qli{false};
+  const bool is_rank_zero =
+      std::getenv("ASCEND_RT_VISIBLE_DEVICES") != nullptr &&
+      std::string(std::getenv("ASCEND_RT_VISIBLE_DEVICES")) == "0";
+  const char* qli_dump_dir = std::getenv("XLLM_DSV4_QLI_DUMP_DIR");
+  const bool dump_this_call = qli_dump_dir != nullptr && x.size(0) > 1 &&
+                              is_rank_zero &&
+                              !dumped_prefill_qli.exchange(true);
+
   (void)with_prefill;
   auto q = build_query(qr, qr_pertoken_scale);
+  auto q_build_dump = dump_this_call ? q.clone() : torch::Tensor();
   if (cos.has_value() && sin.has_value()) {
     const int64_t rope_start_dim =
         std::max<int64_t>(head_dim_ - rope_head_dim_, 0);
     q = apply_partial_rope(
         q, rope_start_dim, rope_head_dim_, cos.value(), sin.value());
   }
+  auto q_rope_dump = dump_this_call ? q.clone() : torch::Tensor();
   auto hadamard = get_hadamard_matrix(attn_metadata, hadamard_matrix_);
   q = rotate_activation_with_hadamard(q, hadamard, hadamard_scale_);
+  auto q_hadamard_dump = dump_this_call ? q.clone() : torch::Tensor();
 
   // The index cache must cover every token so that top-k indices and the sparse
   // attention block-table addressing share one global compressed coordinate
@@ -449,9 +463,11 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
                         compress_cu_seqlens,
                         compressor_states,
                         compressor_block_tables);
+  auto kv_compressor_dump = dump_this_call ? kv.clone() : torch::Tensor();
   if (kv.numel() > 0) {
     kv = rotate_activation_with_hadamard(kv, hadamard, hadamard_scale_);
   }
+  auto kv_hadamard_dump = dump_this_call ? kv.clone() : torch::Tensor();
 
   auto weights = build_weights(x);
   auto [q_quant, q_scale] = dynamic_quant_int8(q);
@@ -548,6 +564,37 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
 
   auto [topk_indices, sparse_values] =
       xllm::kernel::quant_lightning_indexer(qli_params);
+  if (dump_this_call) {
+    std::filesystem::create_directories(qli_dump_dir);
+    const std::string prefix = std::string(qli_dump_dir) + "/cpp_qli_";
+    auto save_cpu = [&prefix](const char* name, const torch::Tensor& tensor) {
+      if (tensor.defined()) {
+        torch::save(tensor.detach().to(torch::kCPU), prefix + name + ".pt");
+      }
+    };
+    save_cpu("hidden", x);
+    save_cpu("qr", qr);
+    if (qr_pertoken_scale.has_value()) {
+      save_cpu("qr_scale", qr_pertoken_scale.value());
+    }
+    save_cpu("q_build", q_build_dump);
+    save_cpu("q_post_rope", q_rope_dump);
+    save_cpu("q_post_hadamard", q_hadamard_dump);
+    save_cpu("kv_post_compressor", kv_compressor_dump);
+    save_cpu("kv_post_hadamard", kv_hadamard_dump);
+    save_cpu("query", q_quant);
+    save_cpu("key_block_1", index_cache.select(0, 1));
+    save_cpu("weights", qli_params.weights);
+    save_cpu("q_scale", q_scale);
+    save_cpu("key_scale_block_1", key_dequant_scale.select(0, 1));
+    save_cpu("query_lens", query_seq_lens);
+    save_cpu("key_lens", key_seq_lens);
+    save_cpu("block_table", attn_metadata.block_table);
+    if (qli_metadata.has_value()) {
+      save_cpu("metadata", qli_metadata.value());
+    }
+    save_cpu("topk", topk_indices);
+  }
   (void)sparse_values;
 
   (void)key_seq_lens;

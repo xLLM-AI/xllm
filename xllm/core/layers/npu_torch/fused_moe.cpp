@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "fused_moe.h"
 
+#include "core/layers/deepseek_v4_numeric_debug.h"
+
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -1214,6 +1216,17 @@ torch::Tensor FusedMoEImpl::forward_expert(
   // reshape the final hidden states to the original shape
   final_hidden_states = final_hidden_states.reshape(hidden_states_shape);
 
+  const bool dsv4_numeric_debug =
+      is_deepseek_v4_ && deepseek_v4_numeric_debug_enabled() &&
+      hidden_states.size(0) > 1;
+  if (dsv4_numeric_debug) {
+    deepseek_v4_log_numeric_tensor("moe_routed_local", final_hidden_states);
+    if (shared_output.has_value()) {
+      deepseek_v4_log_numeric_tensor("moe_shared_local",
+                                     shared_output.value());
+    }
+  }
+
   if (shared_output.has_value()) {
     if (parallel_args_.ep_size() == 1) {
       // reduce(a) + reduce(b) == reduce(a + b). Combining the routed and shared
@@ -1246,6 +1259,9 @@ torch::Tensor FusedMoEImpl::forward_expert(
       final_hidden_states = parallel_state::reduce(
           final_hidden_states, parallel_args_.moe_ep_group_);
     }
+  }
+  if (dsv4_numeric_debug) {
+    deepseek_v4_log_numeric_tensor("moe_final", final_hidden_states);
   }
   return final_hidden_states;
 }

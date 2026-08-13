@@ -14,9 +14,12 @@ limitations under the License.
 ==============================================================================*/
 #include "deepseek_sparse_attention.h"
 
+#include "core/layers/deepseek_v4_numeric_debug.h"
+
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -384,6 +387,7 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     const torch::Tensor& q_rms_gamma,
     const torch::Tensor& cos,
     const torch::Tensor& sin,
+    int64_t layer_id,
     // Prefill CP: q runs on this rank's rows while kv must cover all tokens,
     // so the kv projection takes its own input and its own global-position
     // RoPE. All undefined (the default) means q and kv share one input, which
@@ -393,7 +397,26 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     const torch::Tensor& kv_sin = torch::Tensor()) {
   Dsv4PreprocessOutputs outputs;
 
+  const char* dump_dir = std::getenv("XLLM_DSV4_PREPROCESS_DUMP_DIR");
+  const char* dump_layer = std::getenv("XLLM_DSV4_PREPROCESS_DUMP_LAYER");
+  const char* visible_device = std::getenv("ASCEND_RT_VISIBLE_DEVICES");
+  const bool dump_preprocess =
+      dump_dir != nullptr && dump_layer != nullptr &&
+      std::strtoll(dump_layer, nullptr, 10) == layer_id &&
+      hidden_states.size(0) > 1 &&
+      (visible_device == nullptr || std::strcmp(visible_device, "0") == 0);
+  auto save_dump = [&](const char* name, const torch::Tensor& tensor) {
+    if (!dump_preprocess || !tensor.defined()) {
+      return;
+    }
+    std::filesystem::create_directories(dump_dir);
+    torch::save(tensor.detach().to(torch::kCPU),
+                std::string(dump_dir) + "/cpp_layer_" +
+                    std::to_string(layer_id) + "_" + name + ".pt");
+  };
+
   auto q_down = q_a_proj->forward(hidden_states);
+  save_dump("q_down", q_down);
   if (q_b_proj->uses_w8a8_dynamic_quant()) {
     xllm::kernel::RmsNormDynamicQuantParams rms_quant_params;
     rms_quant_params.input = q_down;
@@ -403,6 +426,8 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     std::tie(outputs.qr, q_pertoken_scale) =
         xllm::kernel::rms_norm_dynamic_quant(rms_quant_params);
     outputs.qr_pertoken_scale = q_pertoken_scale;
+    save_dump("qr", outputs.qr);
+    save_dump("qr_scale", q_pertoken_scale);
     outputs.q =
         w8a8_dynamic_linear_forward(outputs.qr,
                                     q_b_proj->weight(),
@@ -416,6 +441,7 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     outputs.q =
         q_b_proj->forward(outputs.qr).view({-1, n_local_heads, head_dim});
   }
+  save_dump("q_pre_norm", outputs.q);
 
   xllm::kernel::FusedLayerNormParams q_rmsnorm_params;
   q_rmsnorm_params.input = outputs.q;
@@ -424,11 +450,14 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
   q_rmsnorm_params.eps = eps;
   xllm::kernel::fused_layernorm(q_rmsnorm_params);
   outputs.q = q_rmsnorm_params.output;
+  save_dump("q_post_norm", outputs.q);
 
   const torch::Tensor& kv_input =
       kv_hidden_states.defined() ? kv_hidden_states : hidden_states;
   auto kv_down = kv_proj->forward(kv_input);
+  save_dump("kv_down", kv_down);
   outputs.kv = std::get<0>(kv_layernorm->forward(kv_down));
+  save_dump("kv_post_norm", outputs.kv);
   outputs.kv = outputs.kv.view({-1, 1, qk_head_dim});
 
   apply_partial_rope(outputs.q, nope_head_dim, rope_head_dim, cos, sin);
@@ -436,6 +465,8 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
   const torch::Tensor& kv_rope_sin = kv_sin.defined() ? kv_sin : sin;
   apply_partial_rope(
       outputs.kv, nope_head_dim, rope_head_dim, kv_rope_cos, kv_rope_sin);
+  save_dump("q_post_rope", outputs.q);
+  save_dump("kv_post_rope", outputs.kv);
 
   return outputs;
 }
@@ -711,6 +742,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                                    q_rms_gamma_,
                                    cos,
                                    sin,
+                                   attn_metadata.layer_id,
                                    kv_hidden_states,
                                    kv_cos,
                                    kv_sin);
@@ -718,6 +750,26 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   auto qr_pertoken_scale = preprocess_outputs.qr_pertoken_scale;
   auto q = preprocess_outputs.q;
   auto kv = preprocess_outputs.kv;
+  const bool numeric_debug =
+      deepseek_v4_numeric_debug_enabled() &&
+      deepseek_v4_numeric_debug_layer(attn_metadata.layer_id) &&
+      hidden_states.size(0) > 1;
+  const bool decode_detail = deepseek_v4_decode_detail_enabled(
+      attn_metadata.layer_id, attn_metadata.input_positions);
+  const std::string numeric_prefix =
+      "layer_" + std::to_string(attn_metadata.layer_id);
+  auto save_decode_detail = [&](const char* stage,
+                                const torch::Tensor& tensor) {
+    if (decode_detail) {
+      deepseek_v4_save_decode_detail(numeric_prefix + "_" + stage, tensor);
+    }
+  };
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_q").c_str(), q);
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_kv").c_str(), kv);
+  }
+  save_decode_detail("q", q);
+  save_decode_detail("kv", kv);
 
   // 4) resolve per-layer cache mapping
   const int64_t compress_ratio_i = static_cast<int64_t>(compress_ratio_);
@@ -852,6 +904,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                    : attn_metadata.actual_seq_lengths_query);
     scatter_by_slot(cmp_kv, cmp_slot, compressed_kv);
     cmp_kv_for_attn = cmp_kv;
+    if (numeric_debug) {
+      deepseek_v4_log_numeric_tensor(
+          (numeric_prefix + "_compressed_kv").c_str(), compressed_kv);
+    }
   }
 
   torch::Tensor compress_topk_idxs;
@@ -902,6 +958,11 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     CHECK(compress_topk_idxs.defined())
         << "DSAttention indexer returned undefined topk indices for "
            "compress_ratio==4.";
+    if (numeric_debug) {
+      deepseek_v4_log_numeric_tensor(
+          (numeric_prefix + "_compress_topk_idxs").c_str(),
+          compress_topk_idxs);
+    }
   }
 
   // 7) sparse shared-kv attention
@@ -917,6 +978,51 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   CHECK(sparse_metadata.has_value())
       << "DSAttention requires precomputed sparse metadata for compress_ratio="
       << compress_ratio_i;
+
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor(
+        (numeric_prefix + "_sparse_ori_kv").c_str(), ori_kv_for_attn);
+    if (cmp_kv_for_attn.defined()) {
+      deepseek_v4_log_numeric_tensor(
+          (numeric_prefix + "_sparse_cmp_kv").c_str(), cmp_kv_for_attn);
+    }
+    deepseek_v4_log_numeric_tensor(
+        (numeric_prefix + "_sparse_ori_block_table").c_str(),
+        ori_block_table_for_attn);
+    if (compress_ratio_i > 1) {
+      deepseek_v4_log_numeric_tensor(
+          (numeric_prefix + "_sparse_cmp_block_table").c_str(),
+          cmp_block_table);
+    }
+    deepseek_v4_log_numeric_tensor(
+        (numeric_prefix + "_sparse_metadata").c_str(),
+        sparse_metadata.value());
+  }
+  save_decode_detail("sparse_ori_kv", ori_kv_for_attn);
+  save_decode_detail("sparse_ori_block_table", ori_block_table_for_attn);
+  save_decode_detail("sparse_metadata", sparse_metadata.value());
+  if (deepseek_v4_cache_debug_enabled() &&
+      attn_metadata.layer_id == 2 && compress_ratio_i == 4) {
+    LOG(INFO) << "[DSV4_CACHE] cmp_kv shape=" << cmp_kv_for_attn.sizes()
+              << " stride=" << cmp_kv_for_attn.strides()
+              << " device=" << cmp_kv_for_attn.device()
+              << " cmp_bt=" << cmp_block_table.sizes()
+              << " cmp_bt_vals=" << cmp_block_table.to(torch::kCPU)
+              << " topk_shape=" << compress_topk_idxs.sizes();
+    auto cmp_bt_cpu = cmp_block_table.to(torch::kCPU).reshape({-1});
+    if (cmp_bt_cpu.numel() > 0) {
+      const int64_t block_id = cmp_bt_cpu[0].item<int64_t>();
+      if (block_id >= 0 && block_id < cmp_kv_for_attn.size(0)) {
+        deepseek_v4_log_numeric_tensor(
+            (numeric_prefix + "_cmp_block_" + std::to_string(block_id)).c_str(),
+            cmp_kv_for_attn.select(0, block_id));
+      }
+    }
+    if (cmp_slot.defined()) {
+      deepseek_v4_log_numeric_tensor(
+          (numeric_prefix + "_cmp_slots").c_str(), cmp_slot);
+    }
+  }
 
   std::optional<torch::Tensor> cu_seqlens_ori_kv_for_attn = std::nullopt;
   if (use_prefill_attn) {
@@ -957,6 +1063,41 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       /*layout_q=*/"TND",
       /*layout_kv=*/ori_kv_layout,
       /*return_softmax_lse=*/false);
+  if (const char* dump_dir = std::getenv("XLLM_DSV4_SPARSE_DUMP_DIR");
+      dump_dir != nullptr &&
+      deepseek_v4_numeric_debug_layer(attn_metadata.layer_id) &&
+      hidden_states.size(0) > 1 && deepseek_v4_numeric_debug_enabled()) {
+    std::filesystem::create_directories(dump_dir);
+    const std::string prefix = std::string(dump_dir) + "/cpp_layer_" +
+                               std::to_string(attn_metadata.layer_id) + "_";
+    auto save_cpu = [&prefix](const char* name, const torch::Tensor& tensor) {
+      if (tensor.defined()) {
+        torch::save(tensor.detach().to(torch::kCPU), prefix + name + ".pt");
+      }
+    };
+    save_cpu("q", q);
+    save_cpu("ori_kv", ori_kv_for_attn);
+    if (cmp_kv_for_attn.defined() && cmp_kv_for_attn.size(0) > 1) {
+      save_cpu("cmp_block_1", cmp_kv_for_attn.select(0, 1));
+    }
+    save_cpu("topk", compress_topk_idxs);
+    save_cpu("ori_bt", ori_block_table_for_attn);
+    if (cmp_block_table.defined()) {
+      save_cpu("cmp_bt", cmp_block_table);
+    }
+    save_cpu("seq_q", attn_metadata.actual_seq_lengths_query);
+    save_cpu("seq_kv", attn_metadata.actual_seq_lengths_kv);
+    if (attn_sink_loaded_) {
+      save_cpu("sinks", attn_sink_);
+    }
+    save_cpu("metadata", sparse_metadata.value());
+    save_cpu("out", attn_output);
+  }
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor(
+        (numeric_prefix + "_sparse_attention").c_str(), attn_output);
+  }
+  save_decode_detail("sparse_attention", attn_output);
 
   // 8) Deferred cache write for full prefill.
   if (use_temporary_prefill_kv) {
@@ -967,11 +1108,32 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   auto o = attn_output.view({-1, n_local_heads_, head_dim_});
   apply_partial_rope(
       o, nope_head_dim_, rope_head_dim_, cos, sin, /*inverse=*/true);
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_inverse_rope").c_str(),
+                                   o);
+  }
+  save_decode_detail("inverse_rope", o);
 
   const int64_t num_tokens = o.size(0);
   auto o_group = o.view({num_tokens, n_local_groups_, -1});
   auto wo_a = o_a_proj_->weight().view({n_local_groups_, o_lora_rank_, -1});
   auto o_low_rank = torch::einsum("tgd,grd->tgr", {o_group, wo_a});
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_o_a").c_str(),
+                                   o_low_rank);
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_o_b_weight").c_str(),
+                                   o_b_proj_->weight());
+    auto o_b_local = torch::nn::functional::linear(
+        o_low_rank.reshape({num_tokens, -1}), o_b_proj_->weight());
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_o_b_local").c_str(),
+                                   o_b_local);
+  }
+  save_decode_detail("o_a", o_low_rank);
+  if (decode_detail) {
+    auto o_b_local = torch::nn::functional::linear(
+        o_low_rank.reshape({num_tokens, -1}), o_b_proj_->weight());
+    save_decode_detail("o_b_local", o_b_local);
+  }
   torch::Tensor output;
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
@@ -980,6 +1142,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   } else {
     output = o_b_proj_->forward(o_low_rank.reshape({num_tokens, -1}));
   }
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_o_b").c_str(), output);
+  }
+  save_decode_detail("o_b", output);
   std::optional<torch::Tensor> final_lse = std::nullopt;
   (void)output_lse;
 

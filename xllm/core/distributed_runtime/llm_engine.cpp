@@ -122,7 +122,6 @@ LLMEngine::LLMEngine(const runtime::Options& options,
 }
 
 void LLMEngine::process_group_test() {
-#if !defined(USE_NPU)
   // In multi-node serving mode, only driver engine
   // create worker_clients_.
   if (worker_clients_num_ > 1) {
@@ -142,7 +141,6 @@ void LLMEngine::process_group_test() {
         .within(std::chrono::seconds(timeout_seconds))
         .get();
   }
-#endif
 }
 
 bool LLMEngine::init(MasterStatus master_status) {
@@ -1171,7 +1169,11 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
-  uint32_t stride = dp_local_tp_size_;
+  // Sampling output is recorded only by the first worker in each DP group.
+  // A model-sharded CP group contains multiple effective TP groups, but those
+  // additional CP leaders are not WorkerImpl drivers and never publish
+  // is_recorded_. Querying them here would block get_last_step_result forever.
+  uint32_t stride = dp_local_size_;
   // If EPLB is enabled, we need to get results from all workers,
   // because the experts on each worker are different,
   // and the tokens load of all experts needs to be returned to engine.
@@ -1193,7 +1195,7 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   }
 
   for (auto worker_rank = 0; worker_rank < worker_clients_num_;
-       worker_rank += dp_local_tp_size_) {
+       worker_rank += dp_local_size_) {
     auto result = last_step_results[worker_rank / stride].value();
     if (result.has_value()) {
       raw_forward_outputs.emplace_back(std::move(result.value()));

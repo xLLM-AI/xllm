@@ -89,6 +89,15 @@ DEFINE_HISTOGRAM(mooncake_transfer_latency_microseconds_read,
 DEFINE_HISTOGRAM(mooncake_transfer_latency_microseconds_write,
                  "MoonCake WRITE transfer latency in microseconds");
 
+DEFINE_COUNTER(host_kv_offload_blocks_total,
+               "Total host KV blocks copied from device to host");
+DEFINE_COUNTER(host_kv_restore_blocks_total,
+               "Total host KV blocks copied from host to device");
+DEFINE_COUNTER(host_kv_offload_failures_total,
+               "Total host KV blocks affected by failed device-to-host copies");
+DEFINE_COUNTER(host_kv_restore_failures_total,
+               "Total host KV blocks affected by failed host-to-device copies");
+
 // worker metrics
 DEFINE_COUNTER(execution_latency_seconds_model,
                "Latency of model execution in seconds");

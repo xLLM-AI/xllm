@@ -24,6 +24,7 @@ limitations under the License.
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -42,6 +43,7 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/deepseek_v4_decoder_layer.h"
+#include "core/layers/deepseek_v4_numeric_debug.h"
 #include "core/util/tensor_helper.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
 #include "layers/npu_torch/deepseek_v4_cp_context.h"
@@ -676,6 +678,37 @@ class DeepseekV4ModelImpl
     torch::Tensor h =
         inputs_embeds.defined() ? inputs_embeds : embed_tokens_(tokens);
 
+    const char* decode_dump_dir = std::getenv("XLLM_DSV4_DECODE_DUMP_DIR");
+    const char* decode_dump_step = std::getenv("XLLM_DSV4_DECODE_DUMP_STEP");
+    const char* visible_device = std::getenv("ASCEND_RT_VISIBLE_DEVICES");
+    bool dump_decode = false;
+    if (decode_dump_dir != nullptr && decode_dump_step != nullptr &&
+        (visible_device == nullptr || std::strcmp(visible_device, "0") == 0)) {
+      if (tokens.numel() > 1) {
+        decode_dump_counter_ = 0;
+      } else if (tokens.numel() == 1) {
+        ++decode_dump_counter_;
+        dump_decode =
+            decode_dump_counter_ == std::strtoll(decode_dump_step, nullptr, 10);
+      }
+    }
+    auto save_decode = [&](const std::string& name,
+                           const torch::Tensor& tensor) {
+      if (!dump_decode || !tensor.defined()) {
+        return;
+      }
+      std::filesystem::create_directories(decode_dump_dir);
+      torch::save(tensor.detach().to(torch::kCPU),
+                  std::string(decode_dump_dir) + "/cpp_" + name + ".pt");
+    };
+    save_decode("embedding", h);
+
+    const bool numeric_debug =
+        deepseek_v4_numeric_debug_enabled() && tokens.numel() > 1;
+    if (numeric_debug) {
+      deepseek_v4_log_numeric_tensor("embedding", h);
+    }
+
     if (h.dim() == 2) {
       h = h.unsqueeze(1).repeat({1, hc_mult_, 1});
     }
@@ -887,6 +920,16 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
+      save_decode("layer_" + std::to_string(i) + "_output", h);
+      const bool numeric_all_layers =
+          std::getenv("XLLM_DSV4_NUMERIC_ALL_LAYERS") != nullptr &&
+          std::strcmp(std::getenv("XLLM_DSV4_NUMERIC_ALL_LAYERS"), "1") == 0;
+      if (numeric_debug &&
+          (numeric_all_layers || i == 0 || i == 1 || i == 2 || i == 21 ||
+           i == 42)) {
+        const std::string name = "layer_" + std::to_string(i) + "_output";
+        deepseek_v4_log_numeric_tensor(name.c_str(), h);
+      }
 #if defined(USE_NPU)
       if (modified_input_params.parallel.layer_synchronizer != nullptr &&
           !modified_input_params.parallel.layer_synchronizer->record_event(
@@ -912,7 +955,15 @@ class DeepseekV4ModelImpl
       pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
+    save_decode("hc_head", h);
+    if (numeric_debug) {
+      deepseek_v4_log_numeric_tensor("hc_head", h);
+    }
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    save_decode("final_norm", hidden_states);
+    if (numeric_debug) {
+      deepseek_v4_log_numeric_tensor("final_norm", hidden_states);
+    }
     if (pre_hc_head_hidden_states.defined()) {
       ModelOutput out(hidden_states, residual_out);
       out.aux_hidden_states = pre_hc_head_hidden_states.flatten(1);
@@ -1749,6 +1800,7 @@ class DeepseekV4ModelImpl
 
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
+  int64_t decode_dump_counter_ = 0;
 
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that

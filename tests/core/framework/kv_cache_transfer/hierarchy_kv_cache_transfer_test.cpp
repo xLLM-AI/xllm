@@ -35,7 +35,8 @@ namespace {
 TEST(HierarchyKVCacheTransferTest,
      QuantizedIndexerRoundTripRestoresIndexAndScale) {
   if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "MLU device is required for hierarchy KV cache transfer.";
+    GTEST_SKIP() << "NPU or MLU device is required for hierarchy KV cache "
+                    "transfer.";
   }
 
   constexpr int64_t kBlockCount = 2;
@@ -50,7 +51,9 @@ TEST(HierarchyKVCacheTransferTest,
   validation_options.device_block_count = kBlockCount;
   validation_options.supports_host_kv_offload = true;
   validation_options.indexer_cache_dtype = "int8";
-  validation_options.model_type = "deepseek_v32";
+  validation_options.has_grouped_cache_layout = true;
+  validation_options.supports_grouped_cache_offload = true;
+  validation_options.model_type = "deepseek_v4";
   EXPECT_FALSE(validate_host_cache_options(validation_options).has_value());
 
   Device device(/*device_index=*/0);
@@ -58,29 +61,25 @@ TEST(HierarchyKVCacheTransferTest,
   device.init_device_context();
 
   KVCacheCapacity capacity;
-  capacity.n_blocks(kBlockCount)
-      .block_size(kBlockSize)
-      .enable_indexer_cache_quant(true);
+  capacity.block_size(kBlockSize)
+      .swa_count(kBlockCount)
+      .c4_count(kBlockCount)
+      .c128_count(1);
 
   ModelArgs model_args;
-  model_args.model_type("deepseek_v32")
-      .enable_mla(true)
-      .n_heads(8)
-      .n_kv_heads(2)
-      .head_dim(8)
-      .kv_lora_rank(8)
-      .qk_rope_head_dim(4)
-      .index_n_heads(1)
-      .index_head_dim(4);
+  model_args.model_type("deepseek_v4");
   const KVCacheShape cache_shape(capacity, model_args, /*world_size=*/1);
 
   KVCacheCreateOptions create_options;
   create_options.device(device.unwrap())
       .dtype(torch::kBFloat16)
       .num_layers(1)
-      .model_type("deepseek_v32")
-      .enable_lighting_indexer(true)
-      .enable_indexer_cache_quant(true);
+      .model_type("deepseek_v4")
+      .block_size(kBlockSize)
+      .head_dim(8)
+      .index_head_dim(4)
+      .window_size(16)
+      .compress_ratios({4});
   std::vector<KVCache> caches;
   allocate_kv_caches(caches, cache_shape, create_options);
   ASSERT_EQ(caches.size(), 1U);
@@ -89,6 +88,8 @@ TEST(HierarchyKVCacheTransferTest,
   const std::optional<torch::Tensor> index_scale =
       caches[0].get_indexer_cache_scale();
   ASSERT_TRUE(index_scale.has_value());
+  EXPECT_EQ(source_index.scalar_type(), torch::kInt8);
+  EXPECT_EQ(index_scale.value().scalar_type(), torch::kFloat16);
   torch::Tensor source_scale = index_scale.value()[kSourceBlockId];
   source_index.fill_(37);
   source_scale.fill_(0.625F);
@@ -110,12 +111,12 @@ TEST(HierarchyKVCacheTransferTest,
                                     create_options);
 
   BlockTransferInfo offload_info(kSourceBlockId, /*dst_block_id=*/0);
-  offload_info.block_type = BlockType::KV;
+  offload_info.block_type = BlockType::C4;
   offload_info.transfer_type = TransferType::D2H2G;
   EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {offload_info}), 1U);
 
   BlockTransferInfo load_info(/*src_block_id=*/0, kDestinationBlockId);
-  load_info.block_type = BlockType::KV;
+  load_info.block_type = BlockType::C4;
   load_info.transfer_type = TransferType::H2D;
   EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {load_info}), 1U);
 

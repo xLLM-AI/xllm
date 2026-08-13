@@ -52,5 +52,6 @@ class HiddenParallelEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.embedding(input_ids, self.weight)
         if self.tp_size > 1:
-            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
+            import xllm_runtime
+            out = xllm_runtime.tp_all_gather(out, -1)
         return out

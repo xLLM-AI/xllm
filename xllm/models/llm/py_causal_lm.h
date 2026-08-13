@@ -50,6 +50,16 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
 
+  // Expose C++ HCCL collectives to the Python model so it reuses the C++
+  // ProcessGroup (no second HCCL communicator). Used by RowParallelLinear /
+  // HiddenParallelEmbedding in the Python model executor path.
+  void tp_all_reduce(torch::Tensor& tensor);
+  torch::Tensor tp_all_gather(const torch::Tensor& tensor, int64_t dim);
+  void moe_tp_all_reduce(torch::Tensor& tensor);
+  void moe_ep_all_reduce(torch::Tensor& tensor);
+  torch::Tensor cp_gather(const torch::Tensor& tensor,
+                          const std::vector<int32_t>& tokens_per_rank);
+
   pybind11::object& python_model() { return py_model_; }
   const pybind11::object& config_dict() const { return config_dict_; }
 
@@ -69,7 +79,12 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   int64_t moe_tp_rank_ = 0;
   int64_t ep_size_ = 1;
   int64_t ep_rank_ = 0;
+  int64_t cp_size_ = 1;
+  int64_t cp_rank_ = 0;
   ProcessGroup* tp_group_ = nullptr;
+  ProcessGroup* moe_tp_group_ = nullptr;
+  ProcessGroup* moe_ep_group_ = nullptr;
+  ProcessGroup* cp_group_ = nullptr;
 
   pybind11::object py_model_;
   pybind11::object config_dict_;

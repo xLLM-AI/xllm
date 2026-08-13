@@ -602,13 +602,20 @@ std::tuple<int64_t, int64_t> WorkerImpl::estimate_kv_cache_capacity() {
 void WorkerImpl::process_group_test() {
   device_.set_device();
 
-  // create random tensors
   const auto options = torch::dtype(torch::kHalf).device(device_);
-  torch::Tensor tensor = torch::randn({10, 10}, options);
-  // call allreduce
-  parallel_state::reduce(tensor, parallel_args_.process_group_);
-  // call allgather
-  parallel_state::gather(tensor, parallel_args_.process_group_);
+  auto warmup_group = [&options](ProcessGroup* group) {
+    if (group == nullptr || group->world_size() <= 1) {
+      return;
+    }
+    torch::Tensor tensor = torch::randn({10, 10}, options);
+    parallel_state::reduce(tensor, group);
+    parallel_state::gather(tensor, group);
+  };
+
+  warmup_group(parallel_args_.process_group_);
+  if (parallel_args_.tp_group_ != parallel_args_.process_group_) {
+    warmup_group(parallel_args_.tp_group_);
+  }
 }
 
 ForwardInput WorkerImpl::prepare_inputs(Batch& batch) {

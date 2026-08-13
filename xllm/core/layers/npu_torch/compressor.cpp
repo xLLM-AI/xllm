@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -151,6 +152,48 @@ torch::Tensor CompressorImpl::forward(
   params.norm_eps = eps_;
   params.rotary_mode = rot_mode_;
   params.enable_grad = false;
+
+  // [CMPDUMP C++] Diagnostic dump before aclnnCompressor, matching the Python
+  // [CMPDUMP] print for param-by-param comparison. Gated on env var to avoid
+  // log spam in production.
+  static const bool _dump_compressor = []() {
+    const char* e = std::getenv("XLLM_DUMP_COMPRESSOR");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  if (_dump_compressor) {
+    auto _fmt = [](const torch::Tensor& t) -> std::string {
+      if (!t.defined()) return "undefined";
+      std::ostringstream _ss;
+      _ss << t.sizes() << " " << t.scalar_type()
+          << " stride=" << t.strides();
+      return _ss.str();
+    };
+    auto _opt = [](const c10::optional<torch::Tensor>& t) -> std::string {
+      if (!t.has_value() || !t->defined()) return "nullopt/undefined";
+      std::ostringstream _ss;
+      _ss << t->sizes() << " " << t->scalar_type()
+          << " vals=" << t->cpu().reshape(-1).to(torch::kFloat32).slice(0, 0, 8);
+      return _ss.str();
+    };
+    LOG(INFO) << "[CMPDUMP C++]"
+              << "\n  x=" << _fmt(params.x)
+              << "\n  wkv=" << _fmt(params.wkv)
+              << "\n  wgate=" << _fmt(params.wgate)
+              << "\n  norm_weight=" << _fmt(params.norm_weight)
+              << "\n  ape=" << _fmt(params.ape)
+              << "\n  rope_sin=" << _fmt(params.rope_sin)
+              << "\n  rope_cos=" << _fmt(params.rope_cos)
+              << "\n  kv_state=" << _fmt(params.kv_state)
+              << "\n  score_state=" << _fmt(params.score_state)
+              << "\n  kv_block_table=" << _opt(params.kv_block_table)
+              << "\n  score_block_table=" << _opt(params.score_block_table)
+              << "\n  cu_seqlens=" << _opt(params.cu_seqlens)
+              << "\n  start_pos=" << _opt(params.start_pos)
+              << "\n  rope_head_dim=" << params.rope_head_dim
+              << " cmp_ratio=" << params.cmp_ratio
+              << " coff=" << params.coff
+              << " rotary_mode=" << params.rotary_mode;
+  }
 
   std::tie(compressed_kv, std::ignore, std::ignore, std::ignore, std::ignore) =
       xllm::kernel::compressor(params);

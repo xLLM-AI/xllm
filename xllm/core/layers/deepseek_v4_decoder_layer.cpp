@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/flash_comm1_context.h"
+#include "deepseek_v4_numeric_debug.h"
 #include "kernels/ops_api.h"
 #include "npu_torch/deepseek_v4_cp_context.h"
 
@@ -146,17 +147,39 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
       << "DeepseekV4DecoderLayer requires DSA metadata for DSAttention path.";
 
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
+  auto& dsa = *(attn_metadata.dsa_metadata);
+  const bool numeric_debug =
+      deepseek_v4_numeric_debug_enabled() &&
+      deepseek_v4_numeric_debug_layer(dsa.layer_id) && x.size(0) > 1;
+  const bool decode_detail =
+      deepseek_v4_decode_detail_enabled(dsa.layer_id, positions);
+  const std::string numeric_prefix = "layer_" + std::to_string(dsa.layer_id);
+  auto save_decode_detail = [&](const char* stage,
+                                const torch::Tensor& tensor) {
+    if (decode_detail) {
+      deepseek_v4_save_decode_detail(numeric_prefix + "_" + stage, tensor);
+    }
+  };
 
   auto residual_attn = x;
   auto [attn_input, post_attn, comb_attn] =
       hc_pre(x, hc_attn_fn_, hc_attn_scale_, hc_attn_base_);
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_attn_hc_pre").c_str(),
+                                   attn_input);
+  }
+  save_decode_detail("attn_hc_pre", attn_input);
   attn_input = std::get<0>(attn_norm_->forward(attn_input));
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_attn_norm").c_str(),
+                                   attn_input);
+  }
+  save_decode_detail("attn_norm", attn_input);
 
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     attn_input = gather_sequence(attn_input, *fc1_ctx);
   }
 
-  auto& dsa = *(attn_metadata.dsa_metadata);
   const auto compress_metadata = std::make_tuple(
       dsa.c1_metadata, dsa.c4_metadata, dsa.c128_metadata, dsa.qli_metadata);
   KVState kv_state{kv_cache.get_swa_cache(),
@@ -174,12 +197,32 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
                           compress_metadata);
   (void)attn_lse;
   attn_input = attn_output;
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor(
+        (numeric_prefix + "_attention_output").c_str(), attn_input);
+  }
+  save_decode_detail("attention_output", attn_input);
   x = hc_post(attn_input, residual_attn, post_attn, comb_attn);
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_attn_hc_post").c_str(),
+                                   x);
+  }
+  save_decode_detail("attn_hc_post", x);
 
   auto residual_ffn = x;
   auto [ffn_input, post_ffn, comb_ffn] =
       hc_pre(x, hc_ffn_fn_, hc_ffn_scale_, hc_ffn_base_);
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_ffn_hc_pre").c_str(),
+                                   ffn_input);
+  }
+  save_decode_detail("ffn_hc_pre", ffn_input);
   ffn_input = std::get<0>(ffn_norm_->forward(ffn_input));
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_ffn_norm").c_str(),
+                                   ffn_input);
+  }
+  save_decode_detail("ffn_norm", ffn_input);
 
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     ffn_input = gather_sequence(ffn_input, *fc1_ctx);
@@ -219,8 +262,21 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
         << "DeepseekV4 hash gate requires input_ids for routing";
   }
   auto [topk_weights, topk_ids] = gate_->forward(ffn_input_2d, gate_input_ids);
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_topk_weights").c_str(),
+                                   topk_weights);
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_topk_ids").c_str(),
+                                   topk_ids);
+  }
+  save_decode_detail("topk_weights", topk_weights);
+  save_decode_detail("topk_ids", topk_ids);
   ffn_input = moe_mlp_->forward_with_selected_experts(
       ffn_input, topk_weights, topk_ids, input_params);
+  if (numeric_debug) {
+    deepseek_v4_log_numeric_tensor((numeric_prefix + "_moe_output").c_str(),
+                                   ffn_input);
+  }
+  save_decode_detail("moe_output", ffn_input);
 
   if (cp_bridge_ffn) {
     ffn_input = cp_ctx->shard_rows(ffn_input);
@@ -230,6 +286,7 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     ffn_input = shard_sequence(ffn_input, *fc1_ctx);
   }
   x = hc_post(ffn_input, residual_ffn, post_ffn, comb_ffn);
+  save_decode_detail("layer_output", x);
 
   return x;
 }

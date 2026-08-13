@@ -149,6 +149,14 @@ DECLARE_COUNTER(mooncake_transfer_failed_total);
 DECLARE_HISTOGRAM(mooncake_transfer_latency_microseconds_read);
 DECLARE_HISTOGRAM(mooncake_transfer_latency_microseconds_write);
 
+// Host KV cache offload/restore metrics. These counters are updated only after
+// the worker-side copy completes; scheduler-side queued transfers are not
+// counted as successful blocks.
+DECLARE_COUNTER(host_kv_offload_blocks_total);
+DECLARE_COUNTER(host_kv_restore_blocks_total);
+DECLARE_COUNTER(host_kv_offload_failures_total);
+DECLARE_COUNTER(host_kv_restore_failures_total);
+
 // latency of worker execution operations in seconds
 DECLARE_COUNTER(execution_latency_seconds_model);
 DECLARE_COUNTER(execution_latency_seconds_logits_processing);

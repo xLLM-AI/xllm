@@ -30,7 +30,7 @@ cc_test(
     GTest::gtest_main
 )
 
-if(USE_NPU OR USE_MLU)
+if(USE_MLU)
 cc_test(
   NAME
     mooncake_transfer_engine_test
@@ -47,7 +47,7 @@ target_link_libraries(mooncake_transfer_engine_test PRIVATE
   "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
 endif()
 
-if(USE_MLU)
+if(USE_NPU OR USE_MLU)
 cc_test(
   NAME
     quantized_indexer_host_offload_test
