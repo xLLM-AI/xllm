@@ -517,21 +517,11 @@ class DeepseekV4ModelImpl
     }
 
     if (!model_args.layers_to_capture().empty()) {
-      const auto& capture_layers = model_args.layers_to_capture();
-      std::unordered_set<int32_t> unique_capture_layers;
-      for (int32_t output_layer : capture_layers) {
-        CHECK_GT(output_layer, 0);
-        CHECK_LE(output_layer, model_args.n_layers())
-            << "DeepSeek-V4 capture layer output is out of range.";
-        CHECK(unique_capture_layers.emplace(output_layer).second)
-            << "DeepSeek-V4 capture layer outputs must be unique.";
-      }
-      // Scheduler capacity is fixed before model construction. Resizing this
-      // graph-visible buffer after initialization would invalidate captured
-      // addresses, so forward verifies that the runtime contract is unchanged.
-      aux_output_capacity_ =
-          ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch();
-      aux_capture_.init(model_args, options, aux_output_capacity_);
+    if (!model_args.layers_to_capture().empty()) {
+      aux_capture_.init(
+          model_args,
+          options,
+          ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
     }
 
     // Build DSA caches_info from compress_ratios
