@@ -25,6 +25,32 @@ if(USE_NPU)
 
   cc_test(
     NAME
+      dspark_confidence_head_test
+    SRCS
+      dspark_confidence_head_test.cpp
+    DEPS
+      :models
+      :state_dict
+      :xllm_ops
+      glog::glog
+      torch
+      GTest::gtest_main
+  )
+  target_link_libraries(dspark_confidence_head_test
+                        PRIVATE
+                        torch_npu
+                        ascendcl
+                        hccl
+                        c_sec
+                        nnopbase
+                        atb)
+  target_link_options(dspark_confidence_head_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+
+  cc_test(
+    NAME
       acl_graph_executor_test
     SRCS
       acl_graph_executor_test.cpp

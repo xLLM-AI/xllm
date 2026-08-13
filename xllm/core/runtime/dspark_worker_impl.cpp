@@ -180,13 +180,9 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
                    torch::TensorOptions()
                        .dtype(torch::kFloat32)
                        .device(base_logits.device()));
+  // Filled after the sample loop by a single batched ConfidenceHead call; stays
+  // undefined when confidence is disabled.
   torch::Tensor confidence_probs;
-  if (with_confidence) {
-    confidence_probs = torch::empty({num_reqs, num_speculative_tokens},
-                                    torch::TensorOptions()
-                                        .dtype(torch::kFloat32)
-                                        .device(base_logits.device()));
-  }
 
   using ISlice = torch::indexing::Slice;
   Sampler sampler;
@@ -201,19 +197,6 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
     CHECK_EQ(markov_bias.size(1), draft_vocab_size)
         << "DSpark reduced-vocab drafts need draft-to-target remapping, not "
            "yet implemented.";
-
-    // ConfidenceHead is applied on this step's hidden and the previous token
-    // (anchor for step 0, sampled draft for later steps). Compute BEFORE
-    // sampling so that on greedy path we don't wait on the argmax result.
-    if (with_confidence) {
-      torch::Tensor step_hidden =
-          last_hidden.select(/*dim=*/1, /*index=*/token_idx);
-      torch::Tensor conf =
-          draft_impl_->dspark_confidence_probs(step_hidden, previous_token_ids);
-      CHECK_EQ(conf.dim(), 1) << "confidence probs must be [num_reqs]";
-      CHECK_EQ(conf.size(0), num_reqs) << "confidence probs batch mismatch";
-      confidence_probs.index_put_({ISlice(), token_idx}, conf);
-    }
 
     torch::Tensor step_logits =
         base_logits.select(/*dim=*/1, /*index=*/token_idx) + markov_bias;
@@ -246,6 +229,26 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
     token_ids.index_put_({ISlice(), token_idx}, sampled_token_ids);
     proposal_probs.index_put_({ISlice(), token_idx}, selected_proposal_probs);
     previous_token_ids = sampled_token_ids;
+  }
+
+  // ConfidenceHead over the whole block, batched. Equivalent to computing it
+  // per step inside the loop on (last_hidden[:, k], prev_k) — prev_k is the
+  // anchor for step 0 and the draft token sampled at step k-1 otherwise — but
+  // as a single linear+sigmoid instead of gamma small kernel launches. The
+  // inputs don't depend on the sampling of the same step, so hoisting is exact.
+  if (with_confidence) {
+    torch::Tensor prev_matrix = torch::cat(
+        {anchor_token_ids.view({num_reqs, 1}),
+         token_ids.slice(/*dim=*/1, /*start=*/0, num_speculative_tokens - 1)},
+        /*dim=*/1);  // [num_reqs, num_spec]
+    confidence_probs =
+        draft_impl_->dspark_confidence_probs_batched(last_hidden, prev_matrix);
+    CHECK_EQ(confidence_probs.dim(), 2)
+        << "batched confidence probs must be [num_reqs, num_spec]";
+    CHECK_EQ(confidence_probs.size(0), num_reqs)
+        << "batched confidence probs batch mismatch";
+    CHECK_EQ(confidence_probs.size(1), num_speculative_tokens)
+        << "batched confidence probs n_spec mismatch";
   }
 
   return {.token_ids = std::move(token_ids),

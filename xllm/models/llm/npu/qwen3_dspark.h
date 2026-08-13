@@ -204,24 +204,56 @@ class DSparkConfidenceHead final {
     }
     namespace F = torch::nn::functional;
     torch::Tensor logit = F::linear(input, proj_weight_, proj_bias_);
-    // Optional temperature scaling on the confidence logit before sigmoid.
-    // Raw neural confidence estimates are typically overconfident (Guo et al.
-    // 2017); the DSpark paper (Section 3.2.1 "Post-hoc Calibration") calls for
-    // Sequential Temperature Scaling to keep the cumulative product ∏ c_i
-    // aligned with the empirical acceptance rate. We approximate that with a
-    // single global temperature read from DSPARK_CONFIDENCE_TEMPERATURE
-    // (default 1.0 = no scaling). Higher T flattens confidence toward 0.5 so
-    // the cumulative product decays slower and the scheduler prunes less
-    // aggressively at long block lengths.
-    static const double temperature = [] {
-      const char* s = std::getenv("DSPARK_CONFIDENCE_TEMPERATURE");
-      double t = s != nullptr ? std::atof(s) : 1.0;
-      return t > 0.0 ? t : 1.0;
-    }();
+    const double temperature = confidence_temperature();
     if (temperature != 1.0) {
       logit = logit / temperature;
     }
     return torch::sigmoid(logit).squeeze(-1).to(torch::kFloat32);
+  }
+
+  // Batched over the whole draft block: applies the same head as `forward` to
+  // all gamma steps at once, so the sample loop pays one linear+sigmoid instead
+  // of gamma. Numerically identical to gamma per-step `forward` calls.
+  //   hidden_all:       [B, gamma, hidden_size]
+  //   markov_embed_all: [B, gamma, markov_rank]  (consumed only when
+  //   with_markov_)
+  // returns:            [B, gamma] float32 acceptance probabilities in [0, 1].
+  torch::Tensor forward_batched(const torch::Tensor& hidden_all,
+                                const torch::Tensor& markov_embed_all) const {
+    CHECK(defined()) << "DSpark ConfidenceHead weights are not initialized";
+    CHECK_EQ(hidden_all.dim(), 3)
+        << "ConfidenceHead hidden_all must be [B, gamma, H]";
+    CHECK_EQ(hidden_all.size(-1), hidden_size_)
+        << "ConfidenceHead hidden size mismatch";
+    const int64_t batch = hidden_all.size(0);
+    const int64_t gamma = hidden_all.size(1);
+    torch::Tensor input;
+    if (with_markov_) {
+      CHECK(markov_embed_all.defined())
+          << "ConfidenceHead with_markov requires markov_embed_all";
+      CHECK_EQ(markov_embed_all.dim(), 3)
+          << "ConfidenceHead markov_embed_all must be [B, gamma, rank]";
+      CHECK_EQ(markov_embed_all.size(0), batch)
+          << "ConfidenceHead markov_embed_all batch mismatch";
+      CHECK_EQ(markov_embed_all.size(1), gamma)
+          << "ConfidenceHead markov_embed_all gamma mismatch";
+      CHECK_EQ(markov_embed_all.size(-1), markov_rank_)
+          << "ConfidenceHead markov_embed_all rank mismatch";
+      input = torch::cat({hidden_all.to(proj_weight_.dtype()),
+                          markov_embed_all.to(proj_weight_.dtype())},
+                         /*dim=*/-1);
+    } else {
+      input = hidden_all.to(proj_weight_.dtype());
+    }
+    namespace F = torch::nn::functional;
+    torch::Tensor logit =
+        F::linear(input.reshape({batch * gamma, -1}), proj_weight_, proj_bias_)
+            .view({batch, gamma});
+    const double temperature = confidence_temperature();
+    if (temperature != 1.0) {
+      logit = logit / temperature;
+    }
+    return torch::sigmoid(logit).to(torch::kFloat32);
   }
 
   bool defined() const {
@@ -229,6 +261,25 @@ class DSparkConfidenceHead final {
   }
 
  private:
+  // Optional temperature scaling on the confidence logit before sigmoid, shared
+  // by both `forward` and `forward_batched` so the two paths stay numerically
+  // identical. Raw neural confidence estimates are typically overconfident (Guo
+  // et al. 2017); the DSpark paper (Section 3.2.1 "Post-hoc Calibration") calls
+  // for Sequential Temperature Scaling to keep the cumulative product ∏ c_i
+  // aligned with the empirical acceptance rate. We approximate that with a
+  // single global temperature read from DSPARK_CONFIDENCE_TEMPERATURE (default
+  // 1.0 = no scaling). Higher T flattens confidence toward 0.5 so the
+  // cumulative product decays slower and the scheduler prunes less aggressively
+  // at long block lengths.
+  static double confidence_temperature() {
+    static const double temperature = [] {
+      const char* s = std::getenv("DSPARK_CONFIDENCE_TEMPERATURE");
+      double t = s != nullptr ? std::atof(s) : 1.0;
+      return t > 0.0 ? t : 1.0;
+    }();
+    return temperature;
+  }
+
   torch::Tensor proj_weight_;  // [1, hidden_size (+ markov_rank)]
   torch::Tensor proj_bias_;    // [1]
   torch::TensorOptions tensor_options_;
@@ -284,6 +335,24 @@ class DSparkQwen3ForCausalLMImpl final
       markov_embed = markov_head_.markov_embed(previous_token_ids);
     }
     return confidence_head_.forward(hidden, markov_embed);
+  }
+
+  // Batched variant of dspark_confidence_probs over the whole draft block.
+  //   hidden_all:  [num_reqs, num_spec, hidden_size]
+  //   prev_matrix: [num_reqs, num_spec] int64 — column k is step k's "prev"
+  //                token (col 0 = anchor, col k = draft token sampled at k-1).
+  // Returns [num_reqs, num_spec] fp32 in [0, 1]. Defined only when
+  // enable_confidence_head.
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) const {
+    CHECK(confidence_head_.defined())
+        << "DSpark ConfidenceHead is not initialized (enable_confidence_head?)";
+    torch::Tensor markov_embed_all;
+    if (prev_matrix.defined()) {
+      markov_embed_all = markov_head_.markov_embed(prev_matrix);
+    }
+    return confidence_head_.forward_batched(hidden_all, markov_embed_all);
   }
 
   bool has_dspark_confidence_head() const { return confidence_head_.defined(); }
