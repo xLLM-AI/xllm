@@ -43,15 +43,6 @@ inline DecodeTokenWidths decode_token_widths(int32_t num_speculative_tokens,
           /*validate=*/num_speculative_tokens + 1};
 }
 
-inline int32_t draft_model_num_speculative_tokens(
-    const runtime::Options& options) {
-  // DeepSeek-V4 uses this value to configure the DSpark attention window.
-  // Other DFlash-style drafts keep the historical single-step model options.
-  return options.speculative_algorithm() == "DSpark"
-             ? options.num_speculative_tokens()
-             : 0;
-}
-
 inline void invalidate_draft_model_geometry(ModelInputParams& input_params) {
   // Attention metadata is model-owned: DeepSeek-V4 bakes DSA group layout and
   // sparse tiling values such as ori_win_left into opaque tensors. A draft

@@ -74,12 +74,17 @@ runtime::Options target_options(const runtime::Options& options) {
 }
 
 runtime::Options draft_options(const runtime::Options& options) {
+  // DSpark uses num_speculative_tokens to size the DSpark attention window;
+  // other DFlash-style drafts keep the historical single-step options.
+  const int32_t draft_num_speculative_tokens =
+      options.speculative_algorithm() == "DSpark"
+          ? options.num_speculative_tokens()
+          : 0;
   runtime::Options opts = options;
   opts.enable_schedule_overlap(false)
       .is_draft_engine(true)
       .num_decoding_tokens(1)
-      .num_speculative_tokens(
-          dflash_detail::draft_model_num_speculative_tokens(options))
+      .num_speculative_tokens(draft_num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
   return opts;
 }

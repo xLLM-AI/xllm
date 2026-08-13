@@ -1226,15 +1226,6 @@ TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
                            torch::full({3, 2}, 10.0f)));
 }
 
-TEST(DSparkWorkerOptionsTest, PreservesDraftBlockSize) {
-  runtime::Options options;
-  options.speculative_algorithm("DSpark").num_speculative_tokens(5);
-  EXPECT_EQ(dflash_detail::draft_model_num_speculative_tokens(options), 5);
-
-  options.speculative_algorithm("DFlash");
-  EXPECT_EQ(dflash_detail::draft_model_num_speculative_tokens(options), 0);
-}
-
 TEST(DSparkNativeSasConfigTest, DefaultsToCompatibilityMode) {
   KernelConfig config;
   EXPECT_FALSE(config.enable_dspark_native_sas());
