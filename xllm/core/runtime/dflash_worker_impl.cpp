@@ -98,14 +98,8 @@ void expand_block_parallel_sequence_rows(ModelInputParams& input_params,
 }
 
 int64_t native_dspark_ori_window_left(const ModelArgs& model_args) {
-#if defined(USE_NPU)
-  return layer::deepseek_v4_ori_window_left(model_args.window_size(),
-                                            model_args.dspark_block_size(),
-                                            /*use_native_dspark_sas=*/true);
-#else
   return std::max<int64_t>(
       model_args.window_size() + model_args.dspark_block_size() - 1, 0);
-#endif
 }
 
 // Pack a host int32 vector into a pinned CPU tensor and stage an async H2D
@@ -188,9 +182,8 @@ void build_query_rows(const ForwardInput& input,
   // N mask positions are sampled. DSpark: N-wide block — every position is a
   // prediction; slot 0 still carries the real token but is itself sampled
   // (predicts the first draft token), positions 1..N-1 are masks.
-  const int32_t query_width = dflash_detail::decode_token_widths(
-                                  num_speculative_tokens, sample_from_anchor)
-                                  .draft;
+  const int32_t query_width = dflash_detail::decode_draft_width(
+      num_speculative_tokens, sample_from_anchor);
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   if (use_block_parallel_rows) {
@@ -576,9 +569,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // Mirror prepare_query_inputs' metadata geometry: DSV4 DSpark represents
   // every block row as a q_len=1 sequence, while Qwen/DFlash keeps one
   // query_width-wide sequence.
-  const dflash_detail::DecodeTokenWidths token_widths =
-      dflash_detail::decode_token_widths(options_.num_speculative_tokens(),
-                                         sample_from_anchor());
+  const int32_t draft_width = dflash_detail::decode_draft_width(
+      options_.num_speculative_tokens(), sample_from_anchor());
   const dflash_detail::DSparkSasMode sas_mode = draft_sas_mode();
   const bool use_block_parallel_rows =
       sas_mode == dflash_detail::DSparkSasMode::COMPATIBILITY;
@@ -589,13 +581,12 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
           ? BatchForwardType::DECODE
           : BatchForwardType::CHUNKED_PREFILL;
   query_input.input_params.meta.q_max_seq_len =
-      use_block_parallel_rows ? 1 : token_widths.draft;
+      use_block_parallel_rows ? 1 : draft_width;
   if (use_block_parallel_rows) {
-    expand_block_parallel_sequence_rows(query_input.input_params,
-                                        token_widths.draft);
+    expand_block_parallel_sequence_rows(query_input.input_params, draft_width);
   }
   scale_speculative_parallel_token_counts(query_input.input_params,
-                                          token_widths.draft);
+                                          draft_width);
   // Warmup only: prime the draft; its output is unused. Keep it alive until the
   // sync below so the no-sync draft input is not freed while the target forward
   // launched next can reuse the buffer.
@@ -607,8 +598,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // DSpark's draft omits the extra anchor row, so its N-wide draft geometry
   // must not be reused for this (N+1)-wide target forward. Active ranks use the
   // same width in SpeculativeWorkerImpl::prepare_validate_inputs().
-  scale_speculative_parallel_token_counts(validate_input.input_params,
-                                          token_widths.validate);
+  scale_speculative_parallel_token_counts(
+      validate_input.input_params, options_.num_speculative_tokens() + 1);
   ForwardOutput output =
       run_llm_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
@@ -1078,10 +1069,8 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
                    buf,
                    selected_idxes);
   // DFlash: (1 + N) rows per seq; DSpark (sample_from_anchor): N rows.
-  const int32_t query_width =
-      dflash_detail::decode_token_widths(options_.num_speculative_tokens(),
-                                         sample_from_anchor())
-          .draft;
+  const int32_t query_width = dflash_detail::decode_draft_width(
+      options_.num_speculative_tokens(), sample_from_anchor());
   // DFlash emits query_width rows per seq unconditionally, so DP shape
   // symmetry holds by construction. Catch scheduler regressions that break
   // the invariant (see MTP dp_enabled idle-rank branch).

@@ -162,9 +162,7 @@ SpeculativeWorkerImpl::estimate_kv_cache_capacity_with_draft(
       std::min(std::get<1>(target_memory), std::get<1>(draft_memory));
 
   const ModelArgs& target_model_args = impl_->context_.get_model_args();
-  if (!util::is_target_model_type(target_model_args.model_type(),
-                                  /*target_model_type=*/"deepseek_v4",
-                                  /*match_mtp=*/true)) {
+  if (!util::is_deepseek_v4_model_type(target_model_args.model_type())) {
     return {cache_size_in_bytes, total_memory};
   }
 

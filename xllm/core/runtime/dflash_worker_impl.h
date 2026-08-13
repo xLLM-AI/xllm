@@ -31,16 +31,10 @@ namespace xllm {
 
 namespace dflash_detail {
 
-struct DecodeTokenWidths {
-  int32_t draft;
-  int32_t validate;
-};
-
-inline DecodeTokenWidths decode_token_widths(int32_t num_speculative_tokens,
-                                             bool sample_from_anchor) {
-  return {/*draft=*/sample_from_anchor ? num_speculative_tokens
-                                       : num_speculative_tokens + 1,
-          /*validate=*/num_speculative_tokens + 1};
+inline int32_t decode_draft_width(int32_t num_speculative_tokens,
+                                  bool sample_from_anchor) {
+  return sample_from_anchor ? num_speculative_tokens
+                            : num_speculative_tokens + 1;
 }
 
 inline void invalidate_draft_model_geometry(ModelInputParams& input_params) {

@@ -1591,12 +1591,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
   if (is_block_diffusion) {
-    std::string config_dir = model_weights_path_;
-    if (!options_.is_draft_engine()) {
-      CHECK(options_.draft_model_path().has_value())
-          << "block-diffusion speculative decoding requires --draft_model.";
-      config_dir = options_.draft_model_path().value();
-    }
     if (options_.is_draft_engine()) {
       args.layers_to_capture({});
       const bool is_dspark = speculative_algorithm == "DSpark";
@@ -1615,8 +1609,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
         configure_deepseek_v4_dspark_args(args, options_);
       }
     } else {
+      CHECK(options_.draft_model_path().has_value())
+          << "block-diffusion speculative decoding requires --draft_model.";
       std::vector<int32_t> capture_layer_ids =
-          read_capture_layer_ids(config_dir);
+          read_capture_layer_ids(options_.draft_model_path().value());
       args.layers_to_capture(std::move(capture_layer_ids));
     }
   } else if (options_.enable_speculative_decode() &&

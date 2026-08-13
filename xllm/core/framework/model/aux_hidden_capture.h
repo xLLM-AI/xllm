@@ -95,7 +95,7 @@ class AuxHiddenCapture final {
       const torch::Tensor& hidden_states,
       const std::optional<torch::Tensor>& residual = std::nullopt) const {
     ModelOutput output(hidden_states, residual);
-    if (layers_to_capture_.empty()) {
+    if (!enabled()) {
       return output;
     }
     CHECK_EQ(capture_idx_, static_cast<int64_t>(layers_to_capture_.size()))

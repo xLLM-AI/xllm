@@ -611,9 +611,7 @@ class DeepseekV4ModelImpl
     LlmModelImplBase<layer::DeepseekV4DecoderLayer>::load_state_dict(
         state_dict);
     embed_tokens_->load_state_dict(state_dict.get_dict_with_prefix("embed."));
-    LOAD_WEIGHT(hc_head_fn);
-    LOAD_WEIGHT(hc_head_base);
-    LOAD_WEIGHT(hc_head_scale);
+    load_hc_head_state_dict(state_dict);
   }
 
   void prepare_expert_weight(int32_t layer_id,

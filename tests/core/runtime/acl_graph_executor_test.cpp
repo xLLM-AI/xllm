@@ -1256,17 +1256,12 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
 }
 
 TEST(DSparkWorkerInputTest, SeparatesDraftAndValidationWidths) {
-  const dflash_detail::DecodeTokenWidths dspark_widths =
-      dflash_detail::decode_token_widths(/*num_speculative_tokens=*/5,
-                                         /*sample_from_anchor=*/true);
-  EXPECT_EQ(dspark_widths.draft, 5);
-  EXPECT_EQ(dspark_widths.validate, 6);
-
-  const dflash_detail::DecodeTokenWidths dflash_widths =
-      dflash_detail::decode_token_widths(/*num_speculative_tokens=*/5,
-                                         /*sample_from_anchor=*/false);
-  EXPECT_EQ(dflash_widths.draft, 6);
-  EXPECT_EQ(dflash_widths.validate, 6);
+  EXPECT_EQ(dflash_detail::decode_draft_width(/*num_speculative_tokens=*/5,
+                                              /*sample_from_anchor=*/true),
+            5);
+  EXPECT_EQ(dflash_detail::decode_draft_width(/*num_speculative_tokens=*/5,
+                                              /*sample_from_anchor=*/false),
+            6);
 }
 
 TEST(DSparkWorkerWeightsTest, PreservesDeepseekDraftHeadAndEmbedding) {
