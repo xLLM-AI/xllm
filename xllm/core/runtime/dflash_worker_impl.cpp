@@ -1498,25 +1498,6 @@ void DFlashWorkerImpl::apply_per_seq_varlen_prune(
   new_validate.input_params.embedding.input_embedding = torch::Tensor();
   record_metadata_ready_event(*prepare_stream_, new_validate);
   validate_input = std::move(new_validate);
-
-  int32_t max_w = 0;
-  int32_t total_w = 0;
-  int32_t sum_kept_below_default = 0;
-  int32_t default_val_tokens = options_.num_speculative_tokens() + 1;
-  int32_t pruned_seqs = 0;
-  for (int32_t v : per_seq_val_tokens) {
-    max_w = std::max(max_w, v);
-    total_w += v;
-    if (v < default_val_tokens) {
-      ++pruned_seqs;
-      sum_kept_below_default += v;
-    }
-  }
-  LOG_EVERY_N(INFO, 32) << "[dflash_dspark_varlen_prune] batch="
-                        << num_sequences << " total_val_tokens=" << total_w
-                        << " max_val_tokens=" << max_w << " (was "
-                        << (num_sequences * default_val_tokens) << ")"
-                        << " pruned_seqs=" << pruned_seqs;
 }
 
 void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(

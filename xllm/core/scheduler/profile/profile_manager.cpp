@@ -500,8 +500,7 @@ void ProfileManager::profile_speculative_validate_time() {
       SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) ||
       speculative_algorithm == "dflash" || speculative_algorithm == "dspark";
   if (!speculative_config.enable_adaptive_speculative_decode() ||
-      speculative_config.num_speculative_tokens() <= 1 ||
-      !is_supported_algo) {
+      speculative_config.num_speculative_tokens() <= 1 || !is_supported_algo) {
     return;
   }
   LOG(INFO) << "Starting speculative validate profile for "
