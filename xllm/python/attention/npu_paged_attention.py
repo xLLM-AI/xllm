@@ -195,9 +195,12 @@ class NpuPagedAttentionBackend(AttentionBackend):
                     "decode attention requires scheduler-provided host KV lengths"
                 )
             if len(kv_seq_lens_host_values) != real_batch:
-                raise RuntimeError(
-                    "host KV lengths must have one entry per block-table row"
-                )
+                if len(kv_seq_lens_host_values) > real_batch:
+                    kv_seq_lens_host_values = kv_seq_lens_host_values[:real_batch]
+                else:
+                    raise RuntimeError(
+                        "host KV lengths must have one entry per block-table row"
+                    )
             self._actual_seq_q: list[int] = list(range(1, real_batch + 1))
             self._actual_seq_kv: list[int] = list(kv_seq_lens_host_values)
         else:

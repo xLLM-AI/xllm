@@ -122,9 +122,11 @@ class ModelExecutor:
             "none",
             "0",
             "cudagraphs",
+            "aclgraph",
         ):
             raise NotImplementedError(
-                "Python data parallel graph execution supports cudagraphs only"
+                "Python data parallel graph execution supports cudagraphs and "
+                "aclgraph only"
             )
         if graph_backend in ("", "off", "none", "0"):
             pass
@@ -151,6 +153,8 @@ class ModelExecutor:
                 device,
                 max_seqs_per_batch,
                 int(config["max_position_embeddings"]),
+                dp_size,
+                dp_rank,
             )
         else:
             if self.eager_runner.cp_size > 1:

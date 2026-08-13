@@ -66,6 +66,8 @@ class Qwen3Config:
     attention_bias: bool = False
     tp_size: int = 1
     tp_rank: int = 0
+    dp_size: int = 1
+    dp_rank: int = 0
 
     @classmethod
     def from_dict(cls, d: dict) -> "Qwen3Config":
@@ -95,6 +97,8 @@ class Qwen3Config:
             attention_bias=bool(pick("attention_bias", default=False)),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
+            dp_size=int(pick("dp_size", default=1)),
+            dp_rank=int(pick("dp_rank", default=0)),
         )
 
     def head_split(self) -> Tuple[int, int, int]:
@@ -356,6 +360,11 @@ class Qwen3ForCausalLM(PyModelBase):
         self.device = device
 
         tp = self.cfg.tp_size
+        dp = self.cfg.dp_size
+        if tp * dp != int(config.get("world_size", tp * dp)):
+            raise ValueError("world_size must equal tp_size * dp_size")
+        if not 0 <= self.cfg.dp_rank < dp:
+            raise ValueError("dp_rank must be in [0, dp_size)")
         assert self.cfg.vocab_size % tp == 0
         self.model = Qwen3Model(self.cfg, dtype, device)
         self.lm_head = ColumnParallelLinear(

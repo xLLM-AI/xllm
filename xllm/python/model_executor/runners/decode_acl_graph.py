@@ -113,9 +113,13 @@ class DecodeAclGraphRunner(BaseRunner):
         device: torch.device,
         max_batch: int,
         max_model_len: int,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ) -> None:
         super().__init__(model, attention_backend, device)
-        self.max_batch = max_batch
+        self.dp_size = dp_size
+        self.dp_rank = dp_rank
+        self.max_batch = (max_batch + dp_size - 1) // dp_size
         self.max_model_len = max_model_len
         self._graphs: dict[_GraphKey, _DecodeGraphEntry] = {}
         self._paged_kv_indices_buffer: torch.Tensor | None = None
