@@ -1309,7 +1309,6 @@ TEST(SpeculativeOutputMetricsTest, CountsCommittedAndAcceptedTokensFromOutput) {
   const auto stats =
       calculate_speculative_output_stats(tokens, /*num_speculative_tokens=*/5);
 
-  EXPECT_TRUE(stats.supported_dtype);
   EXPECT_EQ(stats.committed_tokens, 9);
   EXPECT_EQ(stats.accepted_per_position, (std::vector<int64_t>{2, 2, 1, 1, 1}));
 }

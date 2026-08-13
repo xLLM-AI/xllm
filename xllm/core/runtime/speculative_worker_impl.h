@@ -39,12 +39,11 @@ void scale_speculative_parallel_token_counts(ModelInputParams& params,
 struct SpeculativeOutputStats {
   std::vector<int64_t> accepted_per_position;
   int64_t committed_tokens = 0;
-  bool supported_dtype = false;
 };
 
 // Extracts per-position acceptance counts and total committed tokens from a
-// speculative next_tokens tensor. Returns supported_dtype=false for unsupported
-// integer widths.
+// speculative next_tokens tensor. Casts to int64 internally so callers can pass
+// any integer-typed output tensor.
 SpeculativeOutputStats calculate_speculative_output_stats(
     const torch::Tensor& tokens,
     int64_t num_speculative_tokens);

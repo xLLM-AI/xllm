@@ -80,14 +80,8 @@ void record_speculative_metrics_from_output(
   }
   CHECK_EQ(position_labels.size(), static_cast<size_t>(num_speculative_tokens));
 
-  torch::Tensor tokens = next_tokens.contiguous();
   SpeculativeOutputStats stats =
-      calculate_speculative_output_stats(tokens, num_speculative_tokens);
-  if (!stats.supported_dtype) {
-    LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "
-                 << tokens.scalar_type();
-    return;
-  }
+      calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
 
   // Step and GetLastStepResult share a thread pool. Serialize the counter
   // update and derived gauge publication so the ratio cannot combine totals
