@@ -145,10 +145,6 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-bool is_block_diffusion_algorithm(const std::string& algorithm) {
-  return algorithm == "DFlash" || algorithm == "DSpark";
-}
-
 // Hooks run before a layer, so output layer L is captured at L + 1.
 std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path) {
@@ -171,7 +167,6 @@ std::vector<int32_t> read_capture_layer_ids(
   return capture_layer_ids;
 }
 
-
 void configure_deepseek_v4_dspark_args(ModelArgs& args,
                                        const runtime::Options& options) {
   CHECK_GT(args.dspark_num_layers(), 0)
@@ -190,51 +185,6 @@ void configure_deepseek_v4_dspark_args(ModelArgs& args,
 #else
   LOG(FATAL) << "DeepSeek-V4 DSpark is not supported on "
              << Platform::type_str() << ".";
-#endif
-}
-
-void configure_block_diffusion_model_args(
-    ModelArgs& args,
-    const runtime::Options& options,
-    const std::string& model_weights_path) {
-  CHECK(is_block_diffusion_algorithm(options.speculative_algorithm()));
-  std::string config_dir = model_weights_path;
-  if (!options.is_draft_engine()) {
-    CHECK(options.draft_model_path().has_value())
-        << "block-diffusion speculative decoding requires --draft_model.";
-    config_dir = options.draft_model_path().value();
-  }
-  std::vector<int32_t> capture_layer_ids = read_capture_layer_ids(config_dir);
-  args.block_diffusion_num_capture_layers(
-      static_cast<int64_t>(capture_layer_ids.size()));
-
-  if (options.is_draft_engine()) {
-    args.layers_to_capture({});
-  } else {
-    args.layers_to_capture(std::move(capture_layer_ids));
-    return;
-  }
-
-  const std::string& algorithm = options.speculative_algorithm();
-#if !defined(USE_NPU)
-  LOG(FATAL) << algorithm << " block-diffusion draft is not supported on "
-             << Platform::type_str() << ".";
-#else
-  auto set_draft_model_type = [&](const std::string& draft_model_type) {
-    LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-              << " to " << draft_model_type
-              << " for block-diffusion speculative decoding";
-    args.model_type(draft_model_type);
-  };
-
-  if (algorithm == "DFlash") {
-    set_draft_model_type("DFlashDraftModel");
-  } else if (util::is_deepseek_v4_model_type(args.model_type())) {
-    set_draft_model_type("deepseek_v4_dspark");
-    configure_deepseek_v4_dspark_args(args, options);
-  } else {
-    set_draft_model_type("DSparkDraftModel");
-  }
 #endif
 }
 
@@ -1630,23 +1580,50 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     }
   }
 
+  const std::string& speculative_algorithm = options_.speculative_algorithm();
   const bool is_block_diffusion =
-      is_block_diffusion_algorithm(options_.speculative_algorithm());
-  if (is_block_diffusion) {
-    configure_block_diffusion_model_args(args, options_, model_weights_path_);
-  }
+      speculative_algorithm == "DFlash" || speculative_algorithm == "DSpark";
 
 #if defined(USE_NPU)
-  const std::string& speculative_algorithm = options_.speculative_algorithm();
   if (options_.enable_speculative_decode() &&
       SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) &&
       util::is_deepseek_v4_model_type(args.model_type())) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
-  if (!is_block_diffusion && options_.enable_speculative_decode() &&
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (is_block_diffusion) {
+    std::string config_dir = model_weights_path_;
+    if (!options_.is_draft_engine()) {
+      CHECK(options_.draft_model_path().has_value())
+          << "block-diffusion speculative decoding requires --draft_model.";
+      config_dir = options_.draft_model_path().value();
+    }
+    std::vector<int32_t> capture_layer_ids = read_capture_layer_ids(config_dir);
+    args.block_diffusion_num_capture_layers(
+        static_cast<int64_t>(capture_layer_ids.size()));
+
+    if (options_.is_draft_engine()) {
+      args.layers_to_capture({});
+      const bool is_dspark = speculative_algorithm == "DSpark";
+      std::string draft_model_type =
+          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+      if (is_dspark && util::is_deepseek_v4_model_type(args.model_type())) {
+        draft_model_type = "deepseek_v4_dspark";
+      }
+      LOG(INFO) << "Overriding draft model_type from " << args.model_type()
+                << " to " << draft_model_type
+                << " for block-diffusion speculative decoding";
+      args.model_type(draft_model_type);
+      if (is_dspark && draft_model_type == "deepseek_v4_dspark") {
+        configure_deepseek_v4_dspark_args(args, options_);
+      }
+    } else {
+      args.layers_to_capture(std::move(capture_layer_ids));
+    }
+  } else if (options_.enable_speculative_decode() &&
+             ::xllm::SpeculativeConfig::get_instance()
+                 .enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
-  } else if (!is_block_diffusion && options_.enable_speculative_decode() &&
+  } else if (options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&
              args.num_nextn_predict_layers() != 0) {
     const std::string& current_type = args.model_type();
@@ -1675,6 +1652,20 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 #else
   if (options_.enable_speculative_decode()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
+    if (is_block_diffusion && options_.is_draft_engine()) {
+      LOG(FATAL) << speculative_algorithm
+                 << " block-diffusion draft is not supported on "
+                 << Platform::type_str() << ".";
+    }
+    if (is_block_diffusion && !options_.is_draft_engine()) {
+      CHECK(options_.draft_model_path().has_value())
+          << "block-diffusion speculative decoding requires --draft_model.";
+      std::vector<int32_t> capture_layer_ids =
+          read_capture_layer_ids(options_.draft_model_path().value());
+      args.block_diffusion_num_capture_layers(
+          static_cast<int64_t>(capture_layer_ids.size()));
+      args.layers_to_capture(std::move(capture_layer_ids));
+    }
     // When running speculative decoding, the draft worker reuses the same
     // checkpoint as the target model. The draft worker needs to instantiate
     // the MTP variant, so override the model_type here without mutating the
