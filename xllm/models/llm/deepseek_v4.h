@@ -1896,7 +1896,6 @@ class DeepseekV4ModelImpl
   torch::Device device_{torch::kCPU};
 
   ParallelArgs parallel_args_;
-  FlashComm1Options flash_comm1_options_;
 
   AuxHiddenCapture aux_capture_;
   int64_t aux_output_capacity_ = 0;
