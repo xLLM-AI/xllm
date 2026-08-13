@@ -16,6 +16,7 @@ limitations under the License.
 #include "dsa_metadata_builder.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "attention_metadata.h"
 #include "attention_metadata_builder.h"
@@ -531,9 +532,10 @@ void DSAMetadataBuilder::process_swa_group(
     // Expanded block-parallel rows all report q_len=1 and the same kv_len, so
     // q_start cannot recover their distinct positions. The row builder already
     // resolved those positions through the SWA ring; preserve those slots.
-    for (const int32_t slot : new_cache_slots) {
-      out_slots_acc[write_idx++] = slot;
-    }
+    std::memcpy(out_slots_acc.data(),
+                new_cache_slots.data(),
+                query_total_tokens * sizeof(int32_t));
+    write_idx = query_total_tokens;
   } else {
     for (int32_t seq = 0; seq < batch_size; ++seq) {
       const int64_t ctx_len = static_cast<int64_t>(ctx_lens[seq]);
