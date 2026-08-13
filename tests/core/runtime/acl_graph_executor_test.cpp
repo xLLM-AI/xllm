@@ -1206,8 +1206,8 @@ TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
   ModelArgs args;
   args.hidden_size(2).layers_to_capture({0, 2});
-  AuxHiddenCapture capture;
-  capture.init(args, torch::TensorOptions().dtype(torch::kFloat32), 3);
+  AuxHiddenCapture capture(
+      args, torch::TensorOptions().dtype(torch::kFloat32), 3);
 
   capture.reset_capture_index();
   capture.capture_layer(
