@@ -513,14 +513,12 @@ class DeepseekV4ModelImpl
 
     for (int32_t i = 0; i < model_args.n_layers(); ++i) {
       auto layer = layer::DeepseekV4DecoderLayer(context, i);
-      layers_.push_back(layer);
-    }
-
-    if (!model_args.layers_to_capture().empty()) {
     if (!model_args.layers_to_capture().empty()) {
       aux_capture_.init(
           model_args,
           options,
+          ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
+    }
           ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
     }
 
