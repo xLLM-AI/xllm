@@ -897,13 +897,6 @@ class DeepseekV4ModelImpl
     FlashComm1ContextScope fc1_scope(&fc1_ctx);
     if (is_sequence_sharded(fc1_ctx)) {
       h = shard_sequence(h, fc1_ctx);
-    }
-
-    std::optional<torch::Tensor> residual;
-    aux_capture_.reset_capture_index();
-    if (aux_capture_.enabled()) {
-      CHECK_EQ(::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
-               aux_output_capacity_)
           << "max_tokens_per_batch must remain unchanged after model "
              "construction while auxiliary hidden capture is enabled.";
     }
