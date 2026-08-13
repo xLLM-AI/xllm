@@ -142,13 +142,12 @@ TEST(DcpCompatTest, AllowsPrefixCache) {
       validate_dcp_first_version_options(options, EngineType::LLM).has_value());
 }
 
-TEST(DcpCompatTest, RejectsScheduleOverlap) {
+TEST(DcpCompatTest, AllowsScheduleOverlap) {
   Options options = dcp_options_with_supported_feature_flags();
   options.enable_schedule_overlap(true);
 
-  expect_error_contains(
-      validate_dcp_first_version_options(options, EngineType::LLM),
-      "enable_schedule_overlap=false");
+  EXPECT_FALSE(
+      validate_dcp_first_version_options(options, EngineType::LLM).has_value());
 }
 
 TEST(DcpCompatTest, RejectsDisaggregatedPrefillDecodeFlag) {
@@ -196,17 +195,9 @@ TEST(DcpCompatTest, RejectsSpeculativeTokens) {
 }
 
 // Enabling the experimental chunked prefill opt-in must not bypass the other
-// first-version rejections: schedule overlap, disaggregated PD, and
-// speculative decoding are still unsupported even under the experimental path.
-TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassScheduleOverlap) {
-  Options options = dcp_options_with_experimental_chunked_prefill();
-  options.enable_schedule_overlap(true);
-
-  expect_error_contains(
-      validate_dcp_first_version_options(options, EngineType::LLM),
-      "enable_schedule_overlap=false");
-}
-
+// first-version rejections: disaggregated PD and speculative decoding are still
+// unsupported even under the experimental path. (Schedule overlap is now
+// supported for eager DCP and is asserted by AllowsScheduleOverlap.)
 TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassDisaggPd) {
   Options options = dcp_options_with_experimental_chunked_prefill();
   options.enable_disagg_pd(true);

@@ -41,11 +41,6 @@ inline std::optional<std::string> validate_dcp_first_version_options(
            "(--enable_chunked_prefill=false and a non-multi_slo_and_prio "
            "priority_strategy), or set --decode_context_parallel_size=1";
   }
-  if (options.enable_schedule_overlap()) {
-    return "decode_context_parallel_size first version does not yet support "
-           "schedule overlap; set --enable_schedule_overlap=false or set "
-           "--decode_context_parallel_size=1";
-  }
   if (options.enable_disagg_pd() ||
       options.instance_role() != InstanceRole::DEFAULT) {
     return "decode_context_parallel_size first version does not yet support "
