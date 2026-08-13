@@ -243,8 +243,15 @@ class DeepseekV3Config:
     topk_method: str = "noaux_tc"
     norm_topk_prob: bool = True
     moe_intermediate_size: int = 2048
-    tp_size: int = 1
+    tp_size: int = 1  # TP for dense layers (attn, embed, shared expert, lm_head)
     tp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    dp_size: int = 1
+    dp_rank: int = 0
+    moe_tp_size: int = 1  # TP for routed MoE experts (equals tp_size when ep_size == 1)
+    moe_tp_rank: int = 0
+    world_size: int = 1
 
     @classmethod
     def from_dict(cls, d: dict) -> "DeepseekV3Config":
@@ -314,12 +321,35 @@ class DeepseekV3Config:
             ),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
+            ep_size=int(pick("ep_size", default=1)),
+            ep_rank=int(pick("ep_rank", default=0)),
+            dp_size=int(pick("dp_size", default=1)),
+            dp_rank=int(pick("dp_rank", default=0)),
+            moe_tp_size=int(pick("moe_tp_size", default=1)),
+            moe_tp_rank=int(pick("moe_tp_rank", default=0)),
+            world_size=int(pick("world_size", default=1)),
         )
 
     def head_split(self) -> Tuple[int, int]:
         """Per-rank (num_heads_local, num_kv_heads_local=1)."""
         num_heads_local = self.n_heads // self.tp_size
         return num_heads_local, 1
+
+    def validate(self) -> None:
+        if self.ep_size not in (1, self.world_size):
+            raise ValueError(
+                f"ep_size must be 1 or world_size ({self.world_size}), got {self.ep_size}"
+            )
+        if self.ep_size > 1 and self.n_routed_experts % self.ep_size:
+            raise ValueError(
+                f"n_routed_experts ({self.n_routed_experts}) must be divisible by "
+                f"ep_size ({self.ep_size})"
+            )
+        if self.ep_size > 1 and self.moe_tp_size * self.ep_size != self.world_size:
+            raise ValueError(
+                f"world_size ({self.world_size}) must equal "
+                f"moe_tp_size ({self.moe_tp_size}) * ep_size ({self.ep_size})"
+            )
 
 
 class W8A8StaticLinear(nn.Module):
@@ -498,9 +528,10 @@ class DeepseekV3MLP(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         skip_tp_reduce: bool = False,
+        tp_override: Optional[int] = None,
     ) -> None:
         super().__init__()
-        tp = cfg.tp_size
+        tp = tp_override if tp_override is not None else cfg.tp_size
         assert intermediate_size % tp == 0, (
             f"intermediate_size {intermediate_size} not divisible by tp {tp}"
         )
@@ -737,7 +768,7 @@ class DeepseekV3Indexer(nn.Module):
 
 
 class DeepseekV3MoE(nn.Module):
-    """Pure-TP MoE: 256 routed experts replicated, expert intermediate TP-sharded."""
+    """EP-aware MoE: experts split across EP ranks, intermediate TP-sharded."""
 
     def __init__(
         self,
@@ -749,7 +780,6 @@ class DeepseekV3MoE(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.layer_id = layer_id
-        tp = cfg.tp_size
         self.num_experts = cfg.n_routed_experts
         self.topk = cfg.num_experts_per_tok
         self.n_group = cfg.n_group
@@ -757,8 +787,20 @@ class DeepseekV3MoE(nn.Module):
         self.routed_scaling = cfg.routed_scaling_factor
         self.moe_inter = cfg.moe_intermediate_size
         self.hidden = cfg.hidden_size
+        self.ep_size = cfg.ep_size
+        self.ep_rank = cfg.ep_rank
+        self.dp_size = cfg.dp_size
+        self.dp_rank = cfg.dp_rank
+        self.moe_tp_size = cfg.moe_tp_size
+
+        tp = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
         assert self.moe_inter % tp == 0
         self.inter_local = self.moe_inter // tp
+
+        num_local_experts = self.num_experts // max(self.ep_size, 1)
+        self.num_local_experts = num_local_experts
+        self.local_expert_start = self.ep_rank * num_local_experts
+        self.local_expert_end = self.local_expert_start + num_local_experts
 
         self.gate = nn.Linear(
             cfg.hidden_size, self.num_experts, bias=False, dtype=dtype, device=device
@@ -770,7 +812,7 @@ class DeepseekV3MoE(nn.Module):
         )
         self.experts_w13 = nn.Parameter(
             torch.empty(
-                self.num_experts, 2 * self.inter_local, self.hidden,
+                num_local_experts, 2 * self.inter_local, self.hidden,
                 dtype=torch.int8, device=device,
             ),
             requires_grad=False,
@@ -778,20 +820,20 @@ class DeepseekV3MoE(nn.Module):
         self.register_buffer(
             "experts_w13_scale",
             torch.empty(
-                self.num_experts, 2 * self.inter_local, 1,
+                num_local_experts, 2 * self.inter_local, 1,
                 dtype=torch.float32, device=device,
             ),
         )
         self.register_buffer(
             "experts_w13_offset",
             torch.empty(
-                self.num_experts, 2 * self.inter_local, 1,
+                num_local_experts, 2 * self.inter_local, 1,
                 dtype=torch.float32, device=device,
             ),
         )
         self.experts_w2 = nn.Parameter(
             torch.empty(
-                self.num_experts, self.hidden, self.inter_local,
+                num_local_experts, self.hidden, self.inter_local,
                 dtype=torch.int8, device=device,
             ),
             requires_grad=False,
@@ -799,20 +841,22 @@ class DeepseekV3MoE(nn.Module):
         self.register_buffer(
             "experts_w2_scale",
             torch.empty(
-                self.num_experts, self.hidden, 1,
+                num_local_experts, self.hidden, 1,
                 dtype=torch.float32, device=device,
             ),
         )
         self.register_buffer(
             "experts_w2_offset",
             torch.empty(
-                self.num_experts, self.hidden, 1,
+                num_local_experts, self.hidden, 1,
                 dtype=torch.float32, device=device,
             ),
         )
         shared_inter = cfg.moe_intermediate_size * cfg.n_shared_experts
+        shared_tp = cfg.moe_tp_size if cfg.ep_size > 1 else None
         self.shared_experts = DeepseekV3MLP(cfg, shared_inter, dtype, device,
-                                            skip_tp_reduce=True)
+                                            skip_tp_reduce=True,
+                                            tp_override=shared_tp)
 
     def process_weights_after_loading(self) -> None:
         assert torch.all(self.experts_w13_offset == 0), (
@@ -830,20 +874,28 @@ class DeepseekV3MoE(nn.Module):
             )
         )
         self.experts_w13_scale.data = self.experts_w13_scale.data.view(
-            self.num_experts, -1
+            self.num_local_experts, -1
         ).contiguous()
         self.experts_w13_offset.data = self.experts_w13_offset.data.view(
-            self.num_experts, -1
+            self.num_local_experts, -1
         ).contiguous()
         self.experts_w2_scale.data = self.experts_w2_scale.data.view(
-            self.num_experts, -1
+            self.num_local_experts, -1
         ).contiguous()
         self.experts_w2_offset.data = self.experts_w2_offset.data.view(
-            self.num_experts, -1
+            self.num_local_experts, -1
         ).contiguous()
         self.shared_experts.process_weights_after_loading()
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        local_hidden = hidden
+        token_counts: list[int] | None = None
+        if self.dp_size > 1:
+            token_counts = list(get_forward_context().metadata.dp_token_counts)
+            hidden = distributed.all_gather_variable(
+                hidden, token_counts, self.dp_rank, "dp",
+            )
+
         logits = self.gate(hidden)
         routed = kernels.grouped_moe(
             hidden,
@@ -857,12 +909,27 @@ class DeepseekV3MoE(nn.Module):
             self.topk_group,
             self.n_group,
             self.cfg.norm_topk_prob,
+            [self.local_expert_start, self.local_expert_end],
         )
         routed = routed * self.routed_scaling
+
+        if self.ep_size > 1:
+            distributed.all_reduce_(routed, "moe_ep")
+
         shared_out = self.shared_experts(hidden)
         final = routed + shared_out
-        if self.cfg.tp_size > 1:
+        if self.moe_tp_size > 1:
+            distributed.all_reduce_(final, "moe_tp")
+        elif self.cfg.tp_size > 1 and self.ep_size == 1:
             distributed.all_reduce_(final)
+
+        if token_counts is not None:
+            local_tokens = token_counts[self.dp_rank]
+            if local_tokens == 0:
+                return torch.zeros_like(local_hidden)
+            start = sum(token_counts[:self.dp_rank])
+            final = final.narrow(0, start, local_tokens)
+
         return final
 
 
@@ -967,6 +1034,15 @@ class DeepseekV3ForCausalLM(PyModelBase):
         self.cfg.tp_size = int(config.get("tp_size", 1))
         self.cfg.tp_rank = int(config.get(
             "tp_rank", _tp_rank_from_device(config.get("device", "npu:0"))))
+        self.cfg.ep_size = int(config.get("ep_size", 1))
+        self.cfg.ep_rank = int(config.get("ep_rank", 0))
+        self.cfg.dp_size = int(config.get("dp_size", 1))
+        self.cfg.dp_rank = int(config.get("dp_rank", 0))
+        self.cfg.moe_tp_size = int(config.get("moe_tp_size", 1))
+        self.cfg.moe_tp_rank = int(config.get("moe_tp_rank", 0))
+        self.cfg.world_size = int(config.get("world_size", self.cfg.tp_size))
+        if hasattr(self.cfg, "validate"):
+            self.cfg.validate()
         dtype = self.resolve_dtype(
             config.get("dtype") or config.get("torch_dtype")
         )
@@ -1053,7 +1129,13 @@ class DeepseekV3ForCausalLM(PyModelBase):
                 w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
                 w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
                 w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                for j in range(cfg.n_routed_experts):
+                moe_layer = self.model.layers[i].mlp
+                expert_start = moe_layer.local_expert_start
+                expert_end = moe_layer.local_expert_end
+                shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
+                shard_rank = cfg.moe_tp_rank if cfg.ep_size > 1 else cfg.tp_rank
+                for j in range(expert_start, expert_end):
+                    local_idx = j - expert_start
                     gw = loader.load_tensor(se + f"{j}.gate_proj.weight")
                     gs = loader.load_tensor(se + f"{j}.gate_proj.weight_scale")
                     go = loader.load_tensor(se + f"{j}.gate_proj.weight_offset")
@@ -1063,20 +1145,34 @@ class DeepseekV3ForCausalLM(PyModelBase):
                     dw = loader.load_tensor(se + f"{j}.down_proj.weight")
                     ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
                     do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
-                    w13_param.data[j].copy_(
-                        torch.cat([loader.shard(gw, 0), loader.shard(uw, 0)], dim=0).contiguous())
-                    w13_scale.data[j].copy_(
-                        torch.cat([loader.shard(gs, 0), loader.shard(us, 0)], dim=0).contiguous())
-                    w13_offset.data[j].copy_(
-                        torch.cat([loader.shard(go, 0), loader.shard(uo, 0)], dim=0).contiguous())
-                    w2_param.data[j].copy_(loader.shard(dw, 1).contiguous())
-                    w2_scale.data[j].copy_(ds.contiguous())
-                    w2_offset.data[j].copy_(do.contiguous())
+                    w13_param.data[local_idx].copy_(
+                        torch.cat([
+                            loader.shard(gw, 0, shard_world, shard_rank),
+                            loader.shard(uw, 0, shard_world, shard_rank),
+                        ], dim=0).contiguous())
+                    w13_scale.data[local_idx].copy_(
+                        torch.cat([
+                            loader.shard(gs, 0, shard_world, shard_rank),
+                            loader.shard(us, 0, shard_world, shard_rank),
+                        ], dim=0).contiguous())
+                    w13_offset.data[local_idx].copy_(
+                        torch.cat([
+                            loader.shard(go, 0, shard_world, shard_rank),
+                            loader.shard(uo, 0, shard_world, shard_rank),
+                        ], dim=0).contiguous())
+                    w2_param.data[local_idx].copy_(
+                        loader.shard(dw, 1, shard_world, shard_rank).contiguous())
+                    w2_scale.data[local_idx].copy_(ds.contiguous())
+                    w2_offset.data[local_idx].copy_(do.contiguous())
                 loader.copy_in(p + "mlp.gate.weight",
                                loader.load_tensor(p + "mlp.gate.weight"))
                 loader.copy_in(p + "mlp.e_score_correction_bias",
                                loader.load_tensor(p + "mlp.gate.e_score_correction_bias"))
+                saved_tp = (loader.tp_size, loader.tp_rank)
+                loader.tp_size = shard_world
+                loader.tp_rank = shard_rank
                 loader.load_w8a8_b(p + "mlp.shared_experts.")
+                loader.tp_size, loader.tp_rank = saved_tp
                 self.model.layers[i].mlp.process_weights_after_loading()
 
         loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))
