@@ -202,7 +202,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // attention plan for each request.
   need_update_attention_plan_ =
       (args.model_type() != "deepseek_v32" &&
-       args.model_type() != "deepseek_v4" &&
+       !util::is_deepseek_v4_model_type(args.model_type()) &&
        args.model_type() != "glm_moe_dsa" && !supports_mla_graph_kv_bucketing_);
 
   // Check if mRoPE is used (for VLM models like qwen2-vl)

@@ -28,6 +28,10 @@ namespace xllm {
 // plan for the current global DP batch.
 bool should_run_speculative_decode(const ModelInputParams& params);
 
+// Keep padded and raw DP token-count views in the same speculative layout.
+void scale_speculative_parallel_token_counts(ModelInputParams& params,
+                                             int32_t multiplier);
+
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and
 // sampling parameter updates. Subclasses implement algorithm-specific

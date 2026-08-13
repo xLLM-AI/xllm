@@ -109,6 +109,16 @@ bool should_run_speculative_decode(const ModelInputParams& params) {
                      [](int32_t is_decode) { return is_decode == 1; });
 }
 
+void scale_speculative_parallel_token_counts(ModelInputParams& params,
+                                             int32_t multiplier) {
+  for (int32_t& token_num : params.parallel.dp_global_token_nums) {
+    token_num *= multiplier;
+  }
+  for (int32_t& token_num : params.parallel.raw_dp_global_token_nums) {
+    token_num *= multiplier;
+  }
+}
+
 SpeculativeWorkerImpl::SpeculativeWorkerImpl(
     const ParallelArgs& parallel_args,
     const torch::Device& device,
@@ -454,13 +464,8 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   update_sampling_params(
       validate_input.sampling_params, num_val_tokens, total_num_val_tokens);
 
-  // update dp_global_token_nums for dp/ep parallel
-  for (auto& it : input_params.parallel.dp_global_token_nums) {
-    it *= num_val_tokens;
-  }
-  for (auto& it : input_params.parallel.raw_dp_global_token_nums) {
-    it *= num_val_tokens;
-  }
+  // Update both padded and raw token counts for DP/EP parallelism.
+  scale_speculative_parallel_token_counts(input_params, num_val_tokens);
   validate_input.device_tensors_ready = true;
 }
 

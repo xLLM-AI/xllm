@@ -1251,6 +1251,33 @@ TEST(DSparkWorkerInputTest, InvalidatesTargetAttentionMetadataOnly) {
   EXPECT_EQ(params.multi_block_tables.size(), 3);
 }
 
+TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
+  ModelInputParams params;
+  params.parallel.dp_global_token_nums = {2, 0, 4};
+  params.parallel.raw_dp_global_token_nums = {1, 0, 3};
+
+  scale_speculative_parallel_token_counts(params, /*multiplier=*/5);
+
+  EXPECT_EQ(params.parallel.dp_global_token_nums,
+            (std::vector<int32_t>{10, 0, 20}));
+  EXPECT_EQ(params.parallel.raw_dp_global_token_nums,
+            (std::vector<int32_t>{5, 0, 15}));
+}
+
+TEST(DSparkWorkerInputTest, SeparatesDraftAndValidationWidths) {
+  const dflash_detail::DecodeTokenWidths dspark_widths =
+      dflash_detail::decode_token_widths(/*num_speculative_tokens=*/5,
+                                         /*sample_from_anchor=*/true);
+  EXPECT_EQ(dspark_widths.draft, 5);
+  EXPECT_EQ(dspark_widths.validate, 6);
+
+  const dflash_detail::DecodeTokenWidths dflash_widths =
+      dflash_detail::decode_token_widths(/*num_speculative_tokens=*/5,
+                                         /*sample_from_anchor=*/false);
+  EXPECT_EQ(dflash_widths.draft, 6);
+  EXPECT_EQ(dflash_widths.validate, 6);
+}
+
 TEST(DSparkWorkerWeightsTest, PreservesDeepseekDraftHeadAndEmbedding) {
   EXPECT_TRUE(
       dflash_detail::draft_uses_own_head_and_embedding("deepseek_v4_dspark"));
