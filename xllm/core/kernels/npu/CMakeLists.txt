@@ -37,7 +37,6 @@ cc_library(
     w4a8_dynamic_moe_preprocess.cpp
     rec_constrained_topk.cpp
     npu_ops_library.cpp
-    group_gemm_wrapper.cpp
   DEPS
     :torch_npu_kernels
     :tilelang_kernels

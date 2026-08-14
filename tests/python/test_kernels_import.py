@@ -57,9 +57,6 @@ _NPU_SCHEMAS = (
     "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, ScalarType dtype, int axis) -> Tensor",
     "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
     "ScalarType? dst_type) -> (Tensor, Tensor?)",
-    "group_gemm(Tensor x, Tensor weight, Tensor? scale, Tensor? "
-    "per_token_scale, Tensor group_list, int split_item, int group_type, int "
-    "group_list_type, ScalarType? output_dtype) -> Tensor",
     "lightning_indexer(Tensor query, Tensor key, Tensor weights, Tensor? "
     "query_seq_lengths, Tensor? key_seq_lengths, Tensor? block_table, str "
     "layout_query, str layout_key, int selected_count, int sparse_mode, int "
@@ -211,7 +208,7 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
     _run_isolated_python(
         """
         import xllm.python.kernels_npu._custom_op  # noqa: F401
-        from xllm.python.kernels_npu import dsa, normalization, quantization
+        from xllm.python.kernels_npu import dsa, moe, normalization, quantization
         from xllm.python.kernels_npu import rotary_embedding, sparse_attention
 
         mode = torch._subclasses.fake_tensor.FakeTensorMode()
@@ -227,22 +224,6 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             )
             assert quantized.shape == (2, 2) and quantized.dtype == torch.int32
             assert scale.shape == (2,) and scale.dtype == torch.float32
-
-            grouped = torch.ops.xllm_ops.group_gemm(
-                torch.empty(6, 16, dtype=torch.int8),
-                torch.empty(4, 16, 32, dtype=torch.int8),
-                None,
-                None,
-                torch.empty(4, dtype=torch.int64),
-                2,
-                0,
-                1,
-                torch.int32,
-            )
-            assert grouped.shape == (6, 32)
-            assert grouped.dtype == torch.int32
-
-            from xllm.python.kernels_npu import moe
 
             selected_moe = moe.grouped_moe_with_selected_experts(
                 torch.empty(3, 16, dtype=torch.bfloat16),
@@ -312,6 +293,13 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             assert sparse_metadata.shape == (1024,)
             assert sparse_metadata.dtype == torch.int32
 
+            sparse_metadata_default = dsa.sparse_attn_sharedkv_metadata(
+                64, 1, 512, None, None, None, None, None,
+                1, 4, 16, 0, 0, 1, 4, 3, 127, 0,
+                "BSND", "PA_ND", True, False,
+            )
+            assert sparse_metadata_default.device.type == "npu"
+
             dsa_query = torch.empty(1, 4, 64, 512)
             sparse_out, sparse_lse = dsa.sparse_attn_sharedkv(
                 dsa_query, None, None, None, None, None, None,
@@ -320,6 +308,15 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             )
             assert sparse_out.shape == dsa_query.shape
             assert sparse_lse.numel() == 0
+            assert sparse_lse.dtype == torch.float32
+
+            _, sparse_lse = dsa.sparse_attn_sharedkv(
+                dsa_query, None, None, None, None, None, None,
+                None, None, None, None, None, None, sparse_metadata,
+                1.0, 1, 4, 3, 127, 0, "BSND", "PA_ND", True,
+            )
+            assert sparse_lse.shape == (1, 4, 64, 1)
+            assert sparse_lse.dtype == torch.float32
 
             qli_metadata = dsa.quant_lightning_indexer_metadata(
                 64, 1, 128, 0, 0, seq_lens, seq_lens,
@@ -328,6 +325,13 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             )
             assert qli_metadata.shape == (1024,)
             assert qli_metadata.dtype == torch.int32
+
+            qli_metadata_default = dsa.quant_lightning_indexer_metadata(
+                64, 1, 128, 0, 0, None, None,
+                1, 8, 8, "TND", "PA_BSND", 512, 3,
+                2**63 - 1, 2**63 - 1, 4, "npu",
+            )
+            assert qli_metadata_default.device.type == "npu"
 
             qli_indices, qli_values = dsa.quant_lightning_indexer(
                 torch.empty(8, 64, 128, dtype=torch.int8),
@@ -358,7 +362,7 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
                 hc_attn, hc_input, hc_post, hc_comb
             ).shape == hc_input.shape
 
-            gate_weights, expert_idx, gate_out = dsa.moe_gating_top_k_hash(
+            gate_weights, expert_idx, gate_out = moe.moe_gating_top_k_hash(
                 torch.empty(8, 256), 6, None, None, None,
                 1, 1, 1.0, 1e-20, 1, 0, 2, False,
             )
@@ -368,13 +372,19 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             assert gate_out.shape == (8, 256)
             assert gate_out.dtype == torch.float32
 
-            swiglu_out, swiglu_scale = dsa.dequant_swiglu_quant(
+            swiglu_out, swiglu_scale = moe.dequant_swiglu_quant(
                 torch.empty(8, 32, dtype=torch.int32), None, None
             )
             assert swiglu_out.shape == (8, 16)
             assert swiglu_out.dtype == torch.int8
             assert swiglu_scale.shape == (8,)
             assert swiglu_scale.dtype == torch.float32
+
+            swiglu_3d, swiglu_scale_3d = moe.dequant_swiglu_quant(
+                torch.empty(2, 8, 32, dtype=torch.int32), None, None
+            )
+            assert swiglu_3d.shape == (2, 8, 16)
+            assert swiglu_scale_3d.shape == (2, 8)
 
             try:
                 quantization.dynamic_quant(

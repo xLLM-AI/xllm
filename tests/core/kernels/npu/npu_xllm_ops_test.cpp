@@ -209,11 +209,46 @@ TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
              .item<float>();
 }
 
-TEST_F(NpuXllmOpsTest, GroupGemmWrapperMatchesInt32Reference) {
+TEST_F(NpuXllmOpsTest, Dsv4OpsUseNpuDispatchKeys) {
   py::gil_scoped_acquire gil;
 
   py::exec(R"PY(
 import torch
+
+device_ops = (
+    "moe_gating_top_k_hash",
+    "dequant_swiglu_quant",
+    "hc_pre",
+    "hc_post",
+    "compressor",
+    "sparse_attn_sharedkv",
+    "quant_lightning_indexer",
+)
+for op_name in device_ops:
+    qualname = f"xllm_ops::{op_name}"
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(
+        qualname, "PrivateUse1"
+    ), qualname
+    assert not torch._C._dispatch_has_kernel_for_dispatch_key(
+        qualname, "CompositeExplicitAutograd"
+    ), qualname
+
+for op_name in (
+    "sparse_attn_sharedkv_metadata",
+    "quant_lightning_indexer_metadata",
+):
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(
+        f"xllm_ops::{op_name}", "CompositeExplicitAutograd"
+    ), op_name
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4GroupGemmMatchesInt32Reference) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.moe import _group_gemm
 
 device = torch.device("privateuseone:0")
 torch.manual_seed(20260814)
@@ -225,8 +260,16 @@ group_list_cpu = torch.tensor([4, 4], dtype=torch.int64)
 x = x_cpu.to(device)
 w = w_cpu.to(device)
 group_list = group_list_cpu.to(device)
-out = torch.ops.xllm_ops.group_gemm(
-    x, w, None, None, group_list, 2, 0, 1, torch.int32
+out = _group_gemm(
+    x=x,
+    weight=w,
+    scale=None,
+    per_token_scale=None,
+    group_list=group_list,
+    split_item=2,
+    group_type=0,
+    group_list_type=1,
+    output_dtype=torch.int32,
 )
 torch.npu.synchronize()
 
@@ -240,11 +283,12 @@ torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 )PY");
 }
 
-TEST_F(NpuXllmOpsTest, GroupGemmWrapperAcceptsScaleAndPerTokenScale) {
+TEST_F(NpuXllmOpsTest, Dsv4GroupGemmAcceptsScaleAndPerTokenScale) {
   py::gil_scoped_acquire gil;
 
   py::exec(R"PY(
 import torch
+from xllm.python.kernels_npu.moe import _group_gemm
 
 device = torch.device("privateuseone:0")
 tokens, experts, input_dim, output_dim = 8, 2, 128, 128
@@ -254,8 +298,16 @@ scale = torch.ones((experts, output_dim), dtype=torch.bfloat16, device=device)
 per_token_scale = torch.ones((tokens,), dtype=torch.float32, device=device)
 group_list = torch.tensor([4, 4], dtype=torch.int64, device=device)
 
-out = torch.ops.xllm_ops.group_gemm(
-    x, w, scale, per_token_scale, group_list, 2, 0, 1, torch.bfloat16
+out = _group_gemm(
+    x=x,
+    weight=w,
+    scale=scale,
+    per_token_scale=per_token_scale,
+    group_list=group_list,
+    split_item=2,
+    group_type=0,
+    group_list_type=1,
+    output_dtype=torch.bfloat16,
 )
 torch.npu.synchronize()
 assert out.shape == (tokens, output_dim)
@@ -605,6 +657,36 @@ assert out.shape == query.shape
 assert out.dtype == query.dtype
 assert lse.numel() == 0
 assert torch.equal(metadata.cpu(), metadata_again.cpu())
+
+_, lse = sparse_attn_sharedkv(
+    query,
+    ori_kv,
+    None,
+    None,
+    None,
+    block_table,
+    None,
+    None,
+    None,
+    None,
+    None,
+    seq_kv,
+    sinks,
+    metadata,
+    head_dim**-0.5,
+    1,
+    4,
+    3,
+    127,
+    0,
+    "BSND",
+    "PA_ND",
+    True,
+)
+torch.npu.synchronize()
+assert lse.shape == (*query.shape[:-1], 1)
+assert lse.dtype == torch.float32
+assert torch.isfinite(lse).all()
 
 expected = torch.zeros_like(query_cpu.float())
 keys = kv_cpu[0, :, 0].float()

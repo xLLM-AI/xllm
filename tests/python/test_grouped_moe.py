@@ -43,10 +43,10 @@ def test_selected_expert_moe_matches_native_call_contract(
 
     hidden = torch.empty(3, 16, dtype=torch.bfloat16)
     topk_weights = torch.ones(3, 2, dtype=torch.bfloat16)
-    topk_ids = torch.zeros(3, 2, dtype=torch.int32)
+    topk_ids = torch.tensor([[4, 0], [5, 9], [7, 6]], dtype=torch.int32)
     expanded = torch.empty(6, 16, dtype=torch.bfloat16)
     row_ids = torch.arange(6, dtype=torch.int32)
-    group_list = torch.tensor([1, 3, 5, 6], dtype=torch.int64)
+    expert_tokens = torch.tensor([1, 3, 5, 6, 7, 8], dtype=torch.int64)
     quantized = torch.empty(6, 16, dtype=torch.int8)
     input_scale = torch.empty(6, dtype=torch.float32)
     gemm1 = torch.empty(6, 32, dtype=torch.int32)
@@ -57,7 +57,7 @@ def test_selected_expert_moe_matches_native_call_contract(
 
     def init_routing(*args, **kwargs):
         calls.append(("routing", kwargs))
-        return expanded, row_ids, group_list, torch.empty(0)
+        return expanded, row_ids, expert_tokens, torch.empty(0)
 
     def dynamic_quant(value):
         assert value is expanded
@@ -112,12 +112,38 @@ def test_selected_expert_moe_matches_native_call_contract(
     assert gemm_calls[1]["scale"].dtype == torch.bfloat16
     assert gemm_calls[1]["per_token_scale"] is activation_scale
     assert gemm_calls[1]["output_dtype"] == torch.bfloat16
-    assert all(call["group_list"] is group_list for call in gemm_calls)
+    assert all(torch.equal(call["group_list"], expert_tokens[:4]) for call in gemm_calls)
+    assert all(call["group_list"].numel() == 4 for call in gemm_calls)
     assert all(call["group_list_type"] == 1 for call in gemm_calls)
 
     dequant = dict(calls)["dequant_swiglu_quant"]
     assert isinstance(dequant, dict)
     assert dequant["x"] is gemm1
     assert dequant["activation_scale"] is input_scale
-    assert dequant["group_index"] is group_list
+    assert torch.equal(dequant["group_index"], expert_tokens[:4])
     assert dequant["clamp_limit"] == 7.0
+
+    unpermute = dict(calls)["unpermute"]
+    assert isinstance(unpermute, dict)
+    torch.testing.assert_close(
+        unpermute["probs"],
+        torch.tensor([[1, 0], [1, 0], [1, 1]], dtype=torch.bfloat16),
+    )
+
+
+def test_selected_expert_moe_rejects_an_invalid_active_range() -> None:
+    moe = _load_npu_moe_module()
+
+    with pytest.raises(ValueError, match="active expert range"):
+        moe._grouped_moe_with_selected_experts_impl(
+            torch.empty(1, 16, dtype=torch.bfloat16),
+            torch.ones(1, 1, dtype=torch.bfloat16),
+            torch.zeros(1, 1, dtype=torch.int32),
+            torch.empty(4, 16, 32, dtype=torch.int8),
+            torch.empty(4, 16, 16, dtype=torch.int8),
+            torch.empty(4, 32),
+            torch.empty(4, 16),
+            num_total_experts=16,
+            start_expert_id=14,
+            num_experts_per_rank=4,
+        )

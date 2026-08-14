@@ -22,6 +22,72 @@ import torch_npu
 _FRACTAL_NZ_FORMAT = 29
 
 
+def dequant_swiglu_quant(
+    x: torch.Tensor,
+    weight_scale: torch.Tensor | None,
+    activation_scale: torch.Tensor | None,
+    bias: torch.Tensor | None = None,
+    quant_scale: torch.Tensor | None = None,
+    quant_offset: torch.Tensor | None = None,
+    group_index: torch.Tensor | None = None,
+    activate_left: bool = True,
+    quant_mode: int = 1,
+    swiglu_mode: int = 1,
+    clamp_limit: float = 0.0,
+    glu_alpha: float = 1.0,
+    glu_bias: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the fused dequantization, SwiGLU, and dynamic quantization."""
+    return torch.ops.xllm_ops.dequant_swiglu_quant(
+        x,
+        weight_scale,
+        activation_scale,
+        bias,
+        quant_scale,
+        quant_offset,
+        group_index,
+        activate_left,
+        quant_mode,
+        swiglu_mode,
+        clamp_limit,
+        glu_alpha,
+        glu_bias,
+    )
+
+
+def moe_gating_top_k_hash(
+    x: torch.Tensor,
+    k: int,
+    bias: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    tid2eid: torch.Tensor | None,
+    k_group: int,
+    group_count: int,
+    routed_scaling_factor: float,
+    eps: float,
+    group_select_mode: int,
+    renorm: int,
+    norm_type: int,
+    out_flag: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Select experts with the DeepSeek-V4 hash-routing gate."""
+    return torch.ops.xllm_ops.moe_gating_top_k_hash(
+        x,
+        k,
+        bias,
+        input_ids,
+        tid2eid,
+        k_group,
+        group_count,
+        routed_scaling_factor,
+        eps,
+        group_select_mode,
+        renorm,
+        norm_type,
+        out_flag,
+    )
+
+
 def supports_cutlass_moe(device: torch.device) -> bool:
     """Return whether ``device`` has the native expert GEMMs.
 
@@ -148,8 +214,30 @@ def grouped_moe(
     )
 
 
-def _group_gemm(**kwargs) -> torch.Tensor:
-    return torch.ops.xllm_ops.group_gemm(**kwargs)
+def _group_gemm(
+    *,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    per_token_scale: torch.Tensor | None,
+    group_list: torch.Tensor,
+    split_item: int,
+    group_type: int,
+    group_list_type: int,
+    output_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    outputs = torch.ops.npu.npu_grouped_matmul(
+        x=[x],
+        weight=[weight],
+        scale=None if scale is None else [scale],
+        per_token_scale=None if per_token_scale is None else [per_token_scale],
+        group_list=group_list,
+        split_item=split_item,
+        group_type=group_type,
+        group_list_type=group_list_type,
+        output_dtype=output_dtype,
+    )
+    return outputs[0]
 
 
 def _grouped_moe_with_selected_experts_impl(
@@ -174,8 +262,12 @@ def _grouped_moe_with_selected_experts_impl(
     """
     num_tokens = hidden_states.shape[0]
     expert_num = num_total_experts if num_total_experts > 0 else w13.shape[0]
-    local_expert_count = num_experts_per_rank if num_experts_per_rank > 0 else expert_num
+    local_expert_count = num_experts_per_rank if num_experts_per_rank > 0 else w13.shape[0]
     active_range = [start_expert_id, start_expert_id + local_expert_count]
+    if start_expert_id < 0 or active_range[1] > expert_num:
+        raise ValueError(f"active expert range {active_range} is outside [0, {expert_num})")
+    if w13.shape[0] != local_expert_count or w2.shape[0] != local_expert_count:
+        raise ValueError("local expert count must match the first dimension of w13 and w2")
     expanded_hidden, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
         hidden_states,
         topk_ids.to(torch.int32),
@@ -192,7 +284,9 @@ def _grouped_moe_with_selected_experts_impl(
     sorted_hidden_i8, pertoken_scale = _kernels.dynamic_quant(expanded_hidden)
     if pertoken_scale is None:
         raise RuntimeError("dynamic_quant did not return a per-token scale")
-    group_list = expert_tokens.to(torch.int64)
+    if expert_tokens.numel() < local_expert_count:
+        raise RuntimeError("npu_moe_init_routing_v2 returned fewer groups than local experts")
+    group_list = expert_tokens[:local_expert_count].to(torch.int64)
     gemm1_out = _group_gemm(
         x=sorted_hidden_i8,
         weight=w13,
@@ -211,7 +305,7 @@ def _grouped_moe_with_selected_experts_impl(
         bias=None,
         quant_scale=None,
         quant_offset=None,
-        group_index=group_list.to(torch.int64),
+        group_index=group_list,
         activate_left=True,
         quant_mode=1,
         swiglu_mode=1,
@@ -231,10 +325,12 @@ def _grouped_moe_with_selected_experts_impl(
         group_list_type=1,
         output_dtype=hidden_states.dtype,
     )
+    local_mask = (topk_ids >= active_range[0]) & (topk_ids < active_range[1])
+    local_topk_weights = topk_weights * local_mask.to(topk_weights.dtype)
     return torch_npu.npu_moe_token_unpermute(
         permuted_tokens=output,
         sorted_indices=expanded_row_idx.abs(),
-        probs=topk_weights.to(output.dtype),
+        probs=local_topk_weights.to(output.dtype),
     )
 
 
@@ -413,9 +509,12 @@ def fused_moe(
 
 
 __all__ = [
+    "dequant_swiglu_quant",
+    "moe_gating_top_k_hash",
     "supports_cutlass_moe",
     "prepare_grouped_moe_weights",
     "grouped_moe",
+    "grouped_moe_with_selected_experts",
     "moe_fused_topk",
     "cutlass_fused_moe",
     "fused_moe",

@@ -179,22 +179,6 @@ def _dynamic_quant_fake(
     return output, scale
 
 
-def _group_gemm_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor | None,
-    per_token_scale: torch.Tensor | None,
-    group_list: torch.Tensor,
-    split_item: int,
-    group_type: int,
-    group_list_type: int,
-    output_dtype: torch.dtype | None,
-) -> torch.Tensor:
-    del scale, per_token_scale, group_list, split_item, group_type, group_list_type
-    dtype = output_dtype if output_dtype is not None else x.dtype
-    return x.new_empty((x.size(0), weight.size(-1)), dtype=dtype)
-
-
 def _lightning_indexer_fake(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -510,10 +494,10 @@ def _sparse_attn_sharedkv_fake(
         ori_win_right,
         layout_q,
         layout_kv,
-        return_softmax_lse,
     )
     out = q.new_empty(q.shape, dtype=q.dtype)
-    lse = q.new_empty((0,), dtype=q.dtype)
+    lse_shape = (*q.shape[:-1], 1) if return_softmax_lse else (0,)
+    lse = q.new_empty(lse_shape, dtype=torch.float32)
     return out, lse
 
 
@@ -569,7 +553,7 @@ def _sparse_attn_sharedkv_metadata_fake(
     ):
         if tensor is not None:
             return tensor.new_empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
-    return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
+    return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32, device="npu")
 
 
 def _quant_lightning_indexer_fake(
@@ -654,12 +638,11 @@ def _quant_lightning_indexer_metadata_fake(
         pre_tokens,
         next_tokens,
         cmp_ratio,
-        device,
     )
     for tensor in (actual_seq_lengths_query, actual_seq_lengths_key):
         if tensor is not None:
             return tensor.new_empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
-    return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
+    return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32, device=device)
 
 
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
@@ -670,7 +653,6 @@ register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_met
 register_fake("xllm_ops::quant_matmul", _quant_matmul_fake)
 register_fake("xllm_ops::quantize_per_tensor", _quantize_per_tensor_fake)
 register_fake("xllm_ops::dynamic_quant", _dynamic_quant_fake)
-register_fake("xllm_ops::group_gemm", _group_gemm_fake)
 register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
 register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
@@ -731,7 +713,7 @@ def _dequant_swiglu_quant_fake(
     del clamp_limit, glu_alpha, glu_bias
     # Output is half of input's last dim (SwiGLU splits gate/up).
     out_dim = x.size(-1) // 2
-    act_quantized = x.new_empty(x.size(0), out_dim, dtype=torch.int8)
+    act_quantized = x.new_empty((*x.shape[:-1], out_dim), dtype=torch.int8)
     act_scale = x.new_empty(x.shape[:-1], dtype=torch.float32)
     return act_quantized, act_scale
 

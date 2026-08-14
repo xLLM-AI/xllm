@@ -44,10 +44,8 @@ from .causal_conv1d import (
 )
 from .dsa import (
     compressor,
-    dequant_swiglu_quant,
     hc_post,
     hc_pre,
-    moe_gating_top_k_hash,
     quant_lightning_indexer,
     quant_lightning_indexer_metadata,
     sparse_attn_sharedkv,
@@ -62,10 +60,12 @@ from .gated_delta_net import (
 from .linear import prepare_row_parallel_weight
 from .moe import (
     cutlass_fused_moe,
+    dequant_swiglu_quant,
     fused_moe,
     grouped_moe,
     grouped_moe_with_selected_experts,
     moe_fused_topk,
+    moe_gating_top_k_hash,
     prepare_grouped_moe_weights,
     supports_cutlass_moe,
 )
