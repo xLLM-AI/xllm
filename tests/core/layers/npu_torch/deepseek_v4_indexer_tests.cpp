@@ -228,9 +228,9 @@ TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {
 
 TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesWrapAroundRingBuffer) {
   // Two-block ring buffer with kv_len=10 forces the SWA window to span both
-  // ring entries and to wrap. Positions 6..9 fall into block_column 1, and
-  // position 8..9 wrap back to block_column 0 once the ring rotates once
-  // (positions / block_size = {1,1,2,2}, then % ring_size(2) = {1,1,0,0}).
+  // ring entries and to wrap. Visible positions 5..9 map through
+  // block_column = pos/2 % ring_size(2) -> {0,1,1,0,0}, wrapping back to
+  // block_column 0 once the ring rotates.
   const torch::Tensor block_table = torch::tensor({{20, 21}}, torch::kInt32);
   const torch::Tensor query_cu_seq_lens = torch::tensor({0, 1}, torch::kInt32);
   const torch::Tensor seq_lens = torch::tensor({10}, torch::kInt32);
@@ -246,11 +246,12 @@ TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesWrapAroundRingBuffer) {
   ASSERT_EQ(indices.dim(), 3);
   ASSERT_EQ(indices.size(0), 1);
   ASSERT_EQ(indices.size(1), 1);
-  // start_pos = max(kv-window, 0) = 6, so the visible window is positions
-  // 6,7,8,9. block_column = pos/2 % 2 -> {1,1,0,0}; slot = block_id * 2 +
-  // pos%2 -> {21*2+0, 21*2+1, 20*2+0, 20*2+1} = {42, 43, 40, 41}.
+  // start_pos = max((kv - q_len) - window, 0) = (10-1)-4 = 5, so the visible
+  // window is positions 5,6,7,8,9. block_column = pos/2 % 2 -> {0,1,1,0,0};
+  // slot = block_id*2 + pos%2 -> {20*2+1, 21*2+0, 21*2+1, 20*2+0, 20*2+1} =
+  // {41, 42, 43, 40, 41}.
   const torch::Tensor expected_prefix =
-      torch::tensor({42, 43, 40, 41, -1}, torch::kInt32);
+      torch::tensor({41, 42, 43, 40, 41}, torch::kInt32);
   EXPECT_TRUE(torch::equal(indices[0][0].slice(0, 0, 5), expected_prefix));
 }
 

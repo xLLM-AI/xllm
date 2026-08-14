@@ -2088,7 +2088,8 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
       json.value_or<std::vector<int32_t>>("dspark_target_layer_ids",
                                           std::vector<int32_t>{})
           .size());
-  LOAD_ARG_OR(dspark_block_size, "dspark_block_size", 0);
+  // Don't arm dspark_block_size on the shared target (enables non-causal DSpark
+  // attention there); the draft worker sets it from the checkpoint.
 
   // Token ids
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);

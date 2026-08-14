@@ -168,6 +168,14 @@ std::vector<int32_t> read_capture_layer_ids(
 }
 
 #if defined(USE_NPU)
+int32_t read_block_size(const std::string& model_weights_path) {
+  JsonReader reader;
+  const std::string config_path = model_weights_path + "/config.json";
+  CHECK(reader.parse(config_path))
+      << "Failed to parse DSpark draft config: " << config_path;
+  return reader.value_or<int32_t>("dspark_block_size", 0);
+}
+
 void configure_deepseek_v4_dspark_args(ModelArgs& args,
                                        const runtime::Options& options) {
   CHECK_GT(args.dspark_num_layers(), 0)
@@ -175,17 +183,15 @@ void configure_deepseek_v4_dspark_args(ModelArgs& args,
   args.n_layers(args.dspark_num_layers());
   args.n_hash_layers(0);
 
-  // --num_speculative_tokens overrides the checkpoint's dspark_block_size.
-  const int32_t ckpt_block_size = args.dspark_block_size();
+  // Default to the checkpoint's block_size; --num_speculative_tokens overrides.
+  const int32_t ckpt_block_size = read_block_size(options.model_path());
   const int32_t user_num_spec = options.num_speculative_tokens();
-  if (user_num_spec > 0) {
-    if (user_num_spec != ckpt_block_size) {
-      LOG(WARNING) << "--num_speculative_tokens=" << user_num_spec
-                   << " overrides DSpark checkpoint dspark_block_size="
-                   << ckpt_block_size << ".";
-    }
-    args.dspark_block_size(user_num_spec);
+  if (user_num_spec > 0 && user_num_spec != ckpt_block_size) {
+    LOG(WARNING) << "--num_speculative_tokens=" << user_num_spec
+                 << " overrides DSpark checkpoint dspark_block_size="
+                 << ckpt_block_size << ".";
   }
+  args.dspark_block_size(user_num_spec > 0 ? user_num_spec : ckpt_block_size);
 
   // DSpark stages are all standard SWA layers. Their stage ids are not target
   // model layer ids, so target compress_ratios[0..N) must not be reused.

@@ -529,8 +529,8 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
       index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
   torch::Tensor valid = columns.unsqueeze(0) < visible_lens.unsqueeze(1);
   torch::Tensor positions = start_pos.unsqueeze(1) + columns.unsqueeze(0);
-  torch::Tensor block_columns =
-      (positions / cache_block_size).remainder(block_table.size(1));
+  torch::Tensor block_columns = torch::floor_divide(positions, cache_block_size)
+                                    .remainder(block_table.size(1));
   torch::Tensor block_ids = block_table.gather(/*dim=*/1, block_columns);
   torch::Tensor slot_ids =
       block_ids * cache_block_size + positions.remainder(cache_block_size);
