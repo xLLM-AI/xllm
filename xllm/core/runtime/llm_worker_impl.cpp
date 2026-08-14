@@ -339,19 +339,16 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
         // ATB lm_head backend does not expose a second output tensor
         // (LmHeadParam::outputHidden is false), so we surface the hidden here.
-        // return_selected_hidden is a DSpark-only request, and DSpark selects
-        // every draft row in order (sample_from_anchor keeps slot 0), i.e. the
-        // idxes are the identity 0..N-1. In that case index_select is a full
-        // redundant copy — alias the hidden directly. The numel guard is exact:
-        // it only fires when the selection covers all rows, which for DSpark's
-        // in-order construction is the identity permutation.
-        if (selected_token_idxes.numel() ==
-            model_output.hidden_states.size(0)) {
-          selected_hidden = model_output.hidden_states;
-        } else {
-          selected_hidden = model_output.hidden_states.index_select(
-              /*dim=*/0, selected_token_idxes.to(torch::kLong));
-        }
+        // selected_hidden must align row-for-row with `logits`, which is
+        // produced in selected_token_idxes order. index_select reproduces that
+        // order for any selection. We deliberately do NOT alias the full
+        // hidden_states on a numel match: equal row count does not imply the
+        // idxes are the identity permutation, and a full-but-reordered
+        // selection would silently misalign hidden against logits. The gather
+        // is one [num_selected, hidden] copy per decode step (not per layer),
+        // negligible next to the forward.
+        selected_hidden = model_output.hidden_states.index_select(
+            /*dim=*/0, selected_token_idxes.to(torch::kLong));
       }
     } else {
       logits = model_->logits(model_output.hidden_states, selected_token_idxes);

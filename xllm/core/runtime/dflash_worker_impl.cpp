@@ -1596,6 +1596,46 @@ void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(
                                                             src_indices));
     target_output.sample_output.embeddings = padded_embeddings;
   }
+
+  // Pad sampled logprobs / top_tokens / top_logprobs into the same dense
+  // [B*max_val_tokens, ...] layout. sync_pruned_boundary_{logprobs,
+  // top_logprobs} CHECK_EQ these against B*max_val_tokens and view them as
+  // [batch, max_val_tokens, ...]; leaving them varlen aborts on any actually-
+  // pruned adaptive step whenever the request set logprobs/top_logprobs.
+  if (target_output.sample_output.logprobs.defined()) {
+    torch::Tensor padded_logprobs = torch::zeros(
+        {padded_total}, target_output.sample_output.logprobs.options());
+    padded_logprobs.index_copy_(
+        /*dim=*/0,
+        dst_indices,
+        target_output.sample_output.logprobs.index_select(/*dim=*/0,
+                                                          src_indices));
+    target_output.sample_output.logprobs = padded_logprobs;
+  }
+  if (target_output.sample_output.top_tokens.defined()) {
+    const int64_t top_k = target_output.sample_output.top_tokens.size(-1);
+    torch::Tensor padded_top_tokens =
+        torch::zeros({padded_total, top_k},
+                     target_output.sample_output.top_tokens.options());
+    padded_top_tokens.index_copy_(
+        /*dim=*/0,
+        dst_indices,
+        target_output.sample_output.top_tokens.index_select(/*dim=*/0,
+                                                            src_indices));
+    target_output.sample_output.top_tokens = padded_top_tokens;
+  }
+  if (target_output.sample_output.top_logprobs.defined()) {
+    const int64_t top_k = target_output.sample_output.top_logprobs.size(-1);
+    torch::Tensor padded_top_logprobs =
+        torch::zeros({padded_total, top_k},
+                     target_output.sample_output.top_logprobs.options());
+    padded_top_logprobs.index_copy_(
+        /*dim=*/0,
+        dst_indices,
+        target_output.sample_output.top_logprobs.index_select(/*dim=*/0,
+                                                              src_indices));
+    target_output.sample_output.top_logprobs = padded_top_logprobs;
+  }
 }
 
 void DFlashWorkerImpl::record_validate_metrics(
@@ -1632,8 +1672,12 @@ void DFlashWorkerImpl::record_validate_metrics(
     // the full dense width.
     int32_t seq_width = width;
     if (have_per_seq) {
+      // lo=1: a controller prefix=0 decision yields per_seq_val_tokens[i]==1
+      // (bonus only, zero drafts). Clamping to 1 gives prefix_len=0 so a
+      // fully-pruned seq contributes no draft/accept counts; clamping to 2
+      // would fabricate one phantom draft + one phantom accept.
       seq_width = std::clamp(per_seq_val_tokens[static_cast<size_t>(seq_id)],
-                             /*lo=*/2,
+                             /*lo=*/1,
                              /*hi=*/width);
     }
     // Drafts attempted for this seq = seq_width - 1 (bonus column excluded).
