@@ -63,14 +63,12 @@ struct RegionEOptions : public DiTBaseCacheOptions {
   int64_t tail_steps = 1;
   std::vector<int64_t> refresh_steps = {16};
   float region_threshold = 0.80f;
-  // AVDCache δ in paper Eq.8/9 / inplace.py cache_threshold (Qwen default
-  // 0.03).
-  float cache_threshold = 0.03f;
+  // AVDCache δ in paper Eq.8/9.
+  float cache_threshold = 0.02f;
   // Use fitted γ_t AVDCache (paper) instead of fixed skip_interval.
   bool use_avd_gamma = true;
   // Enable erosion/dilation morphological cleanup after ARP mask selection.
   bool erosion_dilation = true;
-  bool profile = false;
 };
 
 struct ResidualCacheOptions {

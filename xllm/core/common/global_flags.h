@@ -365,7 +365,6 @@ DECLARE_double(dit_regione_region_threshold);
 DECLARE_double(dit_regione_cache_threshold);
 DECLARE_bool(dit_regione_use_avd_gamma);
 DECLARE_bool(dit_regione_erosion_dilation);
-DECLARE_bool(dit_regione_profile);
 
 DECLARE_bool(dit_sp_communication_overlap);
 

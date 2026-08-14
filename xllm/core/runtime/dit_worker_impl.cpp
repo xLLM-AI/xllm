@@ -111,8 +111,6 @@ DiTCacheConfig parse_dit_cache_from_flags() {
         ::xllm::DiTConfig::get_instance().dit_regione_use_avd_gamma();
     cache_config.regione.erosion_dilation =
         ::xllm::DiTConfig::get_instance().dit_regione_erosion_dilation();
-    cache_config.regione.profile =
-        ::xllm::DiTConfig::get_instance().dit_regione_profile();
   } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }

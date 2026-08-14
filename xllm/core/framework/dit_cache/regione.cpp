@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/nn/functional/pooling.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace xllm {
 namespace {
@@ -61,6 +62,12 @@ void RegionECache::init(const DiTCacheConfig& cfg) {
   regione_local_edited_global_ids_ = torch::Tensor();
   regione_local_edited_cache_ids_ = torch::Tensor();
   regione_local_image_global_ids_ = torch::Tensor();
+  regione_avd_accumulate_ = 1.0;
+  regione_avd_ratio_ = 1.0;
+  regione_avd_raw_gamma_ = 1.0;
+  regione_avd_gamma_ = 1.0;
+  regione_avd_gamma_exponent_ = 1.0;
+  regione_avd_error_ = 0.0;
   regione_clear_all_prefetch_slots();
 }
 
@@ -96,6 +103,10 @@ bool RegionECache::regione_should_compute_velocity(int64_t step,
                                                    double prev_timestep) {
   if (!regione_enabled_) {
     regione_avd_ratio_ = 1.0;
+    regione_avd_raw_gamma_ = 1.0;
+    regione_avd_gamma_ = 1.0;
+    regione_avd_gamma_exponent_ = 1.0;
+    regione_avd_error_ = 0.0;
     return true;
   }
   // STS / SMS / forced refresh: always run DiT and reset AVD accumulator.
@@ -106,12 +117,17 @@ bool RegionECache::regione_should_compute_velocity(int64_t step,
       step <= config_.regione.warmup_steps) {
     regione_avd_accumulate_ = 1.0;
     regione_avd_ratio_ = 1.0;
+    regione_avd_raw_gamma_ = 1.0;
+    regione_avd_gamma_ = 1.0;
+    regione_avd_gamma_exponent_ = 1.0;
+    regione_avd_error_ = 0.0;
     return true;
   }
 
   // Diffusers 28-step RegionE transition gamma (inplace.py), 27 values for
-  // transitions between 28 steps. Linearly upsample/downsample onto the
-  // actual (infer_steps - 1) transitions.
+  // transitions between 28 steps. Linearly sample it onto the actual
+  // (infer_steps - 1) transitions, then temper the per-step gamma when the
+  // current run uses more transitions than the reference schedule.
   static constexpr double kRegionEGammaRef[] = {
       1.0186, 1.0241, 1.0236, 1.0205, 1.0298, 1.0221, 1.0248, 1.0246, 1.0269,
       1.0275, 1.0323, 1.0311, 1.0298, 1.0353, 1.0343, 1.0397, 1.0387, 1.0393,
@@ -139,25 +155,34 @@ bool RegionECache::regione_should_compute_velocity(int64_t step,
     const bool compute =
         ((step - config_.regione.warmup_steps) % interval) == 0;
     regione_avd_ratio_ = 1.0;
+    regione_avd_raw_gamma_ = 1.0;
+    regione_avd_gamma_ = 1.0;
+    regione_avd_gamma_exponent_ = 1.0;
+    regione_avd_error_ = 0.0;
     if (compute) regione_avd_accumulate_ = 1.0;
     return compute;
   }
 
-  // AVDCache (paper Eq.7-9 / inplace.py), step-count agnostic via resampled γ:
+  // AVDCache (paper Eq.7-9 / inplace.py), timestep-delta normalized γ:
   //   ratio = gamma(step) * (1 + (t - t_prev) / 1000)
   //   accumulate *= ratio; error = 1 - accumulate
-  //   reuse velocity while error <= cache_threshold and ratio < 1
-  const double gamma = sample_gamma(step);
+  //   reuse velocity while error <= cache_threshold
+  const double raw_gamma = sample_gamma(step);
+  const double ref_timestep_delta = 1000.0 / static_cast<double>(kGammaRefLen);
+  const double local_timestep_delta = std::abs(timestep - prev_timestep);
+  const double raw_gamma_exponent = local_timestep_delta / ref_timestep_delta;
+  const double gamma_exponent =
+      std::max(0.25, std::min(3.0, raw_gamma_exponent));
+  const double gamma = std::pow(raw_gamma, gamma_exponent);
   const double ratio = gamma * (1.0 + (timestep - prev_timestep) / 1000.0);
   regione_avd_ratio_ = ratio;
-
-  if (ratio >= 1.0) {
-    regione_avd_accumulate_ = 1.0;
-    return true;  // recompute DiT
-  }
+  regione_avd_raw_gamma_ = raw_gamma;
+  regione_avd_gamma_ = gamma;
+  regione_avd_gamma_exponent_ = gamma_exponent;
 
   regione_avd_accumulate_ *= ratio;
-  const double error = 1.0 - regione_avd_accumulate_;
+  const double error = std::abs(1.0 - regione_avd_accumulate_);
+  regione_avd_error_ = error;
   if (error > static_cast<double>(config_.regione.cache_threshold)) {
     regione_avd_accumulate_ = 1.0;
     return true;  // recompute DiT
@@ -231,6 +256,10 @@ void RegionECache::regione_prepare_inference(
   regione_velocity_cache_ = torch::Tensor();
   regione_avd_accumulate_ = 1.0;
   regione_avd_ratio_ = 1.0;
+  regione_avd_raw_gamma_ = 1.0;
+  regione_avd_gamma_ = 1.0;
+  regione_avd_gamma_exponent_ = 1.0;
+  regione_avd_error_ = 0.0;
   regione_partial_mode_ = false;
   regione_local_edited_global_ids_ = torch::Tensor();
   regione_local_edited_cache_ids_ = torch::Tensor();
@@ -791,100 +820,6 @@ std::pair<torch::Tensor, torch::Tensor> RegionECache::regione_patch_img_kv(
     full_value = regione_scatter_ids(value, update_ids, full_value, 1);
   }
   return {full_key, full_value};
-}
-
-bool RegionECache::regione_profile_enabled() const {
-  return regione_enabled_ && config_.regione.profile;
-}
-
-void RegionECache::regione_profile_reset_step(int64_t step,
-                                              bool partial_step,
-                                              bool full_step,
-                                              bool velocity_cache,
-                                              int64_t step_tokens,
-                                              int64_t full_tokens) {
-  regione_profile_step_ = step;
-  regione_profile_partial_step_ = partial_step;
-  regione_profile_full_step_ = full_step;
-  regione_profile_velocity_cache_ = velocity_cache;
-  regione_profile_step_tokens_ = step_tokens;
-  regione_profile_full_tokens_ = full_tokens;
-  regione_profile_kv_store_count_ = 0;
-  regione_profile_prefetch_issue_count_ = 0;
-  regione_profile_prefetch_hit_count_ = 0;
-  regione_profile_prefetch_miss_count_ = 0;
-  regione_profile_fallback_h2d_count_ = 0;
-  regione_profile_patch_scatter_count_ = 0;
-  regione_profile_kv_store_cpu_ms_ = 0.0;
-  regione_profile_prefetch_issue_ms_ = 0.0;
-  regione_profile_prefetch_wait_ms_ = 0.0;
-  regione_profile_fallback_h2d_ms_ = 0.0;
-  regione_profile_patch_scatter_ms_ = 0.0;
-}
-
-void RegionECache::regione_profile_log_step(double transformer_ms,
-                                            double arp_ms,
-                                            double scheduler_ms,
-                                            double total_ms) const {
-  if (!regione_profile_enabled()) return;
-  LOG(INFO) << "[RegionEProfile] step=" << regione_profile_step_ << " mode="
-            << (regione_profile_partial_step_
-                    ? "partial"
-                    : (regione_profile_full_step_ ? "full" : "reuse"))
-            << " velocity_cache=" << regione_profile_velocity_cache_
-            << " tokens=" << regione_profile_step_tokens_ << "/"
-            << regione_profile_full_tokens_ << " total_ms=" << total_ms
-            << " transformer_ms=" << transformer_ms
-            << " scheduler_ms=" << scheduler_ms << " arp_ms=" << arp_ms
-            << " kv_store_cpu_ms=" << regione_profile_kv_store_cpu_ms_
-            << " kv_store_count=" << regione_profile_kv_store_count_
-            << " kv_prefetch_issue_ms=" << regione_profile_prefetch_issue_ms_
-            << " kv_prefetch_issue_count="
-            << regione_profile_prefetch_issue_count_
-            << " kv_prefetch_wait_ms=" << regione_profile_prefetch_wait_ms_
-            << " kv_prefetch_hit_count=" << regione_profile_prefetch_hit_count_
-            << " kv_prefetch_miss_count="
-            << regione_profile_prefetch_miss_count_
-            << " kv_fallback_h2d_ms=" << regione_profile_fallback_h2d_ms_
-            << " kv_fallback_h2d_count=" << regione_profile_fallback_h2d_count_
-            << " kv_patch_scatter_ms=" << regione_profile_patch_scatter_ms_
-            << " kv_patch_scatter_count="
-            << regione_profile_patch_scatter_count_;
-}
-
-void RegionECache::regione_profile_add_kv_store(double ms) {
-  if (!regione_profile_enabled()) return;
-  regione_profile_kv_store_cpu_ms_ += ms;
-  ++regione_profile_kv_store_count_;
-}
-
-void RegionECache::regione_profile_add_prefetch_issue(double ms) {
-  if (!regione_profile_enabled()) return;
-  regione_profile_prefetch_issue_ms_ += ms;
-  ++regione_profile_prefetch_issue_count_;
-}
-
-void RegionECache::regione_profile_add_prefetch_hit(double wait_ms) {
-  if (!regione_profile_enabled()) return;
-  regione_profile_prefetch_wait_ms_ += wait_ms;
-  ++regione_profile_prefetch_hit_count_;
-}
-
-void RegionECache::regione_profile_add_prefetch_miss() {
-  if (!regione_profile_enabled()) return;
-  ++regione_profile_prefetch_miss_count_;
-}
-
-void RegionECache::regione_profile_add_fallback_h2d(double ms) {
-  if (!regione_profile_enabled()) return;
-  regione_profile_fallback_h2d_ms_ += ms;
-  ++regione_profile_fallback_h2d_count_;
-}
-
-void RegionECache::regione_profile_add_patch_scatter(double ms) {
-  if (!regione_profile_enabled()) return;
-  regione_profile_patch_scatter_ms_ += ms;
-  ++regione_profile_patch_scatter_count_;
 }
 
 }  // namespace xllm

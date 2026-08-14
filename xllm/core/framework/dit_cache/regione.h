@@ -135,24 +135,6 @@ class RegionECache {
       const torch::Tensor& image_rope,
       int64_t key_len) const;
 
-  bool regione_profile_enabled() const;
-  void regione_profile_reset_step(int64_t step,
-                                  bool partial_step,
-                                  bool full_step,
-                                  bool velocity_cache,
-                                  int64_t step_tokens,
-                                  int64_t full_tokens);
-  void regione_profile_log_step(double transformer_ms,
-                                double arp_ms,
-                                double scheduler_ms,
-                                double total_ms) const;
-  void regione_profile_add_kv_store(double ms);
-  void regione_profile_add_prefetch_issue(double ms);
-  void regione_profile_add_prefetch_hit(double wait_ms);
-  void regione_profile_add_prefetch_miss();
-  void regione_profile_add_fallback_h2d(double ms);
-  void regione_profile_add_patch_scatter(double ms);
-
  private:
   void regione_select_regions(const torch::Tensor& sample,
                               const torch::Tensor& model_output,
@@ -236,23 +218,10 @@ class RegionECache {
   torch::Tensor regione_velocity_cache_;
   double regione_avd_accumulate_ = 1.0;
   double regione_avd_ratio_ = 1.0;
-  int64_t regione_profile_step_ = -1;
-  bool regione_profile_partial_step_ = false;
-  bool regione_profile_full_step_ = false;
-  bool regione_profile_velocity_cache_ = false;
-  int64_t regione_profile_step_tokens_ = 0;
-  int64_t regione_profile_full_tokens_ = 0;
-  int64_t regione_profile_kv_store_count_ = 0;
-  int64_t regione_profile_prefetch_issue_count_ = 0;
-  int64_t regione_profile_prefetch_hit_count_ = 0;
-  int64_t regione_profile_prefetch_miss_count_ = 0;
-  int64_t regione_profile_fallback_h2d_count_ = 0;
-  int64_t regione_profile_patch_scatter_count_ = 0;
-  double regione_profile_kv_store_cpu_ms_ = 0.0;
-  double regione_profile_prefetch_issue_ms_ = 0.0;
-  double regione_profile_prefetch_wait_ms_ = 0.0;
-  double regione_profile_fallback_h2d_ms_ = 0.0;
-  double regione_profile_patch_scatter_ms_ = 0.0;
+  double regione_avd_raw_gamma_ = 1.0;
+  double regione_avd_gamma_ = 1.0;
+  double regione_avd_gamma_exponent_ = 1.0;
+  double regione_avd_error_ = 0.0;
   std::vector<torch::Tensor> regione_k_cache_cpu_;
   std::vector<torch::Tensor> regione_v_cache_cpu_;
   std::vector<torch::Tensor> regione_cond_k_cache_cpu_;
