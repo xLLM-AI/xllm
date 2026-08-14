@@ -212,7 +212,7 @@ TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {
                                query_cu_seq_lens,
                                seq_lens,
                                /*window_size=*/4,
-                               /*num_speculative_tokens=*/3,
+                               /*dspark_block_size=*/3,
                                /*cache_block_size=*/4);
 
   ASSERT_EQ(indices.dim(), 3);
