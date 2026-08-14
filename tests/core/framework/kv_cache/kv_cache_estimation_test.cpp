@@ -390,8 +390,8 @@ TEST(KVCacheEstimationTest,
   EXPECT_LE(capacity.cache_size_in_bytes() + kDraftSwaBytes,
             target_options.cache_size_in_bytes);
   EXPECT_EQ(capacity.swa_count(), 19);
-  EXPECT_EQ(capacity.c4_count(), 32);
-  EXPECT_EQ(capacity.c128_count(), 1);
+  EXPECT_EQ(capacity.c4_count(), 64);
+  EXPECT_EQ(capacity.c128_count(), 2);
 }
 
 TEST(KVCacheEstimationTest,
