@@ -66,6 +66,7 @@ def _create_attention_backend(
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
         )
+
         return NpuPagedAttentionBackend(
             num_heads=first_attention.num_heads,
             num_kv_heads=first_attention.num_kv_heads,
@@ -77,6 +78,7 @@ def _create_attention_backend(
         )
     if current_platform.is_cuda():
         from xllm.python.attention.flashinfer import FlashInferBackend
+
         return FlashInferBackend(
             num_heads=first_attention.num_heads,
             num_kv_heads=first_attention.num_kv_heads,
@@ -86,9 +88,7 @@ def _create_attention_backend(
             device=device,
             dtype=dtype,
         )
-    raise NotImplementedError(
-        f"No attention backend available for device type '{device.type}'"
-    )
+    raise NotImplementedError(f"No attention backend available for device type '{device.type}'")
 
 
 class ModelExecutor:
@@ -101,9 +101,7 @@ class ModelExecutor:
         self.model = model
         self._kv_bound = False
 
-        attention_layers = [
-            module for module in model.modules() if isinstance(module, Attention)
-        ]
+        attention_layers = [module for module in model.modules() if isinstance(module, Attention)]
         if not attention_layers:
             raise ValueError("Python model does not contain an Attention layer")
 
@@ -111,17 +109,12 @@ class ModelExecutor:
         expected_config = self._attention_config(first_attention)
         for layer in attention_layers[1:]:
             if self._attention_config(layer) != expected_config:
-                raise ValueError(
-                    "Attention backend requires identical attention configuration "
-                    "across all layers"
-                )
+                raise ValueError("Attention backend requires identical attention configuration across all layers")
 
         first_parameter = next(model.parameters())
         device = first_parameter.device
         self._num_attention_layers = len(attention_layers)
-        self.attention_backend = _create_attention_backend(
-            first_attention, device, first_parameter.dtype, config
-        )
+        self.attention_backend = _create_attention_backend(first_attention, device, first_parameter.dtype, config)
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
@@ -143,16 +136,14 @@ class ModelExecutor:
             "cudagraphs",
             "aclgraph",
         ):
-            raise NotImplementedError(
-                "Python data parallel graph execution supports cudagraphs and "
-                "aclgraph only"
-            )
+            raise NotImplementedError("Python data parallel graph execution supports cudagraphs and aclgraph only")
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":
             from xllm.python.model_executor.runners.decode_cuda_graph import (
                 DecodeCudaGraphRunner,
             )
+
             self.decode_graph_runner = DecodeCudaGraphRunner(
                 execution_model,
                 self.attention_backend,
@@ -166,6 +157,7 @@ class ModelExecutor:
             from xllm.python.model_executor.runners.decode_acl_graph import (
                 DecodeAclGraphRunner,
             )
+
             self.decode_graph_runner = DecodeAclGraphRunner(
                 execution_model,
                 self.attention_backend,
@@ -187,9 +179,8 @@ class ModelExecutor:
                     "graph_backend=off/aclgraph, or set cp_size=1."
                 )
             from xllm.python.model_executor.runners.inductor import InductorRunner
-            self.inductor_runner = InductorRunner(
-                execution_model, self.attention_backend, device, graph_backend
-            )
+
+            self.inductor_runner = InductorRunner(execution_model, self.attention_backend, device, graph_backend)
 
     @staticmethod
     def _attention_config(layer: Attention) -> tuple[int, int, int, float, int]:
@@ -203,15 +194,9 @@ class ModelExecutor:
 
     def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:
         layer_caches = normalize_layer_caches(kv_caches)
-        required_layers = max(
-            layer.layer_id
-            for layer in self.model.modules()
-            if isinstance(layer, Attention)
-        ) + 1
+        required_layers = max(layer.layer_id for layer in self.model.modules() if isinstance(layer, Attention)) + 1
         if len(layer_caches) < required_layers:
-            raise ValueError(
-                "cache layer count does not match the model layer layout"
-            )
+            raise ValueError("cache layer count does not match the model layer layout")
         if self._kv_bound:
             return
         self.attention_backend.bind_kv_caches(layer_caches)
@@ -235,15 +220,9 @@ class ModelExecutor:
             raise RuntimeError("KV caches are not bound")
 
         graph_runner = self.decode_graph_runner
-        if graph_runner is not None and graph_runner.can_execute(
-            input_ids, metadata, input_embedding
-        ):
-            graph_runner.warmup(
-                input_ids.device, input_ids.dtype, input_embedding
-            )
-            return graph_runner.execute(
-                input_ids, positions, metadata, input_embedding
-            )
+        if graph_runner is not None and graph_runner.can_execute(input_ids, metadata, input_embedding):
+            graph_runner.warmup(input_ids.device, input_ids.dtype, input_embedding)
+            return graph_runner.execute(input_ids, positions, metadata, input_embedding)
         if self.inductor_runner is not None:
             return self.inductor_runner.execute(
                 input_ids,

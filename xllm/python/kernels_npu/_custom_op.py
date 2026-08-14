@@ -168,9 +168,7 @@ def _dynamic_quant_fake(
     del smooth_scales, group_index
     if dst_type == torch.quint4x2:
         if input.shape[-1] % 8:
-            raise ValueError(
-                "dynamic_quant int4 input's last dimension must be divisible by 8"
-            )
+            raise ValueError("dynamic_quant int4 input's last dimension must be divisible by 8")
         output_shape = (*input.shape[:-1], input.shape[-1] // 8)
         output_dtype = torch.int32
     else:
@@ -356,9 +354,7 @@ def _rms_norm_dynamic_quant_fake(
     input: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     del weight, eps
-    return input.new_empty(input.shape, dtype=torch.int8), input.new_empty(
-        input.shape[:-1], dtype=torch.float32
-    )
+    return input.new_empty(input.shape, dtype=torch.int8), input.new_empty(input.shape[:-1], dtype=torch.float32)
 
 
 def _npu_inplace_partial_rotary_mul_fake(
@@ -572,9 +568,7 @@ def _sparse_attn_sharedkv_metadata_fake(
         seqused_kv,
     ):
         if tensor is not None:
-            return tensor.new_empty(
-                (_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32
-            )
+            return tensor.new_empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
     return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
 
 
@@ -619,9 +613,7 @@ def _quant_lightning_indexer_fake(
         out_shape = (query.size(0), key_head_num, sparse_count)
     out = query.new_zeros(out_shape, dtype=torch.int32)
     val = (
-        query.new_empty(out_shape, dtype=torch.float32)
-        if return_value
-        else query.new_empty((0,), dtype=torch.float32)
+        query.new_empty(out_shape, dtype=torch.float32) if return_value else query.new_empty((0,), dtype=torch.float32)
     )
     return out, val
 
@@ -666,9 +658,7 @@ def _quant_lightning_indexer_metadata_fake(
     )
     for tensor in (actual_seq_lengths_query, actual_seq_lengths_key):
         if tensor is not None:
-            return tensor.new_empty(
-                (_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32
-            )
+            return tensor.new_empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
     return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
 
 
@@ -676,9 +666,7 @@ register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
-register_fake(
-    "xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake
-)
+register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake)
 register_fake("xllm_ops::quant_matmul", _quant_matmul_fake)
 register_fake("xllm_ops::quantize_per_tensor", _quantize_per_tensor_fake)
 register_fake("xllm_ops::dynamic_quant", _dynamic_quant_fake)
@@ -687,9 +675,7 @@ register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
 register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
 register_fake("xllm_ops::sparse_flash_attention", _sparse_flash_attention_fake)
-register_fake(
-    "xllm_ops::sparse_flash_attention_out", _sparse_flash_attention_out_fake
-)
+register_fake("xllm_ops::sparse_flash_attention_out", _sparse_flash_attention_out_fake)
 register_fake("xllm_ops::rms_norm_dynamic_quant", _rms_norm_dynamic_quant_fake)
 register_fake(
     "xllm_ops::npu_inplace_partial_rotary_mul",
@@ -754,9 +740,7 @@ register_fake("xllm_ops::dequant_swiglu_quant", _dequant_swiglu_quant_fake)
 register_fake("xllm_ops::hc_pre", _hc_pre_fake)
 register_fake("xllm_ops::hc_post", _hc_post_fake)
 register_fake("xllm_ops::sparse_attn_sharedkv", _sparse_attn_sharedkv_fake)
-register_fake(
-    "xllm_ops::sparse_attn_sharedkv_metadata", _sparse_attn_sharedkv_metadata_fake
-)
+register_fake("xllm_ops::sparse_attn_sharedkv_metadata", _sparse_attn_sharedkv_metadata_fake)
 register_fake("xllm_ops::quant_lightning_indexer", _quant_lightning_indexer_fake)
 register_fake(
     "xllm_ops::quant_lightning_indexer_metadata",

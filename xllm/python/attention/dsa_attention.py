@@ -49,8 +49,8 @@ from xllm.python.attention.dsa_metadata import (
 from xllm.python.model_executor.forward_context import get_forward_context
 
 if TYPE_CHECKING:
-    from xllm.python.layers.attention import Attention
     from xllm.python.attention.backend import AttentionMetadata
+    from xllm.python.layers.attention import Attention
 
 # Sparse mask modes used by the C++ DSA attention (rightDownCausal variants).
 _MASK_MODE_RIGHT_DOWN_CAUSAL = 3
@@ -102,9 +102,7 @@ class DsaAttentionBackend(AttentionBackend):
         device: torch.device,
         dtype: torch.dtype,
     ) -> None:
-        self.caches_info, self.group_infos = build_cache_specs(
-            compress_ratios, window_size, n_layers
-        )
+        self.caches_info, self.group_infos = build_cache_specs(compress_ratios, window_size, n_layers)
         self._builder = DsaMetadataBuilder(self.caches_info, self.group_infos)
         self.window_size = window_size
         self.index_topk = index_topk
@@ -115,7 +113,7 @@ class DsaAttentionBackend(AttentionBackend):
         self.head_dim = attn_head_dim
         self.device = device
         self.dtype = dtype
-        self.scale = attn_head_dim ** -0.5
+        self.scale = attn_head_dim**-0.5
 
         self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
@@ -140,9 +138,7 @@ class DsaAttentionBackend(AttentionBackend):
         graph_mode: bool = False,
     ) -> None:
         if graph_mode:
-            raise NotImplementedError(
-                "DeepSeek-V4 ACL graph support is not part of the eager DSA backend"
-            )
+            raise NotImplementedError("DeepSeek-V4 ACL graph support is not part of the eager DSA backend")
         self._metadata = metadata
 
     def prepare_dsa_metadata_for_forward(
@@ -155,15 +151,11 @@ class DsaAttentionBackend(AttentionBackend):
         multi_block_tables = list(metadata.multi_block_tables)
         kv_seq_lens_host = metadata.kv_seq_lens_host
         kv_seq_lens = (
-            kv_seq_lens_host.cpu().tolist()
-            if kv_seq_lens_host is not None and kv_seq_lens_host.numel() > 0
-            else []
+            kv_seq_lens_host.cpu().tolist() if kv_seq_lens_host is not None and kv_seq_lens_host.numel() > 0 else []
         )
         q_seq_lens_host = getattr(metadata, "q_seq_lens_host", None)
         q_seq_lens = (
-            q_seq_lens_host.cpu().tolist()
-            if q_seq_lens_host is not None and q_seq_lens_host.numel() > 0
-            else None
+            q_seq_lens_host.cpu().tolist() if q_seq_lens_host is not None and q_seq_lens_host.numel() > 0 else None
         )
         # DSA RoPE tables and positions are model-owned; the backend reads them
         # off the metadata when the model attaches them (see attach_rope_tables).
@@ -215,38 +207,18 @@ class DsaAttentionBackend(AttentionBackend):
     ) -> None:
         """Build request-shaped RoPE tensors for the current forward."""
         metadata = metadata or self._metadata
-        css = (
-            getattr(metadata, "dsa_cos_sin", None)
-            if metadata is not None
-            else None
-        )
+        css = getattr(metadata, "dsa_cos_sin", None) if metadata is not None else None
         if dsa.cos_table is None and css is not None and css.numel() > 0:
-            dsa.cos_table, dsa.sin_table = (
-                tensor.contiguous() for tensor in css.chunk(2, dim=-1)
-            )
-        c4css = (
-            getattr(metadata, "dsa_c4_cos_sin", None)
-            if metadata is not None
-            else None
-        )
+            dsa.cos_table, dsa.sin_table = (tensor.contiguous() for tensor in css.chunk(2, dim=-1))
+        c4css = getattr(metadata, "dsa_c4_cos_sin", None) if metadata is not None else None
         if c4css is not None and dsa.c4_pad_positions.numel() > 0:
             c4_idx = dsa.c4_pad_positions.clamp_min(0).long().to(c4css.device)
-            dsa.c4_cos, dsa.c4_sin = (
-                tensor.contiguous()
-                for tensor in c4css.index_select(0, c4_idx).chunk(2, dim=-1)
-            )
-        c128css = (
-            getattr(metadata, "dsa_c128_cos_sin", None)
-            if metadata is not None
-            else None
-        )
+            dsa.c4_cos, dsa.c4_sin = (tensor.contiguous() for tensor in c4css.index_select(0, c4_idx).chunk(2, dim=-1))
+        c128css = getattr(metadata, "dsa_c128_cos_sin", None) if metadata is not None else None
         if c128css is not None and dsa.c128_pad_positions.numel() > 0:
-            c128_idx = dsa.c128_pad_positions.clamp_min(0).long().to(
-                c128css.device
-            )
+            c128_idx = dsa.c128_pad_positions.clamp_min(0).long().to(c128css.device)
             dsa.c128_cos, dsa.c128_sin = (
-                tensor.contiguous()
-                for tensor in c128css.index_select(0, c128_idx).chunk(2, dim=-1)
+                tensor.contiguous() for tensor in c128css.index_select(0, c128_idx).chunk(2, dim=-1)
             )
 
     def execute(
@@ -294,9 +266,7 @@ class DsaAttentionBackend(AttentionBackend):
         # Decode/chunked: scatter to paged SWA cache.
         ori_kv = layer_cache.swa
         ori_slot = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, mapping.ori_cache_idx)
-        ori_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.ori_cache_idx
-        )
+        ori_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.ori_cache_idx)
         if use_temporary_prefill_kv:
             # Prefill: build temporary PA_ND cache from kv (mirrors C++
             # build_prefill_pa_nd_kv, deepseek_sparse_attention.cpp:272-368).
@@ -315,19 +285,11 @@ class DsaAttentionBackend(AttentionBackend):
         # 2) Compressor: pool KV into the compressed cache when ratio > 1.
         cmp_kv = layer_cache.key
         cmp_slot = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, mapping.cmp_cache_idx)
-        cmp_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.cmp_cache_idx
-        )
-        if (
-            compress_ratio > 1
-            and cmp_kv is not None
-            and cmp_slot is not None
-        ):
+        cmp_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.cmp_cache_idx)
+        if compress_ratio > 1 and cmp_kv is not None and cmp_slot is not None:
             compressor_fn = getattr(self, "_compressor_fn", None)
             if compressor_fn is None:
-                raise RuntimeError(
-                    f"DSA compressor is required for compression ratio {compress_ratio}"
-                )
+                raise RuntimeError(f"DSA compressor is required for compression ratio {compress_ratio}")
             compressed = compressor_fn(
                 layer_id,
                 layer_cache,
@@ -366,10 +328,7 @@ class DsaAttentionBackend(AttentionBackend):
         else:
             sparse_meta = None
         if sparse_meta is None:
-            raise RuntimeError(
-                "DSA sparse metadata is missing for compression ratio "
-                f"{compress_ratio}"
-            )
+            raise RuntimeError(f"DSA sparse metadata is missing for compression ratio {compress_ratio}")
         seq_q = dsa.actual_seq_lengths_query
         seq_kv = dsa.actual_seq_lengths_kv
         sparse_meta_for_kernel = sparse_meta
@@ -380,11 +339,7 @@ class DsaAttentionBackend(AttentionBackend):
         # cu_seqlens_ori_kv as std::nullopt. A defined empty tensor selects a
         # different ACL optional-input path and causes small decode drift.
         use_prefill_attn = is_prefill or is_chunked_prefill
-        cu_seqlens_ori_kv_for_attn = (
-            seq_q
-            if use_prefill_attn
-            else None
-        )
+        cu_seqlens_ori_kv_for_attn = seq_q if use_prefill_attn else None
         out, _lse = _sparse_attn_sharedkv(
             q=q,
             ori_kv=ori_kv_for_attn,
@@ -431,15 +386,9 @@ class DsaAttentionBackend(AttentionBackend):
         compress_ratio = self._layer_compress_ratio(layer_id)
         mapping = self._resolve_cache_mapping(layer_id, compress_ratio)
         layer_cache = self._kv_caches[layer_id]
-        index_slot = _get_layer_cache_tensor(
-            dsa.slot_mappings, layer_id, mapping.index_cache_idx
-        )
-        index_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.index_cache_idx
-        )
-        cmp_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.cmp_cache_idx
-        )
+        index_slot = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, mapping.index_cache_idx)
+        index_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.index_cache_idx)
+        cmp_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.cmp_cache_idx)
         return DsaIndexContext(
             index_cache=layer_cache.index if layer_cache.index is not None else torch.empty(0),
             indexer_scale=layer_cache.indexer_scale,
@@ -448,12 +397,8 @@ class DsaAttentionBackend(AttentionBackend):
             cmp_block_table=cmp_block_table,
             kv_state=layer_cache.compress_kv_state,
             score_state=layer_cache.compress_score_state,
-            kv_block_table=_get_layer_cache_tensor(
-                dsa.block_tables, layer_id, mapping.kv_state_cache_idx
-            ),
-            score_block_table=_get_layer_cache_tensor(
-                dsa.block_tables, layer_id, mapping.score_state_cache_idx
-            ),
+            kv_block_table=_get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.kv_state_cache_idx),
+            score_block_table=_get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.score_state_cache_idx),
             actual_seq_q=dsa.actual_seq_lengths_query,
             actual_seq_kv=dsa.actual_seq_lengths_kv,
             start_pos=dsa.start_pos,
@@ -511,9 +456,7 @@ class DsaAttentionBackend(AttentionBackend):
                     return ci.ratio
         return 1
 
-    def _resolve_cache_mapping(
-        self, layer_id: int, compress_ratio: int
-    ) -> _DsaCacheMapping:
+    def _resolve_cache_mapping(self, layer_id: int, compress_ratio: int) -> _DsaCacheMapping:
         """Python port of ``resolve_cache_mapping`` (deepseek_sparse_attention.cpp:92)."""
         mapping = _DsaCacheMapping()
         if layer_id < 0 or layer_id >= len(self.caches_info):
@@ -571,8 +514,7 @@ class DsaAttentionBackend(AttentionBackend):
         # Metadata kernels enqueue asynchronously. Retain their tensor inputs
         # on the current forward's DsaMetadata, as C++ DSAMetadata does.
         dsa.precomputed_metadata_inputs = tuple(
-            (seq_q, seq_kv, cu_seqlens_ori_kv, cu_seqlens_cmp_kv,
-             seqused_q, seqused_kv)
+            (seq_q, seq_kv, cu_seqlens_ori_kv, cu_seqlens_cmp_kv, seqused_q, seqused_kv)
         )
         for ratio in (1, 4, 128):
             has_cmp = ratio > 1
@@ -607,9 +549,7 @@ class DsaAttentionBackend(AttentionBackend):
                 dsa.c4_metadata = sparse_metadata
             elif ratio == 128:
                 dsa.c128_metadata = sparse_metadata
-        query_lens = (
-            seq_q[1:].clone() if seq_q.numel() > 1 else dsa.seq_lens_q
-        )
+        query_lens = seq_q[1:].clone() if seq_q.numel() > 1 else dsa.seq_lens_q
         key_lens = dsa.seq_lens if dsa.seq_lens.numel() else seq_kv
         dsa.precomputed_metadata_inputs += (query_lens, key_lens)
         dsa.qli_metadata = kernels.quant_lightning_indexer_metadata(
@@ -672,9 +612,7 @@ def _tensor_max_or_zero(tensor: torch.Tensor | None) -> int:
     return int(tensor.max().item())
 
 
-def _build_dsa_forward_meta(
-    dsa: DsaMetadata, metadata: AttentionMetadata
-) -> _DsaForwardMeta:
+def _build_dsa_forward_meta(dsa: DsaMetadata, metadata: AttentionMetadata) -> _DsaForwardMeta:
     """Mirror the C++ max-seqlen inputs used by build_precomputed_metadata.
 
     C++ computes sparse metadata max sizes from ModelInputParams::meta plus the
@@ -720,11 +658,7 @@ def _build_prefill_pa_nd_kv(
     total_blocks = 0
     max_blocks_per_req = 0
     for i in range(batch_size):
-        q_len = (
-            dst_cu[i + 1] - dst_cu[i]
-            if dst_cu is not None
-            else cu[i + 1] - cu[i]
-        )
+        q_len = dst_cu[i + 1] - dst_cu[i] if dst_cu is not None else cu[i + 1] - cu[i]
         dst_lens.append(q_len)
         blocks = (q_len + block_size - 1) // block_size
         total_blocks += blocks
@@ -740,8 +674,12 @@ def _build_prefill_pa_nd_kv(
 
     # Block 0 is zero-filled padding block; real blocks are 1-based.
     packed_kv = torch.zeros(
-        total_blocks + 1, block_size, kv.size(1), kv.size(2),
-        dtype=kv.dtype, device=kv.device,
+        total_blocks + 1,
+        block_size,
+        kv.size(1),
+        kv.size(2),
+        dtype=kv.dtype,
+        device=kv.device,
     )
 
     table_data = [0] * (batch_size * table_cols)
@@ -757,15 +695,11 @@ def _build_prefill_pa_nd_kv(
             table_data[req * table_cols + j] = next_block + j
         copy_len = min(q_len, src_len)
         if copy_len > 0:
-            target = packed_kv[next_block:next_block + blocks].view(
-                blocks * block_size, kv.size(1), kv.size(2)
-            )
-            target[q_len - copy_len:q_len].copy_(kv[q_start:q_start + copy_len])
+            target = packed_kv[next_block : next_block + blocks].view(blocks * block_size, kv.size(1), kv.size(2))
+            target[q_len - copy_len : q_len].copy_(kv[q_start : q_start + copy_len])
         next_block += blocks
 
-    table = torch.tensor(table_data, dtype=torch.int32, device=kv.device).view(
-        batch_size, table_cols
-    )
+    table = torch.tensor(table_data, dtype=torch.int32, device=kv.device).view(batch_size, table_cols)
     return packed_kv, table
 
 
@@ -775,12 +709,7 @@ def _get_layer_cache_tensor(
     cache_idx: int,
 ) -> torch.Tensor | None:
     """Python port of ``get_layer_cache_tensor`` (deepseek_sparse_attention.cpp:80)."""
-    if (
-        layer_id < 0
-        or layer_id >= len(layer_tensors)
-        or cache_idx < 0
-        or cache_idx >= len(layer_tensors[layer_id])
-    ):
+    if layer_id < 0 or layer_id >= len(layer_tensors) or cache_idx < 0 or cache_idx >= len(layer_tensors[layer_id]):
         return None
     return layer_tensors[layer_id][cache_idx]
 

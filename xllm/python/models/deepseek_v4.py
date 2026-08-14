@@ -33,8 +33,8 @@ linear / MLP / MoE / YaRN-RoPE / weight-loader primitives from
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
 import threading
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -45,9 +45,13 @@ from xllm.python.attention.dsa_attention import (
     _scatter_by_slot,
 )
 from xllm.python.layers.attention import Attention
-from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.layernorm import RMSNorm
+from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
+from xllm.python.model_executor.forward_context import (
+    get_forward_context,
+    record_layer_event,
+)
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP,
@@ -55,10 +59,6 @@ from xllm.python.models.deepseek_v32 import (
     W8A8DynamicLinear,
     W8A8WeightLoader,
     _tp_rank_from_device,
-)
-from xllm.python.model_executor.forward_context import (
-    get_forward_context,
-    record_layer_event,
 )
 
 try:
@@ -150,6 +150,7 @@ class DeepseekV4Config:
     def from_dict(cls, d: dict) -> DeepseekV4Config:
         rs_raw = d.get("rope_scaling")
         rs = rs_raw if isinstance(rs_raw, dict) else {}
+
         def rope_value(
             model_arg: str,
             nested_key: str,
@@ -167,10 +168,7 @@ class DeepseekV4Config:
             return default if value in (None, 0, 0.0) else value
 
         n_layers = int(_pick(d, "num_hidden_layers", "n_layers", default=43))
-        compress_ratios = [
-            1 if int(ratio) <= 1 else int(ratio)
-            for ratio in d.get("compress_ratios", [])
-        ]
+        compress_ratios = [1 if int(ratio) <= 1 else int(ratio) for ratio in d.get("compress_ratios", [])]
         if len(compress_ratios) < n_layers:
             compress_ratios.extend([1] * (n_layers - len(compress_ratios)))
 
@@ -183,9 +181,7 @@ class DeepseekV4Config:
             vocab_size=int(_pick(d, "vocab_size", default=129280)),
             rms_norm_eps=float(_pick(d, "rms_norm_eps", default=1e-6)),
             rope_theta=float(_pick(d, "rope_theta", default=10000.0)),
-            max_position_embeddings=int(
-                _pick(d, "max_position_embeddings", default=1048576)
-            ),
+            max_position_embeddings=int(_pick(d, "max_position_embeddings", default=1048576)),
             original_max_position_embeddings=int(
                 rope_value(
                     "rope_scaling_original_max_position_embeddings",
@@ -193,18 +189,10 @@ class DeepseekV4Config:
                     65536,
                 )
             ),
-            rope_scaling_factor=float(
-                rope_value("factor", "factor", 16.0, "rope_scaling_factor")
-            ),
-            rope_beta_fast=int(
-                rope_value("beta_fast", "beta_fast", 32, "rope_scaling_beta_fast")
-            ),
-            rope_beta_slow=int(
-                rope_value("beta_slow", "beta_slow", 1, "rope_scaling_beta_slow")
-            ),
-            rope_mscale=float(
-                rope_value("rope_scaling_attn_factor", "attn_factor", 1.0)
-            ),
+            rope_scaling_factor=float(rope_value("factor", "factor", 16.0, "rope_scaling_factor")),
+            rope_beta_fast=int(rope_value("beta_fast", "beta_fast", 32, "rope_scaling_beta_fast")),
+            rope_beta_slow=int(rope_value("beta_slow", "beta_slow", 1, "rope_scaling_beta_slow")),
+            rope_mscale=float(rope_value("rope_scaling_attn_factor", "attn_factor", 1.0)),
             rope_mscale_all_dim=1.0,
             q_lora_rank=int(_pick(d, "q_lora_rank", default=1024)),
             qk_rope_head_dim=int(_pick(d, "qk_rope_head_dim", default=64)),
@@ -212,15 +200,11 @@ class DeepseekV4Config:
             o_lora_rank=int(_pick(d, "o_lora_rank", default=1024)),
             o_groups=int(_pick(d, "o_groups", default=8)),
             compress_ratios=compress_ratios,
-            compress_rope_theta=float(
-                _pick(d, "compress_rope_theta", default=160000.0)
-            ),
+            compress_rope_theta=float(_pick(d, "compress_rope_theta", default=160000.0)),
             window_size=(
                 int(v) if (v := _pick(d, "window_size", "sliding_window", default=128)) not in (None, -1, 0) else 128
             ),
-            n_activated_experts=int(
-                _pick(d, "n_activated_experts", "num_experts_per_tok", default=6)
-            ),
+            n_activated_experts=int(_pick(d, "n_activated_experts", "num_experts_per_tok", default=6)),
             n_hash_layers=int(_pick(d, "num_hash_layers", default=3)),
             hc_mult=int(_pick(d, "hc_mult", default=4)),
             hc_sinkhorn_iters=int(_pick(d, "hc_sinkhorn_iters", default=20)),
@@ -232,9 +216,7 @@ class DeepseekV4Config:
             index_topk=int(_pick(d, "index_topk", default=512)),
             n_routed_experts=int(_pick(d, "n_routed_experts", default=256)),
             n_shared_experts=int(_pick(d, "n_shared_experts", default=1)),
-            moe_intermediate_size=int(
-                _pick(d, "moe_intermediate_size", default=2048)
-            ),
+            moe_intermediate_size=int(_pick(d, "moe_intermediate_size", default=2048)),
             swiglu_limit=float(_pick(d, "swiglu_limit", default=10.0)),
             first_k_dense_replace=int(_pick(d, "first_k_dense_replace", default=0)),
             moe_layer_freq=int(_pick(d, "moe_layer_freq", default=1)),
@@ -350,15 +332,11 @@ class DeepseekV4RotaryEmbedding(nn.Module):
             old_context_len,
             cpu,
         )
-        positions = torch.arange(
-            max_position_embeddings, dtype=torch.float32, device=cpu
-        )
+        positions = torch.arange(max_position_embeddings, dtype=torch.float32, device=cpu)
         freqs = torch.outer(positions, inv_freq)
         # Keep one value per frequency. Call sites repeat_interleave to the
         # same [position, rotary_dim] interleaved layout C++ stores directly.
-        cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1).to(
-            device=device, dtype=dtype
-        )
+        cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1).to(device=device, dtype=dtype)
         return cache.contiguous()
 
 
@@ -416,8 +394,14 @@ class DeepseekV4HyperConnection(nn.Module):
         from xllm.python import kernels
 
         return kernels.hc_pre(
-            x, hc_fn, hc_scale, hc_base,
-            self.hc_mult, self.sinkhorn_iters, self.norm_eps, self.hc_eps,
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            self.hc_mult,
+            self.sinkhorn_iters,
+            self.norm_eps,
+            self.hc_eps,
         )
 
     def hc_post(
@@ -437,8 +421,10 @@ class DeepseekV4HyperConnection(nn.Module):
 
         if sub_out.dim() == 2 and residual.dim() == 3 and post.dim() == 2 and comb.dim() == 3:
             out = kernels.hc_post(
-                sub_out.unsqueeze(0), residual.unsqueeze(0),
-                post.unsqueeze(0), comb.unsqueeze(0),
+                sub_out.unsqueeze(0),
+                residual.unsqueeze(0),
+                post.unsqueeze(0),
+                comb.unsqueeze(0),
             )
             return out.squeeze(0)
         return kernels.hc_post(sub_out, residual, post, comb)
@@ -468,7 +454,7 @@ class DeepseekV4Attention(Attention):
         tp = cfg.tp_size
         num_heads = cfg.n_heads // tp
         head_dim = cfg.head_dim
-        scale = head_dim ** -0.5
+        scale = head_dim**-0.5
         super().__init__(
             num_heads=num_heads,
             num_kv_heads=1,
@@ -506,12 +492,8 @@ class DeepseekV4Attention(Attention):
             device,
             transpose_weight_after_loading=False,
         )
-        self.q_a_layernorm = RMSNorm(
-            cfg.q_lora_rank, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
-        self.kv_a_layernorm = RMSNorm(
-            head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.q_a_layernorm = RMSNorm(cfg.q_lora_rank, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.kv_a_layernorm = RMSNorm(head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
         # q up-projection (W8A8) produces [T, num_heads, head_dim].
         self.q_b_proj = W8A8DynamicLinear(
             cfg.q_lora_rank,
@@ -549,9 +531,7 @@ class DeepseekV4Attention(Attention):
         )
         compress_ratio = cfg.compress_ratios[layer_id]
         self.indexer: DeepseekV4Indexer | None = (
-            DeepseekV4Indexer(cfg, dtype, device)
-            if compress_ratio == 4 and cfg.index_topk > 0
-            else None
+            DeepseekV4Indexer(cfg, dtype, device) if compress_ratio == 4 and cfg.index_topk > 0 else None
         )
         # Cmp_kv compressor (separate from the indexer compressor). C++ DSA
         # attention has its own CompressorImpl with head_dim_=512 (attention
@@ -577,14 +557,8 @@ class DeepseekV4Attention(Attention):
                 dtype=torch.float32,
                 device=device,
             )
-            self.cmp_ape = nn.Parameter(
-                torch.empty(
-                    compress_ratio, cmp_out, dtype=torch.float32, device=device
-                )
-            )
-            self.cmp_norm = RMSNorm(
-                cmp_hd, cfg.rms_norm_eps, dtype=torch.float32, device=device
-            )
+            self.cmp_ape = nn.Parameter(torch.empty(compress_ratio, cmp_out, dtype=torch.float32, device=device))
+            self.cmp_norm = RMSNorm(cmp_hd, cfg.rms_norm_eps, dtype=torch.float32, device=device)
 
     def process_weights_after_loading(self) -> None:
         for m in (self.q_a_proj, self.kv_proj, self.q_b_proj):
@@ -619,21 +593,16 @@ class DeepseekV4Attention(Attention):
         # build_query, so stash them on the backend for _run_indexer.
         q_a = self.q_a_proj(hidden)
         from xllm.python import kernels as _k
-        qr, qr_pertoken_scale = _k.rms_norm_dynamic_quant(
-            q_a, self.q_a_layernorm.weight, self.cfg.rms_norm_eps
-        )
-        q = self.q_b_proj.forward_quant(qr, qr_pertoken_scale).view(
-            num_tokens, self.num_heads_local, self.head_dim
-        )
+
+        qr, qr_pertoken_scale = _k.rms_norm_dynamic_quant(q_a, self.q_a_layernorm.weight, self.cfg.rms_norm_eps)
+        q = self.q_b_proj.forward_quant(qr, qr_pertoken_scale).view(num_tokens, self.num_heads_local, self.head_dim)
         q = _k.rms_norm(q, self.q_rms_gamma, self.cfg.rms_norm_eps)
 
         cos_sin = cos_sin_cache.index_select(0, positions.long())
         half = cos_sin.size(-1) // 2
         cos = cos_sin[..., :half].repeat_interleave(2, dim=-1).contiguous()
         sin = cos_sin[..., half:].repeat_interleave(2, dim=-1).contiguous()
-        _k.npu_inplace_partial_rotary_mul(
-            q, cos, sin, self.nope_head_dim, self.rope_head_dim
-        )
+        _k.npu_inplace_partial_rotary_mul(q, cos, sin, self.nope_head_dim, self.rope_head_dim)
 
         kv = self.kv_proj(kv_hidden)
         # kv_proj outputs head_dim = nope_head_dim + rope_head_dim; layernorm
@@ -678,9 +647,7 @@ class DeepseekV4Attention(Attention):
         # Match C++ DSAttentionImpl exactly. A flattened F.linear is
         # mathematically equivalent but selects a different NPU accumulation
         # path and produces layer-by-layer BF16 drift.
-        wo_a = self.o_a_proj.weight.view(
-            self.n_local_groups, self.o_lora_rank, -1
-        )
+        wo_a = self.o_a_proj.weight.view(self.n_local_groups, self.o_lora_rank, -1)
         o_low = torch.einsum("tgd,grd->tgr", out, wo_a)
         o = self.o_b_proj(o_low.reshape(num_tokens, -1))
         # o_b_proj is RowParallelLinear with reduce_results=True (default),
@@ -721,12 +688,16 @@ class DeepseekV4Attention(Attention):
             sin_table = dsa.sin_table
         if cos_table is None or sin_table is None:
             return None
-        kv_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.kv_state_cache_idx
-        ) if dsa.block_tables else None
-        score_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.score_state_cache_idx
-        ) if dsa.block_tables else None
+        kv_block_table = (
+            _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.kv_state_cache_idx)
+            if dsa.block_tables
+            else None
+        )
+        score_block_table = (
+            _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.score_state_cache_idx)
+            if dsa.block_tables
+            else None
+        )
         coff = 2 if compress_ratio == 4 else 1
         rope_head_dim = self.cfg.qk_rope_head_dim
         sin_view = sin_table.reshape(-1, sin_table.size(-1)) if sin_table.dim() > 2 else sin_table
@@ -816,7 +787,7 @@ class DeepseekV4Indexer(nn.Module):
         self.rope_dim = cfg.qk_rope_head_dim
         self.topk = cfg.index_topk
         self.dtype = dtype
-        self.hadamard_scale = cfg.index_head_dim ** -0.5 if cfg.index_head_dim else 1.0
+        self.hadamard_scale = cfg.index_head_dim**-0.5 if cfg.index_head_dim else 1.0
         # indexer q projection + scoring weights + compressor (K projection is
         # done by the compressor's wkv, so there is no separate wk/k_norm --
         # matches C++ DeepseekV4IndexerImpl).
@@ -826,21 +797,13 @@ class DeepseekV4Indexer(nn.Module):
             device,
             transpose_weight_after_loading=False,
         )
-        self.weights_proj = nn.Linear(
-            cfg.hidden_size, self.n_head, bias=False, dtype=dtype, device=device
-        )
+        self.weights_proj = nn.Linear(cfg.hidden_size, self.n_head, bias=False, dtype=dtype, device=device)
         # Compressor: wkv (fused wk+wv, unquantized f32) + wgate + ape + norm.
         # wkv out = 2*head_dim (cat of wk, wv); ape = [4, 2*head_dim].
         cmp_out = 2 * self.head_dim
-        self.compressor_wkv = nn.Linear(
-            cfg.hidden_size, cmp_out, bias=False, dtype=torch.float32, device=device
-        )
-        self.compressor_wgate = nn.Linear(
-            cfg.hidden_size, cmp_out, bias=False, dtype=torch.float32, device=device
-        )
-        self.compressor_ape = nn.Parameter(
-            torch.empty(4, cmp_out, dtype=torch.float32, device=device)
-        )
+        self.compressor_wkv = nn.Linear(cfg.hidden_size, cmp_out, bias=False, dtype=torch.float32, device=device)
+        self.compressor_wgate = nn.Linear(cfg.hidden_size, cmp_out, bias=False, dtype=torch.float32, device=device)
+        self.compressor_ape = nn.Parameter(torch.empty(4, cmp_out, dtype=torch.float32, device=device))
         self.compressor_norm = RMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=torch.float32, device=device)
 
     def process_weights_after_loading(self) -> None:
@@ -877,9 +840,7 @@ class DeepseekV4Indexer(nn.Module):
         device = index_cache.device
         # --- build_query (C++ 310-335): wq_b W8A8 matmul over pre-quantized qr. ---
         if qr is not None and qr_pertoken_scale is not None:
-            q_idx = self.wq_b.forward_quant(qr, qr_pertoken_scale).view(
-                -1, self.n_head, self.head_dim
-            )
+            q_idx = self.wq_b.forward_quant(qr, qr_pertoken_scale).view(-1, self.n_head, self.head_dim)
         else:
             q_idx = self.wq_b(qr).view(-1, self.n_head, self.head_dim)
         # --- partial RoPE on q (C++ 417-422): apply_partial_rope over
@@ -908,21 +869,17 @@ class DeepseekV4Indexer(nn.Module):
                 cos_sel = cos_sel.repeat_interleave(2, dim=-1).contiguous()
                 sin_sel = sin_sel.repeat_interleave(2, dim=-1).contiguous()
             elif cos_sel.size(-1) != self.rope_dim:
-                raise RuntimeError(
-                    f"QRoPE cos/sin dim mismatch: cos={cos_sel.shape}, "
-                    f"rope_dim={self.rope_dim}"
-                )
+                raise RuntimeError(f"QRoPE cos/sin dim mismatch: cos={cos_sel.shape}, rope_dim={self.rope_dim}")
             # In-place partial RoPE: modifies q_idx[...rope_start_dim:rope_dim]
             # via aclnnInplacePartialRotaryMul (interleave mode).
             from xllm.python import kernels as _pk
-            _pk.npu_inplace_partial_rotary_mul(
-                q_idx, cos_sel, sin_sel, rope_start_dim, self.rope_dim
-            )
+
+            _pk.npu_inplace_partial_rotary_mul(q_idx, cos_sel, sin_sel, rope_start_dim, self.rope_dim)
         # --- Hadamard rotation on q (C++ 423-424). ---
         hadamard = self._get_hadamard(device)
         q_idx = _rotate_hadamard(q_idx, hadamard, self.hadamard_scale)
         # --- build_weights(hidden) (C++ 337-340, 456). ---
-        softmax_mul = (self.head_dim ** -0.5) * (self.n_head ** -0.5)
+        softmax_mul = (self.head_dim**-0.5) * (self.n_head**-0.5)
         weights = self.weights_proj(hidden) * softmax_mul
         # --- Rebuild index cache: compress_kv -> Hadamard -> quant -> scatter. ---
         kv = self._indexer_compress_kv(
@@ -970,9 +927,7 @@ class DeepseekV4Indexer(nn.Module):
             if tensor is None or tensor.numel() == 0:
                 raise RuntimeError(f"QLI {name} must be defined and non-empty")
             if tensor.device != device:
-                raise RuntimeError(
-                    f"QLI {name} must be on {device}, got {tensor.device}"
-                )
+                raise RuntimeError(f"QLI {name} must be on {device}, got {tensor.device}")
         topk, _ = kernels.quant_lightning_indexer(
             query=q_quant,
             key=index_cache,
@@ -1037,12 +992,16 @@ class DeepseekV4Indexer(nn.Module):
         sin_table = dsa.c4_sin
         if cos_table is None or sin_table is None:
             return None
-        kv_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.index_kv_state_cache_idx
-        ) if dsa.block_tables else None
-        score_block_table = _get_layer_cache_tensor(
-            dsa.block_tables, layer_id, mapping.index_score_state_cache_idx
-        ) if dsa.block_tables else None
+        kv_block_table = (
+            _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.index_kv_state_cache_idx)
+            if dsa.block_tables
+            else None
+        )
+        score_block_table = (
+            _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.index_score_state_cache_idx)
+            if dsa.block_tables
+            else None
+        )
         # Indexer only runs on C4 layers (backend execute: compress_ratio==4),
         # so cmp_ratio is always 4 here -- not a hardcode bug, unlike cmp_kv.
         cmp_ratio = 4
@@ -1094,12 +1053,7 @@ def _layer_tensor(block_tables, layer_id: int, cache_idx: int):
     with the same underlying tensor shared across caches in one group. Mirrors
     C++ ``get_layer_cache_tensor`` (deepseek_sparse_attention.cpp:80).
     """
-    if (
-        layer_id < 0
-        or layer_id >= len(block_tables)
-        or cache_idx < 0
-        or cache_idx >= len(block_tables[layer_id])
-    ):
+    if layer_id < 0 or layer_id >= len(block_tables) or cache_idx < 0 or cache_idx >= len(block_tables[layer_id]):
         return None
     tensor = block_tables[layer_id][cache_idx]
     return tensor if tensor.numel() > 0 else None
@@ -1117,9 +1071,7 @@ def _rotate_hadamard(x: torch.Tensor, hadamard: torch.Tensor, scale: float) -> t
     dim = x.size(-1)
     x2d = x.reshape(-1, dim)
     if x2d.dtype != hadamard.dtype:
-        raise RuntimeError(
-            f"Hadamard dtype must match input: {hadamard.dtype} != {x2d.dtype}"
-        )
+        raise RuntimeError(f"Hadamard dtype must match input: {hadamard.dtype} != {x2d.dtype}")
     dim_padded = hadamard.size(0)
     if dim != dim_padded:
         x2d = torch.nn.functional.pad(x2d, (0, dim_padded - dim))
@@ -1204,16 +1156,22 @@ class DeepseekV4MoE(nn.Module):
             torch.empty(nepr, cfg.hidden_size, inter_local, dtype=torch.int8, device=device),
             requires_grad=False,
         )
-        self.register_buffer("experts_w13_scale", torch.empty(nepr, 2 * inter_local, 1, dtype=torch.float32, device=device))
-        self.register_buffer("experts_w13_offset", torch.zeros(nepr, 2 * inter_local, 1, dtype=torch.float32, device=device))
-        self.register_buffer("experts_w2_scale", torch.empty(nepr, cfg.hidden_size, 1, dtype=torch.float32, device=device))
-        self.register_buffer("experts_w2_offset", torch.zeros(nepr, cfg.hidden_size, 1, dtype=torch.float32, device=device))
+        self.register_buffer(
+            "experts_w13_scale", torch.empty(nepr, 2 * inter_local, 1, dtype=torch.float32, device=device)
+        )
+        self.register_buffer(
+            "experts_w13_offset", torch.zeros(nepr, 2 * inter_local, 1, dtype=torch.float32, device=device)
+        )
+        self.register_buffer(
+            "experts_w2_scale", torch.empty(nepr, cfg.hidden_size, 1, dtype=torch.float32, device=device)
+        )
+        self.register_buffer(
+            "experts_w2_offset", torch.zeros(nepr, cfg.hidden_size, 1, dtype=torch.float32, device=device)
+        )
 
         # Shared expert uses the orthogonal MoE TP group, matching C++
         # FusedMoEImpl. skip_tp_reduce keeps collective ordering in this class.
-        shared_cfg = replace(
-            cfg, tp_size=self.moe_tp_size, tp_rank=self.moe_tp_rank
-        )
+        shared_cfg = replace(cfg, tp_size=self.moe_tp_size, tp_rank=self.moe_tp_rank)
         self.shared_experts = DeepseekV3MLP(
             shared_cfg,
             cfg.moe_intermediate_size * cfg.n_shared_experts,
@@ -1257,34 +1215,60 @@ class DeepseekV4MoE(nn.Module):
 
         if self.hash_layer and hasattr(self, "tid2eid") and gate_input_ids is not None:
             topk_weights, topk_idx, _ = kernels.moe_gating_top_k_hash(
-                x=logits, k=self.topk, bias=None, input_ids=gate_input_ids,
-                tid2eid=self.tid2eid, k_group=1, group_count=1,
-                routed_scaling_factor=self.routed_scaling, eps=1e-20,
-                group_select_mode=1, renorm=renorm, norm_type=norm_type, out_flag=False,
+                x=logits,
+                k=self.topk,
+                bias=None,
+                input_ids=gate_input_ids,
+                tid2eid=self.tid2eid,
+                k_group=1,
+                group_count=1,
+                routed_scaling_factor=self.routed_scaling,
+                eps=1e-20,
+                group_select_mode=1,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=False,
             )
         else:
             bias = getattr(self, "e_score_correction_bias", None)
             topk_weights, topk_idx, _ = kernels.moe_gating_top_k_hash(
-                x=logits, k=self.topk, bias=bias, input_ids=None, tid2eid=None,
-                k_group=1, group_count=1, routed_scaling_factor=self.routed_scaling,
-                eps=1e-20, group_select_mode=1, renorm=renorm, norm_type=norm_type,
+                x=logits,
+                k=self.topk,
+                bias=bias,
+                input_ids=None,
+                tid2eid=None,
+                k_group=1,
+                group_count=1,
+                routed_scaling_factor=self.routed_scaling,
+                eps=1e-20,
+                group_select_mode=1,
+                renorm=renorm,
+                norm_type=norm_type,
                 out_flag=False,
             )
 
         # 2) EP: zero out non-local expert weights (C++ fused_moe.cpp:843-850).
         ep_size = self.cfg.ep_size if self.cfg.ep_size > 0 else self.cfg.tp_size
         if ep_size > 1:
-            local_mask = (topk_idx >= self.start_expert_id) & \
-                         (topk_idx < self.start_expert_id + self.num_experts_per_rank)
+            local_mask = (topk_idx >= self.start_expert_id) & (
+                topk_idx < self.start_expert_id + self.num_experts_per_rank
+            )
             topk_weights = topk_weights * local_mask.to(topk_weights.dtype)
 
         # 3) Expert computation with pre-selected routing (EP-sharded).
         routed_out = kernels.grouped_moe_with_selected_experts(
-            hidden, topk_weights, topk_idx.to(torch.int32),
-            self.experts_w13, self.experts_w2,
-            self.experts_w13_scale, self.experts_w2_scale,
-            self.experts_w13_offset, self.experts_w2_offset,
-            self.num_total_experts, self.start_expert_id, self.num_experts_per_rank,
+            hidden,
+            topk_weights,
+            topk_idx.to(torch.int32),
+            self.experts_w13,
+            self.experts_w2,
+            self.experts_w13_scale,
+            self.experts_w2_scale,
+            self.experts_w13_offset,
+            self.experts_w2_offset,
+            self.num_total_experts,
+            self.start_expert_id,
+            self.num_experts_per_rank,
             self.cfg.swiglu_limit,
         )
         # 4) Shared experts + C++-ordered TP/EP reductions.
@@ -1292,9 +1276,7 @@ class DeepseekV4MoE(nn.Module):
 
         return self._reduce_moe_outputs(routed_out, shared_out)
 
-    def _reduce_moe_outputs(
-        self, routed_out: torch.Tensor, shared_out: torch.Tensor
-    ) -> torch.Tensor:
+    def _reduce_moe_outputs(self, routed_out: torch.Tensor, shared_out: torch.Tensor) -> torch.Tensor:
         """Reduce routed/shared results in the C++ ``FusedMoEImpl`` order.
 
         With both MoE TP and EP enabled, routed and shared outputs are partial
@@ -1344,9 +1326,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc = DeepseekV4HyperConnection(cfg, dtype, device)
         self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.self_attn = DeepseekV4Attention(cfg, layer_id, dtype, device)
-        self.post_attention_layernorm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         # Dense vs MoE by first_k_dense_replace / moe_layer_freq.
         is_dense = (layer_id < cfg.first_k_dense_replace) or (
             cfg.moe_layer_freq > 1 and layer_id % cfg.moe_layer_freq != 0
@@ -1381,9 +1361,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         attn_input = self.input_layernorm(attn_input)
         attn_output = self.self_attn(attn_input, positions, cos_sin_cache)
-        hidden = self.hc.hc_post(
-            attn_output, residual_attn, post_attn, comb_attn
-        )
+        hidden = self.hc.hc_post(attn_output, residual_attn, post_attn, comb_attn)
 
         residual_ffn = hidden
         ffn_input, post_ffn, comb_ffn = self.hc.hc_pre(
@@ -1393,14 +1371,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc.hc_ffn_base,
         )
         ffn_input = self.post_attention_layernorm(ffn_input)
-        ffn_output = (
-            self.mlp(ffn_input, input_ids)
-            if isinstance(self.mlp, DeepseekV4MoE)
-            else self.mlp(ffn_input)
-        )
-        hidden = self.hc.hc_post(
-            ffn_output, residual_ffn, post_ffn, comb_ffn
-        )
+        ffn_output = self.mlp(ffn_input, input_ids) if isinstance(self.mlp, DeepseekV4MoE) else self.mlp(ffn_input)
+        hidden = self.hc.hc_post(ffn_output, residual_ffn, post_ffn, comb_ffn)
         # Native C++ resets its optional residual at the start of every layer.
         return hidden, None
 
@@ -1412,28 +1384,19 @@ class DeepseekV4Model(nn.Module):
         super().__init__()
         self.cfg = cfg
         if cfg.cp_size > 1:
-            raise NotImplementedError(
-                "DeepSeek-V4 Python CP is reserved for the CP context PR"
-            )
+            raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
         tp = cfg.tp_size
         self.embed_tokens = HiddenParallelEmbedding(
             cfg.vocab_size, cfg.hidden_size // tp, tp, dtype=dtype, device=device
         )
-        self.layers = nn.ModuleList(
-            [
-                DeepseekV4DecoderLayer(cfg, i, dtype, device)
-                for i in range(cfg.n_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([DeepseekV4DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         # Model-level HyperConnection head: merges the hc_mult residual streams
         # back into a single hidden vector before the final norm. Unlike the
         # per-layer hc_pre (which uses mix_hc=(2+mult)*mult), the head uses a
         # plain [hc_mult, hc_dim] hc_fn + [hc_mult] base + [1] scale.
         hc_dim = cfg.hc_mult * cfg.hidden_size
-        self.hc_head_fn = nn.Parameter(
-            torch.empty(cfg.hc_mult, hc_dim, dtype=torch.float32, device=device)
-        )
+        self.hc_head_fn = nn.Parameter(torch.empty(cfg.hc_mult, hc_dim, dtype=torch.float32, device=device))
         self.hc_head_base = nn.Parameter(torch.empty(cfg.hc_mult, dtype=torch.float32, device=device))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32, device=device))
         # Native C++ falls back to max_position_embeddings when the flat
@@ -1479,6 +1442,7 @@ class DeepseekV4Model(nn.Module):
             dtype=dtype,
             device=device,
         )
+
     def attach_rope_tables_to_backend(
         self,
         backend,
@@ -1496,7 +1460,8 @@ class DeepseekV4Model(nn.Module):
             return
         positions = positions.to(torch.int64).contiguous()
         backend.attach_rope_tables(
-            positions, self.rotary.cos_sin_cache,
+            positions,
+            self.rotary.cos_sin_cache,
             graph_bt_cols=graph_bt_cols,
             c4_cos_sin=self.compress_rotary_c4.cos_sin_cache,
             c128_cos_sin=self.compress_rotary_c128.cos_sin_cache,
@@ -1532,19 +1497,13 @@ class DeepseekV4Model(nn.Module):
         if prepare_dsa is not None:
             prepare_dsa(metadata)
         if self.cfg.cp_size > 1:
-            raise NotImplementedError(
-                "DeepSeek-V4 Python CP is reserved for the CP context PR"
-            )
+            raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
         # Expand hidden into hc_mult parallel residual streams for the
         # HyperConnection decoder layers (C++ flat_hc does this reshape).
         hidden = hidden.unsqueeze(1).expand(-1, self.cfg.hc_mult, -1).contiguous()
         residual: torch.Tensor | None = None
         for layer_id, layer in enumerate(self.layers):
-            compress_ratio = (
-                self.cfg.compress_ratios[layer_id]
-                if layer_id < len(self.cfg.compress_ratios)
-                else 1
-            )
+            compress_ratio = self.cfg.compress_ratios[layer_id] if layer_id < len(self.cfg.compress_ratios) else 1
             if compress_ratio == 4:
                 layer_cos_sin_cache = self.compress_rotary_c4.cos_sin_cache
             elif compress_ratio == 128:
@@ -1575,9 +1534,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
         super().__init__()
         self.cfg = DeepseekV4Config.from_dict(config)
         if self.cfg.cp_size > 1:
-            raise NotImplementedError(
-                "DeepSeek-V4 Python CP is reserved for the CP context PR"
-            )
+            raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "npu:0"))
         self.model = DeepseekV4Model(self.cfg, dtype, device)
@@ -1630,7 +1587,8 @@ class DeepseekV4ForCausalLM(PyModelBase):
             # Attention W8A8 projections (ckpt name -> module name).
             _w8a8(ck + "attn.wq_a", pm + "self_attn.q_a_proj")
             _w8a8(
-                ck + "attn.wq_b", pm + "self_attn.q_b_proj",
+                ck + "attn.wq_b",
+                pm + "self_attn.q_b_proj",
                 {"weight": 0, "weight_scale": 0, "weight_offset": 0},
             )
             _w8a8(ck + "attn.wkv", pm + "self_attn.kv_proj")
@@ -1675,9 +1633,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             for part in ("attn", "ffn"):
                 for suffix in ("fn", "scale", "base"):
                     name = f"hc_{part}_{suffix}"
-                    loader.copy_in(
-                        pm + "hc." + name, loader.load_tensor(ck + name)
-                    )
+                    loader.copy_in(pm + "hc." + name, loader.load_tensor(ck + name))
             # Indexer weights (ckpt layers.N.attn.indexer.*).
             if attn.indexer is not None and _has(ck + "attn.indexer.wq_b.weight"):
                 # Indexer wq_b (ReplicatedLinear, not sharded) + weights_proj.
@@ -1707,9 +1663,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             # Attention-level cmp_kv compressor (head_dim=512, separate from the
             # indexer compressor at head_dim=128). Ckpt: attn.compressor.*.
             # Mirrors C++ DSAttentionImpl compressor_ (compressor.cpp:590-597).
-            if hasattr(attn, "cmp_wkv") and _has(
-                ck + "attn.compressor.wkv.weight"
-            ):
+            if hasattr(attn, "cmp_wkv") and _has(ck + "attn.compressor.wkv.weight"):
                 _w = loader.load_tensor(ck + "attn.compressor.wkv.weight")
                 loader.copy_in(pm + "self_attn.cmp_wkv.weight", _w)
                 loader.copy_in(
@@ -1767,6 +1721,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
         (only local EP experts, fused into w13=w1+w3) + shared_experts.
         Mirrors C++ FusedMoEImpl::load_experts (fused_moe.cpp:1938+).
         """
+
         def _has(name: str) -> bool:
             return loader.find(name) is not None
 
@@ -1779,12 +1734,8 @@ class DeepseekV4ForCausalLM(PyModelBase):
             tid2eid_key = ck + "ffn.gate.tid2eid"
             if not _has(tid2eid_key):
                 tid2eid_key += ".weight"
-            assert _has(tid2eid_key), (
-                f"hash gate checkpoint tensor not found: {tid2eid_key}"
-            )
-            loader.copy_in(
-                pm + "mlp.tid2eid", loader.load_tensor(tid2eid_key)
-            )
+            assert _has(tid2eid_key), f"hash gate checkpoint tensor not found: {tid2eid_key}"
+            loader.copy_in(pm + "mlp.tid2eid", loader.load_tensor(tid2eid_key))
         else:
             # Match DeepseekV4GateImpl::load_state_dict: the correction bias is
             # mandatory for non-hash routing, with the legacy key as fallback.
@@ -1792,8 +1743,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             if not _has(bias_key):
                 bias_key = ck + "ffn.gate.e_score_correction_bias"
             assert _has(bias_key), (
-                "non-hash gate checkpoint tensor not found: "
-                f"{ck}ffn.gate.bias (or e_score_correction_bias)"
+                f"non-hash gate checkpoint tensor not found: {ck}ffn.gate.bias (or e_score_correction_bias)"
             )
             loader.copy_in(
                 pm + "mlp.e_score_correction_bias",
@@ -1827,7 +1777,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
                 s13 = torch.cat([s1, s3], dim=0)
                 if tp > 1:
                     s13 = loader.shard(s13, dim=0, world=tp, rank=tp_rank)
-                w13_scale[local_idx].copy_(s13[:w13_j.size(0)])
+                w13_scale[local_idx].copy_(s13[: w13_j.size(0)])
             if _has(e + "w2.weight_scale"):
                 w2_scale[local_idx].copy_(loader.load_tensor(e + "w2.weight_scale"))
         # Shared experts: checkpoint has w1/w2/w3 (W8A8 dynamic), fuse w1+w3 -> gate_up_proj.
@@ -1837,37 +1787,33 @@ class DeepseekV4ForCausalLM(PyModelBase):
             se_w3 = loader.load_tensor(se + "w3.weight")
             se_w13 = torch.cat([se_w1, se_w3], dim=0)
             if tp > 1:
-                se_w13 = loader.shard(
-                    se_w13, dim=0, world=tp, rank=tp_rank
-                )
+                se_w13 = loader.shard(se_w13, dim=0, world=tp, rank=tp_rank)
             loader.copy_in(pm + "mlp.shared_experts.gate_up_proj.weight", se_w13)
             if _has(se + "w1.weight_scale"):
                 s1 = loader.load_tensor(se + "w1.weight_scale")
                 s3 = loader.load_tensor(se + "w3.weight_scale")
                 se_s13 = torch.cat([s1, s3], dim=0)
                 if tp > 1:
-                    se_s13 = loader.shard(
-                        se_s13, dim=0, world=tp, rank=tp_rank
-                    )
-                loader.copy_in(pm + "mlp.shared_experts.gate_up_proj.weight_scale",
-                               se_s13[:se_w13.size(0)])
+                    se_s13 = loader.shard(se_s13, dim=0, world=tp, rank=tp_rank)
+                loader.copy_in(pm + "mlp.shared_experts.gate_up_proj.weight_scale", se_s13[: se_w13.size(0)])
             if _has(se + "w1.weight_offset"):
                 o1 = loader.load_tensor(se + "w1.weight_offset")
                 o3 = loader.load_tensor(se + "w3.weight_offset")
-                loader.copy_in(pm + "mlp.shared_experts.gate_up_proj.weight_offset",
-                               torch.cat([o1, o3], dim=0)[:se_w13.size(0)])
+                loader.copy_in(
+                    pm + "mlp.shared_experts.gate_up_proj.weight_offset", torch.cat([o1, o3], dim=0)[: se_w13.size(0)]
+                )
             se_w2 = loader.load_tensor(se + "w2.weight")
             if tp > 1:
-                se_w2 = loader.shard(
-                    se_w2, dim=1, world=tp, rank=tp_rank
-                )
+                se_w2 = loader.shard(se_w2, dim=1, world=tp, rank=tp_rank)
             loader.copy_in(pm + "mlp.shared_experts.down_proj.weight", se_w2)
             if _has(se + "w2.weight_scale"):
-                loader.copy_in(pm + "mlp.shared_experts.down_proj.weight_scale",
-                               loader.load_tensor(se + "w2.weight_scale"))
+                loader.copy_in(
+                    pm + "mlp.shared_experts.down_proj.weight_scale", loader.load_tensor(se + "w2.weight_scale")
+                )
             if _has(se + "w2.weight_offset"):
-                loader.copy_in(pm + "mlp.shared_experts.down_proj.weight_offset",
-                               loader.load_tensor(se + "w2.weight_offset"))
+                loader.copy_in(
+                    pm + "mlp.shared_experts.down_proj.weight_offset", loader.load_tensor(se + "w2.weight_offset")
+                )
             # NOTE: shared_experts.{gate_up,down}_proj.process_weights_after_loading
             # is NOT called here. It is called exactly once via
             # DeepseekV4MoE.process_weights_after_loading (line ~816) at the end of

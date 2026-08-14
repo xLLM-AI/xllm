@@ -168,11 +168,7 @@ def build_cache_specs(
 
     caches_info: list[list[DSACacheInfo]] = [[] for _ in range(n_layers)]
     for layer_id in range(n_layers):
-        cr = (
-            compress_ratios[layer_id]
-            if layer_id < len(compress_ratios)
-            else 1
-        )
+        cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
         cr = _normalize_compress_ratio(cr)
 
         if cr == 1:
@@ -202,9 +198,7 @@ def build_cache_specs(
 
         for cache_type, ratio, block_size in entries:
             gid = register_group(cache_type, ratio, block_size)
-            caches_info[layer_id].append(
-                DSACacheInfo(gid, cache_type, ratio, block_size)
-            )
+            caches_info[layer_id].append(DSACacheInfo(gid, cache_type, ratio, block_size))
 
     return caches_info, group_infos
 
@@ -264,9 +258,7 @@ class DsaMetadataBuilder:
             dsa.sin_table = cos_sin_chunks[1].contiguous()
         if positions is not None and positions.numel() > 0:
             self._build_positions(dsa, kv_seq_lens, q_lens, enable_graph)
-        dsa.start_pos = (dsa.actual_seq_lengths_kv - dsa.seq_lens_q).to(
-            torch.int32
-        )
+        dsa.start_pos = (dsa.actual_seq_lengths_kv - dsa.seq_lens_q).to(torch.int32)
 
         self._build_block_tables_and_slots(
             multi_block_tables,
@@ -294,23 +286,11 @@ class DsaMetadataBuilder:
         kv = torch.tensor(kv_seq_lens, dtype=torch.int32, device=device)
         q = torch.tensor(q_lens, dtype=torch.int32, device=device)
         zeros_prefix = torch.zeros(1, dtype=torch.int32, device=device)
-        actual_seq_lengths_query = torch.cat(
-            [zeros_prefix, q.cumsum(0).to(torch.int32)]
-        )
+        actual_seq_lengths_query = torch.cat([zeros_prefix, q.cumsum(0).to(torch.int32)])
         kv_cu = torch.cat([zeros_prefix, kv.cumsum(0).to(torch.int32)])
-        max_kv = (
-            kv.max().to(torch.int32)
-            if kv.numel()
-            else torch.zeros(1, dtype=torch.int32, device=device)
-        )
-        max_q = (
-            q.max().to(torch.int32)
-            if q.numel()
-            else torch.zeros(1, dtype=torch.int32, device=device)
-        )
-        max_query_len = max(
-            int(max_query_len), max((int(value) for value in q_lens), default=0)
-        )
+        max_kv = kv.max().to(torch.int32) if kv.numel() else torch.zeros(1, dtype=torch.int32, device=device)
+        max_q = q.max().to(torch.int32) if q.numel() else torch.zeros(1, dtype=torch.int32, device=device)
+        max_query_len = max(int(max_query_len), max((int(value) for value in q_lens), default=0))
         max_seq_len = max(
             int(max_seq_len),
             max((int(value) for value in kv_seq_lens), default=0),
@@ -364,9 +344,7 @@ class DsaMetadataBuilder:
             if enable_graph:
                 # Graph mode pads to total_tokens so the tensor address is stable
                 # across bucket sizes. C++ vector::resize() zero-fills the tail.
-                out = torch.zeros(
-                    total_tokens, dtype=dsa.input_positions.dtype
-                )
+                out = torch.zeros(total_tokens, dtype=dsa.input_positions.dtype)
                 for idx, p in enumerate(positions):
                     out[idx] = p
                 return out
@@ -416,16 +394,12 @@ class DsaMetadataBuilder:
             manager_num = len(active)
 
         if manager_num > len(self.group_infos):
-            raise ValueError(
-                f"manager count {manager_num} exceeds group count "
-                f"{len(self.group_infos)}"
-            )
+            raise ValueError(f"manager count {manager_num} exceeds group count {len(self.group_infos)}")
         if enable_graph and graph_block_table_capacity_cols > 0:
             for manager_id, block_table in enumerate(active):
                 if block_table.dim() != 2:
                     raise ValueError(
-                        "ACL graph multi_block_tables must be 2-D: "
-                        f"manager {manager_id} has rank {block_table.dim()}"
+                        f"ACL graph multi_block_tables must be 2-D: manager {manager_id} has rank {block_table.dim()}"
                     )
                 if block_table.size(1) > graph_block_table_capacity_cols:
                     raise ValueError(
@@ -434,9 +408,7 @@ class DsaMetadataBuilder:
                         f"columns, capacity is {graph_block_table_capacity_cols}"
                     )
 
-        graph_slot_capacity = (
-            int(positions.numel()) if enable_graph and positions.numel() > 0 else 0
-        )
+        graph_slot_capacity = int(positions.numel()) if enable_graph and positions.numel() > 0 else 0
         total_tokens = sum(int(x) for x in ctx_lens)
 
         proc_bt: list[torch.Tensor] = [torch.empty(0)] * manager_num
@@ -502,9 +474,7 @@ class DsaMetadataBuilder:
                 graph_block_table_capacity_cols,
             )
         # SEQUENCE: expand the whole context.
-        return self._expand_blocks_to_slots(
-            raw_bt, gi, ctx_lens, batch_size, total_tokens
-        )
+        return self._expand_blocks_to_slots(raw_bt, gi, ctx_lens, batch_size, total_tokens)
 
     # -- TOKEN group (process_token_group, cpp:364-464) --------------------
     # Commits only the compressed rows crossed by the current forward step.
@@ -527,14 +497,8 @@ class DsaMetadataBuilder:
             prev_ctx_len = ctx_len - q_len
             committed_rows += ctx_len // ratio - prev_ctx_len // ratio
 
-        out_slot_rows = (
-            max(graph_slot_capacity, committed_rows)
-            if graph_slot_capacity > 0
-            else committed_rows
-        )
-        out_slots = torch.full(
-            (out_slot_rows,), -1, dtype=torch.int32, device=raw_bt.device
-        )
+        out_slot_rows = max(graph_slot_capacity, committed_rows) if graph_slot_capacity > 0 else committed_rows
+        out_slots = torch.full((out_slot_rows,), -1, dtype=torch.int32, device=raw_bt.device)
         semantic_cols = int(raw_bt.size(1))
 
         def slot_for_compressed_index(seq: int, compressed_idx: int) -> int:
@@ -559,9 +523,7 @@ class DsaMetadataBuilder:
             committed = ctx_len // ratio
             new_committed = committed - prev_committed
             for i in range(new_committed):
-                slots_list[write_idx] = slot_for_compressed_index(
-                    seq, prev_committed + i
-                )
+                slots_list[write_idx] = slot_for_compressed_index(seq, prev_committed + i)
                 write_idx += 1
         out_slots = torch.tensor(slots_list, dtype=torch.int32, device=raw_bt.device)
 
@@ -586,18 +548,10 @@ class DsaMetadataBuilder:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         query_total_tokens = 0
         for seq in range(batch_size):
-            query_total_tokens += max(
-                0, min(int(q_lens[seq]), int(ctx_lens[seq]))
-            )
+            query_total_tokens += max(0, min(int(q_lens[seq]), int(ctx_lens[seq])))
 
-        out_slot_rows = (
-            max(graph_slot_capacity, query_total_tokens)
-            if graph_slot_capacity > 0
-            else query_total_tokens
-        )
-        out_slots = torch.full(
-            (out_slot_rows,), -1, dtype=torch.int32, device=raw_bt.device
-        )
+        out_slot_rows = max(graph_slot_capacity, query_total_tokens) if graph_slot_capacity > 0 else query_total_tokens
+        out_slots = torch.full((out_slot_rows,), -1, dtype=torch.int32, device=raw_bt.device)
         semantic_cols = int(raw_bt.size(1))
 
         def slot_for_position(seq: int, pos: int) -> int:
@@ -626,10 +580,7 @@ class DsaMetadataBuilder:
 
         # Rebuild the read-side block table: keep only the SWA window columns,
         # right-aligned.
-        dst_lens = [
-            (max(int(ctx_lens[s]), 0) + block_size - 1) // block_size
-            for s in range(batch_size)
-        ]
+        dst_lens = [(max(int(ctx_lens[s]), 0) + block_size - 1) // block_size for s in range(batch_size)]
         max_dst_len = max(max(dst_lens) if dst_lens else 0, semantic_cols)
         if graph_slot_capacity > 0 and graph_block_table_capacity_cols > 0:
             storage_cols = max(graph_block_table_capacity_cols, int(raw_bt.size(1)))
@@ -662,9 +613,7 @@ class DsaMetadataBuilder:
         total_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         block_size = gi.block_size
-        slots = torch.full(
-            (total_tokens,), -1, dtype=torch.int32, device=raw_bt.device
-        )
+        slots = torch.full((total_tokens,), -1, dtype=torch.int32, device=raw_bt.device)
         max_blocks = int(raw_bt.size(1))
         start_idx = 0
         for seq in range(batch_size):
@@ -687,9 +636,7 @@ class DsaMetadataBuilder:
                     filled += 1
             start_idx += token_len
         # Replace -1 padding with 0 (C++ does torch::where(eq(-1), 0, raw)).
-        slots = torch.where(
-            slots.eq(-1), torch.zeros_like(slots), slots
-        )
+        slots = torch.where(slots.eq(-1), torch.zeros_like(slots), slots)
         return raw_bt, slots
 
     @staticmethod
@@ -711,9 +658,7 @@ class DsaMetadataBuilder:
         pad_value: int,
     ) -> torch.Tensor:
         cols = max(capacity_cols, int(raw_bt.size(1)))
-        out = torch.full(
-            (batch_size, cols), pad_value, dtype=torch.int32, device=raw_bt.device
-        )
+        out = torch.full((batch_size, cols), pad_value, dtype=torch.int32, device=raw_bt.device)
         rows = min(batch_size, int(raw_bt.size(0)))
         copy_cols = min(int(raw_bt.size(1)), cols)
         out[:rows, :copy_cols] = raw_bt[:rows, :copy_cols]

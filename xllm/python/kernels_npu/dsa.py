@@ -43,9 +43,19 @@ def dequant_swiglu_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused dequant + SwiGLU + dynamic quant (replaces manual loop)."""
     return torch.ops.xllm_ops.dequant_swiglu_quant(
-        x, weight_scale, activation_scale, bias, quant_scale, quant_offset,
-        group_index, activate_left, quant_mode, swiglu_mode,
-        clamp_limit, glu_alpha, glu_bias,
+        x,
+        weight_scale,
+        activation_scale,
+        bias,
+        quant_scale,
+        quant_offset,
+        group_index,
+        activate_left,
+        quant_mode,
+        swiglu_mode,
+        clamp_limit,
+        glu_alpha,
+        glu_bias,
     )
 
 
@@ -66,8 +76,19 @@ def moe_gating_top_k_hash(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """DeepSeek-V4 MoE hash routing gate."""
     return torch.ops.xllm_ops.moe_gating_top_k_hash(
-        x, k, bias, input_ids, tid2eid, k_group, group_count,
-        routed_scaling_factor, eps, group_select_mode, renorm, norm_type, out_flag,
+        x,
+        k,
+        bias,
+        input_ids,
+        tid2eid,
+        k_group,
+        group_count,
+        routed_scaling_factor,
+        eps,
+        group_select_mode,
+        renorm,
+        norm_type,
+        out_flag,
     )
 
 
@@ -85,9 +106,7 @@ def hc_pre(
 
     Returns ``(attn_input, post, comb)`` where post/comb feed ``hc_post``.
     """
-    return torch.ops.xllm_ops.hc_pre(
-        x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps
-    )
+    return torch.ops.xllm_ops.hc_pre(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps)
 
 
 def hc_post(
@@ -133,9 +152,7 @@ def compressor(
     # adapter deterministic; experimental clone/noalias paths do not belong in
     # the public binding.
     kv_block_table = kv_block_table.to(x.device) if kv_block_table is not None else None
-    score_block_table = (
-        score_block_table.to(x.device) if score_block_table is not None else None
-    )
+    score_block_table = score_block_table.to(x.device) if score_block_table is not None else None
     cu_seqlens = cu_seqlens.to(x.device) if cu_seqlens is not None else None
     seqused = seqused.to(x.device) if seqused is not None else None
     start_pos = start_pos.to(x.device) if start_pos is not None else None

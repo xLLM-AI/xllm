@@ -76,9 +76,7 @@ def fused_qk_norm_rope(
     )
 
 
-@torch.library.custom_op(
-    "xllm_python::interleaved_rotary_embedding", mutates_args=()
-)
+@torch.library.custom_op("xllm_python::interleaved_rotary_embedding", mutates_args=())
 def interleaved_rotary_embedding(
     value: torch.Tensor,
     cosine: torch.Tensor,
@@ -95,9 +93,7 @@ def interleaved_rotary_embedding(
         A tensor with the shape and dtype of ``value``.
     """
     num_tokens, num_heads, head_dim = value.shape
-    output = torch_npu.npu_interleave_rope(
-        value.view(num_tokens, num_heads, 1, head_dim), cosine, sine
-    )
+    output = torch_npu.npu_interleave_rope(value.view(num_tokens, num_heads, 1, head_dim), cosine, sine)
     return output.view(num_tokens, num_heads, head_dim)
 
 
@@ -170,9 +166,7 @@ def vision_rotary_mul(
     """
     import torch_npu
 
-    return torch_npu.npu_rotary_mul(
-        value.unsqueeze(0).contiguous(), cos_full, sin_full
-    ).squeeze(0)
+    return torch_npu.npu_rotary_mul(value.unsqueeze(0).contiguous(), cos_full, sin_full).squeeze(0)
 
 
 def npu_inplace_partial_rotary_mul(
@@ -197,7 +191,10 @@ def npu_inplace_partial_rotary_mul(
     sin_cache = -sin if inverse else sin
     sin4d = sin_cache.view(sin.size(0), 1, 1, sin.size(1))
     torch.ops.xllm_ops.npu_inplace_partial_rotary_mul(
-        x4d, cos4d, sin4d, "interleave",
+        x4d,
+        cos4d,
+        sin4d,
+        "interleave",
         [int(rope_start_dim), int(rope_start_dim + rope_head_dim)],
     )
     return x

@@ -21,19 +21,19 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 
+from xllm.python import kernels
 from xllm.python.attention import dsa_attention as dsa_attention_module
+from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.dsa_attention import (
     DsaAttentionBackend,
     _DsaCacheMapping,
     _get_layer_cache_tensor,
     _scatter_by_slot,
 )
-from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.dsa_metadata import build_cache_specs
-from xllm.python import kernels
 
 
 def _make_backend() -> DsaAttentionBackend:
@@ -136,9 +136,7 @@ def test_default_mapping_is_empty() -> None:
 def test_prepare_binds_dsa_metadata_to_current_forward(monkeypatch) -> None:
     backend = _make_backend()
     monkeypatch.setattr(backend, "_move_metadata_to_device", lambda dsa: None)
-    monkeypatch.setattr(
-        backend, "_build_precomputed_metadata", lambda dsa, metadata: None
-    )
+    monkeypatch.setattr(backend, "_build_precomputed_metadata", lambda dsa, metadata: None)
 
     def make_metadata(kv_len: int, is_prefill: bool) -> SimpleNamespace:
         q_len = kv_len if is_prefill else 1
@@ -276,9 +274,7 @@ def test_c4_execute_requires_model_compressor(monkeypatch) -> None:
 def test_forward_rope_state_is_owned_by_each_metadata(monkeypatch) -> None:
     backend = _make_backend()
     monkeypatch.setattr(backend, "_move_metadata_to_device", lambda dsa: None)
-    monkeypatch.setattr(
-        backend, "_build_precomputed_metadata", lambda dsa, metadata: None
-    )
+    monkeypatch.setattr(backend, "_build_precomputed_metadata", lambda dsa, metadata: None)
 
     def make_metadata(kv_len: int, q_len: int) -> SimpleNamespace:
         return SimpleNamespace(
@@ -372,9 +368,7 @@ def test_prefill_persists_swa_for_decode_and_omits_ori_kv_cu_seqlens(
 
     prepare_step(kv_len=2, q_len=2, is_prefill=True)
     prefill_kv = torch.arange(2 * 512, dtype=torch.float32).view(2, 1, 512)
-    backend.execute(
-        torch.zeros(2, 8, 512), prefill_kv, prefill_kv, layer
-    )
+    backend.execute(torch.zeros(2, 8, 512), prefill_kv, prefill_kv, layer)
     assert torch.equal(swa[1, :2], prefill_kv)
 
     prepare_step(kv_len=3, q_len=1, is_prefill=False)

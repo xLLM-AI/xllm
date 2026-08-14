@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 import torch
 
-
 _REPO_ROOT = Path(__file__).parents[2]
 
 
@@ -83,9 +82,7 @@ def test_selected_expert_moe_matches_native_call_contract(
     monkeypatch.setattr(moe.torch_npu, "npu_moe_init_routing_v2", init_routing)
     monkeypatch.setattr(moe.torch_npu, "npu_moe_token_unpermute", token_unpermute)
     monkeypatch.setattr(kernels, "dynamic_quant", dynamic_quant, raising=False)
-    monkeypatch.setattr(
-        kernels, "dequant_swiglu_quant", dequant_swiglu_quant, raising=False
-    )
+    monkeypatch.setattr(kernels, "dequant_swiglu_quant", dequant_swiglu_quant, raising=False)
 
     result = moe._grouped_moe_with_selected_experts_impl(
         hidden,

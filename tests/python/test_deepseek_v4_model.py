@@ -21,18 +21,18 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 
+from xllm.python.models import deepseek_v4, deepseek_v32
 from xllm.python.models.deepseek_v4 import (
     DeepseekV4Config,
     DeepseekV4DecoderLayer,
     DeepseekV4HyperConnection,
-    DeepseekV4MoE,
     DeepseekV4Model,
+    DeepseekV4MoE,
     DeepseekV4RotaryEmbedding,
 )
-from xllm.python.models import deepseek_v32, deepseek_v4
 from xllm.python.models.deepseek_v32 import W8A8DynamicLinear, _swiglu_with_clamp
 from xllm.python.registry import get_model_class
 
@@ -170,9 +170,7 @@ def test_hyper_connection_shapes() -> None:
 def test_decoder_layer_builds() -> None:
     """A C4 decoder layer builds attention + HC + MoE without error."""
     cfg = DeepseekV4Config.from_dict(_DSV4_CONFIG)
-    layer = DeepseekV4DecoderLayer(
-        cfg, layer_id=1, dtype=torch.float32, device=torch.device("cpu")
-    )
+    layer = DeepseekV4DecoderLayer(cfg, layer_id=1, dtype=torch.float32, device=torch.device("cpu"))
     assert layer.self_attn.layer_id == 1
     assert layer.self_attn.indexer is not None
     assert layer.hc.hc_mult_local == 4
@@ -180,15 +178,9 @@ def test_decoder_layer_builds() -> None:
 
 def test_attention_builds_compression_modules_only_for_matching_ratios() -> None:
     cfg = DeepseekV4Config.from_dict(_DSV4_CONFIG)
-    c1 = DeepseekV4DecoderLayer(
-        cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu")
-    ).self_attn
-    c4 = DeepseekV4DecoderLayer(
-        cfg, layer_id=1, dtype=torch.float32, device=torch.device("cpu")
-    ).self_attn
-    c128 = DeepseekV4DecoderLayer(
-        cfg, layer_id=2, dtype=torch.float32, device=torch.device("cpu")
-    ).self_attn
+    c1 = DeepseekV4DecoderLayer(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu")).self_attn
+    c4 = DeepseekV4DecoderLayer(cfg, layer_id=1, dtype=torch.float32, device=torch.device("cpu")).self_attn
+    c128 = DeepseekV4DecoderLayer(cfg, layer_id=2, dtype=torch.float32, device=torch.device("cpu")).self_attn
 
     assert c1.indexer is None
     assert not hasattr(c1, "cmp_wkv")
@@ -203,12 +195,8 @@ def test_moe_gate_state_matches_cpp_parameter_ownership() -> None:
     cfg_dict["n_hash_layers"] = 3
     cfg = DeepseekV4Config.from_dict(cfg_dict)
 
-    hash_moe = DeepseekV4MoE(
-        cfg, layer_id=2, dtype=torch.float32, device=torch.device("cpu")
-    )
-    non_hash_moe = DeepseekV4MoE(
-        cfg, layer_id=3, dtype=torch.float32, device=torch.device("cpu")
-    )
+    hash_moe = DeepseekV4MoE(cfg, layer_id=2, dtype=torch.float32, device=torch.device("cpu"))
+    non_hash_moe = DeepseekV4MoE(cfg, layer_id=3, dtype=torch.float32, device=torch.device("cpu"))
 
     hash_params = dict(hash_moe.named_parameters())
     non_hash_params = dict(non_hash_moe.named_parameters())
@@ -219,14 +207,11 @@ def test_moe_gate_state_matches_cpp_parameter_ownership() -> None:
 
 
 def test_clamped_swiglu_matches_cpp_activation_formula() -> None:
-    x = torch.tensor(
-        [[-20.0, 5.0, 20.0, 12.0, -15.0, 3.0]], dtype=torch.bfloat16
-    )
+    x = torch.tensor([[-20.0, 5.0, 20.0, 12.0, -15.0, 3.0]], dtype=torch.bfloat16)
     gate, up = x.chunk(2, dim=-1)
-    expected = (
-        torch.nn.functional.silu(gate.float().clamp_max(10.0))
-        * up.float().clamp(min=-10.0, max=10.0)
-    ).to(x.dtype)
+    expected = (torch.nn.functional.silu(gate.float().clamp_max(10.0)) * up.float().clamp(min=-10.0, max=10.0)).to(
+        x.dtype
+    )
 
     torch.testing.assert_close(_swiglu_with_clamp(x, 10.0), expected)
 
@@ -236,15 +221,11 @@ def test_dynamic_linear_preserves_v3_and_v4_weight_layout_contracts(
 ) -> None:
     calls: list[bool] = []
 
-    def fake_quant_matmul(
-        x, weight, transpose2, scale, offset, pertoken, bias, output_dtype
-    ):
+    def fake_quant_matmul(x, weight, transpose2, scale, offset, pertoken, bias, output_dtype):
         calls.append(transpose2)
         return torch.empty((x.size(0), scale.numel()), dtype=output_dtype)
 
-    monkeypatch.setattr(
-        deepseek_v32.kernels, "quant_matmul", fake_quant_matmul, raising=False
-    )
+    monkeypatch.setattr(deepseek_v32.kernels, "quant_matmul", fake_quant_matmul, raising=False)
     x = torch.ones((2, 3), dtype=torch.int8)
     pertoken = torch.ones((2,), dtype=torch.float32)
 
@@ -254,9 +235,7 @@ def test_dynamic_linear_preserves_v3_and_v4_weight_layout_contracts(
     assert v3.weight.shape == (3, 4)
     v3.forward_quant(x, pertoken)
 
-    v4 = W8A8DynamicLinear(
-        3, 4, torch.device("cpu"), transpose_weight_after_loading=False
-    )
+    v4 = W8A8DynamicLinear(3, 4, torch.device("cpu"), transpose_weight_after_loading=False)
     v4.weight_offset.zero_()
     v4.process_weights_after_loading()
     assert v4.weight.shape == (4, 3)
@@ -284,9 +263,7 @@ def test_moe_uses_dedicated_group_sizes() -> None:
         cp_rank=0,
     )
     cfg = DeepseekV4Config.from_dict(cfg_dict)
-    moe = DeepseekV4MoE(
-        cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu")
-    )
+    moe = DeepseekV4MoE(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu"))
 
     assert moe.moe_tp_size == 1
     assert moe.moe_tp_rank == 0
@@ -336,9 +313,7 @@ def test_moe_ep_only_reduces_routed_output(monkeypatch: pytest.MonkeyPatch) -> N
         moe_tp_size=1,
     )
 
-    output = DeepseekV4MoE._reduce_moe_outputs(
-        owner, torch.zeros(1), torch.ones(1)
-    )
+    output = DeepseekV4MoE._reduce_moe_outputs(owner, torch.zeros(1), torch.ones(1))
 
     assert calls == ["moe_ep"]
     assert torch.equal(output, torch.full((1,), 101.0))
@@ -361,9 +336,7 @@ def test_moe_tp_only_combines_before_one_reduce(
         moe_tp_size=2,
     )
 
-    output = DeepseekV4MoE._reduce_moe_outputs(
-        owner, torch.full((1,), 2.0), torch.full((1,), 3.0)
-    )
+    output = DeepseekV4MoE._reduce_moe_outputs(owner, torch.full((1,), 2.0), torch.full((1,), 3.0))
 
     assert calls == ["moe_tp"]
     assert torch.equal(output, torch.full((1,), 10.0))

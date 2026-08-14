@@ -36,9 +36,7 @@ from xllm.python.attention.dsa_metadata import (
 def test_build_cache_specs_groups() -> None:
     """Group 0 is always SWA; TOKEN groups register in first-seen order."""
     compress_ratios = [0, 0, 4, 128, 4, 128, 4, 0]
-    caches_info, group_infos = build_cache_specs(
-        compress_ratios, window_size=128, n_layers=8
-    )
+    caches_info, group_infos = build_cache_specs(compress_ratios, window_size=128, n_layers=8)
 
     # Three groups: SWA(1,128), TOKEN(4,128), TOKEN(128,128).
     assert len(group_infos) == 3
@@ -76,9 +74,7 @@ def test_build_cache_specs_real_dsv4_config() -> None:
     remain (indices 0 and 1).
     """
     compress_ratios = (
-        [0, 0]
-        + [4, 128] * 20
-        + [4, 0]  # layer 42 is C4; index 43 (zero) is ignored.
+        [0, 0] + [4, 128] * 20 + [4, 0]  # layer 42 is C4; index 43 (zero) is ignored.
     )
     assert len(compress_ratios) == 44
     caches_info, group_infos = build_cache_specs(compress_ratios, 128, 43)
@@ -340,9 +336,7 @@ def test_multi_batch_slots_are_concatenated_by_sequence() -> None:
 
 def test_packed_manager_block_table_is_unpacked() -> None:
     builder, _, _ = _make_builder()
-    packed = torch.tensor(
-        [[10, 11], [20, 21], [30, 31]], dtype=torch.int32
-    )
+    packed = torch.tensor([[10, 11], [20, 21], [30, 31]], dtype=torch.int32)
     dsa = builder.build(
         multi_block_tables=[packed],
         kv_seq_lens=[128],
