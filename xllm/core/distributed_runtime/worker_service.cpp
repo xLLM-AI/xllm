@@ -31,6 +31,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
@@ -137,14 +138,26 @@ void WorkerService::record_speculative_metrics_from_output(
       next_tokens.dim() != 2 || next_tokens.numel() == 0) {
     return;
   }
+  // DFlash / DSpark record metrics inline in their own worker
+  // (DFlashWorkerImpl::record_validate_metrics) with precise per-seq widths,
+  // so this generic per-tensor count would double-count them.
+  if (SpeculativeConfig::is_block_diffusion_algorithm(
+          options_.speculative_algorithm())) {
+    return;
+  }
 
   const int64_t batch_size = next_tokens.size(0);
   const int64_t token_width = next_tokens.size(1);
   const int64_t num_speculative_tokens = options_.num_speculative_tokens();
-  if (num_speculative_tokens <= 0 ||
-      token_width != num_speculative_tokens + 1) {
+  if (num_speculative_tokens <= 0 || token_width < 2) {
     return;
   }
+  // Adaptive pruning may hand back a narrower validate block, so accept any
+  // width in [2, N+1] and derive the actual draft count from token_width - 1.
+  if (token_width > num_speculative_tokens + 1) {
+    return;
+  }
+  const int64_t effective_speculative_tokens = token_width - 1;
 
   SpeculativeOutputStats stats =
       calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
@@ -155,9 +168,10 @@ void WorkerService::record_speculative_metrics_from_output(
   // instance. A per-instance mutex avoids process-wide contention when
   // multiple WorkerServices run in the same process (multi-DP).
   std::lock_guard<std::mutex> lock(speculative_metrics_mutex_);
-  const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
+  const int64_t num_draft_tokens = batch_size * effective_speculative_tokens;
   int64_t num_accepted_tokens = 0;
-  for (int64_t position = 0; position < num_speculative_tokens; ++position) {
+  for (int64_t position = 0; position < effective_speculative_tokens;
+       ++position) {
     const int64_t accepted =
         stats.accepted_per_position[static_cast<size_t>(position)];
     num_accepted_tokens += accepted;

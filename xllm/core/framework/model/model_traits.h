@@ -270,5 +270,34 @@ struct has_dspark_markov_bias<
     std::void_t<decltype(std::declval<T>()->dspark_markov_bias(
         std::declval<const torch::Tensor&>()))>> : std::true_type {};
 
+template <typename T, typename = void>
+struct has_dspark_confidence_probs : std::false_type {};
+
+template <typename T>
+struct has_dspark_confidence_probs<
+    T,
+    std::void_t<decltype(std::declval<T>()->dspark_confidence_probs(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_dspark_confidence_probs_batched : std::false_type {};
+
+template <typename T>
+struct has_dspark_confidence_probs_batched<
+    T,
+    std::void_t<decltype(std::declval<T>()->dspark_confidence_probs_batched(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_has_dspark_confidence_head : std::false_type {};
+
+template <typename T>
+struct has_has_dspark_confidence_head<
+    T,
+    std::void_t<decltype(std::declval<T>()->has_dspark_confidence_head())>>
+    : std::true_type {};
+
 }  // namespace detail
 }  // namespace xllm

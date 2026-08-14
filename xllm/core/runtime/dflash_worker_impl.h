@@ -99,6 +99,11 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   struct DraftBlock {
     torch::Tensor token_ids;
     torch::Tensor probs;
+    // Optional acceptance-probability estimate, [batch, num_speculative_tokens]
+    // fp32 in [0, 1]. Populated by DSpark's ConfidenceHead when available;
+    // consumed by the adaptive-speculative pruning controller. When undefined,
+    // the controller falls back to `probs` (sampler-gathered softmax scores).
+    torch::Tensor confidence_probs;
     // No-sync draft inputs must outlive validation's stream sync.
     std::vector<std::shared_ptr<ForwardInput>> retained_inputs;
   };
@@ -135,20 +140,67 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 
   void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
                                               ForwardInput& validate_input,
-                                              Stream& compute_stream);
+                                              Stream& compute_stream,
+                                              int32_t effective_val_tokens);
+
+  // Per-seq varlen variant. Handles the case where validate_input.token_ids
+  // is a flat [Σ per_seq_val_tokens] layout (i.e. the base per_seq builder
+  // produced it), copying draft tokens into the varlen slots per seq.
+  void fill_validate_input_from_draft_outputs_varlen(
+      const DraftBlock& draft_block,
+      ForwardInput& validate_input,
+      Stream& compute_stream,
+      const std::vector<int32_t>& per_seq_val_tokens);
 
   std::optional<ForwardOutput> run_validate(const ForwardInput& input,
                                             const DraftBlock& draft_block,
                                             ForwardInput& validate_input);
 
+  // `per_seq_val_tokens` (optional): when non-empty, the target output was
+  // scattered from a per-seq varlen batch and each seq's bonus lives at
+  // dense col (per_seq_val_tokens[i] - 1), not the fixed last column. Passing
+  // it lets validate() gather the bonus token per-seq. Empty = uniform
+  // batch-max width (bonus at col effective_val_tokens - 1 for every seq).
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const DraftBlock& draft_block,
-                        const ForwardOutput& target_output);
+                        const ForwardOutput& target_output,
+                        int32_t effective_val_tokens,
+                        const std::vector<int32_t>& per_seq_val_tokens);
 
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const torch::Tensor& draft_token_ids,
                         const torch::Tensor& draft_probs,
-                        const ForwardOutput& target_output);
+                        const ForwardOutput& target_output,
+                        int32_t effective_val_tokens,
+                        const std::vector<int32_t>& per_seq_val_tokens);
+
+  // Adaptive-speculative helper: run controller on draft acceptance
+  // probabilities (ConfidenceHead output if available, sampler-gathered probs
+  // otherwise) and return per-seq prefix_len vector (each entry in
+  // [0, num_speculative_tokens]). Returns empty vector when adaptive is off,
+  // in which case the caller keeps the full draft block.
+  std::vector<int32_t> compute_adaptive_prefix_lengths(
+      const DraftBlock& draft_block,
+      const ForwardInput& input);
+
+  // Zero out draft probs beyond each sequence's prefix_len so the rejection
+  // Per-seq varlen prune: rebuild validate_input as a true varlen
+  // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
+  // compute on tokens each seq's prefix_len actually needs. Reuses the base
+  // SpeculativeWorkerImpl per-seq builder.
+  void apply_per_seq_varlen_prune(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& per_seq_val_tokens);
+
+  // Record precise (draft, accepted) counters. Padded -1 slots at positions
+  // past per_seq_val_tokens[i]-1 are excluded — the count only walks each
+  // row up to its per-seq width. Passing an empty vector treats every row
+  // as full width (static). Caller must ensure val_output.next_tokens is on
+  // CPU (avoids a blocking device sync on the hot path).
+  void record_validate_metrics(
+      const SampleOutput& val_output,
+      const std::vector<int32_t>& per_seq_val_tokens) const;
 
   void process_draft_sample_output(SampleOutput& sample_output);
 

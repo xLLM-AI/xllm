@@ -277,7 +277,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
-  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
+  // adaptive_spec_controller_ now lives on SpeculativeWorkerImpl (base class).
 
   // Classified once when the corresponding models are loaded. Decode-path
   // decisions only read these closed policies.

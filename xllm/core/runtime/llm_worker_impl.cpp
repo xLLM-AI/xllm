@@ -321,6 +321,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
+  torch::Tensor selected_hidden;
   if (sampling_params.selected_token_idxes.defined()) {
     torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
     if (model_output.hidden_states.defined() &&
@@ -330,7 +331,28 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    if (input.return_selected_hidden) {
+      // Emit both selected hidden and logits from a single lm_head pass so the
+      // ConfidenceHead can consume hidden without a second projection.
+      logits = model_->logits(
+          model_output.hidden_states, selected_token_idxes, selected_hidden);
+      if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
+        // ATB lm_head backend does not expose a second output tensor
+        // (LmHeadParam::outputHidden is false), so we surface the hidden here.
+        // selected_hidden must align row-for-row with `logits`, which is
+        // produced in selected_token_idxes order. index_select reproduces that
+        // order for any selection. We deliberately do NOT alias the full
+        // hidden_states on a numel match: equal row count does not imply the
+        // idxes are the identity permutation, and a full-but-reordered
+        // selection would silently misalign hidden against logits. The gather
+        // is one [num_selected, hidden] copy per decode step (not per layer),
+        // negligible next to the forward.
+        selected_hidden = model_output.hidden_states.index_select(
+            /*dim=*/0, selected_token_idxes.to(torch::kLong));
+      }
+    } else {
+      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    }
   }
 
   ForwardOutput output;
@@ -359,6 +381,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   // driver prepare model output
   if (sampling_params.selected_token_idxes.defined()) {
     output.logits = logits;
+    output.selected_hidden = selected_hidden;
     output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;

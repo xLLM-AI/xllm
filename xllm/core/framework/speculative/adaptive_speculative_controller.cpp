@@ -28,6 +28,13 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+// Returns true when the adaptive controller can operate on the given
+// speculative algorithm name. Currently: MTP, DFlash, DSpark.
+bool is_supported_algorithm(const std::string& algorithm) {
+  return SpeculativeConfig::is_mtp_algorithm(algorithm) ||
+         SpeculativeConfig::is_block_diffusion_algorithm(algorithm);
+}
+
 struct PruneCandidate {
   int32_t seq_id = 0;
   int32_t prefix_len = 0;
@@ -40,8 +47,7 @@ AdaptiveSpeculativeController::AdaptiveSpeculativeController(
     const runtime::Options& options)
     : enabled_(options.enable_adaptive_speculative_decode() &&
                options.num_speculative_tokens() > 1 &&
-               SpeculativeConfig::is_mtp_algorithm(
-                   options.speculative_algorithm()) &&
+               is_supported_algorithm(options.speculative_algorithm()) &&
                !options.enable_graph()),
       min_gain_(options.adaptive_speculative_min_gain()) {}
 
@@ -86,7 +92,13 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     double path_prob = 1.0;
     for (int32_t token_idx = 0; token_idx < num_speculative_tokens;
          ++token_idx) {
-      path_prob *= prob_data[seq_id * num_speculative_tokens + token_idx];
+      const double step_prob =
+          prob_data[seq_id * num_speculative_tokens + token_idx];
+      // Chain rule cumulative product: a_{r,j} = ∏ c_i (paper Section 3.2.2
+      // Algorithm 1). Works for MTP / DFlash sample-gathered probs and for
+      // DSpark ConfidenceHead c_k alike; both are per-step conditional
+      // probabilities.
+      path_prob *= step_prob;
       if (!std::isfinite(path_prob)) {
         path_prob = 0.0;
       }

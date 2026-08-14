@@ -16,9 +16,11 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "framework/sampling/rejection_sampler.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/options.h"
@@ -149,6 +151,13 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs);
+  // Per-seq variant used by adaptive-speculative pruning: each sequence's
+  // validate row width equals per_seq_val_tokens[i] (must be in [1, N+1]).
+  // The dense meta/token/position/kv-slot buffers are rebuilt as varlen with
+  // total_tokens = Σ per_seq_val_tokens.
+  void prepare_validate_inputs(const ForwardInput& inputs,
+                               ForwardInput& validate_inputs,
+                               const std::vector<int32_t>& per_seq_val_tokens);
 
   // Target-side cache budget after reserving storage for a colocated draft.
   // DeepSeek-V4's fixed SWA pools require both geometries to participate.
@@ -160,6 +169,12 @@ class SpeculativeWorkerImpl : public WorkerImpl {
  protected:
   // Target model worker
   std::unique_ptr<LLMWorkerImpl> impl_;
+
+  // Optional adaptive pruning controller. Subclasses create it in their ctor
+  // when the algorithm supports adaptive per-seq validate pruning (MTP,
+  // DFlash, DSpark). Left null otherwise. Held in the base so shared plumbing
+  // (predictor setter, profile hook) does not need per-subclass duplication.
+  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
 
   bool enable_fused_kernel_ = false;
   int32_t embedding_size_ = 0;

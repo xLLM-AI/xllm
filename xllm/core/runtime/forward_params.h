@@ -531,6 +531,7 @@ struct ForwardInput {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.step_decode = step_decode;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
+    inputs.return_selected_hidden = return_selected_hidden;
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
     inputs.retained_device_tensors = retained_device_tensors;
@@ -593,6 +594,10 @@ struct ForwardInput {
   std::optional<StepDecodeMeta> step_decode;
   // If true, skip sampler forward and only keep logits.
   bool skip_sampling_for_logits_only = false;
+  // If true, populate ForwardOutput.selected_hidden with hidden states matching
+  // the `logits` selection layout. Used by DSpark ConfidenceHead which needs
+  // pre-lm_head hidden states of the draft tokens.
+  bool return_selected_hidden = false;
 
   // kv info for disaggregated prefill/decode
   std::vector<TransferKVInfo> transfer_kv_infos;
@@ -639,6 +644,11 @@ struct ForwardOutput {
   StreamEventPtr ready_event;
   torch::Tensor logits;
   torch::Tensor embedding;
+  // Selected hidden states matching `logits` layout: [num_selected,
+  // hidden_dim]. Populated when a speculative worker asks for the pre-lm_head
+  // hidden (e.g. DSpark's ConfidenceHead needs the draft-step hidden). Only
+  // computed when `input.return_selected_hidden` is true.
+  torch::Tensor selected_hidden;
   // Backend-neutral state for the next MTP draft step.
   MtpTopkStatePtr mtp_topk_state;
 
