@@ -359,6 +359,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
                 << (draft_args.dspark_use_native_sas()
                         ? "native explicit indices"
                         : "CANN 9.0-compatible q_len=1 fallback");
+#if defined(USE_NPU)
       if (draft_args.dspark_use_native_sas()) {
         LOG(WARNING)
             << "Native DeepSeek-V4 DSpark SAS requires an operator that "
@@ -369,6 +370,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
                    /*use_native_dspark_sas=*/true)
             << ".";
       }
+#endif
       // Keep the trained mtp.0.embed and mtp.<last>.head modules loaded by
       // DeepseekV4DSparkForCausalLMImpl. Sharing the target modules here makes
       // the draft backbone/Markov head project through the wrong vocabulary
