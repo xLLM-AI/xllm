@@ -133,10 +133,10 @@ TEST(DSparkConfidenceHeadParity, NoMarkov_Gamma16) {
   check_parity(/*with_markov=*/false, /*batch=*/3, /*gamma=*/16);
 }
 
-// forward and forward_batched read the SAME cached confidence_temperature(), so
-// whatever value the process froze at, both paths scale identically — parity
-// holds under any temperature. This case just exercises a non-default T env.
-TEST(DSparkConfidenceHeadParity, WithMarkov_TemperatureEnv) {
+// forward and forward_batched apply the same fixed confidence_temperature(), so
+// both paths scale identically and parity holds. An extra batch/gamma shape for
+// coverage beyond the cases above.
+TEST(DSparkConfidenceHeadParity, WithMarkov_Batch6Gamma8) {
   check_parity(/*with_markov=*/true, /*batch=*/6, /*gamma=*/8);
 }
 

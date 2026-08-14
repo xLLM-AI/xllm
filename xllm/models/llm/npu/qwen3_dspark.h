@@ -19,7 +19,6 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -266,19 +265,11 @@ class DSparkConfidenceHead final {
   // identical. Raw neural confidence estimates are typically overconfident (Guo
   // et al. 2017); the DSpark paper (Section 3.2.1 "Post-hoc Calibration") calls
   // for Sequential Temperature Scaling to keep the cumulative product ∏ c_i
-  // aligned with the empirical acceptance rate. We approximate that with a
-  // single global temperature read from DSPARK_CONFIDENCE_TEMPERATURE (default
-  // 1.0 = no scaling). Higher T flattens confidence toward 0.5 so the
-  // cumulative product decays slower and the scheduler prunes less aggressively
-  // at long block lengths.
-  static double confidence_temperature() {
-    static const double temperature = [] {
-      const char* s = std::getenv("DSPARK_CONFIDENCE_TEMPERATURE");
-      double t = s != nullptr ? std::atof(s) : 1.0;
-      return t > 0.0 ? t : 1.0;
-    }();
-    return temperature;
-  }
+  // aligned with the empirical acceptance rate, which higher T approximates by
+  // flattening confidence toward 0.5. The scaling path is kept for that future
+  // calibration, but T is fixed at 1.0 (no scaling) here; when it becomes
+  // tunable it should arrive as a ModelArgs field, not a process-global knob.
+  static constexpr double confidence_temperature() { return 1.0; }
 
   torch::Tensor proj_weight_;  // [1, hidden_size (+ markov_rank)]
   torch::Tensor proj_bias_;    // [1]
