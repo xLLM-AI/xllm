@@ -66,7 +66,8 @@ struct CausalConv1dGraphTask {
   std::shared_ptr<c10_npu::NPUEvent> event;
 };
 
-struct FusedInferAttentionWorkspaceSignature {
+class FusedInferAttentionWorkspaceSignature {
+ public:
   torch::ScalarType query_dtype;
   torch::ScalarType key_dtype;
   torch::ScalarType value_dtype;
