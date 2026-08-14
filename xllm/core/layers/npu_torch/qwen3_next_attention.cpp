@@ -33,6 +33,11 @@ bool is_qwen3_5_model_type(const std::string& model_type) {
          model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp";
 }
 
+bool should_enable_qwen3_5_fia_decode(const std::string& model_type) {
+  return is_qwen3_5_model_type(model_type) &&
+         !ExecutionConfig::get_instance().disable_fia_decode();
+}
+
 Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
     const ModelArgs& args,
     const QuantArgs& quant_args,
@@ -117,8 +122,7 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                 num_kv_heads_,
                 args.sliding_window(),
                 /*enable_fia_decode=*/
-                is_qwen3_5_model_type(args.model_type()) &&
-                    !ExecutionConfig::get_instance().disable_fia_decode()));
+                should_enable_qwen3_5_fia_decode(args.model_type())));
 
   // 7. Fused split_qkv_rmsnorm_mrope kernel setup
   rotary_dim_ = static_cast<int64_t>(head_dim_ * args.partial_rotary_factor());
