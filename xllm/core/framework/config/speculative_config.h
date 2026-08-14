@@ -54,6 +54,15 @@ class SpeculativeConfig final {
            (algorithm[2] == 'P' || algorithm[2] == 'p');
   }
 
+  // True for the block-diffusion draft algorithms (DFlash, DSpark) that record
+  // validate metrics inline per-seq and drive the adaptive per-seq varlen
+  // prune. Case-insensitive so it matches however the flag was cased. MTP is
+  // classified separately via is_mtp_algorithm; callers that also accept MTP
+  // must OR the two.
+  static bool is_block_diffusion_algorithm(std::string_view algorithm) {
+    return iequals(algorithm, "dflash") || iequals(algorithm, "dspark");
+  }
+
   void from_flags();
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
@@ -106,6 +115,29 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_adaptive_speculative_decode) = false;
 
   PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
+
+ private:
+  // ASCII case-insensitive equality. Mirrors the manual case handling in
+  // is_mtp_algorithm rather than pulling <algorithm>/<cctype> into this header.
+  static bool iequals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+      char ca = a[i];
+      char cb = b[i];
+      if (ca >= 'A' && ca <= 'Z') {
+        ca = static_cast<char>(ca - 'A' + 'a');
+      }
+      if (cb >= 'A' && cb <= 'Z') {
+        cb = static_cast<char>(cb - 'A' + 'a');
+      }
+      if (ca != cb) {
+        return false;
+      }
+    }
+    return true;
+  }
 };
 
 }  // namespace xllm

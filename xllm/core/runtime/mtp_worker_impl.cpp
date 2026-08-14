@@ -1899,98 +1899,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   const bool needs_padding =
       (total_tokens != static_cast<int32_t>(padded_total));
   if (needs_padding) {
-    // Slow path: per-seq variable-length, scatter into padded layout.
+    // Slow path: per-seq variable-length, scatter into padded layout. Pad
+    // next_tokens with 0 (MTP's established padding); trailing pads are masked
+    // to -1 by apply_pruned_prefix_lengths downstream regardless.
     padded_target_output_slow.emplace(target_output);
-    ForwardOutput& padded_target_output = *padded_target_output_slow;
-    std::vector<int64_t> dst_indices_vec;
-    dst_indices_vec.reserve(static_cast<size_t>(total_tokens));
-    for (int32_t i = 0; i < batch_size; ++i) {
-      const int32_t seq_tokens = per_seq_val_tokens[static_cast<size_t>(i)];
-      for (int32_t j = 0; j < seq_tokens; ++j) {
-        dst_indices_vec.push_back(static_cast<int64_t>(i) * max_val_tokens + j);
-      }
-    }
-    torch::Tensor dst_indices =
-        torch::tensor(dst_indices_vec,
-                      torch::TensorOptions()
-                          .dtype(torch::kLong)
-                          .device(target_output.logits.device()));
-
-    // Only the padding rows need the -inf sentinel; using empty + a targeted
-    // index_fill_ over the complement of dst_indices avoids paying vocab_size
-    // × padded_total writes when most rows will be overwritten by index_copy_.
-    torch::Tensor padded_logits = torch::empty({padded_total, vocab_size},
-                                               target_output.logits.options());
-    if (dst_indices_vec.size() < static_cast<size_t>(padded_total)) {
-      std::vector<bool> valid(static_cast<size_t>(padded_total), false);
-      for (int64_t idx : dst_indices_vec) {
-        valid[static_cast<size_t>(idx)] = true;
-      }
-      std::vector<int64_t> pad_indices_vec;
-      pad_indices_vec.reserve(static_cast<size_t>(padded_total) -
-                              dst_indices_vec.size());
-      for (int64_t i = 0; i < padded_total; ++i) {
-        if (!valid[static_cast<size_t>(i)]) {
-          pad_indices_vec.push_back(i);
-        }
-      }
-      torch::Tensor pad_indices =
-          torch::tensor(pad_indices_vec,
-                        torch::TensorOptions()
-                            .dtype(torch::kLong)
-                            .device(target_output.logits.device()));
-      padded_logits.index_fill_(/*dim=*/0, pad_indices, -1e9);
-    }
-    padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);
-    padded_target_output.logits = padded_logits;
-
-    torch::Tensor padded_next_tokens = torch::zeros(
-        {padded_total}, target_output.sample_output.next_tokens.options());
-    padded_next_tokens.index_copy_(
-        /*dim=*/0, dst_indices, target_output.sample_output.next_tokens);
-    padded_target_output.sample_output.next_tokens = padded_next_tokens;
-
-    if (target_output.sample_output.embeddings.defined()) {
-      const int32_t hidden_size =
-          static_cast<int32_t>(target_output.sample_output.embeddings.size(-1));
-      torch::Tensor padded_embeddings =
-          torch::zeros({padded_total, hidden_size},
-                       target_output.sample_output.embeddings.options());
-      padded_embeddings.index_copy_(
-          /*dim=*/0, dst_indices, target_output.sample_output.embeddings);
-      padded_target_output.sample_output.embeddings = padded_embeddings;
-    }
-
-    // Pad sampled logprobs / top_tokens / top_logprobs to [padded_total, ...]
-    // so downstream sync_pruned_boundary_{logprobs,top_logprobs} can safely
-    // view them as [batch, max_val_tokens]. Without this the shape CHECKs
-    // in the helpers abort on any actually-pruned adaptive step when the
-    // target sampler produced logprobs (non-Qwen3.5 targets + logprobs on).
-    if (target_output.sample_output.logprobs.defined()) {
-      torch::Tensor padded_logprobs = torch::zeros(
-          {padded_total}, target_output.sample_output.logprobs.options());
-      padded_logprobs.index_copy_(
-          /*dim=*/0, dst_indices, target_output.sample_output.logprobs);
-      padded_target_output.sample_output.logprobs = padded_logprobs;
-    }
-    if (target_output.sample_output.top_tokens.defined()) {
-      const int64_t top_k = target_output.sample_output.top_tokens.size(-1);
-      torch::Tensor padded_top_tokens =
-          torch::zeros({padded_total, top_k},
-                       target_output.sample_output.top_tokens.options());
-      padded_top_tokens.index_copy_(
-          /*dim=*/0, dst_indices, target_output.sample_output.top_tokens);
-      padded_target_output.sample_output.top_tokens = padded_top_tokens;
-    }
-    if (target_output.sample_output.top_logprobs.defined()) {
-      const int64_t top_k = target_output.sample_output.top_logprobs.size(-1);
-      torch::Tensor padded_top_logprobs =
-          torch::zeros({padded_total, top_k},
-                       target_output.sample_output.top_logprobs.options());
-      padded_top_logprobs.index_copy_(
-          /*dim=*/0, dst_indices, target_output.sample_output.top_logprobs);
-      padded_target_output.sample_output.top_logprobs = padded_top_logprobs;
-    }
+    adaptive_pruning::scatter_varlen_target_output_to_dense(
+        *padded_target_output_slow,
+        per_seq_val_tokens,
+        batch_size,
+        max_val_tokens,
+        /*next_token_pad_value=*/0);
   }
   // Uniform fast path uses a scoped local ForwardOutput whose only diff is
   // logits viewed to [padded_total, vocab]; slow path uses the materialized

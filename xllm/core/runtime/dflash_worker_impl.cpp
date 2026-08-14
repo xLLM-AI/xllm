@@ -916,10 +916,17 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
               timer.elapsed_seconds());
 
   // Scatter varlen target output back to dense [B, max_val_tokens] layout so
-  // the rejection sampler (dense API) can consume it.
+  // the rejection sampler (dense API) can consume it. Pad next_tokens with -1
+  // (reject marker), not 0: Qwen id 0 is "!", and a padded slot must not
+  // surface a real token if any downstream consumer reads it before
+  // apply_pruned_prefix_lengths masks trailing positions to -1.
   if (did_prune) {
-    scatter_varlen_target_output_to_dense(
-        target_output, per_seq_val_tokens, batch_size, max_val_tokens);
+    adaptive_pruning::scatter_varlen_target_output_to_dense(
+        target_output,
+        per_seq_val_tokens,
+        batch_size,
+        max_val_tokens,
+        /*next_token_pad_value=*/-1);
   }
 
   timer.reset();
@@ -1498,144 +1505,6 @@ void DFlashWorkerImpl::apply_per_seq_varlen_prune(
   new_validate.input_params.embedding.input_embedding = torch::Tensor();
   record_metadata_ready_event(*prepare_stream_, new_validate);
   validate_input = std::move(new_validate);
-}
-
-void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(
-    ForwardOutput& target_output,
-    const std::vector<int32_t>& per_seq_val_tokens,
-    int32_t batch_size,
-    int32_t max_val_tokens) {
-  CHECK(target_output.logits.defined())
-      << "target logits must be defined for varlen->dense scatter";
-  const int32_t total_tokens =
-      static_cast<int32_t>(target_output.logits.size(0));
-  const int64_t padded_total =
-      static_cast<int64_t>(batch_size) * max_val_tokens;
-  if (total_tokens == static_cast<int32_t>(padded_total)) {
-    // Already uniform max width; no scatter needed.
-    return;
-  }
-  const int32_t vocab_size =
-      static_cast<int32_t>(target_output.logits.size(-1));
-
-  // Pure order-preserving scatter: seq i's varlen rows [cu_offset,
-  // cu_offset + seq_tokens) map to dense cols [0, seq_tokens). Row j is the
-  // target's prediction after seeing anchor + draft[0..j-1]:
-  //   dense col 0            → predicts draft[0] (anchor row)
-  //   dense col j            → predicts draft[j] given first j accepted
-  //   dense col seq_tokens-1 → bonus (all seq_tokens-1 drafts accepted)
-  // Trailing cols [seq_tokens, max_val_tokens) stay as the caller's -inf
-  // logits / 0 tokens. This matches MTP's varlen->dense scatter exactly; the
-  // per-seq bonus therefore lands at col (seq_tokens - 1), NOT the fixed last
-  // column, so validate()/apply_pruned_prefix_lengths must read the bonus and
-  // cut position per-seq (see per_seq_val_tokens plumbing below).
-  std::vector<int64_t> src_indices_vec;
-  std::vector<int64_t> dst_indices_vec;
-  src_indices_vec.reserve(static_cast<size_t>(total_tokens));
-  dst_indices_vec.reserve(static_cast<size_t>(total_tokens));
-  int64_t cu_offset = 0;
-  for (int32_t i = 0; i < batch_size; ++i) {
-    const int32_t seq_tokens = per_seq_val_tokens[static_cast<size_t>(i)];
-    for (int32_t j = 0; j < seq_tokens; ++j) {
-      src_indices_vec.push_back(cu_offset + j);
-      dst_indices_vec.push_back(static_cast<int64_t>(i) * max_val_tokens + j);
-    }
-    cu_offset += seq_tokens;
-  }
-  torch::Tensor src_indices =
-      torch::tensor(src_indices_vec,
-                    torch::TensorOptions()
-                        .dtype(torch::kLong)
-                        .device(target_output.logits.device()));
-  torch::Tensor dst_indices =
-      torch::tensor(dst_indices_vec,
-                    torch::TensorOptions()
-                        .dtype(torch::kLong)
-                        .device(target_output.logits.device()));
-
-  // Logits: pad to [B*max_val_tokens, V] filled with -inf so any col we do
-  // not explicitly write remains a strictly-rejecting distribution.
-  torch::Tensor padded_logits = torch::full(
-      {padded_total, vocab_size}, -1e9, target_output.logits.options());
-  padded_logits.index_copy_(
-      /*dim=*/0,
-      dst_indices,
-      target_output.logits.index_select(/*dim=*/0, src_indices));
-  target_output.logits = padded_logits;
-
-  if (target_output.sample_output.next_tokens.defined()) {
-    // Pad next_tokens with -1 (reject marker) rather than 0. Qwen tokenizer
-    // token id 0 is "!" — if any downstream consumer picks up a padded slot
-    // (e.g. sync_pruned_boundary_outputs reads target_next_tokens at the
-    // cut position `per_seq_val_tokens[i]-1`, which for a pruned seq is a
-    // padded slot since we only fill dense positions [0, seq_tokens-2] and
-    // move the bonus to `max_val_tokens-1`), it must not emit garbage
-    // tokens. apply_pruned_prefix_lengths downstream masks drop_mask to -1
-    // anyway, so -1 propagates cleanly through the rest of the pipeline.
-    torch::Tensor padded_next_tokens =
-        torch::full({padded_total},
-                    static_cast<int64_t>(-1),
-                    target_output.sample_output.next_tokens.options());
-    padded_next_tokens.index_copy_(
-        /*dim=*/0,
-        dst_indices,
-        target_output.sample_output.next_tokens.index_select(/*dim=*/0,
-                                                             src_indices));
-    target_output.sample_output.next_tokens = padded_next_tokens;
-  }
-  if (target_output.sample_output.embeddings.defined()) {
-    const int32_t hidden_size =
-        static_cast<int32_t>(target_output.sample_output.embeddings.size(-1));
-    torch::Tensor padded_embeddings =
-        torch::zeros({padded_total, hidden_size},
-                     target_output.sample_output.embeddings.options());
-    padded_embeddings.index_copy_(
-        /*dim=*/0,
-        dst_indices,
-        target_output.sample_output.embeddings.index_select(/*dim=*/0,
-                                                            src_indices));
-    target_output.sample_output.embeddings = padded_embeddings;
-  }
-
-  // Pad sampled logprobs / top_tokens / top_logprobs into the same dense
-  // [B*max_val_tokens, ...] layout. sync_pruned_boundary_{logprobs,
-  // top_logprobs} CHECK_EQ these against B*max_val_tokens and view them as
-  // [batch, max_val_tokens, ...]; leaving them varlen aborts on any actually-
-  // pruned adaptive step whenever the request set logprobs/top_logprobs.
-  if (target_output.sample_output.logprobs.defined()) {
-    torch::Tensor padded_logprobs = torch::zeros(
-        {padded_total}, target_output.sample_output.logprobs.options());
-    padded_logprobs.index_copy_(
-        /*dim=*/0,
-        dst_indices,
-        target_output.sample_output.logprobs.index_select(/*dim=*/0,
-                                                          src_indices));
-    target_output.sample_output.logprobs = padded_logprobs;
-  }
-  if (target_output.sample_output.top_tokens.defined()) {
-    const int64_t top_k = target_output.sample_output.top_tokens.size(-1);
-    torch::Tensor padded_top_tokens =
-        torch::zeros({padded_total, top_k},
-                     target_output.sample_output.top_tokens.options());
-    padded_top_tokens.index_copy_(
-        /*dim=*/0,
-        dst_indices,
-        target_output.sample_output.top_tokens.index_select(/*dim=*/0,
-                                                            src_indices));
-    target_output.sample_output.top_tokens = padded_top_tokens;
-  }
-  if (target_output.sample_output.top_logprobs.defined()) {
-    const int64_t top_k = target_output.sample_output.top_logprobs.size(-1);
-    torch::Tensor padded_top_logprobs =
-        torch::zeros({padded_total, top_k},
-                     target_output.sample_output.top_logprobs.options());
-    padded_top_logprobs.index_copy_(
-        /*dim=*/0,
-        dst_indices,
-        target_output.sample_output.top_logprobs.index_select(/*dim=*/0,
-                                                              src_indices));
-    target_output.sample_output.top_logprobs = padded_top_logprobs;
-  }
 }
 
 void DFlashWorkerImpl::record_validate_metrics(

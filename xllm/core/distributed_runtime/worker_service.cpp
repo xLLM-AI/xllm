@@ -29,6 +29,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
@@ -81,11 +82,8 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
   // DFlash / DSpark record metrics inline in their own worker
   // (DFlashWorkerImpl::record_validate_metrics) with precise per-seq
   // widths, so this generic per-tensor count would double-count them.
-  std::string algo = options.speculative_algorithm();
-  std::transform(algo.begin(), algo.end(), algo.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  if (algo == "dflash" || algo == "dspark") {
+  if (SpeculativeConfig::is_block_diffusion_algorithm(
+          options.speculative_algorithm())) {
     return;
   }
 
