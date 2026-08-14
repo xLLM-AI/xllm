@@ -64,6 +64,8 @@ class AutoCounter final {
 
 #define COUNTER_ADD(name, value) COUNTER_##name << (value);
 
+#define COUNTER_VALUE(name) (COUNTER_##name.get_value())
+
 #define COUNTER_INC(name) COUNTER_##name << 1;
 
 // Declares a latency counter having a variable name based on line number.

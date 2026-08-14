@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -162,12 +161,6 @@ void WorkerService::record_speculative_metrics_from_output(
   SpeculativeOutputStats stats =
       calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
 
-  // Step and GetLastStepResult share a thread pool inside one WorkerService.
-  // Serialize the counter update and derived gauge publication so the ratio
-  // cannot combine totals from different in-flight callbacks on the same
-  // instance. A per-instance mutex avoids process-wide contention when
-  // multiple WorkerServices run in the same process (multi-DP).
-  std::lock_guard<std::mutex> lock(speculative_metrics_mutex_);
   const int64_t num_draft_tokens = batch_size * effective_speculative_tokens;
   int64_t num_accepted_tokens = 0;
   for (int64_t position = 0; position < effective_speculative_tokens;
@@ -184,12 +177,13 @@ void WorkerService::record_speculative_metrics_from_output(
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
   COUNTER_ADD(speculative_num_committed_tokens_total, stats.committed_tokens);
-  speculative_total_drafts_ += batch_size;
-  speculative_total_committed_ += stats.committed_tokens;
-  if (speculative_total_drafts_ > 0) {
-    GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              static_cast<double>(speculative_total_committed_) /
-                  static_cast<double>(speculative_total_drafts_));
+  // Derive from the global counters, not per-instance totals, so multi-DP
+  // writers converge on one aggregate instead of overwriting the gauge.
+  const double total_drafts = COUNTER_VALUE(speculative_num_drafts_total);
+  if (total_drafts > 0) {
+    GAUGE_SET(
+        speculative_mean_tokens_per_decode_step,
+        COUNTER_VALUE(speculative_num_committed_tokens_total) / total_drafts);
   }
 }
 

@@ -899,6 +899,8 @@ class DeepseekV4ModelImpl
           cp_ctx.tokens_per_rank.begin(), cp_ctx.tokens_per_rank.end());
     }
     FlashComm1Context fc1_ctx;
+    // FC1 shards the sequence across ranks; per-layer aux capture needs the
+    // full local token set, so skip FC1 while capturing.
     if (!acl_graph_forward && !is_empty_dp_rank && !aux_capture_.enabled()) {
       const bool is_prefill_side =
           input_params.meta.batch_forward_type.no_decode();
