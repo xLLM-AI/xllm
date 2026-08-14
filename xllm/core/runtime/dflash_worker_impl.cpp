@@ -41,7 +41,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
-#include "runtime/spec_input_builder.h"
+#include "core/framework/speculative/spec_input_builder.h"
 #include "util/json_reader.h"
 #include "util/timer.h"
 

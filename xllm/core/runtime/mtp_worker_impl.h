@@ -20,8 +20,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/runtime/mtp_async_state.h"
-#include "framework/kv_cache/embedding_cache.h"
+#include "core/framework/speculative/embedding_cache.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"

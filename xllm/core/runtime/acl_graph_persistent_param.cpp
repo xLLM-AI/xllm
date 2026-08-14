@@ -30,9 +30,9 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
-#include "core/runtime/mtp_async_state.h"
 #include "core/util/utils.h"
 
 // ATB includes

@@ -22,7 +22,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "framework/kv_cache/embedding_cache.h"
+#include "core/framework/speculative/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "runtime/speculative_worker_impl.h"
 

@@ -20,7 +20,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/speculative_config.h"
-#include "spec_input_builder.h"
+#include "core/framework/speculative/spec_input_builder.h"
 #include "util/slice.h"
 #include "util/timer.h"
 #include "util/utils.h"
