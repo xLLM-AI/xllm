@@ -174,22 +174,18 @@ def _grouped_moe_with_selected_experts_impl(
     """
     num_tokens = hidden_states.shape[0]
     expert_num = num_total_experts if num_total_experts > 0 else w13.shape[0]
-    local_expert_count = (
-        num_experts_per_rank if num_experts_per_rank > 0 else expert_num
-    )
+    local_expert_count = num_experts_per_rank if num_experts_per_rank > 0 else expert_num
     active_range = [start_expert_id, start_expert_id + local_expert_count]
-    expanded_hidden, expanded_row_idx, expert_tokens, _ = (
-        torch_npu.npu_moe_init_routing_v2(
-            hidden_states,
-            topk_ids.to(torch.int32),
-            scale=None,
-            active_num=num_tokens * topk_ids.size(-1),
-            expert_num=expert_num,
-            expert_tokens_num_type=1,
-            expert_tokens_num_flag=True,
-            active_expert_range=active_range,
-            quant_mode=-1,
-        )
+    expanded_hidden, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
+        hidden_states,
+        topk_ids.to(torch.int32),
+        scale=None,
+        active_num=num_tokens * topk_ids.size(-1),
+        expert_num=expert_num,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=active_range,
+        quant_mode=-1,
     )
     from xllm.python import kernels as _kernels
 
@@ -242,9 +238,7 @@ def _grouped_moe_with_selected_experts_impl(
     )
 
 
-@torch.library.custom_op(
-    "xllm_python::grouped_moe_with_selected_experts", mutates_args=()
-)
+@torch.library.custom_op("xllm_python::grouped_moe_with_selected_experts", mutates_args=())
 def grouped_moe_with_selected_experts(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,

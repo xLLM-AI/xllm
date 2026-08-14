@@ -232,9 +232,7 @@ def grouped_moe_with_selected_experts(
         num_experts_per_rank,
         swiglu_limit,
     )
-    raise NotImplementedError(
-        "grouped_moe_with_selected_experts is currently implemented only for NPU"
-    )
+    raise NotImplementedError("grouped_moe_with_selected_experts is currently implemented only for NPU")
 
 
 __all__ = [

@@ -85,8 +85,8 @@ from .rotary_embedding import (
     fused_qk_norm_rope,
     interleaved_rotary_embedding,
     mrope,
-    vision_rotary_mul,
     npu_inplace_partial_rotary_mul,
+    vision_rotary_mul,
 )
 from .sparse_attention import (
     lightning_indexer,

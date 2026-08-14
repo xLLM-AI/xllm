@@ -191,7 +191,10 @@ def npu_inplace_partial_rotary_mul(
     sin_cache = -sin if inverse else sin
     sin4d = sin_cache.view(sin.size(0), 1, 1, sin.size(1))
     torch.ops.xllm_ops.npu_inplace_partial_rotary_mul(
-        x4d, cos4d, sin4d, "interleave",
+        x4d,
+        cos4d,
+        sin4d,
+        "interleave",
         [int(rope_start_dim), int(rope_start_dim + rope_head_dim)],
     )
     return x
