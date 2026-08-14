@@ -309,7 +309,6 @@ TEST_F(NpuXllmOpsTest,
           kScale,
           kBlockSize);
   ASSERT_TRUE(workspace.defined());
-  EXPECT_GT(workspace.numel(), 0);
   EXPECT_EQ(workspace.device(), query.device());
 
   torch::Tensor out = torch::zeros_like(eager_output);

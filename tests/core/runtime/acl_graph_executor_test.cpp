@@ -1245,7 +1245,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
 TEST(AclGraphPersistentParamTest,
      GenericSpecVerifyCaptureKeepsPersistentBlockTableWidth) {
   constexpr int32_t kSpecWidth = 6;
-  constexpr int64_t kActiveBlockTableWidth = 2;
+  constexpr int64_t kActiveBlockTableWidth = 5;
   ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");

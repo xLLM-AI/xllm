@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
@@ -37,6 +38,7 @@ limitations under the License.
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/attention_metadata_builder.h"
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/layers/npu_torch/attention.h"
@@ -168,6 +170,9 @@ class HybridConv1dMockLM final : public CausalLM {
     const bool register_graph_task =
         graph_context != nullptr && graph_context->capturing;
 
+    layer::AttentionMetadataBuildOptions metadata_build_options;
+    metadata_build_options.materialize_linear_state_validity =
+        !params.enable_graph;
     for (auto& kv_cache : kv_caches) {
       if (kv_cache.empty() || !kv_cache.get_conv_cache().defined()) {
         continue;
@@ -267,7 +272,8 @@ class HybridConv1dMockLM final : public CausalLM {
             layer::AttentionMetadataBuilder::build(params,
                                                    /*enable_mla=*/false,
                                                    /*attn_mask=*/std::nullopt,
-                                                   device_);
+                                                   device_,
+                                                   metadata_build_options);
         torch::Tensor query = hidden.to(torch::kBFloat16).contiguous();
         torch::Tensor key = query
                                 .slice(/*dim=*/1,
@@ -287,6 +293,10 @@ class HybridConv1dMockLM final : public CausalLM {
             !graph_context->fused_infer_attention_tasks.empty();
         fia_graph_task_count_ =
             graph_context->fused_infer_attention_tasks.size();
+        if (!graph_context->fused_infer_attention_tasks.empty()) {
+          captured_fia_batch_size_ = static_cast<uint32_t>(
+              graph_context->fused_infer_attention_tasks.front().query.size(0));
+        }
         all_fia_graph_tasks_share_workspace_ = fia_graph_task_count_ > 1;
         for (size_t task_index = 1; task_index < fia_graph_task_count_;
              ++task_index) {
@@ -327,6 +337,7 @@ class HybridConv1dMockLM final : public CausalLM {
     return saw_causal_conv_graph_task_;
   }
   bool saw_fia_graph_task() const { return saw_fia_graph_task_; }
+  uint32_t captured_fia_batch_size() const { return captured_fia_batch_size_; }
   size_t fia_graph_task_count() const { return fia_graph_task_count_; }
   bool all_fia_graph_tasks_share_workspace() const {
     return all_fia_graph_tasks_share_workspace_;
@@ -353,6 +364,7 @@ class HybridConv1dMockLM final : public CausalLM {
   int32_t attention_repetitions_ = 1;
   bool saw_causal_conv_graph_task_ = false;
   bool saw_fia_graph_task_ = false;
+  uint32_t captured_fia_batch_size_ = 0;
   size_t fia_graph_task_count_ = 0;
   bool all_fia_graph_tasks_share_workspace_ = false;
 };
@@ -563,13 +575,12 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
     auto kv_graph = create_hybrid_kv_caches();
     auto graph_exec = std::make_unique<npu::AclGraphExecutorImpl>(
         model_.get(), model_args_, *device_, options_);
-    EXPECT_EQ(graph_exec->bucket_num_tokens_for_test(capture_batch_size),
-              expected_bucket);
     graph_exec->run({capture_fi.token_ids},
                     {capture_fi.positions},
                     kv_graph,
                     {capture_fi.input_params});
     ASSERT_TRUE(model_->saw_causal_conv_and_fia_graph_tasks());
+    EXPECT_EQ(model_->captured_fia_batch_size(), expected_bucket);
 
     reset_sequences();
     auto replay_prompts =
@@ -620,6 +631,8 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
 
     fi.input_params.attention.host.q_seq_lens.assign(
         static_cast<size_t>(num_sequences), num_spec_tokens);
+    fi.input_params.linear_state_validity_mask = build_linear_state_mask(
+        fi.input_params.attention.host.kv_cache_tokens_nums, num_sequences);
 
     fi.input_params.num_accepted_tokens_host.assign(
         static_cast<size_t>(num_sequences), 1);
@@ -641,7 +654,6 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
     fi.token_ids = torch::tensor(token_ids_vec, torch::kInt32).to(*device_);
     fi.positions = torch::tensor(positions_vec, torch::kInt32).to(*device_);
 
-    fi.input_params.graph.use_expanded_decode_for_spec_verify_attention = true;
     std::vector<int32_t> expanded_kv_vec;
     expanded_kv_vec.reserve(static_cast<size_t>(total_tokens));
     for (int32_t s = 0; s < num_sequences; ++s) {
@@ -651,8 +663,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
         expanded_kv_vec.push_back(kv_len + t + 1);
       }
     }
-    fi.input_params.graph.expanded_kv_seq_lens_vec = expanded_kv_vec;
-    fi.input_params.graph.expanded_kv_seq_lens =
+    auto expanded_kv_seq_lens =
         torch::tensor(expanded_kv_vec, torch::kInt32).to(*device_);
 
     torch::Tensor host_block_tables =
@@ -689,7 +700,12 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
         expanded_bt[s * num_spec_tokens + t] = block_tables[s];
       }
     }
-    fi.input_params.graph.expanded_block_tables = expanded_bt;
+    layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+        fi.input_params,
+        expanded_kv_seq_lens,
+        expanded_bt,
+        expanded_kv_vec,
+        kBlockSize);
 
     std::vector<int32_t> q_cu_vec;
     q_cu_vec.reserve(static_cast<size_t>(num_sequences + 1));
