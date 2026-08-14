@@ -446,4 +446,15 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     int64_t dispatch_quant_out_dtype = 0,
     int64_t topo_type = 0,
     int64_t rank_num_per_server = 2);
+
+torch::Tensor group_gemm(const torch::Tensor& x,
+                         const torch::Tensor& weight,
+                         const std::optional<torch::Tensor>& scale,
+                         const std::optional<torch::Tensor>& per_token_scale,
+                         const torch::Tensor& group_list,
+                         int64_t split_item,
+                         int64_t group_type,
+                         int64_t group_list_type,
+                         std::optional<at::ScalarType> output_dtype);
+
 }  // namespace xllm::kernel::npu

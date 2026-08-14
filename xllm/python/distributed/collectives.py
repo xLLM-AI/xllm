@@ -281,6 +281,46 @@ def cp_world_size(device: torch.device | str) -> int:
     return group.size() if group is not None else 1
 
 
+def _native_runtime_op(name: str):
+    """Return an embedded C++ collective when running under PyExecutorImpl."""
+    try:
+        import xllm_runtime
+    except ImportError:
+        return None
+    return getattr(xllm_runtime, name, None)
+
+
+def tp_all_reduce(x: torch.Tensor) -> None:
+    op = _native_runtime_op("tp_all_reduce")
+    if op is not None:
+        op(x)
+        return
+    all_reduce_(x, "tp")
+
+
+def tp_all_gather(x: torch.Tensor, dim: int, world_size: int) -> torch.Tensor:
+    op = _native_runtime_op("tp_all_gather")
+    if op is not None:
+        return op(x, dim)
+    return all_gather(x, dim, world_size, "tp")
+
+
+def moe_tp_all_reduce(x: torch.Tensor) -> None:
+    op = _native_runtime_op("moe_tp_all_reduce")
+    if op is not None:
+        op(x)
+        return
+    all_reduce_(x, "moe_tp")
+
+
+def moe_ep_all_reduce(x: torch.Tensor) -> None:
+    op = _native_runtime_op("moe_ep_all_reduce")
+    if op is not None:
+        op(x)
+        return
+    all_reduce_(x, "moe_ep")
+
+
 # A one-shot symmetric-memory reduction is an ordinary kernel on the current
 # stream, so a captured graph runs it inline. NCCL runs collectives on its own
 # stream, which costs a fork/join per call -- measured at ~32us of device idle
@@ -430,6 +470,10 @@ __all__ = [
     "tp_rank",
     "cp_rank",
     "cp_world_size",
+    "tp_all_reduce",
+    "tp_all_gather",
+    "moe_tp_all_reduce",
+    "moe_ep_all_reduce",
     "all_reduce_",
     "all_gather",
     "all_gather_variable",

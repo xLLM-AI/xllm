@@ -400,10 +400,18 @@ class W8A8StaticLinear(nn.Module):
 class W8A8DynamicLinear(nn.Module):
     """Dynamic-activation W8A8 linear (MLP / experts)."""
 
-    def __init__(self, in_features: int, out_features: int, device: torch.device) -> None:
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        device: torch.device,
+        transpose_weight_after_loading: bool = True,
+    ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.transpose_weight_after_loading = transpose_weight_after_loading
+        self._weight_is_transposed = False
         self.weight = nn.Parameter(
             torch.empty(out_features, in_features, dtype=torch.int8, device=device),
             requires_grad=False,
@@ -416,7 +424,9 @@ class W8A8DynamicLinear(nn.Module):
         )
 
     def process_weights_after_loading(self) -> None:
-        self.weight.data = self.weight.data.transpose(0, 1).contiguous()
+        if self.transpose_weight_after_loading and not self._weight_is_transposed:
+            self.weight.data = self.weight.data.transpose(0, 1).contiguous()
+            self._weight_is_transposed = True
         self.weight_scale.data = self.weight_scale.data.flatten().contiguous()
         self.weight_offset.data = self.weight_offset.data.flatten().contiguous()
         if not bool(torch.all(self.weight_offset == 0)):
@@ -430,9 +440,26 @@ class W8A8DynamicLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_int8, pertoken = kernels.dynamic_quant(x)
         return kernels.quant_matmul(
-            x_int8, self.weight, False, self.weight_scale, None,
+            x_int8, self.weight, not self._weight_is_transposed,
+            self.weight_scale, None,
             pertoken, None, torch.bfloat16,
         )
+
+    def forward_quant(
+        self, x_int8: torch.Tensor, pertoken: torch.Tensor
+    ) -> torch.Tensor:
+        """Run quantized matmul on an already-quantized activation."""
+        return kernels.quant_matmul(
+            x_int8, self.weight, not self._weight_is_transposed,
+            self.weight_scale, None, pertoken, None, torch.bfloat16,
+        )
+
+
+def _swiglu_with_clamp(x: torch.Tensor, limit: float) -> torch.Tensor:
+    gate, up = x.chunk(2, dim=-1)
+    gate = gate.to(torch.float32).clamp_max(limit)
+    up = up.to(torch.float32).clamp(min=-limit, max=limit)
+    return (torch.nn.functional.silu(gate) * up).to(x.dtype)
 
 
 class W8A8WeightLoader:
@@ -529,6 +556,7 @@ class DeepseekV3MLP(nn.Module):
         device: torch.device,
         skip_tp_reduce: bool = False,
         tp_override: Optional[int] = None,
+        swiglu_limit: float = 0.0,
     ) -> None:
         super().__init__()
         tp = tp_override if tp_override is not None else cfg.tp_size
@@ -538,6 +566,7 @@ class DeepseekV3MLP(nn.Module):
         inter_local = intermediate_size // tp
         self.tp = tp
         self.skip_tp_reduce = skip_tp_reduce
+        self.swiglu_limit = swiglu_limit
         self.gate_up_proj = W8A8DynamicLinear(cfg.hidden_size, 2 * inter_local, device)
         self.down_proj = W8A8DynamicLinear(inter_local, cfg.hidden_size, device)
 
@@ -547,7 +576,11 @@ class DeepseekV3MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
-        act = kernels.silu_and_mul(gate_up)
+        act = (
+            _swiglu_with_clamp(gate_up, self.swiglu_limit)
+            if 0.0 < self.swiglu_limit < 1_000_000.0
+            else kernels.silu_and_mul(gate_up)
+        )
         out = self.down_proj(act)
         if self.tp > 1 and not self.skip_tp_reduce:
             distributed.all_reduce_(out)
