@@ -809,6 +809,12 @@ void DFlashWorkerImpl::fill_validate_input_from_draft_outputs_varlen(
   // [cu_offset[i] + 1, cu_offset[i] + per_seq_val_tokens[i]).
   std::vector<int64_t> dst_idx_vec;
   std::vector<int64_t> src_idx_vec;
+  // Upper bound: each seq contributes at most num_speculative_tokens draft
+  // rows (seq_val_tokens - 1 <= num_speculative_tokens).
+  const size_t max_draft_rows =
+      static_cast<size_t>(num_sequences) * num_speculative_tokens;
+  dst_idx_vec.reserve(max_draft_rows);
+  src_idx_vec.reserve(max_draft_rows);
   int64_t cu_offset = 0;
   for (int64_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     const int32_t seq_val_tokens =
