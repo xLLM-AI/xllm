@@ -145,12 +145,12 @@ class SyncEvent(enum.IntEnum):
     # MTE3 -> MTE2 (per-buffer free signals)
     Q_FREE = 0
     G_FREE = 1
-    K_FREE = 9
-    V_FREE = 10
+    K_FREE = 2
+    V_FREE = 3
 
     # MTE2 -> MTE3
     GATE_READY = 3
-    V_READY = 8
+    V_READY = 4
 
 
 KERNEL_PASS_CONFIGS = {
@@ -380,7 +380,6 @@ def build_split_qkv_rmsnorm_mrope_kernel(
 
                 # Init: load gather pattern, weights.
                 T.copy(gather_pattern, gather_offset_ub)
-                T.tile.fill(axes_ub, 0.0)
                 T.copy(q_weight[0, 0], q_weight_half_ub[0, :])
                 T.copy(k_weight[0, 0], k_weight_half_ub[0, :])
                 mte2_notify_v(E.INIT_WEIGHTS)
