@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "runtime/spec_input_builder.h"
+#include "core/framework/speculative/spec_input_builder.h"
 
 #include <gtest/gtest.h>
 

@@ -7,12 +7,26 @@ cc_library(
     adaptive_speculative_controller.h
     speculative_profile_registry.h
     adaptive_pruning_helpers.h
+    spec_input_builder.h
+    mtp_async_input_builder.h
+    mtp_async_state.h
+    embedding_cache.h
   SRCS
     adaptive_speculative_controller.cpp
     speculative_profile_registry.cpp
     adaptive_pruning_helpers.cpp
+    spec_input_builder.cpp
+    mtp_async_input_builder.cpp
+    mtp_async_state.cpp
+    embedding_cache.cpp
   DEPS
     torch
+    $<$<BOOL:${USE_NPU}>:torch_npu>
+    :common
+    :util
+    :sampler
+    :common_layers
+    $<$<BOOL:${USE_NPU}>:xllm_ops>
     glog::glog
     proto::xllm_proto
 )

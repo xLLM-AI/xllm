@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/runtime/mtp_async_input_builder.h"
+#include "core/framework/speculative/mtp_async_input_builder.h"
 
 #include <glog/logging.h>
 
@@ -21,8 +21,8 @@ limitations under the License.
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #endif
 
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/mtp_async_state.h"
 #include "layers/common/expanded_decode_metadata_builder.h"
 
 namespace xllm::mtp_async {

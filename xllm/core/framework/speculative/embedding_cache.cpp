@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "embedding_cache.h"
+#include "core/framework/speculative/embedding_cache.h"
 
 #include <glog/logging.h>
 

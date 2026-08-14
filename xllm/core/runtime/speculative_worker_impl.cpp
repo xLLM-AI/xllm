@@ -23,7 +23,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/model/mtp_utils.h"
-#include "spec_input_builder.h"
+#include "core/framework/speculative/spec_input_builder.h"
 #include "util/slice.h"
 #include "util/timer.h"
 #include "util/utils.h"
