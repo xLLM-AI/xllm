@@ -30,6 +30,7 @@ namespace xllm {
 struct ModelInputParams;
 struct ForwardInput;
 struct SamplingParameters;
+struct SampleOutput;
 
 namespace specBuilder {
 
@@ -193,6 +194,10 @@ namespace draftProbs {
 // [batch_size] / [batch_size, 1].
 torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
                                  const torch::Tensor& draft_token_ids);
+
+// Compresses a draft SampleOutput's probs to selected-only cache form in place;
+// no-op when probs are undefined.
+void compress_sample_output_for_cache(SampleOutput& sample_output);
 
 // Build validate inputs from per-step draft token ids/probs.
 // Returns:

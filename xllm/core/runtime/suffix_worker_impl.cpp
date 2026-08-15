@@ -19,7 +19,8 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/eplb/eplb_utils.h"
-#include "framework/sampling/rejection_sampler.h"
+#include "core/framework/speculative/spec_verify.h"
+#include "framework/sampling/sampling_params.h"
 #include "util/slice.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -409,26 +410,16 @@ SampleOutput SuffixWorkerImpl::validate(
   // Suffix decoding always uses greedy sampling for validation,
   // regardless of the user's sampling parameters.
   auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
-  auto rejection_sampler =
-      std::make_unique<RejectionSampler>(greedy_do_sample,
-                                         /*all_random_sample=*/false,
-                                         /*all_greedy_sample=*/true,
-                                         target_output.logprobs,
-                                         target_output.max_top_logprobs,
-                                         enable_fused_kernel_);
-
-  SampleOutput sample_output =
-      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
-                                 draft_probs.to(target_logits.device()),
-                                 target_logits,
-                                 bonus_token_ids,
-                                 /*mask_out_rejected_tokens=*/true);
-
-  auto embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings =
-      embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
-
-  return sample_output;
+  return spec_verify::run_rejection_sampling({.do_sample = greedy_do_sample,
+                                              .all_random_sample = false,
+                                              .all_greedy_sample = true},
+                                             draft_token_ids,
+                                             draft_probs,
+                                             target_output,
+                                             bonus_token_ids,
+                                             batch_size,
+                                             num_val_tokens,
+                                             enable_fused_kernel_);
 }
 
 }  // namespace xllm

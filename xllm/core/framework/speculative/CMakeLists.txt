@@ -12,6 +12,7 @@ cc_library(
     mtp_async_state.h
     mtp_json_object_state.h
     embedding_cache.h
+    spec_verify.h
   SRCS
     adaptive_speculative_controller.cpp
     speculative_profile_registry.cpp
@@ -20,6 +21,7 @@ cc_library(
     mtp_async_input_builder.cpp
     mtp_async_state.cpp
     embedding_cache.cpp
+    spec_verify.cpp
   DEPS
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>

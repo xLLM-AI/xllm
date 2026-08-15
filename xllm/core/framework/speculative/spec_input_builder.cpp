@@ -578,6 +578,25 @@ torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
   return extract_selected_probs(draft_probs, draft_token_ids);
 }
 
+void compress_sample_output_for_cache(SampleOutput& sample_output) {
+  if (!sample_output.probs.defined()) {
+    return;
+  }
+  CHECK(sample_output.next_tokens.defined())
+      << "draft sample_output.next_tokens must be defined when probs exist";
+  CHECK_EQ(sample_output.next_tokens.dim(), 1)
+      << "draft cache expects next_tokens [batch], got "
+      << sample_output.next_tokens.sizes();
+  CHECK(sample_output.probs.dim() == 1 || sample_output.probs.dim() == 2)
+      << "draft cache expects probs [batch] or [batch,vocab], got "
+      << sample_output.probs.sizes();
+  CHECK_EQ(sample_output.probs.size(0), sample_output.next_tokens.size(0))
+      << "draft cache probs/token batch mismatch";
+  // Cache always stores selected-only draft probs [batch_size] to reduce HBM.
+  sample_output.probs =
+      compress_for_cache(sample_output.probs, sample_output.next_tokens);
+}
+
 std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
     const std::vector<torch::Tensor>& draft_token_ids_steps,
     const std::vector<torch::Tensor>& draft_probs_steps,

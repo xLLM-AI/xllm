@@ -2866,21 +2866,7 @@ bool MTPWorkerImpl::adaptive_enabled() const {
 }
 
 void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {
-  if (sample_output.probs.defined()) {
-    CHECK(sample_output.next_tokens.defined())
-        << "draft sample_output.next_tokens must be defined when probs exist";
-    CHECK_EQ(sample_output.next_tokens.dim(), 1)
-        << "MTP draft cache expects next_tokens [batch], got "
-        << sample_output.next_tokens.sizes();
-    CHECK(sample_output.probs.dim() == 1 || sample_output.probs.dim() == 2)
-        << "MTP draft cache expects probs [batch] or [batch,vocab], got "
-        << sample_output.probs.sizes();
-    CHECK_EQ(sample_output.probs.size(0), sample_output.next_tokens.size(0))
-        << "MTP draft cache probs/token batch mismatch";
-    // Cache always stores selected-only draft probs [batch_size] to reduce HBM.
-    sample_output.probs = specBuilder::draftProbs::compress_for_cache(
-        sample_output.probs, sample_output.next_tokens);
-  }
+  specBuilder::draftProbs::compress_sample_output_for_cache(sample_output);
 }
 
 void MTPWorkerImpl::update_decode_step_input(

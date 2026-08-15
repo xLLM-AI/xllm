@@ -33,7 +33,7 @@ limitations under the License.
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/process_group.h"
-#include "framework/sampling/rejection_sampler.h"
+#include "framework/sampling/sampling_params.h"
 #if defined(USE_NPU) || defined(USE_MLU)
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
@@ -43,6 +43,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
 #include "core/framework/speculative/spec_input_builder.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "util/json_reader.h"
 #include "util/timer.h"
 
@@ -1110,8 +1111,6 @@ SampleOutput DFlashWorkerImpl::validate(
       << "DFlash validate target logits rows must be divisible by validation "
          "width";
   const int32_t batch_size = num_logits_rows / num_val_tokens;
-  const int32_t vocab_size =
-      static_cast<int32_t>(target_output.logits.size(/*dim=*/-1));
 
   using torch::indexing::None;
   using ISlice = torch::indexing::Slice;
@@ -1145,47 +1144,22 @@ SampleOutput DFlashWorkerImpl::validate(
         target_next_tokens_2d.gather(/*dim=*/1, bonus_idx).view({-1, 1});
   }
 
-  torch::Tensor target_logits =
-      target_output.logits.view({batch_size, num_val_tokens, vocab_size});
-
-  auto rejection_sampler =
-      std::make_unique<RejectionSampler>(sampling_params.do_sample,
-                                         sampling_params.all_random_sample,
-                                         sampling_params.all_greedy_sample,
-                                         target_output.logprobs,
-                                         target_output.max_top_logprobs,
-                                         enable_fused_kernel_);
-
-  SampleOutput sample_output =
-      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
-                                 draft_probs.to(target_logits.device()),
-                                 target_logits,
-                                 bonus_token_ids,
-                                 /*mask_out_rejected_tokens=*/true);
-
-  const torch::Tensor& embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings =
-      embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
-  return sample_output;
+  return spec_verify::run_rejection_sampling(
+      {.do_sample = sampling_params.do_sample,
+       .all_random_sample = sampling_params.all_random_sample,
+       .all_greedy_sample = sampling_params.all_greedy_sample},
+      draft_token_ids,
+      draft_probs,
+      target_output,
+      bonus_token_ids,
+      batch_size,
+      num_val_tokens,
+      enable_fused_kernel_);
 }
 
 void DFlashWorkerImpl::process_draft_sample_output(
     SampleOutput& sample_output) {
-  if (sample_output.probs.defined()) {
-    CHECK(sample_output.next_tokens.defined())
-        << "DFlash draft sample_output.next_tokens must be defined when probs "
-           "exist";
-    CHECK_EQ(sample_output.next_tokens.dim(), 1)
-        << "DFlash draft cache expects next_tokens [batch], got "
-        << sample_output.next_tokens.sizes();
-    CHECK(sample_output.probs.dim() == 1 || sample_output.probs.dim() == 2)
-        << "DFlash draft cache expects probs [batch] or [batch,vocab], got "
-        << sample_output.probs.sizes();
-    CHECK_EQ(sample_output.probs.size(0), sample_output.next_tokens.size(0))
-        << "DFlash draft cache probs/token batch mismatch";
-    sample_output.probs = specBuilder::draftProbs::compress_for_cache(
-        sample_output.probs, sample_output.next_tokens);
-  }
+  specBuilder::draftProbs::compress_sample_output_for_cache(sample_output);
 }
 
 void DFlashWorkerImpl::maybe_broadcast_spec_tokens(torch::Tensor& tokens) {
