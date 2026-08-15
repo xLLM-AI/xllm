@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/framework/speculative/adaptive_speculative_controller.h"
+#include "framework/sampling/draft_sampling_mode.h"
 #include "framework/sampling/rejection_sampler.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/options.h"
@@ -141,6 +142,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
                               const std::vector<int32_t>& per_seq_val_tokens,
                               const int32_t total_num_val_tokens);
 
+  static void force_greedy_draft_sampling(SamplingParameters& sampling_params);
+
   // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs);
@@ -190,5 +193,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
 
   bool enable_fused_kernel_ = false;
   int32_t embedding_size_ = 0;
+  DraftSamplingMode draft_sampling_mode_ = DraftSamplingMode::GREEDY;
 };
 }  // namespace xllm

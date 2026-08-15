@@ -21,6 +21,7 @@ limitations under the License.
 
 namespace xllm {
 
+class DraftProposal;
 struct SampleOutput;
 struct ForwardOutput;
 
@@ -32,12 +33,8 @@ struct SamplerPolicy {
   bool all_greedy_sample = false;
 };
 
-// Shared accept core for the speculative workers. Callers own target_logits so
-// MTP can inject its filter mask first; draft_probs may be undefined
-// (all-greedy).
 SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
-                                    const torch::Tensor& draft_token_ids,
-                                    const torch::Tensor& draft_probs,
+                                    const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
                                     const ForwardOutput& target_output,
                                     const torch::Tensor& bonus_token_ids,

@@ -776,24 +776,20 @@ class NpuJsonDraftTokenHandoff final {
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
                              const runtime::Options& options)
-    : MTPWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          MTPTargetOptions(options),
-          mtp_draft_options(options),
-          ::xllm::SpeculativeConfig::get_instance().enable_opt_validate_probs(),
-          /*enable_adaptive_speculative_decode=*/true) {}
+    : MTPWorkerImpl(parallel_args,
+                    device,
+                    options,
+                    MTPTargetOptions(options),
+                    mtp_draft_options(options),
+                    /*enable_adaptive_speculative_decode=*/true) {}
 
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
                              const runtime::Options& options,
                              const runtime::Options& target_options,
                              const runtime::Options& draft_options,
-                             bool enable_opt_validate_probs,
                              bool enable_adaptive_speculative_decode)
-    : SpeculativeWorkerImpl(parallel_args, device, options, target_options),
-      enable_opt_validate_probs_(enable_opt_validate_probs) {
+    : SpeculativeWorkerImpl(parallel_args, device, options, target_options) {
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       MTPDraftParallelArgs(parallel_args, options),
       device,
@@ -1349,7 +1345,7 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
                                            ForwardInput& prefill_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   prefill_input = input.to(device_, dtype_);
-  prefill_input.sampling_params.return_probs = true;
+  prepare_draft_sampling(prefill_input.sampling_params);
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
@@ -1379,6 +1375,20 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
                                     /*non_blocking=*/true);
   prefill_input.device_tensors_ready = true;
   finish_metadata_prepare(*prepare_stream_, prefill_input);
+}
+
+void MTPWorkerImpl::prepare_draft_sampling(
+    SamplingParameters& sampling_params) const {
+  if (draft_sampling_mode_ == DraftSamplingMode::GREEDY) {
+    force_greedy_draft_sampling(sampling_params);
+  } else {
+    sampling_params.logprobs = false;
+    sampling_params.max_top_logprobs = 0;
+    // Qwen3.5 derives adaptive probabilities from logits instead.
+    sampling_params.return_probs =
+        !sampling_params.all_greedy_sample ||
+        (adaptive_enabled() && !supports_explicit_spec_verify_replay_update());
+  }
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
@@ -1734,10 +1744,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         mtp_topk_state = specBuilder::select_mtp_topk_state_for_next_step(
             draft_outputs.back().mtp_topk_state, draft_sampling_params);
       }
-      // Unify this step's draft next_tokens across the consensus group before
-      // process_draft_sample_output() compresses the still-full [batch, vocab]
-      // probs into the cache: gathering the cached prob with a unified token
-      // yields a unified prob, so we only broadcast the [batch] token tensor.
+      // Keep draft tokens consistent across the consensus group.
       if (should_broadcast_spec_tokens(
               parallel_args_,
               get_optimization_config().enable_spec_token_broadcast,
@@ -2043,6 +2050,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
         /*full_draft_time_ms=*/0.0,
         per_seq_kv_lens);
   } else {
+    LOG_FIRST_N(WARNING, 1)
+        << "Adaptive speculative pruning disabled: draft exposed neither "
+           "probs nor logits for selected-prob computation. Falling back to "
+           "full speculative width.";
     prefix_lengths.assign(static_cast<size_t>(batch_size),
                           num_speculative_tokens);
   }
@@ -2851,7 +2862,9 @@ bool MTPWorkerImpl::adaptive_enabled() const {
 }
 
 void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {
-  specBuilder::draftProbs::compress_sample_output_for_cache(sample_output);
+  if (draft_sampling_mode_ == DraftSamplingMode::GREEDY) {
+    sample_output.probs = torch::Tensor();
+  }
 }
 
 void MTPWorkerImpl::update_decode_step_input(
@@ -3543,14 +3556,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     prepare_stream_->wait_stream(*compute_stream_);
   }
   extend_input = base_input;
-  // Adaptive pruning needs draft selected-probs; force return_probs on so the
-  // sampler's greedy fast-path doesn't skip probs assignment. Skip Qwen3.5:
-  // its SSM (CausalConv1d) path fails when return_probs changes sampler
-  // routing; on Qwen3.5 the controller falls back to computing probs from
-  // logits (see adaptive_pruning_helpers.cpp).
-  extend_input.sampling_params.return_probs =
-      !extend_input.sampling_params.all_greedy_sample ||
-      (adaptive_enabled() && !supports_explicit_spec_verify_replay_update());
+  prepare_draft_sampling(extend_input.sampling_params);
   clear_ready_events(extend_input);
   extend_input.device_tensors_ready = false;
   auto& input_params = extend_input.input_params;
@@ -3795,14 +3801,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
                                          int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = input;
-  // Adaptive pruning needs draft selected-probs; force return_probs on so the
-  // sampler's greedy fast-path doesn't skip probs assignment. Skip Qwen3.5:
-  // its SSM (CausalConv1d) path fails when return_probs changes sampler
-  // routing; on Qwen3.5 the controller falls back to computing probs from
-  // logits (see adaptive_pruning_helpers.cpp).
-  draft_input.sampling_params.return_probs =
-      !draft_input.sampling_params.all_greedy_sample ||
-      (adaptive_enabled() && !supports_explicit_spec_verify_replay_update());
+  prepare_draft_sampling(draft_input.sampling_params);
   clear_ready_events(draft_input);
   draft_input.device_tensors_ready = false;
 
@@ -3875,8 +3874,6 @@ SampleOutput MTPWorkerImpl::validate(
       target_output.sample_output.next_tokens.numel();
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   CHECK_EQ(num_target_tokens % num_val_tokens, 0);
-  const int32_t batch_size = num_target_tokens / num_val_tokens;
-  const int32_t vocab_size = target_output.logits.size(/*dim=*/-1);
 
   std::vector<torch::Tensor> draft_token_ids_steps;
   std::vector<torch::Tensor> draft_probs_steps;
@@ -3887,17 +3884,14 @@ SampleOutput MTPWorkerImpl::validate(
     draft_probs_steps.emplace_back(draft_output.sample_output.probs);
   }
 
-  std::pair<torch::Tensor, torch::Tensor> validate_tensors =
-      specBuilder::draftProbs::build_validate_tensors(
-          draft_token_ids_steps,
-          draft_probs_steps,
-          batch_size,
-          vocab_size,
-          enable_opt_validate_probs_,
-          /*draft_probs_required=*/!sampling_params.all_greedy_sample);
+  DraftProposal draft_proposal = specBuilder::build_validate_proposal(
+      draft_token_ids_steps,
+      draft_probs_steps,
+      /*draft_probs_required=*/
+      draft_probs_required(draft_sampling_mode_,
+                           sampling_params.all_greedy_sample));
   return validate(sampling_params,
-                  validate_tensors.first,
-                  validate_tensors.second,
+                  draft_proposal,
                   target_output,
                   num_speculative_tokens,
                   pruned_prefix_lengths,
@@ -3908,8 +3902,7 @@ SampleOutput MTPWorkerImpl::validate(
 
 SampleOutput MTPWorkerImpl::validate(
     const SamplingParameters& sampling_params,
-    const torch::Tensor& draft_token_ids,
-    const torch::Tensor& draft_probs,
+    const DraftProposal& draft_proposal,
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
     const std::vector<int32_t>* pruned_prefix_lengths,
@@ -3939,7 +3932,7 @@ SampleOutput MTPWorkerImpl::validate(
         /*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1);
     auto [accepted_token_ids, masked_accepted_token_ids] =
         RejectionSampler::greedy_sample_from_token_ids(
-            draft_token_ids.to(target_draft_token_ids),
+            draft_proposal.token_ids().to(target_draft_token_ids),
             target_draft_token_ids,
             bonus_token_ids,
             /*mask_out_rejected_tokens=*/true);
@@ -3973,6 +3966,7 @@ SampleOutput MTPWorkerImpl::validate(
           target_filter_mask.view({batch_size, num_val_tokens, vocab_size});
     }
 
+    const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
     torch::Tensor validation_draft_token_ids = draft_token_ids;
     if (!invalid_draft.empty()) {
       CHECK_EQ(invalid_draft.size(),
@@ -3995,13 +3989,14 @@ SampleOutput MTPWorkerImpl::validate(
                        draft_token_ids);
     }
 
-    // get the accepted tokens
+    DraftProposal validation_proposal(std::move(validation_draft_token_ids),
+                                      draft_proposal.draft_probs());
+
     sample_output = spec_verify::run_rejection_sampling(
         {.do_sample = sampling_params.do_sample,
          .all_random_sample = sampling_params.all_random_sample,
          .all_greedy_sample = sampling_params.all_greedy_sample},
-        validation_draft_token_ids,
-        draft_probs,
+        validation_proposal,
         target_logits,
         target_output,
         bonus_token_ids,

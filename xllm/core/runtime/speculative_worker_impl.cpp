@@ -171,7 +171,9 @@ SpeculativeWorkerImpl::SpeculativeWorkerImpl(
     const torch::Device& device,
     const runtime::Options& options,
     const runtime::Options& target_options)
-    : WorkerImpl(parallel_args, device, options) {
+    : WorkerImpl(parallel_args, device, options),
+      draft_sampling_mode_(
+          parse_draft_sampling_mode(options.draft_sampling_mode())) {
   impl_ =
       std::make_unique<LLMWorkerImpl>(parallel_args, device, target_options);
 }
@@ -328,6 +330,18 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
   new_inputs.device_tensors_ready = true;
 
   return new_inputs;
+}
+
+void SpeculativeWorkerImpl::force_greedy_draft_sampling(
+    SamplingParameters& sampling_params) {
+  if (sampling_params.do_sample.defined()) {
+    sampling_params.do_sample = torch::zeros_like(sampling_params.do_sample);
+  }
+  sampling_params.all_random_sample = false;
+  sampling_params.all_greedy_sample = true;
+  sampling_params.logprobs = false;
+  sampling_params.max_top_logprobs = 0;
+  sampling_params.return_probs = false;
 }
 
 void SpeculativeWorkerImpl::update_sampling_params(

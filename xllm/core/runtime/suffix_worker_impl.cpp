@@ -302,17 +302,11 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
           .view({num_sequences, num_speculative_tokens})
           .to(target_output.logits.device());
 
-  // RejectionSampler::forward requires draft_probs tensor for interface
-  // compatibility, but greedy-only validation does not use its values.
-  // Use a minimal placeholder to avoid one-hot scatter over vocab.
-  auto draft_probs = torch::empty({num_sequences, num_speculative_tokens, 1},
-                                  torch::TensorOptions()
-                                      .dtype(torch::kFloat32)
-                                      .device(target_output.logits.device()));
+  DraftProposal draft_proposal = DraftProposal(std::move(draft_token_ids));
 
   timer.reset();
-  SampleOutput val_output = validate(
-      input.sampling_params, draft_token_ids, draft_probs, target_output);
+  SampleOutput val_output =
+      validate(input.sampling_params, draft_proposal, target_output);
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -386,13 +380,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
 SampleOutput SuffixWorkerImpl::validate(
     const SamplingParameters& sampling_params,
-    const torch::Tensor& draft_token_ids,
-    const torch::Tensor& draft_probs,
+    const DraftProposal& draft_proposal,
     const ForwardOutput& target_output) {
   (void)sampling_params;
   const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
   const int32_t batch_size =
-      static_cast<int32_t>(draft_token_ids.size(/*dim=*/0));
+      static_cast<int32_t>(draft_proposal.token_ids().size(/*dim=*/0));
   const int32_t vocab_size =
       static_cast<int32_t>(target_output.logits.size(/*dim=*/-1));
   CHECK_EQ(target_output.logits.size(/*dim=*/0),
@@ -407,14 +400,11 @@ SampleOutput SuffixWorkerImpl::validate(
       target_logits.index({ISlice(), num_val_tokens - 1, ISlice()})
           .argmax(/*dim=*/-1, /*keepdim=*/true);
 
-  // Suffix decoding always uses greedy sampling for validation,
-  // regardless of the user's sampling parameters.
   auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
   return spec_verify::run_rejection_sampling({.do_sample = greedy_do_sample,
                                               .all_random_sample = false,
                                               .all_greedy_sample = true},
-                                             draft_token_ids,
-                                             draft_probs,
+                                             draft_proposal,
                                              target_logits,
                                              target_output,
                                              bonus_token_ids,

@@ -82,6 +82,8 @@ class Options {
 
   PROPERTY(std::string, speculative_algorithm) = "MTP";
 
+  PROPERTY(std::string, draft_sampling_mode) = "greedy";
+
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
   PROPERTY(double, speculative_suffix_max_spec_factor) = 1.0;

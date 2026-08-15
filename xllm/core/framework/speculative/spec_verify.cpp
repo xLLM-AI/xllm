@@ -18,14 +18,12 @@ limitations under the License.
 #include <memory>
 
 #include "framework/sampling/rejection_sampler.h"
-#include "framework/sampling/sampling_params.h"
 #include "runtime/forward_params.h"
 
 namespace xllm::spec_verify {
 
 SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
-                                    const torch::Tensor& draft_token_ids,
-                                    const torch::Tensor& draft_probs,
+                                    const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
                                     const ForwardOutput& target_output,
                                     const torch::Tensor& bonus_token_ids,
@@ -38,13 +36,11 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                          target_output.max_top_logprobs,
                                          enable_fused_kernel);
 
-  SampleOutput sample_output = rejection_sampler->forward(
-      draft_token_ids.to(bonus_token_ids),
-      draft_probs.defined() ? draft_probs.to(target_logits.device())
-                            : torch::Tensor(),
-      target_logits,
-      bonus_token_ids,
-      /*mask_out_rejected_tokens=*/true);
+  SampleOutput sample_output =
+      rejection_sampler->forward(draft_proposal.coerce_to(bonus_token_ids),
+                                 target_logits,
+                                 bonus_token_ids,
+                                 /*mask_out_rejected_tokens=*/true);
 
   const torch::Tensor& embeddings = target_output.sample_output.embeddings;
   sample_output.embeddings = embeddings.view(

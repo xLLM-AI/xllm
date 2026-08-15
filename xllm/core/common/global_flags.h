@@ -78,7 +78,7 @@ DECLARE_int32(num_speculative_tokens);
 
 DECLARE_string(speculative_algorithm);
 
-DECLARE_bool(enable_opt_validate_probs);
+DECLARE_string(draft_sampling_mode);
 
 DECLARE_bool(enable_mtp_draft_body_tp1);
 DECLARE_bool(enable_adaptive_speculative_decode);

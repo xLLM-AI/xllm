@@ -135,6 +135,11 @@ torch::Tensor selected_probs_by_step(
   std::vector<torch::Tensor> probs_steps;
   probs_steps.reserve(draft_outputs.size());
   int64_t batch_size = -1;
+  const auto gather_selected = [](const torch::Tensor& values,
+                                  const torch::Tensor& index) {
+    return values.gather(/*dim=*/-1, index.view({-1, 1}).to(torch::kLong))
+        .squeeze(/*dim=*/-1);
+  };
   for (const ForwardOutput& draft_output : draft_outputs) {
     torch::Tensor probs = draft_output.sample_output.probs;
     if (!probs.defined()) {
@@ -157,10 +162,15 @@ torch::Tensor selected_probs_by_step(
       const torch::Tensor logits_f32 = logits.to(torch::kFloat32);
       const torch::Tensor logsumexp = torch::logsumexp(logits_f32, /*dim=*/-1);
       const torch::Tensor selected_logits =
-          logits_f32
-              .gather(/*dim=*/-1, next_tokens.view({-1, 1}).to(torch::kLong))
-              .squeeze(/*dim=*/-1);
+          gather_selected(logits_f32, next_tokens);
       probs = torch::exp(selected_logits - logsumexp).to(logits.dtype());
+    } else if (probs.dim() == 2 && probs.size(1) != 1) {
+      const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
+      CHECK(next_tokens.defined())
+          << "adaptive pruning dense draft probs need next_tokens";
+      CHECK_EQ(probs.size(0), next_tokens.numel())
+          << "adaptive pruning dense draft prob batch mismatch";
+      probs = gather_selected(probs, next_tokens);
     }
     CHECK(probs.dim() == 1 || probs.dim() == 2)
         << "adaptive pruning expects draft probs [batch] or [batch,1], got "

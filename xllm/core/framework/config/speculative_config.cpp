@@ -55,11 +55,9 @@ DEFINE_bool(speculative_suffix_use_tree_spec,
             "Whether to use tree-based suffix speculation instead of path "
             "speculation.");
 
-DEFINE_bool(enable_opt_validate_probs,
-            false,
-            "Whether validate uses selected-only draft_probs [B,S] directly. "
-            "If false, selected-only cache values are restored to dense "
-            "[B,S,V].");
+DEFINE_string(draft_sampling_mode,
+              "greedy",
+              "Draft proposal sampling mode: greedy or probabilistic.");
 
 DEFINE_bool(enable_mtp_draft_body_tp1,
             false,
@@ -92,7 +90,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_use_tree_spec);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_opt_validate_probs);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_sampling_mode);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_adaptive_speculative_decode);
@@ -109,7 +107,7 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_use_tree_spec);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_opt_validate_probs);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(draft_sampling_mode);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_adaptive_speculative_decode);
@@ -138,7 +136,7 @@ void SpeculativeConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_suffix_use_tree_spec);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_opt_validate_probs);
+      config_json, default_config, draft_sampling_mode);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mtp_draft_body_tp1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -158,6 +156,19 @@ void SpeculativeConfig::initialize() {
   from_flags();
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
+  }
+  validate();
+}
+
+void SpeculativeConfig::validate() const {
+  const DraftSamplingMode mode =
+      parse_draft_sampling_mode(draft_sampling_mode());
+  const std::string& algorithm = speculative_algorithm();
+  if (mode == DraftSamplingMode::PROBABILISTIC) {
+    CHECK(is_probabilistic_draft_sampling_supported(algorithm))
+        << algorithm << " does not support draft_sampling_mode="
+        << kDraftSamplingModeProbabilistic
+        << ". Supported: MTP, DSpark, Eagle3.";
   }
 }
 

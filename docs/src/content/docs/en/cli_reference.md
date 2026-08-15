@@ -187,7 +187,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `speculative_suffix_min_token_prob` | `double` | `0.1` | Minimum token probability used in suffix speculation. |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Maximum number of globally cached requests for suffix speculation. `-1` means unlimited; `0` disables it. |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | Whether to use tree-based suffix speculation instead of path speculation. |
-| `enable_opt_validate_probs` | `bool` | `false` | Whether validation uses selected-only `draft_probs [B,S]` directly. If false, selected-only cache values are restored to dense `[B,S,V]`. |
+| `draft_sampling_mode` | `string` | `"greedy"` | How the draft model samples proposal tokens: `greedy`, `probabilistic`. Only `MTP`, `DSpark`, `Eagle3` accept `probabilistic`. |
 | `enable_atb_spec_kernel` | `bool` | `false` | Whether to use the ATB speculative kernel. |
 
 ## ProfileConfig

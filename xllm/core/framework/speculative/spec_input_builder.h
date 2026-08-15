@@ -19,10 +19,10 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
-#include <utility>
 #include <vector>
 
 #include "core/framework/model/mtp_topk_state.h"
+#include "core/framework/sampling/draft_proposal.h"
 #include "util/slice.h"
 
 namespace xllm {
@@ -30,7 +30,6 @@ namespace xllm {
 struct ModelInputParams;
 struct ForwardInput;
 struct SamplingParameters;
-struct SampleOutput;
 
 namespace specBuilder {
 
@@ -180,53 +179,10 @@ MtpTopkStatePtr select_mtp_topk_state_for_next_step(
     const MtpTopkStatePtr& state,
     const SamplingParameters& sampling_params);
 
-namespace draftProbs {
-
-// Compress draft probs to selected-only format [batch_size] for cache storage.
-// Input draft_probs may be dense [batch_size, vocab_size] or selected-only
-// [batch_size] / [batch_size, 1].
-torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
-                                 const torch::Tensor& draft_token_ids);
-
-// Compresses a draft SampleOutput's probs to selected-only cache form in place;
-// no-op when probs are undefined.
-void compress_sample_output_for_cache(SampleOutput& sample_output);
-
-// Build validate inputs from per-step draft token ids/probs.
-// Returns:
-//   - draft_token_ids: [batch_size, n_speculative_tokens]
-//   - draft_probs:
-//       * selected-only [batch_size, n_speculative_tokens], if
-//         enable_opt_validate_probs=true
-//       * recovered-dense [batch_size, n_speculative_tokens, vocab_size], if
-//         enable_opt_validate_probs=false
-//       * undefined, if draft_probs_required=false
-std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
+DraftProposal build_validate_proposal(
     const std::vector<torch::Tensor>& draft_token_ids_steps,
     const std::vector<torch::Tensor>& draft_probs_steps,
-    int32_t batch_size,
-    int32_t vocab_size,
-    bool enable_opt_validate_probs,
-    bool draft_probs_required = true);
-
-// Build validate inputs from an already-stacked draft block. Block-diffusion
-// drafters (DFlash) emit the whole block in one forward, so there are no
-// per-step tensors to assemble — this avoids the per-step select/view/cat
-// round trip of build_validate_tensors.
-//   token_ids_block / probs_block: [batch_size, n_speculative_tokens]
-// Returns draft_token_ids [batch, n_spec] (int64). When
-// enable_opt_validate_probs is true the selected-only probs_block is returned
-// as-is [batch, n_spec]; otherwise the selected probs are scattered into a
-// dense [batch, n_spec, vocab_size] tensor matching MTP's
-// build_validate_tensors output, which the default path and the fused
-// rejection kernel require.
-std::pair<torch::Tensor, torch::Tensor> build_validate_tensors_from_block(
-    const torch::Tensor& token_ids_block,
-    const torch::Tensor& probs_block,
-    int32_t vocab_size,
-    bool enable_opt_validate_probs);
-
-}  // namespace draftProbs
+    bool draft_probs_required);
 
 }  // namespace specBuilder
 

@@ -58,7 +58,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const runtime::Options& options,
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
-                bool enable_opt_validate_probs = false,
                 bool enable_adaptive_speculative_decode = false);
 
  public:
@@ -142,13 +141,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const std::vector<uint8_t>& invalid_draft);
 
   // Hook for algorithm-specific draft output post-processing during decode.
-  // Default MTP behavior always compresses probs for cache storage.
   virtual void process_draft_sample_output(SampleOutput& sample_output);
 
   SampleOutput validate(
       const SamplingParameters& sampling_params,
-      const torch::Tensor& draft_token_ids,
-      const torch::Tensor& draft_probs,
+      const DraftProposal& draft_proposal,
       const ForwardOutput& target_output,
       int32_t num_speculative_tokens,
       const std::vector<int32_t>* pruned_prefix_lengths = nullptr,
@@ -163,6 +160,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
+  void prepare_draft_sampling(SamplingParameters& sampling_params) const;
   bool supports_explicit_spec_verify_replay_update() const;
   bool should_use_explicit_spec_verify_replay_update(
       const ForwardInput& input) const;
@@ -291,9 +289,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.
   PendingDraftContext pending_draft_context_;
-  // Whether validation directly uses selected-only draft_probs [B, S].
-  // If false, selected-only cache values are restored to dense [B, S, V].
-  bool enable_opt_validate_probs_ = false;
   // adaptive_spec_controller_ now lives on SpeculativeWorkerImpl (base class).
 
   // Classified once when the corresponding models are loaded. Decode-path

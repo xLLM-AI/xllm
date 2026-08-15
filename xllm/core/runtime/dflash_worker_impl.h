@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/speculative/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
+#include "framework/sampling/draft_proposal.h"
 #include "runtime/speculative_worker_impl.h"
 #include "util/utils.h"
 
@@ -97,12 +98,8 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // output is a single [batch, num_speculative_tokens] block rather than the
   // per-step outputs an autoregressive drafter (e.g. MTP) yields.
   struct DraftBlock {
-    torch::Tensor token_ids;
-    torch::Tensor probs;
-    // Optional acceptance-probability estimate, [batch, num_speculative_tokens]
-    // fp32 in [0, 1]. Populated by DSpark's ConfidenceHead when available;
-    // consumed by the adaptive-speculative pruning controller. When undefined,
-    // the controller falls back to `probs` (sampler-gathered softmax scores).
+    DraftProposal proposal;
+    // DSpark ConfidenceHead output for adaptive pruning; empty otherwise.
     torch::Tensor confidence_probs;
     // No-sync draft inputs must outlive validation's stream sync.
     std::vector<std::shared_ptr<ForwardInput>> retained_inputs;
@@ -168,8 +165,7 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                         const std::vector<int32_t>& per_seq_val_tokens);
 
   SampleOutput validate(const SamplingParameters& sampling_params,
-                        const torch::Tensor& draft_token_ids,
-                        const torch::Tensor& draft_probs,
+                        const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output,
                         int32_t effective_val_tokens,
                         const std::vector<int32_t>& per_seq_val_tokens);

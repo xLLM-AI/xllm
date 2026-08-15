@@ -326,6 +326,8 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
       std::to_string(options.enable_mtp_draft_body_tp1());
   const char* enable_mtp_draft_body_tp1_ptr =
       enable_mtp_draft_body_tp1_str.c_str();
+  std::string draft_sampling_mode_str = options.draft_sampling_mode();
+  const char* draft_sampling_mode_ptr = draft_sampling_mode_str.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -377,6 +379,7 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         indexer_cache_dtype_ptr,
                         enable_mtp_draft_body_tp1_ptr,
                         text_encoder_tp_size_ptr,
+                        draft_sampling_mode_ptr,
                         nullptr};
   static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;
