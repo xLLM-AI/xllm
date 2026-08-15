@@ -127,6 +127,9 @@ if(USE_MUSA)
   )
 endif()
 
+if (USE_NPU AND USE_XLITE)
+  xllm_link_xlite(xllm)
+endif()
 # install xllm
 install(TARGETS xllm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

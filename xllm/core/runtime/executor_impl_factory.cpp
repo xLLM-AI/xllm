@@ -21,6 +21,9 @@ limitations under the License.
 #include "runtime/vlm_executor_impl.h"
 #if defined(USE_NPU)
 #include "runtime/acl_graph_executor_impl.h"
+#if defined(USE_XLITE)
+#include "runtime/xlite_executor_impl.h"
+#endif
 #elif defined(USE_MLU)
 #include "runtime/mlu_graph_executor_impl.h"
 #elif defined(USE_CUDA)

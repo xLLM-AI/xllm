@@ -38,3 +38,7 @@ cc_library(
     torch_python
     Python::Python
 )
+
+if(USE_NPU AND USE_XLITE)
+  xllm_link_xlite(models)
+endif()

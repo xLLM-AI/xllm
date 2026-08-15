@@ -31,6 +31,8 @@ Executor::Executor(CausalLM* model,
   std::string backend;
   if (ModelConfig::is_python_model_impl(model_config.model_impl())) {
     backend = "python";
+  } else if (options.npu_kernel_backend() == "XLITE") {
+    backend = "xlite";
   } else if (options.backend() != "vlm" && options.enable_graph()) {
     backend = Platform::type_str();
   } else {

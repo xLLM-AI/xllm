@@ -264,6 +264,15 @@ struct has_init_or_refresh_rolling_runtime<
         std::declval<int32_t>(),
         std::declval<const std::string&>()))>> : std::true_type {};
 
+// SFINAE: xlite-backend models expose get_xlite_holder().
+template <typename T, typename = void>
+struct has_get_xlite_holder : std::false_type {};
+
+template <typename T>
+struct has_get_xlite_holder<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_xlite_holder())>>
+    : std::true_type {};
 #endif
 
 template <typename T, typename = void>
