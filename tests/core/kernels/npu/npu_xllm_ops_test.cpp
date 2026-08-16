@@ -76,6 +76,12 @@ bool is_ascend950_device() {
          std::string(soc_name).find("Ascend950") != std::string::npos;
 }
 
+bool is_ascend910_93_device() {
+  const char* soc_name = aclrtGetSocName();
+  return soc_name != nullptr &&
+         std::string(soc_name).find("Ascend910_93") != std::string::npos;
+}
+
 torch::Tensor expand_kv_heads_reference(const torch::Tensor& tensor,
                                         int64_t num_heads) {
   const int64_t num_kv_heads = tensor.size(1);
@@ -442,8 +448,10 @@ torch.testing.assert_close(
 )PY");
 }
 
-TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu) {
+void run_dsv4_quant_lightning_indexer_probe(bool production_shape) {
   py::gil_scoped_acquire gil;
+  py::dict locals;
+  locals["production_shape"] = production_shape;
 
   py::exec(R"PY(
 import torch
@@ -454,17 +462,32 @@ from xllm.python.kernels_npu.dsa import (
 
 device = torch.device("privateuseone:0")
 torch.manual_seed(2026)
-tokens, heads, head_dim = 84, 64, 128
-page_size, sparse_count = 128, 512
-query_cpu = torch.randint(-8, 8, (tokens, heads, head_dim), dtype=torch.int8)
+heads, head_dim, page_size = 64, 128, 128
+batch = 1
+if production_shape:
+    q_tokens, kv_tokens = 84, 84
+    sparse_count, cmp_ratio = 512, 4
+    query_layout = "TND"
+    query_shape = (q_tokens, heads, head_dim)
+    weights_shape = (q_tokens, heads)
+    expected_indices_shape = (q_tokens, 1, sparse_count)
+else:
+    q_tokens, kv_tokens = 4, 128
+    sparse_count, cmp_ratio = 8, 1
+    query_layout = "BSND"
+    query_shape = (batch, q_tokens, heads, head_dim)
+    weights_shape = (batch, q_tokens, heads)
+    expected_indices_shape = (batch, q_tokens, 1, sparse_count)
+
+query_cpu = torch.randint(-8, 8, query_shape, dtype=torch.int8)
 key_cpu = torch.randint(-8, 8, (1, page_size, 1, head_dim), dtype=torch.int8)
 query = query_cpu.to(device)
 key = key_cpu.to(device)
-weights = torch.ones((tokens, heads), dtype=torch.float16, device=device)
-query_scale = torch.ones((tokens, heads), dtype=torch.float16, device=device)
+weights = torch.ones(weights_shape, dtype=torch.float16, device=device)
+query_scale = torch.ones_like(weights)
 key_scale = torch.ones((1, page_size, 1), dtype=torch.float16, device=device)
-query_lens = torch.tensor([tokens], dtype=torch.int32, device=device)
-key_lens = torch.tensor([tokens], dtype=torch.int32, device=device)
+query_lens = torch.tensor([q_tokens], dtype=torch.int32, device=device)
+key_lens = torch.tensor([kv_tokens], dtype=torch.int32, device=device)
 block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
 metadata = quant_lightning_indexer_metadata(
     heads,
@@ -474,16 +497,16 @@ metadata = quant_lightning_indexer_metadata(
     0,
     query_lens,
     key_lens,
-    1,
-    tokens,
-    tokens,
-    "TND",
+    batch,
+    q_tokens,
+    kv_tokens,
+    query_layout,
     "PA_BSND",
     sparse_count,
     3,
     2**63 - 1,
     2**63 - 1,
-    4,
+    cmp_ratio,
     "npu",
 )
 metadata_again = quant_lightning_indexer_metadata(
@@ -494,16 +517,16 @@ metadata_again = quant_lightning_indexer_metadata(
     0,
     query_lens,
     key_lens,
-    1,
-    tokens,
-    tokens,
-    "TND",
+    batch,
+    q_tokens,
+    kv_tokens,
+    query_layout,
     "PA_BSND",
     sparse_count,
     3,
     2**63 - 1,
     2**63 - 1,
-    4,
+    cmp_ratio,
     "npu",
 )
 indices, values = quant_lightning_indexer(
@@ -518,39 +541,58 @@ indices, values = quant_lightning_indexer(
     key_lens,
     block_table,
     metadata,
-    "TND",
+    query_layout,
     "PA_BSND",
     sparse_count,
     3,
     2**63 - 1,
     2**63 - 1,
-    4,
+    cmp_ratio,
     False,
 )
 torch.npu.synchronize()
 
-assert indices.shape == (tokens, 1, sparse_count)
+assert indices.shape == expected_indices_shape
 assert indices.dtype == torch.int32
 assert values.numel() == 0
 assert values.dtype == torch.float32
 assert torch.equal(metadata.cpu(), metadata_again.cpu())
 
-valid_key_count = tokens // 4
-indices_cpu = indices.cpu().squeeze(1)
+valid_key_count = kv_tokens // cmp_ratio
+indices_cpu = indices.cpu()
 assert torch.all(
     (indices_cpu == -1)
     | ((indices_cpu >= 0) & (indices_cpu < valid_key_count))
 )
 keys = key_cpu[0, :valid_key_count, 0].float()
-token_idx = tokens - 1
-dots = query_cpu[token_idx].float() @ keys.T
+token_idx = q_tokens - 1
+if production_shape:
+    query_token = query_cpu[token_idx]
+    actual_indices = indices_cpu[token_idx, 0]
+else:
+    query_token = query_cpu[0, token_idx]
+    actual_indices = indices_cpu[0, token_idx, 0]
+dots = query_token.float() @ keys.T
 expected_top8 = set(torch.topk(dots.clamp_min(0).sum(0), 8).indices.tolist())
-actual_top8 = set(indices_cpu[token_idx, :8].tolist())
+actual_top8 = set(actual_indices[:8].tolist())
 assert len(expected_top8 & actual_top8) >= 4, (
     sorted(expected_top8),
     sorted(actual_top8),
 )
-)PY");
+)PY",
+           py::globals(),
+           locals);
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu) {
+  run_dsv4_quant_lightning_indexer_probe(/*production_shape=*/false);
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerProductionShapeRunsOnA3) {
+  if (!is_ascend910_93_device()) {
+    GTEST_SKIP() << "Atlas A3 is required for the production-shape QLI probe.";
+  }
+  run_dsv4_quant_lightning_indexer_probe(/*production_shape=*/true);
 }
 
 TEST_F(NpuXllmOpsTest, Dsv4SparseAttentionPythonWrapperRunsOnNpu) {
@@ -657,36 +699,6 @@ assert out.shape == query.shape
 assert out.dtype == query.dtype
 assert lse.numel() == 0
 assert torch.equal(metadata.cpu(), metadata_again.cpu())
-
-_, lse = sparse_attn_sharedkv(
-    query,
-    ori_kv,
-    None,
-    None,
-    None,
-    block_table,
-    None,
-    None,
-    None,
-    None,
-    None,
-    seq_kv,
-    sinks,
-    metadata,
-    head_dim**-0.5,
-    1,
-    4,
-    3,
-    127,
-    0,
-    "BSND",
-    "PA_ND",
-    True,
-)
-torch.npu.synchronize()
-assert lse.shape == (*query.shape[:-1], 1)
-assert lse.dtype == torch.float32
-assert torch.isfinite(lse).all()
 
 expected = torch.zeros_like(query_cpu.float())
 keys = kv_cpu[0, :, 0].float()

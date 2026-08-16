@@ -16,10 +16,12 @@ cc_test(
     pybind11::embed
 )
 
-# These operator probes each initialize a Python interpreter and submit large
-# NPU kernels. Running them concurrently in CTest can abort the subprocess.
+# Keep the embedded-Python NPU probes isolated from the parallel CTest pool.
+# This limits shared-device contention but is not a substitute for validating
+# each operator's supported parameter combinations.
 set_tests_properties(
   NpuXllmOpsTest.Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu
+  NpuXllmOpsTest.Dsv4QuantLightningIndexerProductionShapeRunsOnA3
   NpuXllmOpsTest.Dsv4SparseAttentionPythonWrapperRunsOnNpu
   PROPERTIES RUN_SERIAL TRUE
 )
