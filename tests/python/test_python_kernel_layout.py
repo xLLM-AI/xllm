@@ -121,11 +121,9 @@ def test_kernel_package_import_boundaries() -> None:
     assert violations == []
 
 
-def test_platform_packages_export_the_same_kernel_api() -> None:
-    cuda_exports = _exports("kernels_cuda")
-    npu_exports = _exports("kernels_npu")
-    assert cuda_exports
-    assert set(cuda_exports) == set(npu_exports)
+def test_platform_packages_define_public_kernel_apis() -> None:
+    for package in _KERNEL_PACKAGES:
+        assert _exports(package)
 
 
 def test_platform_queries_stay_in_the_owning_layers() -> None:

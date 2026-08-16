@@ -16,6 +16,14 @@ cc_test(
     pybind11::embed
 )
 
+# These operator probes each initialize a Python interpreter and submit large
+# NPU kernels. Running them concurrently in CTest can abort the subprocess.
+set_tests_properties(
+  NpuXllmOpsTest.Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu
+  NpuXllmOpsTest.Dsv4SparseAttentionPythonWrapperRunsOnNpu
+  PROPERTIES RUN_SERIAL TRUE
+)
+
 # Temporarily disabled: Dsv4ScatterCache tests are unstable in the current
 # NPU test environment.
 # cc_test(
