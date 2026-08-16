@@ -153,13 +153,6 @@ void update_kv_seq_lens_and_max(std::vector<int32_t>& kv_seq_lens_vec,
                                 int32_t kv_len,
                                 int32_t& kv_max_seq_len);
 
-// Builds q_cu_seq_lens tensor from upstream-provided host values.
-// When include_leading_zero is true, returns query_start_loc-style
-// [0, cumsum...].
-torch::Tensor build_q_cu_seq_lens_tensor(const ModelInputParams& params,
-                                         torch::Device device = torch::kCPU,
-                                         bool include_leading_zero = false);
-
 // Updates common decode-side ModelInputParams fields from built buffers.
 void update_input_params(ModelInputParams& input_params,
                          DecodeBuildBuffers& buf,

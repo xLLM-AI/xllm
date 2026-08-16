@@ -445,27 +445,6 @@ void append_decode_row_from_last_step(const DecodeRowContext& ctx,
   append_decode_row(ctx, row, block_size, buf);
 }
 
-torch::Tensor build_q_cu_seq_lens_tensor(const ModelInputParams& params,
-                                         torch::Device device,
-                                         bool include_leading_zero) {
-  CHECK_EQ(params.attention.host.q_seq_lens.empty(),
-           params.attention.host.q_cu_seq_lens.empty())
-      << "q_seq_lens and q_cu_seq_lens must be provided together";
-  if (!include_leading_zero) {
-    return torch::tensor(params.attention.host.q_cu_seq_lens,
-                         torch::dtype(torch::kInt).device(device));
-  }
-  std::vector<int32_t> q_cu_seq_lens_vec;
-  q_cu_seq_lens_vec.reserve(params.meta.num_sequences + 1);
-  q_cu_seq_lens_vec.emplace_back(0);
-  for (int32_t i = 0; i < params.meta.num_sequences; ++i) {
-    q_cu_seq_lens_vec.emplace_back(q_cu_seq_lens_vec.back() +
-                                   params.get_q_seq_len(i));
-  }
-  return torch::tensor(q_cu_seq_lens_vec,
-                       torch::dtype(torch::kInt).device(device));
-}
-
 void update_input_params(ModelInputParams& input_params,
                          DecodeBuildBuffers& buf,
                          int32_t q_max_seq_len,
