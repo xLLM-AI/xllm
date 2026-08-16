@@ -20,9 +20,9 @@ cc_test(
 # This limits shared-device contention but is not a substitute for validating
 # each operator's supported parameter combinations.
 set_tests_properties(
-  NpuXllmOpsTest.Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu
+  NpuXllmOpsTest.Dsv4QuantLightningIndexerPythonWrapperRunsOnA3
   NpuXllmOpsTest.Dsv4QuantLightningIndexerProductionShapeRunsOnA3
-  NpuXllmOpsTest.Dsv4SparseAttentionPythonWrapperRunsOnNpu
+  NpuXllmOpsTest.Dsv4SparseAttentionPythonWrapperRunsOnA3
   PROPERTIES RUN_SERIAL TRUE
 )
 

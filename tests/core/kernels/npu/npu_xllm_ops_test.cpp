@@ -584,7 +584,10 @@ assert len(expected_top8 & actual_top8) >= 4, (
            locals);
 }
 
-TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu) {
+TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerPythonWrapperRunsOnA3) {
+  if (!is_ascend910_93_device()) {
+    GTEST_SKIP() << "Atlas A3 is required for this DSV4 QLI operator probe.";
+  }
   run_dsv4_quant_lightning_indexer_probe(/*production_shape=*/false);
 }
 
@@ -595,7 +598,11 @@ TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerProductionShapeRunsOnA3) {
   run_dsv4_quant_lightning_indexer_probe(/*production_shape=*/true);
 }
 
-TEST_F(NpuXllmOpsTest, Dsv4SparseAttentionPythonWrapperRunsOnNpu) {
+TEST_F(NpuXllmOpsTest, Dsv4SparseAttentionPythonWrapperRunsOnA3) {
+  if (!is_ascend910_93_device()) {
+    GTEST_SKIP() << "Atlas A3 is required for this DSV4 sparse-attention "
+                    "operator probe.";
+  }
   py::gil_scoped_acquire gil;
 
   py::exec(R"PY(
@@ -634,7 +641,7 @@ metadata = sparse_attn_sharedkv_metadata(
     kv_tokens,
     0,
     0,
-    1,
+    4,
     4,
     3,
     127,
@@ -658,7 +665,7 @@ metadata_again = sparse_attn_sharedkv_metadata(
     kv_tokens,
     0,
     0,
-    1,
+    4,
     4,
     3,
     127,
@@ -684,7 +691,7 @@ out, lse = sparse_attn_sharedkv(
     sinks,
     metadata,
     head_dim**-0.5,
-    1,
+    4,
     4,
     3,
     127,
