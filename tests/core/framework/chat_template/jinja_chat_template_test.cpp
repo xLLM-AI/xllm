@@ -124,4 +124,37 @@ TEST(ChatTemplate, ClassifiesTerminalGenerationMarkers) {
             ChatTemplateGenerationMode::UNKNOWN);
 }
 
+TEST(JinjaChatTemplate, SupportsUndefinedTests) {
+  // Qwen3.8 uses both forms for optional chat-template arguments. Quoted text
+  // must remain unchanged while executable Jinja expressions are normalized.
+  const std::string template_str =
+      "plain text: value is undefined|"
+      "{{ 'quoted value is undefined' }}|"
+      "{% if enable_thinking is undefined %}default"
+      "{% else %}configured{% endif %}|"
+      "{% if enable_thinking is not undefined %}present"
+      "{% else %}missing{% endif %}";
+
+  nlohmann::ordered_json messages = {{{"role", "user"}, {"content", "hello"}}};
+  TokenizerArgs args;
+  args.chat_template(template_str);
+  args.bos_token("");
+  args.eos_token("");
+  TestableJinjaChatTemplate template_(args);
+
+  auto default_result = template_.apply(messages);
+  ASSERT_TRUE(default_result.has_value());
+  EXPECT_EQ(default_result.value(),
+            "plain text: value is undefined|quoted value is undefined|default|"
+            "missing");
+
+  const nlohmann::ordered_json tools = nlohmann::json::array();
+  const nlohmann::ordered_json kwargs = {{"enable_thinking", false}};
+  auto configured_result = template_.apply(messages, tools, kwargs);
+  ASSERT_TRUE(configured_result.has_value());
+  EXPECT_EQ(configured_result.value(),
+            "plain text: value is undefined|quoted value is undefined|"
+            "configured|present");
+}
+
 }  // namespace xllm
