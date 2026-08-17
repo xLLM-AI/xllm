@@ -496,7 +496,15 @@ class DecodeAclGraphRunner(BaseRunner):
         input_embedding: torch.Tensor | None,
     ) -> _DecodeGraphEntry:
         batch_size = input_ids.shape[0]
-        padded_batch_size = _decode_bucket(batch_size)
+        # DP ranks all_gather MoE tokens into one fixed shape, so every rank
+        # must capture the same graph. Bucket by the group-wide max token count
+        # (dp_token_counts) rather than the local batch, keeping shapes uniform.
+        if self.dp_size > 1:
+            dp_token_counts = tuple(int(c) for c in metadata.dp_token_counts)
+            global_batch = max(max(dp_token_counts, default=0), batch_size)
+            padded_batch_size = _decode_bucket(global_batch)
+        else:
+            padded_batch_size = _decode_bucket(batch_size)
         if padded_batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
 
@@ -636,6 +644,7 @@ class DecodeAclGraphRunner(BaseRunner):
             paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
             kv_seq_lens_host_values=[1] * padded_batch_size,
             block_table=static_block_table,
+            dp_token_counts=tuple([padded_batch_size] * self.dp_size) if self.dp_size > 1 else (),
         )
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
         entry.kv_seq_lens_delta = torch.empty(padded_batch_size, dtype=torch.int32, device=device)
@@ -784,7 +793,7 @@ class DecodeAclGraphRunner(BaseRunner):
             self.layer_caches,
             execution_state=entry.execution_state,
         )
-        with forward_context(context):
+        with forward_context(context), torch.npu.stream(self._stream):
             for _ in range(_CAPTURE_WARMUP_STEPS):
                 self._forward_static(entry)
         torch.npu.synchronize()

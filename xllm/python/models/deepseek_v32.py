@@ -1477,16 +1477,16 @@ class DeepseekV3MoE(nn.Module):
         return self._combine_expert_outputs(routed, shared)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        local_hidden = hidden
-        token_counts: list[int] | None = None
+        local_tokens: int = 0
+        padded_tokens: int = 0
         if self.dp_size > 1:
             token_counts = list(get_forward_context().metadata.dp_token_counts)
-            hidden = distributed.all_gather_variable(
-                hidden,
-                token_counts,
-                self.dp_rank,
-                "dp",
-            )
+            padded_tokens = max(token_counts)
+            local_tokens = hidden.shape[0]
+            pad_size = padded_tokens - local_tokens
+            if pad_size > 0:
+                hidden = torch.nn.functional.pad(hidden, (0, 0, 0, pad_size))
+            hidden = distributed.all_gather(hidden, dim=0, world_size=self.dp_size, group_name="dp")
 
         if self._fine_overlap_enabled:
             final = self._forward_fine_grained_parallel(hidden)
@@ -1497,11 +1497,8 @@ class DeepseekV3MoE(nn.Module):
             shared = self._run_shared_experts(hidden)
             final = self._combine_expert_outputs(routed, shared)
 
-        if token_counts is not None:
-            local_tokens = token_counts[self.dp_rank]
-            if local_tokens == 0:
-                return torch.zeros_like(local_hidden)
-            start = sum(token_counts[: self.dp_rank])
+        if padded_tokens > 0:
+            start = self.dp_rank * padded_tokens
             final = final.narrow(0, start, local_tokens)
         return final
 
@@ -1632,6 +1629,17 @@ class DeepseekV3ForCausalLM(PyModelBase):
         self.cfg.moe_tp_size = int(config.get("moe_tp_size", 1))
         self.cfg.moe_tp_rank = int(config.get("moe_tp_rank", 0))
         self.cfg.world_size = int(config.get("world_size", self.cfg.tp_size))
+        # C++ computes moe_tp_size = world_size / ep_size, which conflates DP
+        # replicas with TP shards when dp > 1.  With ep=1 the expert weights
+        # are sharded by tp_size (not moe_tp_size), and the C++-created
+        # "moe_tp" group still spans all world_size ranks including DP peers.
+        # Force moe_tp_size=1 so the all_reduce falls through to the "tp"
+        # group that is correctly scoped to one DP replica.
+        if self.cfg.dp_size > 1 and self.cfg.moe_tp_size > 1:
+            if self.cfg.ep_size == 1:
+                self.cfg.moe_tp_size = 1
+            else:
+                self.cfg.moe_tp_size = max(1, self.cfg.moe_tp_size // self.cfg.dp_size)
         if hasattr(self.cfg, "validate"):
             self.cfg.validate()
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))

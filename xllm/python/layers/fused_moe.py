@@ -103,18 +103,18 @@ class FusedMoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        local_hidden_states = hidden_states
-        token_counts: list[int] | None = None
+        local_tokens: int = 0
+        padded_tokens: int = 0
         if self.dp_size > 1:
             token_counts = list(get_forward_context().metadata.dp_token_counts)
             if len(token_counts) != self.dp_size:
                 raise RuntimeError(f"expected {self.dp_size} DP token counts, got {token_counts}")
-            hidden_states = distributed.all_gather_variable(
-                hidden_states,
-                token_counts,
-                self.dp_rank,
-                "dp",
-            )
+            padded_tokens = max(token_counts)
+            local_tokens = hidden_states.shape[0]
+            pad_size = padded_tokens - local_tokens
+            if pad_size > 0:
+                hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            hidden_states = distributed.all_gather(hidden_states, dim=0, world_size=self.dp_size, group_name="dp")
 
         router_logits = self.gate(hidden_states)
         topk_weights, topk_ids = kernels.moe_fused_topk(
@@ -150,15 +150,7 @@ class FusedMoE(nn.Module):
                 distributed.all_reduce_(output, "moe_tp")
             if self.ep_size > 1:
                 distributed.all_reduce_(output, "moe_ep")
-        if token_counts is not None:
-            local_tokens = token_counts[self.dp_rank]
-            if local_tokens == 0:
-                return torch.zeros_like(local_hidden_states)
-            start = sum(token_counts[: self.dp_rank])
-            local_output = output.narrow(0, start, local_tokens)
-            if local_tokens == local_hidden_states.shape[0]:
-                return local_output
-            padding_shape = list(local_hidden_states.shape)
-            padding_shape[0] -= local_tokens
-            return torch.cat([local_output, local_hidden_states.new_zeros(padding_shape)], dim=0)
+        if padded_tokens > 0:
+            start = self.dp_rank * padded_tokens
+            output = output.narrow(0, start, local_tokens)
         return output
