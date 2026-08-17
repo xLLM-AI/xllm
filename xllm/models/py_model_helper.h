@@ -30,6 +30,10 @@ namespace xllm {
 // Initializes the embedded CPython interpreter (idempotent, process-wide).
 void ensure_python_interpreter();
 
+// Makes the internal StateDict binding importable as xllm_weight_loader.
+// The caller must hold the Python GIL.
+void ensure_xllm_weight_loader_module();
+
 // Convert torch dtype to the string form used by Python model config.
 std::string dtype_to_string(const torch::TensorOptions& options);
 

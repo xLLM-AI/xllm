@@ -216,7 +216,7 @@ py::dict PyCausalLM::build_config_dict(
 void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   py::gil_scoped_acquire gil;
   auto& state_dicts = loader->get_state_dicts();
-  py::module_::import("xllm_weight_loader");
+  ensure_xllm_weight_loader_module();
 
   py::list py_state_dicts;
   for (const auto& sd : state_dicts) {
