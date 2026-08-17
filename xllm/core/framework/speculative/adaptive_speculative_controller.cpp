@@ -43,12 +43,18 @@ struct PruneCandidate {
 
 }  // namespace
 
+// Adaptive pruning is compatible with enable_graph: the pruned per-seq validate
+// step is flattened to total_num_val_tokens q=1 rows tagged BatchForwardType
+// DECODE (see SpeculativeWorkerImpl::prepare_validate_inputs), so the executor
+// routes it through the ordinary decode graph path and pads the (variable)
+// pruned token count up to the next decode bucket, exactly like an unpruned
+// decode batch of a different size. No static-shape assumption is violated, so
+// graph mode does not force the controller off.
 AdaptiveSpeculativeController::AdaptiveSpeculativeController(
     const runtime::Options& options)
     : enabled_(options.enable_adaptive_speculative_decode() &&
                options.num_speculative_tokens() > 1 &&
-               is_supported_algorithm(options.speculative_algorithm()) &&
-               !options.enable_graph()),
+               is_supported_algorithm(options.speculative_algorithm())),
       min_gain_(options.adaptive_speculative_min_gain()) {}
 
 bool AdaptiveSpeculativeController::enabled() const { return enabled_; }

@@ -62,20 +62,6 @@ constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 
 namespace {
 
-// Qwen3.5 GDN conv_state history capacity (kernel_conv_size - 1). Values of
-// num_accepted_tokens beyond this describe history that has already rolled
-// out of conv_state; passing them to aclnnCausalConv1d makes tiling fail when
-// the current step's per_seq_val_tokens is small (e.g. adaptive prunes down
-// to 2 while nat=5). Callers clamp accepted-prefix lengths to this cap before
-// invoking the GDN spec-verify path.
-constexpr int32_t kGdnConvHistoryCap = 3;
-
-void clamp_gdn_conv_history(std::vector<int32_t>& accepted_prefix_lengths) {
-  for (int32_t& v : accepted_prefix_lengths) {
-    v = std::min(v, kGdnConvHistoryCap);
-  }
-}
-
 bool has_active_dp_tokens(const ForwardInput& input) {
   const ParallelInput& parallel = input.input_params.parallel;
   const std::vector<int32_t>& token_nums =
@@ -1671,7 +1657,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   const bool reuse_mtp_topk_state = layer::is_mtp_dsa_topk_reuse_enabled(
       draft_impl_->context_.get_model_args());
   MtpTopkStatePtr mtp_topk_state;
-  timer.reset();
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     const bool is_final_draft = draft_idx == num_speculative_tokens - 1;
     const bool static_graph_tasks_prepared =
@@ -2084,21 +2069,21 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
     effective_speculative_tokens = 1;
   }
 
-  // The Qwen3.5 GDN CausalConv1d kernel produces aivec errors when the
-  // per-seq validate segment length is smaller than num_accepted_tokens
-  // (the previous step's accepted count). The tiling validation would
-  // reject nat > lenI, but the underlying kernel itself is fragile at
-  // those boundaries. Floor effective_speculative_tokens by the batch's
-  // max num_accepted so uniform_val_tokens >= max(nat) + 1. Read from
-  // embedding_cache directly since input.num_accepted_tokens_host is
-  // populated by prepare_validate_inputs which hasn't run yet here.
+  // Qwen3.5 GDN spec-verify commits the recurrent/conv checkpoint selected by
+  // the previous step's num_accepted_tokens (nat): the GDN kernel indexes
+  // ssm_state as nat - 1 and requires nat <= this step's validate width. Floor
+  // effective_speculative_tokens by the batch's max nat so uniform_val_tokens
+  // >= max(nat) + 1. nat itself must stay the true accepted count (never
+  // clamped) so the committed checkpoint matches the last accepted token;
+  // clamping it would commit a stale checkpoint (see issue #2247). Read from
+  // embedding_cache directly since input.num_accepted_tokens_host is populated
+  // by prepare_validate_inputs which hasn't run yet here.
   if (supports_explicit_spec_verify_replay_update() &&
       embedding_cache_ != nullptr &&
       !input.input_params.embedding.embedding_ids.empty()) {
     std::vector<int32_t> nat = embedding_cache_->read_accepted_prefix_lengths(
         input.input_params.embedding.embedding_ids,
         input.input_params.embedding.request_ids);
-    clamp_gdn_conv_history(nat);
     int32_t max_nat = 0;
     for (int32_t v : nat) {
       max_nat = std::max(max_nat, v);
@@ -3201,14 +3186,11 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
           input.input_params.embedding.embedding_ids,
           input.input_params.embedding.request_ids);
     }
-    // Clamp num_accepted_tokens to Qwen3.5 GDN conv_state history capacity
-    // (kernel_conv_size - 1 = 3). Larger values describe history that has
-    // already rolled out of conv_state; passing them to aclnnCausalConv1d
-    // makes tiling fail when the current step's per_seq_val_tokens is small
-    // (e.g. adaptive prunes down to 2 while nat=5).
-    if (supports_explicit_spec_verify_replay_update()) {
-      clamp_gdn_conv_history(accepted_prefix_lengths);
-    }
+    // num_accepted_tokens must stay the true accepted count. The Qwen3.5 GDN
+    // spec-verify kernel uses it to select which recurrent/conv checkpoint to
+    // commit (checkpoint index = nat - 1); it is a logical checkpoint index,
+    // not the conv_state physical history capacity. Clamping it commits a
+    // stale checkpoint whenever 4+ tokens were accepted (see issue #2247).
     input_params.num_accepted_tokens_host.assign(
         accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
     if (!use_explicit_spec_verify_replay_update) {
@@ -3542,14 +3524,12 @@ void MTPWorkerImpl::prepare_validate_inputs(
           input.input_params.embedding.embedding_ids,
           input.input_params.embedding.request_ids);
     }
-    // Clamp num_accepted_tokens to Qwen3.5 GDN conv_state history capacity
-    // (kernel_conv_size - 1 = 3). Larger values describe history that has
-    // already rolled out of conv_state; passing them to aclnnCausalConv1d
-    // makes tiling fail when the current step's per_seq_val_tokens is small
-    // (e.g. adaptive prunes down to 2 while nat=5).
-    if (supports_explicit_spec_verify_replay_update()) {
-      clamp_gdn_conv_history(accepted_prefix_lengths);
-    }
+    // num_accepted_tokens must stay the true accepted count: the Qwen3.5 GDN
+    // spec-verify kernel commits the recurrent/conv checkpoint at index
+    // nat - 1, so clamping it would commit a stale state whenever 4+ tokens
+    // were accepted (see issue #2247). The conv1d kernel already clamps its
+    // own physical conv_state read offset internally, and the tiling check
+    // no longer rejects nat > segment length, so no host-side clamp is needed.
     input_params.num_accepted_tokens =
         torch::tensor(accepted_prefix_lengths, token_options);
     input_params.num_accepted_tokens_host.assign(
