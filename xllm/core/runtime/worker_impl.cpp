@@ -1871,15 +1871,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
-  // A draft engine is fed token ids and detokenized by the target, so it owns
-  // no tokenizer (its weights dir may not even ship tokenizer files, e.g. the
-  // DFlash / DSpark draft checkpoints). Only the target worker builds one; its
-  // JSON grammar restoration below is target-only and never runs on a draft.
-  std::unique_ptr<Tokenizer> tokenizer;
-  if (!options_.is_draft_engine()) {
-    tokenizer = model_loader->tokenizer();
-    CHECK(tokenizer != nullptr);
-  }
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1887,9 +1878,16 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  // Only the target engine reconciles tokenizer and model vocab sizes. Draft
-  // engines do not detokenize output and own no tokenizer.
+  // A draft engine is fed token ids and detokenized by the target, so it owns
+  // no tokenizer (its weights dir may not even ship tokenizer files, e.g. the
+  // DFlash / DSpark draft checkpoints). Only the target worker builds one and
+  // reconciles vocab sizes; its JSON grammar restoration below is target-only
+  // and never runs on a draft.
+  std::unique_ptr<Tokenizer> tokenizer;
   if (!options_.is_draft_engine()) {
+    tokenizer = model_loader->tokenizer();
+    CHECK(tokenizer != nullptr);
+
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
     // use tokenizer vocab size if model vocab size is not set
