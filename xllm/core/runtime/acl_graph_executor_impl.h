@@ -206,6 +206,12 @@ class AclGraphExecutorImpl : public ExecutorImpl {
     return graph_slot_count_;
   }
 
+  [[nodiscard]] uint64_t graph_key_for_test(
+      uint32_t bucket_num_tokens,
+      const ModelInputParams& params) const {
+    return get_graph_key(bucket_num_tokens, params);
+  }
+
  private:
   // not own
   CausalLM* model_;

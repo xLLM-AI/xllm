@@ -173,6 +173,36 @@ TEST(DcpAttentionUtilsTest, CoversPhase4LocalContextContracts) {
   EXPECT_EQ(local_context_lens_by_rank[1], (std::vector<int64_t>{0, 128, 256}));
 }
 
+TEST(DcpAttentionUtilsTest, GraphZeroShardMaskTracksTensorKvLengthChanges) {
+  const torch::TensorOptions fp32_options =
+      torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32);
+  torch::Tensor global_kv_seq_lens = torch::tensor(
+      {128}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32));
+  torch::Tensor partial_out = torch::full({1, 2, 3}, 7.0, fp32_options);
+  torch::Tensor partial_lse = torch::full({1, 2, 1}, 9.0, fp32_options);
+
+  detail::normalize_zero_dcp_partials_for_graph(partial_out,
+                                                partial_lse,
+                                                global_kv_seq_lens,
+                                                /*dcp_rank=*/1,
+                                                /*block_size=*/128);
+  EXPECT_TRUE(torch::equal(partial_out, torch::zeros_like(partial_out)));
+  EXPECT_TRUE(torch::equal(
+      partial_lse,
+      torch::full_like(partial_lse, -std::numeric_limits<float>::infinity())));
+
+  global_kv_seq_lens.fill_(129);
+  partial_out.fill_(7.0);
+  partial_lse.fill_(9.0);
+  detail::normalize_zero_dcp_partials_for_graph(partial_out,
+                                                partial_lse,
+                                                global_kv_seq_lens,
+                                                /*dcp_rank=*/1,
+                                                /*block_size=*/128);
+  EXPECT_TRUE(torch::equal(partial_out, torch::full_like(partial_out, 7.0)));
+  EXPECT_TRUE(torch::equal(partial_lse, torch::full_like(partial_lse, 9.0)));
+}
+
 TEST(DcpAttentionUtilsTest, ValidateChunkedLengthsAcceptsMultiTokenRequests) {
   const std::vector<int64_t> normalized_q_cu_seq_lens =
       detail::validate_dcp_chunked_lengths(

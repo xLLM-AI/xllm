@@ -142,10 +142,6 @@ std::optional<std::string> validate_model_dcp(
   if (options.npu_kernel_backend() != "TORCH") {
     return "decode_context_parallel_size requires --npu_kernel_backend=TORCH";
   }
-  if (options.enable_graph()) {
-    return "decode_context_parallel_size does not support graph capture yet; "
-           "disable graph or set decode_context_parallel_size=1";
-  }
   if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
     return "decode context parallelism supports only LLM text generation";
   }

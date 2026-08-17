@@ -23,6 +23,7 @@ limitations under the License.
 #include "kernels/npu/npu_ops_api.h"
 #include "kernels/ops_api.h"
 #include "layers/npu_torch/dcp_attention_utils.h"
+#include "platform/npu/acl_graph_task_update_context.h"
 
 namespace {
 
@@ -236,8 +237,6 @@ void AttentionImpl::dcp_decoder_forward(
       << "DCP-2 does not support speculative decode attention.";
   CHECK(!attn_metadata.use_expanded_decode_for_spec_verify_attention)
       << "DCP-2 does not support speculative decode attention.";
-  CHECK(!attn_metadata.paged_attention_tiling_data.defined())
-      << "DCP-2 does not support graph-captured decode attention.";
   CHECK(v_cache.has_value() && v_cache.value().defined())
       << "DCP decode requires a defined V cache.";
   CHECK(attn_metadata.block_table.defined())
@@ -254,9 +253,18 @@ void AttentionImpl::dcp_decoder_forward(
   const std::vector<int64_t> local_kv_seq_lens =
       detail::compute_dcp_local_kv_seq_lens(
           global_kv_seq_lens, dcp_size_, dcp_rank_, block_size);
-  const torch::Tensor local_block_table =
-      parallel_state::select_dcp_local_block_table(
-          attn_metadata.block_table, dcp_size_, dcp_rank_);
+  const std::shared_ptr<xllm::npu::AclGraphTaskUpdateContext>& graph_context =
+      attn_metadata.acl_graph_task_update_context;
+  const bool capturing = graph_context != nullptr && graph_context->capturing;
+  const torch::Tensor local_block_table = [&]() {
+    if (capturing) {
+      CHECK(attn_metadata.dcp_local_block_table.defined())
+          << "DCP ACL graph capture requires a persistent local block table";
+      return attn_metadata.dcp_local_block_table;
+    }
+    return parallel_state::select_dcp_local_block_table(
+        attn_metadata.block_table, dcp_size_, dcp_rank_);
+  }();
   CHECK_EQ(local_block_table.size(0), token_count)
       << "DCP local block table batch size does not match decode tokens.";
 
@@ -275,24 +283,125 @@ void AttentionImpl::dcp_decoder_forward(
       {v_cache.value().size(0), v_cache.value().size(1), -1});
   const std::optional<torch::Tensor> no_mask = std::nullopt;
   const std::optional<torch::Tensor> local_block_table_opt = local_block_table;
-  const auto fia_result =
-      xllm::kernel::npu::npu_fused_infer_attention(query_group,
-                                                   k,
-                                                   v,
-                                                   no_mask,
-                                                   local_block_table_opt,
-                                                   q_cu_seq_lens,
-                                                   local_kv_seq_lens,
-                                                   group_num_heads,
-                                                   num_kv_heads_,
-                                                   scale_,
-                                                   block_size,
-                                                   0,
-                                                   "TND",
-                                                   true);
-  torch::Tensor partial_out = std::get<0>(fia_result).to(torch::kFloat32);
-  torch::Tensor partial_lse = std::get<1>(fia_result).to(torch::kFloat32);
-  normalize_zero_dcp_partials(partial_out, partial_lse, local_kv_seq_lens);
+
+  torch::Tensor fia_out;
+  torch::Tensor fia_lse;
+  if (capturing) {
+    // Graph capture: preallocate stable-address output/LSE, wrap the FIA call
+    // in a task group, and record a FiaGraphTask so the executor can re-inject
+    // the per-step DCP-local KV lengths (and local block table) on replay.
+    fia_out = torch::empty({token_count, group_num_heads, head_size_},
+                           query_group.options());
+    fia_lse = torch::empty({token_count, group_num_heads, 1},
+                           query_group.options().dtype(torch::kFloat32));
+    // aclnn's default workspace is function-local and released after the call,
+    // leaving a dangling address in the captured graph (hangs on replay once
+    // the KV length crosses the tiling threshold that needs a non-zero
+    // workspace). Query the workspace for the largest local-KV envelope the
+    // graph can replay (full local block-table width) and allocate a stable
+    // caller-owned buffer reused on every replay.
+    const int64_t max_local_kv = local_block_table.size(1) * block_size;
+    const std::vector<int64_t> max_local_kv_seq_lens(local_kv_seq_lens.size(),
+                                                     max_local_kv);
+    const uint64_t fia_workspace_bytes =
+        xllm::kernel::npu::npu_fused_infer_attention_workspace_size(
+            query_group,
+            k,
+            v,
+            no_mask,
+            local_block_table_opt,
+            q_cu_seq_lens,
+            max_local_kv_seq_lens,
+            group_num_heads,
+            num_kv_heads_,
+            scale_,
+            block_size,
+            /*sparse_mode=*/0,
+            "TND",
+            /*softmax_lse_flag=*/true,
+            fia_out,
+            fia_lse);
+    torch::Tensor fia_workspace;
+    if (fia_workspace_bytes > 0) {
+      fia_workspace = torch::empty({static_cast<int64_t>(fia_workspace_bytes)},
+                                   query_group.options().dtype(torch::kByte));
+    }
+    const std::optional<torch::Tensor> fia_workspace_opt =
+        fia_workspace.defined() ? std::optional<torch::Tensor>(fia_workspace)
+                                : std::nullopt;
+    c10_npu::NPUStream stream = c10_npu::getCurrentNPUStream();
+    auto event = std::make_shared<c10_npu::NPUEvent>(ACL_EVENT_EXTERNAL);
+    event->block(stream);
+    event->reset(stream);
+    c10_npu::graph_task_group_begin(stream);
+    xllm::kernel::npu::npu_fused_infer_attention_out(query_group,
+                                                     k,
+                                                     v,
+                                                     no_mask,
+                                                     local_block_table_opt,
+                                                     q_cu_seq_lens,
+                                                     local_kv_seq_lens,
+                                                     group_num_heads,
+                                                     num_kv_heads_,
+                                                     scale_,
+                                                     block_size,
+                                                     /*sparse_mode=*/0,
+                                                     "TND",
+                                                     /*softmax_lse_flag=*/true,
+                                                     fia_out,
+                                                     fia_lse,
+                                                     fia_workspace_opt);
+    c10_npu::NPUTaskGroupHandle handle = c10_npu::graph_task_group_end(stream);
+    xllm::npu::FiaGraphTask task;
+    task.output = fia_out;
+    task.softmax_lse = fia_lse;
+    task.query = query_group;
+    task.key = k;
+    task.value = v;
+    task.block_table = local_block_table_opt;
+    task.workspace = fia_workspace;
+    task.num_heads = group_num_heads;
+    task.num_key_value_heads = num_kv_heads_;
+    task.scale = scale_;
+    task.block_size = block_size;
+    task.sparse_mode = 0;
+    task.dcp_size = static_cast<int32_t>(dcp_size_);
+    task.dcp_rank = static_cast<int32_t>(dcp_rank_);
+    task.input_layout = "TND";
+    task.softmax_lse_flag = true;
+    task.handle = handle;
+    task.event = std::move(event);
+    graph_context->fia_tasks.emplace_back(std::move(task));
+  } else {
+    const auto fia_result =
+        xllm::kernel::npu::npu_fused_infer_attention(query_group,
+                                                     k,
+                                                     v,
+                                                     no_mask,
+                                                     local_block_table_opt,
+                                                     q_cu_seq_lens,
+                                                     local_kv_seq_lens,
+                                                     group_num_heads,
+                                                     num_kv_heads_,
+                                                     scale_,
+                                                     block_size,
+                                                     /*sparse_mode=*/0,
+                                                     "TND",
+                                                     /*softmax_lse_flag=*/true);
+    fia_out = std::get<0>(fia_result);
+    fia_lse = std::get<1>(fia_result);
+  }
+  torch::Tensor partial_out = fia_out.to(torch::kFloat32);
+  torch::Tensor partial_lse = fia_lse.to(torch::kFloat32);
+  if (capturing) {
+    detail::normalize_zero_dcp_partials_for_graph(partial_out,
+                                                  partial_lse,
+                                                  attn_metadata.kv_seq_lens,
+                                                  dcp_rank_,
+                                                  block_size);
+  } else {
+    normalize_zero_dcp_partials(partial_out, partial_lse, local_kv_seq_lens);
+  }
 
   const torch::Tensor all_partial_out =
       dcp_group_->allgather_base_sync(partial_out);
@@ -508,7 +617,6 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
 
   if (tiling_data.defined()) {
     // Use CustomPagedAttention for ACL graph mode to avoid .to(kCPU) operations
-
     xllm::kernel::npu::batch_decode_acl_graph(query,
                                               k_cache,
                                               v_cache.value_or(torch::Tensor()),

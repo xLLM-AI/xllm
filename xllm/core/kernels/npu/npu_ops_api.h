@@ -67,6 +67,50 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     const std::string& input_layout,
     bool softmax_lse_flag = false);
 
+// Out-variant: writes into caller-preallocated `output`/`softmax_lse` instead
+// of allocating them, so the buffers keep stable device addresses across
+// ACLGraph replays (required for graph capture of the DCP attention path).
+void npu_fused_infer_attention_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const std::optional<torch::Tensor>& atten_mask,
+    const std::optional<torch::Tensor>& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    int64_t sparse_mode,
+    const std::string& input_layout,
+    bool softmax_lse_flag,
+    torch::Tensor& output,
+    torch::Tensor& softmax_lse,
+    const std::optional<torch::Tensor>& workspace = std::nullopt);
+
+// Queries the aclnn workspace size (bytes) required by the FIA out-variant for
+// the given inputs, without executing the op. Used to pre-size a caller-owned
+// workspace buffer for ACLGraph capture, where the workspace address must stay
+// stable across replays.
+uint64_t npu_fused_infer_attention_workspace_size(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const std::optional<torch::Tensor>& atten_mask,
+    const std::optional<torch::Tensor>& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    int64_t sparse_mode,
+    const std::string& input_layout,
+    bool softmax_lse_flag,
+    torch::Tensor& output,
+    torch::Tensor& softmax_lse);
+
 void batch_chunked_paged_prefill(const torch::Tensor& query,
                                  const torch::Tensor& k_cache,
                                  const torch::Tensor& v_cache,

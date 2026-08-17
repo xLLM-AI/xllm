@@ -30,6 +30,15 @@ std::vector<int64_t> compute_dcp_local_kv_seq_lens(
     int32_t dcp_rank,
     int64_t block_size);
 
+// Graph replay must derive the empty-shard mask from the live device KV
+// lengths. A host-side branch would be frozen at capture time.
+void normalize_zero_dcp_partials_for_graph(
+    torch::Tensor& partial_out,
+    torch::Tensor& partial_lse,
+    const torch::Tensor& global_kv_seq_lens,
+    int32_t dcp_rank,
+    int64_t block_size);
+
 // Per-request cached-context length for chunked prefill: the KV that precedes
 // the current chunk, derived as global_kv_seq_len - current_chunk_query_len.
 // q_cu_seq_lens is the cumulative host query length per request.

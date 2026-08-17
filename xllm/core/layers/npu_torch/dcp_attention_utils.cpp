@@ -47,6 +47,25 @@ std::vector<int64_t> compute_dcp_local_kv_seq_lens(
   return local_kv_seq_lens;
 }
 
+void normalize_zero_dcp_partials_for_graph(
+    torch::Tensor& partial_out,
+    torch::Tensor& partial_lse,
+    const torch::Tensor& global_kv_seq_lens,
+    int32_t dcp_rank,
+    int64_t block_size) {
+  CHECK(global_kv_seq_lens.defined());
+  CHECK_EQ(global_kv_seq_lens.dim(), 1);
+  CHECK_EQ(global_kv_seq_lens.size(0), partial_out.size(0));
+  const int64_t first_local_block_offset =
+      static_cast<int64_t>(dcp_rank) * block_size;
+  const torch::Tensor zero_local_kv_mask =
+      global_kv_seq_lens.le(first_local_block_offset)
+          .view({global_kv_seq_lens.size(0), 1, 1});
+  partial_out.masked_fill_(zero_local_kv_mask, 0.0);
+  partial_lse.masked_fill_(zero_local_kv_mask,
+                           -std::numeric_limits<float>::infinity());
+}
+
 std::vector<int64_t> compute_dcp_context_lens(
     const std::vector<int64_t>& q_cu_seq_lens,
     const std::vector<int64_t>& global_kv_seq_lens) {

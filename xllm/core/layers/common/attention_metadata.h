@@ -30,6 +30,10 @@ namespace ffi = tvm::ffi;
 
 #include "dsa_metadata.h"
 
+namespace xllm::npu {
+class AclGraphTaskUpdateContext;
+}  // namespace xllm::npu
+
 namespace xllm::layer {
 
 #if defined(USE_CUDA) || defined(USE_MUSA)
@@ -179,6 +183,16 @@ struct AttentionMetadata {
   // For ACL graph execution - fixed-address device tiling data for
   // CustomPagedAttention replay.
   torch::Tensor paged_attention_tiling_data;
+  // Fixed-address DCP-local block table prepared outside ACL graph capture.
+  // Graph-captured DCP decode consumes this directly so no temporary
+  // arange/index_select inputs are retained by the graph.
+  torch::Tensor dcp_local_block_table;
+  // ACL-graph task-update context (from ModelInputParams::graph). When non-null
+  // and capturing, the DCP attention path records its FIA call as a
+  // FiaGraphTask so the executor can re-inject the per-step DCP-local KV
+  // lengths on replay.
+  std::shared_ptr<xllm::npu::AclGraphTaskUpdateContext>
+      acl_graph_task_update_context;
   // Pre-computed attention mask for npu_fused_infer_attention.
   torch::Tensor fia_attn_mask;
   // Host vectors for npu_fused_infer_attention (kernel requires host memory).

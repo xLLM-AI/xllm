@@ -44,6 +44,7 @@ limitations under the License.
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/layers/npu_torch/tests_utils.h"
+#include "core/platform/npu/acl_graph_task_update_context.h"
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
@@ -110,6 +111,22 @@ TEST(AclGraphStaticGraphTaskSignatureTest,
 
   params.parallel.query_start_loc.push_back(6);
   EXPECT_FALSE(npu::make_static_graph_task_signature(params).has_value());
+}
+
+TEST(AclGraphTaskUpdateContextTest, CaptureResetsAndRetainsRecordedTasks) {
+  npu::AclGraphTaskUpdateContext context;
+  context.causal_conv1d_tasks.emplace_back();
+  context.fia_tasks.emplace_back();
+
+  context.begin_capture();
+  EXPECT_TRUE(context.capturing);
+  EXPECT_TRUE(context.causal_conv1d_tasks.empty());
+  EXPECT_TRUE(context.fia_tasks.empty());
+
+  context.fia_tasks.emplace_back();
+  context.end_capture();
+  EXPECT_FALSE(context.capturing);
+  EXPECT_EQ(context.fia_tasks.size(), 1);
 }
 
 namespace {
@@ -1005,6 +1022,66 @@ TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
       original_enable_graph_double_buffer);
 }
 
+TEST_F(AclGraphExecutorTest, SingleSlotGraphKeySeparatesPagedAttentionPlans) {
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  const bool original_enable_graph_double_buffer =
+      execution_config.enable_graph_double_buffer();
+  options_.block_size(128);
+  options_.decode_context_parallel_size(1);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+
+  execution_config.enable_graph_double_buffer(false);
+  std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> graph_executor =
+      std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
+          model_.get(), model_args_, *device_, options_);
+  params.meta.kv_max_seq_len = 16;
+  const uint64_t short_context_key =
+      graph_executor->graph_key_for_test(/*bucket_num_tokens=*/1, params);
+  params.meta.kv_max_seq_len = 514;
+  const uint64_t first_long_context_key =
+      graph_executor->graph_key_for_test(/*bucket_num_tokens=*/1, params);
+  params.meta.kv_max_seq_len = 515;
+  const uint64_t second_long_context_key =
+      graph_executor->graph_key_for_test(/*bucket_num_tokens=*/1, params);
+
+  EXPECT_NE(short_context_key, first_long_context_key);
+  EXPECT_EQ(first_long_context_key, second_long_context_key);
+  execution_config.enable_graph_double_buffer(
+      original_enable_graph_double_buffer);
+}
+
+TEST_F(AclGraphExecutorTest, DoubleBufferGraphKeySeparatesPagedAttentionPlans) {
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  const bool original_enable_graph_double_buffer =
+      execution_config.enable_graph_double_buffer();
+  options_.block_size(128);
+  options_.decode_context_parallel_size(1);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+
+  execution_config.enable_graph_double_buffer(true);
+  std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> graph_executor =
+      std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
+          model_.get(), model_args_, *device_, options_);
+  params.meta.kv_max_seq_len = 16;
+  const uint64_t short_context_key =
+      graph_executor->graph_key_for_test(/*bucket_num_tokens=*/1, params);
+  params.meta.kv_max_seq_len = 514;
+  const uint64_t first_long_context_key =
+      graph_executor->graph_key_for_test(/*bucket_num_tokens=*/1, params);
+  params.meta.kv_max_seq_len = 515;
+  const uint64_t second_long_context_key =
+      graph_executor->graph_key_for_test(/*bucket_num_tokens=*/1, params);
+
+  EXPECT_NE(short_context_key, first_long_context_key);
+  EXPECT_EQ(first_long_context_key, second_long_context_key);
+  execution_config.enable_graph_double_buffer(
+      original_enable_graph_double_buffer);
+}
+
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
   SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
   const bool original_enable_atb_spec_kernel =
@@ -1160,6 +1237,106 @@ TEST(AclGraphPersistentParamTest,
   EXPECT_EQ(stable->graph.expanded_block_tables.size(0), kSpecWidth);
   EXPECT_EQ(stable->graph.expanded_block_tables.size(1),
             kActiveBlockTableWidth);
+}
+
+TEST(AclGraphPersistentParamTest, DcpDecodeUsesStableRankLocalBlockTable) {
+  ModelArgs args;
+  args.model_type("deepseek_v4");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(16);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(2);
+  options.max_tokens_per_batch(2);
+  options.num_decoding_tokens(1);
+  options.world_size(2);
+  options.dp_size(1);
+  options.decode_context_parallel_size(2);
+  options.node_rank(1);
+
+  const torch::Device device("npu:0");
+  const torch::TensorOptions int_options =
+      torch::dtype(torch::kInt).device(device);
+  ::xllm::npu::GraphPersistentParam persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/true);
+  EXPECT_EQ(persistent_param.persistent_block_tables().size(1), 5);
+  EXPECT_EQ(persistent_param.persistent_dcp_local_block_tables().size(1), 2);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = 2;
+  params.attention.host.q_seq_lens = {1, 1};
+  params.attention.host.kv_seq_lens = {4, 8};
+  params.attention.device.q_seq_lens = torch::ones({2}, int_options);
+  params.attention.device.kv_seq_lens = torch::tensor({4, 8}, int_options);
+  params.attention.device.new_cache_slots = torch::zeros({2}, int_options);
+  params.attention.device.block_tables =
+      torch::tensor({{10, 11, 12, 13, 14}, {20, 21, 22, 23, 24}}, int_options);
+  const torch::Tensor tokens = torch::tensor({1, 2}, int_options);
+  const torch::Tensor positions = torch::tensor({3, 7}, int_options);
+
+  auto first = persistent_param.update(tokens,
+                                       torch::Tensor(),
+                                       torch::Tensor(),
+                                       positions,
+                                       params,
+                                       /*padded_num_tokens=*/2,
+                                       /*return_capture_params=*/true);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(first->graph.dcp_local_block_tables.defined());
+  EXPECT_EQ(first->graph.dcp_local_block_tables.data_ptr(),
+            persistent_param.persistent_dcp_local_block_tables(2).data_ptr());
+  EXPECT_TRUE(torch::equal(first->graph.dcp_local_block_tables.cpu(),
+                           torch::tensor({{11, 13}, {21, 23}}, torch::kInt)));
+  const void* local_table_address =
+      first->graph.dcp_local_block_tables.data_ptr();
+
+  params.attention.device.block_tables =
+      torch::tensor({{30, 31, 32, 33, 34}, {40, 41, 42, 43, 44}}, int_options);
+  auto second = persistent_param.update(tokens,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        positions,
+                                        params,
+                                        /*padded_num_tokens=*/2,
+                                        /*return_capture_params=*/true);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->graph.dcp_local_block_tables.data_ptr(),
+            local_table_address);
+  EXPECT_TRUE(torch::equal(second->graph.dcp_local_block_tables.cpu(),
+                           torch::tensor({{31, 33}, {41, 43}}, torch::kInt)));
+
+  params.meta.num_sequences = 1;
+  params.attention.host.q_seq_lens = {1};
+  params.attention.host.kv_seq_lens = {4};
+  params.attention.host.q_cu_seq_lens = {1};
+  params.attention.device.q_seq_lens = torch::ones({1}, int_options);
+  params.attention.device.kv_seq_lens = torch::tensor({4}, int_options);
+  params.attention.device.new_cache_slots = torch::zeros({1}, int_options);
+  params.attention.device.block_tables =
+      torch::tensor({{50, 51, 52, 53, 54}}, int_options);
+  const torch::Tensor single_token = torch::tensor({3}, int_options);
+  const torch::Tensor single_position = torch::tensor({3}, int_options);
+
+  auto padded = persistent_param.update(single_token,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        single_position,
+                                        params,
+                                        /*padded_num_tokens=*/2,
+                                        /*return_capture_params=*/true);
+  ASSERT_TRUE(padded.has_value());
+  EXPECT_EQ(padded->attention.host.q_seq_lens, (std::vector<int32_t>{1, 1}));
+  EXPECT_EQ(padded->attention.host.kv_seq_lens, (std::vector<int32_t>{4, 1}));
+  EXPECT_EQ(padded->attention.host.q_cu_seq_lens, (std::vector<int32_t>{1, 2}));
+  EXPECT_TRUE(torch::equal(padded->graph.dcp_local_block_tables.cpu(),
+                           torch::tensor({{51, 53}, {0, 0}}, torch::kInt)));
 }
 
 TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {

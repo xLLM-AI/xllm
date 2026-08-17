@@ -104,6 +104,9 @@ AttentionMetadata build_attention_metadata(
 
 #if defined(USE_NPU)
   attn_metadata.is_spec_verify = params.is_spec_verify;
+  attn_metadata.dcp_local_block_table = params.graph.dcp_local_block_tables;
+  attn_metadata.acl_graph_task_update_context =
+      params.graph.acl_graph_task_update_context;
   attn_metadata.use_expanded_decode_for_spec_verify_attention =
       params.graph.use_expanded_decode_for_spec_verify_attention;
   if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {

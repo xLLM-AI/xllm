@@ -34,8 +34,11 @@ limitations under the License.
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #endif
 #include "core/common/metrics.h"
+#include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/kernels/ops_api.h"
+#include "core/layers/common/attention_metadata.h"
+#include "core/layers/npu_torch/dcp_attention_utils.h"
 #include "core/platform/device.h"
 #include "core/platform/npu/acl_graph_task_update_context.h"
 #include "core/runtime/mtp_async_state.h"
@@ -412,58 +415,140 @@ bool AclGraph::capture(CausalLM* model,
 }
 
 bool AclGraph::update_graph_tasks(const ModelInputParams& params) {
-  if (graph_task_context_ == nullptr ||
-      graph_task_context_->causal_conv1d_tasks.empty()) {
+  if (graph_task_context_ == nullptr) {
     return false;
   }
-
-  const std::vector<int64_t> empty_host_args;
-  CHECK(!params.parallel.query_start_loc.empty())
-      << "causal_conv1d graph update requires padded query_start_loc";
-  CHECK(!params.embedding.linear_state_ids.empty())
-      << "causal_conv1d graph update requires padded cache indices";
-
-  std::vector<int64_t> linear_state_indices_host(
-      params.embedding.linear_state_ids.begin(),
-      params.embedding.linear_state_ids.end());
+  const bool has_conv = !graph_task_context_->causal_conv1d_tasks.empty();
+  const bool has_fia = !graph_task_context_->fia_tasks.empty();
+  if (!has_conv && !has_fia) {
+    return false;
+  }
 
   c10_npu::NPUStream update_stream = update_stream_.value();
   c10_npu::NPUStreamGuard stream_guard(update_stream);
 
-  for (auto& task : graph_task_context_->causal_conv1d_tasks) {
-    CHECK_EQ(params.parallel.query_start_loc.back(), task.x.size(0))
-        << "causal_conv1d graph update host args must be padded to the "
-           "capture x.shape[0]";
-    CHECK_EQ(linear_state_indices_host.size() + 1,
-             params.parallel.query_start_loc.size())
-        << "cache_indices must be sequence-scoped";
+  if (has_conv) {
+    const std::vector<int64_t> empty_host_args;
+    CHECK(!params.parallel.query_start_loc.empty())
+        << "causal_conv1d graph update requires padded query_start_loc";
+    CHECK(!params.embedding.linear_state_ids.empty())
+        << "causal_conv1d graph update requires padded cache indices";
 
-    const std::vector<int64_t>& num_accepted_tokens =
-        task.branch == CausalConv1dGraphBranch::kSpecVerify
-            ? params.num_accepted_tokens_host
-            : empty_host_args;
-    if (task.branch == CausalConv1dGraphBranch::kSpecVerify) {
-      CHECK_EQ(num_accepted_tokens.size(), linear_state_indices_host.size())
-          << "spec causal_conv1d graph update requires accepted-token counts";
+    std::vector<int64_t> linear_state_indices_host(
+        params.embedding.linear_state_ids.begin(),
+        params.embedding.linear_state_ids.end());
+
+    for (auto& task : graph_task_context_->causal_conv1d_tasks) {
+      CHECK_EQ(params.parallel.query_start_loc.back(), task.x.size(0))
+          << "causal_conv1d graph update host args must be padded to the "
+             "capture x.shape[0]";
+      CHECK_EQ(linear_state_indices_host.size() + 1,
+               params.parallel.query_start_loc.size())
+          << "cache_indices must be sequence-scoped";
+
+      const std::vector<int64_t>& num_accepted_tokens =
+          task.branch == CausalConv1dGraphBranch::kSpecVerify
+              ? params.num_accepted_tokens_host
+              : empty_host_args;
+      if (task.branch == CausalConv1dGraphBranch::kSpecVerify) {
+        CHECK_EQ(num_accepted_tokens.size(), linear_state_indices_host.size())
+            << "spec causal_conv1d graph update requires accepted-token counts";
+      }
+
+      c10_npu::graph_task_update_begin(update_stream, task.handle);
+      xllm::kernel::causal_conv1d_out(
+          task.output,
+          task.x,
+          task.weight,
+          task.conv_state,
+          task.bias,
+          torch::IntArrayRef(params.parallel.query_start_loc),
+          torch::IntArrayRef(linear_state_indices_host),
+          torch::IntArrayRef(empty_host_args),
+          torch::IntArrayRef(num_accepted_tokens),
+          task.activation_mode,
+          task.pad_slot_id,
+          task.run_mode);
+      c10_npu::graph_task_update_end(update_stream);
+      if (task.event != nullptr) {
+        task.event->record(update_stream);
+      }
     }
+  }
 
-    c10_npu::graph_task_update_begin(update_stream, task.handle);
-    xllm::kernel::causal_conv1d_out(
-        task.output,
-        task.x,
-        task.weight,
-        task.conv_state,
-        task.bias,
-        torch::IntArrayRef(params.parallel.query_start_loc),
-        torch::IntArrayRef(linear_state_indices_host),
-        torch::IntArrayRef(empty_host_args),
-        torch::IntArrayRef(num_accepted_tokens),
-        task.activation_mode,
-        task.pad_slot_id,
-        task.run_mode);
-    c10_npu::graph_task_update_end(update_stream);
-    if (task.event != nullptr) {
-      task.event->record(update_stream);
+  if (has_fia) {
+    // DCP FIA replay: recompute the per-step DCP-local KV lengths from the
+    // step's global metadata, then re-inject them via the FIA out variant under
+    // graph_task_update. The block table keeps the persistent DCP-local address
+    // captured with the graph. See TODO-vllm-ascend-parity/01.
+    //
+    // attn_metadata is NOT threaded to the executor; source the current step's
+    // global KV/query lengths and stable block table from the persistent graph
+    // params instead. GraphPersistentParam pads
+    // host.kv_seq_lens/host.q_seq_lens per step; q_cu_seq_lens is not padded,
+    // so build it from the padded per-request q_seq_lens (decode: each request
+    // contributes one token).
+    const std::vector<int32_t>& host_kv_seq_lens =
+        params.attention.host.kv_seq_lens;
+    const std::vector<int32_t>& host_q_seq_lens =
+        params.attention.host.q_seq_lens;
+    CHECK(!host_kv_seq_lens.empty() &&
+          host_kv_seq_lens.size() == host_q_seq_lens.size())
+        << "DCP FIA graph update requires padded host kv/q seq lens";
+    const std::vector<int64_t> global_kv_seq_lens(host_kv_seq_lens.begin(),
+                                                  host_kv_seq_lens.end());
+    std::vector<int64_t> q_cu_seq_lens;
+    q_cu_seq_lens.reserve(host_q_seq_lens.size());
+    int64_t q_running_total = 0;
+    for (const int32_t q_len : host_q_seq_lens) {
+      q_running_total += q_len;
+      q_cu_seq_lens.emplace_back(q_running_total);
+    }
+    for (auto& task : graph_task_context_->fia_tasks) {
+      const std::vector<int64_t> local_kv_seq_lens =
+          xllm::layer::detail::compute_dcp_local_kv_seq_lens(global_kv_seq_lens,
+                                                             task.dcp_size,
+                                                             task.dcp_rank,
+                                                             task.block_size);
+      CHECK(task.block_table.has_value() && task.block_table.value().defined())
+          << "FiaGraphTask must hold a persistent DCP-local block table";
+      const int64_t local_kv_capacity =
+          task.block_table.value().size(1) * task.block_size;
+      for (const int64_t local_kv_seq_len : local_kv_seq_lens) {
+        CHECK_GE(local_kv_seq_len, 0);
+        CHECK_LE(local_kv_seq_len, local_kv_capacity)
+            << "DCP local KV length exceeds persistent local block-table "
+               "capacity";
+      }
+      const std::optional<torch::Tensor>& local_block_table_opt =
+          task.block_table;
+      const std::optional<torch::Tensor> workspace_opt =
+          task.workspace.defined()
+              ? std::optional<torch::Tensor>(task.workspace)
+              : std::nullopt;
+
+      c10_npu::graph_task_update_begin(update_stream, task.handle);
+      xllm::kernel::npu::npu_fused_infer_attention_out(task.query,
+                                                       task.key,
+                                                       task.value,
+                                                       task.atten_mask,
+                                                       local_block_table_opt,
+                                                       q_cu_seq_lens,
+                                                       local_kv_seq_lens,
+                                                       task.num_heads,
+                                                       task.num_key_value_heads,
+                                                       task.scale,
+                                                       task.block_size,
+                                                       task.sparse_mode,
+                                                       task.input_layout,
+                                                       task.softmax_lse_flag,
+                                                       task.output,
+                                                       task.softmax_lse,
+                                                       workspace_opt);
+      c10_npu::graph_task_update_end(update_stream);
+      if (task.event != nullptr) {
+        task.event->record(update_stream);
+      }
     }
   }
   return true;
@@ -686,6 +771,22 @@ ModelOutput AclGraph::replay(CausalLM* model,
     // supported-width cycles use the compute-stream pre-submit path instead.
     CHECK(update_stream_.has_value());
     signal_static_graph_tasks(update_stream_.value());
+  }
+  // Per-replay completion barrier for the dynamic graph-task path (DCP FIA /
+  // GDN conv task-update). vLLM synchronizes the current stream before every
+  // FULL graph replay (compilation/acl_graph.py) so iteration i cannot rewrite
+  // task handles / record external events while iteration i-1's graph is still
+  // running. Synchronizing the current stream here waits for both the previous
+  // graph replay (queued on this stream by the prior
+  // make_current_stream_wait_for_graph) and this step's persistent-input copies
+  // before we launch and re-inject task parameters, preventing cross-replay
+  // task/event generation overlap (delayed ACL_ERROR_RT_MODEL_EXECUTE 507011).
+  // First-version host-blocking barrier; can later become a persistent
+  // input-ready/replay-done event chain (never a stack-local event).
+  if (!graph_paged_attention_tiling_data_.defined() &&
+      model->is_hybrid_linear_attention() && !use_static_graph_tasks) {
+    CHECK_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS)
+        << "pre-replay current-stream synchronize failed";
   }
   graph_.replay();
   if (model->is_hybrid_linear_attention()) {
@@ -1258,6 +1359,18 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
     }
     return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
+  }
+  if (params.meta.batch_forward_type.is_decode() &&
+      options_.decode_context_parallel_size() == 1) {
+    // Keep CustomPagedAttention static and separate ordinary decode graphs by
+    // vendor plan geometry. Rebuilding this ATB wrapper through graph task
+    // update is unsafe because run_atb_cmd creates function-local workspace and
+    // format-conversion tensors whose addresses do not outlive the update call.
+    const uint64_t plan_bucket = paged_attention_plan_bucket(
+        params.meta.kv_max_seq_len, options_.block_size());
+    return mix_graph_key(static_cast<uint64_t>(bucket_num_tokens),
+                         plan_bucket) &
+           ~kSpecVerifyGraphKeyMask;
   }
   return static_cast<uint64_t>(bucket_num_tokens);
 }

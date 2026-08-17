@@ -920,8 +920,6 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
              "cache writes; mixed batches require DCP-2 layout support.";
       CHECK(!processed_input.input_params.is_spec_verify)
           << "DCP-1c does not support speculative verification cache writes.";
-      CHECK(!processed_input.input_params.enable_graph)
-          << "DCP-1c does not support graph-captured cache writes.";
       processed_input.input_params.attention.device.new_cache_slots =
           recompute_dcp_cache_slots(processed_input);
       processed_input.kv_slot_layout = KvSlotLayout::NPU_DCP_LOCAL_PHYSICAL;
