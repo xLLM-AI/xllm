@@ -1871,8 +1871,15 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
-  auto tokenizer = model_loader->tokenizer();
-  CHECK(tokenizer != nullptr);
+  // A draft engine is fed token ids and detokenized by the target, so it owns
+  // no tokenizer (its weights dir may not even ship tokenizer files, e.g. the
+  // DFlash / DSpark draft checkpoints). Only the target worker builds one; its
+  // JSON grammar restoration below is target-only and never runs on a draft.
+  std::unique_ptr<Tokenizer> tokenizer;
+  if (!options_.is_draft_engine()) {
+    tokenizer = model_loader->tokenizer();
+    CHECK(tokenizer != nullptr);
+  }
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1881,8 +1888,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
   // Only the target engine reconciles tokenizer and model vocab sizes. Draft
-  // engines do not detokenize output, but worker-local JSON grammar state
-  // restoration still requires retaining the tokenizer below.
+  // engines do not detokenize output and own no tokenizer.
   if (!options_.is_draft_engine()) {
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
@@ -2027,12 +2033,16 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   // Warm JSON grammars off the forward path so the first constrained request
   // does not pay tokenizer.decode over the full vocab under the step lock.
-  if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
-    LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
-  }
-  if (ensure_json_object_grammar(/*reasoning_enabled=*/true) == nullptr) {
-    LOG(WARNING)
-        << "JSON reasoning grammar warmup failed; will retry lazily on demand";
+  // Draft-engine workers own no tokenizer and never serve constrained requests
+  // (the target does), so skip the warmup for them.
+  if (!options_.is_draft_engine()) {
+    if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
+      LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
+    }
+    if (ensure_json_object_grammar(/*reasoning_enabled=*/true) == nullptr) {
+      LOG(WARNING) << "JSON reasoning grammar warmup failed; will retry lazily "
+                      "on demand";
+    }
   }
 
   int32_t tp_world_size = parallel_args_.world_size();
