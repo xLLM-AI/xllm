@@ -1365,7 +1365,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   const bool reuse_mtp_topk_state = layer::is_mtp_dsa_topk_reuse_enabled(
       draft_impl_->context_.get_model_args());
   MtpTopkStatePtr mtp_topk_state;
-  timer.reset();
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     const bool is_final_draft = draft_idx == num_speculative_tokens - 1;
     const bool static_graph_tasks_prepared =
