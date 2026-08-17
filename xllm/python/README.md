@@ -76,23 +76,23 @@ A platform package owns everything specific to its hardware:
 - mutation declarations and `torch.compile` graph boundaries;
 - the weight layouts its kernels require.
 
-### The `__all__` contract
+### Platform-owned kernel APIs
 
-Every platform package exports the same set of names, declared in its own
-`__all__`. Where a platform has no kernel for a name, it still exports the name,
-bound to a function that carries the intended signature and raises
-`NotImplementedError` explaining what is missing and where the reference
-implementation lives.
+Each platform package owns its public API and declares that API in its own
+`__all__`. Peer packages do not need to export the same names: models and layers
+reuse the stable `xllm.python.kernels` binding, while the active peer supplies
+the operations needed by the models supported on that platform.
 
-That makes the stub set the work list for a new platform: a kernel author fills
-in stubs against a peer's `__all__` without reading that peer's kernel sources.
-Nothing enforces the contract at runtime -- keeping the packages independent
-means keeping the check in review.
+An existing unsupported stub may remain when its explicit
+`NotImplementedError` is useful, but new operators do not require matching
+stubs in every peer. The model/platform support matrix in
+`model_platform_support.py` records the coarse combinations expected to work.
+The registry rejects an unsupported combination before importing the model
+implementation.
 
-Semantically identical operators on different platforms may use different Torch
-schemas, different fusion boundaries, and different parameters. The shared
-contract is the Python signature behind the exported name, not the Torch
-operator name.
+Semantically similar operators on different platforms may use different public
+functions, Torch schemas, fusion boundaries, and parameters. Each platform's
+tests define its own kernel contract.
 
 ### `distributed/`
 
@@ -124,23 +124,24 @@ up the change.
 
 1. Add the launcher under the matching platform package's framework
    subdirectory.
-2. Bind the name in that platform's family module and add it to the package
+2. Bind the name in that platform's family module and add it to that package's
    `__all__`, registering a `custom_op` and its FakeTensor implementation when
    the computation needs a stable graph node, FakeTensor propagation, or
    mutation tracking. FakeTensor contracts for C++ operators go in the
    platform's `_custom_op.py`.
-3. Add the name to every peer package, as a real kernel or as a stub carrying
-   the signature and the reason it is missing.
-4. Add launcher-level numerical tests and graph/FakeTensor tests.
+3. Add launcher-level numerical tests and graph/FakeTensor tests for that
+   platform. Do not add peer stubs solely to keep export lists aligned.
+4. Update `model_platform_support.py` when the operator changes the supported
+   model set.
 5. Verify that dependencies still flow from models through layers to kernels,
    never in the reverse direction.
 
 ## Adding a platform
 
-1. Create `kernels_<device>/` beside the existing peers.
-2. Copy a peer's `__all__` and implement or stub every name. A stub carries the
-   full signature and a `NotImplementedError` naming the reference
-   implementation.
+1. Create `kernels_<device>/` beside the existing peers and implement the API
+   needed by the first models targeted for the platform.
+2. Keep the package independent: it owns its exports and does not import a
+   peer.
 3. Add `_custom_op.py` with the FakeTensor implementations of the platform's
    C++ operators.
 4. Teach `Platform` in `xllm/python/platform.py` to report `<device>` (extend
@@ -148,3 +149,5 @@ up the change.
    branch to the import in `xllm/python/__init__.py`.
 5. `setup.py --device <device>` then ships it. Before that, a build for the
    device logs the packages that do exist and ships none of them.
+6. Mark a model supported in `model_platform_support.py` only after its
+   platform path passes functional tests.

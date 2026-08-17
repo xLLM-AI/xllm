@@ -54,8 +54,8 @@ elif current_platform.is_npu():
 else:
     raise ImportError(
         f"no kernel package for platform '{current_platform.device_type()}'; add "
-        f"xllm/python/kernels_{current_platform.device_type()}/ exporting the same "
-        "names as its peers, and import it here"
+        f"xllm/python/kernels_{current_platform.device_type()}/ with the APIs "
+        "required by that platform's supported models, and import it here"
     )
 
 # The binding above only creates an attribute of this package, which the import

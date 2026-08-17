@@ -25,6 +25,9 @@ from importlib import import_module
 
 import torch.nn as nn
 
+from xllm.python.model_platform_support import MODEL_PLATFORM_SUPPORT
+from xllm.python.platform import current_platform
+
 _ModelPath = tuple[str, str]
 _REGISTRY: dict[str, _ModelPath] = {}
 
@@ -52,7 +55,19 @@ def _register_model_path(module_name: str, class_name: str, *names: str) -> None
 def get_model_class(name: str) -> type[nn.Module]:
     if name not in _REGISTRY:
         raise KeyError(f"model '{name}' not registered; available: {sorted(_REGISTRY)}")
+
     module_name, class_name = _REGISTRY[name]
+    implementation = module_name.rsplit(".", 1)[-1]
+    platform = current_platform.device_type()
+    support = MODEL_PLATFORM_SUPPORT.get(implementation, {})
+    if not support.get(platform, False):
+        supported_platforms = sorted(name for name, enabled in support.items() if enabled)
+        raise NotImplementedError(
+            f"Python model '{name}' (implementation '{implementation}') is not "
+            f"supported on platform '{platform}'; supported platforms: "
+            f"{supported_platforms}"
+        )
+
     model_cls = getattr(import_module(module_name), class_name)
     return model_cls
 
