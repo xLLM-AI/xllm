@@ -44,13 +44,12 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                          target_output.max_top_logprobs,
                                          enable_fused_kernel);
 
-  SampleOutput sample_output = rejection_sampler->forward(
-      draft_token_ids.to(bonus_token_ids),
-      draft_probs.defined() ? draft_probs.to(target_logits.device())
-                            : torch::Tensor(),
-      target_logits,
-      bonus_token_ids,
-      /*mask_out_rejected_tokens=*/true);
+  SampleOutput sample_output =
+      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
+                                 draft_probs.to(target_logits.device()),
+                                 target_logits,
+                                 bonus_token_ids,
+                                 /*mask_out_rejected_tokens=*/true);
 
   const torch::Tensor& embeddings = target_output.sample_output.embeddings;
   sample_output.embeddings =
