@@ -2244,6 +2244,9 @@ void PDOOCScheduler::build_disagg_requests(
     req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
     req->set_include_stop_str_in_output(
         requests[i]->state().include_stop_str_in_output);
+    req->set_json_object(requests[i]->state().sampling_param.json_object);
+    req->set_json_reasoning_enabled(
+        requests[i]->state().json_reasoning_enabled);
     req->set_offline(requests[i]->offline());
   }
 

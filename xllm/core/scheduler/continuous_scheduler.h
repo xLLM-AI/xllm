@@ -202,6 +202,9 @@ class ContinuousScheduler : public Scheduler {
 
   // for test only
   std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+  void process_batch_output_test(bool enable_schedule_overlap) {
+    process_batch_output(enable_schedule_overlap);
+  }
   std::vector<std::shared_ptr<Request>> get_running_requests() {
     return running_requests_;
   }

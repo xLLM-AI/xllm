@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Package stubs for Python tests that run without compiled operators.
-
-Tests of the real platform binding run in isolated subprocesses instead.
-"""
+"""Package stubs for pure-Python tests that run without platform kernels."""
 
 from __future__ import annotations
 

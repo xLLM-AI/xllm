@@ -70,6 +70,19 @@ struct ModelArgs {
   // DSpark: low-rank dim of the Markov head. 0 = disabled (plain DFlash /
   // non-DSpark models).
   PROPERTY(int64_t, markov_rank) = 0;
+  PROPERTY(int32_t, dspark_num_layers) = 0;
+  PROPERTY(int32_t, dspark_block_size) = 0;
+  // True only when SparseAttnSharedkv accepts explicit DSpark SWA indices.
+  // False selects the CANN 9.0-compatible q_len=1 row fallback.
+  PROPERTY(bool, dspark_use_native_sas) = false;
+
+  // DSpark ConfidenceHead switches. When enabled, DSpark's ForCausalLM
+  // registers a `confidence_head.proj` layer used for adaptive-speculative
+  // pruning acceptance-probability estimation. `with_markov` toggles whether
+  // the head is applied on `concat(hidden, markov_embedding[prev])` (True in
+  // released dspark_qwen3_*b_block* checkpoints) or on `hidden` alone.
+  PROPERTY(bool, enable_confidence_head) = false;
+  PROPERTY(bool, confidence_head_with_markov) = false;
 
   PROPERTY(bool, use_qk_norm) = false;
   PROPERTY(float, rms_norm_eps) = 0.0f;

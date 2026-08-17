@@ -21,9 +21,10 @@ for new hardware -- are bound the same way on their own platform. Exactly one of
 them is imported in a process; they share no code and never import each other.
 ``setup.py`` ships only the package matching ``--device``.
 
-Launchers live under ``triton/``; the modules here bind the NPU kernel API in
-``__all__``. Peer packages may expose platform-specific kernels in addition to
-the shared API.
+Launchers live under ``triton/``; the modules here bind the public NPU kernel
+API declared in ``__all__``. Peer packages own their APIs independently and
+need not export the same names. Existing unsupported stubs remain explicit NPU
+failure paths, but they are not a cross-platform export contract.
 """
 
 from __future__ import annotations

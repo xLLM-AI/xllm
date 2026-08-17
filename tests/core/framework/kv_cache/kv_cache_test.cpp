@@ -320,6 +320,60 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
 #endif
 }
 
+TEST(KVCacheTest, DeepSeekV4DSparkUsesGroupedSwaCaches) {
+  constexpr int64_t kSwaCount = 10;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kHeadDim = 16;
+
+  KVCacheCapacity capacity;
+  capacity.block_size(kBlockSize)
+      .swa_count(kSwaCount)
+      .c4_count(32)
+      .c128_count(1);
+
+  ModelArgs dspark_args;
+  dspark_args.model_type("deepseek_v4_dspark");
+  const KVCacheShape dspark_shape(capacity, dspark_args, /*world_size=*/1);
+  ASSERT_TRUE(dspark_shape.has_grouped_cache_layout());
+  EXPECT_FALSE(dspark_shape.has_index_cache_shape());
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kFloat32)
+      .num_layers(3)
+      .model_type("deepseek_v4_dspark")
+      .enable_lighting_indexer(true)
+      .block_size(kBlockSize)
+      .head_dim(kHeadDim)
+      .index_head_dim(8)
+      .window_size(/*window_size=*/512)
+      .compress_ratios({1, 1, 1});
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, dspark_shape, options);
+
+  ASSERT_EQ(caches.size(), 3U);
+  for (const KVCache& cache : caches) {
+    EXPECT_EQ(shape_vec(cache.get_swa_cache()),
+              dsv4_block_shape(kSwaCount, kBlockSize, 1, kHeadDim));
+    EXPECT_FALSE(cache.get_k_cache().defined());
+    EXPECT_FALSE(cache.get_index_cache().defined());
+  }
+}
+
+TEST(KVCacheTest, DeepSeekV4MtpKeepsGroupedCacheClassification) {
+  KVCacheCapacity capacity;
+  capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);
+
+  ModelArgs mtp_args;
+  mtp_args.model_type("deepseek_v4_mtp");
+  const KVCacheShape mtp_shape(capacity, mtp_args, /*world_size=*/1);
+
+  EXPECT_TRUE(mtp_shape.has_grouped_cache_layout());
+  EXPECT_EQ(mtp_shape.key_cache_shape(), (std::vector<int64_t>{10, 32, 1}));
+  EXPECT_FALSE(mtp_shape.has_index_cache_shape());
+}
+
 TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
   KVCacheCapacity capacity;
   capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);

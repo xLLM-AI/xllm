@@ -244,6 +244,12 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
 
   std::vector<BeamSourceInfo> source_infos;
   source_infos.reserve(sequences_.size());
+  const bool restore_json_states =
+      sequences_.front()->json_object_state() != nullptr;
+  std::vector<JsonObjectGrammarSnapshot> source_json_states;
+  if (restore_json_states) {
+    source_json_states.reserve(sequences_.size());
+  }
 
   auto build_source_info = [&](Sequence* seq) {
     BeamSourceInfo source_info;
@@ -265,6 +271,12 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
                                   seq->kv_state().blocks(BlockType::KV).end());
 
     source_infos.emplace_back(std::move(source_info));
+    if (restore_json_states) {
+      const JsonObjectGrammarState* json_state = seq->json_object_state();
+      CHECK(json_state != nullptr)
+          << "beam sequences in one request must share JSON grammar state";
+      source_json_states.emplace_back(json_state->snapshot());
+    }
   };
 
   for (size_t seq_index = 0; seq_index < sequences_.size(); ++seq_index) {
@@ -362,11 +374,11 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
     CHECK_LT(candidate.source_index, sequences_.size());
     CHECK(sequences_[candidate.source_index] != nullptr);
     if (i < existing_size) {
-      replacement_sequences[i] =
-          std::make_unique<Sequence>(*sequences_[candidate.source_index]);
+      replacement_sequences[i] = std::make_unique<Sequence>(
+          *sequences_[candidate.source_index], /*index=*/i);
     } else {
-      tail_sequences.emplace_back(
-          std::make_unique<Sequence>(*sequences_[candidate.source_index]));
+      tail_sequences.emplace_back(std::make_unique<Sequence>(
+          *sequences_[candidate.source_index], /*index=*/i));
     }
   }
 
@@ -408,6 +420,18 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
                                 : 0.0f;
       }
       next_seq->update_token(token_idx, new_token);
+    }
+    if (restore_json_states) {
+      JsonObjectGrammarSnapshot final_json_state =
+          source_json_states[candidate.source_index];
+      if (candidate.override_last_token) {
+        CHECK(!final_json_state.token_ids.empty())
+            << "beam JSON state has no token for candidate replacement";
+        final_json_state.token_ids.back() = candidate.last_token_id;
+      }
+      if (!next_seq->restore_json_object_state(final_json_state)) {
+        continue;
+      }
     }
     next_seq->logprob_state()->set_acc_logprob(candidate.logprob_sum);
     next_seq->logprob_state()->set_last_acc_token_idx(next_seq->num_tokens());

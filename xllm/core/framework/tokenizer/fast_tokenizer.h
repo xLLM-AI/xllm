@@ -35,6 +35,8 @@ class FastTokenizer : public Tokenizer {
   std::string decode(const Slice<int32_t>& ids,
                      bool skip_special_tokens) const override;
 
+  std::string decode_token(int32_t id) const override;
+
   std::optional<int32_t> token_to_id(
       const std::string_view& token) const override;
 
@@ -46,6 +48,7 @@ class FastTokenizer : public Tokenizer {
 
  private:
   TokenizerArgs tokenizer_args_;
+  bool byte_level_decoder_ = false;
   TokenizerHandle handle_ = nullptr;
 };
 

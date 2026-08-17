@@ -20,6 +20,7 @@ limitations under the License.
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@ limitations under the License.
 #include "framework/chat_template/chat_template.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
+#include "framework/sampling/json_object_grammar.h"
 #include "llm_engine.h"
 #include "master.h"
 #include "scheduler/continuous_scheduler.h"
@@ -106,7 +108,8 @@ class LLMMaster : public Master {
       std::optional<std::vector<int>> prompt_tokens,
       const RequestParams& sp,
       std::optional<Call*> call,
-      OutputCallback callback);
+      OutputCallback callback,
+      std::optional<ChatTemplateGenerationMode> generation_mode = std::nullopt);
 
   std::shared_ptr<Request> generate_request(
       const std::vector<Message>& messages,
@@ -114,6 +117,10 @@ class LLMMaster : public Master {
       const RequestParams& sp,
       std::optional<Call*> call,
       OutputCallback callback);
+
+  std::shared_ptr<const JsonObjectGrammar> get_json_object_grammar(
+      bool reasoning_enabled,
+      std::string* error);
 
  private:
   XServiceClient* xservice_client_ = nullptr;
@@ -129,6 +136,9 @@ class LLMMaster : public Master {
   // we don't know if tokenizer is thread safe, so we create one for each thread
   // for now
   std::unique_ptr<Tokenizer> tokenizer_;
+  std::mutex json_object_grammar_mutex_;
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
+  std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
 
   // chat template instance
   std::unique_ptr<ChatTemplate> chat_template_;

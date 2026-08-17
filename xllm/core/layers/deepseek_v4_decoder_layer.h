@@ -59,6 +59,12 @@ class DeepseekV4DecoderLayerImpl : public torch::nn::Module {
       const ModelInputParams& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt);
 
+  void write_context_kv(const torch::Tensor& hidden_states,
+                        const torch::Tensor& cos,
+                        const torch::Tensor& sin,
+                        const torch::Tensor& slot_mapping,
+                        KVCache& kv_cache);
+
  private:
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> hc_pre(
       const torch::Tensor& x,

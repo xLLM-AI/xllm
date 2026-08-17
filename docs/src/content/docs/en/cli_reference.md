@@ -182,7 +182,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `draft_model` | `string` | `""` | Draft model path. See [MTP](/en/features/mtp/) for MTP usage. |
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
-| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`. |
+| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`, `DSpark`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |
 | `speculative_suffix_max_spec_factor` | `double` | `1.0` | Maximum suffix speculation token factor relative to match length. |
 | `speculative_suffix_max_spec_offset` | `double` | `0.0` | Maximum additive token offset for suffix speculation. |
@@ -238,6 +238,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_split_rmsnorm_rope` | `bool` | `false` | Whether to enable fused split rmsnorm rope ops. |
 | `enable_aclnn_matmul` | `bool` | `false` | Whether to enable the ACLNN matmul backend for supported NPU ATB layers. |
 | `enable_aclnn_swiglu` | `bool` | `false` | Whether to enable the ACLNN SwiGLU backend for supported NPU ATB layers. |
+| `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig
 

@@ -15,7 +15,12 @@ limitations under the License.
 
 #pragma once
 
+#include <memory>
+#include <mutex>
+#include <string>
+
 #include "disagg_pd.pb.h"
+#include "framework/sampling/json_object_grammar.h"
 #include "runtime/xservice_client.h"
 
 namespace xllm {
@@ -46,9 +51,16 @@ class DisaggPDServiceImpl {
  protected:
   std::shared_ptr<Request> generate_request(const proto::DisaggRequest& req);
 
+  std::shared_ptr<const JsonObjectGrammar> get_json_object_grammar(
+      bool reasoning_enabled,
+      std::string* error);
+
   DisaggPDScheduler* scheduler_;  // not owned
   Engine* engine_;                // not owned
   XServiceClient* xservice_client_ = nullptr;
+  std::mutex json_object_grammar_mutex_;
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
+  std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
 };
 
 }  // namespace xllm

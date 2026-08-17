@@ -67,6 +67,9 @@ void Request::create_sequences_group() {
   sequence_params.sample_slots = &(state_.sample_slots);
   sequence_params.sampling_param = &(state_.sampling_param);
   sequence_params.stopping_checker = &(state_.stopping_checker);
+  sequence_params.json_object_grammar = state_.json_object_grammar;
+  sequence_params.json_reasoning_enabled = state_.json_reasoning_enabled;
+  sequence_params.request_failure_state = failure_state_;
   sequences_group_ = std::make_unique<SequencesGroup>(state_.prompt,
                                                       state_.prompt_tokens,
                                                       state_.input_embedding,
@@ -74,7 +77,13 @@ void Request::create_sequences_group() {
                                                       sequence_params);
 }
 
-bool Request::finished() const { return sequences_group_->finished(); }
+bool Request::finished() const {
+  return error_status().has_value() || sequences_group_->finished();
+}
+
+std::optional<Status> Request::error_status() const {
+  return failure_state_->status;
+}
 
 bool Request::expand_sequences(bool share_prefix) {
   return sequences_group_->expand_sequences(share_prefix);
@@ -163,11 +172,12 @@ RequestOutput Request::generate_output(const Tokenizer& tokenizer,
   Usage usage;
   usage.num_prompt_tokens = state_.prompt_tokens.size();
   for (const auto& seq : sequences()) {
-    usage.num_generated_tokens += seq->num_generated_tokens();
+    size_t num_generated_tokens = seq->num_generated_tokens();
     // NOTE: Avoid counting the extra execution step in overlap scenario.
-    if (state_.enable_schedule_overlap) {
-      usage.num_generated_tokens--;
+    if (state_.enable_schedule_overlap && num_generated_tokens > 0) {
+      --num_generated_tokens;
     }
+    usage.num_generated_tokens += num_generated_tokens;
   }
   CHECK_LE(num_prefix_cache_tokens_,
            static_cast<size_t>(std::numeric_limits<int32_t>::max()));
@@ -179,9 +189,14 @@ RequestOutput Request::generate_output(const Tokenizer& tokenizer,
   output.service_request_id = service_request_id_;
   output.target_xservice_addr = source_xservice_addr_;
   output.usage = usage;
-  output.status = Status(StatusCode::OK);
   output.finished = finished();
   output.cancelled = cancelled();
+  const std::optional<Status> request_error = error_status();
+  if (request_error.has_value()) {
+    output.status = request_error.value();
+    return output;
+  }
+  output.status = Status(StatusCode::OK);
   sequences_group_->generate_outputs(output.outputs, tokenizer, thread_pool);
   return output;
 }

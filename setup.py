@@ -95,9 +95,9 @@ def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) 
 
     ``xllm/python/`` holds one peer package per hardware platform
     (``kernels_cuda``, ``kernels_npu``, ...). The peers share no code, never
-    import each other, and export the same names. ``xllm/python/__init__.py``
-    binds the one matching the active platform as ``xllm.python.kernels``, so
-    only that package has to reach the wheel.
+    import each other, and own their public APIs independently.
+    ``xllm/python/__init__.py`` binds the one matching the active platform as
+    ``xllm.python.kernels``, so only that package has to reach the wheel.
 
     The Python model executor covers fewer platforms than ``--device`` does, so
     a device without a peer package is not a build error: the rest of
@@ -115,8 +115,8 @@ def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) 
             f"No Python kernel package for --device {device}; the Python model "
             f"executor stays unavailable in this wheel (packages exist for "
             f"{', '.join(available)}). To support it, add "
-            f"xllm/python/kernels_{device}/ exporting the same names as its "
-            "peers."
+            f"xllm/python/kernels_{device}/ with the APIs required by that "
+            "platform's supported models."
         )
         return
     shutil.copytree(
@@ -691,6 +691,8 @@ class BuildDistWheel(bdist_wheel):
         super().finalize_options()
 
     def run(self) -> None:
+        global BUILD_TEST_FILE
+
         build_ext_cmd = self.get_finalized_command("build_ext")
         build_ext_cmd.device = self.device
         build_ext_cmd.arch = self.arch
@@ -719,7 +721,6 @@ class BuildDistWheel(bdist_wheel):
                 path = os.path.join(root, item)
                 if "_test" in item and os.path.isfile(path):
                     os.remove(path)
-        global BUILD_TEST_FILE
         BUILD_TEST_FILE = False
 
         self.skip_build = True

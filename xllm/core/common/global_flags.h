@@ -404,6 +404,8 @@ DECLARE_bool(enable_aclnn_matmul);
 
 DECLARE_bool(enable_aclnn_swiglu);
 
+DECLARE_bool(enable_dspark_native_sas);
+
 DECLARE_bool(enable_flashcomm1);
 
 DECLARE_int32(flashcomm1_min_prefill_tokens);
@@ -417,6 +419,8 @@ DECLARE_string(mmrs_comm_mode);
 DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
+
+DECLARE_bool(enable_json_object_output);
 
 // --- verbose trace logging config ---
 DECLARE_bool(enable_verbose_trace_log);

@@ -29,9 +29,11 @@ limitations under the License.
 #include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/kv_cache/kv_cache_utils.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
@@ -39,6 +41,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
@@ -46,9 +49,11 @@ limitations under the License.
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
-#include "core/runtime/mtp_async_state.h"
+#include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
+#include "models/llm/deepseek_v4.h"
+#include "models/llm/dspark_weight_source.h"
 #include "models/model_registry.h"
 #include "tests/npu_test_environment.h"
 
@@ -88,6 +93,38 @@ class AclGraphExecutorTestEnvironment : public ::testing::Environment {
     ::testing::AddGlobalTestEnvironment(new AclGraphExecutorTestEnvironment);
 
 namespace xllm {
+
+TEST(DeepseekV4MetadataInputTest, KeepsOnlyDraftRegisteredBlockTables) {
+  ModelInputParams target_input_params;
+  target_input_params.multi_block_tables = {
+      torch::tensor({{10}}, torch::kInt32),
+      torch::tensor({{20}}, torch::kInt32),
+      torch::tensor({{30}}, torch::kInt32)};
+
+  ModelInputParams draft_input_params = target_input_params;
+  deepseek_v4_clamp_multi_block_tables(draft_input_params,
+                                       /*registered_group_count=*/1);
+
+  ASSERT_EQ(target_input_params.multi_block_tables.size(), 3);
+  ASSERT_EQ(draft_input_params.multi_block_tables.size(), 1);
+  EXPECT_TRUE(torch::equal(draft_input_params.multi_block_tables.front(),
+                           target_input_params.multi_block_tables.front()));
+}
+
+TEST(DeepseekV4MetadataInputTest, PreservesMatchingTargetBlockTables) {
+  ModelInputParams input_params;
+  input_params.multi_block_tables = {torch::tensor({{10}}, torch::kInt32),
+                                     torch::tensor({{20}}, torch::kInt32),
+                                     torch::tensor({{30}}, torch::kInt32)};
+
+  deepseek_v4_clamp_multi_block_tables(input_params,
+                                       /*registered_group_count=*/3);
+
+  ASSERT_EQ(input_params.multi_block_tables.size(), 3);
+  EXPECT_EQ(input_params.multi_block_tables[0].item<int32_t>(), 10);
+  EXPECT_EQ(input_params.multi_block_tables[1].item<int32_t>(), 20);
+  EXPECT_EQ(input_params.multi_block_tables[2].item<int32_t>(), 30);
+}
 
 TEST(AclGraphStaticGraphTaskSignatureTest,
      BuildsSameSignatureFromCaptureAndSignal) {
@@ -1164,6 +1201,94 @@ TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("DFlash"));
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("Suffix"));
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("unknown"));
+}
+
+TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
+  ModelArgs args;
+  args.hidden_size(2).layers_to_capture({0, 2});
+  AuxHiddenCapture capture(
+      args, torch::TensorOptions().dtype(torch::kFloat32), 3);
+
+  capture.capture_layer(
+      /*layer_idx=*/0, torch::full({3, 2}, 10.0f), std::nullopt);
+  capture.capture_layer(
+      /*layer_idx=*/2, torch::full({3, 2}, 20.0f), std::nullopt);
+  const torch::Tensor hidden_states = torch::zeros({3, 2});
+  const torch::Tensor residual = torch::ones({3, 2});
+  const ModelOutput output = capture.finalize(hidden_states, residual);
+
+  EXPECT_TRUE(torch::equal(output.residual, residual));
+  EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 0, 2),
+                           torch::full({3, 2}, 10.0f)));
+  EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 2, 4),
+                           torch::full({3, 2}, 20.0f)));
+}
+
+TEST(DSparkWorkerInputTest, InvalidatesTargetAttentionMetadataOnly) {
+  ModelInputParams params;
+  params.attn_metadata = std::make_shared<layer::AttentionMetadata>();
+  params.multi_block_tables.resize(3);
+
+  dflash_detail::invalidate_draft_model_geometry(params);
+
+  EXPECT_EQ(params.attn_metadata, nullptr);
+  EXPECT_EQ(params.multi_block_tables.size(), 3);
+}
+
+TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
+  ModelInputParams params;
+  params.parallel.dp_global_token_nums = {2, 0, 4};
+  params.parallel.raw_dp_global_token_nums = {1, 0, 3};
+
+  scale_speculative_parallel_token_counts(params, /*multiplier=*/5);
+
+  EXPECT_EQ(params.parallel.dp_global_token_nums,
+            (std::vector<int32_t>{10, 0, 20}));
+  EXPECT_EQ(params.parallel.raw_dp_global_token_nums,
+            (std::vector<int32_t>{5, 0, 15}));
+}
+
+TEST(DSparkSasFallbackTest, ChoosesCompatibleRowsUnlessNativeIsEnabled) {
+  ModelArgs draft_args;
+  draft_args.model_type("deepseek_v4_dspark");
+  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
+                draft_args, /*sample_from_anchor=*/true),
+            dflash_detail::DSparkSasMode::COMPATIBILITY);
+
+  draft_args.dspark_use_native_sas(true);
+  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
+                draft_args, /*sample_from_anchor=*/true),
+            dflash_detail::DSparkSasMode::NATIVE);
+  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
+                draft_args, /*sample_from_anchor=*/false),
+            dflash_detail::DSparkSasMode::NOT_DSPARK);
+}
+
+TEST(DSparkWorkerWeightsTest, DedicatedVocabularyOverridesFallbackInAnyOrder) {
+  dspark_detail::VocabularyWeightSelector fallback_first;
+  EXPECT_TRUE(fallback_first.should_load(/*dedicated=*/false));
+  fallback_first.mark_loaded(/*dedicated=*/false);
+  EXPECT_TRUE(fallback_first.should_load(/*dedicated=*/true));
+  fallback_first.mark_loaded(/*dedicated=*/true);
+  EXPECT_FALSE(fallback_first.should_load(/*dedicated=*/true));
+  EXPECT_FALSE(fallback_first.should_load(/*dedicated=*/false));
+
+  dspark_detail::VocabularyWeightSelector dedicated_first;
+  EXPECT_TRUE(dedicated_first.should_load(/*dedicated=*/true));
+  dedicated_first.mark_loaded(/*dedicated=*/true);
+  EXPECT_FALSE(dedicated_first.should_load(/*dedicated=*/false));
+  EXPECT_FALSE(dedicated_first.should_load(/*dedicated=*/true));
+}
+
+TEST(SpeculativeOutputMetricsTest, CountsCommittedAndAcceptedTokensFromOutput) {
+  // Row 0 accepts two draft tokens; row 1 accepts all five.
+  const torch::Tensor tokens = torch::tensor(
+      {{10, 11, 12, -1, -1, -1}, {20, 21, 22, 23, 24, 25}}, torch::kInt32);
+  const auto stats =
+      calculate_speculative_output_stats(tokens, /*num_speculative_tokens=*/5);
+
+  EXPECT_EQ(stats.committed_tokens, 9);
+  EXPECT_EQ(stats.accepted_per_position, (std::vector<int64_t>{2, 2, 1, 1, 1}));
 }
 
 TEST(SpeculativeWorkerDispatchTest, DecodeRequiresEveryDpRankToDecode) {

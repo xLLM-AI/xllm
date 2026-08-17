@@ -44,7 +44,11 @@ TORCH_MODULE(QWen3DecoderLayer);
 class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<QWen3DecoderLayer>("qwen3", context.get_model_args()) {
+      : LlmModelImplBase<QWen3DecoderLayer>("qwen3", context.get_model_args()),
+        aux_capture_(
+            context.get_model_args(),
+            context.get_tensor_options(),
+            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
@@ -80,11 +84,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       layers_.push_back(block);
       blocks_->push_back(block);
     }
-
-    aux_capture_.init(
-        model_args,
-        options,
-        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -187,7 +186,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
-    aux_capture_.reset_capture_index();
     RollingLayerGuard rolling_guard(rolling_mgr_);
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event{nullptr};
@@ -294,6 +292,9 @@ REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_atb, qwen3_atb, [&] {
   // DSpark: low-rank dim of the Markov head (top-level config key, like vLLM's
   // config.markov_rank). 0 = disabled (plain DFlash / non-DSpark models).
   LOAD_ARG_OR(markov_rank, "markov_rank", 0);
+  LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
+  LOAD_ARG_OR(
+      confidence_head_with_markov, "confidence_head_with_markov", false);
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();

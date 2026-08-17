@@ -104,6 +104,20 @@ class LLMWorkerImpl : public WorkerImpl {
     return model_->dspark_markov_bias(previous_token_ids);
   }
 
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) {
+    return model_->dspark_confidence_probs(hidden, previous_token_ids);
+  }
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) {
+    return model_->dspark_confidence_probs_batched(hidden_all, prev_matrix);
+  }
+  bool has_dspark_confidence_head() const {
+    return model_->has_dspark_confidence_head();
+  }
+
   bool share_weights_from(LLMWorkerImpl& source) {
     return model_->share_weights_from(*source.model_);
   }

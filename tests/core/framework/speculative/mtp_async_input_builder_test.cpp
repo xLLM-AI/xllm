@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/runtime/mtp_async_input_builder.h"
+#include "core/framework/speculative/mtp_async_input_builder.h"
 
 #include <gtest/gtest.h>
 #include <pybind11/embed.h>
@@ -89,7 +89,7 @@ void prepare_single_sequence(ForwardInput& draft_input,
 
 void prepend_python_model_path() {
   std::filesystem::path repo_root(__FILE__);
-  for (int32_t depth = 0; depth < 4; ++depth) {
+  for (int32_t depth = 0; depth < 5; ++depth) {
     repo_root = repo_root.parent_path();
   }
   py::list sys_path = py::module_::import("sys").attr("path");

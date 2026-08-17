@@ -192,6 +192,24 @@ class CausalLM : public torch::nn::Module {
     return {};
   }
 
+  // DSpark ConfidenceHead: acceptance-prob estimate for adaptive-speculative
+  // pruning. Returns [num_reqs] fp32 in [0, 1]. When the confidence head is
+  // absent (not built or feature disabled), returns an undefined tensor; the
+  // worker falls back to the sampler-gathered draft prob.
+  virtual torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) {
+    return {};
+  }
+  // Batched over the whole draft block: hidden [num_reqs, num_spec, H],
+  // prev_matrix [num_reqs, num_spec]; returns [num_reqs, num_spec] fp32.
+  virtual torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) {
+    return {};
+  }
+  virtual bool has_dspark_confidence_head() const { return false; }
+
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
   }
@@ -307,6 +325,31 @@ class CausalLMImpl : public CausalLM {
       return model_->dspark_markov_bias(previous_token_ids);
     }
     return CausalLM::dspark_markov_bias(previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) override {
+    if constexpr (detail::has_dspark_confidence_probs<Model>::value) {
+      return model_->dspark_confidence_probs(hidden, previous_token_ids);
+    }
+    return CausalLM::dspark_confidence_probs(hidden, previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) override {
+    if constexpr (detail::has_dspark_confidence_probs_batched<Model>::value) {
+      return model_->dspark_confidence_probs_batched(hidden_all, prev_matrix);
+    }
+    return CausalLM::dspark_confidence_probs_batched(hidden_all, prev_matrix);
+  }
+
+  bool has_dspark_confidence_head() const override {
+    if constexpr (detail::has_has_dspark_confidence_head<Model>::value) {
+      return model_->has_dspark_confidence_head();
+    }
+    return false;
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {

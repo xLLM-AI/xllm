@@ -19,6 +19,7 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/quant_args.h"
 #include "layers/common/dsa_metadata_builder.h"
+#include "layers/npu_torch/deepseek_sparse_attention.h"
 #include "layers/npu_torch/deepseek_v4_indexer.h"
 
 namespace xllm {
@@ -146,6 +147,112 @@ TEST_F(DeepseekV4IndexerTest, DsaSwaBlockTableUsesLogicalColumnsWithoutWrap) {
 
   const auto expected_slot = torch::tensor({10 * 128}, torch::kInt32);
   EXPECT_TRUE(torch::equal(dsa.slot_mappings[0][0].cpu(), expected_slot));
+}
+
+TEST_F(DeepseekV4IndexerTest, DsaSwaUsesExplicitBlockParallelSlots) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.num_sequences = 3;
+  params.meta.q_max_seq_len = 1;
+  params.meta.kv_max_seq_len = 8;
+  params.attention.host.kv_seq_lens = {8, 8, 8};
+  params.attention.host.q_seq_lens = {1, 1, 1};
+  params.attention.host.new_cache_slots = {5, 6, 7};
+  params.multi_block_tables = {
+      torch::tensor({{0, 1, 2}, {0, 1, 2}, {0, 1, 2}}, torch::kInt32)};
+
+  const torch::Tensor positions = torch::tensor({5, 6, 7}, torch::kInt64);
+  const std::vector<DSAGroupInfo> group_infos = {
+      {DSACacheType::SLIDING_WINDOW, 1, 4}};
+  const std::vector<std::vector<DSACacheInfo>> caches_info = {{
+      {0, DSACacheType::SLIDING_WINDOW, 1, 4},
+  }};
+
+  const AttentionMetadata metadata = DSAMetadataBuilder::build(
+      params, positions, torch::Tensor(), caches_info, group_infos);
+
+  ASSERT_TRUE(metadata.dsa_metadata != nullptr);
+  ASSERT_EQ(metadata.dsa_metadata->slot_mappings.size(), 1);
+  ASSERT_EQ(metadata.dsa_metadata->slot_mappings[0].size(), 1);
+  EXPECT_TRUE(torch::equal(metadata.dsa_metadata->slot_mappings[0][0],
+                           torch::tensor({5, 6, 7}, torch::kInt32)));
+}
+
+TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.q_max_seq_len = 1;
+
+  EXPECT_TRUE(params.meta.batch_forward_type.no_decode());
+  EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
+                                        /*dspark_block_size=*/5,
+                                        /*use_native_dspark_sas=*/false),
+            127);
+  EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
+                                        /*dspark_block_size=*/0,
+                                        /*use_native_dspark_sas=*/true),
+            127);
+  EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
+                                        /*dspark_block_size=*/5,
+                                        /*use_native_dspark_sas=*/true),
+            132);
+
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  EXPECT_FALSE(params.meta.batch_forward_type.no_decode());
+}
+
+TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {
+  const torch::Tensor block_table =
+      torch::tensor({{10, 11, 12}}, torch::kInt32);
+  const torch::Tensor query_cu_seq_lens = torch::tensor({0, 3}, torch::kInt32);
+  const torch::Tensor seq_lens = torch::tensor({6}, torch::kInt32);
+
+  const torch::Tensor indices =
+      build_dspark_swa_indices(block_table,
+                               query_cu_seq_lens,
+                               seq_lens,
+                               /*window_size=*/4,
+                               /*dspark_block_size=*/3,
+                               /*cache_block_size=*/4);
+
+  ASSERT_EQ(indices.dim(), 3);
+  ASSERT_EQ(indices.size(0), 3);
+  ASSERT_EQ(indices.size(1), 1);
+  ASSERT_EQ(indices.size(2), 128);
+  const torch::Tensor expected_prefix =
+      torch::tensor({40, 41, 42, 43, 44, 45, -1}, torch::kInt32);
+  for (int64_t row = 0; row < indices.size(0); ++row) {
+    EXPECT_TRUE(torch::equal(indices[row][0].slice(0, 0, 7), expected_prefix));
+  }
+}
+
+TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesWrapAroundRingBuffer) {
+  // Two-block ring buffer with kv_len=10 forces the SWA window to span both
+  // ring entries and to wrap. Visible positions 5..9 map through
+  // block_column = pos/2 % ring_size(2) -> {0,1,1,0,0}, wrapping back to
+  // block_column 0 once the ring rotates.
+  const torch::Tensor block_table = torch::tensor({{20, 21}}, torch::kInt32);
+  const torch::Tensor query_cu_seq_lens = torch::tensor({0, 1}, torch::kInt32);
+  const torch::Tensor seq_lens = torch::tensor({10}, torch::kInt32);
+
+  const torch::Tensor indices =
+      build_dspark_swa_indices(block_table,
+                               query_cu_seq_lens,
+                               seq_lens,
+                               /*window_size=*/4,
+                               /*dspark_block_size=*/3,
+                               /*cache_block_size=*/2);
+
+  ASSERT_EQ(indices.dim(), 3);
+  ASSERT_EQ(indices.size(0), 1);
+  ASSERT_EQ(indices.size(1), 1);
+  // start_pos = max((kv - q_len) - window, 0) = (10-1)-4 = 5, so the visible
+  // window is positions 5,6,7,8,9. block_column = pos/2 % 2 -> {0,1,1,0,0};
+  // slot = block_id*2 + pos%2 -> {20*2+1, 21*2+0, 21*2+1, 20*2+0, 20*2+1} =
+  // {41, 42, 43, 40, 41}.
+  const torch::Tensor expected_prefix =
+      torch::tensor({41, 42, 43, 40, 41}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(indices[0][0].slice(0, 0, 5), expected_prefix));
 }
 
 TEST_F(DeepseekV4IndexerTest, DsaDummyAttentionUsesPositionDevice) {

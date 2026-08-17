@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/request/stopping_checker.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/params_utils.h"
 
@@ -184,6 +185,9 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
   ASSERT_TRUE(input.sampling_params.sample_idxes.defined());
+  input.sampling_params.filter_bitmask =
+      torch::tensor({{static_cast<int32_t>(0x5)}},
+                    torch::TensorOptions().dtype(torch::kInt32));
 
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(forward_input_to_packed_proto(input, &packed_input));
@@ -203,6 +207,76 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
   ASSERT_TRUE(unpacked_input.sampling_params.sample_idxes.defined());
   EXPECT_TRUE(tensor_equals_vector<int32_t>(
       unpacked_input.sampling_params.sample_idxes, {0}));
+  ASSERT_TRUE(unpacked_input.sampling_params.filter_bitmask.defined());
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.filter_bitmask,
+                           input.sampling_params.filter_bitmask));
+}
+
+TEST(BatchPackedInputTest, PackedProtoLazyToPreservesJsonMetadata) {
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 32;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.enable_schedule_overlap = true;
+
+  MMData mm_data;
+  BlockManager::Options options;
+  options.num_blocks(2).block_size(4);
+  BlockManagerImpl manager(options);
+
+  IncrementalDecoder decoder("", 1, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*token_ids=*/{1, 2, 3, 4},
+                    torch::Tensor(),
+                    mm_data,
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
+
+  std::vector<Sequence*> sequences = {&sequence};
+  std::vector<uint32_t> allowed_max_tokens = {4};
+  BatchInputBuilder builder(sequences,
+                            allowed_max_tokens,
+                            {},
+                            {},
+                            nullptr,
+                            /*batch_id=*/2,
+                            nullptr,
+                            BatchForwardType::DECODE);
+  ForwardInput input = builder.build_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0);
+
+  JsonObjectGrammar grammar({"{", "}", "stop"}, /*stop_token_ids=*/{2});
+  JsonObjectGrammarState state = grammar.initial_state();
+  ASSERT_TRUE(state.accept_token(/*open_object=*/0));
+  input.json_object_state_snapshots = {state.snapshot()};
+  input.sample_sequence_ids = {"req-json#0"};
+  input.sample_prior_output_rows = {-1};
+
+  proto::PackedForwardInput packed_input;
+  ASSERT_TRUE(forward_input_to_packed_proto(input, &packed_input));
+
+  ForwardInput lazy_input;
+  packed_proto_to_forward_input(
+      packed_input, lazy_input, torch::Device(torch::kCPU), nullptr);
+  EXPECT_TRUE(lazy_input.input_host_buffer_has_layout);
+  EXPECT_TRUE(lazy_input.json_object_state_snapshots.empty());
+
+  const ForwardInput materialized_input =
+      lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
+  ASSERT_EQ(materialized_input.json_object_state_snapshots.size(), 1u);
+  EXPECT_EQ(materialized_input.json_object_state_snapshots[0].token_ids,
+            std::vector<int32_t>({0}));
+  EXPECT_FALSE(
+      materialized_input.json_object_state_snapshots[0].reasoning_enabled);
+  EXPECT_EQ(materialized_input.sample_sequence_ids,
+            std::vector<std::string>({"req-json#0"}));
+  EXPECT_EQ(materialized_input.sample_prior_output_rows,
+            std::vector<int32_t>({-1}));
 }
 
 }  // namespace xllm

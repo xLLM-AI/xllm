@@ -189,7 +189,8 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     const SamplingParameters& params,
     const torch::Tensor& filter_mask,
     const RecSamplingContext* context) const {
-  if (context != nullptr && context->device_constrained_sampler) {
+  if (context != nullptr && context->device_constrained_sampler &&
+      !params.filter_mask.defined()) {
     auto sampled = context->device_constrained_sampler(logits,
                                                        params,
                                                        context->sequence_group,

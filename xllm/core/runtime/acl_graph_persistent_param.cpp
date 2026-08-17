@@ -30,9 +30,9 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
-#include "core/runtime/mtp_async_state.h"
 #include "core/util/utils.h"
 
 // ATB includes
@@ -202,7 +202,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // attention plan for each request.
   need_update_attention_plan_ =
       (args.model_type() != "deepseek_v32" &&
-       args.model_type() != "deepseek_v4" &&
+       !util::is_deepseek_v4_model_type(args.model_type()) &&
        args.model_type() != "glm_moe_dsa" && !supports_mla_graph_kv_bucketing_);
 
   // Check if mRoPE is used (for VLM models like qwen2-vl)

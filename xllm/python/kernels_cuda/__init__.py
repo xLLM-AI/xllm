@@ -22,8 +22,10 @@ them is imported in a process; they share no code and never import each other.
 ``setup.py`` ships only the package matching ``--device``.
 
 Launchers live under ``triton/`` and ``flashinfer/``; the modules here bind the
-CUDA kernel API in ``__all__``. Peer packages may expose platform-specific
-kernels in addition to the shared API.
+public CUDA kernel API declared in ``__all__``. Peer packages own their APIs
+independently and need not export the same names. Existing unsupported stubs
+remain explicit CUDA failure paths, but they are not a cross-platform export
+contract.
 """
 
 from __future__ import annotations

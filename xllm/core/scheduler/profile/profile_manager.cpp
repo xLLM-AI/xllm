@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <Eigen/Dense>
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -486,15 +485,20 @@ void ProfileManager::profile_speculative_validate_time() {
   const SpeculativeConfig& speculative_config =
       ::xllm::SpeculativeConfig::get_instance();
   // Only fit the validate-time predictor when the adaptive path can
-  // actually consume it: MTP with SL > 1 and adaptive explicitly enabled.
-  // Otherwise this whole prefix/query/batch sweep is wasted startup time.
+  // actually consume it: MTP/DFlash/DSpark with SL > 1 and adaptive
+  // explicitly enabled. Otherwise this whole prefix/query/batch sweep is
+  // wasted startup time.
+  const std::string& speculative_algorithm =
+      speculative_config.speculative_algorithm();
+  const bool is_supported_algo =
+      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) ||
+      SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
   if (!speculative_config.enable_adaptive_speculative_decode() ||
-      speculative_config.num_speculative_tokens() <= 1 ||
-      !SpeculativeConfig::is_mtp_algorithm(
-          speculative_config.speculative_algorithm())) {
+      speculative_config.num_speculative_tokens() <= 1 || !is_supported_algo) {
     return;
   }
-  LOG(INFO) << "Starting speculative validate profile for MTP, "
+  LOG(INFO) << "Starting speculative validate profile for "
+            << speculative_algorithm << ", "
             << "adaptive_enabled="
             << speculative_config.enable_adaptive_speculative_decode();
 

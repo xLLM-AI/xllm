@@ -13,6 +13,9 @@ description: "DeepSeek-V4 在 Ascend A3 设备上的 xLLM 推理实践指南"
 Flash权重：
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp
 
+带 DSpark 权重的 DeepSeek-V4-Flash-0731 W8A8：
+https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
+
 Pro权重:
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
 
@@ -83,11 +86,24 @@ python -c "import torch_npu
 for i in range(16):torch_npu.npu.set_device(i)"
 ```
 
-### 导出MTP权重
+### 选择 speculative decoding 权重格式
+
+原有 DeepSeek-V4 MTP 路径和 DeepSeek-V4-Flash-0731 DSpark 路径使用不同的
+draft 模型格式：
+
+- 使用原有 MTP 路径时，需要将 MTP 权重额外导出到独立目录：
 
 ```bash
 python tools/export_mtp.py --input-dir ${W4A8/W8A8权重目录} --output-dir ${导出MTP权重目录}
 ```
+
+- 使用 DeepSeek-V4-Flash-0731 DSpark 时，**不要**执行 `export_mtp.py`。
+  三层 DSpark、独立的词表 embedding/head 和 Markov head 都保留在 target
+  权重的 `mtp.0`、`mtp.1`、`mtp.2` 下。`--model` 和 `--draft_model` 应指向
+  同一个原始或量化后的 0731 权重目录。原始 FP 权重可能复用顶层
+  `embed.weight/head.weight`，QuaRot 权重可能带独立的
+  `mtp.0.embed.weight/mtp.2.head.weight`；xLLM 同时兼容两种格式，且两者
+  同时存在时优先使用 DSpark 独立词表权重。
 
 ### 环境变量
 
@@ -165,6 +181,11 @@ done
     # --draft_model=$DRAFT_MODEL_PATH \
     # --num_speculative_tokens=1 \
 
+    # DeepSeek-V4-Flash-0731 DSpark 改用：
+    # --speculative_algorithm=DSpark \
+    # --draft_model=$MODEL_PATH \
+    # --num_speculative_tokens=5 \
+
 # numactl -C xxxxx          亲和性绑核(NUMA亲和性查询命令： npu-smi info -t topo)
 #--max_memory_utilization   单卡最大显存占用比例
 #--max_tokens_per_batch     单batch最大token数  （主要限制prefill）
@@ -177,6 +198,44 @@ done
 #--draft_model              mtp - mtp权重路径
 #--num_speculative_tokens   mtp - 预测token数
 ```
+
+### DSpark 使用方式
+
+DSpark 不需要额外导出 MTP 权重。将 `--model` 和 `--draft_model` 设置为同一个
+DeepSeek-V4-Flash-0731 权重目录即可：
+
+```bash
+--speculative_algorithm=DSpark \
+--model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--draft_model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--num_speculative_tokens=5
+```
+
+推荐使用 `--num_speculative_tokens=5`，因为 0731 权重按
+`dspark_block_size=5` 训练。改用其他 gamma 会改变扩散块几何，超出训练分布，
+需要重新验证接受率和性能。当前路径暂不支持 `cp_size > 1`。
+
+在 NPU 上，xLLM 支持两种 SAS 模式。默认兼容模式适配 CANN 9.0，无需增加参数；
+若当前 SAS 算子支持非空 `ori_sparse_indices`，可设置
+`--enable_dspark_native_sas=true`，使用完整的 DSpark SWA 窗口。旧版算子会在
+tiling 阶段直接终止进程，因此无法安全地自动探测该能力。
+
+可通过逐位置计数观察 DSpark 接受率：
+
+```bash
+curl http://${HOST}:${PORT}/brpc_metrics | grep speculative_num
+```
+
+```text
+acceptance[position] =
+  speculative_num_accepted_tokens_per_pos{position} /
+  speculative_num_drafts_total
+```
+
+逐位置值表示“接受前缀能到达该位置”的概率。指标
+`speculative_mean_tokens_per_decode_step` 现在表示每个 proposal 序列累计平均
+提交 token 数，由
+`speculative_num_committed_tokens_total / speculative_num_drafts_total` 计算。
 
 日志出现"Brpc Server Started"表示服务成功拉起。
 

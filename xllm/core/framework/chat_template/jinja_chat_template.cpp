@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <optional>
 #include <string>
 
@@ -31,12 +32,73 @@ const std::unordered_map<std::string, std::string> type_to_modality = {
     {"image_embedding", "image"},
     {"video_embedding", "video"},
     {"audio_embedding", "audio"}};
+
+void replace_undefined_tests(std::string& block) {
+  char quote = '\0';
+  for (size_t pos = 0; pos < block.size(); ++pos) {
+    const char current = block[pos];
+    if (quote != '\0') {
+      if (current == '\\') {
+        ++pos;
+      } else if (current == quote) {
+        quote = '\0';
+      }
+      continue;
+    }
+    if (current == '\'' || current == '"') {
+      quote = current;
+      continue;
+    }
+
+    static constexpr char kIsNotUndefined[] = " is not undefined";
+    static constexpr char kIsNotNone[] = " is not none";
+    static constexpr char kIsUndefined[] = " is undefined";
+    static constexpr char kIsNone[] = " is none";
+    if (block.compare(pos, sizeof(kIsNotUndefined) - 1, kIsNotUndefined) == 0) {
+      block.replace(pos, sizeof(kIsNotUndefined) - 1, kIsNotNone);
+    } else if (block.compare(pos, sizeof(kIsUndefined) - 1, kIsUndefined) ==
+               0) {
+      block.replace(pos, sizeof(kIsUndefined) - 1, kIsNone);
+    }
+  }
 }
+
+std::string normalize_minja_tests(std::string chat_template) {
+  size_t search_pos = 0;
+  while (search_pos < chat_template.size()) {
+    const size_t expression_pos = chat_template.find("{{", search_pos);
+    const size_t statement_pos = chat_template.find("{%", search_pos);
+    const size_t block_pos = std::min(expression_pos, statement_pos);
+    if (block_pos == std::string::npos) {
+      break;
+    }
+
+    const std::string close = block_pos == expression_pos ? "}}" : "%}";
+    const size_t close_pos = chat_template.find(close, block_pos + 2);
+    if (close_pos == std::string::npos) {
+      break;
+    }
+
+    std::string block =
+        chat_template.substr(block_pos, close_pos + close.size() - block_pos);
+    // Qwen3.8's official template uses Jinja's `is undefined` test for optional
+    // arguments. Minja represents missing arguments as null and only supports
+    // `is none`, so normalize the test before Minja parses the template.
+    replace_undefined_tests(block);
+    chat_template.replace(
+        block_pos, close_pos + close.size() - block_pos, block);
+    search_pos = block_pos + block.size();
+  }
+  return chat_template;
+}
+}  // namespace
 
 JinjaChatTemplate::JinjaChatTemplate(const TokenizerArgs& args) : args_(args) {
   try {
     template_ = std::make_unique<minja::chat_template>(
-        args_.chat_template(), args_.bos_token(), args_.eos_token());
+        normalize_minja_tests(args_.chat_template()),
+        args_.bos_token(),
+        args_.eos_token());
     LOG(INFO) << "Jinja chat template init succeed.";
 
   } catch (const std::exception& e) {

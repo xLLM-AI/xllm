@@ -509,11 +509,12 @@ TEST(DisaggPDSchedulerTest, AmortizedTokenLatencyRoundsHalfUp) {
   EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(37, 1), 37);
 }
 
-TEST(DisaggPDSchedulerTest, SpeculativeGaugeReportsBatchMeanTokensPerStep) {
+TEST(DisaggPDSchedulerTest, SchedulerDoesNotOverwriteSpeculativeOutputGauge) {
   FakeEngine engine(/*num_blocks=*/8,
                     /*block_size=*/2,
                     /*num_speculative_tokens=*/1);
   TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
+  GAUGE_SET(speculative_mean_tokens_per_decode_step, 4.25);
 
   std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});
   Sequence* first_sequence = first_request->sequences()[0].get();
@@ -535,7 +536,7 @@ TEST(DisaggPDSchedulerTest, SpeculativeGaugeReportsBatchMeanTokensPerStep) {
   scheduler.update_metrics(sequences);
 
   EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
-                   4.0);
+                   4.25);
   EXPECT_EQ(first_sequence->generated_tokens_since_latency(), 0u);
   EXPECT_EQ(second_sequence->generated_tokens_since_latency(), 0u);
 }
@@ -558,6 +559,25 @@ TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
 
   EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
                    -1.0);
+}
+
+TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
+  proto::DisaggRequest request;
+  request.set_include_stop_str_in_output(true);
+  request.set_json_object(true);
+  request.set_json_reasoning_enabled(true);
+
+  std::string serialized;
+  ASSERT_TRUE(request.SerializeToString(&serialized));
+
+  proto::DisaggRequest decoded;
+  ASSERT_TRUE(decoded.ParseFromString(serialized));
+  EXPECT_TRUE(decoded.include_stop_str_in_output());
+  EXPECT_TRUE(decoded.json_object());
+  EXPECT_TRUE(decoded.json_reasoning_enabled());
+  EXPECT_EQ(proto::DisaggRequest::kIncludeStopStrInOutputFieldNumber, 39);
+  EXPECT_EQ(proto::DisaggRequest::kJsonObjectFieldNumber, 40);
+  EXPECT_EQ(proto::DisaggRequest::kJsonReasoningEnabledFieldNumber, 41);
 }
 
 }  // namespace xllm

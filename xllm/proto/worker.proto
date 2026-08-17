@@ -384,6 +384,11 @@ message SquenceOutput {
   TensorList mm_embeddings = 2;
 }
 
+message JsonObjectOutputError {
+  string sample_sequence_id = 1;
+  string message = 2;
+}
+
 message ForwardOutput {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
@@ -392,6 +397,7 @@ message ForwardOutput {
   repeated int32 out_tokens = 6;
   repeated float out_logprobs = 7;
   DiTForwardOutput dit_forward_output = 8;
+  repeated JsonObjectOutputError json_object_errors = 9;
 }
 
 // master create Collective service

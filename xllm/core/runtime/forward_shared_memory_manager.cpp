@@ -285,6 +285,8 @@ size_t get_sampling_params_size(const SamplingParameters& params) {
   size_t total = 0;
 
   total += get_tensor_size(params.selected_token_idxes);
+  total += get_tensor_size(params.filter_mask);
+  total += get_tensor_size(params.filter_bitmask);
   total += get_tensor_size(params.frequency_penalties);
   total += get_tensor_size(params.presence_penalties);
   total += get_tensor_size(params.repetition_penalties);
@@ -599,6 +601,17 @@ inline void write_vector(RawInputSectionCursor& cursor,
   if (size > 0) {
     const uint64_t bytes = size * type_size<T>;
     write_bytes(cursor, vec.data(), bytes);
+  }
+}
+
+void write_json_object_state_snapshots(
+    RawInputSectionCursor& cursor,
+    const std::vector<JsonObjectGrammarSnapshot>& snapshots) {
+  write_data(cursor, static_cast<uint64_t>(snapshots.size()));
+  for (const auto& snapshot : snapshots) {
+    write_data(cursor, snapshot.enabled);
+    write_data(cursor, snapshot.reasoning_enabled);
+    write_vector(cursor, snapshot.token_ids);
   }
 }
 
@@ -1562,6 +1575,19 @@ inline void read_vector(ReadContext& context, std::vector<T>& vec) {
   }
 }
 
+void read_json_object_state_snapshots(
+    ReadContext& context,
+    std::vector<JsonObjectGrammarSnapshot>& snapshots) {
+  uint64_t size;
+  read_data(context, size);
+  snapshots.resize(size);
+  for (auto& snapshot : snapshots) {
+    read_data(context, snapshot.enabled);
+    read_data(context, snapshot.reasoning_enabled);
+    read_vector(context, snapshot.token_ids);
+  }
+}
+
 template <typename T>
 inline void read_tensor_and_vector(ReadContext& context,
                                    torch::Tensor& tensor,
@@ -2463,6 +2489,8 @@ inline void deserialize_forward_input_payload(
   if (selected_token_idxes_size > 0) {
     auto& sampling_params = forward_input.sampling_params;
     read_tensor(context, sampling_params.selected_token_idxes, stream);
+    read_tensor(context, sampling_params.filter_mask, stream);
+    read_tensor(context, sampling_params.filter_bitmask, stream);
     read_tensor(context, sampling_params.frequency_penalties, stream);
     read_tensor(context, sampling_params.presence_penalties, stream);
     read_tensor(context, sampling_params.repetition_penalties, stream);
@@ -2484,6 +2512,10 @@ inline void deserialize_forward_input_payload(
   }
   // acc_logprob
   read_tensor(context, forward_input.sampling_params.acc_logprob, stream);
+  read_string_vector(context, forward_input.sample_sequence_ids);
+  read_vector(context, forward_input.sample_prior_output_rows);
+  read_json_object_state_snapshots(context,
+                                   forward_input.json_object_state_snapshots);
 
   // Keep transfer/eplb host-materialized, but continue advancing the
   // device cursor when a contiguous device buffer is active.
@@ -2588,6 +2620,16 @@ size_t calculate_raw_sample_output_size(const RawSampleOutput& sample) {
   return size;
 }
 
+size_t calculate_json_object_errors_size(
+    const std::vector<JsonObjectOutputError>& errors) {
+  size_t size = type_size<uint64_t>;
+  for (const JsonObjectOutputError& error : errors) {
+    size += get_string_size(error.sample_sequence_id);
+    size += get_string_size(error.message);
+  }
+  return size;
+}
+
 size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   size_t size = 0;
 
@@ -2595,6 +2637,8 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   for (const auto& sample : output.outputs) {
     size += calculate_raw_sample_output_size(sample);
   }
+
+  size += calculate_json_object_errors_size(output.json_object_errors);
 
   size += get_vector_size(output.expert_load_data);
   size += get_vector_size(output.src_seq_idxes);
@@ -2660,6 +2704,27 @@ void read_raw_sample_output(const char*& buffer, RawSampleOutput& sample) {
   read_vector_tensor(buffer, sample.mm_embeddings);
 }
 
+void write_json_object_errors(
+    char*& buffer,
+    const std::vector<JsonObjectOutputError>& errors) {
+  write_data(buffer, static_cast<uint64_t>(errors.size()));
+  for (const JsonObjectOutputError& error : errors) {
+    write_string(buffer, error.sample_sequence_id);
+    write_string(buffer, error.message);
+  }
+}
+
+void read_json_object_errors(const char*& buffer,
+                             std::vector<JsonObjectOutputError>& errors) {
+  uint64_t error_count;
+  read_data(buffer, error_count);
+  errors.resize(error_count);
+  for (JsonObjectOutputError& error : errors) {
+    read_string(buffer, error.sample_sequence_id);
+    read_string(buffer, error.message);
+  }
+}
+
 void deserialize_raw_forward_output(const char* buffer,
                                     RawForwardOutput& output) {
   uint64_t outputs_count;
@@ -2668,6 +2733,8 @@ void deserialize_raw_forward_output(const char* buffer,
   for (auto& sample : output.outputs) {
     read_raw_sample_output(buffer, sample);
   }
+
+  read_json_object_errors(buffer, output.json_object_errors);
 
   read_vector(buffer, output.expert_load_data);
   read_vector(buffer, output.src_seq_idxes);
@@ -2689,6 +2756,8 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
   for (const auto& sample : output.outputs) {
     write_raw_sample_output(buffer, sample);
   }
+
+  write_json_object_errors(buffer, output.json_object_errors);
 
   write_vector(buffer, output.expert_load_data);
   write_vector(buffer, output.src_seq_idxes);
@@ -2868,6 +2937,8 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, selected_token_idxes_size);
   if (selected_token_idxes_size > 0) {
     write_tensor(context, sampling_params.selected_token_idxes);
+    write_tensor(context, sampling_params.filter_mask);
+    write_tensor(context, sampling_params.filter_bitmask);
     write_tensor(context, sampling_params.frequency_penalties);
     write_tensor(context, sampling_params.presence_penalties);
     write_tensor(context, sampling_params.repetition_penalties);
@@ -2889,6 +2960,10 @@ inline void serialize_forward_input_sections(
   }
 
   write_tensor(context, sampling_params.acc_logprob);
+  write_string_vector(context.descriptor, input.sample_sequence_ids);
+  write_vector(context.descriptor, input.sample_prior_output_rows);
+  write_json_object_state_snapshots(context.descriptor,
+                                    input.json_object_state_snapshots);
 
   write_data(context.descriptor,
              static_cast<uint64_t>(input.transfer_kv_infos.size()));
@@ -3321,7 +3396,8 @@ bool ForwardSharedMemoryManager::raw_output_write(
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
-    const torch::Tensor& out_logprobs) {
+    const torch::Tensor& out_logprobs,
+    const std::vector<JsonObjectOutputError>& json_object_errors) {
   RawForwardOutput output;
   convert_tensor_to_raw_output(next_tokens,
                                logprobs,
@@ -3337,6 +3413,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
                                out_tokens,
                                out_logprobs,
                                output);
+  output.json_object_errors = json_object_errors;
   uint64_t total_size = sizeof(ControlMetadata);
   total_size += calculate_raw_forward_output_size(output);
   if (unlikely(total_size > size())) {

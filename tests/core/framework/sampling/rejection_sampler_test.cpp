@@ -249,6 +249,58 @@ TEST(RejectionSamplerTest, GreedyForwardAllowsUndefinedDraftProbs) {
                            torch::tensor({{1, 3, -1}, {3, 4, 1}}, device)));
 }
 
+TEST(RejectionSamplerTest, GreedyRejectsGrammarMaskedDraftToken) {
+  const auto options = get_test_options(torch::kFloat32);
+
+  // The JSON grammar mask removes draft token 0 from the target distribution.
+  const auto draft_token_ids =
+      torch::tensor({{0}}, options.dtype(torch::kInt64));
+  const auto target_probs = torch::tensor({{{0.0F, 1.0F, 0.0F}}}, options);
+  const auto bonus_token_ids =
+      torch::tensor({{2}}, options.dtype(torch::kInt64));
+
+  auto [output, masked_output] =
+      RejectionSampler::greedy_sample(draft_token_ids,
+                                      target_probs,
+                                      bonus_token_ids,
+                                      /*mask_out_rejected_tokens=*/true);
+
+  const auto expected_output =
+      torch::tensor({{1, 2}}, options.dtype(torch::kInt64));
+  const auto expected_masked_output =
+      torch::tensor({{1, -1}}, options.dtype(torch::kInt64));
+  EXPECT_TRUE(torch::equal(output, expected_output));
+  EXPECT_TRUE(torch::equal(masked_output, expected_masked_output));
+}
+
+TEST(RejectionSamplerTest, RandomRejectsGrammarMaskedDraftToken) {
+  const auto options = get_test_options(torch::kFloat32);
+
+  // The JSON grammar mask removes draft token 0 from the target distribution.
+  const auto draft_token_ids =
+      torch::tensor({{0}}, options.dtype(torch::kInt64));
+  const auto draft_probs = torch::tensor({{{1.0F, 0.0F, 0.0F}}}, options);
+  const auto target_probs = torch::tensor({{{0.0F, 1.0F, 0.0F}}}, options);
+  const auto uniform_rand = torch::tensor({{0.5F}}, options);
+  const auto bonus_token_ids =
+      torch::tensor({{2}}, options.dtype(torch::kInt64));
+
+  auto [output, masked_output] =
+      RejectionSampler::random_sample(draft_token_ids,
+                                      draft_probs,
+                                      target_probs,
+                                      uniform_rand,
+                                      bonus_token_ids,
+                                      /*mask_out_rejected_tokens=*/true);
+
+  const auto expected_output =
+      torch::tensor({{1, 2}}, options.dtype(torch::kInt64));
+  const auto expected_masked_output =
+      torch::tensor({{1, -1}}, options.dtype(torch::kInt64));
+  EXPECT_TRUE(torch::equal(output, expected_output));
+  EXPECT_TRUE(torch::equal(masked_output, expected_masked_output));
+}
+
 TEST(RejectionSamplerTest, LogProbs) {
   const auto options = get_test_options(torch::kFloat32);
   const auto device = get_test_device();
@@ -574,6 +626,37 @@ TEST(RejectionSamplerTest, RandomFused) {
       }
     }
   }
+}
+
+TEST(RejectionSamplerTest, RandomFusedRejectsGrammarMaskedDraftToken) {
+  if (!Platform::is_mlu() || Platform::device_count() == 0) {
+    GTEST_SKIP() << "Skipping test: MLU device required.";
+  }
+
+  const torch::Device device(Platform::type_torch(), 0);
+  const auto options = torch::dtype(torch::kFloat32).device(device);
+
+  // The JSON grammar mask removes draft token 0 from the target distribution.
+  const auto draft_token_ids =
+      torch::tensor({{0}}, options.dtype(torch::kInt64));
+  const auto draft_probs = torch::tensor({{{1.0F, 0.0F, 0.0F}}}, options);
+  const auto target_probs = torch::tensor({{{0.0F, 1.0F, 0.0F}}}, options);
+  const auto uniform_rand = torch::tensor({{0.5F}}, options);
+  const auto bonus_token_ids =
+      torch::tensor({{2}}, options.dtype(torch::kInt64));
+
+  auto [output, masked_output] =
+      RejectionSampler::random_sample_fused(draft_token_ids,
+                                            draft_probs,
+                                            target_probs,
+                                            uniform_rand,
+                                            bonus_token_ids,
+                                            /*mask_out_rejected_tokens=*/true);
+
+  const auto expected_masked_output =
+      torch::tensor({{1, -1}}, options.dtype(torch::kInt64));
+  EXPECT_TRUE(torch::equal(output, expected_masked_output));
+  EXPECT_TRUE(torch::equal(masked_output, expected_masked_output));
 }
 
 TEST(RejectionSamplerTest, RandomFusedRecoveryDistribution) {

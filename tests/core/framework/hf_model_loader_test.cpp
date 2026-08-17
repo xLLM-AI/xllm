@@ -244,6 +244,39 @@ TEST(HFModelLoaderTest, RecFactoryCreatesRecCausalLmInstance) {
 }
 
 #if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU)
+TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
+  auto loader = ModelRegistry::get_model_args_loader("deepseek_v4");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "deepseek_v4",
+      "hidden_size": 4096,
+      "num_hidden_layers": 43,
+      "num_attention_heads": 32,
+      "num_key_value_heads": 1,
+      "compress_ratios": [1],
+      "dspark_block_size": 5,
+      "dspark_markov_rank": 256,
+      "dspark_noise_token_id": 128799,
+      "dspark_target_layer_ids": [40, 41, 42]
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_EQ(args.model_type(), "deepseek_v4");
+  EXPECT_EQ(args.dspark_num_layers(), 3);
+  // Base loader leaves this 0; applied later in
+  // configure_deepseek_v4_dspark_args.
+  EXPECT_EQ(args.dspark_block_size(), 0);
+  EXPECT_EQ(args.markov_rank(), 256);
+  ASSERT_EQ(args.compress_ratios().size(), 43);
+}
+#endif
+
 TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromDenseConfig) {
   auto loader = ModelRegistry::get_model_args_loader("qwen3_5_mtp");
   ASSERT_NE(loader, nullptr);

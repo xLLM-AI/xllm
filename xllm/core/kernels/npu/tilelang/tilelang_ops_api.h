@@ -62,6 +62,17 @@ void spec_verify_attention_tiling_update(
     int64_t max_kv_seq_len,
     int64_t kv_split_core_count);
 
+//
+// Return whether the packed allowed-token mask can use the TileLang fast path.
+bool can_apply_token_bitmask_inplace(const torch::Tensor& logits,
+                                     const torch::Tensor& bitmask);
+
+// Apply [rows, ceil(vocab / 32)] packed allowed-token words to logits in place.
+// Invalid inputs trigger CHECK failures; callers should use the predicate when
+// an ATen fallback is available.
+void apply_token_bitmask_inplace(torch::Tensor& logits,
+                                 const torch::Tensor& bitmask);
+
 // Apply TileLang RoPE kernel in-place on a single input tensor.
 // Invalid inputs trigger CHECK failures.
 // Supports input not contiguous, with stride.

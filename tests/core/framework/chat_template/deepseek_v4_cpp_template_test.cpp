@@ -127,6 +127,26 @@ TEST(DeepseekV4CppTemplate, ThinkingModeAddsThinkAfterLastUser) {
                 "<｜User｜>Hello<｜Assistant｜><think>");
 }
 
+TEST(DeepseekV4CppTemplate, ReportsRenderedGenerationMode) {
+  auto encoder = make_encoder();
+  ChatMessages messages;
+  messages.emplace_back("user", "Hello");
+
+  auto chat = encoder.apply_with_generation_mode(
+      messages,
+      /*json_tools=*/{},
+      nlohmann::ordered_json{{"thinking", false}});
+  ASSERT_TRUE(chat.has_value());
+  EXPECT_EQ(chat->generation_mode, ChatTemplateGenerationMode::CHAT);
+
+  auto reasoning = encoder.apply_with_generation_mode(
+      messages,
+      /*json_tools=*/{},
+      nlohmann::ordered_json{{"thinking", true}});
+  ASSERT_TRUE(reasoning.has_value());
+  EXPECT_EQ(reasoning->generation_mode, ChatTemplateGenerationMode::REASONING);
+}
+
 TEST(DeepseekV4CppTemplate, UsesToolCallsBlockName) {
   auto encoder = make_encoder();
 

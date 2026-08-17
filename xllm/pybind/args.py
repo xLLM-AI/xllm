@@ -86,7 +86,7 @@ class ArgumentParser:
             "--speculative_algorithm",
             type=str,
             default="MTP",
-            help="Speculative decoding algorithm. Supported options: MTP, Eagle3, Suffix, DFlash.",
+            help="Speculative decoding algorithm. Supported options: MTP, Eagle3, Suffix, DFlash, DSpark.",
         )
         self.parser.add_argument(
             "--num_request_handling_threads", type=int, default=4, help="Number of handling threads."

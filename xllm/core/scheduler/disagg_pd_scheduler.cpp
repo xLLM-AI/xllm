@@ -497,6 +497,9 @@ void DisaggPDScheduler::dispatch_requests() {
       req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
       req->set_include_stop_str_in_output(
           requests[i]->state().include_stop_str_in_output);
+      req->set_json_object(requests[i]->state().sampling_param.json_object);
+      req->set_json_reasoning_enabled(
+          requests[i]->state().json_reasoning_enabled);
       //*reqs.mutable_reqs()->Add() = req;
     }
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
@@ -1129,8 +1132,6 @@ void DisaggPDScheduler::update_token_latency_metrics(
   const auto now = absl::Now();
   const bool speculative_metrics_enabled =
       options_.num_speculative_tokens() > 0;
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
@@ -1153,18 +1154,12 @@ void DisaggPDScheduler::update_token_latency_metrics(
       if (speculative_metrics_enabled && committed_tokens > 0) {
         inter_token_latency_us =
             amortized_token_latency(tbt_microseconds, committed_tokens);
-        step_committed_tokens += static_cast<int64_t>(committed_tokens);
-        ++step_decode_seqs;
       }
       HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
                         inter_token_latency_us);
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
                         microseconds_to_milliseconds(inter_token_latency_us));
     }
-  }
-  if (step_decode_seqs > 0) {
-    GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              static_cast<double>(step_committed_tokens) / step_decode_seqs);
   }
 }
 

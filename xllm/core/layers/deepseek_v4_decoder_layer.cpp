@@ -249,6 +249,15 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   return x;
 }
 
+void DeepseekV4DecoderLayerImpl::write_context_kv(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    const torch::Tensor& slot_mapping,
+    KVCache& kv_cache) {
+  attention_->write_context_kv(hidden_states, cos, sin, slot_mapping, kv_cache);
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 DeepseekV4DecoderLayerImpl::hc_pre(const torch::Tensor& x,
                                    const torch::Tensor& hc_fn,

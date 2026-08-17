@@ -20,6 +20,9 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "batch_input_builder.h"
@@ -65,6 +68,54 @@ Token make_empty_logprob_placeholder(const Sequence& seq) {
   const int64_t placeholder_token_id =
       prompt_tokens.empty() ? 0 : prompt_tokens[0];
   return Token(placeholder_token_id);
+}
+
+std::unordered_set<std::string> fail_json_object_requests(
+    const std::vector<Sequence*>& sequences,
+    const std::vector<JsonObjectOutputError>& errors) {
+  std::unordered_set<std::string> failed_request_ids;
+  if (errors.empty()) {
+    return failed_request_ids;
+  }
+
+  std::unordered_map<std::string, Sequence*> sequences_by_sample_id;
+  sequences_by_sample_id.reserve(sequences.size());
+  for (Sequence* sequence : sequences) {
+    CHECK(sequence != nullptr);
+    const bool inserted =
+        sequences_by_sample_id.emplace(sequence->sample_sequence_id(), sequence)
+            .second;
+    CHECK(inserted) << "duplicate sampled sequence id in batch: "
+                    << sequence->sample_sequence_id();
+  }
+
+  std::unordered_map<std::string, Status> request_errors;
+  request_errors.reserve(errors.size());
+  for (const JsonObjectOutputError& error : errors) {
+    CHECK(!error.sample_sequence_id.empty())
+        << "json_object output error has empty sampled sequence id";
+    const auto sequence_iter =
+        sequences_by_sample_id.find(error.sample_sequence_id);
+    CHECK(sequence_iter != sequences_by_sample_id.end())
+        << "json_object output error references unknown sampled sequence id: "
+        << error.sample_sequence_id;
+
+    const std::string& request_id = sequence_iter->second->request_id();
+    request_errors.try_emplace(request_id,
+                               StatusCode::UNKNOWN,
+                               "json_object constrained decoding failed for " +
+                                   error.sample_sequence_id + ": " +
+                                   error.message);
+    failed_request_ids.emplace(request_id);
+  }
+
+  for (Sequence* sequence : sequences) {
+    const auto error_iter = request_errors.find(sequence->request_id());
+    if (error_iter != request_errors.end()) {
+      sequence->fail(error_iter->second);
+    }
+  }
+  return failed_request_ids;
 }
 
 }  // namespace
@@ -476,11 +527,20 @@ void Batch::refresh_onerec_prefill_output_targets() {
 
 void Batch::process_sample_output(const RawForwardOutput& raw_output,
                                   bool replace_fake_token) {
+  const std::vector<Sequence*> sequences = get_sequences();
+  const std::unordered_set<std::string> failed_request_ids =
+      fail_json_object_requests(sequences, raw_output.json_object_errors);
+
   for (size_t output_idx = 0; output_idx < output_targets_.size();
        ++output_idx) {
     const auto& target = output_targets_[output_idx];
     auto* seq = target.sequence;
     CHECK(seq != nullptr);
+
+    if (failed_request_ids.contains(seq->request_id()) ||
+        seq->error_status().has_value()) {
+      continue;
+    }
 
     if (output_idx < raw_output.outputs.size()) {
       const auto& seq_mm_embeddings =
@@ -516,6 +576,9 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
       const auto& raw_token = raw_sample_output.tokens[token_idx];
       append_token_for_sequence(
           seq, make_token(raw_token), token_idx, replace_fake_token);
+      if (seq->error_status().has_value()) {
+        break;
+      }
 
       if (!raw_token.embeddings.empty()) {
         torch::Tensor embeddings = torch::tensor(raw_token.embeddings);
@@ -634,6 +697,9 @@ void Batch::process_sample_output(const SampleOutput& sample_output,
     const auto& target = output_targets_[output_idx];
     auto* seq = target.sequence;
     CHECK(seq != nullptr);
+    if (seq->error_status().has_value()) {
+      continue;
+    }
 
     if (!target.from_sample_slot) {
       if (seq->finished()) {
@@ -699,6 +765,9 @@ void Batch::append_token_for_sequence(Sequence* seq,
   // always append a token, maybe true or fake token
   if (!replace_fake_token) {
     seq->append_token(token);
+    if (seq->error_status().has_value()) {
+      return;
+    }
     if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
       seq->pre_scheduled_step_prefill_queue().push(false);
       // if not replace_fake_token, pop out here to avoid endless growth
@@ -709,6 +778,9 @@ void Batch::append_token_for_sequence(Sequence* seq,
   } else if (!seq->cancelled()) {
     // truely update the real token if replace_fake_token
     seq->update_last_step_token(token, token_idx);
+    if (seq->error_status().has_value()) {
+      return;
+    }
     if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() &&
         token_idx == 0) {
       seq->pre_scheduled_step_prefill_queue().pop();
@@ -724,6 +796,10 @@ void Batch::process_beam_search(bool force_requested_result_size) {
 
 void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
                                        bool replace_fake_token) {
+  const std::vector<Sequence*> sequences = get_sequences();
+  const std::unordered_set<std::string> failed_request_ids =
+      fail_json_object_requests(sequences, raw_output.json_object_errors);
+
   const int32_t beam_width = sequences_[0]->sampling_param()->beam_width;
   if (beam_width <= 1) {
     return;
@@ -734,13 +810,27 @@ void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
   CHECK_EQ(raw_output.out_logprobs.size(), sequences_.size());
 
   auto update_for_sequence_group = [&](size_t sequence_group_id) {
+    CHECK_LT(sequence_group_id, sequence_groups_.size());
+    const auto& group_sequences =
+        sequence_groups_[sequence_group_id]->sequences();
+    CHECK(!group_sequences.empty());
+    if (failed_request_ids.contains(group_sequences[0]->request_id())) {
+      return;
+    }
+
     std::unordered_set<int32_t> seq_idx_set;
     std::vector<float> src_acc_logprob_vec;
     std::vector<std::vector<int32_t>> src_token_ids;
     std::vector<std::vector<std::optional<float>>> src_logprobs;
+    const bool restore_json_states =
+        group_sequences[0]->json_object_state() != nullptr;
+    std::vector<JsonObjectGrammarSnapshot> src_json_states;
     src_acc_logprob_vec.resize(beam_width);
     src_token_ids.resize(beam_width);
     src_logprobs.resize(beam_width);
+    if (restore_json_states) {
+      src_json_states.resize(beam_width);
+    }
 
     for (size_t i = 0; i < beam_width; i++) {
       size_t task_id = sequence_group_id * beam_width + i;
@@ -750,6 +840,12 @@ void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
       src_acc_logprob_vec[i] = src_seq->get_acc_logprob();
       src_token_ids[i] = std::vector<int32_t>(src_seq->tokens());
       src_logprobs[i] = src_seq->logprob_state()->get_logprobs();
+      if (restore_json_states) {
+        const JsonObjectGrammarState* json_state = src_seq->json_object_state();
+        CHECK(json_state != nullptr)
+            << "beam sequences in one request must share JSON grammar state";
+        src_json_states[i] = json_state->snapshot();
+      }
     }
 
     for (size_t i = 0; i < beam_width; i++) {
@@ -758,6 +854,11 @@ void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
       CHECK_LE(src_seq_idx, sequences_.size());
       auto& base_seq = sequences_[task_id];
       auto& src_seq = sequences_[src_seq_idx];
+
+      if (restore_json_states &&
+          !base_seq->restore_json_object_state(src_json_states[i])) {
+        return;
+      }
 
       for (size_t token_idx = base_seq->num_prompt_tokens();
            token_idx < base_seq->num_tokens();
@@ -771,6 +872,9 @@ void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
       new_token.logprob =
           raw_output.out_logprobs[task_id] - src_acc_logprob_vec[i];
       append_token_for_sequence(base_seq, new_token, 0, replace_fake_token);
+      if (base_seq->error_status().has_value()) {
+        return;
+      }
 
       base_seq->logprob_state()->set_acc_logprob(
           raw_output.out_logprobs[task_id]);

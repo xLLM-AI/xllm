@@ -329,5 +329,128 @@ void sync_pruned_boundary_outputs(SampleOutput& sample_output,
       sample_output, target_output, batch_size, num_val_tokens, masks);
 }
 
+void scatter_varlen_target_output_to_dense(
+    ForwardOutput& target_output,
+    const std::vector<int32_t>& per_seq_val_tokens,
+    int32_t batch_size,
+    int32_t max_val_tokens,
+    int64_t next_token_pad_value) {
+  CHECK(target_output.logits.defined())
+      << "target logits must be defined for varlen->dense scatter";
+  const int32_t total_tokens =
+      static_cast<int32_t>(target_output.logits.size(0));
+  const int64_t padded_total =
+      static_cast<int64_t>(batch_size) * max_val_tokens;
+  if (total_tokens == static_cast<int32_t>(padded_total)) {
+    // Already uniform max width; no scatter needed.
+    return;
+  }
+  const int32_t vocab_size =
+      static_cast<int32_t>(target_output.logits.size(-1));
+
+  // Pure order-preserving scatter: seq i's cu-packed rows [cu_offset,
+  // cu_offset + seq_tokens) map 1:1 onto dense cols [0, seq_tokens) of row i.
+  // The source rows are exactly [0, total_tokens) in order, so index_copy_
+  // reads target_output.logits directly with no source gather. Row j is the
+  // target's prediction after seeing anchor + draft[0..j-1]; col 0 predicts
+  // draft[0] (anchor row) and col (seq_tokens - 1) is the per-seq bonus.
+  // Trailing cols [seq_tokens, max_val_tokens) stay padded, so the bonus lands
+  // at col (seq_tokens - 1), NOT the fixed last column; validate() and
+  // apply_pruned_prefix_lengths therefore read the bonus/cut position per-seq.
+  std::vector<int64_t> dst_indices_vec;
+  dst_indices_vec.reserve(static_cast<size_t>(total_tokens));
+  for (int32_t i = 0; i < batch_size; ++i) {
+    const int32_t seq_tokens = per_seq_val_tokens[static_cast<size_t>(i)];
+    for (int32_t j = 0; j < seq_tokens; ++j) {
+      dst_indices_vec.push_back(static_cast<int64_t>(i) * max_val_tokens + j);
+    }
+  }
+  torch::Tensor dst_indices =
+      torch::tensor(dst_indices_vec,
+                    torch::TensorOptions()
+                        .dtype(torch::kLong)
+                        .device(target_output.logits.device()));
+
+  // Logits pad to [B*max_val_tokens, V]. Only the padding rows need the -inf
+  // sentinel (strictly-rejecting distribution); using empty + a targeted
+  // index_fill_ over the complement of dst_indices avoids paying vocab_size ×
+  // padded_total writes when most rows get overwritten by index_copy_.
+  torch::Tensor padded_logits =
+      torch::empty({padded_total, vocab_size}, target_output.logits.options());
+  if (dst_indices_vec.size() < static_cast<size_t>(padded_total)) {
+    std::vector<bool> valid(static_cast<size_t>(padded_total), false);
+    for (int64_t idx : dst_indices_vec) {
+      valid[static_cast<size_t>(idx)] = true;
+    }
+    std::vector<int64_t> pad_indices_vec;
+    pad_indices_vec.reserve(static_cast<size_t>(padded_total) -
+                            dst_indices_vec.size());
+    for (int64_t i = 0; i < padded_total; ++i) {
+      if (!valid[static_cast<size_t>(i)]) {
+        pad_indices_vec.push_back(i);
+      }
+    }
+    torch::Tensor pad_indices =
+        torch::tensor(pad_indices_vec,
+                      torch::TensorOptions()
+                          .dtype(torch::kLong)
+                          .device(target_output.logits.device()));
+    padded_logits.index_fill_(/*dim=*/0, pad_indices, -1e9);
+  }
+  padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);
+  target_output.logits = padded_logits;
+
+  if (target_output.sample_output.next_tokens.defined()) {
+    torch::Tensor padded_next_tokens =
+        torch::full({padded_total},
+                    next_token_pad_value,
+                    target_output.sample_output.next_tokens.options());
+    padded_next_tokens.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.next_tokens);
+    target_output.sample_output.next_tokens = padded_next_tokens;
+  }
+  if (target_output.sample_output.embeddings.defined()) {
+    const int32_t hidden_size =
+        static_cast<int32_t>(target_output.sample_output.embeddings.size(-1));
+    torch::Tensor padded_embeddings =
+        torch::zeros({padded_total, hidden_size},
+                     target_output.sample_output.embeddings.options());
+    padded_embeddings.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.embeddings);
+    target_output.sample_output.embeddings = padded_embeddings;
+  }
+
+  // Pad sampled logprobs / top_tokens / top_logprobs into the same dense
+  // [B*max_val_tokens, ...] layout. sync_pruned_boundary_{logprobs,
+  // top_logprobs} CHECK_EQ these against B*max_val_tokens and view them as
+  // [batch, max_val_tokens, ...]; leaving them varlen aborts on any actually-
+  // pruned adaptive step whenever the request set logprobs/top_logprobs.
+  if (target_output.sample_output.logprobs.defined()) {
+    torch::Tensor padded_logprobs = torch::zeros(
+        {padded_total}, target_output.sample_output.logprobs.options());
+    padded_logprobs.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.logprobs);
+    target_output.sample_output.logprobs = padded_logprobs;
+  }
+  if (target_output.sample_output.top_tokens.defined()) {
+    const int64_t top_k = target_output.sample_output.top_tokens.size(-1);
+    torch::Tensor padded_top_tokens =
+        torch::zeros({padded_total, top_k},
+                     target_output.sample_output.top_tokens.options());
+    padded_top_tokens.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.top_tokens);
+    target_output.sample_output.top_tokens = padded_top_tokens;
+  }
+  if (target_output.sample_output.top_logprobs.defined()) {
+    const int64_t top_k = target_output.sample_output.top_logprobs.size(-1);
+    torch::Tensor padded_top_logprobs =
+        torch::zeros({padded_total, top_k},
+                     target_output.sample_output.top_logprobs.options());
+    padded_top_logprobs.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.top_logprobs);
+    target_output.sample_output.top_logprobs = padded_top_logprobs;
+  }
+}
+
 }  // namespace adaptive_pruning
 }  // namespace xllm

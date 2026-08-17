@@ -58,6 +58,8 @@ class Request : public RequestBase {
 
   bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
 
+  std::optional<Status> error_status() const;
+
   RequestOutput generate_output(const Tokenizer& tokenizer,
                                 ThreadPool* thread_pool = nullptr);
 
@@ -166,6 +168,8 @@ class Request : public RequestBase {
 
  private:
   RequestState state_;
+  std::shared_ptr<RequestFailureState> failure_state_ =
+      std::make_shared<RequestFailureState>();
   // list of sequences to generate completions for the prompt
   // use deque instead of vector to avoid no-copy move for Sequence
   //  std::deque<Sequence> sequences;

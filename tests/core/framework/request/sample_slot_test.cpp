@@ -205,6 +205,49 @@ TEST(SampleSlotTest, RequestPropagatesSampleSlotsToSequenceRuntime) {
   EXPECT_EQ(runtime_sample_slots[1].sample_id, 1);
 }
 
+TEST(RequestTest, GenerateOutputReturnsSequenceFailureStatus) {
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  RequestState request_state(
+      "abc",
+      std::vector<int32_t>{10, 11, 12},
+      sampling_param,
+      SchedulerParam{},
+      stopping_checker,
+      /*seq_capacity=*/8,
+      /*n=*/1,
+      /*best_of=*/1,
+      /*logprobs=*/false,
+      /*stream=*/false,
+      /*echo=*/false,
+      /*skip_special_tokens=*/true,
+      /*enable_schedule_overlap=*/true,
+      [](const RequestOutput&) { return true; },
+      OutputsFunc{});
+  Request request("req-error", "", "", request_state);
+  Status failure(StatusCode::UNKNOWN,
+                 "json_object constrained decoding failed");
+  request.sequences()[0]->fail(failure);
+
+  Sequence copied_sequence(*request.sequences()[0], /*index=*/1);
+  EXPECT_EQ(copied_sequence.sample_sequence_id(), "req-error#1");
+  copied_sequence.reset_finish_state_for_beam_search();
+  EXPECT_TRUE(copied_sequence.finished());
+  ASSERT_TRUE(copied_sequence.error_status().has_value());
+
+  CharTokenizer tokenizer;
+  const RequestOutput output = request.generate_output(tokenizer);
+
+  EXPECT_TRUE(output.finished);
+  ASSERT_TRUE(output.status.has_value());
+  EXPECT_EQ(output.status->code(), StatusCode::UNKNOWN);
+  EXPECT_EQ(output.status->message(),
+            "json_object constrained decoding failed");
+  EXPECT_TRUE(output.outputs.empty());
+  ASSERT_TRUE(output.usage.has_value());
+  EXPECT_EQ(output.usage->num_generated_tokens, 0u);
+}
+
 TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
   torch::Device device(Platform::type_torch(), 0);
   BlockManager::Options options;

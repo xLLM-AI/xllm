@@ -58,6 +58,14 @@ DEFINE_bool(enable_mega_moe,
             false,
             "enable mega_moe fused operator for MoE expert parallel.");
 
+DEFINE_bool(enable_dspark_native_sas,
+            false,
+            "Enable native NPU DSpark SparseAttnSharedkv semantics with a "
+            "gamma-wide query block, non-empty ori_sparse_indices, and an "
+            "expanded SWA window. Older operators that reject non-empty "
+            "ori_sparse_indices may terminate during tiling; keep this false "
+            "to use q_len=1 compatibility mode.");
+
 DEFINE_bool(enable_flashcomm1,
             false,
             "Enable Flash Communication 1 sequence-parallel optimization.");
@@ -108,6 +116,7 @@ void KernelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_swiglu);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mega_moe);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dspark_native_sas);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(flashcomm1_min_prefill_tokens);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mmrs_fusion);
@@ -126,10 +135,14 @@ void KernelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_swiglu);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mega_moe);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dspark_native_sas);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(flashcomm1_min_prefill_tokens);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mmrs_fusion);
   XLLM_CONFIG_ASSIGN_FROM_JSON(mmrs_comm_mode);
+#else
+  CHECK(!json.value_or<bool>("enable_dspark_native_sas", false))
+      << "enable_dspark_native_sas is only supported on NPU.";
 #endif
 }
 
@@ -155,6 +168,8 @@ void KernelConfig::append_config_json(
       config_json, default_config, enable_aclnn_swiglu);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mega_moe);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_dspark_native_sas);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_flashcomm1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

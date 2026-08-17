@@ -16,12 +16,15 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "core/runtime/mtp_async_state.h"
-#include "framework/kv_cache/embedding_cache.h"
+#include "core/framework/speculative/embedding_cache.h"
+#include "core/framework/speculative/mtp_async_state.h"
+#include "core/framework/speculative/mtp_json_object_state.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
@@ -33,6 +36,10 @@ namespace xllm {
 
 #if defined(USE_NPU)
 using namespace llm_datadist;
+
+namespace detail {
+class NpuJsonDraftTokenHandoff;
+}  // namespace detail
 #endif
 
 // MTP (Multi-Token Prediction) speculative worker.
@@ -44,7 +51,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const torch::Device& device,
                 const runtime::Options& options);
 
-  ~MTPWorkerImpl() override = default;
+  ~MTPWorkerImpl() override;
 
  protected:
   // For derived classes (e.g. Eagle3WorkerImpl) that need custom options for
@@ -82,6 +89,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 #endif
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
+  ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& inputs) override;
   void prepare_work_before_execute(const ForwardInput& inputs,
                                    ForwardInput& processed_inputs) override;
 
@@ -94,9 +103,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   std::optional<ForwardOutput> step_empty(const ForwardInput& inputs) override;
 
   void fill_validate_input_from_draft_outputs(
+      const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
       const std::vector<int32_t>& per_seq_val_tokens,
+      const detail::JsonDraftValidationScratch* json_scratch,
       Stream& compute_stream);
   // Adaptive pruning path: compute per-seq prefix lengths, truncate draft
   // outputs, and run variable-length validate.
@@ -110,14 +121,16 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
       int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      const std::vector<int32_t>* pruned_prefix_lengths,
+      const detail::JsonDraftValidationScratch* json_scratch);
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
       int32_t num_speculative_tokens,
       const std::vector<int32_t>& per_seq_val_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      const std::vector<int32_t>* pruned_prefix_lengths,
+      const detail::JsonDraftValidationScratch* json_scratch);
 
   virtual SampleOutput validate(
       const SamplingParameters& sampling_params,
@@ -128,7 +141,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       // statically from the declared base type, so an override changing the
       // default would silently diverge when called through a base reference.
       // Callers must pass nullptr explicitly for the static path.
-      const std::vector<int32_t>* pruned_prefix_lengths);
+      const std::vector<int32_t>* pruned_prefix_lengths,
+      const torch::Tensor& target_filter_mask,
+      const torch::Tensor& target_filter_bitmask,
+      const std::vector<uint8_t>& invalid_draft);
 
   // Hook for algorithm-specific draft output post-processing during decode.
   // Default MTP behavior always compresses probs for cache storage.
@@ -140,7 +156,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const torch::Tensor& draft_probs,
       const ForwardOutput& target_output,
       int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr,
+      const torch::Tensor& target_filter_mask = torch::Tensor(),
+      const torch::Tensor& target_filter_bitmask = torch::Tensor(),
+      const std::vector<uint8_t>& invalid_draft = {});
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
@@ -204,6 +223,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     torch::Tensor accepted_embeddings;
     torch::Tensor base_positions;
     torch::Tensor base_kv_seq_lens;
+    std::vector<uint8_t> json_constrained_rows;
+    std::vector<size_t> failed_rows;
     StreamEventPtr ready_event;
   };
 
@@ -222,7 +243,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                   torch::Tensor base_positions,
                                   torch::Tensor base_kv_seq_lens,
                                   StreamEventPtr ready_event,
-                                  torch::Tensor accepted_tokens_host);
+                                  torch::Tensor accepted_tokens_host,
+                                  std::vector<size_t> failed_rows);
   torch::Tensor acquire_accepted_tokens_host_buffer(
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
@@ -277,7 +299,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
-  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
+  // adaptive_spec_controller_ now lives on SpeculativeWorkerImpl (base class).
 
   // Classified once when the corresponding models are loaded. Decode-path
   // decisions only read these closed policies.
@@ -301,6 +323,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // topology, and are rebuilt only when that width changes.
   torch::Tensor mtp_validate_greedy_indices_;
   torch::Tensor mtp_validate_greedy_do_sample_;
+  std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
 #endif
 
 #if defined(USE_NPU) || defined(USE_MLU)

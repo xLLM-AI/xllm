@@ -532,8 +532,6 @@ void ContinuousScheduler::update_token_latency_metrics(
   const auto now = absl::Now();
   const bool speculative_metrics_enabled =
       options_.num_speculative_tokens() > 0;
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
@@ -555,18 +553,12 @@ void ContinuousScheduler::update_token_latency_metrics(
       if (speculative_metrics_enabled && committed_tokens > 0) {
         inter_token_latency_us =
             amortized_token_latency(tbt_microseconds, committed_tokens);
-        step_committed_tokens += static_cast<int64_t>(committed_tokens);
-        ++step_decode_seqs;
       }
       HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
                         inter_token_latency_us);
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
                         microseconds_to_milliseconds(inter_token_latency_us));
     }
-  }
-  if (step_decode_seqs > 0) {
-    GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              static_cast<double>(step_committed_tokens) / step_decode_seqs);
   }
 }
 
@@ -594,6 +586,9 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
         if (request->cancelled()) {
           continue;
         }
+        if (request->error_status().has_value()) {
+          continue;
+        }
         if (!request->finished()) {
           stream_requests.emplace_back(request);
           continue;
@@ -606,7 +601,8 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
       } else if (request->finished() && !request->last_token_handled()) {
         request->handle_last_token();
       }
-    } else if (request->state().stream) {
+    } else if (request->state().stream &&
+               !request->error_status().has_value()) {
       stream_requests.emplace_back(request);
     }
   }

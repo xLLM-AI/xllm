@@ -23,6 +23,8 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+
+#include "core/runtime/json_object_output_rows.h"
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -37,6 +39,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -154,17 +157,55 @@ std::vector<int32_t> read_capture_layer_ids(
       << "Failed to parse block-diffusion draft config: " << config_path;
   std::vector<int32_t> capture_layer_ids;
   for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           std::vector<std::string>{"target_layer_ids",
+           std::vector<std::string>{"dspark_target_layer_ids",
+                                    "target_layer_ids",
                                     "dflash_config.target_layer_ids"},
            std::vector<int32_t>{})) {
     capture_layer_ids.emplace_back(layer_id + 1);
   }
   CHECK(!capture_layer_ids.empty())
-      << "Block-diffusion draft config requires target_layer_ids or "
-         "dflash_config.target_layer_ids: "
+      << "Block-diffusion draft config requires dspark_target_layer_ids, "
+         "target_layer_ids, or dflash_config.target_layer_ids: "
       << config_path;
   return capture_layer_ids;
 }
+
+#if defined(USE_NPU)
+int32_t read_block_size(const std::string& model_weights_path) {
+  JsonReader reader;
+  const std::string config_path = model_weights_path + "/config.json";
+  CHECK(reader.parse(config_path))
+      << "Failed to parse DSpark draft config: " << config_path;
+  return reader.value_or<int32_t>("dspark_block_size", 0);
+}
+
+void configure_deepseek_v4_dspark_args(ModelArgs& args,
+                                       const runtime::Options& options) {
+  CHECK_GT(args.dspark_num_layers(), 0)
+      << "DeepSeek-V4 DSpark requires at least one draft layer.";
+  args.n_layers(args.dspark_num_layers());
+  args.n_hash_layers(0);
+
+  // Default to the checkpoint's block_size; --num_speculative_tokens overrides.
+  const int32_t ckpt_block_size = read_block_size(options.model_path());
+  const int32_t user_num_spec = options.num_speculative_tokens();
+  if (user_num_spec > 0 && user_num_spec != ckpt_block_size) {
+    LOG(WARNING) << "--num_speculative_tokens=" << user_num_spec
+                 << " overrides DSpark checkpoint dspark_block_size="
+                 << ckpt_block_size << ".";
+  }
+  args.dspark_block_size(user_num_spec > 0 ? user_num_spec : ckpt_block_size);
+
+  // DSpark stages are all standard SWA layers. Their stage ids are not target
+  // model layer ids, so target compress_ratios[0..N) must not be reused.
+  args.compress_ratios(
+      std::vector<int32_t>(static_cast<size_t>(args.dspark_num_layers()),
+                           /*value=*/1));
+
+  args.dspark_use_native_sas(
+      KernelConfig::get_instance().enable_dspark_native_sas());
+}
+#endif
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {
@@ -694,16 +735,35 @@ WorkerImpl::estimate_kv_cache_capacity_async() {
 }
 
 void WorkerImpl::update_last_step_output(
-    const std::optional<ForwardOutput>& output) {
-  if (output.value().sample_output.next_tokens.defined()) {
-    last_step_output_ = std::move(output.value());
+    const std::optional<ForwardOutput>& output,
+    const std::vector<std::string>& request_ids,
+    const std::vector<std::string>& sample_sequence_ids) {
+  const bool has_tokens = output.value().sample_output.next_tokens.defined();
+  last_step_output_ = std::move(output.value());
+  last_step_request_ids_ = request_ids;
+  last_step_sample_sequence_ids_ = sample_sequence_ids;
+  if (has_tokens) {
     last_step_output_valid_ = true;
   } else {
-    if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-      last_step_output_ = std::move(output.value());
+    if (!::xllm::EPLBConfig::get_instance().enable_eplb() &&
+        last_step_output_.json_object_errors.empty()) {
+      last_step_request_ids_.clear();
+      last_step_sample_sequence_ids_.clear();
     }
     last_step_output_valid_ = false;
   }
+}
+
+bool WorkerImpl::can_use_last_step_output_for_schedule_overlap(
+    const ForwardInput& input) const {
+  if (!last_step_output_valid_) {
+    return false;
+  }
+  if (input.json_object_states.empty()) {
+    return true;
+  }
+  const auto& request_ids = input.input_params.embedding.request_ids;
+  return detail::has_request_id_overlap(request_ids, last_step_request_ids_);
 }
 
 ForwardInput WorkerImpl::update_input_by_last_step_output(
@@ -748,8 +808,203 @@ std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
 
 ForwardInput WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
     ForwardInput& input) {
+  update_json_object_states_by_last_step_output(input);
+  sanitize_json_object_error_inputs(input);
   return update_input_by_last_step_output(input);
 }
+
+void WorkerImpl::update_json_object_states_by_last_step_output(
+    ForwardInput& input) {
+  if (input.json_object_states.empty()) {
+    return;
+  }
+  CHECK_EQ(input.sample_sequence_ids.size(), input.json_object_states.size())
+      << "JSON grammar states must align with sampled sequence ids";
+  CHECK_EQ(input.sample_prior_output_rows.size(),
+           input.json_object_states.size())
+      << "JSON grammar states must align with prior output rows";
+
+  const bool has_prior_output =
+      last_step_output_valid_ &&
+      last_step_output_.sample_output.next_tokens.defined();
+  torch::Tensor next_tokens;
+  if (has_prior_output) {
+    CHECK(compute_stream_ != nullptr)
+        << "JSON grammar overlap update requires a compute stream";
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    if (last_step_output_.ready_event != nullptr) {
+      CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
+          << "failed to wait for last-step output before JSON grammar update";
+    }
+    next_tokens =
+        safe_to(last_step_output_.sample_output.next_tokens,
+                torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU),
+                /*non_blocking=*/false);
+    CHECK(next_tokens.dim() == 1 || next_tokens.dim() == 2)
+        << "overlap JSON token output must be 1-D or 2-D, got "
+        << next_tokens.sizes();
+  }
+
+  bool expects_prior_output = false;
+  for (size_t state_idx = 0; state_idx < input.json_object_states.size();
+       ++state_idx) {
+    if (input.json_object_states[state_idx].initialized() &&
+        input.sample_prior_output_rows[state_idx] >= 0) {
+      expects_prior_output = true;
+      break;
+    }
+  }
+  if (has_prior_output &&
+      (!last_step_sample_sequence_ids_.empty() || expects_prior_output)) {
+    CHECK_EQ(last_step_sample_sequence_ids_.size(),
+             static_cast<size_t>(next_tokens.size(0)))
+        << "last-step sampled request ids must align with output rows";
+  }
+
+  std::vector<int32_t> output_rows;
+  std::vector<JsonObjectOutputError> output_errors;
+  std::string row_error;
+  const std::vector<std::string> empty_sample_sequence_ids;
+  const std::vector<std::string>& prior_sample_sequence_ids =
+      has_prior_output ? last_step_sample_sequence_ids_
+                       : empty_sample_sequence_ids;
+  CHECK(detail::resolve_json_object_output_rows(input.json_object_states,
+                                                input.sample_sequence_ids,
+                                                input.sample_prior_output_rows,
+                                                prior_sample_sequence_ids,
+                                                &output_rows,
+                                                &output_errors,
+                                                &row_error))
+      << row_error;
+
+  for (const JsonObjectOutputError& output_error : output_errors) {
+    LOG(ERROR) << "JSON overlap row mismatch: sequence_id="
+               << output_error.sample_sequence_id
+               << ", error=" << output_error.message;
+    input.json_object_errors.emplace_back(output_error);
+  }
+
+  for (size_t state_idx = 0; state_idx < input.json_object_states.size();
+       ++state_idx) {
+    JsonObjectGrammarState& state = input.json_object_states[state_idx];
+    if (!state.initialized()) {
+      continue;
+    }
+
+    const std::string& sequence_id = input.sample_sequence_ids[state_idx];
+    const int32_t output_idx = output_rows[state_idx];
+    if (output_idx == detail::kInvalidJsonObjectOutputRow) {
+      state = JsonObjectGrammarState();
+      continue;
+    }
+    if (output_idx == detail::kNoPriorJsonObjectOutputRow) {
+      continue;
+    }
+    CHECK(has_prior_output);
+    CHECK_GE(output_idx, 0);
+    CHECK_LT(output_idx, next_tokens.size(0));
+    if (next_tokens.dim() == 1) {
+      const int32_t token_id =
+          static_cast<int32_t>(next_tokens[output_idx].item<int64_t>());
+      if (token_id >= 0) {
+        if (!state.can_accept_token(token_id)) {
+          const JsonObjectGrammarSnapshot snapshot = state.snapshot();
+          LOG(ERROR)
+              << "last-step token violates json_object grammar, sequence_id="
+              << sequence_id << ", output_row=" << output_idx
+              << ", token_offset=0, token_id=" << token_id
+              << ", committed_tokens=" << snapshot.token_ids.size()
+              << ", state_fingerprint=" << state.fingerprint();
+          input.json_object_errors.push_back(
+              {sequence_id, "prior token violates json_object grammar"});
+          state = JsonObjectGrammarState();
+          continue;
+        }
+        CHECK(state.accept_token(token_id));
+      }
+      continue;
+    }
+
+    const torch::Tensor output_row = next_tokens[output_idx];
+    for (int64_t token_idx = 0; token_idx < output_row.numel(); ++token_idx) {
+      const int32_t token_id =
+          static_cast<int32_t>(output_row[token_idx].item<int64_t>());
+      if (token_id < 0) {
+        break;
+      }
+      if (!state.can_accept_token(token_id)) {
+        const JsonObjectGrammarSnapshot snapshot = state.snapshot();
+        LOG(ERROR)
+            << "last-step token violates json_object grammar, sequence_id="
+            << sequence_id << ", output_row=" << output_idx
+            << ", token_offset=" << token_idx << ", token_id=" << token_id
+            << ", committed_tokens=" << snapshot.token_ids.size()
+            << ", state_fingerprint=" << state.fingerprint();
+        input.json_object_errors.push_back(
+            {sequence_id, "prior token violates json_object grammar"});
+        state = JsonObjectGrammarState();
+        break;
+      }
+      CHECK(state.accept_token(token_id));
+    }
+  }
+  input.sampling_params.filter_bitmask =
+      build_json_object_filter_bitmask(input.json_object_states, device_);
+  // Prefer compact bitmask; clear dense float mask to avoid duplicate H2D.
+  input.sampling_params.filter_mask = torch::Tensor();
+}
+
+void WorkerImpl::sanitize_json_object_error_inputs(ForwardInput& input) {
+  std::string error;
+  CHECK(detail::sanitize_json_object_error_token_ids(
+      &input.token_ids,
+      input.sample_sequence_ids,
+      input.sample_prior_output_rows,
+      input.json_object_errors,
+      &error))
+      << error;
+}
+
+#if defined(USE_NPU)
+torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
+  auto old_cache_slots = input.input_params.attention.device.new_cache_slots;
+  int64_t numel = old_cache_slots.numel();
+  // The logical block stride that BlockManager hands out is
+  // `block_size * kv_split_size_effective` (see llm_engine init). When KV is
+  // not split (kv_split_size == 1) the stride collapses back to block_size.
+  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
+  const int32_t block_size_total = options_.block_size() * kv_split_size;
+  // KV-shard ownership predicate: block whose sub-index inside the logical
+  // block matches this rank's KV-split rank (degenerates to "this rank only"
+  // when kv_split_size == 1, since sub_block_idx is always 0 there).
+  const int32_t owner_kv_split_rank = parallel_args_.kv_split_rank();
+
+  torch::Tensor indices = torch::arange(numel, torch::kCPU);
+  torch::Tensor block_offset = indices % block_size_total;
+  torch::Tensor sub_block_idx =
+      torch::floor_divide(block_offset, options_.block_size());
+  torch::Tensor mask = (sub_block_idx == owner_kv_split_rank);
+  torch::Tensor valid_indices = torch::nonzero(mask).squeeze();
+
+  torch::Tensor new_cache_slots = torch::full_like(old_cache_slots, -1);
+  if (valid_indices.numel() > 0) {
+    const torch::Device slots_device = old_cache_slots.device();
+    torch::Tensor valid_indices_on_device =
+        valid_indices.to(slots_device, /*non_blocking=*/false);
+    torch::Tensor old_slotid =
+        old_cache_slots.index_select(0, valid_indices_on_device)
+            .to(torch::kInt);
+    torch::Tensor block_id = torch::floor_divide(old_slotid, block_size_total);
+    torch::Tensor block_offset_mod = old_slotid % options_.block_size();
+    torch::Tensor new_slotid =
+        block_id * options_.block_size() + block_offset_mod;
+    new_cache_slots.index_put_({valid_indices_on_device},
+                               new_slotid.to(new_cache_slots.scalar_type()));
+  }
+  return new_cache_slots;
+}
+
+#endif
 
 bool WorkerImpl::model_supports_model_cp() const {
   if (model_cp_capable_computed_) {
@@ -901,6 +1156,13 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     ForwardInput& processed_input,
     Stream& prepare_stream,
     bool record_ready_event) {
+  if (!input.json_object_state_snapshots.empty()) {
+    ForwardInput restored_input = input;
+    restore_json_object_states(restored_input);
+    prepare_work_before_execute_on_stream(
+        restored_input, processed_input, prepare_stream, record_ready_event);
+    return;
+  }
 #if defined(USE_NPU)
   // Without device_capture_lock, ACL graph capture will be interrupted by the
   // synchronization H2D of data update streams asynchronously scheduled by
@@ -932,6 +1194,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
   auto prepare_device_on_stream = [&]() {
     processed_input = input.to(device_, dtype_);
+    // Packed RPC/SHM inputs deserialize JSON snapshots inside ForwardInput::to.
+    // Restore them before speculative dispatch so MTP sees the grammar rows.
+    if (processed_input.json_object_states.empty() &&
+        !processed_input.json_object_state_snapshots.empty()) {
+      restore_json_object_states(processed_input);
+    }
     ensure_forward_input_device_tensors(processed_input, device_);
 
     auto& input_params = processed_input.input_params;
@@ -1023,6 +1291,59 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   } else {
     processed_input.metadata_ready_event.reset();
   }
+}
+
+void WorkerImpl::restore_json_object_states(ForwardInput& input) {
+  if (input.json_object_state_snapshots.empty()) {
+    return;
+  }
+  CHECK(tokenizer_ != nullptr)
+      << "JSON object state restoration requires a worker tokenizer";
+
+  std::vector<JsonObjectGrammarState> states;
+  states.reserve(input.json_object_state_snapshots.size());
+  for (const auto& snapshot : input.json_object_state_snapshots) {
+    if (!snapshot.enabled) {
+      states.emplace_back();
+      continue;
+    }
+
+    std::shared_ptr<const JsonObjectGrammar> grammar =
+        ensure_json_object_grammar(snapshot.reasoning_enabled);
+    CHECK(grammar != nullptr) << "Failed to restore JSON object grammar";
+
+    JsonObjectGrammarState state = grammar->restore_state(snapshot);
+    CHECK(state.is_valid())
+        << "Serialized JSON object grammar state is invalid";
+    states.push_back(std::move(state));
+  }
+  input.json_object_states = std::move(states);
+  input.json_object_state_snapshots.clear();
+}
+
+std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
+    bool reasoning_enabled) {
+  CHECK(tokenizer_ != nullptr)
+      << "JSON object grammar requires a worker tokenizer";
+  std::lock_guard<std::mutex> lock(json_object_grammar_mutex_);
+  std::shared_ptr<const JsonObjectGrammar>* grammar =
+      reasoning_enabled ? &json_reasoning_grammar_ : &json_object_grammar_;
+  if (*grammar != nullptr) {
+    return *grammar;
+  }
+  std::string error;
+  *grammar = JsonObjectGrammar::create_from_tokenizer(
+      *tokenizer_,
+      context_.get_model_args().eos_token_id(),
+      context_.get_model_args().stop_token_ids(),
+      context_.get_model_args().vocab_size(),
+      reasoning_enabled,
+      &error);
+  if (*grammar == nullptr) {
+    LOG(ERROR) << "Failed to create JSON object grammar"
+               << (reasoning_enabled ? " (reasoning)" : "") << ": " << error;
+  }
+  return *grammar;
 }
 
 void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
@@ -1186,13 +1507,18 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       const auto output = this->step(input);
       promise.setValue(output);
     } else {
-      if (last_step_output_valid_ && input.token_ids.numel() > 0 &&
+      if (input.token_ids.numel() > 0 &&
           input.input_params.meta.batch_forward_type.has_decode()) {
-        // replace step i model input with true output of step i-1
-        input = update_input_by_last_step_output_for_schedule_overlap(input);
+        if (can_use_last_step_output_for_schedule_overlap(input)) {
+          // replace step i model input with true output of step i-1
+          input = update_input_by_last_step_output_for_schedule_overlap(input);
+        } else {
+          update_json_object_states_by_last_step_output(input);
+          sanitize_json_object_error_inputs(input);
+        }
       }
 
-      const auto output = this->step_for_schedule_overlap(input);
+      auto output = this->step_for_schedule_overlap(input);
 #if defined(USE_NPU)
       if (output.has_value() && !output->sample_output.next_tokens.defined() &&
           output->ready_event != nullptr && !output->retained_inputs.empty()) {
@@ -1201,10 +1527,15 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 #endif
       if (output.has_value()) {
+        output->json_object_errors.insert(output->json_object_errors.end(),
+                                          input.json_object_errors.begin(),
+                                          input.json_object_errors.end());
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
-          update_last_step_output(output);
+          update_last_step_output(output,
+                                  input.input_params.embedding.request_ids,
+                                  input.sample_sequence_ids);
           is_recorded_ = true;
           cv_.notify_one();
         } else {
@@ -1226,17 +1557,25 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
                 << "failed to retire previous eager DP speculative input";
           }
 #endif
-          update_last_step_output(output);
+          update_last_step_output(output,
+                                  input.input_params.embedding.request_ids,
+                                  input.sample_sequence_ids);
         }
       } else {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           last_step_output_valid_ = false;
+          last_step_output_ = ForwardOutput();
+          last_step_request_ids_.clear();
+          last_step_sample_sequence_ids_.clear();
           is_recorded_ = true;
           cv_.notify_one();
         } else {
           last_step_output_valid_ = false;
+          last_step_output_ = ForwardOutput();
+          last_step_request_ids_.clear();
+          last_step_sample_sequence_ids_.clear();
         }
       }
       promise.setValue(output);
@@ -1250,7 +1589,8 @@ ForwardOutput WorkerImpl::get_last_step_result() {
   std::unique_lock<std::mutex> lock(mtx_);
   cv_.wait(lock, [this] { return is_recorded_; });
   if (last_step_output_valid_ ||
-      ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+      ::xllm::EPLBConfig::get_instance().enable_eplb() ||
+      !last_step_output_.json_object_errors.empty()) {
     output = last_step_output_;
   }
   is_recorded_ = false;
@@ -1531,6 +1871,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
+  auto tokenizer = model_loader->tokenizer();
+  CHECK(tokenizer != nullptr);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1538,12 +1880,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  // Draft engine is fed token ids and detokenized by the target, so it loads
-  // no tokenizer of its own (not universal: Eagle3 keeps its own draft vocab;
-  // see speculative_engine.cpp).
+  // Only the target engine reconciles tokenizer and model vocab sizes. Draft
+  // engines do not detokenize output, but worker-local JSON grammar state
+  // restoration still requires retaining the tokenizer below.
   if (!options_.is_draft_engine()) {
-    std::unique_ptr<Tokenizer> tokenizer = model_loader->tokenizer();
-    CHECK(tokenizer != nullptr);
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
     // use tokenizer vocab size if model vocab size is not set
@@ -1557,24 +1897,36 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
                    << tokenizer_vocab_size << ", model: " << model_vocab_size;
     }
   }
+  tokenizer_ = std::move(tokenizer);
+
+  const std::string& speculative_algorithm = options_.speculative_algorithm();
+  const bool is_block_diffusion =
+      speculative_algorithm == "DFlash" || speculative_algorithm == "DSpark";
 
 #if defined(USE_NPU)
-  const std::string& speculative_algorithm = options_.speculative_algorithm();
   if (options_.enable_speculative_decode() &&
       SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) &&
       util::is_deepseek_v4_model_type(args.model_type())) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
-  if (options_.speculative_algorithm() == "DFlash" ||
-      options_.speculative_algorithm() == "DSpark") {
-    const bool is_dspark = options_.speculative_algorithm() == "DSpark";
-    const char* draft_model_type =
-        is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+  if (is_block_diffusion) {
     if (options_.is_draft_engine()) {
+      args.layers_to_capture({});
+      const bool is_dspark = speculative_algorithm == "DSpark";
+      const bool is_deepseek_v4_dspark =
+          is_dspark && util::is_deepseek_v4_model_type(args.model_type());
+      std::string draft_model_type =
+          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+      if (is_deepseek_v4_dspark) {
+        draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
+      }
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
+      if (is_deepseek_v4_dspark) {
+        configure_deepseek_v4_dspark_args(args, options_);
+      }
     } else {
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
@@ -1614,11 +1966,22 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 #else
   if (options_.enable_speculative_decode()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
+    if (is_block_diffusion) {
+      if (options_.is_draft_engine()) {
+        LOG(FATAL) << speculative_algorithm
+                   << " block-diffusion draft is not supported on "
+                   << Platform::type_str() << ".";
+      }
+      CHECK(options_.draft_model_path().has_value())
+          << "block-diffusion speculative decoding requires --draft_model.";
+      args.layers_to_capture(
+          read_capture_layer_ids(options_.draft_model_path().value()));
+    }
     // When running speculative decoding, the draft worker reuses the same
     // checkpoint as the target model. The draft worker needs to instantiate
     // the MTP variant, so override the model_type here without mutating the
     // original config.
-    if (options_.num_speculative_tokens() == 0 &&
+    if (!is_block_diffusion && options_.num_speculative_tokens() == 0 &&
         args.num_nextn_predict_layers() != 0) {
       static const std::unordered_map<std::string, std::string>
           kModelTypeToMtpType = {
@@ -1660,6 +2023,16 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (!status) {
     LOG(ERROR) << "init_model failed";
     return false;
+  }
+
+  // Warm JSON grammars off the forward path so the first constrained request
+  // does not pay tokenizer.decode over the full vocab under the step lock.
+  if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
+    LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
+  }
+  if (ensure_json_object_grammar(/*reasoning_enabled=*/true) == nullptr) {
+    LOG(WARNING)
+        << "JSON reasoning grammar warmup failed; will retry lazily on demand";
   }
 
   int32_t tp_world_size = parallel_args_.world_size();

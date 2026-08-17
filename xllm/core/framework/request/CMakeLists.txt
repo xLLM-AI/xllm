@@ -45,6 +45,7 @@ cc_library(
     stopping_checker.cpp
     priority_comparator.cpp
   DEPS
+    :config
     :kv_cache
     :prefix_cache
     :encoder_cache
@@ -52,6 +53,7 @@ cc_library(
     :tokenizer
     :chat_template
     :multimodal
+    :json_object_grammar
     glog::glog
     absl::strings
     absl::time
