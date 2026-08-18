@@ -415,10 +415,9 @@ SampleOutput SuffixWorkerImpl::validate(
                                               .all_greedy_sample = true},
                                              draft_token_ids,
                                              draft_probs,
+                                             target_logits,
                                              target_output,
                                              bonus_token_ids,
-                                             batch_size,
-                                             num_val_tokens,
                                              enable_fused_kernel_);
 }
 

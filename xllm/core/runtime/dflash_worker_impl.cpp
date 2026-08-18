@@ -1144,16 +1144,17 @@ SampleOutput DFlashWorkerImpl::validate(
         target_next_tokens_2d.gather(/*dim=*/1, bonus_idx).view({-1, 1});
   }
 
+  torch::Tensor target_logits = target_output.logits.view(
+      {batch_size, num_val_tokens, target_output.logits.size(/*dim=*/-1)});
   return spec_verify::run_rejection_sampling(
       {.do_sample = sampling_params.do_sample,
        .all_random_sample = sampling_params.all_random_sample,
        .all_greedy_sample = sampling_params.all_greedy_sample},
       draft_token_ids,
       draft_probs,
+      target_logits,
       target_output,
       bonus_token_ids,
-      batch_size,
-      num_val_tokens,
       enable_fused_kernel_);
 }
 

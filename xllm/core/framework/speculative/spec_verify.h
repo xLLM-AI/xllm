@@ -32,17 +32,15 @@ struct SamplerPolicy {
   bool all_greedy_sample = false;
 };
 
-// Shared accept core for all speculative workers: build the RejectionSampler
-// from the given policy, run it, reshape embeddings. Callers own
-// bonus_token_ids and pass the policy explicitly so suffix's forced-greedy
-// verify can reuse it.
+// Shared accept core for the speculative workers. Callers own target_logits so
+// MTP can inject its filter mask first; draft_probs may be undefined
+// (all-greedy).
 SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                     const torch::Tensor& draft_token_ids,
                                     const torch::Tensor& draft_probs,
+                                    const torch::Tensor& target_logits,
                                     const ForwardOutput& target_output,
                                     const torch::Tensor& bonus_token_ids,
-                                    int32_t batch_size,
-                                    int32_t num_val_tokens,
                                     bool enable_fused_kernel);
 
 }  // namespace spec_verify

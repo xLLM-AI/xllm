@@ -52,6 +52,7 @@ limitations under the License.
 #include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/spec_input_builder.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "util/pretty_print.h"
@@ -4010,23 +4011,17 @@ SampleOutput MTPWorkerImpl::validate(
                        draft_token_ids);
     }
 
-    // prepare input for rejection sampling
-    std::unique_ptr<RejectionSampler> rejection_sampler =
-        std::make_unique<RejectionSampler>(sampling_params.do_sample,
-                                           sampling_params.all_random_sample,
-                                           sampling_params.all_greedy_sample,
-                                           target_output.logprobs,
-                                           target_output.max_top_logprobs,
-                                           enable_fused_kernel_);
-
     // get the accepted tokens
-    sample_output = rejection_sampler->forward(
-        validation_draft_token_ids.to(bonus_token_ids),
-        draft_probs.defined() ? draft_probs.to(target_logits.device())
-                              : torch::Tensor(),
+    sample_output = spec_verify::run_rejection_sampling(
+        {.do_sample = sampling_params.do_sample,
+         .all_random_sample = sampling_params.all_random_sample,
+         .all_greedy_sample = sampling_params.all_greedy_sample},
+        validation_draft_token_ids,
+        draft_probs,
         target_logits,
+        target_output,
         bonus_token_ids,
-        /*mask_out_rejected_tokens=*/true);
+        enable_fused_kernel_);
 
     if (!invalid_draft.empty()) {
       torch::Tensor target_sampled_tokens =
@@ -4058,11 +4053,6 @@ SampleOutput MTPWorkerImpl::validate(
         }
       }
     }
-
-    // process embedding
-    torch::Tensor embeddings = target_output.sample_output.embeddings;
-    sample_output.embeddings =
-        embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
   }
 
   if (pruned_prefix_lengths != nullptr) {
