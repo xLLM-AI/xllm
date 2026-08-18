@@ -21,10 +21,10 @@ from xllm.python import registry
 
 def test_unsupported_model_fails_before_import(monkeypatch: pytest.MonkeyPatch) -> None:
     import_model = Mock()
-    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
+    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "cuda")
     monkeypatch.setattr(registry, "import_module", import_model)
 
-    with pytest.raises(NotImplementedError, match="qwen3_5.*npu"):
-        registry.get_model_class("qwen3_5")
+    with pytest.raises(NotImplementedError, match="qwen3_vl.*cuda"):
+        registry.get_model_class("qwen3_vl")
 
     import_model.assert_not_called()
