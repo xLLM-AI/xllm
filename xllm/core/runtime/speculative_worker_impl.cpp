@@ -104,9 +104,24 @@ bool should_run_speculative_decode(const ModelInputParams& params) {
     return false;
   }
 
-  return std::all_of(dp_is_decode.begin(),
-                     dp_is_decode.end(),
-                     [](int32_t is_decode) { return is_decode == 1; });
+  // Idle DP ranks (no scheduled tokens this step) must not veto speculative
+  // decode for the active ranks. Under enable_graph=False these idle ranks keep
+  // dp_is_decode=0 (the backfill in llm_engine only fires when enable_graph=
+  // True), which made an all-of-ones check fail for any bs<dp_size batch and
+  // silently fell back to the non-speculative path (validate never ran). Only
+  // ranks that actually carry tokens gate the decision; require every such rank
+  // to be in decode.
+  bool any_active = false;
+  for (size_t i = 0; i < dp_is_decode.size(); ++i) {
+    if (dp_token_nums[i] == 0) {
+      continue;  // idle rank: does not participate in the vote
+    }
+    any_active = true;
+    if (dp_is_decode[i] != 1) {
+      return false;
+    }
+  }
+  return any_active;
 }
 
 void scale_speculative_parallel_token_counts(ModelInputParams& params,
