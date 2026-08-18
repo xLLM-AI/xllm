@@ -137,8 +137,7 @@ class NpuXllmOpsTest : public ::testing::Test {
     py::gil_scoped_acquire gil;
     prepend_python_model_path();
     py::module_::import("xllm.python._npu_bootstrap");
-    py::module_ python_package = py::module_::import("xllm.python");
-    python_package.attr("initialize_runtime")();
+    py::module_::import("xllm.python").attr("initialize_runtime")();
   }
 };
 

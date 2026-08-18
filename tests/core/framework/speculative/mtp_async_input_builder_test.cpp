@@ -208,8 +208,7 @@ TEST(MtpAsyncInputBuilderTest, PybindViewSelectsExpandedGraphMetadata) {
   py::gil_scoped_acquire gil;
   prepend_python_model_path();
   py::module_::import("xllm.python._npu_bootstrap");
-  py::module_ python_package = py::module_::import("xllm.python");
-  python_package.attr("initialize_runtime")();
+  py::module_::import("xllm.python").attr("initialize_runtime")();
   py::module_ main_module = py::module_::import("__main__");
   register_attention_metadata_views(main_module);
 
