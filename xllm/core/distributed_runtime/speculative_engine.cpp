@@ -22,6 +22,8 @@ limitations under the License.
 #include <memory>
 
 #include "common/metrics.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "llm_engine.h"
 #include "runtime/forward_params.h"
 #include "util/timer.h"
@@ -243,6 +245,18 @@ int64_t SpeculativeEngine::calculate_kv_cache(
                               draft_kv_cache_cap.index_slot_size())
           : block_size * draft_full_attention_layers *
                 draft_allocated_full_attention_slot_size;
+  const int32_t layerwise_split_size =
+      options_.is_draft_engine()
+          ? 1
+          : ParallelConfig::get_instance().layerwise_split_size();
+  if (layerwise_split_size > 1) {
+    return estimate_layerwise_split_block_count(
+        model_args_,
+        layerwise_split_size,
+        target_kv_cache_cap,
+        cache_size_in_bytes - linear_cache_size_in_bytes,
+        draft_full_attention_block_size_in_bytes);
+  }
   const int64_t full_attention_block_size_in_bytes =
       target_full_attention_block_size_in_bytes +
       draft_full_attention_block_size_in_bytes;

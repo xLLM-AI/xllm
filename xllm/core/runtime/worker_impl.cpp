@@ -35,6 +35,7 @@ limitations under the License.
 #endif
 
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -77,6 +78,7 @@ limitations under the License.
 #include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/layerwise_split_layout.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_loader.h"
@@ -374,6 +376,33 @@ void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
 }
 #endif
 
+void disable_layerwise_split_for_draft(ParallelArgs* parallel_args) {
+  CHECK(parallel_args != nullptr) << "parallel_args must not be null.";
+  parallel_args->layerwise_split_size(1);
+  nlohmann::json& mapping_data = parallel_args->mapping_data();
+  if (mapping_data.contains("attnLayerwiseSplit")) {
+    nlohmann::json& split = mapping_data["attnLayerwiseSplit"];
+    split["group_size"] = 1;
+    split["rank"] = 0;
+    split["rankIds"] = std::vector<uint32_t>{
+        static_cast<uint32_t>(parallel_args->rank())};
+  }
+#if defined(USE_NPU)
+  if (!parallel_args->mapping().Has(atb_speed::base::ATTN_LAYERWISE_SPLIT)) {
+    return;
+  }
+  atb_speed::common::ParallelInfo split_info =
+      parallel_args->mapping().Get(atb_speed::base::ATTN_LAYERWISE_SPLIT);
+  if (!split_info.IsEnabled()) {
+    return;
+  }
+  split_info.rank = 0;
+  split_info.rankIds = {static_cast<uint32_t>(parallel_args->rank())};
+  parallel_args->mapping().Register(atb_speed::base::ATTN_LAYERWISE_SPLIT,
+                                    split_info);
+#endif
+}
+
 }  // namespace
 
 WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
@@ -463,6 +492,15 @@ bool WorkerImpl::allocate_kv_cache_storage(
       << "simultaneously.";
 
   const int64_t num_layers = get_num_layers();
+  const int32_t layerwise_split_size = parallel_args_.layerwise_split_size();
+  std::vector<bool> layer_cache_owned;
+  if (layerwise_split_size > 1) {
+    const LayerwiseSplitLayout layout(
+        /*enabled=*/true,
+        layerwise_split_size,
+        parallel_args_.rank() % layerwise_split_size);
+    layer_cache_owned = build_layer_cache_owned(args, layout, num_layers);
+  }
   std::vector<bool> indexer_cache_enabled_layers =
       resolve_indexer_cache_enabled_layers(args, num_layers);
 
@@ -513,6 +551,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
       .enable_sleep_mode(options_.enable_sleep_mode())
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
+      .layer_cache_owned(std::move(layer_cache_owned))
       .indexer_cache_enabled_layers(std::move(indexer_cache_enabled_layers))
       .enable_kv_cache_quant(enable_kv_cache_quant)
       .enable_indexer_cache_quant(enable_indexer_cache_quant)
@@ -2004,6 +2043,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 #endif
 
   setup_rl_sleep_weights();
+
+  if (options_.is_draft_engine() || is_spec_draft_) {
+    disable_layerwise_split_for_draft(&parallel_args_);
+  }
 
   // create model context
   dtype_ = dtype;

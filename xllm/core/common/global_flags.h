@@ -110,6 +110,8 @@ DECLARE_int32(ep_size);
 
 DECLARE_int32(cp_size);
 
+DECLARE_int32(layerwise_split_size);
+
 DECLARE_int64(tp_size);
 
 DECLARE_int64(sp_size);
