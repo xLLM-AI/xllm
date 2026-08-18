@@ -169,9 +169,41 @@ def vision_rotary_mul(
     return torch_npu.npu_rotary_mul(value.unsqueeze(0).contiguous(), cos_full, sin_full).squeeze(0)
 
 
+def npu_inplace_partial_rotary_mul(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rope_start_dim: int,
+    rope_head_dim: int,
+    inverse: bool = False,
+) -> torch.Tensor:
+    """In-place partial interleaved RoPE on the ``[rope_start_dim:]`` slice.
+
+    Mirrors C++ ``apply_partial_rope`` (deepseek_sparse_attention.cpp:151-190):
+    x is 3D ``[M, n_head, head_dim]``; cos/sin are 2D ``[M, rope_head_dim]``
+    (per-token, no head dim). Reshaped to 4D for the NPU kernel
+    (``aclnnInplacePartialRotaryMul``, rotary_mode="interleave",
+    partial_slice=[rope_start_dim, rope_start_dim+rope_head_dim] -- a half-open
+    range, NOT [start, length]). Modifies x in place.
+    """
+    x4d = x.unsqueeze(2)  # [M, n_head, 1, head_dim]
+    cos4d = cos.view(cos.size(0), 1, 1, cos.size(1))
+    sin_cache = -sin if inverse else sin
+    sin4d = sin_cache.view(sin.size(0), 1, 1, sin.size(1))
+    torch.ops.xllm_ops.npu_inplace_partial_rotary_mul(
+        x4d,
+        cos4d,
+        sin4d,
+        "interleave",
+        [int(rope_start_dim), int(rope_start_dim + rope_head_dim)],
+    )
+    return x
+
+
 __all__ = [
     "fused_qk_norm_rope",
     "interleaved_rotary_embedding",
     "mrope",
     "vision_rotary_mul",
+    "npu_inplace_partial_rotary_mul",
 ]

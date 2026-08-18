@@ -20,6 +20,7 @@ import torch
 
 rms_norm = torch.ops.xllm_ops.rms_norm
 fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
+rms_norm_dynamic_quant = torch.ops.xllm_ops.rms_norm_dynamic_quant
 
 
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -61,4 +62,10 @@ def rms_norm_gated(
     )
 
 
-__all__ = ["rms_norm", "fused_add_rms_norm", "l2_norm", "rms_norm_gated"]
+__all__ = [
+    "rms_norm",
+    "fused_add_rms_norm",
+    "rms_norm_dynamic_quant",
+    "l2_norm",
+    "rms_norm_gated",
+]
