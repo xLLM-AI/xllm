@@ -32,6 +32,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "framework/kv_cache/kv_cache_shape.h"
@@ -80,30 +81,6 @@ ParallelArgs make_args(int32_t rank, int32_t world_size, int32_t dp_size) {
   return ParallelArgs(rank, world_size, dp_size, nullptr);
 }
 
-void expect_same_mappings(const std::vector<KVTransferMapping>& lhs,
-                          const std::vector<KVTransferMapping>& rhs) {
-  ASSERT_EQ(lhs.size(), rhs.size());
-  for (size_t index = 0; index < lhs.size(); ++index) {
-    EXPECT_EQ(lhs[index].group_id, rhs[index].group_id);
-    EXPECT_EQ(lhs[index].local_ids, rhs[index].local_ids);
-    EXPECT_EQ(lhs[index].remote_ids, rhs[index].remote_ids);
-  }
-}
-
-void expect_same_merge(
-    const std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>& lhs,
-    const std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>& rhs) {
-  ASSERT_EQ(lhs.size(), rhs.size());
-  for (const auto& [key, lhs_info] : lhs) {
-    auto it = rhs.find(key);
-    ASSERT_NE(it, rhs.end());
-    const KVCacheTransfer::KVCacheInfo& rhs_info = it->second;
-    EXPECT_EQ(lhs_info.dst_cluster_id, rhs_info.dst_cluster_id);
-    EXPECT_EQ(lhs_info.dst_addr, rhs_info.dst_addr);
-    expect_same_mappings(lhs_info.mappings, rhs_info.mappings);
-  }
-}
-
 class RecordingMooncakeTransferEngine final : public MooncakeTransferEngine {
  public:
   struct MoveCall {
@@ -132,12 +109,64 @@ class RecordingMooncakeTransferEngine final : public MooncakeTransferEngine {
     return move_result;
   }
 
+  bool has_reshard_plan(const std::string& remote_addr) const override {
+    return planned_addrs.find(remote_addr) != planned_addrs.end();
+  }
+
   bool move_result = true;
+  std::unordered_set<std::string> planned_addrs;
   std::vector<std::vector<void*>> registered_addrs;
   std::vector<std::vector<size_t>> registered_lens;
   std::vector<std::vector<uint64_t>> registered_block_bytes;
   std::vector<MoveCall> move_calls;
 };
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     NegotiatedPlansFilterDestinationDpGroup) {
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  engine->planned_addrs = {"addr_1", "addr_3"};
+  MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                          /*listen_port=*/0,
+                                          torch::Device(torch::kCPU),
+                                          /*model_type=*/"test",
+                                          std::move(engine));
+  const TransferKVInfo info = make_info(/*dst_dp_size=*/1,
+                                        /*dst_tp_size=*/4,
+                                        /*dst_dp_rank=*/0);
+  const ParallelArgs parallel_args = make_args(/*rank=*/0,
+                                               /*world_size=*/2,
+                                               /*dp_size=*/1);
+  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
+
+  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
+
+  ASSERT_EQ(merged_kv_infos.size(), 2U);
+  EXPECT_NE(merged_kv_infos.find("101_addr_1"), merged_kv_infos.end());
+  EXPECT_NE(merged_kv_infos.find("103_addr_3"), merged_kv_infos.end());
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     MissingNegotiationPreservesLegacyDestinationFanout) {
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                          /*listen_port=*/0,
+                                          torch::Device(torch::kCPU),
+                                          /*model_type=*/"test",
+                                          std::move(engine));
+  const TransferKVInfo info = make_info(/*dst_dp_size=*/1,
+                                        /*dst_tp_size=*/4,
+                                        /*dst_dp_rank=*/0);
+  const ParallelArgs parallel_args = make_args(/*rank=*/0,
+                                               /*world_size=*/2,
+                                               /*dp_size=*/1);
+  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
+
+  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
+
+  EXPECT_EQ(merged_kv_infos.size(), 4U);
+}
 
 #if defined(USE_NPU)
 constexpr int32_t kValidatePushCommand = 1;
@@ -552,6 +581,116 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 }
 
 TEST(MooncakeKVCacheTransferDefaultTest,
+     RegistersCheckpointedSsmAsLogicalSequenceSlots) {
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  RecordingMooncakeTransferEngine* engine_observer = engine.get();
+  MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                          /*listen_port=*/0,
+                                          torch::Device(torch::kCPU),
+                                          /*model_type=*/"qwen3_5",
+                                          std::move(engine));
+  transfer.addr_ = "local";
+  ModelArgs model_args;
+  model_args.model_type("qwen3_5")
+      .n_layers(1)
+      .n_heads(4)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(1)
+      .linear_value_head_dim(1);
+  transfer.configure_cache_layout(make_args(/*rank=*/0,
+                                            /*world_size=*/1,
+                                            /*dp_size=*/1),
+                                  model_args,
+                                  /*block_token_capacity=*/0,
+                                  /*is_spec_draft=*/false);
+
+  proto::KVCacheShape proto_shape;
+  for (int64_t dim : {2, 1, 6}) {
+    proto_shape.add_conv_cache_shape(dim);
+  }
+  for (int64_t dim : {6, 2, 1, 1}) {
+    proto_shape.add_ssm_cache_shape(dim);
+  }
+  const KVCacheShape shape = KVCacheShape::from_proto(proto_shape);
+  std::vector<KVCache> caches;
+  caches.emplace_back(LinearAttentionKVCacheTensors{
+      torch::zeros({2, 1, 6}), torch::zeros({6, 2, 1, 1})});
+
+  transfer.register_kv_cache(caches, shape, torch::kFloat32);
+
+  ASSERT_EQ(engine_observer->registered_block_bytes.size(), 1U);
+  ASSERT_EQ(engine_observer->registered_block_bytes[0].size(), 2U);
+  EXPECT_EQ(engine_observer->registered_block_bytes[0][0], 24U);
+  EXPECT_EQ(engine_observer->registered_block_bytes[0][1], 24U);
+  ASSERT_EQ(transfer.local_cache_layout_.tensors.size(), 2U);
+  const auto ssm_it = std::find_if(
+      transfer.local_cache_layout_.tensors.begin(),
+      transfer.local_cache_layout_.tensors.end(),
+      [](const CacheTensorManifest& tensor) {
+        return tensor.role == static_cast<int32_t>(KVCacheTensorRole::SSM);
+      });
+  ASSERT_NE(ssm_it, transfer.local_cache_layout_.tensors.end());
+  EXPECT_EQ(ssm_it->resource_count, 2U);
+  EXPECT_EQ(ssm_it->physical_rows_per_resource, 3U);
+  EXPECT_EQ(ssm_it->resource_stride_bytes, 24U);
+  ASSERT_EQ(ssm_it->shard.spans.size(), 2U);
+  EXPECT_EQ(ssm_it->shard.spans[0].repeat_count, 3U);
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     RegistersTp1SpecDraftBesideTp2MainCache) {
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                          /*listen_port=*/0,
+                                          torch::Device(torch::kCPU),
+                                          /*model_type=*/"qwen3_5",
+                                          std::move(engine));
+  transfer.addr_ = "local-draft-body-tp1";
+  ModelArgs model_args;
+  model_args.model_type("qwen3_5")
+      .n_layers(1)
+      .n_heads(4)
+      .n_kv_heads(4)
+      .head_dim(1);
+
+  transfer.configure_cache_layout(make_args(/*rank=*/0,
+                                            /*world_size=*/2,
+                                            /*dp_size=*/1),
+                                  model_args,
+                                  /*block_token_capacity=*/3,
+                                  /*is_spec_draft=*/false);
+  std::vector<KVCache> main_caches;
+  main_caches.emplace_back(
+      KVCacheTensors{torch::zeros({4, 3, 2, 1}), torch::zeros({4, 3, 2, 1})});
+  transfer.register_kv_cache(main_caches, KVCacheShape(), torch::kFloat32);
+
+  transfer.configure_cache_layout(make_args(/*rank=*/0,
+                                            /*world_size=*/1,
+                                            /*dp_size=*/1),
+                                  model_args,
+                                  /*block_token_capacity=*/3,
+                                  /*is_spec_draft=*/true);
+  std::vector<KVCache> draft_caches;
+  draft_caches.emplace_back(
+      KVCacheTensors{torch::zeros({4, 3, 4, 1}), torch::zeros({4, 3, 4, 1})});
+  transfer.register_kv_cache_spec(
+      draft_caches, KVCacheShape(), torch::kFloat32);
+
+  EXPECT_EQ(transfer.local_cache_layout_.coordinates.tp_size, 2);
+  ASSERT_EQ(transfer.local_cache_layout_.tensors.size(), 4U);
+  const CacheTensorManifest& spec_key = transfer.local_cache_layout_.tensors[2];
+  EXPECT_EQ(spec_key.cache_namespace, CacheNamespace::SPEC_DRAFT);
+  ASSERT_EQ(spec_key.shard.spans.size(), 4U);
+  EXPECT_TRUE(std::all_of(
+      spec_key.shard.spans.begin(),
+      spec_key.shard.spans.end(),
+      [](const LogicalSpan& span) { return span.owner_tp_rank == 0; }));
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
      GroupedPullUsesSwaAndCompressedMappings) {
   auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
       /*listen_port=*/0, torch::Device(torch::kCPU));
@@ -722,6 +861,34 @@ TEST(MooncakeKVCacheTransferDefaultTest,
             (std::vector<uint64_t>{11}));
   EXPECT_EQ(rank_one_infos[0].mappings[0].remote_ids,
             (std::vector<uint64_t>{22}));
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     KvSplitFilterRemapsGroupedAttentionCaches) {
+  TransferKVInfo info = make_info(/*dst_dp_size=*/1,
+                                  /*dst_tp_size=*/1,
+                                  /*dst_dp_rank=*/0);
+  info.mappings[0].group_id = cache_group_id(BlockType::C4);
+  info.mappings[0].remote_ids = {21, 22, 23, 24};
+  KVTransferMapping linear_mapping;
+  linear_mapping.group_id = cache_group_id(BlockType::LINEAR);
+  linear_mapping.local_ids = {31};
+  linear_mapping.remote_ids = {41};
+  info.mappings.emplace_back(std::move(linear_mapping));
+
+  std::vector<TransferKVInfo> rank_one_infos = filter_kv_split_infos(
+      /*kv_split_rank=*/1, /*kv_split_size=*/2, {info});
+
+  ASSERT_EQ(rank_one_infos.size(), 1U);
+  ASSERT_EQ(rank_one_infos[0].mappings.size(), 2U);
+  EXPECT_EQ(rank_one_infos[0].mappings[0].local_ids,
+            (std::vector<uint64_t>{11, 12}));
+  EXPECT_EQ(rank_one_infos[0].mappings[0].remote_ids,
+            (std::vector<uint64_t>{22, 24}));
+  EXPECT_EQ(rank_one_infos[0].mappings[1].local_ids,
+            (std::vector<uint64_t>{31}));
+  EXPECT_EQ(rank_one_infos[0].mappings[1].remote_ids,
+            (std::vector<uint64_t>{41}));
 }
 
 TEST(MooncakeKVCacheTransferDefaultTest,
@@ -963,8 +1130,8 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                             &remote_addr));
   ASSERT_EQ(received_remote_port, static_cast<uint16_t>(remote_listen_port));
   ASSERT_FALSE(remote_addr.empty());
-  ASSERT_TRUE(local_transfer.link_cluster(
-      remote_cluster_id, remote_addr, received_remote_port));
+  ASSERT_TRUE(local_transfer.mooncake_te_->open_session(remote_cluster_id,
+                                                        remote_addr));
 
   KVTransferMapping linear_mapping;
   linear_mapping.group_id = cache_group_id(BlockType::LINEAR);
@@ -1090,95 +1257,6 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 #endif
 
 #if defined(USE_MLU)
-TEST(MooncakeKVCacheTransferDefaultTest, OwnerRankMergesSingleDst) {
-  MooncakeKVCacheTransferDefault transfer(
-      0, 0, torch::Device(torch::kCPU), "test");
-  transfer.has_v_cache_ = false;
-
-  const TransferKVInfo info = make_info(1, 3, 0);
-  const ParallelArgs parallel_args = make_args(2, 8, 1);
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
-
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
-
-  ASSERT_EQ(merged_kv_infos.size(), 1U);
-  const KVCacheTransfer::KVCacheInfo& kv_info = merged_kv_infos.begin()->second;
-  EXPECT_EQ(kv_info.dst_cluster_id, 102U);
-  EXPECT_EQ(kv_info.dst_addr, "addr_2");
-  expect_same_mappings(kv_info.mappings, info.mappings);
-}
-
-TEST(MooncakeKVCacheTransferDefaultTest, MluCpKeepsCompleteKvBlockMapping) {
-  MooncakeKVCacheTransferDefault transfer(
-      0, 0, torch::Device(torch::kCPU), "test");
-  transfer.has_v_cache_ = false;
-
-  const TransferKVInfo info = make_info(1, 4, 0);
-  ParallelArgs parallel_args(
-      2, 4, 1, 4, /*process_group=*/nullptr, /*ep_size=*/1);
-  parallel_args.kv_split_size(1);
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
-
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
-
-  ASSERT_EQ(merged_kv_infos.size(), 1U);
-  const KVCacheTransfer::KVCacheInfo& kv_info = merged_kv_infos.begin()->second;
-  EXPECT_EQ(kv_info.dst_cluster_id, 102U);
-  expect_same_mappings(kv_info.mappings, info.mappings);
-}
-
-TEST(MooncakeKVCacheTransferDefaultTest, WrappedOwnerRankKeepsMerge) {
-  MooncakeKVCacheTransferDefault transfer(
-      0, 0, torch::Device(torch::kCPU), "test");
-  transfer.has_v_cache_ = false;
-
-  const TransferKVInfo info = make_info(2, 3, 1);
-  const ParallelArgs parallel_args = make_args(5, 8, 1);
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
-
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
-
-  ASSERT_EQ(merged_kv_infos.size(), 1U);
-  const KVCacheTransfer::KVCacheInfo& kv_info = merged_kv_infos.begin()->second;
-  EXPECT_EQ(kv_info.dst_cluster_id, 105U);
-  EXPECT_EQ(kv_info.dst_addr, "addr_5");
-  expect_same_mappings(kv_info.mappings, info.mappings);
-}
-
-TEST(MooncakeKVCacheTransferDefaultTest, HasVCacheUsesBaseMerge) {
-  MooncakeKVCacheTransferDefault transfer(
-      0, 0, torch::Device(torch::kCPU), "test");
-  transfer.has_v_cache_ = true;
-
-  const TransferKVInfo info = make_info(2, 3, 1);
-  const ParallelArgs parallel_args = make_args(5, 8, 1);
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> base_kv_infos;
-
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
-  transfer.KVCacheTransfer::merge_kv_blocks(
-      base_kv_infos, {info}, parallel_args);
-
-  expect_same_merge(merged_kv_infos, base_kv_infos);
-}
-
-TEST(MooncakeKVCacheTransferDefaultTest, SmallSrcTpUsesBaseMerge) {
-  MooncakeKVCacheTransferDefault transfer(
-      0, 0, torch::Device(torch::kCPU), "test");
-  transfer.has_v_cache_ = false;
-
-  const TransferKVInfo info = make_info(1, 4, 0);
-  const ParallelArgs parallel_args = make_args(1, 2, 1);
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
-  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> base_kv_infos;
-
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
-  transfer.KVCacheTransfer::merge_kv_blocks(
-      base_kv_infos, {info}, parallel_args);
-
-  expect_same_merge(merged_kv_infos, base_kv_infos);
-}
-
 TEST(MooncakeKVCacheTransferDefaultTest,
      AddBufUsesLogicalLengthWithoutChangingBlockBytes) {
   if (Platform::device_count() < 1) {
@@ -1388,8 +1466,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   std::string addr;
   transfer.get_cache_info(cluster_id, addr);
   ASSERT_FALSE(addr.empty());
-  ASSERT_TRUE(transfer.link_cluster(
-      /*cluster_id=*/0, addr, static_cast<uint16_t>(listen_port)));
+  ASSERT_TRUE(transfer.mooncake_te_->open_session(/*cluster_id=*/0, addr));
   KVTransferMapping mapping;
   mapping.group_id = cache_group_id(BlockType::KV);
   mapping.local_ids = {1};

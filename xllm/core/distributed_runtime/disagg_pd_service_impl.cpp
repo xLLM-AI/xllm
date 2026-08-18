@@ -357,7 +357,6 @@ void DisaggPDServiceImpl::decode_recv_first_generation(
         std::move(source_mappings),
         gen.dp_size(),
         gen.dp_rank(),
-        gen.heterogeneous_pd(),
         mtp_bootstrap_embedding,
         gen.num_cached_tokens());
     if (!success) {

@@ -97,12 +97,12 @@ message DisaggResponses {
 }
 
 message DisaggResponse {
+  reserved 3, 6, 21;
+
   // req id
   string req_id = 1;
   // http code
   int32 status_code = 2;
-  // blocks ids allocated for request.
-  repeated int32 blocks_ids = 3 [deprecated = true];
   int32 dp_rank = 4;
 
   // XTensor mode: GlobalXTensor offsets for each block (per-layer)
@@ -110,15 +110,9 @@ message DisaggResponse {
   // Layout: [layer0_block0_k, layer0_block0_v, layer0_block1_k, layer0_block1_v, ...]
   //         [layer1_block0_k, layer1_block0_v, ...]
   repeated XTensorLayerOffsets xtensor_layer_offsets = 5;
-  // Sequence-scoped cache row used by linear attention caches.
-  int32 linear_state_id = 6 [deprecated = true];
-
   // Group-aware block allocation. group_id is defined by the cache layout and
   // is opaque to the PD protocol.
   repeated KVTransferGroup groups = 20;
-
-  // Deprecated: use KVTransferGroup.remote_shared_num.
-  uint32 remote_shared_num = 21 [deprecated = true];
 }
 
 // XTensor mode: offsets for one layer
@@ -252,24 +246,21 @@ message RemoteToken {
 }
 
 message DisaggGenerationsRequest {
+  reserved 8, 13, 16;
+
   string req_id = 1;
   repeated RemoteToken tokens = 2;
   string kv_cache_transfer_mode = 3;
   repeated uint64 cluster_ids = 4;
   repeated string addrs = 5;
-  repeated int32 block_ids = 8 [deprecated = true];
   int32 dp_size = 9;
   int32 dp_rank = 10;
   string x_request_id = 11;
   string x_request_time = 12;
-  // Sequence-scoped cache row used by linear attention caches.
-  int32 linear_state_id = 13 [deprecated = true];
   // MTP bootstrap state for the first decode draft extend.
   Tensor mtp_bootstrap_embedding = 14;
   // Number of prompt tokens served from the prefill prefix cache.
   int32 num_cached_tokens = 15;
-  // The request uses the opt-in non-MLA heterogeneous TP restore path.
-  bool heterogeneous_pd = 16;
   repeated KVTransferGroup source_groups = 20;
 }
 

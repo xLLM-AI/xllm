@@ -21,8 +21,6 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "util/utils.h"
-
 namespace xllm {
 
 namespace {
@@ -45,8 +43,7 @@ TEST(PdTopologyGuardTest, HomoTopoBypass) {
   EXPECT_EQ(topo.dp_size, 2);
   EXPECT_EQ(topo.tp_size, 2);
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PULL", false);
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PULL");
   EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HOMO);
   EXPECT_TRUE(result.reason.empty());
 }
@@ -68,7 +65,7 @@ TEST(PdTopologyGuardTest, RegistrationOmitsCpAndKeepsTopologyCompatible) {
   EXPECT_FALSE(decode_registration.contains("cp_size"));
   EXPECT_FALSE(decode_registration.contains("requested_cp_size"));
 
-  const PdTopoResult result = check_pd_topo(prefill, decode, "PUSH", true);
+  const PdTopoResult result = check_pd_topo(prefill, decode, "PUSH");
   EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HOMO);
   EXPECT_TRUE(result.reason.empty());
 }
@@ -84,107 +81,65 @@ TEST(PdTopologyGuardTest, TryGetPdTopoReturnTopo) {
   EXPECT_TRUE(reason.empty());
 }
 
-TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsTpShardedPush) {
+TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsPush) {
   const InstanceInfo local_info = make_info(1, {0, 1});
   const InstanceInfo remote_info = make_info(1, {2});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false, true);
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
   EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
   EXPECT_TRUE(result.reason.empty());
-}
-
-TEST(PdTopologyGuardTest, HeterogeneousTpShardedCacheIsOptIn) {
-  const InstanceInfo local_info = make_info(1, {0, 1});
-  const InstanceInfo remote_info = make_info(1, {2});
-
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false);
-  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
-  EXPECT_EQ(result.reason,
-            "tp-sharded kv cache hetero pd is disabled; set "
-            "enable_heterogeneous_pd=true on both instances");
 }
 
 TEST(PdTopologyGuardTest, HeteroTopoNeedPushKv) {
   const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {0, 1, 2, 3});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PULL", true);
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PULL");
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
   EXPECT_EQ(result.reason, "hetero pd requires kv_mode=PUSH");
 }
 
-TEST(PdTopologyGuardTest, HeteroTopoAllowsTpInvariantCachePush) {
+TEST(PdTopologyGuardTest, HeteroDpAllowsPush) {
   const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {0, 1, 2, 3});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", true);
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
   EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
   EXPECT_TRUE(result.reason.empty());
 }
 
-TEST(PdTopologyGuardTest, TpInvariantCacheModelsAllowHeterogeneousPush) {
-  const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
-  const InstanceInfo remote_info = make_info(1, {4, 5, 6, 7});
-
-  EXPECT_TRUE(util::is_tp_invariant_kv_cache_model_type("deepseek_v3"));
-  EXPECT_TRUE(util::is_tp_invariant_kv_cache_model_type("deepseek_v4"));
-  EXPECT_TRUE(util::is_tp_invariant_kv_cache_model_type("deepseek_v4_mtp"));
-  EXPECT_FALSE(util::is_tp_invariant_kv_cache_model_type("qwen3"));
-
-  const PdTopoResult result =
-      check_pd_topo(local_info,
-                    remote_info,
-                    "PUSH",
-                    util::is_tp_invariant_kv_cache_model_type("deepseek_v4"));
-  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
-  EXPECT_TRUE(result.reason.empty());
-}
-
-TEST(PdTopologyGuardTest, TpShardedHeteroTopoRequiresEqualDpSize) {
+TEST(PdTopologyGuardTest, HeteroDpAndTpAllowsPush) {
   const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {4});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false, true);
-  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
-  EXPECT_EQ(result.reason,
-            "tp-sharded kv cache hetero pd requires equal dp_size");
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
+  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
+  EXPECT_TRUE(result.reason.empty());
 }
 
-TEST(PdTopologyGuardTest, TpShardedHeteroTopoSupportsOnlyPrefillTp2DecodeTp1) {
+TEST(PdTopologyGuardTest, NonIntegerTpChangeAllowsPush) {
   const InstanceInfo local_info = make_info(1, {0, 1, 2});
   const InstanceInfo remote_info = make_info(1, {3, 4});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false, true);
-  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
-  EXPECT_EQ(result.reason,
-            "tp-sharded kv cache hetero pd currently supports only Prefill "
-            "TP2 to Decode TP1");
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
+  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
+  EXPECT_TRUE(result.reason.empty());
 }
 
-TEST(PdTopologyGuardTest, TpShardedHeteroTopoRejectsPrefillTp4DecodeTp1) {
+TEST(PdTopologyGuardTest, PrefillTpFourDecodeTpOneAllowsPush) {
   const InstanceInfo local_info = make_info(1, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {4});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false, true);
-  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
-  EXPECT_EQ(result.reason,
-            "tp-sharded kv cache hetero pd currently supports only Prefill "
-            "TP2 to Decode TP1");
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
+  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
+  EXPECT_TRUE(result.reason.empty());
 }
 
 TEST(PdTopologyGuardTest, CheckPdTopoRejectInvalidLocalTopo) {
   const InstanceInfo local_info = make_info(0, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {0, 1, 2, 3});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", true);
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
   EXPECT_EQ(result.status, PdTopoStatus::INVALID_LOCAL);
   EXPECT_EQ(result.reason,
             "invalid local pd topo: dp_size must be greater than 0");
@@ -194,8 +149,7 @@ TEST(PdTopologyGuardTest, CheckPdTopoRejectInvalidRemoteTopo) {
   const InstanceInfo local_info = make_info(1, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(2, {0, 1, 2});
 
-  const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", true);
+  const PdTopoResult result = check_pd_topo(local_info, remote_info, "PUSH");
   EXPECT_EQ(result.status, PdTopoStatus::INVALID_REMOTE);
   EXPECT_EQ(result.reason,
             "invalid remote pd topo: cluster_ids.size() must be divisible by "

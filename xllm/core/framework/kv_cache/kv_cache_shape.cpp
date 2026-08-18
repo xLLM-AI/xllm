@@ -160,6 +160,20 @@ bool KVCacheShape::has_ssm_cache_shape() const {
   return ssm_cache_shape_.has_value();
 }
 
+int64_t KVCacheShape::linear_ssm_checkpoint_stride() const {
+  if (!has_conv_cache_shape() || !has_ssm_cache_shape()) {
+    return 1;
+  }
+  CHECK(!conv_cache_shape().empty() && !ssm_cache_shape().empty());
+  CHECK_GT(conv_cache_shape()[0], 0);
+  CHECK_EQ(ssm_cache_shape()[0] % conv_cache_shape()[0], 0)
+      << "SSM physical rows must be divisible by logical sequence slots.";
+  const int64_t checkpoint_stride =
+      ssm_cache_shape()[0] / conv_cache_shape()[0];
+  CHECK_GT(checkpoint_stride, 0);
+  return checkpoint_stride;
+}
+
 void KVCacheShape::print_shapes() const {
   if (shape_kind_ == ShapeKind::GROUPED_POOL) {
     print_dsv4_pool_shape();

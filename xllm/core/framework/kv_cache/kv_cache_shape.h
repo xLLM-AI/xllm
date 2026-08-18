@@ -49,6 +49,7 @@ class KVCacheShape final {
   bool has_index_cache_scale_shape() const;
   bool has_conv_cache_shape() const;
   bool has_ssm_cache_shape() const;
+  int64_t linear_ssm_checkpoint_stride() const;
   bool has_grouped_cache_layout() const {
     return shape_kind_ == ShapeKind::GROUPED_POOL;
   }

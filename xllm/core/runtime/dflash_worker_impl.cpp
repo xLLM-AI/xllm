@@ -25,7 +25,6 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -40,7 +39,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
-#include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
 #include "core/framework/speculative/spec_input_builder.h"
 #include "util/json_reader.h"
@@ -479,33 +477,11 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
   const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
 
   if (kv_cache_transfer_ == nullptr) {
-#if defined(USE_NPU)
-    const std::string& transfer_type =
-        ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
-    if (transfer_type == "LlmDataDist") {
-      kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
-          options_.transfer_listen_port(),
-          options_.instance_role(),
-          context_.get_model_args().index_n_heads() > 0,
-          context_.get_model_args().enable_mla());
-    } else {
-      CHECK_EQ(transfer_type, "Mooncake");
-      kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
-          device_.index(),
-          options_.transfer_listen_port(),
-          device_,
-          context_.get_model_args().model_type());
-    }
-#elif defined(USE_MLU)
-    CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
-             "Mooncake")
-        << "MLU DFlash only supports Mooncake KV transfer.";
     kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
         device_.index(),
         options_.transfer_listen_port(),
         device_,
         context_.get_model_args().model_type());
-#endif
 
     const int32_t device_id = device_.index();
     kv_cache_transfer_->initialize(device_id);

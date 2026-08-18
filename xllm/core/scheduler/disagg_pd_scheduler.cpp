@@ -366,18 +366,8 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     remote_instances_info_[selected_instance] = remote_info;
 
-    const ModelArgs& model_args = engine_->model_args();
-    const bool kv_cache_is_tp_invariant =
-        model_args.enable_mla() ||
-        util::is_tp_invariant_kv_cache_model_type(model_args.model_type());
-    const bool enable_heterogeneous_pd =
-        DisaggPDConfig::get_instance().enable_heterogeneous_pd();
-    const PdTopoResult topo_result =
-        check_pd_topo(instance_info_,
-                      remote_info,
-                      options_.kv_cache_transfer_mode(),
-                      kv_cache_is_tp_invariant,
-                      enable_heterogeneous_pd);
+    const PdTopoResult topo_result = check_pd_topo(
+        instance_info_, remote_info, options_.kv_cache_transfer_mode());
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
     if (!allow_pd_topo) {
@@ -391,16 +381,6 @@ void DisaggPDScheduler::dispatch_requests() {
                " is incompatible: " + topo_result.reason});
       continue;
     }
-    if (!kv_cache_is_tp_invariant &&
-        topo_result.status == PdTopoStatus::ALLOW_HETERO &&
-        options_.num_speculative_tokens() <= 0) {
-      response_processor_->process_failed_request(
-          request,
-          {StatusCode::INVALID_ARGUMENT,
-           "tp-sharded kv cache heterogeneous PD requires speculative "
-           "decoding"});
-      continue;
-    }
     if (topo_result.status == PdTopoStatus::ALLOW_HETERO && VLOG_IS_ON(1)) {
       const PdTopo local_topo = get_pd_topo(instance_info_);
       const PdTopo remote_topo = get_pd_topo(remote_info);
@@ -409,10 +389,6 @@ void DisaggPDScheduler::dispatch_requests() {
               << ", remote dp/tp=" << remote_topo.dp_size << "/"
               << remote_topo.tp_size;
     }
-    request->state().heterogeneous_pd =
-        !kv_cache_is_tp_invariant &&
-        topo_result.status == PdTopoStatus::ALLOW_HETERO;
-
     proto::DisaggPDService_Stub* stub = create_rpc_channel(selected_instance);
     if (stub == nullptr) {
       response_processor_->process_failed_request(
@@ -733,11 +709,9 @@ void DisaggPDScheduler::prefill_send_first_generation() {
             request->sequences()[0]->first_token().value().token_top_logprobs);
       }
       gen->set_kv_cache_transfer_mode(options_.kv_cache_transfer_mode());
-      gen->set_heterogeneous_pd(request->state().heterogeneous_pd);
-      // Native PULL and heterogeneous PUSH both need source cache metadata.
-      // Homogeneous PUSH does not consume it, so keep that request compact.
-      if (options_.kv_cache_transfer_mode() == "PULL" ||
-          request->state().heterogeneous_pd) {
+      // PUSH is completed before FirstGeneration. Only native PULL needs
+      // source cache metadata in this request.
+      if (options_.kv_cache_transfer_mode() == "PULL") {
         ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
                             instance_info_.cluster_ids);
         ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
@@ -881,7 +855,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     std::vector<KVTransferMapping> source_mappings,
     int32_t src_dp_size,
     int32_t src_dp_rank,
-    bool heterogeneous_pd,
     torch::Tensor mtp_bootstrap_embedding,
     int32_t num_cached_tokens) {
   Timer receive_timer;
@@ -924,16 +897,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   request->record_num_prefix_cache_tokens(
       static_cast<size_t>(num_cached_tokens));
-  const bool hetero_kv_pull =
-      heterogeneous_pd &&
-      DisaggPDConfig::get_instance().enable_heterogeneous_pd();
-  if (heterogeneous_pd && !hetero_kv_pull) {
-    LOG(ERROR) << "Prefill requested heterogeneous PD but Decode did not "
-                  "enable it, request_id: "
-               << req_id;
-    kv_cache_manager_->deallocate(request.get());
-    return false;
-  }
   const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
   if (need_mtp_bootstrap) {
     const int32_t slot_id = sequence->get_embedding_block_id();
@@ -996,10 +959,9 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   const double prepare_seconds = receive_timer.elapsed_seconds();
 
-  // Pull KV cache in native PULL mode. For a TP-sharded heterogeneous PUSH
-  // deployment, pull every P-side shard into temporary D-side caches and
-  // concatenate the sharded tensor dimensions before decode starts.
-  if (kv_cache_transfer_mode == "PULL" || hetero_kv_pull) {
+  // Pull KV cache only in native PULL mode. Heterogeneous PUSH writes directly
+  // into the final destination tensors before FirstGeneration is sent.
+  if (kv_cache_transfer_mode == "PULL") {
     Timer pull_timer;
     for (KVTransferMapping& mapping : source_mappings) {
       const std::optional<BlockType> block_type =
@@ -1046,28 +1008,18 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     }
 
     const int32_t dst_dp_rank = sequence->dp_rank();
-    const bool pulled = hetero_kv_pull
-                            ? engine_->pull_hetero_kv_blocks(src_dp_size,
-                                                             src_dp_rank,
-                                                             src_cluster_ids,
-                                                             src_addrs,
-                                                             dst_dp_rank,
-                                                             source_mappings)
-                            : engine_->pull_kv_blocks(src_dp_size,
-                                                      src_dp_rank,
-                                                      src_cluster_ids,
-                                                      src_addrs,
-                                                      dst_dp_rank,
-                                                      source_mappings);
+    const bool pulled = engine_->pull_kv_blocks(src_dp_size,
+                                                src_dp_rank,
+                                                src_cluster_ids,
+                                                src_addrs,
+                                                dst_dp_rank,
+                                                source_mappings);
     if (!pulled) {
-      LOG(ERROR) << "Failed to pull"
-                 << (hetero_kv_pull ? " and merge heterogeneous" : "")
-                 << " KV blocks, request_id: " << req_id;
+      LOG(ERROR) << "Failed to pull KV blocks, request_id: " << req_id;
       kv_cache_manager_->deallocate(request.get());
       return false;
     }
     VLOG(1) << "Decode KV restore request_id=" << req_id
-            << ", hetero=" << hetero_kv_pull
             << ", pull_ms=" << pull_timer.elapsed_seconds() * 1000.0;
   }
 

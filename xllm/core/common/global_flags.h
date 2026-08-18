@@ -178,8 +178,6 @@ DECLARE_int32(disagg_pd_port);
 
 DECLARE_string(instance_role);
 
-DECLARE_string(kv_cache_transfer_type);
-
 DECLARE_string(kv_cache_transfer_mode);
 
 DECLARE_int32(transfer_listen_port);

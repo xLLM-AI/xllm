@@ -69,6 +69,23 @@ inline constexpr int32_t cache_group_id(BlockType type) {
   return static_cast<int32_t>(type);
 }
 
+// KV-split widens one source-side logical block across multiple destination
+// blocks. This applies to ordinary KV and every grouped attention-cache pool,
+// but not to the sequence-scoped embedding or recurrent-state slots.
+inline constexpr bool is_kv_split_cache_block_type(BlockType type) {
+  switch (type) {
+    case BlockType::KV:
+    case BlockType::SWA:
+    case BlockType::C4:
+    case BlockType::C128:
+      return true;
+    case BlockType::EMBEDDING:
+    case BlockType::LINEAR:
+      return false;
+  }
+  return false;
+}
+
 inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
     int32_t group_id) {
   switch (group_id) {

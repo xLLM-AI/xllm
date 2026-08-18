@@ -517,6 +517,25 @@ TEST(BatchInputBuilderTest, DSV4FirstChunkSlicesFullRemoteAllocation) {
             2u);
 }
 
+TEST(BatchInputBuilderTest, DSV4KvSplitMapsOneSourceBlockToTwoDecodeBlocks) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(32);
+  BlockManagerImpl manager(options);
+  std::vector<Block> blocks = manager.allocate(2);
+  Sequence sequence = make_basic_sequence({1});
+  sequence.add_blocks(BlockType::C4, blocks);
+  const TransferKVInfo full_info =
+      make_info({100, 101, 102, 103}, BlockType::C4);
+
+  const TransferKVInfo info =
+      BatchInputBuilderTestPeer::build_step_transfer_info(
+          full_info, &sequence, /*seq_len=*/64, /*kv_split_size=*/2);
+
+  expect_mapping(info, BlockType::C4, block_ids(blocks), {100, 101, 102, 103});
+  EXPECT_EQ(sequence.kv_state().next_group_transfer_block_idx(BlockType::C4),
+            2u);
+}
+
 TEST(BatchInputBuilderTest, DSV4LaterChunkSkipsExpiredSWABlocks) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);

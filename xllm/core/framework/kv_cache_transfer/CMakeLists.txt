@@ -2,6 +2,32 @@ include(cc_library)
 
 cc_library(
   NAME
+    cache_layout
+  HDRS
+    cache_layout.h
+  SRCS
+    cache_layout.cpp
+  DEPS
+    :common
+    glog::glog
+    proto::xllm_proto
+)
+
+cc_library(
+  NAME
+    reshard_planner
+  HDRS
+    reshard_planner.h
+  SRCS
+    reshard_planner.cpp
+  DEPS
+    :cache_layout
+    :common
+    glog::glog
+)
+
+cc_library(
+  NAME
     push_route
   HDRS
     push_route.h
@@ -17,6 +43,7 @@ cc_library(
   SRCS
     pd_topology_guard.cpp
   DEPS
+    :cache_layout
     :common
     glog::glog
 )
@@ -38,8 +65,6 @@ cc_library(
     kv_cache_transfer
   HDRS
     kv_cache_transfer.h
-    $<$<BOOL:${USE_NPU}>:llm_data_dist_transfer.h>
-    $<$<BOOL:${USE_NPU}>:spec_kv_cache_transfer.h>
     kv_cache_store.h
     prefetch_result.h
     hierarchy_kv_cache_transfer.h
@@ -48,22 +73,22 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:mooncake_weight_transfer.h>
   SRCS
     kv_cache_transfer.cpp
-    $<$<BOOL:${USE_NPU}>:llm_data_dist_transfer.cpp>
-    $<$<BOOL:${USE_NPU}>:spec_kv_cache_transfer.cpp>
     kv_cache_store.cpp
     hierarchy_kv_cache_transfer.cpp
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_transfer_engine.cpp>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>
     $<$<BOOL:${USE_NPU}>:mooncake_weight_transfer.cpp>
   DEPS
+    :cache_layout
     :common
     :kv_cache
     :push_route
+    :reshard_planner
     :xtensor
+    :util
     :platform
     $<$<BOOL:${USE_NPU}>:graph>
     glog::glog
-    $<$<BOOL:${USE_NPU}>:llm_datadist>
     $<$<BOOL:${USE_NPU}>:c_sec>
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>

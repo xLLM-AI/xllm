@@ -48,7 +48,6 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_estimation.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache/kv_cache_utils.h"
-#include "framework/kv_cache_transfer/push_route.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/xtensor/page_allocator.h"
@@ -801,47 +800,6 @@ bool LLMEngine::pull_kv_blocks(const int32_t src_dp_size,
   return true;
 }
 
-bool LLMEngine::pull_hetero_kv_blocks(
-    const int32_t src_dp_size,
-    const int32_t src_dp_rank,
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const int32_t dst_dp_rank,
-    const std::vector<KVTransferMapping>& mappings) {
-  if (src_dp_size <= 0 || src_dp_rank < 0 || src_dp_rank >= src_dp_size ||
-      src_cluster_ids.size() != src_addrs.size() ||
-      src_cluster_ids.size() % static_cast<size_t>(src_dp_size) != 0) {
-    LOG(ERROR) << "Invalid heterogeneous KV pull topology.";
-    return false;
-  }
-  const int32_t src_tp_size =
-      static_cast<int32_t>(src_cluster_ids.size()) / src_dp_size;
-  const int32_t dst_tp_size = static_cast<int32_t>(dp_local_tp_size_);
-  if (src_tp_size < dst_tp_size || src_tp_size % dst_tp_size != 0) {
-    LOG(ERROR) << "Unsupported heterogeneous KV pull ratio: prefill_tp_size="
-               << src_tp_size << ", decode_tp_size=" << dst_tp_size;
-    return false;
-  }
-
-  std::vector<bool> results;
-  results.reserve(dst_tp_size);
-  for (int32_t dst_tp_rank = 0; dst_tp_rank < dst_tp_size; ++dst_tp_rank) {
-    std::vector<uint64_t> worker_src_cluster_ids;
-    std::vector<std::string> worker_src_addrs;
-    for (int32_t src_tp_rank :
-         get_src_tp_ranks(dst_tp_rank, src_tp_size, dst_tp_size)) {
-      const int32_t src_worker_rank = src_dp_rank * src_tp_size + src_tp_rank;
-      worker_src_cluster_ids.push_back(src_cluster_ids[src_worker_rank]);
-      worker_src_addrs.push_back(src_addrs[src_worker_rank]);
-    }
-    const int32_t dst_worker_rank = dst_dp_rank * dst_tp_size + dst_tp_rank;
-    results.push_back(worker_clients_[dst_worker_rank]->pull_hetero_kv_blocks(
-        worker_src_cluster_ids, worker_src_addrs, mappings));
-  }
-  return std::all_of(
-      results.begin(), results.end(), [](bool result) { return result; });
-}
-
 std::vector<folly::SemiFuture<uint32_t>> LLMEngine::transfer_kv_blocks(
     const uint32_t dp_rank,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
@@ -932,12 +890,18 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
                              const int32_t src_dp_size,
                              const int32_t src_kv_split_size) {
   const int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
+  if (src_dp_size <= 0 || src_kv_split_size <= 0 || src_world_size <= 0 ||
+      src_world_size % src_dp_size != 0 ||
+      (src_world_size / src_dp_size) % src_kv_split_size != 0 ||
+      addrs.size() != cluster_ids.size() ||
+      ports.size() != cluster_ids.size()) {
+    LOG(ERROR) << "Invalid source topology for cache layout negotiation.";
+    return false;
+  }
 
-  // Each D worker connects to every P worker that routes KV blocks to its TP
-  // rank. When P TP is larger, multiple P ranks share one D-side owner.
-  // P layout: rank = dp_i * src_cp_tp_size + split_j * src_tp_size + tp_rank
-  int32_t src_cp_tp_size = src_world_size / src_dp_size;
-  int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
+  // Every D worker negotiates with all P workers. Logical shard intersection
+  // determines which edges carry bytes; modulo TP routing cannot represent
+  // non-integer TP changes or KV-head replication.
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -945,27 +909,13 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    const int32_t dst_tp_rank =
-        static_cast<int32_t>(worker_rank % dp_local_tp_size_);
-    const std::vector<int32_t> src_tp_ranks =
-        get_src_tp_ranks(dst_tp_rank, src_tp_size, dp_local_tp_size_);
-    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
-                                  static_cast<size_t>(src_kv_split_size) *
-                                  src_tp_ranks.size();
-    target_cluster_ids.reserve(endpoint_count);
-    target_addrs.reserve(endpoint_count);
-    target_ports.reserve(endpoint_count);
-
-    for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
-      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        for (int32_t src_tp_rank : src_tp_ranks) {
-          const int32_t p_idx =
-              dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
-          target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-          target_addrs.emplace_back(addrs[p_idx]);
-          target_ports.emplace_back(ports[p_idx]);
-        }
-      }
+    target_cluster_ids.reserve(static_cast<size_t>(src_world_size));
+    target_addrs.reserve(static_cast<size_t>(src_world_size));
+    target_ports.reserve(static_cast<size_t>(src_world_size));
+    for (int32_t source_rank = 0; source_rank < src_world_size; ++source_rank) {
+      target_cluster_ids.emplace_back(cluster_ids[source_rank]);
+      target_addrs.emplace_back(addrs[source_rank]);
+      target_ports.emplace_back(ports[source_rank]);
     }
 
     folly::Promise<bool> promise;
@@ -999,10 +949,16 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                const int32_t src_dp_size,
                                const int32_t src_kv_split_size) {
   const int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
+  if (src_dp_size <= 0 || src_kv_split_size <= 0 || src_world_size <= 0 ||
+      src_world_size % src_dp_size != 0 ||
+      (src_world_size / src_dp_size) % src_kv_split_size != 0 ||
+      addrs.size() != cluster_ids.size() ||
+      ports.size() != cluster_ids.size()) {
+    LOG(ERROR) << "Invalid source topology for cache unlink.";
+    return false;
+  }
 
-  // Symmetric to link_cluster; uses the same owner mapping.
-  int32_t src_cp_tp_size = src_world_size / src_dp_size;
-  int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
+  // Symmetric to link_cluster: close every negotiated source edge.
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -1010,27 +966,13 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    const int32_t dst_tp_rank =
-        static_cast<int32_t>(worker_rank % dp_local_tp_size_);
-    const std::vector<int32_t> src_tp_ranks =
-        get_src_tp_ranks(dst_tp_rank, src_tp_size, dp_local_tp_size_);
-    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
-                                  static_cast<size_t>(src_kv_split_size) *
-                                  src_tp_ranks.size();
-    target_cluster_ids.reserve(endpoint_count);
-    target_addrs.reserve(endpoint_count);
-    target_ports.reserve(endpoint_count);
-
-    for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
-      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        for (int32_t src_tp_rank : src_tp_ranks) {
-          const int32_t p_idx =
-              dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
-          target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-          target_addrs.emplace_back(addrs[p_idx]);
-          target_ports.emplace_back(ports[p_idx]);
-        }
-      }
+    target_cluster_ids.reserve(static_cast<size_t>(src_world_size));
+    target_addrs.reserve(static_cast<size_t>(src_world_size));
+    target_ports.reserve(static_cast<size_t>(src_world_size));
+    for (int32_t source_rank = 0; source_rank < src_world_size; ++source_rank) {
+      target_cluster_ids.emplace_back(cluster_ids[source_rank]);
+      target_addrs.emplace_back(addrs[source_rank]);
+      target_ports.emplace_back(ports[source_rank]);
     }
 
     folly::Promise<bool> promise;

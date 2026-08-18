@@ -276,21 +276,6 @@ bool SpeculativeEngine::pull_kv_blocks(
                                  mappings);
 };
 
-bool SpeculativeEngine::pull_hetero_kv_blocks(
-    const int32_t src_dp_size,
-    const int32_t src_dp_rank,
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const int32_t dst_dp_rank,
-    const std::vector<KVTransferMapping>& mappings) {
-  return engine_->pull_hetero_kv_blocks(src_dp_size,
-                                        src_dp_rank,
-                                        src_cluster_ids,
-                                        src_addrs,
-                                        dst_dp_rank,
-                                        mappings);
-}
-
 void SpeculativeEngine::get_cache_info(std::vector<uint64_t>& cluster_ids,
                                        std::vector<std::string>& addrs,
                                        std::vector<uint16_t>& ports) {

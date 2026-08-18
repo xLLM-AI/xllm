@@ -24,9 +24,90 @@ import "common.proto";
 
 message SessionInfo {
   string addr = 1;
+  WorkerCacheLayoutManifest cache_layout_manifest = 2;
+}
+
+enum CacheNamespace {
+  CACHE_NAMESPACE_MAIN = 0;
+  CACHE_NAMESPACE_SPEC_DRAFT = 1;
+}
+
+enum CacheResourceScope {
+  CACHE_RESOURCE_BLOCK = 0;
+  CACHE_RESOURCE_SEQUENCE = 1;
+}
+
+enum LogicalShardKind {
+  LOGICAL_SHARD_REPLICATED = 0;
+  LOGICAL_SHARD_SHARDED = 1;
+  LOGICAL_SHARD_COMPOSITE = 2;
+}
+
+message LogicalSpan {
+  string logical_tensor = 1;
+  uint64 logical_offset_bytes = 2;
+  uint64 physical_offset_bytes = 3;
+  uint64 bytes_per_region = 4;
+  uint64 repeat_count = 5;
+  uint64 logical_stride_bytes = 6;
+  uint64 physical_stride_bytes = 7;
+  int32 owner_tp_rank = 8;
+}
+
+message LogicalShardDescriptor {
+  LogicalShardKind kind = 1;
+  CacheResourceScope resource_scope = 2;
+  repeated LogicalSpan spans = 3;
+}
+
+message ParallelCoordinates {
+  int32 dp_rank = 1;
+  int32 dp_size = 2;
+  int32 tp_rank = 3;
+  int32 tp_size = 4;
+  int32 cp_rank = 5;
+  int32 cp_size = 6;
+  int32 kv_split_rank = 7;
+  int32 kv_split_size = 8;
+}
+
+message CacheTensorManifest {
+  CacheNamespace cache_namespace = 1;
+  int64 layer_id = 2;
+  int32 role = 3;
+  int32 group_id = 4;
+  int64 mooncake_buffer_id = 5;
+  int32 scalar_type = 6;
+  uint64 element_bytes = 7;
+  repeated int64 shape = 8;
+  repeated int64 stride = 9;
+  uint64 resource_count = 10;
+  uint64 resource_stride_bytes = 11;
+  uint64 buffer_bytes = 12;
+  uint64 block_token_capacity = 13;
+  LogicalShardDescriptor shard = 14;
+  uint64 storage_offset_bytes = 15;
+  bool contiguous = 16;
+  bool explicit_resource_offsets = 17;
+  uint64 physical_rows_per_resource = 18;
+}
+
+message WorkerCacheLayoutManifest {
+  uint32 schema_version = 1;
+  string incarnation_id = 2;
+  uint64 layout_generation = 3;
+  string fingerprint = 4;
+  string backend = 5;
+  string layout_family = 6;
+  uint64 cluster_id = 7;
+  string addr = 8;
+  uint32 listen_port = 9;
+  ParallelCoordinates coordinates = 10;
+  repeated CacheTensorManifest tensors = 11;
 }
 
 service MooncakeTransferEngineService {
   rpc OpenSession(SessionInfo) returns (Status) {}
   rpc CloseSession(SessionInfo) returns (Status) {}
+  rpc GetCacheLayoutManifest(Empty) returns (WorkerCacheLayoutManifest) {}
 }

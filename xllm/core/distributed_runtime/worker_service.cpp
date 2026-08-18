@@ -557,18 +557,8 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
                                 proto_mapping.remote_ids().end());
       mappings.emplace_back(std::move(mapping));
     }
-    auto future = [&]() {
-      if (req->hetero_merge()) {
-        std::vector<uint64_t> src_cluster_ids(req->src_cluster_ids().begin(),
-                                              req->src_cluster_ids().end());
-        std::vector<std::string> src_addrs(req->src_addrs().begin(),
-                                           req->src_addrs().end());
-        return worker_->pull_hetero_kv_blocks_async(
-            src_cluster_ids, src_addrs, mappings);
-      }
-      return worker_->pull_kv_blocks_async(
-          req->cluster_id(), req->addr(), mappings);
-    }();
+    auto future =
+        worker_->pull_kv_blocks_async(req->cluster_id(), req->addr(), mappings);
     bool status = std::move(future).get();
     resp->set_ok(status);
   });

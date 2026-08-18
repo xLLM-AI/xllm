@@ -38,6 +38,8 @@ class KVTransferCompletion final {
 
   void add(folly::SemiFuture<bool> future);
 
+  bool empty() const { return futures_.empty(); }
+
   // Waits until all owned transfers finish. Returns false when any transfer
   // reports failure or completes with an exception.
   bool wait();

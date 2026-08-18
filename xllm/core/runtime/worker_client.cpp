@@ -86,15 +86,6 @@ bool WorkerClient::pull_kv_blocks(
   return std::move(future).get();
 }
 
-bool WorkerClient::pull_hetero_kv_blocks(
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<KVTransferMapping>& mappings) {
-  auto future = worker_->pull_hetero_kv_blocks_async(
-      src_cluster_ids, src_addrs, mappings);
-  return std::move(future).get();
-}
-
 ForwardInput WorkerClient::prepare_inputs(Batch& batch) {
   return worker_->prepare_inputs(batch);
 }

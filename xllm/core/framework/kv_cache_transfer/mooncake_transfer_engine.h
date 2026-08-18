@@ -21,10 +21,13 @@ limitations under the License.
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
+#include "framework/kv_cache_transfer/cache_layout.h"
+#include "framework/kv_cache_transfer/reshard_planner.h"
 #include "mooncake_transfer_engine.pb.h"
 #include "platform/device.h"
 
@@ -52,9 +55,30 @@ class MooncakeTransferEngineCore {
   const std::string& host_ip() const { return host_ip_; }
 
   // Session state is shared across all MooncakeTransferEngine instances.
-  bool open_session(const uint64_t cluster_id, const std::string& remote_addr);
+  bool open_session(const uint64_t cluster_id,
+                    const std::string& remote_addr,
+                    bool increment_existing = true);
   bool close_session(const uint64_t cluster_id, const std::string& remote_addr);
   SegmentHandle get_handle(const std::string& remote_addr);
+
+  Status set_local_cache_layout(const WorkerCacheLayoutManifest& manifest);
+  std::optional<WorkerCacheLayoutManifest> local_cache_layout() const;
+  Status install_peer_cache_layout(
+      const WorkerCacheLayoutManifest& peer_manifest);
+  bool has_outgoing_plan(const std::string& remote_addr,
+                         CacheNamespace cache_namespace) const;
+  bool has_reshard_plan(const std::string& remote_addr) const;
+  Status bind_outgoing_regions(const std::string& remote_addr,
+                               const std::vector<KVTransferMapping>& mappings,
+                               CacheNamespace cache_namespace,
+                               int64_t layer_id,
+                               std::vector<ByteRegion>* regions) const;
+  Status bind_outgoing_regions_explicit(
+      const std::string& remote_addr,
+      const std::vector<ExplicitResourceMapping>& mappings,
+      CacheNamespace cache_namespace,
+      int64_t layer_id,
+      std::vector<ByteRegion>* regions) const;
 
   // Lazily create and cache the RPC stub for a remote cluster.
   proto::MooncakeTransferEngineService_Stub* get_or_create_stub(
@@ -72,7 +96,7 @@ class MooncakeTransferEngineCore {
   MooncakeTransferEngineCore& operator=(const MooncakeTransferEngineCore&) =
       delete;
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   bool initialized_ = false;
 
   std::string addr_;
@@ -90,6 +114,8 @@ class MooncakeTransferEngineCore {
     int32_t ref_count = 0;
   };
   std::unordered_map<std::string, SessionInfo> handles_;
+  std::optional<WorkerCacheLayoutManifest> local_cache_layout_;
+  std::unordered_map<std::string, ReshardPlanTemplate> outgoing_plans_;
   std::unordered_map<uint64_t, proto::MooncakeTransferEngineService_Stub*>
       stub_map_;
 };
@@ -125,6 +151,31 @@ class MooncakeTransferEngine {
       const std::vector<BufferTransferMapping>& mappings,
       MoveOpcode move_opcode);
 
+  virtual bool move_memory_regions(const std::string& remote_addr,
+                                   const std::vector<ByteRegion>& regions,
+                                   MoveOpcode move_opcode);
+
+  bool link_sessions(const std::vector<uint64_t>& cluster_ids,
+                     const std::vector<std::string>& remote_addrs);
+
+  Status set_local_cache_layout(const WorkerCacheLayoutManifest& manifest);
+
+  bool has_outgoing_plan(const std::string& remote_addr,
+                         CacheNamespace cache_namespace) const;
+  virtual bool has_reshard_plan(const std::string& remote_addr) const;
+
+  Status bind_outgoing_regions(const std::string& remote_addr,
+                               const std::vector<KVTransferMapping>& mappings,
+                               CacheNamespace cache_namespace,
+                               int64_t layer_id,
+                               std::vector<ByteRegion>* regions) const;
+  Status bind_outgoing_regions_explicit(
+      const std::string& remote_addr,
+      const std::vector<ExplicitResourceMapping>& mappings,
+      CacheNamespace cache_namespace,
+      int64_t layer_id,
+      std::vector<ByteRegion>* regions) const;
+
   virtual bool pull_memory_blocks(const std::string& remote_addr,
                                   const std::vector<uint64_t>& src_blocks,
                                   const std::vector<uint64_t>& dst_blocks,
@@ -154,6 +205,8 @@ class MooncakeTransferEngine {
   std::vector<uint64_t> buf_bytes_;
   Device device_;
   MooncakeTransferEngineCore& core_;
+  std::mutex session_mutex_;
+  std::unordered_map<std::string, int32_t> session_ref_counts_;
 };
 
 class MooncakeTransferEngineService
@@ -172,6 +225,11 @@ class MooncakeTransferEngineService
                     const proto::SessionInfo* request,
                     proto::Status* response,
                     google::protobuf::Closure* done) override;
+
+  void GetCacheLayoutManifest(google::protobuf::RpcController* controller,
+                              const proto::Empty* request,
+                              proto::WorkerCacheLayoutManifest* response,
+                              google::protobuf::Closure* done) override;
 };
 
 }  // namespace xllm

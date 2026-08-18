@@ -318,6 +318,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
     }
 
     const bool is_flat_kv = block_type.value() == BlockType::KV;
+    const bool uses_kv_split = is_kv_split_cache_block_type(block_type.value());
     const size_t next_transfer_idx =
         is_flat_kv ? sequence->kv_state().next_transfer_block_idx()
                    : sequence->kv_state().next_group_transfer_block_idx(
@@ -326,7 +327,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
         static_cast<size_t>(util::ceil_div(seq_len, block_size));
     const size_t map_end = std::min(win_end, local_ids.size());
     const size_t remote_stride =
-        is_flat_kv ? static_cast<size_t>(kv_split_size) : 1;
+        uses_kv_split ? static_cast<size_t>(kv_split_size) : 1;
     CHECK_GT(remote_stride, static_cast<size_t>(0));
     const size_t remote_shared_num =
         static_cast<size_t>(full_mapping.remote_shared_num);

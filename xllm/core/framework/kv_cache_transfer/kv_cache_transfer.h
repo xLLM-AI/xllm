@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/types.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/model/model_args.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -42,10 +43,11 @@ using KVPushSynchronizerImpl = MLULayerSynchronizerImpl;
 using KVPushSynchronizerImpl = DCULayerSynchronizerImpl;
 #endif
 
-// In KV-split mode, filters and remaps the BlockType::KV mapping's remote_ids
-// so that each KV-split rank only sees the remote blocks assigned to it. When
-// `kv_split_size == 1` the caller should skip this entirely (every rank holds
-// the full KV replica and remote_ids is 1:1 with local_ids).
+// In KV-split mode, filters and remaps each block-scoped cache mapping's
+// remote_ids so that every KV-split rank sees only the destination blocks
+// assigned to it. This includes ordinary KV and grouped SWA/C4/C128 caches.
+// When `kv_split_size == 1` the caller should skip this entirely (every rank
+// holds the full KV replica and remote_ids is 1:1 with local_ids).
 //
 // Note: prior to the KV-split / CP decoupling refactor this was named
 // filter_cp_kv_infos and gated on cp_size>1. The behavior is identical when
@@ -81,6 +83,11 @@ class KVCacheTransfer {
 
   virtual void free_kv_cache() {};
 
+  virtual void configure_cache_layout(const ParallelArgs& parallel_args,
+                                      const ModelArgs& model_args,
+                                      int32_t block_token_capacity,
+                                      bool is_spec_draft) {}
+
   virtual void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                                  const KVCacheShape& kv_cache_shape,
                                  const torch::ScalarType dtype) {};
@@ -93,9 +100,9 @@ class KVCacheTransfer {
 
   virtual void get_cache_info(uint64_t& cluster_id, std::string& addr) = 0;
 
-  virtual bool link_cluster(const uint64_t cluster_id,
-                            const std::string& remote_addr,
-                            const uint16_t port) = 0;
+  virtual bool link_clusters(const std::vector<uint64_t>& cluster_ids,
+                             const std::vector<std::string>& remote_addrs,
+                             const std::vector<uint16_t>& ports) = 0;
 
   virtual bool unlink_cluster(const uint64_t& cluster_id,
                               const std::string& remote_addr,
@@ -111,15 +118,6 @@ class KVCacheTransfer {
       const uint64_t src_cluster_id,
       const std::string& src_addr,
       const std::vector<KVTransferMapping>& mappings);
-
-  // Heterogeneous TP fallback transport: pull every source TP shard into
-  // temporary local buffers and merge them into the decode-side cache.
-  virtual bool pull_hetero_kv_blocks(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<KVTransferMapping>& mappings) {
-    return false;
-  }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   virtual folly::SemiFuture<bool> push_kv_blocks_async(
@@ -162,11 +160,8 @@ class KVCacheTransfer {
 class KVCacheTransferFactory {
  public:
   static std::shared_ptr<KVCacheTransfer> create(
-      const std::string& transfer_type,
       uint16_t transfer_listen_port,
-      InstanceRole instance_role,
       const Device& device,
-      bool enable_lighting_indexer,
       const std::string& model_type = "",
       const std::string& model_id = "");
 };

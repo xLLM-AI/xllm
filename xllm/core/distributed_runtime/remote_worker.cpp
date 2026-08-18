@@ -261,13 +261,6 @@ folly::SemiFuture<bool> RemoteWorker::pull_kv_blocks_async(
   return future;
 }
 
-bool RemoteWorker::pull_hetero_kv_blocks(
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<KVTransferMapping>& mappings) {
-  return channel_->pull_hetero_kv_blocks(src_cluster_ids, src_addrs, mappings);
-}
-
 folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   folly::Promise<uint32_t> promise;

@@ -183,14 +183,6 @@ folly::SemiFuture<bool> Worker::pull_kv_blocks_async(
   return impl_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
 }
 
-folly::SemiFuture<bool> Worker::pull_hetero_kv_blocks_async(
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<KVTransferMapping>& mappings) {
-  return impl_->pull_hetero_kv_blocks_async(
-      src_cluster_ids, src_addrs, mappings);
-}
-
 uint32_t Worker::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {

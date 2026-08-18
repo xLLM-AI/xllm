@@ -22,21 +22,16 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/mtp_json_object_state.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
-#if defined(USE_NPU)
-#include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
-#endif
-#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
 
 #if defined(USE_NPU)
-using namespace llm_datadist;
-
 namespace detail {
 class NpuJsonDraftTokenHandoff;
 }  // namespace detail

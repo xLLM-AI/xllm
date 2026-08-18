@@ -44,6 +44,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
+#include "framework/kv_cache/logical_cache_layout.h"
 
 namespace xllm {
 
@@ -139,6 +140,7 @@ struct KVCacheTensor {
   torch::Tensor tensor;
   int32_t group_id = cache_group_id(BlockType::KV);
   bool sequence_scoped = false;
+  std::optional<LogicalShardDescriptor> shard_descriptor;
 };
 
 using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;

@@ -118,7 +118,8 @@ class WorkerImpl {
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream,
-                                             bool record_ready_event = true);
+                                             bool record_ready_event = true,
+                                             bool restore_linear_state = true);
 #if defined(USE_NPU)
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
@@ -184,11 +185,6 @@ class WorkerImpl {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<KVTransferMapping>& mappings);
-
-  virtual folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
       const std::vector<KVTransferMapping>& mappings);
 
   virtual uint32_t transfer_kv_blocks(

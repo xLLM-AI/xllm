@@ -100,15 +100,10 @@ message P2PLinkWorkerRequest {
 }
 
 message PullKVCacheRequest {
+  reserved 4, 5, 7 to 11;
+
   uint64 cluster_id = 1;
   string addr = 6;
-  repeated uint64 src_blocks = 4 [deprecated = true];
-  repeated uint64 dst_blocks = 5 [deprecated = true];
-  repeated uint64 src_linear_state_ids = 7 [deprecated = true];
-  repeated uint64 dst_linear_state_ids = 8 [deprecated = true];
-  repeated uint64 src_cluster_ids = 9;
-  repeated string src_addrs = 10;
-  bool hetero_merge = 11;
   repeated KVTransferMapping mappings = 12;
 }
 
@@ -172,18 +167,14 @@ message InstanceInfo {
 }
 
 message TransferKVInfo {
+  reserved 2, 3, 7, 8;
+
   string request_id = 1;
-  repeated uint64 local_blocks_ids = 2 [deprecated = true];
-  repeated uint64 remote_blocks_ids = 3 [deprecated = true];
   int32 dp_rank = 4;
   InstanceInfo remote_instance_info = 5;
   // XTensor mode: destination offsets from D-node (per-layer)
   // Each XTensorLayerOffsets contains K/V offsets for all blocks at one layer
   repeated XTensorLayerOffsets dst_xtensor_layer_offsets = 6;
-  // Sequence-scoped cache rows used by linear attention caches.
-  repeated uint64 local_linear_state_ids = 7 [deprecated = true];
-  repeated uint64 remote_linear_state_ids = 8 [deprecated = true];
-
   repeated KVTransferMapping mappings = 22;
 }
 

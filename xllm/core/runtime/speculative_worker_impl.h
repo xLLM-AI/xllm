@@ -124,14 +124,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
     return impl_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
   };
 
-  folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<KVTransferMapping>& mappings) override {
-    return impl_->pull_hetero_kv_blocks_async(
-        src_cluster_ids, src_addrs, mappings);
-  };
-
  protected:
   // Algorithm-specific virtual methods for subclasses to implement
   virtual std::optional<ForwardOutput> step_prefill(

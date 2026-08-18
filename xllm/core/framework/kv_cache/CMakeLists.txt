@@ -31,6 +31,8 @@ cc_library(
   NAME
     kv_cache
   HDRS
+    cache_layout_builder.h
+    logical_cache_layout.h
     deepseek_v4_kv_cache_impl.h
     indexed_kv_cache_impl.h
     kv_cache.h
@@ -43,6 +45,7 @@ cc_library(
     linear_attention_kv_cache_impl.h
     quantized_kv_cache_impl.h
   SRCS
+    cache_layout_builder.cpp
     deepseek_v4_kv_cache_impl.cpp
     indexed_kv_cache_impl.cpp
     kv_cache.cpp

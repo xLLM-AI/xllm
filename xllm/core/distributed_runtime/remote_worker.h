@@ -79,11 +79,6 @@ class RemoteWorker : public WorkerClient {
                       const std::string& src_addr,
                       const std::vector<KVTransferMapping>& mappings) override;
 
-  virtual bool pull_hetero_kv_blocks(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<KVTransferMapping>& mappings) override;
-
   // prepare input request
   ForwardInput prepare_inputs(Batch& batch) override;
 
