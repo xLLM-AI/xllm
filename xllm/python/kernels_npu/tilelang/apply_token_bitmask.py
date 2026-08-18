@@ -17,7 +17,6 @@
 import tilelang
 import tilelang.language as T
 
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
 from .utils import DEFAULT_ASCEND_PASS_CONFIGS, detect_vec_core_num
 
 MAX_NUM_ROWS = 4096
@@ -146,26 +145,3 @@ def build_apply_token_bitmask_kernel(*, dtype: str, vec_core_num: int):
                         T.copy(logits_input_ub[0:32], logits[logit_base])
 
     return apply_token_bitmask_kernel
-
-
-@register_kernel
-class ApplyTokenBitmaskKernel(TilelangKernel):
-    DISPATCH_SCHEMA = [DispatchField("dtype", "dtype")]
-    SPECIALIZATIONS = [
-        {
-            "variant_key": dtype,
-            "dtype": dtype,
-        }
-        for dtype in SUPPORTED_DTYPES
-    ]
-
-    @staticmethod
-    def generate_source(dtype: str) -> str:
-        tilelang.disable_cache()
-        tilelang_kernel = build_apply_token_bitmask_kernel(
-            dtype=dtype,
-            vec_core_num=detect_vec_core_num(),
-        )
-        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
-            kernel = tilelang.engine.lower(tilelang_kernel)
-        return kernel.kernel_source

@@ -12,59 +12,72 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""python: Python-defined model graphs executed by xLLM's C++ worker.
+"""Python-defined model graphs executed by xLLM's C++ worker.
 
-The C++ ``PyCausalLM`` embeds a CPython interpreter (sharing this process'
-libtorch), loads a model class from this package, streams weights into
-``load_weights``, and drives ``forward`` / ``compute_logits`` each step.
+Importing this package is intentionally runtime-neutral. The embedded C++
+bootstrap calls :func:`initialize_runtime` after registering native operators
+and before importing a Python model module. That call selects the platform
+kernel package and publishes it as :mod:`xllm.python.kernels`.
 
-Package layout follows ``models -> layers -> kernels``: :mod:`python.models`
-(per-arch graphs) depend on :mod:`python.layers`, which depend on
-``python.kernels``. :mod:`python.distributed` sits beside them and owns the
-tensor-parallel collectives, which differ only in ProcessGroup backend.
-
-``python.kernels`` is not a directory. One peer package per hardware platform
-lives here -- ``kernels_cuda``, ``kernels_npu``, and one per platform added
-later -- sharing no code and never importing each other. The import below binds
-the one matching the active platform as ``kernels``, so layers and models import
-a single fixed name and carry no hardware branch, and exactly one kernel package
-is ever imported in a process.
-
-This is one of the executor's two hardware branches. The other selects the
-attention backend and graph runner in :mod:`python.model_executor.executor`,
-where it belongs: attention backends hold state across steps and follow the
-executor's lifecycle, unlike the stateless functions a kernel package exports.
-
-The C++ worker registers ``torch.ops.xllm_ops`` before importing this package,
-so the kernel package finds its operators here.
+Keeping ordinary package import free of platform and native-operator side
+effects lets build tools import leaf DSL modules such as
+``xllm.python.kernels_npu.tilelang`` before the xLLM binary exists.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
+from types import ModuleType
+from typing import Any
 
-from xllm.python.platform import current_platform
+_runtime_kernels: ModuleType | None = None
 
-# Bound before anything else in the package so that a module reached from here
-# already finds ``xllm.python.kernels`` in place.
-if current_platform.is_cuda():
-    from xllm.python import kernels_cuda as kernels
-elif current_platform.is_npu():
-    from xllm.python import kernels_npu as kernels
-else:
-    raise ImportError(
-        f"no kernel package for platform '{current_platform.device_type()}'; add "
-        f"xllm/python/kernels_{current_platform.device_type()}/ with the APIs "
-        "required by that platform's supported models, and import it here"
-    )
 
-# The binding above only creates an attribute of this package, which the import
-# machinery does not consult, so ``import xllm.python.kernels`` and
-# ``from xllm.python.kernels import rms_norm`` would fail to resolve. Publishing
-# the same module object under the name lifts that restriction; it stays the one
-# object the peer package's own name is bound to, so nothing is imported twice.
-sys.modules[f"{__name__}.kernels"] = kernels
+def initialize_runtime() -> None:
+    """Initialize and publish the active platform's Python kernel package."""
 
-from xllm.python.registry import get_model_class, register_model  # noqa: E402
+    global _runtime_kernels
+    if _runtime_kernels is not None:
+        return
 
-__all__ = ["get_model_class", "register_model", "kernels"]
+    from xllm.python.platform import current_platform
+
+    if current_platform.is_cuda():
+        backend_name = "xllm.python.kernels_cuda"
+    elif current_platform.is_npu():
+        backend_name = "xllm.python.kernels_npu"
+    else:
+        device_type = current_platform.device_type()
+        raise ImportError(
+            f"no Python kernel package for platform '{device_type}'; add "
+            f"xllm/python/kernels_{device_type}/ with the APIs required by "
+            "that platform's supported models"
+        )
+
+    backend = importlib.import_module(backend_name)
+    backend_initializer = getattr(backend, "_initialize_runtime", None)
+    if backend_initializer is not None:
+        backend_initializer()
+
+    globals()["kernels"] = backend
+    sys.modules[f"{__name__}.kernels"] = backend
+    _runtime_kernels = backend
+
+
+def __getattr__(name: str) -> Any:
+    if name == "kernels":
+        raise RuntimeError(
+            "xllm.python runtime is not initialized; the embedded C++ "
+            "bootstrap must call xllm.python.initialize_runtime() before "
+            "importing model or layer modules"
+        )
+    if name in {"get_model_class", "register_model"}:
+        registry = importlib.import_module("xllm.python.registry")
+        value = getattr(registry, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = ["get_model_class", "initialize_runtime", "kernels", "register_model"]

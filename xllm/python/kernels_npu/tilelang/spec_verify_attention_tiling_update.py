@@ -16,7 +16,6 @@
 import tilelang
 import tilelang.language as T
 
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
 from .utils import DEFAULT_ASCEND_PASS_CONFIGS, SUPPORTED_SPEC_VERIFY_WIDTHS
 
 SYMBOL_NUM_ROWS = T.symbolic("num_rows")
@@ -46,25 +45,3 @@ def build_spec_verify_attention_tiling_update_kernel(spec_width: int):
                 tiling_data[row_kv_offset + i * row_stride] = kv_len
 
     return spec_verify_attention_tiling_update
-
-
-@register_kernel
-class SpecVerifyAttentionTilingUpdateKernel(TilelangKernel):
-    DISPATCH_SCHEMA = [
-        DispatchField("spec_width", "int32"),
-    ]
-    SPECIALIZATIONS = [
-        {
-            "variant_key": f"attn_tiling_w{spec_width}",
-            "spec_width": spec_width,
-        }
-        for spec_width in SUPPORTED_SPEC_VERIFY_WIDTHS
-    ]
-
-    @staticmethod
-    def generate_source(spec_width: int) -> str:
-        tilelang.disable_cache()
-        kernel = build_spec_verify_attention_tiling_update_kernel(spec_width)
-        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
-            lowered = tilelang.engine.lower(kernel)
-        return lowered.kernel_source

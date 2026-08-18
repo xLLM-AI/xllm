@@ -7,7 +7,8 @@ from pathlib import Path
 from scripts.logger import logger
 
 from ...common.toolchain import require_env
-from .kernels.utils import DEFAULT_ASCEND_BISHENG_ARCH
+
+DEFAULT_ASCEND_BISHENG_ARCH = "dav-2201"
 
 TILELANG_BISHENG_COMMON_FLAGS = [
     "-O2",

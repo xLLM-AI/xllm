@@ -15,10 +15,13 @@
 
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
 def _load_setup_module():
@@ -52,9 +55,23 @@ class PythonKernelStagingTest(unittest.TestCase):
     def test_device_without_a_package_stages_none(self) -> None:
         # xLLM builds for more devices than the Python model executor covers,
         # so a device with no peer package must not fail the build: the wheel
-        # ships without kernels and xllm/python/__init__.py rejects the
-        # platform at import.
+        # ships without kernels and runtime initialization rejects the
+        # unsupported platform only when the Python executor is selected.
         self.assertEqual(self._stage("mlu", peers=("cuda", "npu")), [])
+
+    def test_nested_dsl_packages_are_staged_recursively(self) -> None:
+        with tempfile.TemporaryDirectory() as source_root:
+            tilelang_dir = os.path.join(source_root, "kernels_npu", "tilelang")
+            triton_dir = os.path.join(source_root, "kernels_npu", "triton")
+            os.makedirs(tilelang_dir)
+            os.makedirs(triton_dir)
+            open(os.path.join(tilelang_dir, "rope.py"), "w", encoding="utf-8").close()
+            open(os.path.join(triton_dir, "rope.py"), "w", encoding="utf-8").close()
+
+            with tempfile.TemporaryDirectory() as dest_root:
+                self.setup._stage_python_kernel_package(source_root, dest_root, "npu")
+                self.assertTrue(os.path.isfile(os.path.join(dest_root, "kernels_npu", "tilelang", "rope.py")))
+                self.assertTrue(os.path.isfile(os.path.join(dest_root, "kernels_npu", "triton", "rope.py")))
 
 
 if __name__ == "__main__":

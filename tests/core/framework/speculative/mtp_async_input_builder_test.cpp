@@ -28,6 +28,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kernels/xllm_torch_ops.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/forward_params.h"
@@ -199,12 +200,16 @@ TEST(MtpAsyncInputBuilderTest, RejectsPageCountBeyondBlockTableWidth) {
 }
 
 TEST(MtpAsyncInputBuilderTest, PybindViewSelectsExpandedGraphMetadata) {
+  ensure_xllm_torch_ops_registered();
   if (!Py_IsInitialized()) {
     setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 1);
     Py_InitializeEx(0);
   }
   py::gil_scoped_acquire gil;
   prepend_python_model_path();
+  py::module_::import("xllm.python._npu_bootstrap");
+  py::module_ python_package = py::module_::import("xllm.python");
+  python_package.attr("initialize_runtime")();
   py::module_ main_module = py::module_::import("__main__");
   register_attention_metadata_views(main_module);
 

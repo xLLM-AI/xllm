@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 
-import argparse
-from pathlib import Path
+import logging
 
 import tilelang
 import tilelang.language as T
 
-from scripts.logger import logger
-
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
 from .utils import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     detect_vec_core_num,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_HEAD_DIM = 576
 DEFAULT_ROPE_DIM = 64
@@ -154,46 +152,6 @@ def rope_in_place_kernel_jit(
     )
 
 
-@register_kernel
-class RopeKernel(TilelangKernel):
-    DISPATCH_SCHEMA = [
-        DispatchField("head_dim", "int32"),
-        DispatchField("rope_dim", "int32"),
-        DispatchField("dtype", "dtype"),
-    ]
-    SPECIALIZATIONS = [
-        {
-            "variant_key": "hd128_rd128_bf16",
-            "head_dim": SECONDARY_HEAD_DIM,
-            "rope_dim": SECONDARY_ROPE_DIM,
-            "dtype": DEFAULT_DTYPE,
-        },
-        {
-            "variant_key": "hd576_rd64_bf16",
-            "head_dim": DEFAULT_HEAD_DIM,
-            "rope_dim": DEFAULT_ROPE_DIM,
-            "dtype": DEFAULT_DTYPE,
-        },
-    ]
-
-    @staticmethod
-    def generate_source(head_dim: int, rope_dim: int, dtype: str) -> str:
-        if dtype != DEFAULT_DTYPE:
-            raise ValueError(f"RoPE TileLang kernel only supports dtype={DEFAULT_DTYPE}, got {dtype}")
-        tilelang.disable_cache()
-        vec_core_num = detect_vec_core_num()
-        ub_buffer_bytes = FIXED_UB_BUFFER_BYTES
-        tilelang_kernel = build_rope_kernel(
-            head_dim=head_dim,
-            rope_dim=rope_dim,
-            vec_core_num=vec_core_num,
-            ub_buffer_bytes=ub_buffer_bytes,
-        )
-        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
-            kernel = tilelang.engine.lower(tilelang_kernel)
-        return kernel.kernel_source
-
-
 def _torch_rope_ref_rows(
     x: "torch.Tensor",
     sin: "torch.Tensor",
@@ -250,44 +208,3 @@ def _run_ref_check(
     x_ref = _torch_rope_ref_rows(x_in, sin, cos, 0)
     torch.testing.assert_close(x_out, x_ref, rtol=1e-3, atol=1e-3)
     logger.info("RoPE output matches torch reference")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate TileLang AscendC source for RoPE AOT kernel.")
-    parser.add_argument("--output", required=True, help="Output AscendC .cpp file")
-    parser.add_argument("--head-dim", type=int, default=DEFAULT_HEAD_DIM)
-    parser.add_argument("--rope-dim", type=int, default=DEFAULT_ROPE_DIM)
-    parser.add_argument("--dtype", default=DEFAULT_DTYPE)
-    parser.add_argument(
-        "--skip-ref-check",
-        action="store_true",
-        help="Skip runtime torch-reference check.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = Path(args.output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        RopeKernel.generate_source(
-            head_dim=args.head_dim,
-            rope_dim=args.rope_dim,
-            dtype=args.dtype,
-        ),
-        encoding="utf-8",
-    )
-
-    if not args.skip_ref_check:
-        _run_ref_check(
-            num_tokens=REF_CHECK_NUM_TOKENS,
-            head_dim=args.head_dim,
-            rope_dim=args.rope_dim,
-            vec_core_num=detect_vec_core_num(),
-            ub_buffer_bytes=FIXED_UB_BUFFER_BYTES,
-        )
-
-
-if __name__ == "__main__":
-    main()

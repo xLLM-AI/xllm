@@ -5,8 +5,6 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
-
 symbol_cache_lines = T.symbolic("num_cache_lines")
 symbol_state_len = T.symbolic("state_len")
 symbol_batch = T.symbolic("batch_size")
@@ -168,58 +166,6 @@ def _build_decode_kernel_jit(
         dtype_str=dtype_str,
         has_silu=has_silu,
     )
-
-
-@register_kernel
-class CausalConv1dDecodeKernel(TilelangKernel):
-    DISPATCH_SCHEMA = [
-        DispatchField("dim", "int32"),
-        DispatchField("width", "int32"),
-        DispatchField("has_silu", "int32"),
-        DispatchField("dtype", "dtype"),
-    ]
-    SPECIALIZATIONS = [
-        {
-            "variant_key": f"d{d}_w4_silu{s}_bf16",
-            "dim": d,
-            "width": 4,
-            "has_silu": s,
-            "dtype": "bfloat16",
-        }
-        for d in sorted(
-            {dim // tp for dim in [2048, 4096, 5120, 6144, 8192, 10240] for tp in [1, 2, 4, 8] if dim % tp == 0}
-        )
-        for s in [0, 1]
-    ]
-
-    @staticmethod
-    def generate_source(
-        dim: int,
-        width: int,
-        has_silu: int,
-        dtype: str,
-    ) -> str:
-        if dtype not in ("float16", "bfloat16"):
-            raise ValueError(f"CausalConv1D Decode TileLang kernel only supports dtype=float16/bfloat16, got {dtype}")
-        dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
-        tilelang.disable_cache()
-        tilelang_kernel = build_causal_conv1d_decode_kernel(
-            width=width,
-            dim_chunks=dim_chunks,
-            dim_per_core=DIM_PER_CORE,
-            dtype_str=dtype,
-            has_silu=bool(has_silu),
-        )
-        with tilelang.tvm.transform.PassContext(
-            opt_level=3,
-            config={
-                "tl.ascend_auto_cv_combine": True,
-                "tl.ascend_auto_sync": False,
-                "tl.ascend_memory_planning": True,
-            },
-        ):
-            kernel = tilelang.engine.lower(tilelang_kernel)
-        return kernel.kernel_source
 
 
 def get_decode_kernel(

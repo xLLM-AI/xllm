@@ -22,12 +22,12 @@ branching on a raw string.
 This module runs in two processes with opposite ``torch`` guarantees, so every
 ``torch`` access is guarded:
 
-* The C++ worker's embedded CPython, where ``torch`` is always present. It
-  imports this module through ``xllm.python`` to pick the kernel package.
-* The ``xllm serve`` launcher, which has no hard ``torch`` dependency. It has no
-  access to ``xllm.python`` (importing that package pulls in ``torch`` and a
-  kernel package), so ``xllm.auto_config.utils`` loads this file by path and
-  re-exports the symbols for the auto-tuning profiles.
+* The C++ worker's embedded CPython, where ``torch`` is always present.
+  ``xllm.python.initialize_runtime()`` imports this module to select the kernel
+  package after native operators are registered.
+* The ``xllm serve`` launcher, which has no hard ``torch`` dependency.
+  ``xllm.auto_config.utils`` loads this file by path and re-exports the symbols
+  for the auto-tuning profiles without importing the model executor package.
 
 Device-type detection comes solely from the framework runtime
 (``torch`` / ``torch_npu`` / ``torch_mlu`` / ...), matching
@@ -70,7 +70,7 @@ class CpuArchEnum(enum.Enum):
 
 # CUDA-like backends that share the CUDA kernel package and the ``torch.cuda``
 # runtime API. Detection maps DCU and ILU onto this group; the executor binds
-# the CUDA kernel package for all three (see ``xllm/python/__init__.py``).
+# the CUDA kernel package for all three through ``initialize_runtime()``.
 _CUDA_LIKE = (PlatformEnum.CUDA, PlatformEnum.DCU, PlatformEnum.ILU)
 
 

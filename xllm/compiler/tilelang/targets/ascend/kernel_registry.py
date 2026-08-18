@@ -28,17 +28,15 @@ class RegisteredKernelFamily:
 
 def _load_kernel_module(module_name: str) -> ModuleType:
     prepare_tilelang_import()
-    return importlib.import_module(f"{__package__}.kernels.{module_name}")
+    return importlib.import_module(f"{__package__}.aot.{module_name}")
 
 
-def _kernels_dir() -> Path:
-    return Path(__file__).resolve().parent / "kernels"
+def _aot_dir() -> Path:
+    return Path(__file__).resolve().parent / "aot"
 
 
 def _iter_kernel_module_names() -> list[str]:
-    return sorted(
-        module.name for module in pkgutil.iter_modules([str(_kernels_dir())]) if not module.name.startswith("_")
-    )
+    return sorted(module.name for module in pkgutil.iter_modules([str(_aot_dir())]) if not module.name.startswith("_"))
 
 
 def _resolve_registered_kernel_class(

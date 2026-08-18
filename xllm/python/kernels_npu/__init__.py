@@ -12,75 +12,64 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NPU kernels.
+"""NPU kernel semantic API.
 
-``xllm/python/__init__.py`` binds this package as ``xllm.python.kernels`` when
-the active platform is NPU, so layers and models import one fixed path and
-carry no hardware branch. Its peers -- ``kernels_cuda`` and any package added
-for new hardware -- are bound the same way on their own platform. Exactly one of
-them is imported in a process; they share no code and never import each other.
-``setup.py`` ships only the package matching ``--device``.
-
-Launchers live under ``triton/``; the modules here bind the public NPU kernel
-API declared in ``__all__``. Peer packages own their APIs independently and
-need not export the same names. Existing unsupported stubs remain explicit NPU
-failure paths, but they are not a cross-platform export contract.
+Ordinary package import is build-safe and does not inspect native operators.
+The embedded runtime calls :func:`_initialize_runtime` through
+``xllm.python.initialize_runtime`` after ``torch.ops.xllm_ops`` is registered.
+Leaf DSL packages under ``tilelang`` and ``triton`` therefore remain directly
+importable by build tooling without initializing this semantic API.
 """
 
 from __future__ import annotations
 
-# FakeTensor implementations of the C++ operators. Imported first so that a
-# graph capture reaching any kernel below finds a registered fake.
-from . import _custom_op  # noqa: F401
-from .activation import silu_and_mul
-from .attention import (
-    reshape_paged_cache,
-    update_decode_graph_metadata,
-    vision_fusion_attention,
-)
-from .causal_conv1d import (
-    causal_conv1d_decode,
-    causal_conv1d_prefill,
-)
-from .gated_delta_net import (
-    chunk_gated_delta_rule,
-    fused_gdn_prefill_post_conv,
-    fused_recurrent_gated_delta_rule_packed_decode,
-    resolve_gdn_prefill_backend,
-)
-from .linear import prepare_row_parallel_weight
-from .moe import (
-    cutlass_fused_moe,
-    fused_moe,
-    grouped_moe,
-    moe_fused_topk,
-    prepare_grouped_moe_weights,
-    supports_cutlass_moe,
-)
-from .normalization import (
-    fused_add_rms_norm,
-    l2_norm,
-    rms_norm,
-    rms_norm_gated,
-)
-from .quantization import (
-    dynamic_quant,
-    quant_matmul,
-    quantize_per_tensor,
-)
-from .rotary_embedding import (
-    fused_qk_norm_rope,
-    interleaved_rotary_embedding,
-    mrope,
-    vision_rotary_mul,
-)
-from .sparse_attention import (
-    lightning_indexer,
-    lightning_indexer_out,
-    scatter_nd_update,
-    sparse_flash_attention,
-    sparse_flash_attention_out,
-)
+import importlib
+from typing import Any
+
+_EXPORTS = {
+    "activation": ("silu_and_mul",),
+    "attention": (
+        "reshape_paged_cache",
+        "update_decode_graph_metadata",
+        "vision_fusion_attention",
+    ),
+    "causal_conv1d": ("causal_conv1d_decode", "causal_conv1d_prefill"),
+    "gated_delta_net": (
+        "chunk_gated_delta_rule",
+        "fused_gdn_prefill_post_conv",
+        "fused_recurrent_gated_delta_rule_packed_decode",
+        "resolve_gdn_prefill_backend",
+    ),
+    "linear": ("prepare_row_parallel_weight",),
+    "moe": (
+        "cutlass_fused_moe",
+        "fused_moe",
+        "grouped_moe",
+        "moe_fused_topk",
+        "prepare_grouped_moe_weights",
+        "supports_cutlass_moe",
+    ),
+    "normalization": (
+        "fused_add_rms_norm",
+        "l2_norm",
+        "rms_norm",
+        "rms_norm_gated",
+    ),
+    "quantization": ("dynamic_quant", "quant_matmul", "quantize_per_tensor"),
+    "rotary_embedding": (
+        "fused_qk_norm_rope",
+        "interleaved_rotary_embedding",
+        "mrope",
+        "vision_rotary_mul",
+    ),
+    "sparse_attention": (
+        "lightning_indexer",
+        "lightning_indexer_out",
+        "scatter_nd_update",
+        "sparse_flash_attention",
+        "sparse_flash_attention_out",
+    ),
+}
 
 __all__ = [
     "rms_norm",
@@ -117,3 +106,31 @@ __all__ = [
     "fused_recurrent_gated_delta_rule_packed_decode",
     "chunk_gated_delta_rule",
 ]
+_runtime_initialized = False
+
+
+def _initialize_runtime() -> None:
+    """Load native-op bindings and publish the NPU semantic API once."""
+
+    global _runtime_initialized
+    if _runtime_initialized:
+        return
+
+    importlib.import_module(f"{__name__}._custom_op")
+    exported: dict[str, Any] = {}
+    for module_name, names in _EXPORTS.items():
+        module = importlib.import_module(f"{__name__}.{module_name}")
+        exported.update((name, getattr(module, name)) for name in names)
+
+    globals().update(exported)
+    _runtime_initialized = True
+
+
+def __getattr__(name: str) -> Any:
+    if name in __all__:
+        raise RuntimeError(
+            "xllm.python.kernels_npu runtime is not initialized; call "
+            "xllm.python.initialize_runtime() after registering native "
+            "torch operators"
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

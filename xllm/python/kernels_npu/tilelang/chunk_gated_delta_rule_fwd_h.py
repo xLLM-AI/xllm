@@ -4,7 +4,6 @@ import tilelang
 import torch
 from tilelang import language as T
 
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
 from .utils import detect_vec_core_num
 
 tilelang.cache.clear_cache()
@@ -20,13 +19,6 @@ DEFAULT_ACCUM_DTYPE = "float32"
 VEC_NUM = 2
 VEC_CORE_NUM = detect_vec_core_num()
 CUBE_BLOCK_NUM = VEC_CORE_NUM // VEC_NUM
-
-_AOT_PASS_CONFIGS = {
-    "tl.ascend_auto_sync": False,
-    "tl.ascend_auto_cv_combine": False,
-    "tl.ascend_auto_cross_core_sync": False,
-    "tl.ascend_memory_planning": False,
-}
 
 pass_configs = {
     tilelang.PassConfigKey.TL_ASCEND_AUTO_SYNC: False,
@@ -456,58 +448,6 @@ def _build_chunk_gated_delta_rule_fwd_h_kernel(
                             )
 
     return main
-
-
-@register_kernel
-class ChunkGatedDeltaRuleFwdHKernel(TilelangKernel):
-    KERNEL_NAME = "chunk_gated_delta_rule_fwd_h"
-    DISPATCH_SCHEMA = [
-        DispatchField("H", "int32"),
-        DispatchField("Hg", "int32"),
-        DispatchField("K", "int32"),
-        DispatchField("V", "int32"),
-        DispatchField("dtype", "dtype"),
-    ]
-    SPECIALIZATIONS = [
-        {
-            "variant_key": f"h{hv}_hg{hg}_k{k}_v{v}_bf16",
-            "H": hv,
-            "Hg": hg,
-            "K": k,
-            "V": v,
-            "dtype": DEFAULT_DTYPE,
-        }
-        for hv, hg, k, v in sorted(
-            {
-                (h // tp, hg // tp, k, v)
-                for h, hg, k, v in [
-                    (16, 16, 128, 128),
-                    (32, 16, 128, 128),
-                    (48, 16, 128, 128),
-                    (64, 16, 128, 128),
-                ]
-                for tp in [1, 2, 4, 8]
-                if h % tp == 0 and hg % tp == 0 and h // tp >= hg // tp
-            }
-        )
-    ]
-
-    @staticmethod
-    def generate_source(H: int, Hg: int, K: int, V: int, dtype: str) -> str:
-        if dtype != DEFAULT_DTYPE:
-            raise ValueError(f"chunk_gated_delta_rule_fwd_h only supports dtype={DEFAULT_DTYPE}, got {dtype}")
-        tilelang.disable_cache()
-        tilelang_kernel = _build_chunk_gated_delta_rule_fwd_h_kernel(
-            H=H,
-            Hg=Hg,
-            K=K,
-            V=V,
-            dtype=dtype,
-            bt=COMPILE_BT,
-        )
-        with tilelang.tvm.transform.PassContext(opt_level=3, config=_AOT_PASS_CONFIGS):
-            kernel = tilelang.engine.lower(tilelang_kernel)
-        return kernel.kernel_source
 
 
 @tilelang.jit(workspace_idx=[10, 11, 12, 13], pass_configs=pass_configs)

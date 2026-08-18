@@ -108,12 +108,12 @@ void ensure_python_interpreter() {
       }
 #endif
       try {
-        py::module_::import("xllm.python");
+        py::module_ python_package = py::module_::import("xllm.python");
+        python_package.attr("initialize_runtime")();
       } catch (const py::error_already_set& e) {
-        LOG(FATAL) << "Failed to import the 'xllm.python' model package for "
-                      "the Python model executor. Set --python_model_path (or "
-                      "XLLM_PYTHON_MODEL_PATH) to the directory containing the "
-                      "'xllm' package. Error: "
+        LOG(FATAL) << "Failed to initialize the 'xllm.python' model runtime. "
+                      "Set --python_model_path (or XLLM_PYTHON_MODEL_PATH) to "
+                      "the directory containing the 'xllm' package. Error: "
                    << e.what();
       }
     }

@@ -14,12 +14,13 @@
 
 """CUDA kernels.
 
-``xllm/python/__init__.py`` binds this package as ``xllm.python.kernels`` when
-the active platform is CUDA, so layers and models import one fixed path and
-carry no hardware branch. Its peers -- ``kernels_npu`` and any package added for
-new hardware -- are bound the same way on their own platform. Exactly one of
-them is imported in a process; they share no code and never import each other.
-``setup.py`` ships only the package matching ``--device``.
+``xllm.python.initialize_runtime()`` binds this package as
+``xllm.python.kernels`` when the active platform is CUDA, so layers and models
+import one fixed path and carry no hardware branch. Its peers -- ``kernels_npu``
+and any package added for new hardware -- are bound the same way on their own
+platform. Exactly one of them is imported in a process; they share no code and
+never import each other. ``setup.py`` ships only the package matching
+``--device``.
 
 Launchers live under ``triton/`` and ``flashinfer/``; the modules here bind the
 public CUDA kernel API declared in ``__all__``. Peer packages own their APIs

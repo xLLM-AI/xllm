@@ -6,15 +6,16 @@ import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 from ...common.cache import compute_cache_key, is_cache_hit
 from ...common.manifest import KernelAbi, KernelFamilyManifest, KernelVariantManifest
 from ...common.spec import DispatchField, KernelCompileSpec, KernelSpec, TilelangKernel
 from ...common.toolchain import repo_root, run_checked
 from . import abi_entry, kernel_registry, toolchain
+from .aot import utils as aot_utils
+from .aot.utils import render_family_registry_inc, render_family_variants_inc
 from .kernel_registry import RegisteredKernelFamily
-from .kernels import utils as kernel_utils
-from .kernels.utils import render_family_registry_inc, render_family_variants_inc
 from .toolchain import AscendBuildContext
 
 # TileLang variant compilation is much heavier than ordinary C++ compilation:
@@ -192,9 +193,20 @@ def _build_dependency_files(family: RegisteredKernelFamily) -> list[Path]:
         Path(toolchain.__file__).resolve(),
         Path(kernel_registry.__file__).resolve(),
         Path(abi_entry.__file__).resolve(),
-        Path(kernel_utils.__file__).resolve(),
+        Path(aot_utils.__file__).resolve(),
         Path(__file__).resolve().with_name("build.py"),
     ]
+    dependency_modules = getattr(family.module, "DEPENDENCY_MODULES", ())
+    if not isinstance(dependency_modules, tuple):
+        raise TypeError(f"TileLang AOT module {family.module.__name__!r} must define DEPENDENCY_MODULES as a tuple")
+    for dependency_module in dependency_modules:
+        if not isinstance(dependency_module, ModuleType):
+            raise TypeError(f"TileLang AOT module {family.module.__name__!r} has a non-module DEPENDENCY_MODULES entry")
+        module_file = getattr(dependency_module, "__file__", None)
+        if module_file is None:
+            raise ValueError(f"TileLang dependency module {dependency_module.__name__!r} does not have a source file")
+        files.append(Path(module_file).resolve())
+
     deduped: list[Path] = []
     seen: set[Path] = set()
     for path in files:

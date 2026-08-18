@@ -1,46 +1,21 @@
-from typing import Any
+# Copyright 2026 The xLLM Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-import tilelang.language as T
+from typing import Any
 
 from ....common.manifest import KernelAbi, KernelVariantManifest
 from ....common.spec import DispatchField
-
-DEFAULT_ASCEND_PASS_CONFIGS = {
-    # Use raw pass-config strings to avoid hard dependency on
-    # tilelang.PassConfigKey export timing/version.
-    "tl.ascend_auto_sync": True,
-    "tl.ascend_memory_planning": True,
-    "tl.ascend_auto_cross_core_sync": True,
-    "tl.ascend_auto_cv_combine": True,
-}
-
-DEFAULT_ASCEND_BISHENG_ARCH = "dav-2201"
-ASCEND_VEC_CORE_NUM_PROPERTY_KEYS = (
-    "vector_core_num",
-    "aiv_core_num",
-    "vec_core_num",
-)
-
-# This is the single source of truth for the generated speculative-verification
-# registries. Verification width includes the base target token, so these
-# variants cover MTP depths 3, 4, and 5.
-SUPPORTED_SPEC_VERIFY_WIDTHS = (4, 5, 6)
-
-
-def detect_vec_core_num(default_vec_core_num: int = 48) -> int:
-    try:
-        import torch
-
-        if hasattr(torch, "npu") and torch.npu.is_available():
-            props = torch.npu.get_device_properties(torch.npu.current_device())
-            for key in ASCEND_VEC_CORE_NUM_PROPERTY_KEYS:
-                value = getattr(props, key, None)
-                if isinstance(value, int) and value > 0:
-                    return value
-    except Exception:
-        pass
-
-    return default_vec_core_num
 
 
 def _snake_to_pascal(name: str) -> str:
@@ -235,70 +210,3 @@ def render_family_registry_inc(
         ]
     )
     return "\n".join(lines) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# Pipeline sync macros for TileLang Ascend kernels with
-# tl.ascend_auto_sync=False. These helpers keep kernel implementations small
-# and centralize flag-direction naming.
-# ---------------------------------------------------------------------------
-
-
-@T.macro
-def mte2_notify_v(event_id: T.int32):
-    T.set_flag("mte2", "v", event_id)
-
-
-@T.macro
-def v_wait_mte2(event_id: T.int32):
-    T.wait_flag("mte2", "v", event_id)
-
-
-@T.macro
-def v_notify_mte2(event_id: T.int32):
-    T.set_flag("v", "mte2", event_id)
-
-
-@T.macro
-def mte2_wait_v(event_id: T.int32):
-    T.wait_flag("v", "mte2", event_id)
-
-
-@T.macro
-def v_notify_mte3(event_id: T.int32):
-    T.set_flag("v", "mte3", event_id)
-
-
-@T.macro
-def mte3_wait_v(event_id: T.int32):
-    T.wait_flag("v", "mte3", event_id)
-
-
-@T.macro
-def mte3_notify_v(event_id: T.int32):
-    T.set_flag("mte3", "v", event_id)
-
-
-@T.macro
-def v_wait_mte3(event_id: T.int32):
-    T.wait_flag("mte3", "v", event_id)
-
-
-@T.macro
-def mte3_notify_mte2(event_id: T.int32):
-    T.set_flag("mte3", "mte2", event_id)
-
-
-@T.macro
-def mte2_wait_mte3(event_id: T.int32):
-    T.wait_flag("mte3", "mte2", event_id)
-
-
-@T.macro
-def mte2_notify_mte3(event_id: T.int32):
-    T.set_flag("mte2", "mte3", event_id)
-
-
-@T.macro
-def mte3_wait_mte2(event_id: T.int32):
-    T.wait_flag("mte2", "mte3", event_id)

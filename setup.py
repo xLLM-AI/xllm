@@ -96,13 +96,14 @@ def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) 
     ``xllm/python/`` holds one peer package per hardware platform
     (``kernels_cuda``, ``kernels_npu``, ...). The peers share no code, never
     import each other, and own their public APIs independently.
-    ``xllm/python/__init__.py`` binds the one matching the active platform as
-    ``xllm.python.kernels``, so only that package has to reach the wheel.
+    ``xllm.python.initialize_runtime()`` binds the one matching the active
+    platform as ``xllm.python.kernels``, so only that package has to reach the
+    wheel.
 
     The Python model executor covers fewer platforms than ``--device`` does, so
     a device without a peer package is not a build error: the rest of
-    ``xllm.python`` still ships, and ``xllm/python/__init__.py`` rejects the
-    platform at import, which only happens once the executor is selected.
+    ``xllm.python`` still ships, and runtime initialization rejects the
+    platform only once the Python executor is selected.
     """
     source = os.path.join(py_pkg_src, f"kernels_{device}")
     if not os.path.isdir(source):
