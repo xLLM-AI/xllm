@@ -112,14 +112,54 @@ inline constexpr RecModelKind get_rec_model_kind(std::string_view model_type) {
   return RecModelKind::kNone;
 }
 
-// Dedup + optional shuffle/truncate to `each_conversion_threshold`.
-// Shared between single-round (Sequence::generate_onerec_output) and
-// multi-round (SequencesGroup::generate_multi_round_output) item assembly so
-// that downstream c_api / consumers see consistent item_ids regardless of the
-// decode pipeline.
-inline std::vector<int64_t> normalize_rec_item_ids(
-    const std::vector<int64_t>& raw_ids,
-    size_t sequence_index) {
+// Sample up to `max_count` items from `src` without copying or shuffling the
+// full source vector. `max_count <= 0` copies everything (legacy "no cap").
+// Predictor sets each_conversion_threshold=1, which is a single O(1) pick.
+template <typename T>
+inline void append_sampled_rec_items(const std::vector<T>& src,
+                                     int32_t max_count,
+                                     size_t sequence_index,
+                                     std::vector<T>* out) {
+  if (out == nullptr || src.empty()) {
+    return;
+  }
+  if (max_count <= 0 || static_cast<size_t>(max_count) >= src.size()) {
+    out->insert(out->end(), src.begin(), src.end());
+    return;
+  }
+
+  std::mt19937 seeded_rng;
+  std::mt19937* gen = nullptr;
+  if (FLAGS_random_seed >= 0) {
+    seeded_rng = std::mt19937(static_cast<uint32_t>(FLAGS_random_seed) +
+                              static_cast<uint32_t>(sequence_index));
+    gen = &seeded_rng;
+  } else {
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    gen = &rng;
+  }
+
+  const size_t n = src.size();
+  const size_t k = static_cast<size_t>(max_count);
+  std::uniform_int_distribution<size_t> dist(0, n - 1);
+  out->reserve(out->size() + k);
+  if (k == 1) {
+    out->push_back(src[dist(*gen)]);
+    return;
+  }
+
+  std::unordered_set<size_t> picked;
+  picked.reserve(k * 2);
+  while (picked.size() < k) {
+    picked.insert(dist(*gen));
+  }
+  for (const size_t idx : picked) {
+    out->push_back(src[idx]);
+  }
+}
+
+inline std::vector<int64_t> unique_rec_item_ids(
+    const std::vector<int64_t>& raw_ids) {
   std::vector<int64_t> item_ids;
   item_ids.reserve(raw_ids.size());
   std::unordered_set<int64_t> seen_item_ids;
@@ -128,25 +168,11 @@ inline std::vector<int64_t> normalize_rec_item_ids(
       item_ids.emplace_back(item_id);
     }
   }
-
-  const int32_t each_threshold = FLAGS_each_conversion_threshold;
-  if (each_threshold > 0 &&
-      static_cast<int32_t>(item_ids.size()) > each_threshold) {
-    uint32_t seed = FLAGS_random_seed >= 0
-                        ? static_cast<uint32_t>(FLAGS_random_seed) +
-                              static_cast<uint32_t>(sequence_index)
-                        : std::random_device{}();
-    std::mt19937 generator(seed);
-    std::shuffle(item_ids.begin(), item_ids.end(), generator);
-    item_ids.resize(each_threshold);
-  }
-
   return item_ids;
 }
 
-inline std::vector<RecItemInfo> normalize_rec_item_infos(
-    const std::vector<RecItemInfo>& raw_item_infos,
-    size_t sequence_index) {
+inline std::vector<RecItemInfo> unique_rec_item_infos(
+    const std::vector<RecItemInfo>& raw_item_infos) {
   std::vector<RecItemInfo> item_infos;
   item_infos.reserve(raw_item_infos.size());
   std::unordered_set<int64_t> seen_item_ids;
@@ -155,20 +181,41 @@ inline std::vector<RecItemInfo> normalize_rec_item_infos(
       item_infos.emplace_back(item_info);
     }
   }
+  return item_infos;
+}
 
+// Dedup + optional truncate to `each_conversion_threshold`.
+// Shared between single-round (Sequence::generate_onerec_output) and
+// multi-round (SequencesGroup::generate_multi_round_output) item assembly so
+// that downstream c_api / consumers see consistent item_ids regardless of the
+// decode pipeline. Truncation samples O(k) items instead of shuffling O(n).
+inline std::vector<int64_t> normalize_rec_item_ids(
+    const std::vector<int64_t>& raw_ids,
+    size_t sequence_index) {
   const int32_t each_threshold = FLAGS_each_conversion_threshold;
   if (each_threshold > 0 &&
-      static_cast<int32_t>(item_infos.size()) > each_threshold) {
-    uint32_t seed = FLAGS_random_seed >= 0
-                        ? static_cast<uint32_t>(FLAGS_random_seed) +
-                              static_cast<uint32_t>(sequence_index)
-                        : std::random_device{}();
-    std::mt19937 generator(seed);
-    std::shuffle(item_infos.begin(), item_infos.end(), generator);
-    item_infos.resize(each_threshold);
+      static_cast<int32_t>(raw_ids.size()) > each_threshold) {
+    std::vector<int64_t> sampled;
+    sampled.reserve(static_cast<size_t>(each_threshold));
+    append_sampled_rec_items(raw_ids, each_threshold, sequence_index, &sampled);
+    return unique_rec_item_ids(sampled);
   }
+  return unique_rec_item_ids(raw_ids);
+}
 
-  return item_infos;
+inline std::vector<RecItemInfo> normalize_rec_item_infos(
+    const std::vector<RecItemInfo>& raw_item_infos,
+    size_t sequence_index) {
+  const int32_t each_threshold = FLAGS_each_conversion_threshold;
+  if (each_threshold > 0 &&
+      static_cast<int32_t>(raw_item_infos.size()) > each_threshold) {
+    std::vector<RecItemInfo> sampled;
+    sampled.reserve(static_cast<size_t>(each_threshold));
+    append_sampled_rec_items(
+        raw_item_infos, each_threshold, sequence_index, &sampled);
+    return unique_rec_item_infos(sampled);
+  }
+  return unique_rec_item_infos(raw_item_infos);
 }
 
 }  // namespace xllm

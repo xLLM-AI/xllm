@@ -7,6 +7,7 @@
 #include <string>
 
 #include "common/global_flags.h"
+#include "core/util/rec_model_utils.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -234,9 +235,13 @@ bool RecVocabDict::get_item_infos_by_tokens(
     return false;
   }
 
-  std::copy(iter->second.begin(),
-            iter->second.end(),
-            std::back_inserter(*item_infos));
+  // Hot path for coarse codebooks: a triple can map to hundreds of thousands
+  // of SKUs. Copying the full list here made generate_output ~150ms. Sample
+  // to each_conversion_threshold (usually 1) in O(k).
+  append_sampled_rec_items(iter->second,
+                           FLAGS_each_conversion_threshold,
+                           /*sequence_index=*/0,
+                           item_infos);
   return true;
 }
 
