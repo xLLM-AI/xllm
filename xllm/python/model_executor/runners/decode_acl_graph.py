@@ -244,23 +244,20 @@ class DecodeAclGraphRunner(BaseRunner):
         metadata: AttentionMetadata,
     ) -> bool:
         """Check the one-token-per-sequence contract of ACL decode graphs."""
-        try:
-            (
-                block_table,
-                _,
-                _,
-                _,
-                _,
-                _,
-            ) = self._decode_metadata(metadata)
-            self._validate_decode_token_layout(
-                input_ids,
-                None,
-                metadata.slot_mapping,
-                block_table.shape[0],
-            )
-        except (RuntimeError, ValueError):
-            return False
+        (
+            block_table,
+            _,
+            _,
+            _,
+            _,
+            _,
+        ) = self._decode_metadata(metadata)
+        self._validate_decode_token_layout(
+            input_ids,
+            None,
+            metadata.slot_mapping,
+            block_table.shape[0],
+        )
         batch_size = input_ids.numel()
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
         if not is_expanded and metadata.kv_cu_seq_lens is not None:
@@ -697,10 +694,6 @@ class DecodeAclGraphRunner(BaseRunner):
     ) -> None:
         for task in graph_tasks:
             torch.npu.graph_task_update_begin(stream, task.handle)
-            try:
-                task.update()
-            except Exception:
-                torch.npu.graph_task_update_end(stream)
-                raise
+            task.update()
             torch.npu.graph_task_update_end(stream)
             task.event.record(stream)

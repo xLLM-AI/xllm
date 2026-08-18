@@ -394,45 +394,22 @@ bool AclGraph::capture(CausalLM* model,
 
     // no mempool id, will create a new one; capture mode is thread local, allow
     // other threads to execute synchronous operations
-    bool capture_started = false;
-    try {
-      graph_.capture_begin(
-          {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
-      capture_started = true;
-      // Execute forward pass - NPUGraph mempool manages temporary tensors
-      auto forward_result =
-          model->forward({persistent_param_.persistent_tokens(num_tokens_)},
-                         {persistent_param_.persistent_positions(num_tokens_)},
-                         kv_cache,
-                         {graph_params.value()});
+    graph_.capture_begin(
+        {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
+    // Execute forward pass - NPUGraph mempool manages temporary tensors
+    auto forward_result =
+        model->forward({persistent_param_.persistent_tokens(num_tokens_)},
+                       {persistent_param_.persistent_positions(num_tokens_)},
+                       kv_cache,
+                       {graph_params.value()});
 
-      // Store result in persistent buffer owned by NPUGraph mempool
-      persistent_param_.set_hidden_states(forward_result.hidden_states);
-      if (options.enable_graph_aux_hidden_states() &&
-          forward_result.aux_hidden_states.defined()) {
-        persistent_param_.set_aux_hidden_states(
-            forward_result.aux_hidden_states);
-      }
-      graph_.capture_end();
-      capture_started = false;
-    } catch (...) {
-      if (capture_started) {
-        try {
-          graph_.capture_end();
-        } catch (const std::exception& cleanup_error) {
-          LOG(ERROR) << "ACL graph capture_end during cleanup failed: "
-                     << cleanup_error.what();
-        } catch (...) {
-          LOG(ERROR) << "ACL graph capture_end during cleanup failed.";
-        }
-        graph_.reset();
-      }
-      if (need_restore_stream) {
-        c10_npu::setCurrentNPUStream(
-            c10_npu::getDefaultNPUStream(tensor_options.device().index()));
-      }
-      throw;
+    // Store result in persistent buffer owned by NPUGraph mempool
+    persistent_param_.set_hidden_states(forward_result.hidden_states);
+    if (options.enable_graph_aux_hidden_states() &&
+        forward_result.aux_hidden_states.defined()) {
+      persistent_param_.set_aux_hidden_states(forward_result.aux_hidden_states);
     }
+    graph_.capture_end();
     if (graph_task_context_ != nullptr) {
       graph_task_context_->end_capture();
     }
@@ -1046,68 +1023,50 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
       std::make_shared<AclGraph>(active_persistent_param, device_.index());
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
-  bool capture_success = false;
-  try {
-    capture_success = graph->capture(model_,
-                                     options_,
-                                     tokens_tensor,
-                                     positions_tensor,
-                                     params_single,
-                                     kv_caches,
-                                     bucket_num_tokens);
-  } catch (const std::exception& e) {
-    LOG(ERROR) << "ACL graph capture threw exception for bucket num_tokens="
-               << bucket_num_tokens << ": " << e.what();
-    if (model_->supports_mla_graph_kv_bucketing()) {
-      throw;
+  const bool capture_success = graph->capture(model_,
+                                              options_,
+                                              tokens_tensor,
+                                              positions_tensor,
+                                              params_single,
+                                              kv_caches,
+                                              bucket_num_tokens);
+
+  CHECK(capture_success)
+      << "Failed to capture ACL graph for bucket num_tokens: "
+      << bucket_num_tokens;
+  LOG(INFO) << "Lazy capturing ACL graph for bucket num_tokens: "
+            << bucket_num_tokens << " (actual num_tokens: " << n_tokens
+            << ") done";
+
+  const bool static_mtp_variant = uses_static_mtp_graph_task_variant(
+      params_single, bucket_num_tokens, options_.block_size());
+  {
+    std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+    if (static_mtp_variant) {
+      while (active_slot.static_mtp_graph_keys.size() >=
+             kMaxStaticMtpGraphVariantsPerSlot) {
+        const uint64_t evicted_key = active_slot.static_mtp_graph_keys.front();
+        active_slot.static_mtp_graph_keys.pop_front();
+        active_slot.graphs.erase(evicted_key);
+      }
+      active_slot.static_mtp_graph_keys.push_back(graph_key);
     }
-    LOG(ERROR) << "Falling back to eager mode.";
-    COUNTER_INC(num_model_execution_total_eager);
-    return forward_eager(model_, tokens, positions, kv_caches, params);
+    // shared_ptr keeps a replay/prepare that already left the map alive if a
+    // later capture evicts this static variant.
+    active_slot.graphs[graph_key] = graph;
   }
 
-  if (capture_success) {
-    LOG(INFO) << "Lazy capturing ACL graph for bucket num_tokens: "
-              << bucket_num_tokens << " (actual num_tokens: " << n_tokens
-              << ") done";
-
-    const bool static_mtp_variant = uses_static_mtp_graph_task_variant(
-        params_single, bucket_num_tokens, options_.block_size());
-    {
-      std::lock_guard<std::mutex> lock(graph_slots_mutex_);
-      if (static_mtp_variant) {
-        while (active_slot.static_mtp_graph_keys.size() >=
-               kMaxStaticMtpGraphVariantsPerSlot) {
-          const uint64_t evicted_key =
-              active_slot.static_mtp_graph_keys.front();
-          active_slot.static_mtp_graph_keys.pop_front();
-          active_slot.graphs.erase(evicted_key);
-        }
-        active_slot.static_mtp_graph_keys.push_back(graph_key);
-      }
-      // shared_ptr keeps a replay/prepare that already left the map alive if a
-      // later capture evicts this static variant.
-      active_slot.graphs[graph_key] = graph;
+  // Return the output from capture (no need to replay since capture
+  // already executed)
+  torch::Tensor hidden_states = graph->get_hidden_states(n_tokens);
+  if (options_.enable_graph_aux_hidden_states()) {
+    torch::Tensor aux_hidden_states =
+        active_persistent_param.aux_hidden_states(n_tokens);
+    if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
+      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
     }
-
-    // Return the output from capture (no need to replay since capture
-    // already executed)
-    torch::Tensor hidden_states = graph->get_hidden_states(n_tokens);
-    if (options_.enable_graph_aux_hidden_states()) {
-      torch::Tensor aux_hidden_states =
-          active_persistent_param.aux_hidden_states(n_tokens);
-      if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
-      }
-    }
-    return ModelOutput(hidden_states);
   }
-
-  // Fallback to eager mode if capture fails
-  LOG(ERROR) << "Failed to capture ACL graph for bucket num_tokens: "
-             << bucket_num_tokens;
-  COUNTER_INC(num_model_execution_total_eager);
-  return forward_eager(model_, tokens, positions, kv_caches, params);
+  return ModelOutput(hidden_states);
 }
 
 void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
