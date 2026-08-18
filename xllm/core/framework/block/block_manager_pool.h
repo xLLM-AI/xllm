@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <map>
 #include <queue>
 #include <vector>
 
@@ -26,9 +27,14 @@ namespace xllm {
 
 class BlockManagerPool : public KVCacheManager {
  public:
+  using HostBlockCounts = std::map<BlockType, uint32_t>;
+
   struct Options {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(uint32_t, host_num_blocks) = 0;
+    // Host prefix-cache capacity keyed by the cache block type. Empty keeps the
+    // legacy flat-KV behavior and uses host_num_blocks for BlockType::KV.
+    PROPERTY(HostBlockCounts, host_num_blocks_by_type) = {};
     PROPERTY(int32_t, block_size) = 0;
     PROPERTY(bool, enable_linear_state) = false;
     // Total physical linear-state slots [0, N) for the unified slot pool
@@ -73,10 +79,6 @@ class BlockManagerPool : public KVCacheManager {
   bool allocate(Sequence* sequence) override;
   bool allocate(std::vector<Sequence*>& sequences) override;
   bool allocate(Sequence* sequence, size_t num_tokens) override;
-  bool allocate(Sequence* sequence,
-                size_t num_tokens,
-                size_t needed_copy_in_blocks_num) override;
-
   // Try to allocate blocks with num_tokens,
   // return {} if not enough blocks
   std::vector<Block> allocate(size_t num_tokens, int32_t& dp_rank) override;

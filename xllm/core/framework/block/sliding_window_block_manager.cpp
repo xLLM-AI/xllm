@@ -38,13 +38,25 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
   if (seq == nullptr) {
     return;
   }
-  KVCacheState& kv_state = seq->kv_state();
+  release_out_of_window(seq, seq->kv_state(), seq->kv_cache_tokens_num());
+}
+
+void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
+                                                      KVCacheState& kv_state) {
+  release_out_of_window(seq, kv_state, kv_state.kv_cache_tokens_num());
+}
+
+void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
+                                                      KVCacheState& kv_state,
+                                                      size_t cached_tokens) {
+  if (seq == nullptr) {
+    return;
+  }
   std::vector<Block>& swa_blocks = *kv_state.mutable_blocks(block_type());
   const size_t block_size = options_.block_size();
   if (block_size == 0 || swa_blocks.empty()) {
     return;
   }
-  const size_t cached_tokens = kv_state.kv_cache_tokens_num();
   const size_t num_spec_tokens =
       static_cast<size_t>(options_.num_speculative_tokens());
   const size_t sliding_window_tokens =

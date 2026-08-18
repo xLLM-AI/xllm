@@ -15,10 +15,9 @@
 
 import ast
 import importlib.util
+import unittest
 from pathlib import Path
 from typing import Any
-import unittest
-
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,16 +34,8 @@ def _load_argument_parser() -> type[Any]:
 def _constructor_defaults(module_name: str, class_name: str) -> dict[str, object]:
     module_path = _ROOT / "xllm" / "pybind" / f"{module_name}.py"
     tree = ast.parse(module_path.read_text(encoding="utf-8"))
-    class_node = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == class_name
-    )
-    init_node = next(
-        node
-        for node in class_node.body
-        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
-    )
+    class_node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    init_node = next(node for node in class_node.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
     args = init_node.args.args
     defaults = init_node.args.defaults
     names = [arg.arg for arg in args[len(args) - len(defaults) :]]

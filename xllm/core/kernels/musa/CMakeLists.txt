@@ -6,30 +6,29 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/../cuda)
 include_directories(${CMAKE_CURRENT_LIST_DIR}/../cuda/moe)
 
 set(_TORCH_MUSA_KERNEL_HDRS
-  attention_runner.h
   musa_ops_api.h
   musa_tvmffi_stream.h
   gdn_ops.h
-  global_capture_instance.h
   llm_decode_metadata_update.h
-  piecewise_graphs.h
   ${CMAKE_CURRENT_LIST_DIR}/../cuda/moe/moe_topk.cuh
   ${CMAKE_CURRENT_LIST_DIR}/../cuda/moe/moe_topk_sigmoid_kernels.cuh
   ${CMAKE_CURRENT_LIST_DIR}/../cuda/moe/moe_topk_softmax_kernels.cuh
 )
 
 set(_TORCH_MUSA_KERNEL_SRCS
-  attention_runner.cpp
   attention_decode.cpp
   attention_prefill.cpp
   gdn_decode.cu
-  gdn_state_commit.cu
   gdn_prefill.cpp
   causal_conv1d.cu
   gemma_norm.cu
   activation.cu
   rope.cu
-  paged_cache.cu
+  gdn_state_commit.cu
+  ../cuda/block_copy.cu
+  ../cuda/norm.cu
+  ../cuda/reshape_paged_cache.cu
+  ../cuda/moe/moe_fused_topk.cu
   random_sample.cpp
   rejection_sample.cu
   replace_token.cu
@@ -43,12 +42,12 @@ set(_TORCH_MUSA_KERNEL_SRCS
   # Graph-safe expert histogram/prefix/placement used by Qwen3.5 routing.
   ../cuda/moe/moe_compute_index.cu
   ../cuda/moe/moe_combine.cu
+  # MUSA-only indexed combine for expert-major GEMM output.
+  moe_combine_indexed.cu
   # Fused per-token-group FP8 activation quant (MUSA-native intrinsics)
   fp8_act_quant.cu
-  # Mate FFI + graph helpers
+  # Mate FFI helpers
   musa_tvmffi_stream.cpp
-  global_capture_instance.cpp
-  piecewise_graphs.cpp
   llm_decode_metadata_update.cu
 )
 
@@ -77,3 +76,4 @@ cc_library(
     musa
     musart
 )
+

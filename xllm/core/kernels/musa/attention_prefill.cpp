@@ -98,7 +98,7 @@ void batch_prefill_impl(const std::string& uri,
                                   use_custom_mask);
 
   if (backend == "fa2") {
-    MusaTvmffiStreamGuard stream_guard(query.device());
+    TvmffiStreamGuard stream_guard(query.device());
     get_function(uri, "ragged_run")(
         to_ffi_tensor(float_workspace_buffer),
         to_ffi_tensor(int_workspace_buffer),
@@ -133,7 +133,7 @@ void batch_prefill_impl(const std::string& uri,
 
     auto [scale_v_tensor, scale_v_scalar] = split_scale_param(v_scale);
 
-    MusaTvmffiStreamGuard stream_guard(query.device());
+    TvmffiStreamGuard stream_guard(query.device());
     get_function(uri, "ragged_run")(
         to_ffi_tensor(float_workspace_buffer),
         to_ffi_tensor(int_workspace_buffer),
@@ -282,7 +282,7 @@ void batch_chunked_prefill(const std::string& uri,
   torch::Tensor v_scale = torch::Tensor();
   auto [scale_v_tensor, scale_v_scalar] = split_scale_param(v_scale);
 
-  MusaTvmffiStreamGuard stream_guard(query.device());
+  TvmffiStreamGuard stream_guard(query.device());
   get_function(uri, "paged_run")(
       to_ffi_tensor(float_workspace_buffer),
       to_ffi_tensor(int_workspace_buffer),

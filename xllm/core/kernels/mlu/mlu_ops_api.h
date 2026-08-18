@@ -362,6 +362,18 @@ std::tuple<torch::Tensor, torch::Tensor> fused_mhc_post(
     bool compute_rms,
     double eps);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+fused_mhc(const torch::Tensor& x,
+          const torch::Tensor& residual_in,
+          const torch::Tensor& hc_fn,
+          const torch::Tensor& gamma,
+          const torch::Tensor& post_in,
+          const torch::Tensor& comb_in,
+          const torch::Tensor& hc_scale,
+          const torch::Tensor& hc_base,
+          int64_t sinkhorn_iter,
+          double eps);
+
 void fused_mla_q(const torch::Tensor& input,
                  torch::Tensor& output,
                  torch::Tensor& output_scale,
@@ -377,6 +389,24 @@ void fused_mla_q(const torch::Tensor& input,
                  const std::string& quant_mode,
                  double eps,
                  bool interleaved);
+
+void fused_mla_q_v2(const torch::Tensor& input,
+                    torch::Tensor& output,
+                    const std::optional<torch::Tensor>& output_norm,
+                    const torch::Tensor& gamma,
+                    const std::optional<torch::Tensor>& smooth_quant_scale,
+                    const torch::Tensor& weight_b,
+                    const std::optional<torch::Tensor>& weight_b_scale,
+                    const torch::Tensor& sin,
+                    const torch::Tensor& cos,
+                    const torch::Tensor& position_id,
+                    double eps,
+                    bool interleaved);
+
+torch::Tensor batch_matmul(const torch::Tensor& a,
+                           const torch::Tensor& b,
+                           bool trans_a,
+                           bool trans_b);
 
 void fused_mla_kv(const torch::Tensor& input_kv,
                   const torch::Tensor& sin,

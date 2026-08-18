@@ -112,6 +112,12 @@ bool is_cpp_chat_template_supported_model(const std::string& model_type) {
   return model_type == "deepseek_v32" || model_type == "deepseek_v4";
 }
 
+bool is_qwen3_5_model_type(std::string_view model_type) {
+  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
+         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text" ||
+         model_type.rfind("qwen3_5_", 0) == 0;
+}
+
 }  // namespace
 
 void ModelConfig::from_flags() {
@@ -139,6 +145,18 @@ bool ModelConfig::is_python_model_impl(std::string_view model_impl) {
   // their model_impl comparison through here, so the raw config value is never
   // normalized: no separate canonicalization step is needed.
   return model_impl == "python" || model_impl == "py";
+}
+
+std::optional<std::string> ModelConfig::validate_python_speculative_decode(
+    std::string_view model_impl,
+    std::string_view model_type,
+    int32_t num_speculative_tokens) {
+  if (!is_python_model_impl(model_impl) || num_speculative_tokens <= 0 ||
+      !is_qwen3_5_model_type(model_type)) {
+    return std::nullopt;
+  }
+  return "Qwen3.5 Python model executor does not support speculative decoding; "
+         "set num_speculative_tokens=0 or use the native model executor";
 }
 
 void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {

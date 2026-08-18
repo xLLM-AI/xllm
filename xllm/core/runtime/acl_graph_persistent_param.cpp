@@ -30,8 +30,9 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
-#include "core/runtime/mtp_async_state.h"
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/util/utils.h"
 
 // ATB includes
@@ -201,7 +202,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // attention plan for each request.
   need_update_attention_plan_ =
       (args.model_type() != "deepseek_v32" &&
-       args.model_type() != "deepseek_v4" &&
+       !util::is_deepseek_v4_model_type(args.model_type()) &&
        args.model_type() != "glm_moe_dsa" && !supports_mla_graph_kv_bucketing_);
 
   // Check if mRoPE is used (for VLM models like qwen2-vl)
@@ -1290,9 +1291,9 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       graph_params->embedding.linear_state_indices =
           persistent_linear_state_indices(
               static_cast<uint32_t>(padded_batch_size));
-      graph_params->parallel.has_initial_state =
-          params.parallel.has_initial_state;
-      graph_params->parallel.has_initial_state.resize(
+      graph_params->linear_state_validity_mask =
+          params.linear_state_validity_mask;
+      graph_params->linear_state_validity_mask.resize(
           static_cast<size_t>(padded_batch_size), 0);
     }
 
@@ -1318,14 +1319,15 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
           static_cast<uint32_t>(padded_batch_size));
     }
     if (use_expanded_spec_decode_attention) {
-      graph_params->graph.use_expanded_decode_for_spec_verify_attention = true;
-      graph_params->graph.expanded_kv_seq_lens = expanded_kv_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
-      graph_params->graph.expanded_block_tables =
-          expanded_block_tables_for_graph();
+      layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+          *graph_params,
+          expanded_kv_seq_lens_.slice(
+              /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens),
+          expanded_block_tables_for_graph(),
+          expanded_kv_seq_lens_vec,
+          options_.block_size());
       graph_params->graph.expanded_tiling_data =
           uses_paged_attention_tiling() ? tiling_data() : torch::Tensor();
-      graph_params->graph.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
     }
     if (params.attention.device.q_cu_seq_lens.defined()) {
       const bool use_hybrid_query_start_loc = is_hybrid_linear_attention_;
@@ -1358,13 +1360,13 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                        padded_q_seq_lens_vec[static_cast<size_t>(i)]);
     }
 
-    if (!params.parallel.has_initial_state.empty()) {
-      auto& his = graph_params->parallel.has_initial_state;
-      his = params.parallel.has_initial_state;
-      if (his.size() > static_cast<size_t>(actual_batch_size)) {
-        his.resize(static_cast<size_t>(actual_batch_size));
+    if (!params.linear_state_validity_mask.empty()) {
+      auto& validity_mask = graph_params->linear_state_validity_mask;
+      validity_mask = params.linear_state_validity_mask;
+      if (validity_mask.size() > static_cast<size_t>(actual_batch_size)) {
+        validity_mask.resize(static_cast<size_t>(actual_batch_size));
       }
-      his.resize(static_cast<size_t>(padded_batch_size), 0);
+      validity_mask.resize(static_cast<size_t>(padded_batch_size), 0);
     }
 
     if (params.num_accepted_tokens.defined() &&

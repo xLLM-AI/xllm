@@ -63,11 +63,11 @@ DeepseekV4HCPreImpl::DeepseekV4HCPreImpl(int64_t hc_mult,
       norm_eps_(norm_eps) {
   const int64_t mix_hc = (2 + hc_mult_) * hc_mult_;
   const int64_t hc_dim = hc_mult_ * dim_;
-  torch::TensorOptions param_options =
-      options.dtype(torch::kFloat32).requires_grad(false);
+  torch::TensorOptions param_options = options.requires_grad(false);
   hc_fn_ = register_parameter("hc_fn",
                               torch::empty({mix_hc, hc_dim}, param_options),
                               /*requires_grad=*/false);
+  param_options = param_options.dtype(torch::kFloat32);
   hc_base_ = register_parameter("hc_base",
                                 torch::empty({mix_hc}, param_options),
                                 /*requires_grad=*/false);
@@ -91,8 +91,7 @@ DeepseekV4HCPreOutput DeepseekV4HCPreImpl::forward(
             .contiguous();
   }
 
-  torch::Tensor mixes =
-      torch::nn::functional::linear(x_flat.to(torch::kFloat32), hc_fn_);
+  torch::Tensor mixes = torch::nn::functional::linear(x_flat, hc_fn_);
   torch::Tensor pre;
   torch::Tensor post;
   torch::Tensor comb;
@@ -115,6 +114,28 @@ DeepseekV4HCPreOutput DeepseekV4HCPreImpl::forward(
   out_shape.emplace_back(hc_mult_);
   comb = comb.reshape(out_shape);
   return {output, post, comb};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+DeepseekV4HCPreImpl::fused_post_pre_norm(const torch::Tensor& x,
+                                         const torch::Tensor& residual,
+                                         const torch::Tensor& post,
+                                         const torch::Tensor& comb,
+                                         const torch::Tensor& gamma) {
+  CHECK(supports_fused_mhc())
+      << "fused_mhc only supports hc_mult=4 and hidden_size=4096";
+  const int64_t token_count = x.numel() / dim_;
+  return kernel::mlu::fused_mhc(
+      flat_hidden(x, dim_),
+      flat_hc(residual, hc_mult_, dim_),
+      hc_fn_,
+      gamma,
+      post.reshape({token_count, hc_mult_}).contiguous(),
+      flat_matrix(comb, hc_mult_, hc_mult_),
+      hc_scale_,
+      hc_base_,
+      sinkhorn_iters_,
+      hc_eps_);
 }
 
 void DeepseekV4HCPreImpl::load_state_dict(const StateDict& state_dict) {

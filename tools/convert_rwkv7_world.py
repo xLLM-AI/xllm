@@ -92,10 +92,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.logger import logger
-
 import torch
 from safetensors.torch import save_file
+
+from scripts.logger import logger
 
 try:
     import rwkv
@@ -147,17 +147,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--src",
-        help=(
-            "Source directory in ModelScope/BlinkDL native format "
-            f"(required unless {ENV_SRC} is set)"
-        ),
+        help=(f"Source directory in ModelScope/BlinkDL native format (required unless {ENV_SRC} is set)"),
     )
     parser.add_argument(
         "--dst",
-        help=(
-            "Parent directory for xLLM-ready output folders "
-            f"(required unless {ENV_DST} is set)"
-        ),
+        help=(f"Parent directory for xLLM-ready output folders (required unless {ENV_DST} is set)"),
     )
     parser.add_argument(
         "--sizes",
@@ -175,11 +169,7 @@ def parse_args() -> argparse.Namespace:
 
 def infer_arch(state: dict[str, torch.Tensor]) -> dict:
     emb = state["emb.weight"]
-    n_layers = max(
-        int(key.split(".")[1])
-        for key in state
-        if key.startswith("blocks.")
-    ) + 1
+    n_layers = max(int(key.split(".")[1]) for key in state if key.startswith("blocks.")) + 1
     head_size = int(state["blocks.0.att.r_k"].shape[-1])
     hidden_size = int(emb.shape[1])
     return {
@@ -308,10 +298,7 @@ def main() -> int:
 
     logger.info("Done. Start xLLM with one of:")
     for out_dir in outputs:
-        logger.info(
-            f"  ./build/xllm/core/server/xllm "
-            f"--model={out_dir} --port=9977 --device_id=0"
-        )
+        logger.info(f"  ./build/xllm/core/server/xllm --model={out_dir} --port=9977 --device_id=0")
     return 0
 
 

@@ -26,7 +26,6 @@ void active(const torch::Tensor& input,
             int64_t start_expert_id,
             int64_t expert_size) {
   std::string hidden_act = act_mode;
-  // TODO: act_mode gelu_pytorch_tanh not support yet.
   std::string gelu_approximate = "none";
   if (act_mode == "gelu_pytorch_tanh") {
     hidden_act = "gelu";
@@ -39,6 +38,9 @@ void active(const torch::Tensor& input,
                          hidden_act,
                          is_gated,
                          start_expert_id,
-                         expert_size);
+                         expert_size,
+                         /*active_coef=*/1.0,
+                         /*high_precision=*/false,
+                         gelu_approximate);
 }
 }  // namespace xllm::kernel::mlu

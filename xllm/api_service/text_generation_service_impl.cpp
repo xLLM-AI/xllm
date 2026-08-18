@@ -87,7 +87,6 @@ void TextGenerationServiceImpl::process_async_impl(
        request_id = saved_request_id,
        created_time = absl::ToUnixSeconds(absl::Now())](
           const DiTRequestOutput& req_output) -> bool {
-        master->get_rate_limiter()->decrease_one_request();
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {

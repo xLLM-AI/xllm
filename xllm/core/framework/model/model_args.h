@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -65,6 +66,23 @@ struct ModelArgs {
 
   PROPERTY(int64_t, vocab_size) = -1;
   PROPERTY(int64_t, draft_vocab_size) = 0;
+
+  // DSpark: low-rank dim of the Markov head. 0 = disabled (plain DFlash /
+  // non-DSpark models).
+  PROPERTY(int64_t, markov_rank) = 0;
+  PROPERTY(int32_t, dspark_num_layers) = 0;
+  PROPERTY(int32_t, dspark_block_size) = 0;
+  // True only when SparseAttnSharedkv accepts explicit DSpark SWA indices.
+  // False selects the CANN 9.0-compatible q_len=1 row fallback.
+  PROPERTY(bool, dspark_use_native_sas) = false;
+
+  // DSpark ConfidenceHead switches. When enabled, DSpark's ForCausalLM
+  // registers a `confidence_head.proj` layer used for adaptive-speculative
+  // pruning acceptance-probability estimation. `with_markov` toggles whether
+  // the head is applied on `concat(hidden, markov_embedding[prev])` (True in
+  // released dspark_qwen3_*b_block* checkpoints) or on `hidden` alone.
+  PROPERTY(bool, enable_confidence_head) = false;
+  PROPERTY(bool, confidence_head_with_markov) = false;
 
   PROPERTY(bool, use_qk_norm) = false;
   PROPERTY(float, rms_norm_eps) = 0.0f;
@@ -431,7 +449,7 @@ struct ModelArgs {
   // number of speculative decoding tokens
   PROPERTY(int64_t, num_speculative_tokens) = 0;
 
-  // Eagle3: layer indices (0-based) to capture aux hidden states, from config
+  // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
 
   // VAE related args
@@ -611,6 +629,14 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
                        });
   }
   return args.full_attention_interval() > 1;
+}
+
+// Closed set by design: a new target variant must be enumerated here rather
+// than matched by a "qwen3_5_" prefix, so draft bodies ("qwen3_5_mtp") are not
+// silently promoted onto the target spec-verify path.
+inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
+  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
+         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

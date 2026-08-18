@@ -16,6 +16,32 @@ limitations under the License.
 #include "mlu_ops_api.h"
 
 namespace xllm::kernel::mlu {
+void fused_mla_q_v2(const torch::Tensor& input,
+                    torch::Tensor& output,
+                    const std::optional<torch::Tensor>& output_norm,
+                    const torch::Tensor& gamma,
+                    const std::optional<torch::Tensor>& smooth_quant_scale,
+                    const torch::Tensor& weight_b,
+                    const std::optional<torch::Tensor>& weight_b_scale,
+                    const torch::Tensor& sin,
+                    const torch::Tensor& cos,
+                    const torch::Tensor& position_id,
+                    double eps,
+                    bool interleaved) {
+  tmo::torch_api::fused_mla_q_v2(input,
+                                 output,
+                                 output_norm,
+                                 gamma,
+                                 smooth_quant_scale,
+                                 weight_b,
+                                 weight_b_scale,
+                                 sin,
+                                 cos,
+                                 position_id,
+                                 eps,
+                                 interleaved);
+}
+
 void fused_mla_q(const torch::Tensor& input,
                  torch::Tensor& output,
                  torch::Tensor& output_scale,

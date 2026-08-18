@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "models/llm/py_causal_lm.h"
 
+#include <Python.h>
 #include <glog/logging.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
@@ -32,6 +33,36 @@ limitations under the License.
 namespace py = pybind11;
 
 namespace xllm {
+namespace detail {
+
+void share_python_model_weights(py::object& draft_model,
+                                const py::object& target_model) {
+  draft_model.attr("lm_head") = target_model.attr("lm_head");
+  py::object draft_body = draft_model.attr("model");
+  py::object target_body = target_model.attr("model");
+  draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+}
+
+}  // namespace detail
+
+namespace {
+
+void clear_python_object(py::object& object) {
+  if (!object) {
+    return;
+  }
+  if (!Py_IsInitialized()) {
+    // CPython has already torn down its GIL. Avoid decref during C++ static
+    // destruction; the process is exiting and the reference cannot be safely
+    // released anymore.
+    (void)object.release();
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  object = py::object();
+}
+
+}  // namespace
 
 PyCausalLM::PyCausalLM(const ModelContext& context)
     : model_args_(context.get_model_args()),
@@ -42,19 +73,104 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;
+  cp_size_ = parallel_args.cp_size();
+  cp_rank_ = parallel_args.cp_rank();
+  // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
+  // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
+  // separate cp_group_ over the cp-strided ranks. Read each dimension from its
+  // own group instead of carving CP back out of tp_group_. TP and CP are
+  // orthogonal: a rank can shard both attention heads (TP) and sequence tokens
+  // (CP) at once, so both dimensions may be > 1 simultaneously.
   tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
+  ProcessGroup* dp_group = parallel_args.dp_local_process_group_;
+  dp_size_ = (dp_group != nullptr) ? dp_group->world_size() : 1;
+  dp_rank_ = (dp_group != nullptr) ? dp_group->rank() : 0;
+  ep_size_ = parallel_args.ep_size();
+  CHECK(ep_size_ == 1 || ep_size_ == parallel_args.world_size())
+      << "Python models support only ep_size=1 or ep_size=world_size.";
+
+  CHECK(parallel_args.moe_tp_group_ != nullptr);
+  ProcessGroup* moe_tp_group = parallel_args.moe_tp_group_;
+  ProcessGroup* ep_group = nullptr;
+  if (ep_size_ > 1) {
+    CHECK(parallel_args.moe_ep_group_ != nullptr);
+    ep_group = parallel_args.moe_ep_group_;
+  }
+  moe_tp_size_ = (moe_tp_group != nullptr) ? moe_tp_group->world_size() : 1;
+  moe_tp_rank_ = (moe_tp_group != nullptr) ? moe_tp_group->rank() : 0;
+  ep_rank_ = (ep_group != nullptr) ? ep_group->rank() : 0;
 
   py::gil_scoped_acquire gil;
+  py::object init_process_group =
+      py::module_::import("xllm.python.distributed").attr("init_process_group");
+  CHECK(!parallel_args.python_rendezvous_host_.empty());
+  CHECK_GT(parallel_args.python_rendezvous_port_, 0);
+  const int32_t global_rank = parallel_args.rank();
+  const int32_t global_world_size = parallel_args.world_size();
   if (tp_size_ > 1) {
-    CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
-    CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
-    py::module_::import("xllm.python.ops")
-        .attr("init_tp_group")(parallel_args.python_tp_rendezvous_host_,
-                               parallel_args.python_tp_rendezvous_port_,
-                               tp_rank_,
-                               tp_size_,
-                               c10::str(device_));
+    init_process_group("tp",
+                       parallel_args.python_rendezvous_host_,
+                       parallel_args.python_rendezvous_port_,
+                       tp_rank_,
+                       tp_size_,
+                       c10::str(device_),
+                       global_rank,
+                       global_world_size,
+                       global_rank / tp_size_);
+  }
+  if (dp_size_ > 1) {
+    init_process_group("dp",
+                       parallel_args.python_rendezvous_host_,
+                       parallel_args.python_rendezvous_port_,
+                       dp_rank_,
+                       dp_size_,
+                       c10::str(device_),
+                       global_rank,
+                       global_world_size,
+                       global_rank % tp_size_);
+  }
+  if (moe_tp_size_ > 1) {
+    init_process_group("moe_tp",
+                       parallel_args.python_rendezvous_host_,
+                       parallel_args.python_rendezvous_port_,
+                       moe_tp_rank_,
+                       moe_tp_size_,
+                       c10::str(device_),
+                       global_rank,
+                       global_world_size,
+                       global_rank / moe_tp_size_);
+  }
+  if (ep_size_ > 1) {
+    init_process_group("moe_ep",
+                       parallel_args.python_rendezvous_host_,
+                       parallel_args.python_rendezvous_port_,
+                       ep_rank_,
+                       ep_size_,
+                       c10::str(device_),
+                       global_rank,
+                       global_world_size,
+                       global_rank % moe_tp_size_);
+  }
+  if (cp_size_ > 1) {
+    // CP shards sequence tokens; its group is strided by tp_size -- ranks with
+    // the same (dp, tp) slot but different cp_rank. The group index selects
+    // that (dp, tp) slot: dp block (global_rank / (cp_size*tp_size)) times
+    // tp_size, plus the tp offset within it. TP and CP are orthogonal, so both
+    // groups may be initialized on the same device off the shared rendezvous
+    // endpoint.
+    const int32_t cp_group_index =
+        (global_rank / (cp_size_ * tp_size_)) * tp_size_ +
+        global_rank % tp_size_;
+    init_process_group("cp",
+                       parallel_args.python_rendezvous_host_,
+                       parallel_args.python_rendezvous_port_,
+                       cp_rank_,
+                       cp_size_,
+                       c10::str(device_),
+                       global_rank,
+                       global_world_size,
+                       cp_group_index);
   }
   const std::string module_name = context.get_model_args().model_type().empty()
                                       ? std::string("Qwen3ForCausalLM")
@@ -68,9 +184,8 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 }
 
 PyCausalLM::~PyCausalLM() {
-  py::gil_scoped_acquire gil;
-  py_model_ = py::object();
-  config_dict_ = py::object();
+  clear_python_object(py_model_);
+  clear_python_object(config_dict_);
 }
 
 py::dict PyCausalLM::build_config_dict(
@@ -83,6 +198,15 @@ py::dict PyCausalLM::build_config_dict(
   d["device"] = c10::str(device_);
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
+  d["dp_size"] = dp_size_;
+  d["dp_rank"] = dp_rank_;
+  d["moe_tp_size"] = moe_tp_size_;
+  d["moe_tp_rank"] = moe_tp_rank_;
+  d["ep_size"] = ep_size_;
+  d["ep_rank"] = ep_rank_;
+  // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
+  // a derived member function, so pass it explicitly for the Python executor.
+  d["cp_rank"] = cp_rank_;
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
@@ -123,6 +247,17 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                             : py::object(py::none());
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
+}
+
+bool PyCausalLM::share_weights_from(CausalLM& source) {
+  auto* source_model = dynamic_cast<PyCausalLM*>(&source);
+  if (source_model == nullptr) {
+    return false;
+  }
+
+  py::gil_scoped_acquire gil;
+  detail::share_python_model_weights(py_model_, source_model->py_model_);
+  return true;
 }
 
 }  // namespace xllm

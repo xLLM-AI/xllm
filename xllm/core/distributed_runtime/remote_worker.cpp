@@ -78,6 +78,11 @@ bool RemoteWorker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return channel_->allocate_kv_cache(kv_cache_shape);
 }
 
+bool RemoteWorker::set_speculative_validate_time_predictor(
+    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
+  return channel_->set_speculative_validate_time_predictor(predictor);
+}
+
 void RemoteWorker::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
                                   uint16_t& port) {
@@ -125,16 +130,8 @@ std::tuple<int64_t, int64_t> RemoteWorker::estimate_kv_cache_capacity() {
 bool RemoteWorker::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  return channel_->pull_kv_blocks(src_cluster_id,
-                                  src_addr,
-                                  src_blocks,
-                                  dst_blocks,
-                                  src_linear_state_ids,
-                                  dst_linear_state_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  return channel_->pull_kv_blocks(src_cluster_id, src_addr, mappings);
 }
 
 ForwardInput RemoteWorker::prepare_inputs(Batch& batch) {
@@ -246,26 +243,15 @@ folly::SemiFuture<bool> RemoteWorker::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> RemoteWorker::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         src_cluster_id,
                         src_addr,
-                        src_blocks,
-                        dst_blocks,
-                        src_linear_state_ids,
-                        dst_linear_state_ids,
+                        mappings,
                         promise = std::move(promise)]() mutable {
-    if (!channel_->pull_kv_blocks(src_cluster_id,
-                                  src_addr,
-                                  src_blocks,
-                                  dst_blocks,
-                                  src_linear_state_ids,
-                                  dst_linear_state_ids)) {
+    if (!channel_->pull_kv_blocks(src_cluster_id, src_addr, mappings)) {
       LOG(ERROR) << "PullKVCache failed";
       promise.setValue(false);
     } else {
@@ -278,16 +264,8 @@ folly::SemiFuture<bool> RemoteWorker::pull_kv_blocks_async(
 bool RemoteWorker::pull_hetero_kv_blocks(
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  return channel_->pull_hetero_kv_blocks(src_cluster_ids,
-                                         src_addrs,
-                                         src_blocks,
-                                         dst_blocks,
-                                         src_linear_state_ids,
-                                         dst_linear_state_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  return channel_->pull_hetero_kv_blocks(src_cluster_ids, src_addrs, mappings);
 }
 
 folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
@@ -306,7 +284,7 @@ folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
 void RemoteWorker::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
-  copy_threadpool_.schedule(
+  threadpool_.schedule(
       [this,
        batch_id = batch_id,
        block_transfer_info = std::move(block_transfer_info)]() mutable {
@@ -316,14 +294,15 @@ void RemoteWorker::transfer_kv_blocks(
 
 void RemoteWorker::prefetch_from_storage(
     const std::vector<BlockTransferInfo>& block_transfer_info,
-    std::shared_ptr<std::atomic<int32_t>> flag,
-    std::shared_ptr<std::atomic<uint32_t>> success_cnt) {
+    std::shared_ptr<PrefetchResult> result,
+    size_t worker_index) {
   copy_threadpool_.schedule(
       [this,
        block_transfer_info = std::move(block_transfer_info),
-       flag = flag,
-       success_cnt = success_cnt]() mutable {
-        channel_->prefetch_from_storage(block_transfer_info, flag, success_cnt);
+       result = std::move(result),
+       worker_index]() mutable {
+        channel_->prefetch_from_storage(
+            block_transfer_info, std::move(result), worker_index);
       });
 }
 

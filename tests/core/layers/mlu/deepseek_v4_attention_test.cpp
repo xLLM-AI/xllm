@@ -223,7 +223,7 @@ class DeepseekV4AttentionTest : public ::testing::Test {
   test::Dsv4AttentionRefConfig make_config(int64_t compress_ratio) const {
     test::Dsv4AttentionRefConfig config;
     config.hidden_dim = 32;
-    config.q_lora_rank = 16;
+    config.q_lora_rank = 1024;
     config.n_heads = 4;
     config.head_dim = 512;
     config.rope_head_dim = 64;

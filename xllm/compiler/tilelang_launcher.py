@@ -16,9 +16,7 @@ def _bootstrap_import_paths() -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Source-tree launcher for xLLM TileLang prepare/compile flows."
-    )
+    parser = argparse.ArgumentParser(description="Source-tree launcher for xLLM TileLang prepare/compile flows.")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
     subparsers.add_parser(

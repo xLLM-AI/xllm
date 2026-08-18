@@ -33,9 +33,15 @@ class BatchMemcpy {
 
   virtual void init(int32_t device_id) = 0;
 
-  virtual bool copy_h2d(const std::vector<torch::Tensor>& src_tensors,
-                        const std::vector<torch::Tensor>& dst_tensors,
-                        Stream* stream) = 0;
+  // Submits H2D copies without waiting for stream completion. A true result
+  // requires the caller to protect buffer lifetime with stream ordering,
+  // events, or explicit synchronization. A false result guarantees that any
+  // work accepted by this call has been drained; a backend must fail-stop if
+  // it cannot establish that guarantee. Backends without non-blocking
+  // submission may complete copies synchronously before returning.
+  virtual bool submit_h2d(const std::vector<torch::Tensor>& src_tensors,
+                          const std::vector<torch::Tensor>& dst_tensors,
+                          Stream* stream) = 0;
 
   virtual bool copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                         const std::vector<torch::Tensor>& dst_tensors,

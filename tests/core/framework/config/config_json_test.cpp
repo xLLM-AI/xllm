@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -50,6 +51,16 @@ inline constexpr std::string_view kUpdatedConfig = R"json({
 inline constexpr std::string_view kMalformedConfig = R"json({
   "block_size":
 })json";
+
+#if !defined(USE_NPU)
+TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
+  JsonReader json_config =
+      config::parse_json_string(R"json({"enable_dspark_native_sas":true})json");
+  KernelConfig kernel_config;
+  EXPECT_DEATH(kernel_config.from_json(json_config),
+               "enable_dspark_native_sas is only supported on NPU");
+}
+#endif
 
 inline constexpr std::string_view kShortRequestFirstConfig = R"json({
   "priority_strategy": "short_request_first",
@@ -215,6 +226,31 @@ std::filesystem::path config_test_file_path() {
   }
 
   return std::filesystem::path("tests/core/framework/config/config_test.json");
+}
+
+TEST(ModelConfigValidationTest, RejectsQwen35PythonSpeculativeDecode) {
+  const std::optional<std::string> error =
+      ModelConfig::validate_python_speculative_decode(
+          "python", "qwen3_5_moe_text", 4);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("does not support speculative decoding"),
+            std::string::npos);
+  EXPECT_TRUE(
+      ModelConfig::validate_python_speculative_decode("py", "qwen3_5_text", 1)
+          .has_value());
+}
+
+TEST(ModelConfigValidationTest, AcceptsSupportedPythonExecutionModes) {
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "python", "qwen3_5_text", 0)
+                   .has_value());
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "native", "qwen3_5_text", 4)
+                   .has_value());
+  EXPECT_FALSE(
+      ModelConfig::validate_python_speculative_decode("python", "qwen3", 4)
+          .has_value());
 }
 
 TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {

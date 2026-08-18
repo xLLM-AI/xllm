@@ -752,11 +752,15 @@ TORCH_MODULE(Qwen2_5_VLForConditionalGeneration);
 using Qwen25VLMultimodalProcessor = MultimodalProcessor<Qwen2VLPromptProcessor,
                                                         Qwen2VLImageProcessor,
                                                         Qwen2VLVideoProcessor>;
-REGISTER_MULTIMODAL_PROCESSOR(qwen2_5_vl, Qwen25VLMultimodalProcessor);
-REGISTER_CAUSAL_VLM_MODEL(qwen2_5_vl, Qwen2_5_VLForConditionalGeneration);
+REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(qwen2_5_vl_atb,
+                                           qwen2_5_vl_atb,
+                                           Qwen25VLMultimodalProcessor);
+REGISTER_CAUSAL_VLM_MODEL_WITH_VARNAME(qwen2_5_vl_atb,
+                                       qwen2_5_vl_atb,
+                                       Qwen2_5_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen2_5_vl, xllm::QwenVLMPositionGenerator);
 
-REGISTER_MODEL_ARGS(qwen2_5_vl, [&] {
+REGISTER_MODEL_ARGS_WITH_VARNAME(qwen2_5_vl_atb, qwen2_5_vl_atb, [&] {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 151643);

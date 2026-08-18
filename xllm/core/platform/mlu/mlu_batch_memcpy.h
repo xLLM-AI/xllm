@@ -33,9 +33,9 @@ class MLUBatchMemcpy final : public BatchMemcpy {
 
   void init(int32_t device_id) override;
 
-  bool copy_h2d(const std::vector<torch::Tensor>& src_tensors,
-                const std::vector<torch::Tensor>& dst_tensors,
-                Stream* stream) override;
+  bool submit_h2d(const std::vector<torch::Tensor>& src_tensors,
+                  const std::vector<torch::Tensor>& dst_tensors,
+                  Stream* stream) override;
 
   bool copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                 const std::vector<torch::Tensor>& dst_tensors,
@@ -43,13 +43,15 @@ class MLUBatchMemcpy final : public BatchMemcpy {
 
  private:
   enum class Direction : int8_t { H2D = 0, D2H = 1 };
+  enum class CompletionMode : int8_t { SYNCHRONIZE = 0, SUBMIT_ONLY = 1 };
 
   static constexpr size_t kMaxBatchCopyCount = 4096;
 
   bool copy(const std::vector<torch::Tensor>& src_tensors,
             const std::vector<torch::Tensor>& dst_tensors,
             Stream* stream,
-            Direction direction);
+            Direction direction,
+            CompletionMode completion_mode);
   bool valid_inputs(const std::vector<torch::Tensor>& src_tensors,
                     const std::vector<torch::Tensor>& dst_tensors,
                     const Stream* stream,

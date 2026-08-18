@@ -146,6 +146,30 @@ torch::Tensor DeepseekV4IndexerImpl::preprocess_q(
     const torch::Tensor& compressed_sin_table,
     const torch::Tensor& compressed_cos_table) {
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
+  if (!attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill) {
+    torch::Tensor output =
+        torch::empty({qr.size(0), n_heads_, head_dim_}, qr.options());
+    torch::Tensor weight =
+        wq_b_->weight().view({n_heads_, head_dim_, q_lora_rank_});
+    CHECK_EQ(weight.scalar_type(), qr.scalar_type())
+        << "DeepSeek V4 indexer wq_b must remain unquantized";
+    xllm::kernel::FusedIndexerQParams params;
+    params.input_q = qr;
+    params.output = output;
+    params.output_scale = std::nullopt;
+    params.w_q = weight;
+    params.w_q_scale = std::nullopt;
+    params.hadamard_matrix = hadamard_matrix_;
+    params.sin = compressed_sin_table;
+    params.cos = compressed_cos_table;
+    params.position_id = dsa.input_positions;
+    params.quant_mode = "none";
+    params.interleaved = true;
+    params.rope_at_front = false;
+    xllm::kernel::fused_indexer_q(params);
+    return output;
+  }
+
   torch::Tensor q = wq_b_->forward(qr).view({qr.size(0), n_heads_, head_dim_});
   apply_last_dim_rope(q,
                       compressed_sin_table,

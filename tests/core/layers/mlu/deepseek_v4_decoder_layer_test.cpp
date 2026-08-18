@@ -409,7 +409,7 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     std::optional<torch::Tensor> input_ids = std::nullopt;
     if (pass_input_ids) {
       input_ids = torch::arange(
-          seq_len, torch::TensorOptions().dtype(torch::kInt32).device(device_));
+          seq_len, torch::TensorOptions().dtype(torch::kInt64).device(device_));
     }
 
     torch::Tensor output = layer->forward(hidden,

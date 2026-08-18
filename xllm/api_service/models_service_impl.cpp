@@ -27,8 +27,10 @@ namespace xllm {
 
 ModelsServiceImpl::ModelsServiceImpl(
     const std::vector<std::string>& model_names,
+    const std::vector<std::string>& model_repository_names,
     const std::vector<std::string>& model_versions)
     : model_names_(model_names),
+      model_repository_names_(model_repository_names),
       model_versions_(model_versions),
       created_(absl::ToUnixSeconds(absl::Now())) {}
 
@@ -49,10 +51,7 @@ std::string ModelsServiceImpl::list_model_versions() {
 
   for (size_t i = 0; i < model_versions_.size(); ++i) {
     nlohmann::json model_state;
-    // The repository index reports the model directory name (carried by
-    // model_versions_), so it stays stable regardless of a user-provided
-    // --model_id.
-    model_state["name"] = model_versions_[i];
+    model_state["name"] = model_repository_names_[i];
     model_state["version"] = model_versions_[i];
     model_state["state"] = "READY";
     model_state["reason"] = "normal";

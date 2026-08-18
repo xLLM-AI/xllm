@@ -139,6 +139,14 @@ StreamEventPtr Stream::record_event() const {
 #endif
 }
 
+StreamEventPtr Stream::record_event_or_sync() const {
+  StreamEventPtr event = record_event();
+  if (event == nullptr) {
+    synchronize();
+  }
+  return event;
+}
+
 bool Stream::wait_event(const StreamEventPtr& event) const {
   if (event == nullptr) {
     return true;

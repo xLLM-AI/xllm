@@ -34,6 +34,7 @@ limitations under the License.
 #include "disagg_pd_scheduler.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
+#include "framework/block/block_manager_pool.h"
 #include "framework/kv_cache_transfer/pd_topology_guard.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -46,6 +47,21 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+
+bool is_permanent_rejection(int32_t status_code) {
+  return status_code == kDecodeAddNewPromptTooLongStatusCode;
+}
+
+bool exceeds_decode_capacity(size_t num_prompt_tokens,
+                             size_t block_size,
+                             size_t num_blocks) {
+  if (block_size == 0) {
+    return true;
+  }
+  const size_t needed_blocks = util::ceil_div(num_prompt_tokens, block_size);
+  const size_t usable_blocks = num_blocks == 0 ? 0 : num_blocks - 1;
+  return needed_blocks > usable_blocks;
+}
 
 DisaggPDScheduler::DisaggPDScheduler(Engine* engine, const Options& options)
     : ContinuousScheduler(engine, options), server_name_("DisaggPDServer") {
@@ -296,20 +312,13 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
-  CHECK(request != nullptr);
-  CHECK(!request->sequences().empty());
-
-  kv_cache_manager_->prefetch_from_storage(request);
-
+bool DisaggPDScheduler::enqueue_ready_request(
+    std::shared_ptr<Request> request) {
   if (request->offline()) {
-    // offline request, push to offline queue
-    prefill_request_queue_offline_.enqueue(request);
+    prefill_request_queue_offline_.enqueue(std::move(request));
     return true;
   }
-  // push and wait
-  prefill_request_queue_.enqueue(request);
-
+  prefill_request_queue_.enqueue(std::move(request));
   return true;
 }
 
@@ -357,14 +366,17 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     remote_instances_info_[selected_instance] = remote_info;
 
-    const bool enable_mla = engine_->model_args().enable_mla();
+    const ModelArgs& model_args = engine_->model_args();
+    const bool kv_cache_is_tp_invariant =
+        model_args.enable_mla() ||
+        util::is_tp_invariant_kv_cache_model_type(model_args.model_type());
     const bool enable_heterogeneous_pd =
         DisaggPDConfig::get_instance().enable_heterogeneous_pd();
     const PdTopoResult topo_result =
         check_pd_topo(instance_info_,
                       remote_info,
                       options_.kv_cache_transfer_mode(),
-                      enable_mla,
+                      kv_cache_is_tp_invariant,
                       enable_heterogeneous_pd);
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
@@ -379,12 +391,14 @@ void DisaggPDScheduler::dispatch_requests() {
                " is incompatible: " + topo_result.reason});
       continue;
     }
-    if (!enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO &&
+    if (!kv_cache_is_tp_invariant &&
+        topo_result.status == PdTopoStatus::ALLOW_HETERO &&
         options_.num_speculative_tokens() <= 0) {
       response_processor_->process_failed_request(
           request,
           {StatusCode::INVALID_ARGUMENT,
-           "non-mla heterogeneous PD requires speculative decoding"});
+           "tp-sharded kv cache heterogeneous PD requires speculative "
+           "decoding"});
       continue;
     }
     if (topo_result.status == PdTopoStatus::ALLOW_HETERO && VLOG_IS_ON(1)) {
@@ -396,7 +410,8 @@ void DisaggPDScheduler::dispatch_requests() {
               << remote_topo.tp_size;
     }
     request->state().heterogeneous_pd =
-        !enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO;
+        !kv_cache_is_tp_invariant &&
+        topo_result.status == PdTopoStatus::ALLOW_HETERO;
 
     proto::DisaggPDService_Stub* stub = create_rpc_channel(selected_instance);
     if (stub == nullptr) {
@@ -482,6 +497,9 @@ void DisaggPDScheduler::dispatch_requests() {
       req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
       req->set_include_stop_str_in_output(
           requests[i]->state().include_stop_str_in_output);
+      req->set_json_object(requests[i]->state().sampling_param.json_object);
+      req->set_json_reasoning_enabled(
+          requests[i]->state().json_reasoning_enabled);
       //*reqs.mutable_reqs()->Add() = req;
     }
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
@@ -528,6 +546,14 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     for (size_t i = 0; i < requests.size(); ++i) {
       if (resps.resps()[i].status_code() != 200) {
+        if (is_permanent_rejection(resps.resps()[i].status_code())) {
+          LOG(ERROR) << "Decode rejected an oversized prompt, request_id="
+                     << requests[i]->request_id() << ", prompt_tokens="
+                     << requests[i]->state().prompt_tokens.size()
+                     << ", selected_instance=" << selected_instance;
+          do_permanent_rejection(requests[i]);
+          continue;
+        }
         // push back to prefill_request_queue_
         if (requests[i]->offline()) {
           prefill_request_queue_offline_.enqueue(requests[i]);
@@ -540,35 +566,14 @@ void DisaggPDScheduler::dispatch_requests() {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
           const auto& resp = resps.resps()[i];
-          const bool has_grouped_cache = resp.kv_block_groups_size() > 0;
-          if (has_grouped_cache) {
-            for (const auto& resp_group : resp.kv_block_groups()) {
-              KVBlockTransferGroup group;
-              group.group_id = resp_group.group_id();
-              group.remote_shared_num = resp_group.remote_shared_num();
-              group.remote_blocks_ids.reserve(resp_group.block_ids_size());
-              for (const int32_t block_id : resp_group.block_ids()) {
-                group.remote_blocks_ids.emplace_back(
-                    static_cast<uint64_t>(block_id));
-              }
-              info.block_transfer_groups.emplace_back(std::move(group));
-            }
-          } else {
-            for (const int32_t block_id : resp.blocks_ids()) {
-              info.remote_blocks_ids.emplace_back(
-                  static_cast<uint64_t>(block_id));
-            }
-            info.remote_shared_num = resp.remote_shared_num();
-          }
-          if (resp.linear_state_id() >= 0) {
-            info.remote_linear_state_ids.emplace_back(resp.linear_state_id());
-          }
-          if (!has_grouped_cache) {
-            const size_t prompt_blocks =
-                (requests[i]->state().prompt_tokens.size() +
-                 kv_cache_manager_->block_size() - 1) /
-                kv_cache_manager_->block_size();
-            info.local_blocks_ids.resize(prompt_blocks);
+          info.mappings.reserve(resp.groups_size());
+          for (const proto::KVTransferGroup& proto_group : resp.groups()) {
+            KVTransferMapping mapping;
+            mapping.group_id = proto_group.group_id();
+            mapping.remote_ids.assign(proto_group.ids().begin(),
+                                      proto_group.ids().end());
+            mapping.remote_shared_num = proto_group.remote_shared_num();
+            info.mappings.emplace_back(std::move(mapping));
           }
           info.dp_rank = resps.resps()[i].dp_rank();
           // TODO: remote_instances_info_ is not multi-thread safe.
@@ -599,30 +604,27 @@ void DisaggPDScheduler::dispatch_requests() {
           // DECODE, or D that got no prefix cache hit); when it is >0, P
           // starts pushing at the first block D actually needs, skipping the
           // shared prefix without touching P's own local shared_num.
-          const auto& groups =
-              sequence->kv_state().transfer_kv_info()->block_transfer_groups;
-          for (const auto& g : groups) {
-            if (g.remote_shared_num == 0) {
+          const auto& mappings =
+              sequence->kv_state().transfer_kv_info()->mappings;
+          for (const KVTransferMapping& mapping : mappings) {
+            if (mapping.remote_shared_num == 0) {
               continue;
             }
             const std::optional<BlockType> block_type =
-                block_type_from_cache_group_id(g.group_id);
+                block_type_from_cache_group_id(mapping.group_id);
             if (!block_type.has_value()) {
               LOG(ERROR) << "Unknown KV cache transfer group_id: "
-                         << g.group_id;
+                         << mapping.group_id;
               continue;
             }
-            sequence->kv_state().advance_group_transfer_block_idx(
-                block_type.value(), static_cast<size_t>(g.remote_shared_num));
-          }
-          // Flat KV counterpart: the flat response ships block_ids starting
-          // from D's shared_num. Advance the flat transfer cursor to the same
-          // origin so build_step_transfer_info indexes remote_blocks_ids from
-          // 0 instead of from local_idx 0 (which would demand D returned
-          // every prompt block).
-          if (!has_grouped_cache && resp.remote_shared_num() > 0) {
-            sequence->kv_state().advance_transfer_block_idx(
-                static_cast<size_t>(resp.remote_shared_num()));
+            if (block_type.value() == BlockType::KV) {
+              sequence->kv_state().advance_transfer_block_idx(
+                  static_cast<size_t>(mapping.remote_shared_num));
+            } else {
+              sequence->kv_state().advance_group_transfer_block_idx(
+                  block_type.value(),
+                  static_cast<size_t>(mapping.remote_shared_num));
+            }
           }
         }
 
@@ -739,21 +741,41 @@ void DisaggPDScheduler::prefill_send_first_generation() {
         ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
                             instance_info_.cluster_ids);
         ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
-        gen->set_dp_size(instance_info_.dp_size);
-        gen->set_dp_rank(request->sequences()[0]->dp_rank());
-        const auto blocks =
-            request->sequences()[0]->kv_state().blocks(BlockType::KV);
-        std::vector<uint64_t> block_ids;
-        block_ids.reserve(blocks.size());
-        for (const auto& block : blocks) {
-          block_ids.push_back(block.id());
+        Sequence* sequence = request->sequences()[0].get();
+        if (sequence->kv_state().has_multi_block_export()) {
+          const auto export_view =
+              sequence->kv_state().multi_block_export_view();
+          for (const auto& [block_type, blocks_ptr] : export_view) {
+            proto::KVTransferGroup* group = gen->add_source_groups();
+            group->set_group_id(cache_group_id(block_type));
+            group->mutable_ids()->Reserve(blocks_ptr->size());
+            for (const Block& block : *blocks_ptr) {
+              if (block.is_valid()) {
+                group->add_ids(static_cast<uint64_t>(block.id()));
+              }
+            }
+          }
+        } else {
+          const Slice<Block> blocks =
+              sequence->kv_state().blocks(BlockType::KV);
+          proto::KVTransferGroup* group = gen->add_source_groups();
+          group->set_group_id(cache_group_id(BlockType::KV));
+          group->mutable_ids()->Reserve(blocks.size());
+          for (const Block& block : blocks) {
+            CHECK(block.is_valid());
+            group->add_ids(static_cast<uint64_t>(block.id()));
+          }
         }
-        ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
-        // Advertise the recurrent-state slot the D side should pull from: the
-        // dedicated LINEAR slot (Qwen3.5 GDN), or -1 for models without
-        // linear-attention layers. Must match the D-side response helper.
-        gen->set_linear_state_id(
-            request->sequences()[0]->get_recurrent_state_slot_id());
+        if (has_linear_attention_layers(engine_->model_args())) {
+          const int32_t linear_state_id = sequence->get_linear_state_slot_id();
+          CHECK_GE(linear_state_id, 0)
+              << "Prefill did not allocate a linear-state slot.";
+          proto::KVTransferGroup* group = gen->add_source_groups();
+          group->set_group_id(cache_group_id(BlockType::LINEAR));
+          group->add_ids(static_cast<uint64_t>(linear_state_id));
+        }
+        gen->set_dp_size(instance_info_.dp_size);
+        gen->set_dp_rank(sequence->dp_rank());
       }
       if (options_.num_speculative_tokens() > 0) {
         torch::Tensor embedding =
@@ -856,8 +878,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     const std::string& kv_cache_transfer_mode,
     std::vector<uint64_t> src_cluster_ids,
     std::vector<std::string> src_addrs,
-    std::vector<uint64_t> src_block_ids,
-    int32_t src_linear_state_id,
+    std::vector<KVTransferMapping> source_mappings,
     int32_t src_dp_size,
     int32_t src_dp_rank,
     bool heterogeneous_pd,
@@ -975,50 +996,69 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   const double prepare_seconds = receive_timer.elapsed_seconds();
 
-  // Pull KV cache in native PULL mode. For a non-MLA heterogeneous TP PUSH
+  // Pull KV cache in native PULL mode. For a TP-sharded heterogeneous PUSH
   // deployment, pull every P-side shard into temporary D-side caches and
   // concatenate the sharded tensor dimensions before decode starts.
   if (kv_cache_transfer_mode == "PULL" || hetero_kv_pull) {
     Timer pull_timer;
-    const auto blocks = sequence->kv_state().blocks(BlockType::KV);
-    std::vector<uint64_t> dst_block_ids;
-    dst_block_ids.reserve(blocks.size());
-    for (const auto& block : blocks) {
-      dst_block_ids.push_back(block.id());
-    }
-    std::vector<uint64_t> src_linear_state_ids;
-    std::vector<uint64_t> dst_linear_state_ids;
-    // Resolve the destination recurrent-state slot with the same helper the
-    // sender used to advertise src_linear_state_id (the LINEAR slot for Qwen3.5
-    // GDN, -1 otherwise), so PULL writes the pulled state into the slot the
-    // decode forward actually reads (see
-    // Sequence::get_recurrent_state_slot_id).
-    const int32_t dst_linear_state_id = sequence->get_recurrent_state_slot_id();
-    if (src_linear_state_id >= 0 && dst_linear_state_id >= 0) {
-      src_linear_state_ids.emplace_back(src_linear_state_id);
-      dst_linear_state_ids.emplace_back(dst_linear_state_id);
+    for (KVTransferMapping& mapping : source_mappings) {
+      const std::optional<BlockType> block_type =
+          block_type_from_cache_group_id(mapping.group_id);
+      if (!block_type.has_value()) {
+        LOG(ERROR) << "Unknown source KV transfer group, request_id=" << req_id
+                   << ", group_id=" << mapping.group_id;
+        kv_cache_manager_->deallocate(request.get());
+        return false;
+      }
+
+      if (block_type.value() == BlockType::LINEAR ||
+          block_type.value() == BlockType::EMBEDDING) {
+        const int32_t local_id = block_type.value() == BlockType::LINEAR
+                                     ? sequence->get_linear_state_slot_id()
+                                     : sequence->get_embedding_block_id();
+        if (local_id >= 0) {
+          mapping.local_ids.emplace_back(static_cast<uint64_t>(local_id));
+        }
+      } else {
+        const Slice<Block> blocks =
+            sequence->kv_state().blocks(block_type.value());
+        size_t local_begin = 0;
+        if (block_type.value() == BlockType::SWA &&
+            mapping.remote_ids.size() < blocks.size()) {
+          local_begin = blocks.size() - mapping.remote_ids.size();
+        }
+        mapping.local_ids.reserve(blocks.size() - local_begin);
+        for (size_t index = local_begin; index < blocks.size(); ++index) {
+          const Block& block = blocks[index];
+          if (block.is_valid()) {
+            mapping.local_ids.emplace_back(static_cast<uint64_t>(block.id()));
+          }
+        }
+      }
+      if (mapping.local_ids.size() != mapping.remote_ids.size()) {
+        LOG(ERROR) << "PULL KV mapping size mismatch, request_id=" << req_id
+                   << ", group_id=" << mapping.group_id
+                   << ", local=" << mapping.local_ids.size()
+                   << ", remote=" << mapping.remote_ids.size();
+        kv_cache_manager_->deallocate(request.get());
+        return false;
+      }
     }
 
-    int32_t dst_dp_rank = sequence->dp_rank();
-    const bool pulled =
-        hetero_kv_pull ? engine_->pull_hetero_kv_blocks(src_dp_size,
-                                                        src_dp_rank,
-                                                        src_cluster_ids,
-                                                        src_addrs,
-                                                        src_block_ids,
-                                                        dst_dp_rank,
-                                                        dst_block_ids,
-                                                        src_linear_state_ids,
-                                                        dst_linear_state_ids)
-                       : engine_->pull_kv_blocks(src_dp_size,
-                                                 src_dp_rank,
-                                                 src_cluster_ids,
-                                                 src_addrs,
-                                                 src_block_ids,
-                                                 dst_dp_rank,
-                                                 dst_block_ids,
-                                                 src_linear_state_ids,
-                                                 dst_linear_state_ids);
+    const int32_t dst_dp_rank = sequence->dp_rank();
+    const bool pulled = hetero_kv_pull
+                            ? engine_->pull_hetero_kv_blocks(src_dp_size,
+                                                             src_dp_rank,
+                                                             src_cluster_ids,
+                                                             src_addrs,
+                                                             dst_dp_rank,
+                                                             source_mappings)
+                            : engine_->pull_kv_blocks(src_dp_size,
+                                                      src_dp_rank,
+                                                      src_cluster_ids,
+                                                      src_addrs,
+                                                      dst_dp_rank,
+                                                      source_mappings);
     if (!pulled) {
       LOG(ERROR) << "Failed to pull"
                  << (hetero_kv_pull ? " and merge heterogeneous" : "")
@@ -1056,6 +1096,35 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
   }
 }
 
+bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
+  CHECK(sequence != nullptr);
+  const BlockManagerPool* block_manager = engine_->block_manager_pool();
+  CHECK(block_manager != nullptr);
+  const BlockManagerPool::Options& block_options = block_manager->options();
+  if (block_options.enable_xtensor() ||
+      !block_options.manager_types().empty() ||
+      (block_options.enable_host_offload() &&
+       options_.instance_role() != InstanceRole::DECODE)) {
+    return false;
+  }
+  return ::xllm::exceeds_decode_capacity(
+      sequence->num_prompt_tokens(),
+      static_cast<size_t>(block_manager->block_size()),
+      static_cast<size_t>(block_manager->num_blocks()));
+}
+
+void DisaggPDScheduler::do_permanent_rejection(
+    const std::shared_ptr<Request>& request) {
+  CHECK(request != nullptr);
+  response_processor_->process_failed_request(
+      request,
+      {StatusCode::RESOURCE_EXHAUSTED,
+       "Request prompt exceeds decode KV cache capacity"});
+  kv_cache_manager_->deallocate(request.get());
+  std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
+  req_to_channel_map_.erase(request->request_id());
+}
+
 void DisaggPDScheduler::update_token_latency_metrics(
     std::vector<Sequence*>& sequences) {
   std::lock_guard<std::mutex> lock(latency_metrics_mutex_);
@@ -1063,8 +1132,6 @@ void DisaggPDScheduler::update_token_latency_metrics(
   const auto now = absl::Now();
   const bool speculative_metrics_enabled =
       options_.num_speculative_tokens() > 0;
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
@@ -1072,7 +1139,9 @@ void DisaggPDScheduler::update_token_latency_metrics(
     }
     // Read the committed-token count before tbt(), which resets it.
     const size_t committed_tokens = sequence->generated_tokens_since_latency();
-    int64_t tbt_milliseconds = sequence->tbt(now);
+    const int64_t tbt_microseconds = sequence->tbt_microseconds(now);
+    const int64_t tbt_milliseconds =
+        microseconds_to_milliseconds(tbt_microseconds);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                         tbt_milliseconds);
@@ -1080,20 +1149,17 @@ void DisaggPDScheduler::update_token_latency_metrics(
           static_cast<double>(tbt_milliseconds) / 1000);
       recent_ttft_.emplace_back(tbt_milliseconds);
     } else {
-      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
+      int64_t inter_token_latency_us = tbt_microseconds;
       recent_tbt_.emplace_back(tbt_milliseconds);
       if (speculative_metrics_enabled && committed_tokens > 0) {
-        HISTOGRAM_OBSERVE(
-            speculative_per_token_latency_milliseconds,
-            amortized_token_latency_ms(tbt_milliseconds, committed_tokens));
-        step_committed_tokens += static_cast<int64_t>(committed_tokens);
-        ++step_decode_seqs;
+        inter_token_latency_us =
+            amortized_token_latency(tbt_microseconds, committed_tokens);
       }
+      HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
+                        inter_token_latency_us);
+      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
+                        microseconds_to_milliseconds(inter_token_latency_us));
     }
-  }
-  if (step_decode_seqs > 0) {
-    GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              static_cast<double>(step_committed_tokens) / step_decode_seqs);
   }
 }
 

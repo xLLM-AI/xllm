@@ -180,7 +180,7 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
         .enable_graph_mode_decode_no_padding(
             xllm_init_options.enable_graph_mode_decode_no_padding);
 
-#if !defined(USE_NPU) && !defined(USE_CUDA)
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
     xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(false);
 #endif
     // Keep dual-source settings aligned with the Config values above.

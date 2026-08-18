@@ -14,6 +14,18 @@ cc_test(
 
 cc_test(
   NAME
+    attention_metadata_builder_test
+  SRCS
+    attention_metadata_builder_test.cpp
+  DEPS
+    :common_layers
+    GTest::gtest_main
+)
+
+target_link_libraries(attention_metadata_builder_test PUBLIC Python::Python)
+
+cc_test(
+  NAME
     rotary_embedding_util_test
   SRCS
     rotary_embedding_util_test.cpp

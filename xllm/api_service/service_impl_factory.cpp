@@ -46,6 +46,7 @@ void ServiceImplFactory::create(
     APIService* service,
     Master* master,
     const std::vector<std::string>& model_names,
+    const std::vector<std::string>& model_repository_names,
     const std::vector<std::string>& model_versions) {
   using InitFn = std::function<void(
       APIService*, Master*, const std::vector<std::string>&)>;
@@ -119,13 +120,17 @@ void ServiceImplFactory::create(
                << master->engine_type().to_string();
   }
 
+  CHECK_EQ(model_names.size(), model_repository_names.size())
+      << "Models and model_repository_names size mismatch: "
+      << "model_names.size()=" << model_names.size()
+      << ", model_repository_names.size()=" << model_repository_names.size();
   CHECK_EQ(model_names.size(), model_versions.size())
       << "Models and model_versions size mismatch: model_names.size()="
       << model_names.size()
       << ", model_versions.size()=" << model_versions.size();
 
-  service->models_service_impl_ =
-      std::make_unique<ModelsServiceImpl>(model_names, model_versions);
+  service->models_service_impl_ = std::make_unique<ModelsServiceImpl>(
+      model_names, model_repository_names, model_versions);
 }
 
 }  // namespace xllm

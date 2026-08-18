@@ -7,20 +7,53 @@
 namespace xllm {
 
 TEST(RequestLimiterTest, Basic) {
-  // Set the maximum number of concurrent requests to 1.
   ServiceConfig::get_instance().max_concurrent_requests(1);
   RateLimiter rate_limiter;
-  // The current number of concurrent requests is 0, no rate limiting is
-  // applied.
-  EXPECT_EQ(rate_limiter.is_limited(), false);
-  // The current number of concurrent requests is 1, rate limiting is applied.
-  EXPECT_EQ(rate_limiter.is_limited(), true);
-  // Decrease the number of concurrent requests by one, changing the concurrency
-  // from 1 to 0.
+
+  EXPECT_FALSE(rate_limiter.is_limited());
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+
+  EXPECT_TRUE(rate_limiter.is_limited());
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+
   rate_limiter.decrease_one_request();
-  // The current number of concurrent requests is 0, no rate limiting is
-  // applied.
-  EXPECT_EQ(rate_limiter.is_limited(), false);
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
+  EXPECT_FALSE(rate_limiter.is_limited());
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+
+  rate_limiter.decrease_one_request();
+}
+
+TEST(RequestLimiterTest, NoLimitWhenMaxIsZero) {
+  ServiceConfig::get_instance().max_concurrent_requests(0);
+  RateLimiter rate_limiter;
+
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_FALSE(rate_limiter.is_limited());
+  }
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 100);
+
+  for (int i = 0; i < 100; ++i) {
+    rate_limiter.decrease_one_request();
+  }
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
+}
+
+TEST(RequestLimiterTest, SleepBlocksAcquisition) {
+  ServiceConfig::get_instance().max_concurrent_requests(10);
+  RateLimiter rate_limiter;
+
+  EXPECT_TRUE(rate_limiter.try_set_sleeping());
+  EXPECT_TRUE(rate_limiter.is_sleeping());
+  // is_limited returns true (reject) while sleeping and does NOT change the
+  // sleep sentinel or increment anything.
+  EXPECT_TRUE(rate_limiter.is_limited());
+  EXPECT_TRUE(rate_limiter.is_sleeping());
+
+  EXPECT_TRUE(rate_limiter.try_wakeup());
+  EXPECT_FALSE(rate_limiter.is_sleeping());
+  EXPECT_FALSE(rate_limiter.is_limited());
+  rate_limiter.decrease_one_request();
 }
 
 }  // namespace xllm

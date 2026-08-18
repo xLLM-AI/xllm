@@ -5,6 +5,18 @@ get_filename_component(_xllm_build_import_root
 
 cc_test(
   NAME
+    scaled_quantize_mlu_test
+  SRCS
+    scaled_quantize_test.cpp
+  DEPS
+    :mlu_kernels
+    torch
+    glog::glog
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     triton_jit_ops_test
   SRCS
     fused_gdn_gating_test.cpp

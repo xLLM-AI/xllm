@@ -15,7 +15,7 @@
 
 import base64
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from PIL import Image
 from xllm_export import MMData
@@ -35,7 +35,7 @@ def _pil_to_data_url(image: Image.Image) -> str:
 
 def normalize_vllm_style_inputs(
     prompts: Any,
-) -> Tuple[List[str], Optional[List[MMData]], Optional[List[List[str]]]]:
+) -> tuple[list[str], list[MMData] | None, list[list[str]] | None]:
     if isinstance(prompts, dict):
         requests = [prompts]
         return _parse_vllm_style_requests(requests)
@@ -49,12 +49,12 @@ def normalize_vllm_style_inputs(
 
 
 def _parse_vllm_style_requests(
-    requests: List[Dict[str, Any]],
-) -> Tuple[List[str], Optional[List[MMData]], Optional[List[List[str]]]]:
-    prompts: List[str] = []
-    mm_datas: List[MMData] = []
-    image_urls: List[List[str]] = []
-    use_mm_data: Optional[bool] = None
+    requests: list[dict[str, Any]],
+) -> tuple[list[str], list[MMData] | None, list[list[str]] | None]:
+    prompts: list[str] = []
+    mm_datas: list[MMData] = []
+    image_urls: list[list[str]] = []
+    use_mm_data: bool | None = None
 
     for req in requests:
         if "prompt" not in req:
@@ -89,7 +89,7 @@ def _parse_vllm_style_requests(
     return prompts, None, image_urls
 
 
-def _to_image_urls(payload: Any) -> List[str]:
+def _to_image_urls(payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         raise TypeError("multi_modal_data must be dict or MMData")
 
@@ -101,12 +101,10 @@ def _to_image_urls(payload: Any) -> List[str]:
     if "audio" in payload:
         raise NotImplementedError("audio multi_modal_data is not supported yet")
 
-    raise ValueError(
-        "Unsupported multi_modal_data format. Expected {'image': ...} or MMData."
-    )
+    raise ValueError("Unsupported multi_modal_data format. Expected {'image': ...} or MMData.")
 
 
-def _normalize_images(images: Any) -> List[str]:
+def _normalize_images(images: Any) -> list[str]:
     if isinstance(images, (list, tuple)):
         if len(images) == 0:
             raise ValueError("multi_modal_data['image'] cannot be empty")
@@ -122,7 +120,4 @@ def _to_image_url(image: Any) -> str:
     if isinstance(image, (bytes, bytearray)):
         return _bytes_to_data_url(bytes(image))
 
-    raise TypeError(
-        "image must be image path/url string, PIL.Image, bytes, "
-        "or a list of these"
-    )
+    raise TypeError("image must be image path/url string, PIL.Image, bytes, or a list of these")

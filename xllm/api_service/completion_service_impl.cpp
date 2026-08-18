@@ -188,21 +188,6 @@ void CompletionServiceImpl::process_async_rpc_impl(
   const auto& target_xservice_addr = request->source_xservice_addr();
   auto callback = [master = master_](const RequestOutput& req_output) -> bool {
     req_output.log_request_status();
-    if (req_output.status.has_value()) {
-      const auto& status = req_output.status.value();
-      if (!status.ok()) {
-        // Reduce the number of concurrent requests when a request is
-        // finished with error.
-        master->get_rate_limiter()->decrease_one_request();
-        return master->handle_rpc_response(req_output);
-      }
-    }
-    // Reduce the number of concurrent requests when a request is finished
-    // or canceled.
-    if (req_output.finished || req_output.cancelled ||
-        req_output.finished_on_prefill_instance) {
-      master->get_rate_limiter()->decrease_one_request();
-    }
     return master->handle_rpc_response(req_output);
   };
 
@@ -307,19 +292,8 @@ void CompletionServiceImpl::process_async_impl(
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            // Reduce the number of concurrent requests when a request is
-            // finished with error.
-            master->get_rate_limiter()->decrease_one_request();
-
             return call->finish_with_error(status.code(), status.message());
           }
-        }
-
-        // Reduce the number of concurrent requests when a request is finished
-        // or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         if (stream) {

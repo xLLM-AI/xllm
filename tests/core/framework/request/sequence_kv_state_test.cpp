@@ -53,6 +53,23 @@ TEST(KVCacheStateTest, ResetClearsBeamSourceState) {
   EXPECT_EQ(block.ref_count(), external_ref_count);
 }
 
+TEST(KVCacheStateTest, PrefixMatchStateIsIndependentAndMovable) {
+  KVCacheState state;
+  EXPECT_FALSE(state.prefix_cache_matched());
+  state.set_prefix_cache_matched();
+  EXPECT_TRUE(state.prefix_cache_matched());
+
+  Block block(/*id=*/7, /*allocator=*/nullptr);
+  state.add_blocks(BlockType::KV, {block});
+  std::vector<Block> moved = state.take_blocks(BlockType::KV);
+  ASSERT_EQ(moved.size(), 1u);
+  EXPECT_FALSE(state.has_any_blocks());
+  EXPECT_TRUE(state.prefix_cache_matched());
+
+  state.reset();
+  EXPECT_FALSE(state.prefix_cache_matched());
+}
+
 // Finding 2 regression: has_any_blocks() must report true for ANY
 // cache-bearing type (KV / SWA / C4 / C128) and IGNORE EMBEDDING. The pool's
 // "started_empty" rollback decision relies on this so that a DSV4 sequence

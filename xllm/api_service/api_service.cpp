@@ -111,13 +111,15 @@ void process_typed_brpc_request(std::unique_ptr<Service>& service_impl,
 
 APIService::APIService(Master* master,
                        const std::vector<std::string>& model_names,
+                       const std::vector<std::string>& model_repository_names,
                        const std::vector<std::string>& model_versions)
     : master_(master) {
   set_model_master(model_names[0], master);
   if (::xllm::DistributedConfig::get_instance().node_rank() != 0) {
     return;
   }
-  ServiceImplFactory::create(this, master, model_names, model_versions);
+  ServiceImplFactory::create(
+      this, master, model_names, model_repository_names, model_versions);
   register_chat_completions_handler();
 }
 

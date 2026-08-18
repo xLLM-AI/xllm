@@ -55,7 +55,8 @@ Qwen2VisionAttentionImpl::Qwen2VisionAttentionImpl(const ModelContext& context,
                                         /*bias=*/has_bias,
                                         /*gather_output=*/false,
                                         parallel_args,
-                                        options));
+                                        options,
+                                        quant_args));
 
   proj_ = register_module("proj",
                           RowParallelLinear(hidden_size,

@@ -5,20 +5,19 @@ from pathlib import Path
 
 import tilelang
 import tilelang.language as T
-
-from scripts.logger import logger
-
+from compiler.tilelang.common.spec import (
+    DispatchField,
+    TilelangKernel,
+    register_kernel,
+)
 from compiler.tilelang.targets.ascend.kernels.utils import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     detect_vec_core_num,
     mte2_wait_mte3,
     mte3_notify_mte2,
 )
-from compiler.tilelang.common.spec import (
-    DispatchField,
-    TilelangKernel,
-    register_kernel,
-)
+
+from scripts.logger import logger
 
 DEFAULT_NUM_HEADS = 32
 DEFAULT_DTYPE = "bf16"
@@ -86,13 +85,7 @@ def _compute_rows_per_iter(num_heads: int, ub_dim: int | None = None) -> int:
         ub_dim = _align_count_to_vector_bytes(num_heads, "float32")
     cmp_mask_bytes = (ub_dim + 7) // 8
     shared_bytes = 1 * ub_dim * 4
-    per_row_bytes = (
-        2 * ub_dim * 4
-        + 2 * ub_dim * 2
-        + 5 * ub_dim * 4
-        + 1 * ub_dim * 1
-        + 1 * cmp_mask_bytes
-    )
+    per_row_bytes = 2 * ub_dim * 4 + 2 * ub_dim * 2 + 5 * ub_dim * 4 + 1 * ub_dim * 1 + 1 * cmp_mask_bytes
     max_rows = (UB_BUDGET_BYTES - shared_bytes) // per_row_bytes
     if max_rows >= 32:
         return 32
@@ -114,25 +107,16 @@ def build_fused_gdn_gating_kernel(
     num_heads: int,
 ):
     if num_heads not in SUPPORTED_NUM_HEADS:
-        raise ValueError(
-            "fused_gdn_gating only supports num_heads in "
-            f"{SUPPORTED_NUM_HEADS}, got {num_heads}"
-        )
+        raise ValueError(f"fused_gdn_gating only supports num_heads in {SUPPORTED_NUM_HEADS}, got {num_heads}")
     if batch_size <= 0:
         raise ValueError(f"batch_size({batch_size}) must be > 0")
     if compile_max_batch <= 0:
-        raise ValueError(
-            f"compile_max_batch({compile_max_batch}) must be > 0"
-        )
+        raise ValueError(f"compile_max_batch({compile_max_batch}) must be > 0")
     if batch_size > compile_max_batch:
-        raise ValueError(
-            f"batch_size({batch_size}) must be <= compile_max_batch({compile_max_batch})"
-        )
+        raise ValueError(f"batch_size({batch_size}) must be <= compile_max_batch({compile_max_batch})")
 
     vec_core_num = MAX_VEC_CORE_NUM
-    block_num = select_launch_block_num(
-        num_batches=batch_size, vec_core_num=vec_core_num
-    )
+    block_num = select_launch_block_num(num_batches=batch_size, vec_core_num=vec_core_num)
     cubecore_block_num = block_num
     task_num = block_num * VEC_NUM
     acc_dtype = "float32"
@@ -188,45 +172,23 @@ def build_fused_gdn_gating_kernel(
 
             with T.Scope("V"):
                 A_log_ub = T.alloc_shared((1, ub_tensor_dim), acc_dtype)
-                neg_exp_A_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                dt_bias_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                a_half_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), input_dtype
-                )
-                b_half_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), input_dtype
-                )
-                x_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                beta_x_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                softplus_abs_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                softplus_tmp_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                beta_fp32_ub = T.alloc_shared(
-                    (rows_per_iter, ub_tensor_dim), acc_dtype
-                )
-                softplus_cmp_mask_ub = T.alloc_ub(
-                    (rows_per_iter, compare_select_mask_bytes), mask_dtype
-                )
+                neg_exp_A_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                dt_bias_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                a_half_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), input_dtype)
+                b_half_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), input_dtype)
+                x_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                beta_x_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                softplus_abs_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                softplus_tmp_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                beta_fp32_ub = T.alloc_shared((rows_per_iter, ub_tensor_dim), acc_dtype)
+                softplus_cmp_mask_ub = T.alloc_ub((rows_per_iter, compare_select_mask_bytes), mask_dtype)
 
                 # Preamble: load constants and replicate to R rows.
                 T.copy(A_log[0], A_log_ub[0, :num_heads])
                 T.tile.exp(A_log_ub, A_log_ub)
                 T.tile.mul(A_log_ub, A_log_ub, -1.0)
 
-                dt_bias_base_ub = T.alloc_shared(
-                    (1, ub_tensor_dim), acc_dtype
-                )
+                dt_bias_base_ub = T.alloc_shared((1, ub_tensor_dim), acc_dtype)
                 T.copy(dt_bias[0], dt_bias_base_ub[0, :num_heads])
                 for r in T.serial(rows_per_iter):
                     T.copy(
@@ -240,12 +202,9 @@ def build_fused_gdn_gating_kernel(
 
                 if use_bulk_dma:
                     for chunk_idx in T.serial(num_chunks):
-                        with T.If(chunk_idx > 0):
-                            with T.Then():
-                                mte2_wait_mte3(CHUNK_OUTPUT_STORED_EVENT)
-                        base_row = (
-                            (chunk_start + chunk_idx) * rows_per_iter
-                        )
+                        with T.If(chunk_idx > 0), T.Then():
+                            mte2_wait_mte3(CHUNK_OUTPUT_STORED_EVENT)
+                        base_row = (chunk_start + chunk_idx) * rows_per_iter
                         remaining = T.if_then_else(
                             num_batches > base_row,
                             num_batches - base_row,
@@ -268,15 +227,11 @@ def build_fused_gdn_gating_kernel(
                                         b_half_ub[r, :num_heads],
                                     )
 
-                        T.tile.cast(
-                            x_ub, a_half_ub, "CAST_NONE", multi_count
-                        )
+                        T.tile.cast(x_ub, a_half_ub, "CAST_NONE", multi_count)
                         T.tile.axpy(x_ub, dt_bias_ub, 1.0)
                         T.tile.mul(beta_x_ub, x_ub, softplus_beta)
                         T.tile.abs(softplus_abs_ub, beta_x_ub)
-                        T.tile.mul(
-                            softplus_tmp_ub, softplus_abs_ub, -1.0
-                        )
+                        T.tile.mul(softplus_tmp_ub, softplus_abs_ub, -1.0)
                         T.tile.exp(beta_fp32_ub, softplus_tmp_ub)
                         T.tile.add(beta_fp32_ub, beta_fp32_ub, 1.0)
                         T.tile.ln(softplus_tmp_ub, beta_fp32_ub)
@@ -286,12 +241,8 @@ def build_fused_gdn_gating_kernel(
                             softplus_threshold,
                             "GT",
                         )
-                        T.tile.add(
-                            beta_x_ub, beta_x_ub, softplus_abs_ub
-                        )
-                        T.tile.mul(
-                            beta_x_ub, beta_x_ub, 0.5 / softplus_beta
-                        )
+                        T.tile.add(beta_x_ub, beta_x_ub, softplus_abs_ub)
+                        T.tile.mul(beta_x_ub, beta_x_ub, 0.5 / softplus_beta)
                         T.tile.axpy(
                             beta_x_ub,
                             softplus_tmp_ub,
@@ -304,12 +255,8 @@ def build_fused_gdn_gating_kernel(
                             beta_x_ub,
                             "VSEL_TENSOR_TENSOR_MODE",
                         )
-                        T.tile.cast(
-                            x_ub, b_half_ub, "CAST_NONE", multi_count
-                        )
-                        T.tile.sigmoid(
-                            beta_fp32_ub, x_ub
-                        )
+                        T.tile.cast(x_ub, b_half_ub, "CAST_NONE", multi_count)
+                        T.tile.sigmoid(beta_fp32_ub, x_ub)
                         T.tile.mul(x_ub, neg_exp_A_ub, beta_x_ub)
                         T.tile.cast(
                             b_half_ub,
@@ -332,18 +279,14 @@ def build_fused_gdn_gating_kernel(
                                         b_half_ub[r, :num_heads],
                                         beta_out[base_row + r, :],
                                     )
-                        with T.If(chunk_idx < num_chunks - 1):
-                            with T.Then():
-                                mte3_notify_mte2(CHUNK_OUTPUT_STORED_EVENT)
+                        with T.If(chunk_idx < num_chunks - 1), T.Then():
+                            mte3_notify_mte2(CHUNK_OUTPUT_STORED_EVENT)
 
                 else:
                     for chunk_idx in T.serial(num_chunks):
-                        with T.If(chunk_idx > 0):
-                            with T.Then():
-                                mte2_wait_mte3(CHUNK_OUTPUT_STORED_EVENT)
-                        base_row = (
-                            (chunk_start + chunk_idx) * rows_per_iter
-                        )
+                        with T.If(chunk_idx > 0), T.Then():
+                            mte2_wait_mte3(CHUNK_OUTPUT_STORED_EVENT)
+                        base_row = (chunk_start + chunk_idx) * rows_per_iter
                         remaining = T.if_then_else(
                             num_batches > base_row,
                             num_batches - base_row,
@@ -365,15 +308,11 @@ def build_fused_gdn_gating_kernel(
                                 b_half_ub[r, :num_heads],
                             )
 
-                        T.tile.cast(
-                            x_ub, a_half_ub, "CAST_NONE", multi_count
-                        )
+                        T.tile.cast(x_ub, a_half_ub, "CAST_NONE", multi_count)
                         T.tile.axpy(x_ub, dt_bias_ub, 1.0)
                         T.tile.mul(beta_x_ub, x_ub, softplus_beta)
                         T.tile.abs(softplus_abs_ub, beta_x_ub)
-                        T.tile.mul(
-                            softplus_tmp_ub, softplus_abs_ub, -1.0
-                        )
+                        T.tile.mul(softplus_tmp_ub, softplus_abs_ub, -1.0)
                         T.tile.exp(beta_fp32_ub, softplus_tmp_ub)
                         T.tile.add(beta_fp32_ub, beta_fp32_ub, 1.0)
                         T.tile.ln(softplus_tmp_ub, beta_fp32_ub)
@@ -383,12 +322,8 @@ def build_fused_gdn_gating_kernel(
                             softplus_threshold,
                             "GT",
                         )
-                        T.tile.add(
-                            beta_x_ub, beta_x_ub, softplus_abs_ub
-                        )
-                        T.tile.mul(
-                            beta_x_ub, beta_x_ub, 0.5 / softplus_beta
-                        )
+                        T.tile.add(beta_x_ub, beta_x_ub, softplus_abs_ub)
+                        T.tile.mul(beta_x_ub, beta_x_ub, 0.5 / softplus_beta)
                         T.tile.axpy(
                             beta_x_ub,
                             softplus_tmp_ub,
@@ -401,12 +336,8 @@ def build_fused_gdn_gating_kernel(
                             beta_x_ub,
                             "VSEL_TENSOR_TENSOR_MODE",
                         )
-                        T.tile.cast(
-                            x_ub, b_half_ub, "CAST_NONE", multi_count
-                        )
-                        T.tile.sigmoid(
-                            beta_fp32_ub, x_ub
-                        )
+                        T.tile.cast(x_ub, b_half_ub, "CAST_NONE", multi_count)
+                        T.tile.sigmoid(beta_fp32_ub, x_ub)
                         T.tile.mul(x_ub, neg_exp_A_ub, beta_x_ub)
                         T.tile.cast(
                             b_half_ub,
@@ -424,9 +355,8 @@ def build_fused_gdn_gating_kernel(
                                 b_half_ub[r, :num_heads],
                                 beta_out[base_row + r, :],
                             )
-                        with T.If(chunk_idx < num_chunks - 1):
-                            with T.Then():
-                                mte3_notify_mte2(CHUNK_OUTPUT_STORED_EVENT)
+                        with T.If(chunk_idx < num_chunks - 1), T.Then():
+                            mte3_notify_mte2(CHUNK_OUTPUT_STORED_EVENT)
 
     return fused_gdn_gating_kernel
 
@@ -465,18 +395,12 @@ class FusedGdnGatingKernel(TilelangKernel):
     @staticmethod
     def generate_source(batch_size: int, num_heads: int, dtype: str) -> str:
         if dtype != DEFAULT_DTYPE:
-            raise ValueError(
-                f"fused_gdn_gating only supports dtype={DEFAULT_DTYPE}, got {dtype}"
-            )
+            raise ValueError(f"fused_gdn_gating only supports dtype={DEFAULT_DTYPE}, got {dtype}")
         if num_heads not in SUPPORTED_NUM_HEADS:
-            raise ValueError(
-                "fused_gdn_gating only supports num_heads in "
-                f"{SUPPORTED_NUM_HEADS}, got {num_heads}"
-            )
+            raise ValueError(f"fused_gdn_gating only supports num_heads in {SUPPORTED_NUM_HEADS}, got {num_heads}")
         if batch_size not in BATCH_SIZE_SPECIALIZATIONS:
             raise ValueError(
-                "fused_gdn_gating only supports batch_size in "
-                f"{BATCH_SIZE_SPECIALIZATIONS}, got {batch_size}"
+                f"fused_gdn_gating only supports batch_size in {BATCH_SIZE_SPECIALIZATIONS}, got {batch_size}"
             )
         tilelang.disable_cache()
         tilelang_kernel = build_fused_gdn_gating_kernel(
@@ -484,9 +408,7 @@ class FusedGdnGatingKernel(TilelangKernel):
             compile_max_batch=DEFAULT_MAX_BATCH,
             num_heads=num_heads,
         )
-        with tilelang.tvm.transform.PassContext(
-            opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS
-        ):
+        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
             kernel = tilelang.engine.lower(tilelang_kernel)
         return kernel.kernel_source
 
@@ -529,9 +451,7 @@ def _run_ref_check(
     if num_batches <= 0:
         raise ValueError(f"num_batches({num_batches}) must be > 0")
     if num_batches > compile_max_batch:
-        raise ValueError(
-            f"num_batches({num_batches}) must be <= compile_max_batch({compile_max_batch})"
-        )
+        raise ValueError(f"num_batches({num_batches}) must be <= compile_max_batch({compile_max_batch})")
 
     torch.manual_seed(42)
     device = torch.device("npu")
@@ -541,9 +461,7 @@ def _run_ref_check(
     b = torch.randn((num_batches, num_heads), device=device, dtype=torch.bfloat16)
     dt_bias = torch.randn((num_heads,), device=device, dtype=torch.float32)
     g_out = torch.empty((num_batches, num_heads), device=device, dtype=torch.float32)
-    beta_out = torch.empty(
-        (num_batches, num_heads), device=device, dtype=torch.bfloat16
-    )
+    beta_out = torch.empty((num_batches, num_heads), device=device, dtype=torch.bfloat16)
 
     kernel = fused_gdn_gating_kernel_jit(
         num_batches=num_batches,
@@ -600,18 +518,13 @@ def _run_ref_suite(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate TileLang AscendC source for fused_gdn_gating AOT kernel."
-    )
+    parser = argparse.ArgumentParser(description="Generate TileLang AscendC source for fused_gdn_gating AOT kernel.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--batch-size",
         type=int,
         default=max(BATCH_SIZE_SPECIALIZATIONS),
-        help=(
-            "Batch-size specialization used for source generation. "
-            f"Supported values: {BATCH_SIZE_SPECIALIZATIONS}"
-        ),
+        help=(f"Batch-size specialization used for source generation. Supported values: {BATCH_SIZE_SPECIALIZATIONS}"),
     )
     parser.add_argument("--num-heads", type=int, default=DEFAULT_NUM_HEADS)
     parser.add_argument("--dtype", type=str, default=DEFAULT_DTYPE)

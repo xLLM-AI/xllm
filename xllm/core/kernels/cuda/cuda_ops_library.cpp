@@ -83,6 +83,41 @@ torch::Tensor silu_and_mul(const torch::Tensor& input) {
   return out;
 }
 
+std::tuple<torch::Tensor, torch::Tensor> moe_fused_topk(
+    const torch::Tensor& gating_output,
+    int64_t topk,
+    bool renormalize,
+    const std::string& scoring_func) {
+  auto logits = gating_output;
+  return xllm::kernel::cuda::moe_fused_topk(
+      logits, topk, renormalize, std::nullopt, scoring_func);
+}
+
+torch::Tensor cutlass_fused_moe(const torch::Tensor& input,
+                                const torch::Tensor& token_selected_experts,
+                                const torch::Tensor& token_final_scales,
+                                const torch::Tensor& fc1_expert_weights,
+                                const torch::Tensor& fc2_expert_weights,
+                                int64_t tp_size,
+                                int64_t tp_rank,
+                                int64_t ep_size,
+                                int64_t ep_rank) {
+  std::vector<torch::Tensor> quant_scales;
+  return xllm::kernel::cuda::cutlass_fused_moe(input,
+                                               token_selected_experts,
+                                               token_final_scales,
+                                               fc1_expert_weights,
+                                               fc2_expert_weights,
+                                               input.scalar_type(),
+                                               quant_scales,
+                                               static_cast<int32_t>(tp_size),
+                                               static_cast<int32_t>(tp_rank),
+                                               static_cast<int32_t>(ep_size),
+                                               static_cast<int32_t>(ep_rank),
+                                               /*cluster_size=*/1,
+                                               /*cluster_rank=*/0);
+}
+
 // Qwen3 fused q/k RMSNorm (on head_dim) + RoPE. `qkv` is [num_tokens,
 // (nq+nk+nv)*head_dim]. IN-PLACE: q/k slices are normalized+roped in `qkv`, v
 // left untouched. Returns the mutated qkv so piecewise cudagraph segments have
@@ -235,6 +270,14 @@ TORCH_LIBRARY(xllm_ops, m) {
       "float eps) -> (Tensor, Tensor)");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   m.def(
+      "moe_fused_topk(Tensor gating_output, int topk, bool renormalize, str "
+      "scoring_func) -> (Tensor, Tensor)");
+  m.def(
+      "cutlass_fused_moe(Tensor input, Tensor token_selected_experts, Tensor "
+      "token_final_scales, Tensor fc1_expert_weights, Tensor "
+      "fc2_expert_weights, int tp_size, int tp_rank, int ep_size, int ep_rank) "
+      "-> Tensor");
+  m.def(
       "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
       "int "
       "num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
@@ -256,6 +299,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm));
   m.impl("fused_add_rms_norm", TORCH_FN(xllm::fused_add_rms_norm));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul));
+  m.impl("moe_fused_topk", TORCH_FN(xllm::moe_fused_topk));
+  m.impl("cutlass_fused_moe", TORCH_FN(xllm::cutlass_fused_moe));
   m.impl("fused_qk_norm_rope", TORCH_FN(xllm::fused_qk_norm_rope));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_op));
 #if defined(USE_CUDA)

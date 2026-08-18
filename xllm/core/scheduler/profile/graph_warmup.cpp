@@ -43,48 +43,6 @@ GraphWarmupPlan graph_warmup_plan(InstanceRole role) {
   return GraphWarmupPlan::UNIFIED;
 }
 
-std::vector<int32_t> graph_warmup_buckets(int32_t max_seqs_per_batch) {
-  CHECK_GT(max_seqs_per_batch, 0);
-
-  std::vector<int32_t> buckets;
-  const std::vector<int32_t> small_buckets = {1, 2, 4, 8, 16};
-  for (int32_t bucket : small_buckets) {
-    if (bucket <= max_seqs_per_batch) {
-      buckets.emplace_back(bucket);
-    }
-  }
-
-  for (int32_t bucket = 32; bucket <= max_seqs_per_batch; bucket += 16) {
-    buckets.emplace_back(bucket);
-  }
-
-  if (buckets.back() != max_seqs_per_batch) {
-    buckets.emplace_back(max_seqs_per_batch);
-  }
-
-  return buckets;
-}
-
-bool skip_graph_bucket(int32_t bucket, int32_t dp_size) {
-  CHECK_GT(bucket, 0);
-  CHECK_GT(dp_size, 0);
-  return bucket < dp_size;
-}
-
-std::vector<int32_t> graph_decode_buckets(int32_t max_seqs_per_batch,
-                                          int32_t dp_size) {
-  std::vector<int32_t> buckets = graph_warmup_buckets(max_seqs_per_batch);
-  std::vector<int32_t> decode_buckets;
-  decode_buckets.reserve(buckets.size());
-  for (int32_t bucket : buckets) {
-    if (!skip_graph_bucket(bucket, dp_size)) {
-      decode_buckets.emplace_back(bucket);
-    }
-  }
-
-  return decode_buckets;
-}
-
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
                                   int32_t bucket,

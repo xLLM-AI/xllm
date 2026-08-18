@@ -42,4 +42,26 @@ torch::Tensor matmul(const torch::Tensor& a,
                                 true);
 }
 
+torch::Tensor batch_matmul(const torch::Tensor& a,
+                           const torch::Tensor& b,
+                           bool trans_a,
+                           bool trans_b) {
+  return tmo::torch_api::batch_matmul(a,
+                                      b,
+                                      /*c=*/std::nullopt,
+                                      /*bias=*/std::nullopt,
+                                      /*dtype=*/std::nullopt,
+                                      /*a_scale_tensor=*/std::nullopt,
+                                      /*b_scale_tensor=*/std::nullopt,
+                                      /*act_mode=*/"none",
+                                      /*alpha=*/1.0,
+                                      /*beta=*/0.0,
+                                      /*a_scale=*/1.0,
+                                      /*b_scale=*/1.0,
+                                      /*trans_a=*/trans_a,
+                                      /*trans_b=*/trans_b,
+                                      /*use_hp_active=*/false,
+                                      /*approximate=*/false);
+}
+
 }  // namespace xllm::kernel::mlu

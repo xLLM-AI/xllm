@@ -52,6 +52,13 @@ class Tokenizer {
     return "";
   }
 
+  // Return a token piece for token-level constraints. Implementations may
+  // preserve raw byte-level token bytes instead of applying lossy UTF-8
+  // replacement used by sequence decoding.
+  virtual std::string decode_token(int32_t id) const {
+    return decode(Slice<int32_t>(&id, 1), /*skip_special_tokens=*/false);
+  }
+
   // Only for generative recommendation
   virtual bool encode(int64_t item_id, std::vector<int32_t>* token_ids) const {
     return false;

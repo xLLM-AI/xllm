@@ -210,6 +210,23 @@ torch::Tensor lightning_indexer(
     int64_t pre_tokens,
     int64_t next_tokens,
     bool return_value);
+
+torch::Tensor lightning_indexer_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& weights,
+    const c10::optional<torch::Tensor>& query_seq_lengths,
+    const c10::optional<torch::Tensor>& key_seq_lengths,
+    const c10::optional<torch::Tensor>& block_table,
+    c10::string_view layout_query,
+    c10::string_view layout_key,
+    int64_t selected_count,
+    int64_t sparse_mode,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    bool return_value,
+    torch::Tensor& sparse_indices_out,
+    torch::Tensor& sparse_values_out);
 at::Tensor hc_pre_inv_rms(const at::Tensor& x, double epsilon);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gamma_add_rms_norm(
@@ -294,6 +311,23 @@ at::Tensor sparse_flash_attention(
     c10::string_view layout_query,
     c10::string_view layout_kv,
     int64_t sparse_mode);
+
+at::Tensor sparse_flash_attention_out(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& sparse_indices,
+    const c10::optional<at::Tensor>& block_table,
+    const c10::optional<at::Tensor>& actual_seq_lengths_query,
+    const c10::optional<at::Tensor>& actual_seq_lengths_kv,
+    const c10::optional<at::Tensor>& query_rope,
+    const c10::optional<at::Tensor>& key_rope,
+    double scale_value,
+    int64_t sparse_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode,
+    at::Tensor& output);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_preprocess(
     const at::Tensor& input,

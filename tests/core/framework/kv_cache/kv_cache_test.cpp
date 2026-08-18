@@ -69,6 +69,19 @@ class IndexerCacheDtypeConfigGuard final {
   std::string old_indexer_cache_dtype_;
 };
 
+void ExpectTensorGroup(const KVCache& cache,
+                       KVCacheTensorRole role,
+                       BlockType expected_block_type) {
+  const auto tensors = cache.get_cache_tensors();
+  const auto it = std::find_if(
+      tensors.begin(), tensors.end(), [role](const KVCacheTensor& tensor) {
+        return tensor.role == role;
+      });
+  ASSERT_NE(it, tensors.end()) << "missing role=" << role.to_string();
+  EXPECT_EQ(it->group_id, cache_group_id(expected_block_type))
+      << "role=" << role.to_string();
+}
+
 #if defined(USE_MLU)
 class RecordingKVCacheTensorAllocator final : public KVCacheTensorAllocator {
  public:
@@ -89,6 +102,48 @@ class RecordingKVCacheTensorAllocator final : public KVCacheTensorAllocator {
 
   std::vector<Request> requests;
 };
+
+// MLU merges the per-block compressed split states into a single owning tensor
+// and exposes them through the COMPRESS_STATE / COMPRESS_INDEX_STATE transfer
+// roles. The common layout test delegates these platform-specific checks here
+// so that the shared test body stays free of scattered #if blocks.
+void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
+                                    int64_t swa_count,
+                                    int64_t block_size,
+                                    int64_t head_dim,
+                                    int64_t index_head_dim) {
+  // c4 layer: merged owning tensor [swa, block, 4 * dim]; split getters are
+  // narrow views into it (sizes unchanged).
+  EXPECT_EQ(shape_vec(caches[1].get_compress_state()),
+            (std::vector<int64_t>{swa_count, block_size, 4 * head_dim}));
+  EXPECT_EQ(shape_vec(caches[1].get_compress_index_state()),
+            (std::vector<int64_t>{swa_count, block_size, 4 * index_head_dim}));
+  EXPECT_TRUE(caches[1].get_compress_state().is_contiguous());
+  EXPECT_TRUE(caches[1].get_compress_index_state().is_contiguous());
+
+  // c128 layer: no index state.
+  EXPECT_EQ(shape_vec(caches[2].get_compress_state()),
+            (std::vector<int64_t>{swa_count, block_size, 2 * head_dim}));
+  EXPECT_FALSE(caches[2].get_compress_index_state().defined());
+
+  ExpectTensorGroup(
+      caches[1], KVCacheTensorRole::COMPRESS_STATE, BlockType::SWA);
+  ExpectTensorGroup(
+      caches[1], KVCacheTensorRole::COMPRESS_INDEX_STATE, BlockType::SWA);
+  const std::vector<KVCacheTensor> c4_transfer_tensors =
+      caches[1].get_cache_tensors();
+  ASSERT_EQ(c4_transfer_tensors.size(), 5U);
+  EXPECT_TRUE(c4_transfer_tensors[3].tensor.is_contiguous());
+  EXPECT_TRUE(c4_transfer_tensors[4].tensor.is_contiguous());
+  EXPECT_EQ(c4_transfer_tensors[3].tensor.data_ptr(),
+            caches[1].get_compress_state().data_ptr());
+  EXPECT_EQ(c4_transfer_tensors[4].tensor.data_ptr(),
+            caches[1].get_compress_index_state().data_ptr());
+
+  ExpectTensorGroup(
+      caches[2], KVCacheTensorRole::COMPRESS_STATE, BlockType::SWA);
+  EXPECT_EQ(caches[2].get_cache_tensors().size(), 3U);
+}
 #endif
 
 }  // namespace
@@ -242,18 +297,6 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
             (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kIndexHeadDim}));
   EXPECT_EQ(shape_vec(caches[1].get_compress_index_score_state()),
             (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kIndexHeadDim}));
-#if defined(USE_MLU)
-  // MLU merges the split states into one owning tensor of shape
-  // [swa_count, block_size, 2 * coff_dim]; the split getters are narrow views
-  // into it (sizes unchanged).
-  EXPECT_EQ(shape_vec(caches[1].get_compress_state()),
-            (std::vector<int64_t>{kSwaCount, kBlockSize, 4 * kHeadDim}));
-  EXPECT_EQ(shape_vec(caches[1].get_compress_index_state()),
-            (std::vector<int64_t>{kSwaCount, kBlockSize, 4 * kIndexHeadDim}));
-  EXPECT_TRUE(caches[1].get_compress_state().is_contiguous());
-  EXPECT_TRUE(caches[1].get_compress_index_state().is_contiguous());
-#endif
-
   EXPECT_EQ(shape_vec(caches[2].get_k_cache()),
             dsv4_block_shape(kC128Count, kBlockSize, 1, kHeadDim));
   EXPECT_EQ(shape_vec(caches[2].get_swa_cache()),
@@ -262,32 +305,73 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
             (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
   EXPECT_EQ(shape_vec(caches[2].get_compress_score_state()),
             (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
-#if defined(USE_MLU)
-  EXPECT_EQ(shape_vec(caches[2].get_compress_state()),
-            (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kHeadDim}));
-  EXPECT_FALSE(caches[2].get_compress_index_state().defined());
-#endif
 
-  auto expect_tensor_group = [](const KVCache& cache,
-                                KVCacheTensorRole role,
-                                BlockType expected_block_type) {
-    const auto tensors = cache.get_cache_tensors();
-    const auto it = std::find_if(
-        tensors.begin(), tensors.end(), [role](const KVCacheTensor& tensor) {
-          return tensor.role == role;
-        });
-    ASSERT_NE(it, tensors.end()) << "missing role=" << role.to_string();
-    EXPECT_EQ(it->group_id, cache_group_id(expected_block_type))
-        << "role=" << role.to_string();
-    EXPECT_FALSE(it->sequence_scoped);
-  };
-  expect_tensor_group(caches[0], KVCacheTensorRole::WINDOW, BlockType::SWA);
-  expect_tensor_group(caches[1], KVCacheTensorRole::KEY, BlockType::C4);
-  expect_tensor_group(caches[1], KVCacheTensorRole::INDEX, BlockType::C4);
-  expect_tensor_group(caches[1], KVCacheTensorRole::KV_STATE, BlockType::SWA);
-  expect_tensor_group(caches[2], KVCacheTensorRole::KEY, BlockType::C128);
-  expect_tensor_group(
-      caches[2], KVCacheTensorRole::SCORE_STATE, BlockType::SWA);
+  ExpectTensorGroup(caches[0], KVCacheTensorRole::WINDOW, BlockType::SWA);
+  ExpectTensorGroup(caches[1], KVCacheTensorRole::KEY, BlockType::C4);
+  ExpectTensorGroup(caches[1], KVCacheTensorRole::INDEX, BlockType::C4);
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::KEY, BlockType::C128);
+#if defined(USE_MLU)
+  // Platform-specific merged compressed-state layout lives in the helper.
+  ExpectMluCompressedStateLayout(
+      caches, kSwaCount, kBlockSize, kHeadDim, kIndexHeadDim);
+#else
+  ExpectTensorGroup(caches[1], KVCacheTensorRole::KV_STATE, BlockType::SWA);
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::SCORE_STATE, BlockType::SWA);
+#endif
+}
+
+TEST(KVCacheTest, DeepSeekV4DSparkUsesGroupedSwaCaches) {
+  constexpr int64_t kSwaCount = 10;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kHeadDim = 16;
+
+  KVCacheCapacity capacity;
+  capacity.block_size(kBlockSize)
+      .swa_count(kSwaCount)
+      .c4_count(32)
+      .c128_count(1);
+
+  ModelArgs dspark_args;
+  dspark_args.model_type("deepseek_v4_dspark");
+  const KVCacheShape dspark_shape(capacity, dspark_args, /*world_size=*/1);
+  ASSERT_TRUE(dspark_shape.has_grouped_cache_layout());
+  EXPECT_FALSE(dspark_shape.has_index_cache_shape());
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kFloat32)
+      .num_layers(3)
+      .model_type("deepseek_v4_dspark")
+      .enable_lighting_indexer(true)
+      .block_size(kBlockSize)
+      .head_dim(kHeadDim)
+      .index_head_dim(8)
+      .window_size(/*window_size=*/512)
+      .compress_ratios({1, 1, 1});
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, dspark_shape, options);
+
+  ASSERT_EQ(caches.size(), 3U);
+  for (const KVCache& cache : caches) {
+    EXPECT_EQ(shape_vec(cache.get_swa_cache()),
+              dsv4_block_shape(kSwaCount, kBlockSize, 1, kHeadDim));
+    EXPECT_FALSE(cache.get_k_cache().defined());
+    EXPECT_FALSE(cache.get_index_cache().defined());
+  }
+}
+
+TEST(KVCacheTest, DeepSeekV4MtpKeepsGroupedCacheClassification) {
+  KVCacheCapacity capacity;
+  capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);
+
+  ModelArgs mtp_args;
+  mtp_args.model_type("deepseek_v4_mtp");
+  const KVCacheShape mtp_shape(capacity, mtp_args, /*world_size=*/1);
+
+  EXPECT_TRUE(mtp_shape.has_grouped_cache_layout());
+  EXPECT_EQ(mtp_shape.key_cache_shape(), (std::vector<int64_t>{10, 32, 1}));
+  EXPECT_FALSE(mtp_shape.has_index_cache_shape());
 }
 
 TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
@@ -444,6 +528,47 @@ TEST(KVCacheTest, IndexedKVCacheExposesQuantizedKvScaleTensors) {
 }
 
 #if defined(USE_MLU)
+TEST(KVCacheTest, DeepSeekV4UsesInjectedAllocatorForTransferableOwners) {
+  KVCacheCapacity capacity;
+  capacity.block_size(2).swa_count(3).c4_count(4).c128_count(1);
+
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4");
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  std::shared_ptr<RecordingKVCacheTensorAllocator> allocator =
+      std::make_shared<RecordingKVCacheTensorAllocator>();
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(3)
+      .model_type("deepseek_v4")
+      .block_size(2)
+      .head_dim(8)
+      .index_head_dim(4)
+      .window_size(4)
+      .compress_ratios({1, 4, 128})
+      .tensor_allocator(allocator);
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  const std::vector<KVCacheTensorRole> expected_roles = {
+      KVCacheTensorRole::WINDOW,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::INDEX,
+      KVCacheTensorRole::WINDOW,
+      KVCacheTensorRole::COMPRESS_STATE,
+      KVCacheTensorRole::COMPRESS_INDEX_STATE,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::WINDOW,
+      KVCacheTensorRole::COMPRESS_STATE};
+  ASSERT_EQ(allocator->requests.size(), expected_roles.size());
+  for (size_t i = 0; i < expected_roles.size(); ++i) {
+    EXPECT_EQ(allocator->requests[i].role, expected_roles[i]);
+  }
+}
+
 TEST(KVCacheTest,
      MluQuantizedIndexedKVCacheAllocatesInt8KvAndScalesOnCpuDevice) {
   constexpr int64_t kBlockCount = 8;
@@ -857,6 +982,65 @@ TEST_F(HostKVCacheConfigTest, AcceptsQuantizedIndexerCache) {
   EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
+TEST_F(HostKVCacheConfigTest, AcceptsDisaggregatedPrefillInstance) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsKVCacheStore) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_kvcache_store = true;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsKVCacheStoreOnDisaggregatedDecode) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.enable_kvcache_store = true;
+  options.instance_role = InstanceRole::DECODE;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsDisaggregatedDecodeInstance) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::DECODE;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsDisaggregatedPrefillOocMode) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.enable_pd_ooc = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("PD-OOC"), std::string::npos);
+}
+
 TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
   HostCacheValidationOptions options;
   options.host_blocks_factor = 2.0;
@@ -868,6 +1052,34 @@ TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
 
   ASSERT_TRUE(error.has_value());
   EXPECT_NE(error->find("--kv_cache_dtype=auto"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsUnsupportedGroupedCacheLayout) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_kvcache_store = true;
+  options.has_grouped_cache_layout = true;
+  options.model_type = "unknown_grouped_model";
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("grouped cache layout"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_kvcache_store = true;
+  options.has_grouped_cache_layout = true;
+  options.supports_grouped_cache_offload = true;
+  options.model_type = "deepseek_v4";
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
 }  // namespace xllm

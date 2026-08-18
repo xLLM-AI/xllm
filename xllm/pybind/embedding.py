@@ -17,12 +17,13 @@ import os
 import signal
 import sys
 import time
-from . import utils
-from typing import Any, List, Optional, Union
+from typing import Any
 
-from xllm_export import (LLMMaster, Options, RequestOutput,
-                         RequestParams)
+from xllm_export import LLMMaster, Options, RequestOutput, RequestParams
+
+from . import utils
 from .errors import ValidationError
+
 
 class Embedding:
     def __init__(
@@ -36,13 +37,13 @@ class Embedding:
         max_tokens_per_batch: int = 10240,
         max_seqs_per_batch: int = 1024,
         max_tokens_per_chunk_for_prefill: int = -1,
-        speculative_algorithm: str = 'MTP',
+        speculative_algorithm: str = "MTP",
         num_request_handling_threads: int = 4,
-        communication_backend: str = 'hccl',
-        rank_tablefile: str = '',
+        communication_backend: str = "hccl",
+        rank_tablefile: str = "",
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
-        instance_role: str = 'DEFAULT',
+        instance_role: str = "DEFAULT",
         nnodes: int = 1,
         node_rank: int = 0,
         dp_size: int = 1,
@@ -115,18 +116,18 @@ class Embedding:
 
     def finish(self) -> None:
         try:
-            #os.kill(os.getpid(), signal.SIGTERM)
-            #os.kill(os.getpid(), signal.SIGKILL)
+            # os.kill(os.getpid(), signal.SIGTERM)
+            # os.kill(os.getpid(), signal.SIGKILL)
             utils.terminate_process(os.getpid())
-        except Exception as e:
+        except Exception:
             pass
 
     def embedding(
         self,
-        inputs: Union[str, List[str]],
-        request_params: Optional[Union[RequestParams, List[RequestParams]]] = None,
+        inputs: str | list[str],
+        request_params: RequestParams | list[RequestParams] | None = None,
         wait_for_schedule: bool = True,
-    ) -> List[RequestOutput]:
+    ) -> list[RequestOutput]:
         if request_params is None:
             request_params = RequestParams()
         if isinstance(inputs, str):
@@ -139,14 +140,13 @@ class Embedding:
                 request_params[i].is_embeddings = True
 
         outputs = [None] * len(inputs)
+
         def callback(index: int, output: RequestOutput) -> bool:
             outputs[index] = output
             return True
 
         # schedule all requests
-        self.master.handle_batch_request(
-            inputs, request_params, callback
-        )
+        self.master.handle_batch_request(inputs, request_params, callback)
 
         # TODO: add wait later
         if wait_for_schedule:

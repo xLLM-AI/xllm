@@ -44,12 +44,6 @@ class XTensorManagerPool final : public KVCacheManager {
     NOT_IMPLEMENTED();
   }
 
-  bool allocate(Sequence* sequence,
-                size_t num_tokens,
-                size_t needed_copy_in_blocks_num) override {
-    LOG(FATAL) << "allocate is not implemented for page manager pool";
-  }
-
   std::vector<Block> allocate(size_t num_tokens, int32_t& dp_rank) override {
     NOT_IMPLEMENTED();
     return {};

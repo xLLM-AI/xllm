@@ -239,10 +239,7 @@ class CausalConv1dKernel(TilelangKernel):
         dtype: str,
     ) -> str:
         if dtype not in ("float16", "bfloat16"):
-            raise ValueError(
-                f"CausalConv1D TileLang kernel only supports dtype=float16/bfloat16, "
-                f"got {dtype}"
-            )
+            raise ValueError(f"CausalConv1D TileLang kernel only supports dtype=float16/bfloat16, got {dtype}")
         vec_core_num = detect_vec_core_num()
         block_dim = (dim + vec_core_num - 1) // vec_core_num
         tilelang.disable_cache()
@@ -269,8 +266,11 @@ class CausalConv1dKernel(TilelangKernel):
 
 
 def get_prefill_kernel(
-    width: int, num_batches: int, dim: int,
-    dtype_str: str = "float16", has_silu: bool = False,
+    width: int,
+    num_batches: int,
+    dim: int,
+    dtype_str: str = "float16",
+    has_silu: bool = False,
 ) -> torch.nn.Module:
     vec_core_num = detect_vec_core_num()
     block_dim = (dim + vec_core_num - 1) // vec_core_num
@@ -368,8 +368,11 @@ def causal_conv1d_update_v2(
         assert dim_check == dim
         x_kernel = x_work.transpose(1, 2).contiguous().reshape(batch * seqlen, dim)
         qsl_kernel = torch.arange(
-            0, (batch + 1) * seqlen, seqlen,
-            device=conv_state.device, dtype=torch.int32,
+            0,
+            (batch + 1) * seqlen,
+            seqlen,
+            device=conv_state.device,
+            dtype=torch.int32,
         )
 
     if conv_state_indices is None:
@@ -392,9 +395,7 @@ def causal_conv1d_update_v2(
             bilt = block_idx_last_scheduled_token.to(torch.int32).contiguous()
             current_indices = torch.where(bilt == 0, ci[:, 0], ci[:, 1]).contiguous()
 
-    if initial_state_idx is not None:
-        initial_state_mode = torch.ones(batch, dtype=torch.int32, device=conv_state.device)
-    elif conv_state_indices is not None and conv_state_indices.dim() == 1:
+    if initial_state_idx is not None or conv_state_indices is not None and conv_state_indices.dim() == 1:
         initial_state_mode = torch.ones(batch, dtype=torch.int32, device=conv_state.device)
     else:
         initial_state_mode = torch.ones(batch, dtype=torch.int32, device=conv_state.device)
@@ -411,13 +412,11 @@ def causal_conv1d_update_v2(
 
         cu_b = torch.tensor([0, sb_len], dtype=torch.int32, device=conv_state.device)
         x_b = x_kernel[seq_start_b:seq_end_b]
-        init_b = init_indices[b:b+1]
-        curr_b = current_indices[b:b+1]
-        ism_b = initial_state_mode[b:b+1]
+        init_b = init_indices[b : b + 1]
+        curr_b = current_indices[b : b + 1]
+        ism_b = initial_state_mode[b : b + 1]
 
-        kernel = get_prefill_kernel(
-            width, 1, dim, kernel_dtype_str, has_silu=False
-        )
+        kernel = get_prefill_kernel(width, 1, dim, kernel_dtype_str, has_silu=False)
 
         x_b_padded = _pad_last_dim(x_b, padded_dim)
         weight_t_padded = _pad_last_dim(weight_t, padded_dim)
@@ -425,8 +424,14 @@ def causal_conv1d_update_v2(
         bias_work_padded = _pad_last_dim(bias_work, padded_dim)
 
         output_padded = kernel(
-            x_b_padded, weight_t_padded, conv_state_t_padded,
-            init_b, curr_b, cu_b, ism_b, bias_work_padded,
+            x_b_padded,
+            weight_t_padded,
+            conv_state_t_padded,
+            init_b,
+            curr_b,
+            cu_b,
+            ism_b,
+            bias_work_padded,
         )
 
         output_b = output_padded[:, :dim]
@@ -597,13 +602,25 @@ def _run_decode_test(dtype_str: str, dtype: torch.dtype, batch_size: int = 2) ->
     qsl_ref = qsl.cpu()
 
     golden = causal_conv1d_update_v2_ref(
-        x_ref, cs_ref, w_ref, bias=b_ref, activation="silu",
-        conv_state_indices=ci_ref, query_start_loc=qsl_ref, max_query_len=1,
+        x_ref,
+        cs_ref,
+        w_ref,
+        bias=b_ref,
+        activation="silu",
+        conv_state_indices=ci_ref,
+        query_start_loc=qsl_ref,
+        max_query_len=1,
     )
 
     out = causal_conv1d_update_v2(
-        x, conv_state, weight, bias=bias, activation="silu",
-        conv_state_indices=ci, query_start_loc=qsl, max_query_len=1,
+        x,
+        conv_state,
+        weight,
+        bias=bias,
+        activation="silu",
+        conv_state_indices=ci,
+        query_start_loc=qsl,
+        max_query_len=1,
     )
 
     torch.testing.assert_close(out.cpu(), golden, rtol=1e-2, atol=1e-2)
@@ -644,19 +661,33 @@ def _run_decode_apc_test(dtype_str: str, dtype: torch.dtype) -> None:
     qsl_ref = qsl.cpu()
 
     golden = causal_conv1d_update_v2_ref(
-        x_ref, cs_ref, w_ref, bias=b_ref, activation="silu",
-        conv_state_indices=ci_ref, query_start_loc=qsl_ref, max_query_len=1,
-        initial_state_idx=isi_ref, block_idx_last_scheduled_token=bilt_ref,
+        x_ref,
+        cs_ref,
+        w_ref,
+        bias=b_ref,
+        activation="silu",
+        conv_state_indices=ci_ref,
+        query_start_loc=qsl_ref,
+        max_query_len=1,
+        initial_state_idx=isi_ref,
+        block_idx_last_scheduled_token=bilt_ref,
     )
 
     out = causal_conv1d_update_v2(
-        x, conv_state, weight, bias=bias, activation="silu",
-        conv_state_indices=ci, query_start_loc=qsl, max_query_len=1,
-        initial_state_idx=isi, block_idx_last_scheduled_token=bilt,
+        x,
+        conv_state,
+        weight,
+        bias=bias,
+        activation="silu",
+        conv_state_indices=ci,
+        query_start_loc=qsl,
+        max_query_len=1,
+        initial_state_idx=isi,
+        block_idx_last_scheduled_token=bilt,
     )
 
     torch.testing.assert_close(out.cpu(), golden, rtol=1e-2, atol=1e-2)
-    print(f"    PASS — decode APC")
+    print("    PASS — decode APC")
 
 
 def _run_prefill_varlen_test(dtype_str: str, dtype: torch.dtype) -> None:
@@ -691,17 +722,29 @@ def _run_prefill_varlen_test(dtype_str: str, dtype: torch.dtype) -> None:
     qsl_ref = qsl.cpu()
 
     golden = causal_conv1d_update_v2_ref(
-        x_ref, cs_ref, w_ref, bias=b_ref, activation="silu",
-        conv_state_indices=ci_ref, query_start_loc=qsl_ref, max_query_len=total_tokens,
+        x_ref,
+        cs_ref,
+        w_ref,
+        bias=b_ref,
+        activation="silu",
+        conv_state_indices=ci_ref,
+        query_start_loc=qsl_ref,
+        max_query_len=total_tokens,
     )
 
     out = causal_conv1d_update_v2(
-        x, conv_state, weight, bias=bias, activation="silu",
-        conv_state_indices=ci, query_start_loc=qsl, max_query_len=total_tokens,
+        x,
+        conv_state,
+        weight,
+        bias=bias,
+        activation="silu",
+        conv_state_indices=ci,
+        query_start_loc=qsl,
+        max_query_len=total_tokens,
     )
 
     torch.testing.assert_close(out.cpu(), golden, rtol=1e-2, atol=1e-2)
-    print(f"    PASS — prefill varlen")
+    print("    PASS — prefill varlen")
 
 
 def _run_decode_no_bias_test(dtype_str: str, dtype: torch.dtype) -> None:
@@ -731,17 +774,29 @@ def _run_decode_no_bias_test(dtype_str: str, dtype: torch.dtype) -> None:
     qsl_ref = qsl.cpu()
 
     golden = causal_conv1d_update_v2_ref(
-        x_ref, cs_ref, w_ref, bias=None, activation="silu",
-        conv_state_indices=ci_ref, query_start_loc=qsl_ref, max_query_len=1,
+        x_ref,
+        cs_ref,
+        w_ref,
+        bias=None,
+        activation="silu",
+        conv_state_indices=ci_ref,
+        query_start_loc=qsl_ref,
+        max_query_len=1,
     )
 
     out = causal_conv1d_update_v2(
-        x, conv_state, weight, bias=None, activation="silu",
-        conv_state_indices=ci, query_start_loc=qsl, max_query_len=1,
+        x,
+        conv_state,
+        weight,
+        bias=None,
+        activation="silu",
+        conv_state_indices=ci,
+        query_start_loc=qsl,
+        max_query_len=1,
     )
 
     torch.testing.assert_close(out.cpu(), golden, rtol=1e-2, atol=1e-2)
-    print(f"    PASS — decode no-bias")
+    print("    PASS — decode no-bias")
 
 
 if __name__ == "__main__":

@@ -8,11 +8,11 @@ import tilelang.language as T
 
 from scripts.logger import logger
 
+from ....common.spec import DispatchField, TilelangKernel, register_kernel
 from .utils import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     detect_vec_core_num,
 )
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
 DEFAULT_HEAD_DIM = 576
 DEFAULT_ROPE_DIM = 64
@@ -43,8 +43,7 @@ def _derive_max_rows_num_in_ub(rope_dim: int, ub_buffer_bytes: int) -> int:
     max_rows = ub_buffer_bytes // bytes_per_row
     if max_rows <= 0:
         raise ValueError(
-            "UB budget is too small for current rope_dim: "
-            f"ub_buffer_bytes={ub_buffer_bytes}, rope_dim={rope_dim}"
+            f"UB budget is too small for current rope_dim: ub_buffer_bytes={ub_buffer_bytes}, rope_dim={rope_dim}"
         )
     return max_rows
 
@@ -62,9 +61,7 @@ def build_rope_kernel(
     if vec_core_num <= 0:
         raise ValueError(f"vec_core_num({vec_core_num}) must be > 0")
     if vec_core_num % VEC_NUM != 0:
-        raise ValueError(
-            f"vec_core_num({vec_core_num}) must be divisible by VEC_NUM({VEC_NUM})"
-        )
+        raise ValueError(f"vec_core_num({vec_core_num}) must be divisible by VEC_NUM({VEC_NUM})")
 
     task_num = vec_core_num
     m_num = vec_core_num // VEC_NUM
@@ -93,9 +90,7 @@ def build_rope_kernel(
             task_id = cid * VEC_NUM + vid
             block_m = (num_tokens + task_num - 1) // task_num
             row_start = task_id * block_m
-            rows_left = T.if_then_else(
-                num_tokens > row_start, num_tokens - row_start, 0
-            )
+            rows_left = T.if_then_else(num_tokens > row_start, num_tokens - row_start, 0)
             num_rows_per_vec = T.if_then_else(
                 rows_left < block_m,
                 rows_left,
@@ -184,9 +179,7 @@ class RopeKernel(TilelangKernel):
     @staticmethod
     def generate_source(head_dim: int, rope_dim: int, dtype: str) -> str:
         if dtype != DEFAULT_DTYPE:
-            raise ValueError(
-                f"RoPE TileLang kernel only supports dtype={DEFAULT_DTYPE}, got {dtype}"
-            )
+            raise ValueError(f"RoPE TileLang kernel only supports dtype={DEFAULT_DTYPE}, got {dtype}")
         tilelang.disable_cache()
         vec_core_num = detect_vec_core_num()
         ub_buffer_bytes = FIXED_UB_BUFFER_BYTES
@@ -196,9 +189,7 @@ class RopeKernel(TilelangKernel):
             vec_core_num=vec_core_num,
             ub_buffer_bytes=ub_buffer_bytes,
         )
-        with tilelang.tvm.transform.PassContext(
-            opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS
-        ):
+        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
             kernel = tilelang.engine.lower(tilelang_kernel)
         return kernel.kernel_source
 
@@ -222,9 +213,7 @@ def _torch_rope_ref_rows(
     x_rot = torch.stack([-x1, x0], dim=-1).reshape_as(x_part)
 
     out = x.clone()
-    out[:, dim_start : dim_start + rope_dim] = (
-        x_part * cos_fp32 + x_rot * sin_fp32
-    ).to(torch.bfloat16)
+    out[:, dim_start : dim_start + rope_dim] = (x_part * cos_fp32 + x_rot * sin_fp32).to(torch.bfloat16)
     return out
 
 
@@ -264,9 +253,7 @@ def _run_ref_check(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate TileLang AscendC source for RoPE AOT kernel."
-    )
+    parser = argparse.ArgumentParser(description="Generate TileLang AscendC source for RoPE AOT kernel.")
     parser.add_argument("--output", required=True, help="Output AscendC .cpp file")
     parser.add_argument("--head-dim", type=int, default=DEFAULT_HEAD_DIM)
     parser.add_argument("--rope-dim", type=int, default=DEFAULT_ROPE_DIM)

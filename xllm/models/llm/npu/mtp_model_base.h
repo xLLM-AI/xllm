@@ -222,8 +222,10 @@ class MtpModelImplBase : public torch::nn::Module {
       h = cp_plan.merge_model_output(h);
     }
 
-    auto hidden_states = final_norm_(h, 0);
-    ModelOutput output(hidden_states);
+    // Keep the decoder output unnormalized for the next MTP draft step.
+    // shared_head.norm belongs to logits computation and must not feed back
+    // into the recurrent draft hidden state.
+    ModelOutput output(h);
     if (prev_topk_indices.defined()) {
       output.mtp_topk_state =
           std::make_shared<NpuMtpTopkState>(prev_topk_indices);
@@ -287,6 +289,11 @@ class MtpModelImplBase : public torch::nn::Module {
 
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& word_embedding) {
     embed_tokens_ = word_embedding;
+  }
+
+  torch::Tensor normalize_for_logits(const torch::Tensor& hidden_states) {
+    torch::Tensor mutable_hidden_states = hidden_states;
+    return final_norm_(mutable_hidden_states, /*nodeId=*/0);
   }
 
  protected:
@@ -360,7 +367,7 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  // returns: [num_tokens, hidden_size]
+  // returns: [num_tokens, hidden_size] raw decoder hidden states
   virtual ModelOutput forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,
@@ -373,7 +380,9 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
   // returns: [num_tokens, vocab_size]
   virtual torch::Tensor logits(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes) {
-    return lm_head_(hidden_states, seleted_idxes, 0);
+    torch::Tensor normalized_hidden =
+        model_->normalize_for_logits(hidden_states);
+    return lm_head_(normalized_hidden, seleted_idxes, /*nodeId=*/0);
   }
 
   // hidden_states: [num_tokens, hidden_size]
@@ -383,8 +392,10 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
   virtual torch::Tensor logits(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes,
                                torch::Tensor& out_hidden) {
+    torch::Tensor normalized_hidden =
+        model_->normalize_for_logits(hidden_states);
     return lm_head_->forward_with_hidden(
-        hidden_states, seleted_idxes, out_hidden, 0);
+        normalized_hidden, seleted_idxes, out_hidden, /*nodeId=*/0);
   }
 
   // hidden_states: [num_tokens, hidden_size]

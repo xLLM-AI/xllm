@@ -33,6 +33,7 @@ limitations under the License.
 #include <filesystem>
 
 #include "core/kernels/cuda/cuda_ops_library.h"
+#include "core/platform/platform.h"
 
 namespace py = pybind11;
 
@@ -75,6 +76,7 @@ class XllmOpsTest : public ::testing::Test {
     if (!torch::cuda::is_available()) {
       GTEST_SKIP() << "CUDA not available; skipping xllm_ops CUDA test.";
     }
+    Platform::init_capabilities(Platform::current_device());
   }
 };
 
@@ -128,6 +130,65 @@ TEST_F(XllmOpsTest, EmbeddedInterpreterSeesOps) {
              .item<float>();
 }
 
+TEST_F(XllmOpsTest, EmbeddedInterpreterMoeOpsMatchTorchReference) {
+  if (!Py_IsInitialized()) {
+    Py_InitializeEx(0);
+  }
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+import torch.nn.functional as F
+
+torch.manual_seed(2026)
+device = "cuda"
+dtype = torch.bfloat16
+num_tokens = 7
+num_experts = 8
+top_k = 2
+hidden_size = 128
+intermediate_size = 128
+
+router_logits = torch.randn(
+    num_tokens, num_experts, device=device, dtype=dtype
+)
+topk_weights, topk_ids = torch.ops.xllm_ops.moe_fused_topk(
+    router_logits, top_k, True, "softmax"
+)
+expected_weights, expected_ids = torch.topk(
+    torch.softmax(router_logits.float(), dim=-1), top_k, dim=-1
+)
+expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
+torch.testing.assert_close(topk_ids, expected_ids.to(torch.int32), rtol=0, atol=0)
+torch.testing.assert_close(topk_weights, expected_weights, rtol=2e-3, atol=2e-3)
+
+hidden = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype)
+scale = hidden_size**-0.5
+up = torch.randn(
+    num_experts, intermediate_size, hidden_size, device=device, dtype=dtype
+) * scale
+gate = torch.randn_like(up) * scale
+w13 = torch.cat((up, gate), dim=1).contiguous()
+w2 = torch.randn(
+    num_experts, hidden_size, intermediate_size, device=device, dtype=dtype
+) * intermediate_size**-0.5
+
+actual = torch.ops.xllm_ops.cutlass_fused_moe(
+    hidden, topk_ids, topk_weights, w13, w2, 1, 0, 1, 0
+)
+expected = torch.zeros_like(actual)
+for token in range(num_tokens):
+    for choice in range(top_k):
+        expert = int(topk_ids[token, choice])
+        expert_hidden = F.linear(hidden[token], gate[expert])
+        expert_hidden = F.silu(expert_hidden) * F.linear(hidden[token], up[expert])
+        expert_output = F.linear(expert_hidden, w2[expert])
+        expected[token] += expert_output * topk_weights[token, choice]
+
+torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+)PY");
+}
+
 TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
   if (!Py_IsInitialized()) {
     Py_InitializeEx(0);
@@ -135,9 +196,12 @@ TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
   py::gil_scoped_acquire gil;
   prepend_python_model_path();
 
-  py::module_ collectives = py::module_::import("xllm.python.ops.collectives");
-  py::object group =
-      collectives.attr("init_tp_group")("127.0.0.1", 0, 0, 1, "cuda:0");
+  py::module_ collectives =
+      py::module_::import("xllm.python.distributed.collectives");
+  py::object group = collectives.attr("init_tp_group")(
+      "127.0.0.1", 0, 0, 1, "cuda:0", 0, 1, 0);
+  py::object ep_group = collectives.attr("init_process_group")(
+      "moe_ep", "127.0.0.1", 0, 0, 1, "cuda:0", 0, 1, 0);
 
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
@@ -148,12 +212,15 @@ TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
       py::str(all_reduce.attr("_opoverload").attr("_schema"))
           .cast<std::string>();
   EXPECT_NE(all_reduce_schema.find("Tensor(a0!) x"), std::string::npos);
+  EXPECT_NE(all_reduce_schema.find("str group_name=\"tp\""), std::string::npos);
   EXPECT_TRUE(all_reduce(input).is_none());
+  EXPECT_TRUE(all_reduce(input, "moe_ep").is_none());
   EXPECT_TRUE(torch::equal(input, torch::ones_like(input)));
 
   auto gathered =
       collectives.attr("all_gather")(input, -1, 1).cast<torch::Tensor>();
   group.attr("shutdown")();
+  ep_group.attr("shutdown")();
 
   ASSERT_EQ(gathered.sizes(), torch::IntArrayRef({2, 3}));
   EXPECT_TRUE(torch::equal(gathered, input));

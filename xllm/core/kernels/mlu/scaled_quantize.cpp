@@ -31,31 +31,46 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
     bool is_gated /* = false */,
     at::ScalarType quant_type /* = at::kChar */
 ) {
-  // If act_mode is "none", override is_gated to false
-  bool gated = is_gated;
-  if (act_mode == "none") {
-    gated = false;
+  torch::Tensor quant_input = x;
+  std::string quant_act_mode = act_mode;
+  bool quant_is_gated = is_gated;
+  if (act_mode == "gelu_pytorch_tanh") {
+    std::vector<int64_t> active_shape(x.sizes().begin(), x.sizes().end());
+    if (is_gated) {
+      active_shape.back() /= 2;
+    }
+    quant_input = torch::empty(active_shape, x.options());
+    active(x,
+           quant_input,
+           std::nullopt,
+           std::nullopt,
+           act_mode,
+           is_gated,
+           /*start_expert_id=*/0,
+           /*expert_size=*/0);
+    quant_act_mode = "none";
+    quant_is_gated = false;
   }
 
-  // Determine output shape
-  auto x_sizes = x.sizes();
-  std::vector<int64_t> output_shape(x_sizes.begin(), x_sizes.end());
-  std::vector<int64_t> output_scale_shape(x_sizes.begin(), x_sizes.end() - 1);
+  if (quant_act_mode == "none") {
+    quant_is_gated = false;
+  }
 
-  // Adjust output shape based on gather_index
+  auto input_sizes = quant_input.sizes();
+  std::vector<int64_t> output_shape(input_sizes.begin(), input_sizes.end());
+  std::vector<int64_t> output_scale_shape(input_sizes.begin(),
+                                          input_sizes.end() - 1);
+
   if (gather_index.has_value()) {
     int64_t output_tokens = gather_index.value().size(0);
     output_shape[0] = output_tokens;
     output_scale_shape[0] = output_tokens;
   }
 
-  // Adjust output shape for gated activation
-  if (gated) {
-    // For gated, output is [..., C//2]
+  if (quant_is_gated) {
     output_shape.back() = output_shape.back() / 2;
   }
 
-  // Allocate output tensors
   torch::Tensor result_output;
   torch::Tensor result_output_scale;
 
@@ -72,9 +87,8 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
         torch::empty(output_scale_shape, x.options().dtype(at::kFloat));
   }
 
-  // Call underlying MLU kernel
   tmo::torch_api::scaled_quantize(
-      x,
+      quant_input,
       result_output,
       result_output_scale,
       smooth,
@@ -84,9 +98,9 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
       gather_index_start_position,
       /*scale_upper_bound*/ std::nullopt,
       /*quant_algo=*/std::string("dynamic_per_token"),
-      act_mode,
+      quant_act_mode,
       active_coef,
-      gated);
+      quant_is_gated);
 
   return std::make_tuple(result_output, result_output_scale);
 }

@@ -50,16 +50,19 @@ template <int32_t ThreadsPerGroup>
 __device__ __forceinline__ float group_reduce_max(float value, int32_t lane) {
   static_assert(ThreadsPerGroup <= kHardwareWarpThreads,
                 "FP8 quantization subwarp must fit in one hardware warp");
-  constexpr unsigned int kSubwarpMaskBits =
-      ThreadsPerGroup == kHardwareWarpThreads ? 0xffffffffu
-                                              : (1u << ThreadsPerGroup) - 1u;
+  constexpr uint32_t kSubwarpMaskBits = ThreadsPerGroup == kHardwareWarpThreads
+                                            ? 0xffffffffu
+                                            : (1u << ThreadsPerGroup) - 1u;
   // threadIdx.x is a block-wide index. Restrict it to the physical warp lane
   // before constructing the mask; using threadIdx.x directly would shift by
   // 32 for the second warp and is undefined for a 32-bit mask.
   const int32_t warp_lane =
       static_cast<int32_t>(threadIdx.x) & (kHardwareWarpThreads - 1);
-  const unsigned int mask = kSubwarpMaskBits << (warp_lane - lane);
+  const uint32_t mask = kSubwarpMaskBits << (warp_lane - lane);
 
+  if constexpr (ThreadsPerGroup >= 32) {
+    value = fmaxf(value, __shfl_xor_sync(mask, value, 16));
+  }
   if constexpr (ThreadsPerGroup >= 16) {
     value = fmaxf(value, __shfl_xor_sync(mask, value, 8));
   }
@@ -253,7 +256,9 @@ __global__ void moe_preprocess_assign_bf16_kernel(
   __syncthreads();
 
   constexpr int32_t kBf16PerVector = sizeof(int4) / sizeof(__mt_bfloat16);
-  if (hidden_size % kBf16PerVector == 0) {
+  if (hidden_size % kBf16PerVector == 0 &&
+      reinterpret_cast<uintptr_t>(input) % alignof(int4) == 0 &&
+      reinterpret_cast<uintptr_t>(output) % alignof(int4) == 0) {
     const int64_t vectors_per_row = hidden_size / kBf16PerVector;
     const auto* input_vec = reinterpret_cast<const int4*>(input);
     auto* output_vec = reinterpret_cast<int4*>(output);
@@ -802,17 +807,18 @@ int32_t choose_subwarps_per_block(int64_t hidden_dim_num_groups) {
 std::tuple<torch::Tensor, torch::Tensor> per_token_group_quant_fp8(
     const torch::Tensor& input,
     int64_t group_size) {
-  TORCH_CHECK(input.scalar_type() == torch::kBFloat16,
-              "per_token_group_quant_fp8 (MUSA g128) supports bf16 input only");
-  TORCH_CHECK(group_size == kGroupSize,
-              "per_token_group_quant_fp8 (MUSA g128) requires group_size=128");
-  TORCH_CHECK(input.stride(-1) == 1,
-              "per_token_group_quant_fp8: input last dim must be contiguous");
+  CHECK_EQ(input.scalar_type(), torch::kBFloat16)
+      << "per_token_group_quant_fp8 supports BF16 input only.";
+  CHECK_EQ(group_size, kGroupSize);
+  CHECK_GT(input.dim(), 0);
+  CHECK(input.is_contiguous())
+      << "per_token_group_quant_fp8 requires contiguous input.";
+  CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % alignof(int4) == 0)
+      << "per_token_group_quant_fp8 requires 16-byte-aligned input.";
 
   const int64_t k = input.size(-1);
-  TORCH_CHECK(k > 0, "per_token_group_quant_fp8: K must be positive");
-  TORCH_CHECK(k % kGroupSize == 0,
-              "per_token_group_quant_fp8: K must be divisible by 128");
+  CHECK_GT(k, 0);
+  CHECK_EQ(k % kGroupSize, 0);
   const int64_t k_groups = k / kGroupSize;
   const int64_t m = input.numel() / k;
 
@@ -855,20 +861,20 @@ fused_moe_preprocess_fp8(const torch::Tensor& input,
                          const torch::Tensor& topk_ids,
                          int64_t num_experts,
                          int64_t group_size) {
-  TORCH_CHECK(input.scalar_type() == torch::kBFloat16 && input.dim() == 2 &&
-                  input.is_contiguous(),
-              "fused_moe_preprocess_fp8 requires contiguous BF16 [M, K]");
-  TORCH_CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
-                  topk_ids.is_contiguous(),
-              "fused_moe_preprocess_fp8 requires contiguous int32 topk ids");
-  TORCH_CHECK(topk_ids.size(0) == input.size(0),
-              "fused_moe_preprocess_fp8 token count mismatch");
-  TORCH_CHECK(group_size == kGroupSize && input.size(1) % kGroupSize == 0,
-              "fused_moe_preprocess_fp8 requires group_size=128");
-  TORCH_CHECK(num_experts > 0 && num_experts <= kMaxMoeExperts,
-              "fused_moe_preprocess_fp8 supports at most 256 experts");
-  TORCH_CHECK(topk_ids.size(1) > 0 && topk_ids.size(1) <= kMaxMoeTopk,
-              "fused_moe_preprocess_fp8 supports topk <= 16");
+  CHECK(input.scalar_type() == torch::kBFloat16 && input.dim() == 2 &&
+        input.is_contiguous())
+      << "fused_moe_preprocess_fp8 requires contiguous BF16 [M, K].";
+  CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
+        topk_ids.is_contiguous())
+      << "fused_moe_preprocess_fp8 requires contiguous int32 top-k ids.";
+  CHECK_EQ(input.device(), topk_ids.device());
+  CHECK_EQ(topk_ids.size(0), input.size(0));
+  CHECK_EQ(group_size, kGroupSize);
+  CHECK_EQ(input.size(1) % kGroupSize, 0);
+  CHECK_GT(num_experts, 0);
+  CHECK_LE(num_experts, kMaxMoeExperts);
+  CHECK_GT(topk_ids.size(1), 0);
+  CHECK_LE(topk_ids.size(1), kMaxMoeTopk);
 
   const int64_t num_tokens = input.size(0);
   const int64_t hidden_size = input.size(1);
@@ -876,8 +882,10 @@ fused_moe_preprocess_fp8(const torch::Tensor& input,
       static_cast<int32_t>(hidden_size / kGroupSize);
   const int32_t topk = static_cast<int32_t>(topk_ids.size(1));
   const int64_t assignment_count = num_tokens * topk;
-  TORCH_CHECK(hidden_dim_num_groups * kActThreadsPerGroup <= 1024,
-              "fused_moe_preprocess_fp8 hidden size exceeds block limit");
+  CHECK_GT(hidden_dim_num_groups, 0);
+  CHECK_LE(hidden_dim_num_groups * kActThreadsPerGroup, 1024);
+  CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % alignof(uint64_t) == 0)
+      << "fused_moe_preprocess_fp8 requires 8-byte-aligned input.";
 
   auto output_q = torch::empty({assignment_count, hidden_size},
                                input.options().dtype(torch::kFloat8_e4m3fn));
@@ -932,20 +940,20 @@ fused_moe_preprocess_bf16(const torch::Tensor& input,
                           const torch::Tensor& topk_ids,
                           int64_t num_experts,
                           int64_t alignment) {
-  TORCH_CHECK(input.scalar_type() == torch::kBFloat16 && input.dim() == 2 &&
-                  input.is_contiguous(),
-              "fused_moe_preprocess_bf16 requires contiguous BF16 [M, K]");
-  TORCH_CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
-                  topk_ids.is_contiguous(),
-              "fused_moe_preprocess_bf16 requires contiguous int32 topk ids");
-  TORCH_CHECK(topk_ids.size(0) == input.size(0),
-              "fused_moe_preprocess_bf16 token count mismatch");
-  TORCH_CHECK(num_experts > 0 && num_experts <= kMaxMoeExperts,
-              "fused_moe_preprocess_bf16 supports at most 256 experts");
-  TORCH_CHECK(topk_ids.size(1) > 0 && topk_ids.size(1) <= kMaxMoeTopk,
-              "fused_moe_preprocess_bf16 supports topk <= 16");
-  TORCH_CHECK(alignment == 128 || alignment == 256,
-              "fused_moe_preprocess_bf16 alignment must be 128 or 256");
+  CHECK(input.scalar_type() == torch::kBFloat16 && input.dim() == 2 &&
+        input.is_contiguous())
+      << "fused_moe_preprocess_bf16 requires contiguous BF16 [M, K].";
+  CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
+        topk_ids.is_contiguous())
+      << "fused_moe_preprocess_bf16 requires contiguous int32 top-k ids.";
+  CHECK_EQ(input.device(), topk_ids.device());
+  CHECK_EQ(topk_ids.size(0), input.size(0));
+  CHECK_GT(num_experts, 0);
+  CHECK_LE(num_experts, kMaxMoeExperts);
+  CHECK_GT(topk_ids.size(1), 0);
+  CHECK_LE(topk_ids.size(1), kMaxMoeTopk);
+  CHECK(alignment == 128 || alignment == 256)
+      << "fused_moe_preprocess_bf16 alignment must be 128 or 256.";
 
   const int64_t num_tokens = input.size(0);
   const int64_t hidden_size = input.size(1);
@@ -1021,6 +1029,7 @@ fused_moe_ragged_preprocess_fp8(const torch::Tensor& input,
   CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
         topk_ids.is_contiguous())
       << "Ragged MoE preprocess requires contiguous int32 top-k ids.";
+  CHECK_EQ(input.device(), topk_ids.device());
   CHECK_EQ(topk_ids.size(0), input.size(0));
   CHECK_EQ(group_size, kGroupSize);
   CHECK_EQ(alignment, kRaggedAlignment);
@@ -1035,7 +1044,10 @@ fused_moe_ragged_preprocess_fp8(const torch::Tensor& input,
   const int32_t topk = static_cast<int32_t>(topk_ids.size(1));
   const int64_t assignment_count = num_tokens * topk;
   const int64_t padded_rows = assignment_count * alignment;
+  CHECK_GT(hidden_dim_num_groups, 0);
   CHECK_LE(hidden_dim_num_groups * kActThreadsPerGroup, 1024);
+  CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % alignof(uint64_t) == 0)
+      << "Ragged MoE preprocess requires 8-byte-aligned input.";
 
   torch::Tensor output_q = torch::empty(
       {padded_rows, hidden_size}, input.options().dtype(torch::kFloat8_e4m3fn));
@@ -1077,6 +1089,7 @@ std::tuple<torch::Tensor, torch::Tensor> fused_moe_ragged_preprocess_bf16(
   CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
         topk_ids.is_contiguous())
       << "Ragged BF16 MoE preprocess requires contiguous int32 top-k ids.";
+  CHECK_EQ(input.device(), topk_ids.device());
   CHECK_EQ(topk_ids.size(0), input.size(0));
   CHECK_EQ(alignment, kRaggedAlignment);
   CHECK_GT(topk_ids.size(1), 0);
@@ -1123,6 +1136,7 @@ fused_moe_decode_preprocess_bf16(const torch::Tensor& input,
   CHECK(topk_ids.scalar_type() == torch::kInt32 && topk_ids.dim() == 2 &&
         topk_ids.is_contiguous())
       << "Decode BF16 MoE preprocess requires contiguous int32 top-k ids.";
+  CHECK_EQ(input.device(), topk_ids.device());
   CHECK_EQ(topk_ids.size(0), input.size(0));
   CHECK_GT(num_experts, 0);
   CHECK_LE(num_experts, kMaxMoeExperts);
@@ -1212,10 +1226,12 @@ torch::Tensor fused_moe_indexed_swiglu_bf16(const torch::Tensor& input,
   CHECK(valid_rows.scalar_type() == torch::kInt32 && valid_rows.dim() == 1 &&
         valid_rows.is_contiguous())
       << "Indexed BF16 SwiGLU requires contiguous int32 row indices.";
+  CHECK_EQ(input.device(), valid_rows.device());
   CHECK_EQ(input.size(1) % 2, 0);
 
   const int64_t assignment_count = valid_rows.size(0);
   const int64_t intermediate_size = input.size(1) / 2;
+  CHECK_GT(intermediate_size, 0);
   torch::Tensor output =
       torch::empty({input.size(0), intermediate_size}, input.options());
   if (assignment_count == 0) {
@@ -1228,6 +1244,8 @@ torch::Tensor fused_moe_indexed_swiglu_bf16(const torch::Tensor& input,
   const int64_t chunks_per_row = intermediate_size / kValuesPerChunk;
   const int64_t total_chunks = assignment_count * chunks_per_row;
   if (intermediate_size % kValuesPerChunk == 0 &&
+      reinterpret_cast<uintptr_t>(input.data_ptr()) % alignof(int4) == 0 &&
+      reinterpret_cast<uintptr_t>(output.data_ptr()) % alignof(int4) == 0 &&
       total_chunks <= std::numeric_limits<int32_t>::max() &&
       assignment_count <= std::numeric_limits<int32_t>::max()) {
     constexpr int32_t kFlatSwiGluThreads = 512;
@@ -1279,7 +1297,10 @@ std::tuple<torch::Tensor, torch::Tensor> fused_moe_ragged_swiglu_quant_fp8(
   const int64_t intermediate_size = input.size(1) / 2;
   const int32_t hidden_dim_num_groups =
       static_cast<int32_t>(intermediate_size / kGroupSize);
+  CHECK_GT(hidden_dim_num_groups, 0);
   CHECK_LE(hidden_dim_num_groups * kActThreadsPerGroup, 1024);
+  CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % alignof(uint64_t) == 0)
+      << "Ragged SwiGLU quant requires 8-byte-aligned input.";
 
   torch::Tensor output_q =
       torch::empty({padded_rows, intermediate_size},
@@ -1317,9 +1338,12 @@ torch::Tensor fused_moe_ragged_combine(const torch::Tensor& down,
   CHECK(topk_weights.scalar_type() == torch::kFloat32 &&
         topk_weights.dim() == 2 && topk_weights.is_contiguous())
       << "Ragged MoE combine requires contiguous FP32 top-k weights.";
+  CHECK_EQ(down.device(), topk_weights.device());
+  CHECK_GE(num_tokens, 0);
   CHECK_EQ(topk_weights.size(0), num_tokens);
   CHECK_EQ(alignment, kRaggedAlignment);
   const int64_t topk = topk_weights.size(1);
+  CHECK_GT(topk, 0);
   CHECK_EQ(down.size(0), num_tokens * topk * alignment);
   CHECK_LE(topk, kMaxMoeTopk);
 

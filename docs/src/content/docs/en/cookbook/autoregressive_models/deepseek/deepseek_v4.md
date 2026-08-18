@@ -13,6 +13,9 @@ Weight Download
 Flash weights:
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp
 
+DeepSeek-V4-Flash-0731 W8A8 weights with DSpark:
+https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
+
 Pro weights:
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
 
@@ -83,11 +86,25 @@ python -c "import torch_npu
 for i in range(16):torch_npu.npu.set_device(i)"
 ```
 
-### Export MTP weights
+### Choose the speculative-decoding weight layout
+
+The original DeepSeek-V4 MTP path and the DeepSeek-V4-Flash-0731 DSpark path
+use different draft models:
+
+- For the original MTP path, export the MTP weights to a separate directory:
 
 ```bash
 python tools/export_mtp.py --input-dir ${W4A8/W8A8 weights directory} --output-dir ${Exported MTP weights directory}
 ```
+
+- For DeepSeek-V4-Flash-0731 DSpark, do **not** run `export_mtp.py`. The three
+  DSpark stages, their vocabulary embedding/head, and the Markov head remain
+  under `mtp.0`, `mtp.1`, and `mtp.2` in the target checkpoint. Point both
+  `--model` and `--draft_model` to the same original or quantized 0731 weight
+  directory. Original FP checkpoints may share the top-level
+  `embed.weight/head.weight`; QuaRot checkpoints may provide dedicated
+  `mtp.0.embed.weight/mtp.2.head.weight`. xLLM supports both layouts and gives
+  the dedicated DSpark vocabulary weights priority when both are present.
 
 ### Environment variables
 
@@ -165,6 +182,11 @@ done
     # --draft_model=$DRAFT_MODEL_PATH \
     # --num_speculative_tokens=1 \
 
+    # DeepSeek-V4-Flash-0731 DSpark instead uses:
+    # --speculative_algorithm=DSpark \
+    # --draft_model=$MODEL_PATH \
+    # --num_speculative_tokens=5 \
+
 # numactl -C xxxxx          NUMA core binding (query with: npu-smi info -t topo)
 #--max_memory_utilization   Max memory usage ratio per NPU card
 #--max_tokens_per_batch     Max tokens per batch (mainly limits prefill)
@@ -177,6 +199,47 @@ done
 #--draft_model              MTP - MTP weights path
 #--num_speculative_tokens   MTP - Number of speculative tokens
 ```
+
+### DSpark usage
+
+DSpark does not require separately exported MTP weights. Set `--model` and
+`--draft_model` to the same DeepSeek-V4-Flash-0731 checkpoint directory:
+
+```bash
+--speculative_algorithm=DSpark \
+--model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--draft_model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--num_speculative_tokens=5
+```
+
+`--num_speculative_tokens=5` is recommended because the 0731 checkpoint was
+trained with `dspark_block_size=5`. A different gamma changes the diffusion
+block geometry and is out of the trained distribution; use it only after an
+acceptance/performance evaluation. Context parallelism (`cp_size > 1`) is not
+supported on this path yet.
+
+On NPU, xLLM supports two SAS modes. The default compatibility mode works with
+CANN 9.0 and needs no extra option. If the installed SAS operator accepts a
+non-empty `ori_sparse_indices`, set `--enable_dspark_native_sas=true` to use
+the complete DSpark SWA window. Older operators terminate during tiling, so
+xLLM cannot safely detect this capability automatically.
+
+Use the per-position counters to inspect DSpark acceptance:
+
+```bash
+curl http://${HOST}:${PORT}/brpc_metrics | grep speculative_num
+```
+
+```text
+acceptance[position] =
+  speculative_num_accepted_tokens_per_pos{position} /
+  speculative_num_drafts_total
+```
+
+The per-position value is the probability that the accepted prefix reaches
+that position. `speculative_mean_tokens_per_decode_step` is the cumulative
+mean number of committed tokens per proposal sequence, calculated from
+`speculative_num_committed_tokens_total / speculative_num_drafts_total`.
 
 A log message "Brpc Server Started" indicates the service has started successfully.
 

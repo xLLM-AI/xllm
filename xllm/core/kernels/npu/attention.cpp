@@ -93,7 +93,7 @@ void reshape_paged_cache(torch::Tensor& key,
         key, value.value(), k_cache, v_cache.value(), slot_mapping);
     return;
   }
-  
+
   atb::npu_reshape_and_cache(
       key, value.value(), k_cache, v_cache.value(), slot_mapping);
 }

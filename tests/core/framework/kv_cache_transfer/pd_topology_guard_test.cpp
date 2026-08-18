@@ -21,6 +21,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "util/utils.h"
+
 namespace xllm {
 
 namespace {
@@ -82,7 +84,7 @@ TEST(PdTopologyGuardTest, TryGetPdTopoReturnTopo) {
   EXPECT_TRUE(reason.empty());
 }
 
-TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsNonMlaPush) {
+TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsTpShardedPush) {
   const InstanceInfo local_info = make_info(1, {0, 1});
   const InstanceInfo remote_info = make_info(1, {2});
 
@@ -92,7 +94,7 @@ TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsNonMlaPush) {
   EXPECT_TRUE(result.reason.empty());
 }
 
-TEST(PdTopologyGuardTest, HeterogeneousNonMlaIsOptIn) {
+TEST(PdTopologyGuardTest, HeterogeneousTpShardedCacheIsOptIn) {
   const InstanceInfo local_info = make_info(1, {0, 1});
   const InstanceInfo remote_info = make_info(1, {2});
 
@@ -100,7 +102,7 @@ TEST(PdTopologyGuardTest, HeterogeneousNonMlaIsOptIn) {
       check_pd_topo(local_info, remote_info, "PUSH", false);
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
   EXPECT_EQ(result.reason,
-            "non-mla hetero pd is disabled; set "
+            "tp-sharded kv cache hetero pd is disabled; set "
             "enable_heterogeneous_pd=true on both instances");
 }
 
@@ -114,7 +116,7 @@ TEST(PdTopologyGuardTest, HeteroTopoNeedPushKv) {
   EXPECT_EQ(result.reason, "hetero pd requires kv_mode=PUSH");
 }
 
-TEST(PdTopologyGuardTest, HeteroTopoAllowOnPushMla) {
+TEST(PdTopologyGuardTest, HeteroTopoAllowsTpInvariantCachePush) {
   const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {0, 1, 2, 3});
 
@@ -124,17 +126,36 @@ TEST(PdTopologyGuardTest, HeteroTopoAllowOnPushMla) {
   EXPECT_TRUE(result.reason.empty());
 }
 
-TEST(PdTopologyGuardTest, NonMlaHeteroTopoRequiresEqualDpSize) {
+TEST(PdTopologyGuardTest, TpInvariantCacheModelsAllowHeterogeneousPush) {
+  const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
+  const InstanceInfo remote_info = make_info(1, {4, 5, 6, 7});
+
+  EXPECT_TRUE(util::is_tp_invariant_kv_cache_model_type("deepseek_v3"));
+  EXPECT_TRUE(util::is_tp_invariant_kv_cache_model_type("deepseek_v4"));
+  EXPECT_TRUE(util::is_tp_invariant_kv_cache_model_type("deepseek_v4_mtp"));
+  EXPECT_FALSE(util::is_tp_invariant_kv_cache_model_type("qwen3"));
+
+  const PdTopoResult result =
+      check_pd_topo(local_info,
+                    remote_info,
+                    "PUSH",
+                    util::is_tp_invariant_kv_cache_model_type("deepseek_v4"));
+  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
+  EXPECT_TRUE(result.reason.empty());
+}
+
+TEST(PdTopologyGuardTest, TpShardedHeteroTopoRequiresEqualDpSize) {
   const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {4});
 
   const PdTopoResult result =
       check_pd_topo(local_info, remote_info, "PUSH", false, true);
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
-  EXPECT_EQ(result.reason, "non-mla hetero pd requires equal dp_size");
+  EXPECT_EQ(result.reason,
+            "tp-sharded kv cache hetero pd requires equal dp_size");
 }
 
-TEST(PdTopologyGuardTest, NonMlaHeteroTopoSupportsOnlyPrefillTp2DecodeTp1) {
+TEST(PdTopologyGuardTest, TpShardedHeteroTopoSupportsOnlyPrefillTp2DecodeTp1) {
   const InstanceInfo local_info = make_info(1, {0, 1, 2});
   const InstanceInfo remote_info = make_info(1, {3, 4});
 
@@ -142,11 +163,11 @@ TEST(PdTopologyGuardTest, NonMlaHeteroTopoSupportsOnlyPrefillTp2DecodeTp1) {
       check_pd_topo(local_info, remote_info, "PUSH", false, true);
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
   EXPECT_EQ(result.reason,
-            "non-mla hetero pd currently supports only Prefill TP2 to Decode "
-            "TP1");
+            "tp-sharded kv cache hetero pd currently supports only Prefill "
+            "TP2 to Decode TP1");
 }
 
-TEST(PdTopologyGuardTest, NonMlaHeteroTopoRejectsPrefillTp4DecodeTp1) {
+TEST(PdTopologyGuardTest, TpShardedHeteroTopoRejectsPrefillTp4DecodeTp1) {
   const InstanceInfo local_info = make_info(1, {0, 1, 2, 3});
   const InstanceInfo remote_info = make_info(1, {4});
 
@@ -154,8 +175,8 @@ TEST(PdTopologyGuardTest, NonMlaHeteroTopoRejectsPrefillTp4DecodeTp1) {
       check_pd_topo(local_info, remote_info, "PUSH", false, true);
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
   EXPECT_EQ(result.reason,
-            "non-mla hetero pd currently supports only Prefill TP2 to Decode "
-            "TP1");
+            "tp-sharded kv cache hetero pd currently supports only Prefill "
+            "TP2 to Decode TP1");
 }
 
 TEST(PdTopologyGuardTest, CheckPdTopoRejectInvalidLocalTopo) {

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include "common/macros.h"
@@ -26,6 +27,7 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "runtime/xservice_client.h"
+#include "scheduler/profile/decode_graph_warmup_plan.h"
 #include "time_predictor.h"
 
 namespace xllm {
@@ -114,6 +116,10 @@ class ProfileManager {
   void train_prefill_time_predictor(
       std::vector<std::pair<int32_t, double>> time_profiling_data);
 
+  void train_speculative_validate_time_predictor(
+      const std::vector<std::tuple<int32_t, int32_t, int32_t, double>>&
+          time_profiling_data);
+
   double get_constant_overhead();
 
   int32_t get_quadratic_root(Sequence* sequence, double budget);
@@ -145,6 +151,8 @@ class ProfileManager {
   void eval_batch_latency_prediction(const std::string mode);
 
   void profile_token_budget();
+
+  void profile_speculative_validate_time();
 
   // Warmup ACL graph executor according to the instance role.
   void warmup_for_graph();
@@ -186,6 +194,8 @@ class ProfileManager {
   const Options options_;
 
   Engine* engine_;
+
+  DecodeGraphWarmupPlan decode_graph_warmup_plan_;
 
   BlockManagerPool* block_manager_pool_;
 

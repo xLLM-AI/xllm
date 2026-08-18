@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,7 @@ PyCausalLM no longer calls model.forward() directly.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -55,9 +55,7 @@ class PyModelBase(nn.Module):
             raise ValueError(f"Unknown dtype: {dtype!r}")
         return resolved
 
-    def compute_logits(
-        self, hidden: torch.Tensor, selected_idxes: Optional[torch.Tensor]
-    ) -> torch.Tensor:
+    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
         if selected_idxes is not None and selected_idxes.numel() > 0:
             hidden = hidden.index_select(0, selected_idxes)
         return self.lm_head(hidden)
@@ -65,7 +63,7 @@ class PyModelBase(nn.Module):
     # -- weight loading -------------------------------------------------------
     def load_weights(
         self,
-        state_dicts: List["StateDict"],
+        state_dicts: list[StateDict],
         tp_rank: int,
         tp_size: int,
     ) -> None:

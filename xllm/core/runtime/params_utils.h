@@ -47,12 +47,13 @@ void forward_output_to_proto(
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
+    const std::vector<JsonObjectOutputError>& json_object_errors,
     proto::ForwardOutput* pb_forward_output);
 
 Token build_token(int64_t index,

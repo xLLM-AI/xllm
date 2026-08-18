@@ -61,6 +61,10 @@ class Platform final {
     return is_mlu() || is_npu();
   }
 
+  static constexpr bool supports_dsa_indexer_cache_sharding() {
+    return is_mlu();
+  }
+
   // MLU can reuse DSA top-k results across layers without keeping an indexer
   // cache for every layer. Other backends retain the legacy all-layer cache
   // allocation until they implement the same cache-elision contract.
@@ -68,11 +72,18 @@ class Platform final {
     return is_mlu();
   }
 
-  // Host KV offload requires both a batch memcpy provider and a layer-wise
-  // synchronization implementation.
+  // Host KV offload requires a batch memcpy provider with stream
+  // synchronization support.
   static constexpr bool supports_host_kv_offload() {
     return is_npu() || is_mlu();
   }
+
+  // MTP decode expands one sequence into num_decoding_tokens token rows. The
+  // MLU graph executor reuses graphs by padded token-row buckets, so graph
+  // warmup must visit every batch size that starts a new MTP token bucket.
+  // Other backends retain the compatibility warmup buckets until their graph
+  // keying and MTP replay contracts are verified against the same strategy.
+  static constexpr bool supports_mtp_decode_graph_warmup() { return is_mlu(); }
 
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)

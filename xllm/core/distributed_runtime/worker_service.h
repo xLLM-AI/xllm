@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "runtime/forward_shared_memory_manager.h"
 #include "runtime/worker.h"
@@ -63,6 +64,12 @@ class WorkerService : public proto::DistributeWorker {
                        const proto::AllocateKVCacheRequest* request,
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
+
+  void SetSpeculativeValidateTimePredictor(
+      ::google::protobuf::RpcController* controller,
+      const proto::SpeculativeValidateTimePredictor* request,
+      proto::Status* response,
+      ::google::protobuf::Closure* done) override;
 
   void AllocateKVCacheWithTransfer(
       ::google::protobuf::RpcController* controller,
@@ -161,15 +168,18 @@ class WorkerService : public proto::DistributeWorker {
             std::vector<torch::Tensor>& dit_images,
             std::vector<std::string>& dit_text_output,
             torch::Tensor& expert_load_data,
-            int32_t& prepared_layer_id,
+            int64_t& prepared_token,
             torch::Tensor& src_seq_idxes,
             torch::Tensor& out_tokens,
-            torch::Tensor& out_logprobs);
+            torch::Tensor& out_logprobs,
+            std::vector<JsonObjectOutputError>& json_object_errors);
+  void record_speculative_metrics_from_output(const torch::Tensor& next_tokens);
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
  private:
   // runtime options
   runtime::Options options_;
+  std::vector<std::string> speculative_position_labels_;
 
   bool initialized_;
 

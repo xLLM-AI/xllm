@@ -297,6 +297,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
     const torch::TensorList scale1,
     const torch::TensorList scale2,
     const torch::Tensor& probs,
+    const std::optional<torch::Tensor>& x_active_mask,
     const std::string& group,
     int64_t max_output_size,
     double swiglu_limit,

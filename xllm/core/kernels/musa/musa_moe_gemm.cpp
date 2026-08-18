@@ -28,7 +28,7 @@ namespace xllm::kernel::musa {
 namespace {
 
 constexpr const char* kGemmOpsUri = "gemm_ops";
-constexpr const char* kMusaTopkUri = "sglang_musa_topk_gating";
+constexpr const char* kTopkUri = "xllm_musa_topk_gating";
 
 void check_masked_moe_inputs(const torch::Tensor& input,
                              const torch::Tensor& weights,
@@ -67,7 +67,7 @@ torch::Tensor masked_moe_gemm_bf16(const torch::Tensor& input,
                                    torch::ScalarType output_dtype,
                                    int64_t expected_tokens) {
   check_masked_moe_inputs(input, weights, token_counts, expected_tokens);
-  MusaTvmffiStreamGuard stream_guard(input.device());
+  TvmffiStreamGuard stream_guard(input.device());
 
   auto output = torch::empty({input.size(0), input.size(1), weights.size(1)},
                              input.options().dtype(output_dtype));
@@ -108,7 +108,7 @@ torch::Tensor masked_moe_gemm_fp8(const torch::Tensor& input,
   TORCH_CHECK(input_scale.is_contiguous() && weight_scale.is_contiguous(),
               "Mate FP8 MoE scales must be contiguous.");
 
-  MusaTvmffiStreamGuard stream_guard(input.device());
+  TvmffiStreamGuard stream_guard(input.device());
   auto output = torch::empty({input.size(0), input.size(1), weights.size(1)},
                              input.options().dtype(output_dtype));
   get_function(kGemmOpsUri, "masked_moe_gemm_8bit")(
@@ -148,7 +148,7 @@ torch::Tensor contiguous_moe_gemm_bf16(const torch::Tensor& input,
   CHECK_EQ(weights.scalar_type(), torch::kBFloat16);
   CHECK_EQ(token_counts.scalar_type(), torch::kInt32);
 
-  MusaTvmffiStreamGuard stream_guard(input.device());
+  TvmffiStreamGuard stream_guard(input.device());
   torch::Tensor output = torch::empty({input.size(0), weights.size(1)},
                                       input.options().dtype(output_dtype));
   get_function(kGemmOpsUri, "m_grouped_contig_gemm_16bit")(
@@ -184,7 +184,7 @@ torch::Tensor ragged_moe_gemm_bf16(const torch::Tensor& input,
       << "Mate Ragged BF16 MoE alignment must be 128 or 256.";
   CHECK_EQ(input.size(0) % alignment, 0);
 
-  MusaTvmffiStreamGuard stream_guard(input.device());
+  TvmffiStreamGuard stream_guard(input.device());
   torch::Tensor output = torch::empty({input.size(0), weights.size(1)},
                                       input.options().dtype(output_dtype));
   get_function(kGemmOpsUri, "ragged_moe_gemm_16bit")(
@@ -233,7 +233,7 @@ torch::Tensor contiguous_moe_gemm_fp8(const torch::Tensor& input,
   CHECK_EQ(weight_scale.size(1) * 128, weights.size(1));
   CHECK_EQ(weight_scale.size(2) * 128, weights.size(2));
 
-  MusaTvmffiStreamGuard stream_guard(input.device());
+  TvmffiStreamGuard stream_guard(input.device());
   torch::Tensor output = torch::empty({input.size(0), weights.size(1)},
                                       input.options().dtype(output_dtype));
   get_function(kGemmOpsUri, "m_grouped_contig_gemm_8bit")(
@@ -287,7 +287,7 @@ torch::Tensor ragged_moe_gemm_fp8(const torch::Tensor& input,
       << "Mate Ragged FP8 MoE alignment must be 128 or 256.";
   CHECK_EQ(input.size(0) % alignment, 0);
 
-  MusaTvmffiStreamGuard stream_guard(input.device());
+  TvmffiStreamGuard stream_guard(input.device());
   torch::Tensor output = torch::empty({input.size(0), weights.size(1)},
                                       input.options().dtype(output_dtype));
   get_function(kGemmOpsUri, "ragged_moe_gemm_8bit")(
@@ -304,7 +304,7 @@ torch::Tensor ragged_moe_gemm_fp8(const torch::Tensor& input,
   return output;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> musa_moe_topk_softmax(
+std::tuple<torch::Tensor, torch::Tensor> moe_topk_softmax(
     const torch::Tensor& router_logits,
     int64_t topk) {
   CHECK(router_logits.defined());
@@ -314,14 +314,14 @@ std::tuple<torch::Tensor, torch::Tensor> musa_moe_topk_softmax(
   CHECK_GT(topk, 0);
   CHECK_LE(topk, router_logits.size(1));
 
-  MusaTvmffiStreamGuard stream_guard(router_logits.device());
+  TvmffiStreamGuard stream_guard(router_logits.device());
   auto topk_weights =
       torch::empty({router_logits.size(0), topk},
                    router_logits.options().dtype(torch::kFloat32));
   auto topk_ids = torch::empty({router_logits.size(0), topk},
                                router_logits.options().dtype(torch::kInt32));
   auto unused_correction_bias = topk_weights.reshape({-1});
-  get_function(kMusaTopkUri, "sgl_musa_topk_softmax")(
+  get_function(kTopkUri, "xllm_musa_topk_softmax")(
       to_ffi_tensor_view(topk_weights),
       to_ffi_tensor_view(topk_ids),
       to_ffi_tensor_view(router_logits),
@@ -332,14 +332,14 @@ std::tuple<torch::Tensor, torch::Tensor> musa_moe_topk_softmax(
   return std::make_tuple(topk_weights, topk_ids);
 }
 
-bool musa_moe_topk_softmax_available() {
+bool moe_topk_softmax_available() {
   static const bool available = [] {
     const char* ops_path = std::getenv("FLASHINFER_OPS_PATH");
     if (ops_path == nullptr || ops_path[0] == '\0') {
       return false;
     }
     const std::string so_path =
-        std::string(ops_path) + "/" + kMusaTopkUri + "/" + kMusaTopkUri + ".so";
+        std::string(ops_path) + "/" + kTopkUri + "/" + kTopkUri + ".so";
     return ::access(so_path.c_str(), R_OK) == 0;
   }();
   return available;

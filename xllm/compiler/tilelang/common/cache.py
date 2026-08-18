@@ -18,19 +18,13 @@ def compute_cache_key(
     payload = {
         "spec": spec.cache_key_material(),
         "fingerprint": fingerprint,
-        "dependencies": {
-            str(Path(path).resolve()): sha256_file(path) for path in dependency_files
-        },
+        "dependencies": {str(Path(path).resolve()): sha256_file(path) for path in dependency_files},
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def is_cache_hit(
-    manifest_path: str | Path, variant_key: str, expected_cache_key: str
-) -> bool:
+def is_cache_hit(manifest_path: str | Path, variant_key: str, expected_cache_key: str) -> bool:
     path = Path(manifest_path)
     if not path.is_file():
         return False

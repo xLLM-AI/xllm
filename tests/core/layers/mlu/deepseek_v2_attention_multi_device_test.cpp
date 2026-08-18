@@ -283,6 +283,9 @@ class DistributedAttentionChildContext final {
 
     parallel_args_ =
         std::make_unique<ParallelArgs>(rank, world_size, process_group_.get());
+    // Keep the CP output-baseline tests on the supported replicated-KV path.
+    // Dedicated DCP tests must opt into KV sharding explicitly.
+    parallel_args_->kv_split_size() = 1;
     parallel_args_->tp_group_ = process_group_.get();
     parallel_args_->single_rank_group_ = self_group_.get();
     parallel_args_->cp_group_ = process_group_.get();
@@ -1130,6 +1133,9 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
     CHECK(self_group) << "Rank " << rank << ": failed to create self group";
 
     ParallelArgs parallel_args(rank, world_size, process_group.get());
+    // This GLM-5.2 case validates rank-local top-k reuse with DCP KV shards.
+    parallel_args.kv_split_size() = world_size;
+    parallel_args.dcp_group_ = process_group.get();
     parallel_args.tp_group_ = process_group.get();
     parallel_args.single_rank_group_ = self_group.get();
     parallel_args.cp_group_ = process_group.get();

@@ -19,6 +19,9 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <mutex>
 #include <utility>
 
 namespace xllm {
@@ -59,5 +62,57 @@ bool KVTransferCompletion::wait() {
         return result.hasValue() && result.value();
       });
 }
+
+class KVTransferTracker::State final {
+ public:
+  void start() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++pending_transfers_;
+  }
+
+  void finish() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      CHECK_GT(pending_transfers_, 0u);
+      --pending_transfers_;
+    }
+    completion_cv_.notify_all();
+  }
+
+  bool has_pending() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_transfers_ > 0;
+  }
+
+  void wait() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    completion_cv_.wait(lock, [this]() { return pending_transfers_ == 0; });
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable completion_cv_;
+  size_t pending_transfers_ = 0;
+};
+
+KVTransferTracker::Completion::Completion(std::shared_ptr<State> state)
+    : state_(std::move(state)) {
+  CHECK(state_ != nullptr);
+  state_->start();
+}
+
+KVTransferTracker::Completion::~Completion() { state_->finish(); }
+
+KVTransferTracker::KVTransferTracker() : state_(std::make_shared<State>()) {}
+
+KVTransferTracker::~KVTransferTracker() { wait(); }
+
+std::shared_ptr<KVTransferTracker::Completion> KVTransferTracker::track() {
+  return std::shared_ptr<Completion>(new Completion(state_));
+}
+
+bool KVTransferTracker::has_pending() const { return state_->has_pending(); }
+
+void KVTransferTracker::wait() { state_->wait(); }
 
 }  // namespace xllm

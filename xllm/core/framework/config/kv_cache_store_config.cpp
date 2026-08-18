@@ -20,7 +20,8 @@ limitations under the License.
 
 DEFINE_uint32(prefetch_timeout,
               0,
-              "Prefetch timeout for prefetch from kv cache store.");
+              "Stop issuing new KV cache Store prefetch batches after this "
+              "timeout; wait for in-flight batches before admission.");
 
 DEFINE_uint32(prefetch_batch_size,
               2,
@@ -41,7 +42,8 @@ DEFINE_string(store_protocol,
 
 DEFINE_string(store_master_server_address,
               "",
-              "The address information of the store master service.");
+              "The Store master address: IP:Port for standalone mode or "
+              "etcd://IP:Port;IP:Port;... for high availability mode.");
 
 DEFINE_string(store_metadata_server,
               "",

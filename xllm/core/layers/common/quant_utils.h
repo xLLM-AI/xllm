@@ -76,6 +76,37 @@ inline void resolve_weight_quant_method_for_linear_load(
   resolved_weight_quant_method = std::nullopt;
 }
 
+inline torch::Tensor npu_w8a8_dynamic_quantized_linear_forward(
+    const torch::Tensor& quantized_input,
+    const torch::Tensor& per_token_scale,
+    const torch::Tensor& weight,
+    const torch::Tensor& weight_scale,
+    const std::optional<torch::Tensor>& bias,
+    at::ScalarType output_dtype,
+    const std::optional<torch::Tensor>& weight_offset = std::nullopt) {
+  CHECK_EQ(quantized_input.scalar_type(), torch::kInt8)
+      << "w8a8_dynamic quantized input must be int8.";
+  CHECK(per_token_scale.defined())
+      << "w8a8_dynamic per-token scale must be defined.";
+  CHECK_EQ(per_token_scale.scalar_type(), torch::kFloat32)
+      << "w8a8_dynamic per-token scale must be float32.";
+
+  kernel::QuantMatmulParams quant_matmul_params;
+  quant_matmul_params.x1 = quantized_input;
+  quant_matmul_params.x2 = weight;
+  quant_matmul_params.transpose2 = true;
+  quant_matmul_params.scale = weight_scale;
+  quant_matmul_params.pertoken_scale = per_token_scale.reshape({-1});
+  quant_matmul_params.output_dtype = output_dtype;
+  if (weight_offset.has_value() && weight_offset->defined()) {
+    quant_matmul_params.offset = weight_offset;
+  }
+  if (bias.has_value() && bias->defined()) {
+    quant_matmul_params.bias = bias;
+  }
+  return kernel::quant_matmul(quant_matmul_params);
+}
+
 inline torch::Tensor npu_w8a8_dynamic_linear_forward(
     const torch::Tensor& input,
     const torch::Tensor& weight,
@@ -85,30 +116,21 @@ inline torch::Tensor npu_w8a8_dynamic_linear_forward(
     const std::optional<torch::Tensor>& weight_offset = std::nullopt) {
   kernel::NpuQuantizeParams quant_params;
   quant_params.input = input;
-  // quant_params.dst_type = at::kChar;
 
   torch::Tensor quantized_input;
-  std::optional<torch::Tensor> pertoken_scale;
-  std::tie(quantized_input, pertoken_scale) =
+  std::optional<torch::Tensor> per_token_scale;
+  std::tie(quantized_input, per_token_scale) =
       kernel::dynamic_quant(quant_params);
-  CHECK(pertoken_scale.has_value() && pertoken_scale->defined())
+  CHECK(per_token_scale.has_value() && per_token_scale->defined())
       << "dynamic_quant must return per-token scale for w8a8_dynamic.";
 
-  kernel::QuantMatmulParams quant_matmul_params;
-  quant_matmul_params.x1 = quantized_input;
-  quant_matmul_params.x2 = weight;
-  quant_matmul_params.transpose2 = true;
-  quant_matmul_params.scale = weight_scale;
-  quant_matmul_params.pertoken_scale = pertoken_scale->reshape({-1});
-  quant_matmul_params.output_dtype = output_dtype;
-  if (weight_offset.has_value() && weight_offset->defined()) {
-    quant_matmul_params.offset = weight_offset;
-  }
-  if (bias.has_value() && bias->defined()) {
-    quant_matmul_params.bias = bias;
-  }
-  auto output = kernel::quant_matmul(quant_matmul_params);
-  return output;
+  return npu_w8a8_dynamic_quantized_linear_forward(quantized_input,
+                                                   per_token_scale.value(),
+                                                   weight,
+                                                   weight_scale,
+                                                   bias,
+                                                   output_dtype,
+                                                   weight_offset);
 }
 
 }  // namespace layer

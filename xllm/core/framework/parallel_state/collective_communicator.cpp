@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "core/framework/parallel_state/collective_communicator.h"
 
+#include <algorithm>
+
 #include "core/framework/parallel_state/mapping_npu.h"
 
 #if defined(USE_NPU)
@@ -356,15 +358,18 @@ void CollectiveCommunicator::create_process_groups(
   }
 #endif
 
+  const int32_t world_group_port = ++port;
   process_group_ = create_process_group(global_rank,
                                         world_size,
                                         world_size,
-                                        ++port,
+                                        world_group_port,
                                         false,
                                         host,
                                         "world_group",
                                         device);
   parallel_args_->process_group_ = process_group_.get();
+  parallel_args_->python_rendezvous_host_ = host;
+  parallel_args_->python_rendezvous_port_ = world_group_port;
 
   // Orthogonal CP x TP (NPU TORCH only): the rank layout is
   //   rank = dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
@@ -582,12 +587,6 @@ void CollectiveCommunicator::create_process_groups(
       port += moe_tp_size;
     }
   }
-
-  const int32_t tp_group_index = global_rank / tp_size;
-  parallel_args_->python_tp_rendezvous_host_ = host;
-  parallel_args_->python_tp_rendezvous_port_ = port + tp_group_index + 1;
-  CHECK_LE(parallel_args_->python_tp_rendezvous_port_, 65535)
-      << "No TCP port remains for the Python TP rendezvous.";
 
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&

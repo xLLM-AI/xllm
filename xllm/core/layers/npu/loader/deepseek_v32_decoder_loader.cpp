@@ -477,7 +477,10 @@ void DeekseekV32DecoderLoader::initialize_weight_tensors(
     const int64_t size =
         50LL * 1024LL * 1024LL * int64_t(n_layers_ - first_k_dense_replace_);
     shared_buffer_ = std::make_unique<ExpertBufferManager>(
-        num_experts_, n_layers_ - first_k_dense_replace_, size);
+        expert_shm_namespace(),
+        num_experts_,
+        n_layers_ - first_k_dense_replace_,
+        size);
   }
 }
 

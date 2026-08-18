@@ -115,13 +115,11 @@ bool MLULayerSynchronizerImpl::record_stream(int64_t layer_index,
                                              Stream* stream) {
   if (!valid_index(layer_index) || stream == nullptr ||
       aborted_.load(std::memory_order_acquire)) {
-    abort();
     return false;
   }
   StreamEventPtr event = stream->record_event();
   if (event == nullptr) {
     LOG(ERROR) << "Failed to record MLU copy event for range=" << layer_index;
-    abort();
     return false;
   }
   events_[layer_index] = std::move(event);
@@ -133,7 +131,9 @@ bool MLULayerSynchronizerImpl::record_current(int64_t layer_index,
                                               int32_t device_index) {
   try {
     Stream current_stream(torch_mlu::getCurrentMLUStream(device_index));
-    return record_stream(layer_index, &current_stream);
+    if (record_stream(layer_index, &current_stream)) {
+      return true;
+    }
   } catch (const std::exception& error) {
     LOG(ERROR) << "Failed to get current MLU stream: device=" << device_index
                << ", error=" << error.what();

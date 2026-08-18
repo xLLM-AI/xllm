@@ -437,6 +437,52 @@ TEST_F(Glm47DetectorTest, StreamingParseWithNormalText) {
   EXPECT_EQ(result3.calls[0].name.value(), "get_weather");
 }
 
+// Object/array arg values also end with '}'. Streaming must still emit the
+// root-object closing brace; otherwise clients see truncated JSON like
+// {"city":"Beijing","config":"{\"nested\": {\"deep\": \"value\"}}"
+// (missing the final root '}').
+TEST_F(Glm47DetectorTest, StreamingParseClosesRootAfterObjectArgValue) {
+  // Keep name and args in separate increments: name is emitted on the first
+  // <arg_key>, and argument JSON increments are only produced afterwards.
+  std::string chunk1 = "<tool_call>get_weather";
+  std::string chunk2 =
+      "<arg_key>city</arg_key><arg_value>Beijing</arg_value>"
+      "<arg_key>config</arg_key><arg_value>{\"nested\": {\"deep\": "
+      "\"value\"}}</arg_value>";
+  std::string chunk3 = "</tool_call>";
+
+  auto result1 = detector_->parse_streaming_increment(chunk1, tools_);
+  EXPECT_EQ(result1.calls.size(), 0);
+
+  auto result2 = detector_->parse_streaming_increment(chunk2, tools_);
+  ASSERT_GE(result2.calls.size(), 1);
+  EXPECT_TRUE(result2.calls[0].name.has_value());
+  EXPECT_EQ(result2.calls[0].name.value(), "get_weather");
+
+  auto result3 = detector_->parse_streaming_increment(chunk3, tools_);
+
+  std::string streamed_args;
+  for (const auto& call : result2.calls) {
+    if (!call.name.has_value()) {
+      streamed_args += call.parameters;
+    }
+  }
+  for (const auto& call : result3.calls) {
+    if (!call.name.has_value()) {
+      streamed_args += call.parameters;
+    }
+  }
+
+  ASSERT_FALSE(streamed_args.empty());
+  EXPECT_EQ(streamed_args.back(), '}');
+  // Without the root closer, this parse fails. Streaming may emit object/array
+  // arg values as escaped JSON strings; only require a complete root object.
+  nlohmann::json params = nlohmann::json::parse(streamed_args);
+  ASSERT_TRUE(params.is_object());
+  EXPECT_EQ(params["city"], "Beijing");
+  ASSERT_TRUE(params.contains("config"));
+}
+
 // Test invalid JSON in arg values
 TEST_F(Glm47DetectorTest, InvalidJsonInArgValues) {
   std::string text =

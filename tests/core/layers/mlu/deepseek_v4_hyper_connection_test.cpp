@@ -201,7 +201,7 @@ class DeepseekV4HyperConnectionTest : public ::testing::Test {
         {"hc_fn",
          seeded("deepseek_v4_hc.pre.fn",
                 {mix_hc, hc_dim},
-                torch::kFloat32,
+                torch::kBFloat16,
                 options_.device())},
         {"hc_base",
          seeded("deepseek_v4_hc.pre.base",
@@ -260,8 +260,8 @@ TEST_F(DeepseekV4HyperConnectionTest, HCPreMatchesOfficialReference) {
   EXPECT_EQ(actual.comb.sizes(), expected.comb.sizes());
   test::verify_tensor_close(
       actual.output.cpu(), expected.output.cpu(), 1e-2, 1e-2);
-  test::verify_tensor_close(actual.post.cpu(), expected.post.cpu(), 1e-4, 1e-4);
-  test::verify_tensor_close(actual.comb.cpu(), expected.comb.cpu(), 1e-4, 1e-4);
+  test::verify_tensor_close(actual.post.cpu(), expected.post.cpu(), 1e-3, 1e-3);
+  test::verify_tensor_close(actual.comb.cpu(), expected.comb.cpu(), 1e-3, 1e-3);
 }
 
 TEST_F(DeepseekV4HyperConnectionTest, HCPostMatchesOfficialReference) {
@@ -305,6 +305,72 @@ TEST_F(DeepseekV4HyperConnectionTest, HCPostMatchesOfficialReference) {
   test::verify_tensor_close(actual.cpu(), expected.cpu(), 1e-2, 1e-2);
   test::verify_tensor_close(
       actual_rsqrt.cpu(), expected_rsqrt.cpu(), 1e-4, 1e-4);
+}
+
+TEST_F(DeepseekV4HyperConnectionTest, FusedPostPreNormMatchesComposition) {
+  const int64_t tokens = 2;
+  torch::Tensor x = seeded("deepseek_v4_hc.fused.x",
+                           {tokens, config_.dim},
+                           torch::kBFloat16,
+                           options_.device());
+  torch::Tensor residual = seeded("deepseek_v4_hc.fused.residual",
+                                  {tokens, config_.hc_mult, config_.dim},
+                                  torch::kBFloat16,
+                                  options_.device());
+  torch::Tensor post = seeded("deepseek_v4_hc.fused.post",
+                              {tokens, config_.hc_mult},
+                              torch::kFloat32,
+                              options_.device()) +
+                       0.5;
+  torch::Tensor comb =
+      torch::softmax(seeded("deepseek_v4_hc.fused.comb",
+                            {tokens, config_.hc_mult, config_.hc_mult},
+                            torch::kFloat32,
+                            options_.device()),
+                     -1);
+  torch::Tensor gamma = seeded("deepseek_v4_hc.fused.gamma",
+                               {config_.dim},
+                               torch::kBFloat16,
+                               options_.device()) +
+                        1.0;
+  std::unordered_map<std::string, torch::Tensor> weights = pre_weights();
+  DeepseekV4HCPre hc_pre(config_.hc_mult,
+                         config_.dim,
+                         config_.sinkhorn_iters,
+                         config_.hc_eps,
+                         config_.norm_eps,
+                         options_);
+  hc_pre->load_state_dict(StateDict(weights));
+  DeepseekV4HCPost hc_post(config_.norm_eps);
+
+  torch::Tensor expected_residual;
+  torch::Tensor rsqrt;
+  std::tie(expected_residual, rsqrt) =
+      hc_post->forward(x, residual, post, comb, /*compute_rms=*/true);
+  DeepseekV4HCPreOutput expected_pre =
+      hc_pre->forward(expected_residual, rsqrt);
+  torch::Tensor expected_norm =
+      expected_pre.output.to(torch::kFloat32) *
+      torch::rsqrt(
+          expected_pre.output.to(torch::kFloat32).square().mean(-1, true) +
+          config_.norm_eps) *
+      gamma.to(torch::kFloat32);
+
+  torch::Tensor actual_norm;
+  torch::Tensor actual_residual;
+  torch::Tensor actual_post;
+  torch::Tensor actual_comb;
+  std::tie(actual_norm, actual_residual, actual_post, actual_comb) =
+      hc_pre->fused_post_pre_norm(x, residual, post, comb, gamma);
+
+  test::verify_tensor_close(
+      actual_norm.cpu(), expected_norm.to(torch::kBFloat16).cpu(), 2e-2, 2e-2);
+  test::verify_tensor_close(
+      actual_residual.cpu(), expected_residual.cpu(), 2e-2, 2e-2);
+  test::verify_tensor_close(
+      actual_post.cpu(), expected_pre.post.cpu(), 2e-3, 2e-3);
+  test::verify_tensor_close(
+      actual_comb.cpu(), expected_pre.comb.cpu(), 2e-3, 2e-3);
 }
 
 TEST_F(DeepseekV4HyperConnectionTest, HCHeadMatchesOfficialReference) {

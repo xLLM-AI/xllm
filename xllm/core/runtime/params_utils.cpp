@@ -44,7 +44,14 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
   raw_forward_output.out_logprobs.reserve(pb_output.out_logprobs().size());
   raw_forward_output.out_logprobs.assign(pb_output.out_logprobs().begin(),
                                          pb_output.out_logprobs().end());
-  raw_forward_output.prepared_layer_id = pb_output.prepared_layer_id();
+  raw_forward_output.json_object_errors.reserve(
+      pb_output.json_object_errors_size());
+  for (const proto::JsonObjectOutputError& pb_error :
+       pb_output.json_object_errors()) {
+    raw_forward_output.json_object_errors.push_back(
+        {pb_error.sample_sequence_id(), pb_error.message()});
+  }
+  raw_forward_output.prepared_token = pb_output.prepared_token();
   for (size_t i = 0; i < seq_nums; ++i) {
     proto::SquenceOutput pb_seq_out = pb_output.outputs()[i];
     RawSampleOutput s;
@@ -89,12 +96,13 @@ void forward_output_to_proto(
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
+    const std::vector<JsonObjectOutputError>& json_object_errors,
     proto::ForwardOutput* pb_forward_output) {
   Timer timer;
   // LLM decode fills next_tokens; DiT text diffusion (e.g. Cola-DLM) may leave
@@ -224,7 +232,7 @@ void forward_output_to_proto(
   }
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    pb_forward_output->set_prepared_layer_id(prepared_layer_id);
+    pb_forward_output->set_prepared_token(prepared_token);
 
     if (expert_load_data.defined()) {
       torch::Tensor expert_load_data_flattened =
@@ -268,6 +276,12 @@ void forward_output_to_proto(
     for (const auto& text : dit_text_output) {
       pb_dit_output->add_text_output(text);
     }
+  }
+  for (const JsonObjectOutputError& error : json_object_errors) {
+    proto::JsonObjectOutputError* pb_error =
+        pb_forward_output->add_json_object_errors();
+    pb_error->set_sample_sequence_id(error.sample_sequence_id);
+    pb_error->set_message(error.message);
   }
   COUNTER_ADD(proto_latency_seconds_o2proto, timer.elapsed_seconds());
   return;

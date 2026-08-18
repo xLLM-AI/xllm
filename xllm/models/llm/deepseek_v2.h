@@ -18,11 +18,13 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "core/common/global_flags.h"
 #include "core/framework/model/model_output.h"
+#include "framework/kv_cache/kv_shard_layout.h"
 #if defined(USE_DCU)
 #include "core/layers/dcu/deepseek_v2_decoder_layer_impl.h"
 #elif defined(USE_MLU)
@@ -112,6 +114,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
                                                      /*device=*/device_));
     }
     auto& attn_metadata = *(modified_input_params.attn_metadata);
+    prepare_attention_metadata(attn_metadata);
     torch::Tensor hidden_states = embed_tokens_(tokens);
     std::optional<torch::Tensor> residual;
     if (!run_decoder_layers(hidden_states,
@@ -159,6 +162,13 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
   }
 
  protected:
+  virtual void prepare_attention_metadata(
+      layer::AttentionMetadata& /*attn_metadata*/) const {}
+
+  virtual std::optional<KVShardLayout> cp_kv_shard_layout() const {
+    return std::nullopt;
+  }
+
   virtual void prepare_decoder_layer_for_forward(
       size_t /*layer_id*/,
       layer::DeepseekV2DecoderLayer& /*layer*/,
@@ -191,6 +201,9 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
                           std::vector<KVCache>& kv_caches,
                           const ModelInputParams& input_params) {
     for (size_t i = 0; i < layers_.size(); ++i) {
+      if (!input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return false;
+      }
       // NOTE: we will remove this until refactor flashinfer API
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;

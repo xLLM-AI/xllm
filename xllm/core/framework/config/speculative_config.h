@@ -43,7 +43,8 @@ class SpeculativeConfig final {
   // process, which reads its own Options rather than this global config, can
   // classify without an initialized singleton.
   static bool requires_aux_hidden_capture(std::string_view algorithm) {
-    return algorithm == "Eagle3" || algorithm == "DFlash";
+    return algorithm == "Eagle3" || algorithm == "DFlash" ||
+           algorithm == "DSpark";
   }
 
   static bool is_mtp_algorithm(std::string_view algorithm) {
@@ -51,6 +52,15 @@ class SpeculativeConfig final {
            (algorithm[0] == 'M' || algorithm[0] == 'm') &&
            (algorithm[1] == 'T' || algorithm[1] == 't') &&
            (algorithm[2] == 'P' || algorithm[2] == 'p');
+  }
+
+  // True for the block-diffusion draft algorithms (DFlash, DSpark) that record
+  // validate metrics inline per-seq and drive the adaptive per-seq varlen
+  // prune. Case-insensitive so it matches however the flag was cased. MTP is
+  // classified separately via is_mtp_algorithm; callers that also accept MTP
+  // must OR the two.
+  static bool is_block_diffusion_algorithm(std::string_view algorithm) {
+    return iequals(algorithm, "dflash") || iequals(algorithm, "dspark");
   }
 
   void from_flags();
@@ -72,7 +82,9 @@ class SpeculativeConfig final {
          "speculative_suffix_use_tree_spec",
          "enable_opt_validate_probs",
          "enable_mtp_draft_body_tp1",
-         "enable_atb_spec_kernel"}};
+         "enable_atb_spec_kernel",
+         "enable_adaptive_speculative_decode",
+         "adaptive_speculative_min_gain"}};
     return kOptionCategory;
   }
 
@@ -99,6 +111,33 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 
   PROPERTY(bool, enable_atb_spec_kernel) = false;
+
+  PROPERTY(bool, enable_adaptive_speculative_decode) = false;
+
+  PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
+
+ private:
+  // ASCII case-insensitive equality. Mirrors the manual case handling in
+  // is_mtp_algorithm rather than pulling <algorithm>/<cctype> into this header.
+  static bool iequals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+      char ca = a[i];
+      char cb = b[i];
+      if (ca >= 'A' && ca <= 'Z') {
+        ca = static_cast<char>(ca - 'A' + 'a');
+      }
+      if (cb >= 'A' && cb <= 'Z') {
+        cb = static_cast<char>(cb - 'A' + 'a');
+      }
+      if (ca != cb) {
+        return false;
+      }
+    }
+    return true;
+  }
 };
 
 }  // namespace xllm

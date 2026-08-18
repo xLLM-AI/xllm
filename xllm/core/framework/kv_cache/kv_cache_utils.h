@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/common/constants.h"
+#include "core/common/types.h"
 #include "util/tensor_helper.h"
 
 #if defined(USE_NPU)
@@ -119,8 +120,13 @@ struct HostCacheValidationOptions {
   int64_t device_block_count = 0;
   bool supports_host_kv_offload = false;
   bool enable_prefix_cache = true;
+  bool enable_disagg_pd = false;
+  bool enable_pd_ooc = false;
+  bool enable_kvcache_store = false;
+  InstanceRole instance_role = InstanceRole::DEFAULT;
   bool has_key_cache_shape = true;
   bool has_grouped_cache_layout = false;
+  bool supports_grouped_cache_offload = false;
   bool has_conv_cache_shape = false;
   bool has_ssm_cache_shape = false;
   std::string kv_cache_dtype = "auto";

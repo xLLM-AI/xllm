@@ -27,6 +27,8 @@ class LayerSynchronizer {
   virtual ~LayerSynchronizer() = default;
 
   virtual bool synchronize_layer(int64_t layer_index) = 0;
+  // Reports record failure without aborting pending waits. The stream owner
+  // must first make any submitted work safe, then call abort().
   virtual bool record_stream(int64_t layer_index, Stream* stream) = 0;
   // Force every layer's wait to unblock and report failure. Called when a copy
   // fails so a forward thread spinning in synchronize_layer does not hang

@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <brpc/channel.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,6 +36,17 @@ limitations under the License.
 
 namespace xllm {
 
+inline constexpr int32_t kDecodeAddNewPromptTooLongStatusCode = 413;
+
+bool is_permanent_rejection(int32_t status_code);
+
+// Flat KV managers reserve block 0 for padding, so only num_blocks - 1 blocks
+// can belong to a request. Returns true only when the prompt can never fit,
+// independent of current cache pressure.
+bool exceeds_decode_capacity(size_t num_prompt_tokens,
+                             size_t block_size,
+                             size_t num_blocks);
+
 class DisaggPDScheduler : public ContinuousScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
@@ -41,12 +54,10 @@ class DisaggPDScheduler : public ContinuousScheduler {
   ~DisaggPDScheduler() override;
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size();
+    return prefill_queue_->size() + num_prefetch_pending_requests();
   };
 
   void step(const absl::Duration& timeout) override;
-
-  bool add_request(std::shared_ptr<Request>& request) override;
 
   // prefill-1: for prefill send new request to decode
   virtual void dispatch_requests();
@@ -68,8 +79,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
       const std::string& kv_cache_transfer_mode,
       std::vector<uint64_t> src_cluster_ids,
       std::vector<std::string> src_addrs,
-      std::vector<uint64_t> src_block_ids,
-      int32_t src_linear_state_id,
+      std::vector<KVTransferMapping> source_mappings,
       int32_t src_dp_size,
       int32_t src_dp_rank,
       bool heterogeneous_pd = false,
@@ -78,6 +88,11 @@ class DisaggPDScheduler : public ContinuousScheduler {
 
   // decode allocate blocks with prefix cache.
   bool try_allocate(Sequence* sequence);
+
+  // Classifies a failed allocation as permanently oversized.
+  // DSV4 multi-manager and XTensor layouts conservatively return false because
+  // their effective token capacity cannot be derived from the flat KV count.
+  bool exceeds_decode_capacity(Sequence* sequence) const;
 
   bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
 
@@ -99,6 +114,10 @@ class DisaggPDScheduler : public ContinuousScheduler {
                        const int32_t src_kv_split_size);
 
  protected:
+  void do_permanent_rejection(const std::shared_ptr<Request>& request);
+
+  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
+
   // Pre-execute prefill requests of different lengths at startup and obtain the
   // corresponding TTFT for calculating the estimated TTFT of requests.
   void profile_ttft();

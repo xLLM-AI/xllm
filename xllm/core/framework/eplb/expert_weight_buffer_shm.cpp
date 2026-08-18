@@ -15,17 +15,109 @@ limitations under the License.
 
 #include "expert_weight_buffer_shm.h"
 
+#include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <mutex>
+#include <sstream>
+#include <string_view>
 #include <thread>
-namespace xllm {
 
-ExpertBufferShm::ExpertBufferShm(int32_t expert_id,
+namespace xllm {
+namespace {
+
+constexpr size_t kTensorAlignment = 64;
+
+uint64_t stable_namespace_hash(std::string_view value) {
+  constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+  constexpr uint64_t kFnvPrime = 1099511628211ULL;
+  uint64_t hash = kFnvOffsetBasis;
+  for (char byte : value) {
+    hash ^= static_cast<uint8_t>(byte);
+    hash *= kFnvPrime;
+  }
+  return hash;
+}
+
+std::string make_expert_shm_name(const std::string& service_namespace,
+                                 int32_t expert_id) {
+  CHECK(!service_namespace.empty())
+      << "Expert shared memory requires a service namespace.";
+  std::ostringstream name;
+  name << "xllm_expert_" << std::hex << stable_namespace_hash(service_namespace)
+       << std::dec << "_" << expert_id;
+  return name.str();
+}
+
+size_t align_tensor_size(size_t size) {
+  return (size + kTensorAlignment - 1) & ~(kTensorAlignment - 1);
+}
+
+int64_t aligned_layer_region_size(int64_t total_size, int32_t max_layers) {
+  if (total_size <= 0 || max_layers <= 0) {
+    return 0;
+  }
+  const int64_t unaligned_size = total_size / max_layers;
+  return unaligned_size -
+         unaligned_size % static_cast<int64_t>(kTensorAlignment);
+}
+
+void lock_shared_mutex(pthread_mutex_t& mutex, int32_t expert_id) {
+  const int32_t result = pthread_mutex_lock(&mutex);
+  if (result == EOWNERDEAD) {
+    CHECK_EQ(pthread_mutex_consistent(&mutex), 0)
+        << "Failed to recover shared mutex for expert " << expert_id;
+    LOG(WARNING) << "Recovered orphaned shared mutex for expert " << expert_id;
+    return;
+  }
+  CHECK_EQ(result, 0) << "Failed to acquire shared mutex for expert "
+                      << expert_id << ": " << std::strerror(result);
+}
+
+void unlock_shared_mutex(pthread_mutex_t& mutex, int32_t expert_id) {
+  const int32_t result = pthread_mutex_unlock(&mutex);
+  CHECK_EQ(result, 0) << "Failed to release shared mutex for expert "
+                      << expert_id << ": " << std::strerror(result);
+}
+
+class SharedMutexGuard final {
+ public:
+  SharedMutexGuard(pthread_mutex_t& mutex, int32_t expert_id)
+      : mutex_(mutex), expert_id_(expert_id) {
+    lock_shared_mutex(mutex_, expert_id_);
+  }
+
+  ~SharedMutexGuard() { unlock_shared_mutex(mutex_, expert_id_); }
+
+  SharedMutexGuard(const SharedMutexGuard&) = delete;
+  SharedMutexGuard& operator=(const SharedMutexGuard&) = delete;
+
+ private:
+  pthread_mutex_t& mutex_;
+  int32_t expert_id_;
+};
+
+}  // namespace
+
+ExpertBufferShm::ExpertBufferShm(const std::string& service_namespace,
+                                 int32_t expert_id,
                                  int32_t max_layers,
                                  int64_t total_size)
-    : expert_id_(expert_id),
+    : shm_name_(make_expert_shm_name(service_namespace, expert_id)),
+      expert_id_(expert_id),
       max_layers_(max_layers),
-      layer_data_region_size_(total_size / max_layers) {
+      data_region_size_(total_size),
+      layer_data_region_size_(
+          aligned_layer_region_size(total_size, max_layers)) {
+  CHECK_GT(max_layers_, 0) << "Expert shared memory requires layers.";
+  CHECK_LE(max_layers_, MAX_LAYERS_PER_EXPERT)
+      << "Expert shared memory layer count exceeds supported maximum.";
+  CHECK_GT(data_region_size_, 0)
+      << "Expert shared memory data region must be positive.";
+  CHECK_GT(layer_data_region_size_, 0)
+      << "Expert shared memory requires at least " << kTensorAlignment
+      << " aligned bytes per layer.";
   // Memory alignment calculation (64-byte alignment for performance)
   constexpr size_t kAlignment = 64;
 
@@ -40,11 +132,9 @@ ExpertBufferShm::ExpertBufferShm(int32_t expert_id,
                      kAlignment;
 
   bool is_creator;
-  std::string shm_name = "xllm_expert_" + std::to_string(expert_id_);
-
   // Create/attach shared memory segment with calculated size
-  shm_ = std::make_unique<SharedMemoryManager>(
-      shm_name, header_size + meta_size + total_size, is_creator);
+  shm_ = std::make_shared<SharedMemoryManager>(
+      shm_name_, header_size + meta_size + total_size, is_creator);
 
   // Memory region pointers setup:
   header_ = static_cast<SharedHeader*>(shm_->base_address());
@@ -57,6 +147,8 @@ ExpertBufferShm::ExpertBufferShm(int32_t expert_id,
     initialize_as_creator();
   }
   verify_and_recover();
+  SharedMutexGuard lock(header_->allocation_mutex, expert_id_);
+  rebuild_name_to_slot();
 }
 
 ExpertBufferShm::~ExpertBufferShm() {
@@ -68,7 +160,8 @@ ExpertBufferShm::~ExpertBufferShm() {
 }
 
 void ExpertBufferShm::initialize_as_creator() {
-  header_->initialized_layers.store(0, std::memory_order_release);
+  header_->layout_version = kExpertShmLayoutVersion;
+  header_->reserved = 0;
 
   pthread_mutexattr_t attr;
   pthread_mutexattr_init(&attr);
@@ -84,96 +177,153 @@ void ExpertBufferShm::initialize_as_creator() {
   memset(tensor_metas_,
          0,
          max_layers_ * MAX_TENSORS_PER_LAYER * sizeof(TensorMeta));
+
+  // Publish the initialized process-shared mutex and metadata as one release.
+  // Attachers wait for this field before touching allocation_mutex.
+  std::atomic_ref<uint64_t>(header_->magic)
+      .store(kExpertShmMagic, std::memory_order_release);
 }
 
 void ExpertBufferShm::verify_and_recover() {
-  int rc = pthread_mutex_lock(&header_->allocation_mutex);
-  if (rc == EOWNERDEAD) {
-    pthread_mutex_consistent(&header_->allocation_mutex);
-    LOG(WARNING) << "Recovered from orphaned mutex for expert " << expert_id_;
-  } else if (rc != 0) {
-    LOG(FATAL) << "Failed to acquire mutex";
+  // Reject segments that were created by a build with a different on-disk
+  // layout (e.g. a mismatched SharedHeader / TensorMeta shape or a stale
+  // segment left over from a previous xLLM version). Silent continuation
+  // would let us read tensor bytes from arbitrary offsets and corrupt
+  // weights across ranks.
+  std::atomic_ref<uint64_t> magic(header_->magic);
+  constexpr int32_t kInitializationRetries = 5000;
+  uint64_t observed_magic = magic.load(std::memory_order_acquire);
+  for (int32_t retry = 0; observed_magic == 0 && retry < kInitializationRetries;
+       ++retry) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    observed_magic = magic.load(std::memory_order_acquire);
   }
-  pthread_mutex_unlock(&header_->allocation_mutex);
+  CHECK_EQ(observed_magic, kExpertShmMagic)
+      << "Shared memory header magic mismatch for expert " << expert_id_
+      << " (expected 0x" << std::hex << kExpertShmMagic << ", got 0x"
+      << observed_magic << std::dec
+      << "). This usually means a stale segment left over from a previous "
+      << "build; remove /dev/shm/" << shm_name_ << " and retry.";
+  CHECK_EQ(header_->layout_version, kExpertShmLayoutVersion)
+      << "Shared memory layout version mismatch for expert " << expert_id_
+      << " (expected " << kExpertShmLayoutVersion << ", got "
+      << header_->layout_version
+      << "). A stale segment from an incompatible xLLM version is attached.";
+
+  SharedMutexGuard lock(header_->allocation_mutex, expert_id_);
+}
+
+void ExpertBufferShm::rebuild_name_to_slot() {
+  // Reconstruct the per-layer name -> slot cache from what is already in
+  // shared memory. Runs once at attach time so an existing segment (creator
+  // or reader) has its lookup table populated before add/get touches it.
+  name_to_slot_.assign(max_layers_, std::unordered_map<std::string, int32_t>());
+  for (int32_t layer = 0; layer < max_layers_; ++layer) {
+    rebuild_layer_index(layer);
+  }
+}
+
+int32_t ExpertBufferShm::rebuild_layer_index(int32_t layer_id) {
+  TensorMeta* layer_metas = &tensor_metas_[layer_id * MAX_TENSORS_PER_LAYER];
+  auto& layer_index = name_to_slot_[layer_id];
+  layer_index.clear();
+  layer_index.reserve(MAX_TENSORS_PER_LAYER);
+  int32_t available_slot = -1;
+  for (int32_t slot = 0; slot < MAX_TENSORS_PER_LAYER; ++slot) {
+    TensorMeta& meta = layer_metas[slot];
+    const uint32_t publication_state =
+        std::atomic_ref<uint32_t>(meta.publication_state)
+            .load(std::memory_order_acquire);
+    if (publication_state == kTensorMetaEmpty && available_slot < 0) {
+      available_slot = slot;
+    }
+    if (publication_state != kTensorMetaPublished) {
+      continue;
+    }
+    const size_t name_length =
+        strnlen(meta.tensor_name, sizeof(meta.tensor_name));
+    CHECK_LT(name_length, sizeof(meta.tensor_name))
+        << "Corrupted tensor name for expert " << expert_id_ << " layer "
+        << layer_id << " slot " << slot;
+    layer_index.emplace(std::string(meta.tensor_name, name_length), slot);
+  }
+  return available_slot;
 }
 
 size_t ExpertBufferShm::get_layer_offset(int32_t layer_id) const {
-  if (layer_id < 0 || layer_id >= max_layers_) {
-    LOG(FATAL) << "Invalid layer ID: " << std::to_string(layer_id)
-               << " for expert " << std::to_string(expert_id_);
-  }
-  return layer_id * layer_data_region_size_;
+  CHECK(layer_id >= 0 && layer_id < max_layers_)
+      << "Invalid layer ID: " << layer_id << " for expert " << expert_id_
+      << " (max_layers=" << max_layers_ << ")";
+  return static_cast<size_t>(layer_id) *
+         static_cast<size_t>(layer_data_region_size_);
 }
 
 void ExpertBufferShm::add_tensor(int32_t layer_id,
                                  const std::string& tensor_name,
                                  const torch::Tensor& tensor) {
-  if (layer_id < 0 || layer_id >= max_layers_) {
-    LOG(FATAL) << "Invalid layer ID: " << std::to_string(layer_id)
-               << " for expert " << std::to_string(expert_id_);
-  }
-  if (tensor_name.empty()) {
-    LOG(FATAL) << "Tensor name cannot be empty";
-  }
-  if (!tensor.defined() || !tensor.is_contiguous()) {
-    LOG(FATAL) << "Tensor must be defined and contiguous";
-  }
-  if (tensor.device().type() != torch::kCPU) {
-    LOG(FATAL) << "Only CPU tensors can be stored in shared memory";
-  }
+  CHECK(layer_id >= 0 && layer_id < max_layers_)
+      << "Invalid layer ID: " << layer_id << " for expert " << expert_id_
+      << " (max_layers=" << max_layers_ << ")";
+  CHECK(!tensor_name.empty()) << "Tensor name cannot be empty";
+  CHECK_LT(tensor_name.size(), sizeof(TensorMeta::tensor_name))
+      << "Tensor name exceeds shared metadata capacity";
+  CHECK(tensor.defined() && tensor.is_contiguous())
+      << "Tensor must be defined and contiguous";
+  CHECK_GT(tensor.numel(), 0) << "Tensor must not be empty";
+  CHECK(tensor.device().type() == torch::kCPU)
+      << "Only CPU tensors can be stored in shared memory";
+  CHECK_LE(tensor.dim(), 8) << "Tensor rank exceeds metadata capacity";
 
   std::lock_guard<std::mutex> lock(local_mutex_);
+  SharedMutexGuard shared_lock(header_->allocation_mutex, expert_id_);
 
   // Get this expert's metadata block
   TensorMeta* layer_metas = &tensor_metas_[layer_id * MAX_TENSORS_PER_LAYER];
+  const int32_t available_slot = rebuild_layer_index(layer_id);
+  auto& layer_index = name_to_slot_[layer_id];
 
-  // Find available slot and check for duplicates
-  int available_slot = -1;
-  for (int i = 0; i < MAX_TENSORS_PER_LAYER; ++i) {
-    TensorMeta& meta = layer_metas[i];
-    if (meta.tensor_name[0] == '\0') {
-      if (available_slot == -1) available_slot = i;
-    } else if (strcmp(meta.tensor_name, tensor_name.c_str()) == 0) {
-      LOG(FATAL) << "Tensor '" << tensor_name << "' already exists for expert "
-                 << std::to_string(expert_id_) << " layer "
-                 << std::to_string(layer_id);
-    }
-  }
+  // Duplicate check via the O(1) hash lookup instead of scanning every slot.
+  CHECK(layer_index.find(tensor_name) == layer_index.end())
+      << "Tensor '" << tensor_name << "' already exists for expert "
+      << expert_id_ << " layer " << layer_id;
 
-  if (available_slot == -1) {
-    LOG(FATAL) << "No available slots for expert " << std::to_string(expert_id_)
-               << " layer " << std::to_string(layer_id);
-  }
+  CHECK_GE(available_slot, 0) << "No available slots for expert " << expert_id_
+                              << " layer " << layer_id;
 
-  // Prepare the tensor metadata
+  // Prepare unpublished tensor metadata. tensor_name remains empty until all
+  // metadata and bytes are complete, so attachers never discover a partial
+  // tensor even if the writer exits between these steps.
   TensorMeta& meta = layer_metas[available_slot];
-  strncpy(meta.tensor_name, tensor_name.c_str(), sizeof(meta.tensor_name) - 1);
-  meta.tensor_name[sizeof(meta.tensor_name) - 1] = '\0';
-
-  meta.rank = tensor.dim();
-  for (int i = 0; i < meta.rank; ++i) {
+  std::memset(&meta, 0, sizeof(meta));
+  meta.rank = static_cast<int32_t>(tensor.dim());
+  for (int32_t i = 0; i < meta.rank; ++i) {
     meta.shape[i] = tensor.size(i);
   }
   meta.dtype = static_cast<int32_t>(tensor.scalar_type());
 
-  constexpr size_t alignment = 64;
-  size_t raw_size = tensor.nbytes();
-  size_t aligned_size = (raw_size + alignment - 1) & ~(alignment - 1);
+  const size_t raw_size = tensor.nbytes();
+  const size_t aligned_size = align_tensor_size(raw_size);
 
   // Calculate offset by summing sizes of previous tensors in this expert
   size_t layer_data_offset = 0;
-  for (int i = 0; i < MAX_TENSORS_PER_LAYER; ++i) {
-    if (&layer_metas[i] == &meta) break;
-    layer_data_offset += layer_metas[i].actual_size;
+  for (int32_t i = 0; i < MAX_TENSORS_PER_LAYER; ++i) {
+    if (&layer_metas[i] == &meta) {
+      break;
+    }
+    const uint32_t publication_state =
+        std::atomic_ref<uint32_t>(layer_metas[i].publication_state)
+            .load(std::memory_order_acquire);
+    if (publication_state == kTensorMetaPublished) {
+      layer_data_offset += align_tensor_size(layer_metas[i].actual_size);
+    }
   }
 
-  if (layer_data_offset + aligned_size > layer_data_region_size_) {
-    LOG(FATAL) << "Insufficient space in expert " << std::to_string(expert_id_)
-               << " layer " << std::to_string(layer_id) << " (needs "
-               << std::to_string(aligned_size) << " bytes, has "
-               << std::to_string(layer_data_region_size_ - layer_data_offset)
-               << " remaining)";
-  }
+  CHECK_LE(layer_data_offset, static_cast<size_t>(layer_data_region_size_));
+  CHECK_LE(aligned_size,
+           static_cast<size_t>(layer_data_region_size_) - layer_data_offset)
+      << "Insufficient space in expert " << expert_id_ << " layer " << layer_id
+      << " (needs " << aligned_size << " bytes, has "
+      << (layer_data_region_size_ - layer_data_offset) << " remaining)";
 
   // Set final storage location
   meta.data_offset = get_layer_offset(layer_id) + layer_data_offset;
@@ -187,58 +337,70 @@ void ExpertBufferShm::add_tensor(int32_t layer_id,
   if (aligned_size > raw_size) {
     memset(static_cast<char*>(dest) + raw_size, 0, aligned_size - raw_size);
   }
+
+  std::memcpy(meta.tensor_name, tensor_name.c_str(), tensor_name.size() + 1);
+  std::atomic_ref<uint32_t>(meta.publication_state)
+      .store(kTensorMetaPublished, std::memory_order_release);
+  layer_index.emplace(tensor_name, available_slot);
 }
 
 torch::Tensor ExpertBufferShm::get_tensor(int32_t layer_id,
                                           const std::string& tensor_name) {
-  if (layer_id < 0 || layer_id >= max_layers_) {
-    LOG(FATAL) << "Invalid layer ID: " << layer_id << " for expert "
-               << expert_id_;
-  }
+  CHECK(layer_id >= 0 && layer_id < max_layers_)
+      << "Invalid layer ID: " << layer_id << " for expert " << expert_id_
+      << " (max_layers=" << max_layers_ << ")";
 
   // Validate expert ID
   std::lock_guard<std::mutex> lock(local_mutex_);
+  SharedMutexGuard shared_lock(header_->allocation_mutex, expert_id_);
 
   // Get this expert's metadata block
   TensorMeta* layer_metas = &tensor_metas_[layer_id * MAX_TENSORS_PER_LAYER];
 
-  // Search for the requested tensor
-  for (int i = 0; i < MAX_TENSORS_PER_LAYER; ++i) {
-    TensorMeta& meta = layer_metas[i];
-
-    // Skip empty slots
-    if (meta.tensor_name[0] == '\0') {
-      continue;
-    }
-
-    // Check for name match
-    if (strcmp(meta.tensor_name, tensor_name.c_str()) == 0) {
-      // Validate metadata
-      if (meta.data_offset < 0 || meta.actual_size == 0 ||
-          meta.data_offset + meta.actual_size > shm_->size()) {
-        LOG(FATAL) << "Corrupted tensor metadata for " << tensor_name
-                   << " in expert " << expert_id_ << " layer " << layer_id;
-      }
-
-      // Create tensor options from stored type
-      auto options = torch::TensorOptions()
-                         .dtype(static_cast<torch::ScalarType>(meta.dtype))
-                         .device(torch::kCPU)
-                         .requires_grad(false);
-
-      // Convert shape array to vector
-      std::vector<int64_t> shape(meta.shape, meta.shape + meta.rank);
-
-      // Create tensor from shared memory
-      void* src = data_base_ + meta.data_offset;
-      torch::Tensor result = torch::from_blob(src, shape, options);
-
-      return result;
-    }
+  // O(1) lookup instead of scanning every slot in the layer.
+  auto it = name_to_slot_[layer_id].find(tensor_name);
+  if (it == name_to_slot_[layer_id].end()) {
+    rebuild_layer_index(layer_id);
+    it = name_to_slot_[layer_id].find(tensor_name);
   }
+  CHECK(it != name_to_slot_[layer_id].end())
+      << "Tensor " << tensor_name << " not found in expert " << expert_id_
+      << " layer " << layer_id;
+  TensorMeta& meta = layer_metas[it->second];
 
-  LOG(FATAL) << "Tensor " << tensor_name << " not found in expert "
-             << expert_id_ << " layer " << layer_id;
+  const size_t data_region_size = static_cast<size_t>(data_region_size_);
+  const size_t layer_begin = get_layer_offset(layer_id);
+  const size_t layer_capacity = static_cast<size_t>(layer_data_region_size_);
+  CHECK_LE(layer_begin, data_region_size);
+  CHECK_LE(layer_capacity, data_region_size - layer_begin);
+  const size_t layer_end = layer_begin + layer_capacity;
+  CHECK_GT(meta.actual_size, 0)
+      << "Corrupted empty tensor metadata for " << tensor_name;
+  CHECK_GE(meta.data_offset, layer_begin)
+      << "Tensor metadata points before its layer region for " << tensor_name;
+  CHECK_LE(meta.data_offset, layer_end)
+      << "Tensor metadata points beyond its layer region for " << tensor_name;
+  CHECK_LE(meta.actual_size, layer_end - meta.data_offset)
+      << "Tensor metadata exceeds its layer region for " << tensor_name;
+  CHECK_LE(meta.data_offset, data_region_size);
+  CHECK_LE(meta.actual_size, data_region_size - meta.data_offset);
+  CHECK_GE(meta.rank, 0);
+  CHECK_LE(meta.rank, 8);
+
+  // Create tensor options from stored type
+  auto options = torch::TensorOptions()
+                     .dtype(static_cast<torch::ScalarType>(meta.dtype))
+                     .device(torch::kCPU)
+                     .requires_grad(false);
+
+  // Convert shape array to vector
+  std::vector<int64_t> shape(meta.shape, meta.shape + meta.rank);
+
+  // Keep the mapping alive for as long as the tensor storage can be accessed.
+  void* src = data_base_ + meta.data_offset;
+  torch::Tensor tensor =
+      torch::from_blob(src, shape, [shared_memory = shm_](void*) {}, options);
+  return tensor;
 }
 
 }  // namespace xllm

@@ -105,6 +105,9 @@ class LlmModelImplBase : public torch::nn::Module {
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
+      if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return ModelOutput();
+      }
       if (llmrec_params != nullptr) {
         attn_metadata.full_k_cache = llmrec_params->full_k_caches[i];
         attn_metadata.full_v_cache = llmrec_params->full_v_caches[i];
@@ -261,7 +264,11 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                                      const std::vector<int32_t>& expert_ids) {
     return;
   }
+  virtual void start_expert_weight_transfer(int32_t /*layer_id*/) {}
   virtual void update_expert_weight(int32_t layer_id) { return; }
+  virtual bool last_prepare_expert_weight_ok(int32_t /*layer_id*/) const {
+    return true;
+  }
 
   virtual layer::LmHead get_lm_head() {
     CHECK(!lm_head_.is_empty())

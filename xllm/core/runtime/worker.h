@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "common/types.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "forward_params.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/causal_lm.h"
@@ -70,6 +71,9 @@ class Worker {
   // allocate kv cache. blocking call
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
 
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor);
+
   void get_cache_info(uint64_t& cluster_id, std::string& addr, uint16_t& port);
 
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
@@ -111,18 +115,12 @@ class Worker {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
@@ -130,6 +128,9 @@ class Worker {
 
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
+      Slice<BlockTransferInfo>& block_transfer_info);
+
+  virtual std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info);
 
   // Run the model on the given input. async call

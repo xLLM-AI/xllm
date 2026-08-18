@@ -208,14 +208,26 @@ TEST_F(MLULayerSynchronizerTest, AbortUnblocksAnUnrecordedRange) {
   EXPECT_FALSE(wait_result.get());
 }
 
-TEST_F(MLULayerSynchronizerTest, RecordFailureAbortsPendingWaits) {
+TEST_F(MLULayerSynchronizerTest, RecordFailureWaitsForOwnerAbort) {
   std::shared_ptr<LayerSynchronizer> synchronizer =
       create_layer_synchronizer(/*num_layers=*/2);
   ASSERT_NE(synchronizer, nullptr);
 
+  std::future<bool> wait_result =
+      std::async(std::launch::async, [synchronizer]() {
+        return synchronizer->synchronize_layer(/*layer_index=*/1);
+      });
+
   EXPECT_FALSE(
       synchronizer->record_stream(/*layer_index=*/0, /*stream=*/nullptr));
-  EXPECT_FALSE(synchronizer->synchronize_layer(/*layer_index=*/1));
+  EXPECT_EQ(wait_result.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  synchronizer->abort();
+
+  ASSERT_EQ(wait_result.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_FALSE(wait_result.get());
 }
 
 TEST_F(MLULayerSynchronizerTest, ModelInputWaitsAtRangeBoundaries) {

@@ -34,3 +34,75 @@ xllm = "xllm.launch_server:main"
 [tool.setuptools.dynamic]
 readme = { file = ["README.md"], content-type = "text/markdown" }
 version = { file = ["version.txt"] }
+
+[tool.ruff]
+line-length = 120
+exclude = ["third_party", "build", "cibuild"]
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+    # flake8-logging-format
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # undefined name (string annotations, dynamic imports)
+    "F821",
+    # unused import (side-effect imports like torch_npu are common)
+    "F401",
+    # unused variable (kernel code uses precomputed constants for clarity)
+    "F841",
+    # import shadowed by loop var
+    "F402",
+    # line too long (ruff-format handles code; comments/strings left as-is)
+    "E501",
+    # module import not at top of file (path setup patterns)
+    "E402",
+    # lambda expression assignment
+    "E731",
+    # zip without strict=
+    "B905",
+    # loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # deprecated typing imports (List, Tuple, Optional -> list, tuple, X | None)
+    "UP035",
+    # raise without from inside except
+    "B904",
+    # ternary instead of if-else block
+    "SIM108",
+    # nested if instead of and
+    "SIM102",
+    # suppressible exception (try/except/pass is idiomatic in device probing)
+    "SIM105",
+    # use capitalized env var (external tools like CMake require specific casing)
+    "SIM112",
+    # use key in dict instead of dict.keys() (not always applicable)
+    "SIM118",
+    # return condition directly (readability preference)
+    "SIM103",
+    # use X | Y for Union (keep compatibility with older annotations)
+    "UP007",
+    # use X | None for Optional
+    "UP045",
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.codespell]
+skip = "build,third_party,cibuild"

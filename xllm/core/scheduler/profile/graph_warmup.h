@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 #include "common/types.h"
 
@@ -32,13 +31,6 @@ enum class GraphWarmupPlan : int8_t {
 };
 
 GraphWarmupPlan graph_warmup_plan(InstanceRole role);
-
-std::vector<int32_t> graph_warmup_buckets(int32_t max_seqs_per_batch);
-
-bool skip_graph_bucket(int32_t bucket, int32_t dp_size);
-
-std::vector<int32_t> graph_decode_buckets(int32_t max_seqs_per_batch,
-                                          int32_t dp_size);
 
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,

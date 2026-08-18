@@ -109,7 +109,7 @@ bool LLM::Initialize(const std::string& model_path,
         .is_local(init_options.is_local)
         .server_idx(init_options.server_idx);
 
-#if !defined(USE_NPU) && !defined(USE_CUDA)
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
     BeamSearchConfig::get_instance().enable_block_copy_kernel(false);
 #endif
     llm_core_ = new LLMCore();

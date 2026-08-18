@@ -79,14 +79,19 @@ int64_t index_slot_size(const ModelArgs& model_args,
   }
 
   const int64_t index_n_head = 1;
+  int64_t split_factor = 1;
+  if (Platform::supports_dsa_indexer_cache_sharding() &&
+      util::kv_split_size_effective() > 1) {
+    split_factor = util::kv_split_size_effective();
+  }
   if (enable_indexer_cache_quantization) {
     // int8 index cache: one byte per element, plus an independent per-token
     // fp32 scale (kept separate from the main-KV scale_slot_size path).
-    return static_cast<int64_t>(sizeof(int8_t)) * index_n_head *
-               model_args.index_head_dim() +
-           static_cast<int64_t>(sizeof(float));
+    return split_factor * (static_cast<int64_t>(sizeof(int8_t)) * index_n_head *
+                               model_args.index_head_dim() +
+                           static_cast<int64_t>(sizeof(float)));
   }
-  return dtype_size * index_n_head * model_args.index_head_dim();
+  return split_factor * dtype_size * index_n_head * model_args.index_head_dim();
 }
 
 int64_t scale_slot_size(const ModelArgs& model_args,
@@ -115,12 +120,6 @@ int64_t standard_full_cache_block_size_in_bytes(
        indexer_layers * kv_cache_cap.index_slot_size());
   CHECK_GT(logical_block_bytes, 0) << "logical block bytes must be positive";
   return logical_block_bytes;
-}
-
-bool is_qwen3_5_target_model_type(const std::string& model_type) {
-  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
-         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text" ||
-         model_type.rfind("qwen3_5_", 0) == 0;
 }
 
 bool enable_qwen3_5_spec_verify(const ModelArgs& model_args,
@@ -334,16 +333,17 @@ void init_dsv4_counts(const ModelArgs& model_args,
   if (options.draft_model_args != nullptr) {
     CHECK(options.draft_options != nullptr)
         << "DSV4 draft options must be provided with draft model args";
-    CHECK(util::is_target_model_type(options.draft_model_args->model_type(),
-                                     /*target_type=*/"deepseek_v4",
-                                     /*match_mtp=*/true))
-        << "DSV4 MTP kv cache estimation only supports DeepSeek V4 draft";
+    CHECK(
+        util::is_deepseek_v4_model_type(options.draft_model_args->model_type()))
+        << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
+           "draft";
     const Dsv4KVCacheEstimateCost draft_cost = estimate_dsv4_kv_cache_cost(
         *options.draft_model_args, *options.draft_options);
     const int64_t constant_bytes =
         cache_cost.constant_swa_bytes + draft_cost.constant_swa_bytes;
     CHECK_GT(kv_cache_cap->cache_size_in_bytes(), constant_bytes)
-        << "no memory left for mtp target/draft fixed kv cache allocation";
+        << "no memory left for speculative target/draft fixed kv cache "
+           "allocation";
 
     const int64_t token_unit_bytes =
         cache_cost.token_unit_bytes + draft_cost.token_unit_bytes;
@@ -353,14 +353,15 @@ void init_dsv4_counts(const ModelArgs& model_args,
         (kv_cache_cap->cache_size_in_bytes() - constant_bytes) /
         token_unit_bytes;
     CHECK_GT(token_unit_count, 0)
-        << "no memory left for mtp target/draft kv cache token blocks";
+        << "no memory left for speculative target/draft kv cache token "
+           "blocks";
 
     const int64_t adjusted_cache_size_in_bytes =
         cache_cost.constant_swa_bytes +
         token_unit_count * cache_cost.token_unit_bytes;
     CHECK_GT(adjusted_cache_size_in_bytes, 0)
-        << "no memory left for mtp target/draft kv cache allocation";
-    LOG(INFO) << "mtp kv cache capacity adjusted from "
+        << "no memory left for speculative target/draft kv cache allocation";
+    LOG(INFO) << "speculative kv cache capacity adjusted from "
               << readable_size(kv_cache_cap->cache_size_in_bytes()) << " to "
               << readable_size(adjusted_cache_size_in_bytes)
               << ", target_constant_bytes=" << cache_cost.constant_swa_bytes
@@ -498,12 +499,11 @@ KVCacheCapacity estimate_kv_cache_capacity(
   CHECK_GT(kv_cache_cap.cache_size_in_bytes(), 0)
       << "Available kv cache size must be greater than 0";
   const bool enable_dsv4_estimation =
-      util::is_target_model_type(model_args.model_type(),
-                                 /*target_type=*/"deepseek_v4",
-                                 /*match_mtp=*/true);
+      util::is_deepseek_v4_model_type(model_args.model_type());
   if (options.draft_model_args != nullptr) {
     CHECK(enable_dsv4_estimation)
-        << "DSV4 MTP kv cache estimation only supports DeepSeek V4 target";
+        << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
+           "target";
   }
 
   const int64_t dtype_size = static_cast<int64_t>(

@@ -36,12 +36,14 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
+#include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
 #include "layers/cuda/flashinfer_workspace.h"
 #endif
 #include "models/model_registry.h"
+#include "util/env_var.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
 
@@ -56,11 +58,7 @@ void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
 
 StreamEventPtr record_current_stream_event(const Device& device) {
   std::unique_ptr<Stream> stream = device.current_stream();
-  StreamEventPtr event = stream->record_event();
-  if (event == nullptr) {
-    stream->synchronize();
-  }
-  return event;
+  return stream->record_event_or_sync();
 }
 
 }  // namespace
@@ -85,8 +83,26 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
 bool LLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
   const auto& model_config = ModelConfig::get_instance();
+#if defined(USE_MUSA)
+  static const bool use_pool_compute_stream = util::get_bool_env(
+      "XLLM_MUSA_POOL_COMPUTE_STREAM", /*default_value=*/true);
+  const bool is_qwen3 = context.get_model_args().model_type() == "qwen3";
+  if (use_pool_compute_stream && !is_qwen3) {
+    compute_stream_ = device_.get_stream_from_pool();
+  } else if (use_pool_compute_stream) {
+    LOG(WARNING) << "MUSA pool compute streams are not validated for Qwen3 "
+                    "attention; using the default compute stream.";
+  }
 
-#if defined(USE_CUDA)
+  const auto& beam_search_config = BeamSearchConfig::get_instance();
+  CHECK(!has_linear_attention_layers(context.get_model_args()) ||
+        (!beam_search_config.enable_beam_search_kernel() &&
+         beam_search_config.beam_width() <= 1))
+      << "MUSA beam search is not supported for models with linear-attention "
+         "layers.";
+#endif
+
+#if defined(USE_CUDA) || defined(USE_MUSA)
   // Ensure FlashinferWorkspace is initialized on the calling thread before
   // constructing model layers. When called synchronously from
   // SpeculativeWorkerImpl (e.g. MTP target/draft setup), init_model runs on
@@ -117,7 +133,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
       model_.get(), context.get_model_args(), device_, options_);
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    eplb_executor_ = std::make_unique<EplbExecutor>(model_.get(), device_);
+    eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
   }
 
   if (::xllm::BeamSearchConfig::get_instance().enable_beam_search_kernel()) {
@@ -223,7 +239,6 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
-#if defined(USE_NPU)
   // Restore live recurrent-state slots from saved checkpoints here (worker
   // thread, on compute_stream_) instead of in prepare_work_before_execute on
   // prepare_stream_. The single-threaded worker pool guarantees the previous
@@ -232,12 +247,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
   // after those writes without needing a cross-stream barrier.
   if (has_linear_attention_layers(context_.get_model_args())) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
-    auto& mutable_params = const_cast<ModelInputParams&>(input.input_params);
+    ModelInputParams& mutable_params =
+        const_cast<ModelInputParams&>(input.input_params);
     restore_linear_state_slots(kv_caches_,
                                mutable_params.linear_state_cache_ops,
-                               mutable_params.parallel.has_initial_state);
+                               mutable_params.linear_state_validity_mask);
   }
-#endif
   return execute_no_sync_on_stream(input, *compute_stream_);
 }
 
@@ -247,7 +262,8 @@ LLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
       << "failed to wait last step output ready event";
-  return update_input_by_last_step_output(input);
+  return WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
+      input);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
@@ -291,18 +307,22 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     CHECK(kv_transfers.wait()) << "KV cache push failed";
   };
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    eplb_executor_->eplb_execute(input.input_params.expert.eplb_info);
+    eplb_executor_->start_eplb_step(input.input_params.expert.eplb_info);
   }
 
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+    eplb_executor_->finish_eplb_step();
+  }
   if (!model_output.hidden_states.defined()) {
     wait_kv_push();
     return std::nullopt;
   }
 
   torch::Tensor logits;
+  torch::Tensor selected_hidden;
   if (sampling_params.selected_token_idxes.defined()) {
     torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
     if (model_output.hidden_states.defined() &&
@@ -312,17 +332,35 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    if (input.return_selected_hidden) {
+      // Emit both selected hidden and logits from a single lm_head pass so the
+      // ConfidenceHead can consume hidden without a second projection.
+      logits = model_->logits(
+          model_output.hidden_states, selected_token_idxes, selected_hidden);
+      if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
+        // ATB lm_head backend does not expose a second output tensor
+        // (LmHeadParam::outputHidden is false), so we surface the hidden here.
+        // selected_hidden must align row-for-row with `logits`, which is
+        // produced in selected_token_idxes order. index_select reproduces that
+        // order for any selection. We deliberately do NOT alias the full
+        // hidden_states on a numel match: equal row count does not imply the
+        // idxes are the identity permutation, and a full-but-reordered
+        // selection would silently misalign hidden against logits. The gather
+        // is one [num_selected, hidden] copy per decode step (not per layer),
+        // negligible next to the forward.
+        selected_hidden = model_output.hidden_states.index_select(
+            /*dim=*/0, selected_token_idxes.to(torch::kLong));
+      }
+    } else {
+      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    }
   }
 
   ForwardOutput output;
   output.mtp_topk_state = std::move(model_output.mtp_topk_state);
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     output.expert_load_data = expert_load_data_;
-    output.prepared_layer_id = eplb_executor_->get_ready_layer_id();
-    if (output.prepared_layer_id != -1) {
-      eplb_executor_->reset_ready_layer_id();
-    }
+    output.prepared_token = eplb_executor_->consume_ready_prepare_token();
   }
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
@@ -344,11 +382,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   // driver prepare model output
   if (sampling_params.selected_token_idxes.defined()) {
     output.logits = logits;
+    output.selected_hidden = selected_hidden;
     output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
+      output.filter_bitmask_applied_to_logits =
+          sampling_params.filter_bitmask.defined();
 
       // beam search kernel
       BeamSearchOutput beam_search_output;
@@ -393,7 +434,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 #endif
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
     wait_kv_push();
-    output.retained_input = std::make_shared<ForwardInput>(input);
+    output.retained_inputs.emplace_back(std::make_shared<ForwardInput>(input));
     if (enable_schedule_overlap() && record_ready_event) {
       output.ready_event = record_current_stream_event(device_);
     }

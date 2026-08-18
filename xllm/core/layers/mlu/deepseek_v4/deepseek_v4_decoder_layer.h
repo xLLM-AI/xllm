@@ -33,6 +33,13 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+struct DeepseekV4PendingMHC {
+  torch::Tensor x;
+  torch::Tensor residual;
+  torch::Tensor post;
+  torch::Tensor comb;
+};
+
 class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
  public:
   DeepseekV4DecoderLayerImpl(const ModelContext& context, int32_t layer_id);
@@ -49,7 +56,9 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
       const AttentionMetadata& attn_metadata,
       KVCache& kv_cache,
       const ModelInputParams& input_params,
-      const std::optional<torch::Tensor>& input_ids = std::nullopt);
+      const std::optional<torch::Tensor>& input_ids = std::nullopt,
+      std::optional<DeepseekV4PendingMHC>* pending_mhc = nullptr,
+      bool is_last_layer = true);
 
  private:
   std::optional<torch::Tensor> route_input_ids(

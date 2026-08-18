@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "base_executor_impl.h"
 #include "core/common/constants.h"
+#include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
@@ -33,6 +34,7 @@ limitations under the License.
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
+#include "runtime/decode_graph_bucket.h"
 #include "runtime/options.h"
 
 namespace xllm {
@@ -42,16 +44,68 @@ class ScopedConfigSnapshot final {
  public:
   ScopedConfigSnapshot()
       : max_tokens_for_graph_mode_(
-            ExecutionConfig::get_instance().max_tokens_for_graph_mode()) {}
+            ExecutionConfig::get_instance().max_tokens_for_graph_mode()),
+        enable_graph_mode_decode_no_padding_(
+            ExecutionConfig::get_instance()
+                .enable_graph_mode_decode_no_padding()) {}
 
   ~ScopedConfigSnapshot() {
     ExecutionConfig::get_instance().max_tokens_for_graph_mode(
         max_tokens_for_graph_mode_);
+    ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(
+        enable_graph_mode_decode_no_padding_);
   }
 
  private:
   int32_t max_tokens_for_graph_mode_;
+  bool enable_graph_mode_decode_no_padding_;
 };
+
+class CompatibilityShapeEngine final : public Engine {
+ public:
+  ForwardOutput step(std::vector<Batch>& /*batch*/) override { return {}; }
+
+  void update_last_step_result(std::vector<Batch>& /*batch*/) override {}
+
+  std::vector<int64_t> get_active_activation_memory() const override {
+    return {};
+  }
+};
+
+TEST(DecodeGraphBucketTest, MapsTokenBucketsWithAndWithoutPadding) {
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/1, /*enable_no_padding=*/false),
+            1);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/2, /*enable_no_padding=*/false),
+            2);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/3, /*enable_no_padding=*/false),
+            4);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/8, /*enable_no_padding=*/false),
+            8);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/9, /*enable_no_padding=*/false),
+            16);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/17, /*enable_no_padding=*/false),
+            32);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/17, /*enable_no_padding=*/true),
+            17);
+}
+
+TEST(DecodeGraphExecutionShapeTest, DefaultEngineUsesSingleTokenDecodeShape) {
+  CompatibilityShapeEngine engine;
+
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      engine.decode_graph_execution_shape();
+
+  EXPECT_EQ(execution_shape.num_decoding_tokens, 1);
+  EXPECT_EQ(execution_shape.num_speculative_tokens, 0);
+  EXPECT_FALSE(execution_shape.enable_graph_mode_decode_no_padding);
+}
 
 }  // namespace
 

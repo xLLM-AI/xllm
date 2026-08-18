@@ -531,6 +531,16 @@ std::optional<std::string> validate_host_cache_options(
     violations.emplace_back(
         "prefix caching is disabled; set --enable_prefix_cache=true");
   }
+  if (options.enable_disagg_pd) {
+    if (options.enable_pd_ooc) {
+      violations.emplace_back(
+          "disaggregated host offload does not support PD-OOC");
+    }
+  } else if (options.instance_role != InstanceRole::DEFAULT) {
+    violations.emplace_back(
+        "host offload outside disaggregated serving requires the DEFAULT "
+        "instance role");
+  }
 
   // Quantized KV caches add scale tensors whose host offload and restore
   // lifecycle is not supported consistently by the common path yet.
@@ -542,7 +552,8 @@ std::optional<std::string> validate_host_cache_options(
   if (!options.has_key_cache_shape) {
     violations.emplace_back("KV cache has no key-cache tensor to offload");
   }
-  if (options.has_grouped_cache_layout) {
+  if (options.has_grouped_cache_layout &&
+      !options.supports_grouped_cache_offload) {
     std::ostringstream violation;
     violation << "model \"" << options.model_type
               << "\" uses a grouped cache layout (for example DeepSeek-V4 "

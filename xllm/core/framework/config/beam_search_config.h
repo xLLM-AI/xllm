@@ -50,7 +50,7 @@ class BeamSearchConfig final {
 
   PROPERTY(int32_t, beam_width) = 1;
 
-#if defined(USE_NPU) || defined(USE_CUDA)
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MUSA)
   PROPERTY(bool, enable_block_copy_kernel) = true;
 #else
   PROPERTY(bool, enable_block_copy_kernel) = false;

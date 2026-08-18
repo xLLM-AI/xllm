@@ -184,11 +184,20 @@ class BlockManager {
       Sequence* seq,
       size_t num_tokens) = 0;
 
+  // State-explicit growth for hierarchy-managed Host/HBM leaves. Unlike the
+  // Sequence overload, this does not assume that blocks live in kv_state().
+  virtual std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
+      size_t num_tokens) = 0;
+
   // Sliding-window hook: release leading blocks that have slid out of the
   // window. The composite calls this on every leaf AFTER a successful
   // allocate_sequence commit; non-SWA leaves keep the empty default (no-op).
   // Running post-commit means a failed round never releases existing blocks.
   virtual void release_out_of_window(Sequence* /*seq*/) {}
+  virtual void release_out_of_window(Sequence* /*seq*/,
+                                     KVCacheState& /*kv_state*/) {}
 
   // Post-construction init hook: only the xtensor leaf needs it (KV tensors
   // must be created on the worker before VMM physical pages can be mapped to

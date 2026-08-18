@@ -29,6 +29,7 @@ limitations under the License.
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include "common/metrics.h"
@@ -53,6 +54,7 @@ limitations under the License.
 #include "platform/platform.h"
 #include "rec_engine.h"
 #include "rec_master.h"
+#include "runtime/options.h"
 #include "speculative_engine.h"
 #include "util/model_config_utils.h"
 #include "util/scope_guard.h"
@@ -69,12 +71,30 @@ DECLARE_bool(graceful_quit_on_sighup);
 namespace xllm {
 namespace {
 
+void apply_runtime_kv_cache_options(const Options& source,
+                                    runtime::Options& destination) {
+  destination.host_blocks_factor(source.host_blocks_factor())
+      .enable_kvcache_store(source.enable_kvcache_store())
+      .store_protocol(source.store_protocol())
+      .store_master_server_address(source.store_master_server_address())
+      .store_metadata_server(source.store_metadata_server())
+      .store_local_hostname(source.store_local_hostname())
+      .prefetch_batch_size(source.prefetch_batch_size())
+      .prefetch_timeout(source.prefetch_timeout())
+      .layers_wise_copy_batchs(source.layers_wise_copy_batchs())
+      .kv_cache_dtype(source.kv_cache_dtype());
+}
+
 std::optional<std::string> validate_model_cp(const Options& options,
                                              EngineType engine_type,
                                              const std::string& model_type,
                                              int32_t global_world_size) {
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
+  }
+  if (Platform::is_mlu() &&
+      ParallelConfig::get_instance().kv_split_size() > 1) {
+    return "MLU only support DCP  for now when kv split size > 1";
   }
   if (options.cp_size() == 1) {
     return std::nullopt;
@@ -145,6 +165,42 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.instance_role() != InstanceRole::DEFAULT &&
         options.instance_role() != InstanceRole::PREFILL) {
       return "Model-side CP supports only DEFAULT or PREFILL roles";
+    }
+
+    // Python model executor runs a standalone torch CP path (all-gather KV,
+    // eager prefill only) that does not go through the ATB fused-attention op,
+    // so it bypasses the ATB-backend requirement and the ATB CP capability
+    // allowlist below. The safety constraints above (LLM/generate, no graph,
+    // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
+    // be > 1, sharing world = cp * tp); the collective communicator builds the
+    // narrowed TP group and the strided CP group as separate torch subgroups
+    // off the shared world rendezvous endpoint. DP > 1 stays unsupported: the
+    // Python executor does not implement the dp * cp * tp rank layout.
+    if (ModelConfig::is_python_model_impl(
+            ModelConfig::get_instance().model_impl())) {
+      // Only models whose Python forward actually shards the sequence (via
+      // cp_shard_rows / cp_merge_rows) may enable CP. Other Python models keep
+      // a full-sequence forward, so a cp_context would be built but never
+      // consumed: qwen3_5 would reach _prefill_cp with unsharded rows (garbled
+      // or out-of-bounds output) and MLA models (glm_moe_dsa, deepseek_v32)
+      // would silently recompute the whole sequence on every rank. Mirror the
+      // NPU-side is_npu_model_cp_capable allowlist rather than admit any
+      // model_impl=python model_type.
+      static const std::unordered_set<std::string> kPythonCpCapableModels = {
+          "qwen3",
+      };
+      if (kPythonCpCapableModels.find(model_type) ==
+          kPythonCpCapableModels.end()) {
+        return "Python model-side CP does not support model_type=" +
+               model_type + "; only qwen3 implements the CP sequence sharding.";
+      }
+      if (options.dp_size() != 1) {
+        return "Python CP requires dp_size == 1";
+      }
+      if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+        return "Python CP requires world_size divisible by dp_size * cp_size";
+      }
+      return std::nullopt;
     }
 
     // Require registered NPU model-side CP capability. The backend is not
@@ -290,6 +346,15 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
+  if (options_.host_blocks_factor() > 1.0) {
+    const bool supports_host_offload =
+        type == EngineType::LLM ||
+        (type == EngineType::SSM &&
+         SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()));
+    CHECK(supports_host_offload)
+        << "Basic host KV cache offload supports the LLM engine and the MTP "
+           "speculative engine only.";
+  }
   // Multi-process serving runs one worker per process. Select one runtime
   // logical device from the process-visible devices while keeping node_rank as
   // the global distributed identity.
@@ -300,12 +365,21 @@ Master::Master(const Options& options, EngineType type)
   const std::vector<torch::Device> devices = {visible_devices[device_idx]};
   // World size is the node count (one worker per process).
   const int32_t global_world_size = options_.nnodes();
-  std::string cp_model_type;
-  if (options_.cp_size() > 1 && Platform::uses_model_cp_sharding()) {
-    cp_model_type = util::get_model_type(model_path, options_.backend());
+  std::string model_type;
+  if ((options_.cp_size() > 1 && Platform::uses_model_cp_sharding()) ||
+      (ModelConfig::is_python_model_impl(
+           ModelConfig::get_instance().model_impl()) &&
+       options_.num_speculative_tokens() > 0)) {
+    model_type = util::get_model_type(model_path, options_.backend());
   }
+  const std::optional<std::string> speculative_error =
+      ModelConfig::validate_python_speculative_decode(
+          ModelConfig::get_instance().model_impl(),
+          model_type,
+          options_.num_speculative_tokens());
+  CHECK(!speculative_error.has_value()) << speculative_error.value();
   const std::optional<std::string> cp_error =
-      validate_model_cp(options_, type, cp_model_type, global_world_size);
+      validate_model_cp(options_, type, model_type, global_world_size);
   CHECK(!cp_error.has_value()) << cp_error.value();
   options_.enable_mla(util::should_enable_mla(model_path, options_.backend()));
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
@@ -396,6 +470,8 @@ Master::Master(const Options& options, EngineType type)
         .enable_mmrs_fusion(options_.enable_mmrs_fusion())
         .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
+        .instance_role(options_.instance_role())
+        .enable_disagg_pd(options_.enable_disagg_pd())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -461,6 +537,9 @@ Master::Master(const Options& options, EngineType type)
             options_.speculative_suffix_max_cached_requests())
         .speculative_suffix_use_tree_spec(
             options_.speculative_suffix_use_tree_spec())
+        .enable_adaptive_speculative_decode(
+            options_.enable_adaptive_speculative_decode())
+        .adaptive_speculative_min_gain(options_.adaptive_speculative_min_gain())
         .task_type(options_.task_type())
         .enable_mla(options_.enable_mla())
         .npu_kernel_backend(options_.npu_kernel_backend())
@@ -483,6 +562,7 @@ Master::Master(const Options& options, EngineType type)
         .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
         .transfer_listen_port(options_.transfer_listen_port())
         .enable_disagg_pd(options_.enable_disagg_pd())
+        .enable_pd_ooc(options_.enable_pd_ooc())
         .enable_service_routing(options_.enable_service_routing())
         .enable_schedule_overlap(options_.enable_schedule_overlap())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -498,6 +578,7 @@ Master::Master(const Options& options, EngineType type)
         .enable_prefill_piecewise_graph(
             options_.enable_prefill_piecewise_graph())
         .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode());
+    apply_runtime_kv_cache_options(options_, spec_options);
 
     if (use_suffix_spec) {
       engine_ = std::make_unique<SuffixSpeculativeEngine>(spec_options);
@@ -543,14 +624,6 @@ Master::Master(const Options& options, EngineType type)
         .enable_disagg_pd(options_.enable_disagg_pd())
         .enable_service_routing(options_.enable_service_routing())
         .enable_schedule_overlap(options_.enable_schedule_overlap())
-        .host_blocks_factor(options_.host_blocks_factor())
-        .enable_kvcache_store(options_.enable_kvcache_store())
-        .store_protocol(options_.store_protocol())
-        .store_master_server_address(options_.store_master_server_address())
-        .store_metadata_server(options_.store_metadata_server())
-        .store_local_hostname(options_.store_local_hostname())
-        .prefetch_batch_size(options_.prefetch_batch_size())
-        .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
         .enable_offline_inference(options_.enable_offline_inference())
         .disable_log_stats(options_.disable_log_stats())
         .spawn_worker_path(options_.spawn_worker_path())
@@ -565,9 +638,9 @@ Master::Master(const Options& options, EngineType type)
         .enable_prefill_piecewise_graph(
             options_.enable_prefill_piecewise_graph())
         .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
-        .kv_cache_dtype(options_.kv_cache_dtype())
         .enable_sleep_mode(options_.enable_sleep_mode())
         .model_id(options_.model_id());
+    apply_runtime_kv_cache_options(options_, eng_options);
 
     engine_ = std::make_unique<LLMEngine>(eng_options);
   } else if (type == EngineType::REC) {

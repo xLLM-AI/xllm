@@ -55,13 +55,9 @@ def tmo_fused_gdn_gating_kernel(
         blk_bias = tl.load(dt_bias + head_off, mask=mask)
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
-        softplus_x = tl.where(
-            beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
-        )
+        softplus_x = tl.where(beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x)
         blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
         tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
         # compute beta_output = sigmoid(b)
         blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
-        tl.store(
-            beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask
-        )
+        tl.store(beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask)

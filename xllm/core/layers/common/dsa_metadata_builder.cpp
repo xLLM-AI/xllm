@@ -16,6 +16,7 @@ limitations under the License.
 #include "dsa_metadata_builder.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "attention_metadata.h"
 #include "attention_metadata_builder.h"
@@ -235,6 +236,7 @@ void DSAMetadataBuilder::build_dsa_fields(
                     group_infos[m],
                     ctx_lens,
                     q_lens_vec,
+                    params.attention.host.new_cache_slots,
                     batch_size,
                     total_tokens,
                     graph_slot_capacity,
@@ -320,16 +322,18 @@ int64_t DSAMetadataBuilder::compute_slot_num(const DSAGroupInfo& gi,
   return (n == 0 && token_len > 0) ? bs : n;
 }
 
-void DSAMetadataBuilder::process_group(const torch::Tensor& raw_bt,
-                                       const DSAGroupInfo& gi,
-                                       const std::vector<int32_t>& ctx_lens,
-                                       const std::vector<int32_t>& q_lens,
-                                       int32_t batch_size,
-                                       int64_t total_tokens,
-                                       int64_t graph_slot_capacity,
-                                       int32_t block_table_capacity_cols,
-                                       torch::Tensor& out_bt,
-                                       torch::Tensor& out_slots) {
+void DSAMetadataBuilder::process_group(
+    const torch::Tensor& raw_bt,
+    const DSAGroupInfo& gi,
+    const std::vector<int32_t>& ctx_lens,
+    const std::vector<int32_t>& q_lens,
+    const std::vector<int32_t>& new_cache_slots,
+    int32_t batch_size,
+    int64_t total_tokens,
+    int64_t graph_slot_capacity,
+    int32_t block_table_capacity_cols,
+    torch::Tensor& out_bt,
+    torch::Tensor& out_slots) {
   if (gi.type == DSACacheType::TOKEN) {
     process_token_group(raw_bt,
                         gi.ratio,
@@ -347,6 +351,7 @@ void DSAMetadataBuilder::process_group(const torch::Tensor& raw_bt,
                       gi.block_size,
                       ctx_lens,
                       q_lens,
+                      new_cache_slots,
                       batch_size,
                       graph_slot_capacity,
                       block_table_capacity_cols,
@@ -463,15 +468,17 @@ void DSAMetadataBuilder::process_token_group(
                : raw_bt;
 }
 
-void DSAMetadataBuilder::process_swa_group(const torch::Tensor& raw_bt,
-                                           int32_t block_size,
-                                           const std::vector<int32_t>& ctx_lens,
-                                           const std::vector<int32_t>& q_lens,
-                                           int32_t batch_size,
-                                           int64_t graph_slot_capacity,
-                                           int32_t block_table_capacity_cols,
-                                           torch::Tensor& out_bt,
-                                           torch::Tensor& out_slots) {
+void DSAMetadataBuilder::process_swa_group(
+    const torch::Tensor& raw_bt,
+    int32_t block_size,
+    const std::vector<int32_t>& ctx_lens,
+    const std::vector<int32_t>& q_lens,
+    const std::vector<int32_t>& new_cache_slots,
+    int32_t batch_size,
+    int64_t graph_slot_capacity,
+    int32_t block_table_capacity_cols,
+    torch::Tensor& out_bt,
+    torch::Tensor& out_slots) {
   CHECK_EQ(static_cast<int32_t>(ctx_lens.size()), batch_size)
       << "process_swa_group requires ctx_lens.size == batch_size, got "
       << ctx_lens.size() << " vs " << batch_size;
@@ -521,19 +528,31 @@ void DSAMetadataBuilder::process_swa_group(const torch::Tensor& raw_bt,
   };
 
   int64_t write_idx = 0;
-  for (int32_t seq = 0; seq < batch_size; ++seq) {
-    const int64_t ctx_len = static_cast<int64_t>(ctx_lens[seq]);
-    const int64_t q_len =
-        std::clamp<int64_t>(static_cast<int64_t>(q_lens[seq]), 0, ctx_len);
-    if (seq >= raw_bt.size(0)) {
-      write_idx += q_len;
-      continue;
-    }
-    const int64_t q_start = ctx_len - q_len;
-    for (int64_t i = 0; i < q_len; ++i) {
-      out_slots_acc[write_idx++] = slot_for_position(seq, q_start + i);
+  if (static_cast<int64_t>(new_cache_slots.size()) == query_total_tokens) {
+    // Expanded block-parallel rows all report q_len=1 and the same kv_len, so
+    // q_start cannot recover their distinct positions. The row builder already
+    // resolved those positions through the SWA ring; preserve those slots.
+    std::memcpy(out_slots_acc.data(),
+                new_cache_slots.data(),
+                query_total_tokens * sizeof(int32_t));
+    write_idx = query_total_tokens;
+  } else {
+    for (int32_t seq = 0; seq < batch_size; ++seq) {
+      const int64_t ctx_len = static_cast<int64_t>(ctx_lens[seq]);
+      const int64_t q_len =
+          std::clamp<int64_t>(static_cast<int64_t>(q_lens[seq]), 0, ctx_len);
+      if (seq >= raw_bt.size(0)) {
+        write_idx += q_len;
+        continue;
+      }
+      const int64_t q_start = ctx_len - q_len;
+      for (int64_t i = 0; i < q_len; ++i) {
+        out_slots_acc[write_idx++] = slot_for_position(seq, q_start + i);
+      }
     }
   }
+  CHECK_EQ(write_idx, query_total_tokens)
+      << "process_swa_group slot count mismatch";
 
   out_slots = out_slots_tensor;
 

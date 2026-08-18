@@ -382,8 +382,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     scheduler_->set_timesteps(num_inference_steps, device_);
     scheduler_->set_begin_index(0);
     auto timesteps = scheduler_->timesteps();
-    DiTCache::get_instance().set_infer_steps(num_inference_steps);
-    DiTCache::get_instance().set_num_blocks(num_layers_);
+    DiTCache::get_instance().set_context({/*infer_steps=*/num_inference_steps,
+                                          /*num_blocks=*/num_layers_});
 
     TransformerForwardContext prompt_transformer_context =
         prepare_transformer_context(batch_size,
@@ -480,8 +480,11 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       CHECK(tokenizer != nullptr)
           << "Failed to load JoyImageEditPlus Qwen3-VL tokenizer";
       tokenizer_ = std::shared_ptr<Tokenizer>(std::move(tokenizer));
-      multimodal_processor_ = create_multimodal_processor(
-          text_encoder_model_args_, tokenizer_, /*max_cache_items=*/0);
+      multimodal_processor_ =
+          create_multimodal_processor(text_encoder_model_args_,
+                                      tokenizer_,
+                                      /*max_cache_items=*/0,
+                                      text_encoder_loader->tokenizer_args());
     }
 
     vae_->load_model(std::move(vae_loader));

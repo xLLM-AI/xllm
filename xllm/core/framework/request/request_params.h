@@ -38,6 +38,11 @@ limitations under the License.
 
 namespace xllm {
 
+enum class ResponseFormatType : int8_t {
+  NONE = 0,
+  JSON_OBJECT = 1,
+};
+
 struct RequestParams {
   RequestParams() = default;
   RequestParams(const proto::CompletionRequest& request,
@@ -175,6 +180,9 @@ struct RequestParams {
   bool add_special_tokens = false;
 
   nlohmann::json chat_template_kwargs = nlohmann::json::object();
+
+  ResponseFormatType response_format = ResponseFormatType::NONE;
+  std::string response_format_error;
 
   bool is_sample_request = false;
 

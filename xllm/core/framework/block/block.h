@@ -80,6 +80,10 @@ inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
       return BlockType::C4;
     case cache_group_id(BlockType::C128):
       return BlockType::C128;
+    case cache_group_id(BlockType::EMBEDDING):
+      return BlockType::EMBEDDING;
+    case cache_group_id(BlockType::LINEAR):
+      return BlockType::LINEAR;
     default:
       return std::nullopt;
   }

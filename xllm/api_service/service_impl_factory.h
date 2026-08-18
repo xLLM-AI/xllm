@@ -31,6 +31,7 @@ class ServiceImplFactory {
   static void create(APIService* service,
                      Master* master,
                      const std::vector<std::string>& model_names,
+                     const std::vector<std::string>& model_repository_names,
                      const std::vector<std::string>& model_versions);
 };
 

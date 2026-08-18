@@ -3,6 +3,32 @@ include(cc_test)
 if(USE_NPU)
   cc_test(
     NAME
+      dspark_confidence_head_test
+    SRCS
+      dspark_confidence_head_test.cpp
+    DEPS
+      :models
+      :state_dict
+      :xllm_ops
+      glog::glog
+      torch
+      GTest::gtest_main
+  )
+  target_link_libraries(dspark_confidence_head_test
+                        PRIVATE
+                        torch_npu
+                        ascendcl
+                        hccl
+                        c_sec
+                        nnopbase
+                        atb)
+  target_link_options(dspark_confidence_head_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+
+  cc_test(
+    NAME
       acl_graph_executor_test
     SRCS
       acl_graph_executor_test.cpp
@@ -66,34 +92,13 @@ endif()
 
 cc_test(
   NAME
-    spec_input_builder_test
+    worker_json_object_overlap_test
   SRCS
-    spec_input_builder_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/spec_input_builder.cpp"
+    worker_json_object_overlap_test.cpp
   DEPS
-    :multimodal
-    :parallel_state
-    torch
-    glog::glog
-    proto::xllm_proto
+    :json_object_grammar
     GTest::gtest_main
 )
-
-cc_test(
-  NAME
-    mtp_async_state_test
-  SRCS
-    mtp_async_state_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/mtp_async_state.cpp"
-  DEPS
-    torch
-    glog::glog
-    GTest::gtest_main
-)
-if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
-  target_link_options(mtp_async_state_test PRIVATE
-    "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
-endif()
 
 if(USE_MLU)
   cc_test(
@@ -101,6 +106,22 @@ if(USE_MLU)
       mlu_graph_executor_test
     SRCS
       mlu_graph_executor_test.cpp
+      mlu_linear_state_restore_worker_test.cpp
+    DEPS
+      :runtime
+      :model_loader
+      :batch
+      :kv_cache
+      :platform
+      GTest::gtest_main
+      torch_mlu
+  )
+
+  cc_test(
+    NAME
+      mtp_host_offload_test
+    SRCS
+      mtp_host_offload_test.cpp
     DEPS
       :runtime
       :model_loader

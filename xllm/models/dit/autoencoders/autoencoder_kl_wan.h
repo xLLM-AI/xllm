@@ -1708,10 +1708,9 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
   }
 
   DecoderOutput decode_(const torch::Tensor& latents) {
-
     torch::Tensor processed_latents = latents.to(device_, dtype_);
     processed_latents = vae_parallel_split(processed_latents);
-    
+
     int64_t num_frame = processed_latents.size(2);
     int64_t height = processed_latents.size(3);
     int64_t width = processed_latents.size(4);

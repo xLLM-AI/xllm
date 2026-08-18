@@ -74,10 +74,7 @@ def normalize_ascend_device(device: str | None) -> str | None:
         return None
     if normalized not in ASCEND_DEVICE_TO_BISHENG_ARCH:
         supported = ", ".join(sorted(ASCEND_DEVICE_TO_BISHENG_ARCH))
-        raise ValueError(
-            f"Unsupported Ascend TileLang device {device!r}. Expected one of: "
-            f"{supported}"
-        )
+        raise ValueError(f"Unsupported Ascend TileLang device {device!r}. Expected one of: {supported}")
     return normalized
 
 
@@ -100,9 +97,7 @@ def build_toolchain_options(device: str | None, bisheng_arch: str) -> dict[str, 
     return toolchain_options
 
 
-def build_bisheng_compile_flags(
-    device: str | None, bisheng_arch: str
-) -> list[str]:
+def build_bisheng_compile_flags(device: str | None, bisheng_arch: str) -> list[str]:
     if device == "a5":
         return [
             f"--cce-aicore-arch={bisheng_arch}",
@@ -138,6 +133,7 @@ def bisheng_include_dirs() -> list[str]:
         f"{npu_home_path}/include",
         f"{npu_home_path}/include/experiment/runtime",
         f"{npu_home_path}/include/experiment/msprof",
+        f"{npu_home_path}/pkg_inc",
         f"{npu_home_path}/compiler/tikcpp",
         f"{npu_home_path}/compiler/tikcpp/tikcfw",
         f"{npu_home_path}/compiler/tikcpp/tikcfw/impl",
@@ -170,9 +166,7 @@ def resolve_build_context(device: str | None, bisheng_executable: str) -> Ascend
         device=normalized_device,
         bisheng_arch=bisheng_arch,
         bisheng_executable=bisheng_executable,
-        bisheng_compile_flags=tuple(
-            build_bisheng_compile_flags(normalized_device, bisheng_arch)
-        ),
+        bisheng_compile_flags=tuple(build_bisheng_compile_flags(normalized_device, bisheng_arch)),
         toolchain_options=build_toolchain_options(normalized_device, bisheng_arch),
         fingerprint=fingerprint,
         include_dirs=bisheng_include_dirs(),

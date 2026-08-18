@@ -37,6 +37,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
     const torch::TensorList scale1,
     const torch::TensorList scale2,
     const torch::Tensor& probs,
+    const std::optional<torch::Tensor>& x_active_mask,
     const std::string& group,
     int64_t max_output_size,
     double swiglu_limit,
@@ -85,6 +86,18 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
               probs.sizes(),
               " vs ",
               expert_ids.sizes());
+  if (x_active_mask.has_value() && x_active_mask->defined()) {
+    TORCH_CHECK(x_active_mask->dim() == 1,
+                "DispatchFFNCombine expects 1D x_active_mask.");
+    TORCH_CHECK(x_active_mask->size(0) == x.size(0),
+                "DispatchFFNCombine x_active_mask token count mismatch: ",
+                x_active_mask->size(0),
+                " vs ",
+                x.size(0));
+    TORCH_CHECK(x_active_mask->scalar_type() == at::kBool,
+                "DispatchFFNCombine expects bool x_active_mask, got ",
+                c10::toString(x_active_mask->scalar_type()));
+  }
   TORCH_CHECK(!group.empty(),
               "DispatchFFNCombine requires non-empty HCCL group name.");
   TORCH_CHECK(max_output_size > 0,
@@ -111,6 +124,8 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
 
   std::string group_copy = group;
   char* group_ptr = group_copy.data();
+  torch::Tensor active_mask =
+      x_active_mask.has_value() ? x_active_mask.value() : torch::Tensor();
 
   EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                x,
@@ -120,6 +135,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
                scale1,
                scale2,
                probs,
+               active_mask,
                group_ptr,
                max_output_size,
                swiglu_limit,

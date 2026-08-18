@@ -16,6 +16,8 @@ cc_library(
     qwen3_next_hybrid_decoder_layer_base.h
     qwen3_next_decoder_layer_impl.h
     qwen3_5_decoder_layer_impl.h
+    deepseek_v4_eplb_load_utils.h
+    deepseek_v4_eplb_utils.h
     deepseek_sparse_attention.h
     compressor.h
     deepseek_v4_indexer.h

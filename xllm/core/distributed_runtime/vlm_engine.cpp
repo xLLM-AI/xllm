@@ -26,6 +26,7 @@ limitations under the License.
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 
 #include "common/device_monitor.h"
 #include "common/interruption_bus.h"

@@ -166,6 +166,7 @@ class MockProcessGroup : public xllm::ProcessGroup {
 
   void allgather(const torch::Tensor& input,
                  std::vector<torch::Tensor>& outputs) override {
+    allgather_input_dtypes_.emplace_back(input.scalar_type());
     outputs.resize(this->world_size());
     if (!allgather_outputs_.empty()) {
       CHECK_EQ(allgather_outputs_.size(), outputs.size())
@@ -192,6 +193,7 @@ class MockProcessGroup : public xllm::ProcessGroup {
   c10::intrusive_ptr<c10d::Work> allgather_base_async(
       const torch::Tensor& input,
       torch::Tensor& output) override {
+    allgather_input_dtypes_.emplace_back(input.scalar_type());
     CHECK(output.defined()) << "mock allgather_base_async requires output";
     CHECK_EQ(output.size(0), this->world_size())
         << "mock allgather_base_async world_size mismatch";
@@ -223,8 +225,15 @@ class MockProcessGroup : public xllm::ProcessGroup {
     allgather_outputs_ = std::move(outputs);
   }
 
+  const std::vector<torch::ScalarType>& allgather_input_dtypes() const {
+    return allgather_input_dtypes_;
+  }
+
+  void clear_allgather_input_dtypes() { allgather_input_dtypes_.clear(); }
+
  private:
   std::vector<torch::Tensor> allgather_outputs_;
+  std::vector<torch::ScalarType> allgather_input_dtypes_;
 };
 
 // Helper function to create custom input tensor for precision testing

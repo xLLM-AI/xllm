@@ -119,7 +119,7 @@ limitations under the License. -->
 ```
 @article{liu2025xllm,
   title={xLLM Technical Report},
-  author={Liu, Tongxuan and Peng, Tao and Yang, Peijun and Zhao, Xiaoyang and Lu, Xiusheng and Huang, Weizhe and Liu, Zirui and Chen, Xiaoyu and Liang, Zhiwei and Xiong, Jun and others},
+  author={xLLM team},
   journal={arXiv preprint arXiv:2510.14686},
   year={2025}
 }

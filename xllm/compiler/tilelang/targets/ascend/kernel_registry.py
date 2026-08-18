@@ -37,9 +37,7 @@ def _kernels_dir() -> Path:
 
 def _iter_kernel_module_names() -> list[str]:
     return sorted(
-        module.name
-        for module in pkgutil.iter_modules([str(_kernels_dir())])
-        if not module.name.startswith("_")
+        module.name for module in pkgutil.iter_modules([str(_kernels_dir())]) if not module.name.startswith("_")
     )
 
 
@@ -50,9 +48,7 @@ def _resolve_registered_kernel_class(
     kernel_classes = [
         obj
         for obj in vars(module).values()
-        if isinstance(obj, type)
-        and obj.__module__ == module.__name__
-        and is_registered_kernel_class(obj)
+        if isinstance(obj, type) and obj.__module__ == module.__name__ and is_registered_kernel_class(obj)
     ]
     if not kernel_classes:
         return module, None
@@ -65,10 +61,7 @@ def _resolve_registered_kernel_class(
 
     kernel_cls = kernel_classes[0]
     if not issubclass(kernel_cls, TilelangKernel):
-        raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' must inherit "
-            "TilelangKernel"
-        )
+        raise TypeError(f"registered kernel class '{kernel_cls.__name__}' must inherit TilelangKernel")
     return module, kernel_cls
 
 
@@ -88,16 +81,12 @@ def _load_registered_kernel_family(
 
     resolved_generate_source = getattr(kernel_cls, "generate_source", None)
     if not callable(resolved_generate_source):
-        raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' must define "
-            "callable generate_source(...)"
-        )
+        raise TypeError(f"registered kernel class '{kernel_cls.__name__}' must define callable generate_source(...)")
 
     resolved_specs = getattr(kernel_cls, "specs", None)
     if not callable(resolved_specs):
         raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' must define "
-            "callable specs() -> list[KernelSpec]"
+            f"registered kernel class '{kernel_cls.__name__}' must define callable specs() -> list[KernelSpec]"
         )
     resolved_dispatch_schema = getattr(kernel_cls, "dispatch_schema", None)
     if not callable(resolved_dispatch_schema):
@@ -112,8 +101,7 @@ def _load_registered_kernel_family(
         raise TypeError(str(exc)) from exc
     if not isinstance(kernel_specs, list) or not kernel_specs:
         raise TypeError(
-            f"registered kernel class '{kernel_cls.__name__}' must return a "
-            "non-empty list[KernelSpec] from specs()"
+            f"registered kernel class '{kernel_cls.__name__}' must return a non-empty list[KernelSpec] from specs()"
         )
     try:
         dispatch_schema = resolved_dispatch_schema()
@@ -127,8 +115,7 @@ def _load_registered_kernel_family(
     for index, field in enumerate(dispatch_schema):
         if not isinstance(field, DispatchField):
             raise TypeError(
-                f"registered kernel class '{kernel_cls.__name__}' "
-                f"dispatch_schema()[{index}] must be DispatchField"
+                f"registered kernel class '{kernel_cls.__name__}' dispatch_schema()[{index}] must be DispatchField"
             )
 
     family_kernel_name: str | None = None
@@ -137,16 +124,11 @@ def _load_registered_kernel_family(
 
     for index, kernel_spec in enumerate(kernel_specs):
         if not isinstance(kernel_spec, KernelSpec):
-            raise TypeError(
-                f"registered kernel class '{kernel_cls.__name__}' specs()[{index}] "
-                "must be KernelSpec"
-            )
+            raise TypeError(f"registered kernel class '{kernel_cls.__name__}' specs()[{index}] must be KernelSpec")
 
         kernel_spec.validate()
         missing_dispatch_fields = [
-            field.name
-            for field in dispatch_schema
-            if field.name not in kernel_spec.specialization
+            field.name for field in dispatch_schema if field.name not in kernel_spec.specialization
         ]
         if missing_dispatch_fields:
             raise ValueError(
@@ -192,10 +174,7 @@ def registered_families() -> dict[str, RegisteredKernelFamily]:
         if family is None:
             continue
         if family.kernel_name in families:
-            raise ValueError(
-                "Duplicate Ascend TileLang kernel_name registered: "
-                f"{family.kernel_name}"
-            )
+            raise ValueError(f"Duplicate Ascend TileLang kernel_name registered: {family.kernel_name}")
         families[family.kernel_name] = family
     return families
 

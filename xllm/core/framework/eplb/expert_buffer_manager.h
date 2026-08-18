@@ -25,7 +25,8 @@ namespace xllm {
 
 class ExpertBufferManager {
  public:
-  ExpertBufferManager(int32_t num_experts,
+  ExpertBufferManager(const std::string& service_namespace,
+                      int32_t num_experts,
                       int32_t num_layers,
                       int64_t shm_size_per_expert);
 
@@ -39,6 +40,7 @@ class ExpertBufferManager {
                            const std::string& tensor_name);
 
  private:
+  const std::string service_namespace_;
   std::vector<std::unique_ptr<ExpertBufferShm>> expert_buffers_;
   const int32_t num_experts_;
   const int32_t num_layers_;

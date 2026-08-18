@@ -19,11 +19,12 @@ import sys
 import threading
 import time
 import uuid
-from . import utils
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from collections.abc import Callable, Sequence
+from typing import Any
 
-from xllm_export import (LLMMaster, VLMMaster, Options, RequestOutput,
-                         RequestParams)
+from xllm_export import LLMMaster, Options, RequestOutput, RequestParams, VLMMaster
+
+from . import utils
 from .errors import ValidationError
 from .params import (
     BeamSearchParams,
@@ -36,8 +37,8 @@ from .params import (
 
 
 def _get_tqdm(
-    use_tqdm: Union[bool, Callable[..., Any]],
-) -> Optional[Callable[..., Any]]:
+    use_tqdm: bool | Callable[..., Any],
+) -> Callable[..., Any] | None:
     if not use_tqdm:
         return None
     if callable(use_tqdm):
@@ -46,8 +47,7 @@ def _get_tqdm(
         from tqdm import tqdm
     except ImportError as exc:
         raise ImportError(
-            "tqdm is required when use_tqdm=True. "
-            "Set use_tqdm=False to disable the progress bar."
+            "tqdm is required when use_tqdm=True. Set use_tqdm=False to disable the progress bar."
         ) from exc
     return tqdm
 
@@ -92,8 +92,8 @@ class LLM:
         self,
         model: str,
         task: str = "generate",
-        runner: Optional[str] = None,
-        draft_model: Optional[str] = '',
+        runner: str | None = None,
+        draft_model: str | None = "",
         limit_image_per_prompt: int = 8,
         block_size: int = 128,
         max_cache_size: int = 0,
@@ -103,25 +103,25 @@ class LLM:
         max_seqs_per_batch: int = 1024,
         max_tokens_per_chunk_for_prefill: int = -1,
         num_speculative_tokens: int = 0,
-        speculative_algorithm: str = 'MTP',
+        speculative_algorithm: str = "MTP",
         num_request_handling_threads: int = 4,
-        communication_backend: str = 'hccl',
-        rank_tablefile: str = '',
+        communication_backend: str = "hccl",
+        rank_tablefile: str = "",
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
-        master_node_addr: str = '',
-        instance_role: str = 'DEFAULT',
+        master_node_addr: str = "",
+        instance_role: str = "DEFAULT",
         transfer_listen_port: int = 26000,
         nnodes: int = 1,
         node_rank: int = 0,
         dp_size: int = 1,
         cp_size: int = 1,
         ep_size: int = 1,
-        instance_name: str = '',
+        instance_name: str = "",
         enable_disagg_pd: bool = False,
         enable_pd_ooc: bool = False,
         enable_schedule_overlap: bool = False,
-        kv_cache_transfer_mode: str = 'PUSH',
+        kv_cache_transfer_mode: str = "PUSH",
         disable_ttft_profiling: bool = False,
         enable_forward_interruption: bool = False,
         enable_graph: bool = False,
@@ -132,7 +132,7 @@ class LLM:
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
-        kv_cache_dtype: str = 'auto',
+        kv_cache_dtype: str = "auto",
         use_cpp_chat_template: bool = True,
         disable_log_stats: bool = True,
         enable_sleep_mode: bool = False,
@@ -219,10 +219,10 @@ class LLM:
 
     def finish(self) -> None:
         try:
-            #os.kill(os.getpid(), signal.SIGTERM)
-            #os.kill(os.getpid(), signal.SIGKILL)
+            # os.kill(os.getpid(), signal.SIGTERM)
+            # os.kill(os.getpid(), signal.SIGKILL)
             utils.terminate_process(os.getpid())
-        except Exception as e:
+        except Exception:
             pass
 
     def sleep(self) -> None:
@@ -235,7 +235,7 @@ class LLM:
         """
         self.master.sleep()
 
-    def wake_up(self, tags: Optional[List[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         """Re-acquire device HBM previously released by ``sleep``.
 
         ``tags`` is reserved for future fine-grained wake-up
@@ -261,20 +261,12 @@ class LLM:
 
     def generate(
         self,
-        prompts: Union[
-            str,
-            List[str],
-            Dict[str, object],
-            List[Dict[str, object]],
-        ],
-        sampling_params: Optional[Union[
-            SamplingParams,
-            List[SamplingParams],
-        ]] = None,
+        prompts: str | list[str] | dict[str, object] | list[dict[str, object]],
+        sampling_params: SamplingParams | list[SamplingParams] | None = None,
         wait_for_schedule: bool = True,
-        use_tqdm: Union[bool, Callable[..., Any]] = True,
+        use_tqdm: bool | Callable[..., Any] = True,
         **kwargs: Any,
-    ) -> List[RequestOutput]:
+    ) -> list[RequestOutput]:
         request_params = kwargs.pop("request_params", None)
         if kwargs:
             unknown = ", ".join(kwargs.keys())
@@ -288,6 +280,7 @@ class LLM:
         image_urls = None
         if self._is_vllm_style_inputs(prompts):
             from . import mm_utils
+
             prompts, mm_datas, image_urls = mm_utils.normalize_vllm_style_inputs(prompts)
         else:
             if isinstance(prompts, str):
@@ -295,13 +288,9 @@ class LLM:
             if not isinstance(prompts, list) or not all(isinstance(x, str) for x in prompts):
                 raise TypeError("prompts must be str/list[str] or vLLM-style dicts")
 
-        request_params_list = to_request_params_list(
-            request_params, default_cls=SamplingParams)
+        request_params_list = to_request_params_list(request_params, default_cls=SamplingParams)
         if len(request_params_list) not in (1, len(prompts)):
-            raise ValueError(
-                "The number of request_params must be 1 or equal to the "
-                "number of prompts."
-            )
+            raise ValueError("The number of request_params must be 1 or equal to the number of prompts.")
 
         outputs = [None] * len(prompts)
         progress_bar = None
@@ -321,22 +310,16 @@ class LLM:
             # schedule all requests
             if self._backend == "vlm":
                 if mm_datas is not None:
-                    self.master.handle_batch_request(
-                        prompts, mm_datas, request_params_list, callback
-                    )
+                    self.master.handle_batch_request(prompts, mm_datas, request_params_list, callback)
                 else:
                     if image_urls is None:
                         image_urls = [[] for _ in prompts]
-                    self.master.handle_batch_request_with_image_urls(
-                        prompts, image_urls, request_params_list, callback
-                    )
+                    self.master.handle_batch_request_with_image_urls(prompts, image_urls, request_params_list, callback)
             else:
                 has_images = image_urls is not None and any(image_urls)
                 if mm_datas is not None or has_images:
                     raise ValueError("multi_modal_data is only supported for VLM models")
-                self.master.handle_batch_request(
-                    prompts, request_params_list, callback
-                )
+                self.master.handle_batch_request(prompts, request_params_list, callback)
 
             # TODO: add wait later
             if wait_for_schedule:
@@ -363,15 +346,15 @@ class LLM:
 
     def beam_search(
         self,
-        prompts: Union[str, Dict[str, str], List[Union[str, Dict[str, str]]]],
-        params: Optional[Union[RequestParams, BeamSearchParams]] = None,
+        prompts: str | dict[str, str] | list[str | dict[str, str]],
+        params: RequestParams | BeamSearchParams | None = None,
         wait_for_schedule: bool = True,
-        use_tqdm: Union[bool, Callable[..., Any]] = True,
-    ) -> List[BeamSearchOutput]:
+        use_tqdm: bool | Callable[..., Any] = True,
+    ) -> list[BeamSearchOutput]:
         if isinstance(prompts, (str, dict)):
             prompts = [prompts]
 
-        parsed_prompts: List[str] = []
+        parsed_prompts: list[str] = []
         for prompt in prompts:
             if isinstance(prompt, str):
                 parsed_prompts.append(prompt)
@@ -383,11 +366,7 @@ class LLM:
                 continue
             raise TypeError("prompts must be str or dict with key 'prompt'")
 
-        explicit_fields = (
-            params.explicit_fields()
-            if isinstance(params, _RequestParamsProxy)
-            else set()
-        )
+        explicit_fields = params.explicit_fields() if isinstance(params, _RequestParamsProxy) else set()
         params = to_request_params(params, default_cls=BeamSearchParams)
         if params.beam_width <= 0:
             raise ValueError("beam_width must be greater than 0")
@@ -396,52 +375,42 @@ class LLM:
             # Keep this aligned with the LLM request-path default.
             if "logprobs" not in explicit_fields:
                 params.logprobs = True
-            if (
-                "top_logprobs" not in explicit_fields
-                and params.top_logprobs == 0
-            ):
+            if "top_logprobs" not in explicit_fields and params.top_logprobs == 0:
                 params.top_logprobs = params.beam_width
 
-        outputs = self.generate(parsed_prompts,
-                                request_params=params,
-                                wait_for_schedule=wait_for_schedule,
-                                use_tqdm=use_tqdm)
+        outputs = self.generate(
+            parsed_prompts, request_params=params, wait_for_schedule=wait_for_schedule, use_tqdm=use_tqdm
+        )
         return [BeamSearchOutput(output) for output in outputs]
 
     def embed(
         self,
-        prompts: Union[str, List[str]],
-        pooling_params: Optional[Union[
-            RequestParams,
-            PoolingParams,
-            List[Union[RequestParams, PoolingParams]],
-        ]] = None,
+        prompts: str | list[str],
+        pooling_params: RequestParams | PoolingParams | list[RequestParams | PoolingParams] | None = None,
         wait_for_schedule: bool = True,
-        use_tqdm: Union[bool, Callable[..., Any]] = True,
-    ) -> List[EmbeddingOutput]:
-        request_params_list = to_request_params_list(
-            pooling_params, default_cls=PoolingParams)
+        use_tqdm: bool | Callable[..., Any] = True,
+    ) -> list[EmbeddingOutput]:
+        request_params_list = to_request_params_list(pooling_params, default_cls=PoolingParams)
         for params in request_params_list:
             params.is_embeddings = True
 
-        use_params: Union[RequestParams, List[RequestParams]]
+        use_params: RequestParams | list[RequestParams]
         if len(request_params_list) == 1:
             use_params = request_params_list[0]
         else:
             use_params = request_params_list
 
-        outputs = self.generate(prompts,
-                                request_params=use_params,
-                                wait_for_schedule=wait_for_schedule,
-                                use_tqdm=use_tqdm)
+        outputs = self.generate(
+            prompts, request_params=use_params, wait_for_schedule=wait_for_schedule, use_tqdm=use_tqdm
+        )
         return [EmbeddingOutput(output) for output in outputs]
 
     @staticmethod
     def _normalize_selector_values(
         prompts: Sequence[str],
-        selector: Union[str, dict, Sequence[Union[str, dict]]],
-    ) -> List[str]:
-        def get_literal(value: Union[str, dict]) -> str:
+        selector: str | dict | Sequence[str | dict],
+    ) -> list[str]:
+        def get_literal(value: str | dict) -> str:
             if isinstance(value, str):
                 return value
             if isinstance(value, dict):
@@ -466,15 +435,13 @@ class LLM:
     @staticmethod
     def _build_request_params_list(
         prompts: Sequence[str],
-        request_params: Optional[Union[RequestParams, Sequence[RequestParams]]],
-    ) -> List[RequestParams]:
+        request_params: RequestParams | Sequence[RequestParams] | None,
+    ) -> list[RequestParams]:
         if request_params is None:
             return [RequestParams() for _ in prompts]
         if isinstance(request_params, RequestParams):
             if len(prompts) != 1:
-                raise ValueError(
-                    "request_params must be a list when prompts has multiple items"
-                )
+                raise ValueError("request_params must be a list when prompts has multiple items")
             return [request_params]
 
         params_list = list(request_params)
@@ -484,12 +451,12 @@ class LLM:
 
     def sample(
         self,
-        prompts: Union[str, List[str]],
-        selector: Union[str, dict, Sequence[Union[str, dict]]],
-        request_params: Optional[Union[RequestParams, Sequence[RequestParams]]] = None,
+        prompts: str | list[str],
+        selector: str | dict | Sequence[str | dict],
+        request_params: RequestParams | Sequence[RequestParams] | None = None,
         logprobs: int = 5,
         wait_schedule_done: bool = True,
-    ) -> List[RequestOutput]:
+    ) -> list[RequestOutput]:
         if isinstance(prompts, str):
             prompts = [prompts]
         if not prompts:
@@ -526,10 +493,7 @@ class LLM:
                 selector_values[i],
             )
             if not ok:
-                raise ValueError(
-                    "Failed to build sample slots. "
-                    "selector.value must be a stable single special token."
-                )
+                raise ValueError("Failed to build sample slots. selector.value must be a stable single special token.")
             params.sample_slots = sample_slots
 
         outputs = [None] * len(prompts)
@@ -549,9 +513,7 @@ class LLM:
             while outputs[i] is None:
                 time.sleep(0.01)
             if outputs[i].status is not None and not outputs[i].status.ok:
-                raise RuntimeError(
-                    f"sample request failed: {outputs[i].status.message}"
-                )
+                raise RuntimeError(f"sample request failed: {outputs[i].status.message}")
             outputs[i].prompt = prompts[i]
 
         return outputs

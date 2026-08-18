@@ -30,6 +30,7 @@ cc_library(
     finish_reason.cpp
     incremental_decoder.cpp
     request.cpp
+    request_base.cpp
     dit_request.cpp
     request_output.cpp
     dit_request_output.cpp
@@ -44,6 +45,7 @@ cc_library(
     stopping_checker.cpp
     priority_comparator.cpp
   DEPS
+    :config
     :kv_cache
     :prefix_cache
     :encoder_cache
@@ -51,6 +53,7 @@ cc_library(
     :tokenizer
     :chat_template
     :multimodal
+    :json_object_grammar
     glog::glog
     absl::strings
     absl::time

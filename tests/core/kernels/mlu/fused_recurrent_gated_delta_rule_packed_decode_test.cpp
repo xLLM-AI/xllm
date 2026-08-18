@@ -147,5 +147,96 @@ TEST_F(FusedRecurrentGdrPackedDecodeJitTest, SupportsNoL2Norm) {
   EXPECT_TRUE(torch::isfinite(state.to(torch::kFloat32)).all().item<bool>());
 }
 
+TEST_F(FusedRecurrentGdrPackedDecodeJitTest,
+       BatchAbove32MatchesChunkedExecution) {
+  torch::DeviceGuard guard(device());
+  // Match the Qwen3.5-122B-A10B per-rank head layout at TP=8.
+  const int32_t num_k_heads = 2;
+  const int32_t num_v_heads = 8;
+  const int32_t head_k_dim = 128;
+  const int32_t head_v_dim = 128;
+  const int32_t batch_size = 33;
+  const int32_t reference_chunk_size = 32;
+  const int32_t qkv_dim =
+      2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
+  const double scale = 1.0 / std::sqrt(static_cast<double>(head_k_dim));
+
+  torch::manual_seed(20260806);
+  torch::Tensor mixed_qkv = bf16_randn({batch_size, qkv_dim}, device());
+  torch::Tensor a = bf16_randn({batch_size, num_v_heads}, device());
+  torch::Tensor b = bf16_randn({batch_size, num_v_heads}, device());
+  torch::Tensor a_log = bf16_randn({num_v_heads}, device());
+  torch::Tensor dt_bias = torch::ones(
+      {num_v_heads},
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device()));
+  torch::Tensor original_cache = fp32_randn(
+      {batch_size + 1, num_v_heads, head_v_dim, head_k_dim}, device());
+  torch::Tensor ssm_state_indices = torch::arange(
+      1,
+      batch_size + 1,
+      torch::TensorOptions().dtype(torch::kInt32).device(device()));
+
+  torch::Tensor full_batch_cache = original_cache.clone();
+  auto [full_batch_out, full_batch_state] =
+      fused_recurrent_gated_delta_rule_packed_decode(
+          mixed_qkv,
+          a,
+          b,
+          a_log,
+          dt_bias,
+          scale,
+          full_batch_cache,
+          ssm_state_indices,
+          /*use_qk_l2norm_in_kernel=*/true);
+
+  // Independent state slots make a 32 + 1 execution a valid reference for
+  // the batch-33 core partitioning regression.
+  torch::Tensor chunked_cache = original_cache.clone();
+  torch::Tensor first_chunk_out =
+      fused_recurrent_gated_delta_rule_packed_decode(
+          mixed_qkv.narrow(/*dim=*/0, /*start=*/0, reference_chunk_size),
+          a.narrow(/*dim=*/0, /*start=*/0, reference_chunk_size),
+          b.narrow(/*dim=*/0, /*start=*/0, reference_chunk_size),
+          a_log,
+          dt_bias,
+          scale,
+          chunked_cache,
+          ssm_state_indices.narrow(
+              /*dim=*/0, /*start=*/0, reference_chunk_size),
+          /*use_qk_l2norm_in_kernel=*/true)
+          .first;
+  const int32_t remaining_batch_size = batch_size - reference_chunk_size;
+  torch::Tensor second_chunk_out =
+      fused_recurrent_gated_delta_rule_packed_decode(
+          mixed_qkv.narrow(/*dim=*/0,
+                           /*start=*/reference_chunk_size,
+                           remaining_batch_size),
+          a.narrow(/*dim=*/0,
+                   /*start=*/reference_chunk_size,
+                   remaining_batch_size),
+          b.narrow(/*dim=*/0,
+                   /*start=*/reference_chunk_size,
+                   remaining_batch_size),
+          a_log,
+          dt_bias,
+          scale,
+          chunked_cache,
+          ssm_state_indices.narrow(/*dim=*/0,
+                                   /*start=*/reference_chunk_size,
+                                   remaining_batch_size),
+          /*use_qk_l2norm_in_kernel=*/true)
+          .first;
+  torch_mlu::synchronize();
+
+  torch::Tensor chunked_out =
+      torch::cat({first_chunk_out, second_chunk_out}, /*dim=*/0);
+  EXPECT_TRUE(tensors_allclose(
+      full_batch_out, chunked_out, /*rtol=*/1e-2, /*atol=*/2e-2))
+      << "batch-33 output differs from the equivalent 32 + 1 execution";
+  EXPECT_TRUE(tensors_allclose(
+      full_batch_state, chunked_cache, /*rtol=*/1e-2, /*atol=*/2e-2))
+      << "batch-33 state update differs from the equivalent 32 + 1 execution";
+}
+
 }  // namespace
 }  // namespace xllm

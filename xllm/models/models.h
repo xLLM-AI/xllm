@@ -24,6 +24,7 @@ limitations under the License.
 #include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
 #include "dit/pipelines/pipeline_wan_i2v.h"              // IWYU pragma: keep
 #include "llm/deepseek_v4.h"                             // IWYU pragma: keep
+#include "llm/deepseek_v4_dspark.h"                      // IWYU pragma: keep
 #include "llm/deepseek_v4_mtp.h"                         // IWYU pragma: keep
 #include "llm/npu/deepseek_mtp.h"                        // IWYU pragma: keep
 #include "llm/npu/deepseek_v2.h"                         // IWYU pragma: keep
@@ -46,6 +47,7 @@ limitations under the License.
 #include "llm/npu/qwen2.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3_dflash.h"                        // IWYU pragma: keep
+#include "llm/npu/qwen3_dspark.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_eagle3.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_moe.h"                           // IWYU pragma: keep
 #include "llm/qwen3.h"                                   // IWYU pragma: keep
@@ -111,6 +113,7 @@ limitations under the License.
 #include "llm/mimo_mtp.h"                               // IWYU pragma: keep
 #include "llm/qwen2.h"                                  // IWYU pragma: keep
 #include "llm/qwen3.h"                                  // IWYU pragma: keep
+#include "llm/qwen3_5.h"                                // IWYU pragma: keep
 #include "llm/qwen3_moe.h"                              // IWYU pragma: keep
 #include "llm/rwkv7.h"                                  // IWYU pragma: keep
 #include "vlm/qwen2_5_vl.h"                             // IWYU pragma: keep

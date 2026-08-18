@@ -80,7 +80,7 @@ class Qwen3HybridDecoderLayerImplBase : public Qwen3HybridDecoderLayerModule {
   std::shared_ptr<Qwen3GatedDeltaNetBaseImpl> linear_attention_;
 
   DenseMLP mlp_{nullptr};
-  Qwen3_5MusaFusedMoE moe_mlp_{nullptr};
+  Qwen3_5FusedMoE moe_mlp_{nullptr};
 
   Qwen3NextRMSNorm input_norm_{nullptr};
   Qwen3NextRMSNorm post_norm_{nullptr};

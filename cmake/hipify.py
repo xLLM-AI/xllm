@@ -41,7 +41,7 @@ def map_output_relpath(source_abs: str, project_dir: str) -> str:
 
     stem, ext = os.path.splitext(rel_path)
     if ext == ".cu":
-      rel_path = stem + ".hip"
+        rel_path = stem + ".hip"
 
     return rel_path
 
@@ -120,12 +120,11 @@ def copy_dcu_headers(src_project_dir: str, final_output_dir: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-p", "--project_dir", required=True,
-                        help="Source root containing cuda/ and dcu/")
-    parser.add_argument("-o", "--output_dir", required=True,
-                        help="Final build output root, e.g. <build>/xllm/core/kernels")
-    parser.add_argument("sources", nargs="*", default=[],
-                        help="Files to hipify")
+    parser.add_argument("-p", "--project_dir", required=True, help="Source root containing cuda/ and dcu/")
+    parser.add_argument(
+        "-o", "--output_dir", required=True, help="Final build output root, e.g. <build>/xllm/core/kernels"
+    )
+    parser.add_argument("sources", nargs="*", default=[], help="Files to hipify")
 
     args = parser.parse_args()
 
@@ -165,28 +164,21 @@ if __name__ == "__main__":
 
     final_outputs = []
 
-    for orig_source_abs, staged_source_abs in zip(
-        map(os.path.abspath, args.sources), staged_sources
-    ):
+    for orig_source_abs, staged_source_abs in zip(map(os.path.abspath, args.sources), staged_sources):
         hipified_abs = (
             hipify_result[staged_source_abs].hipified_path
-            if (
-                staged_source_abs in hipify_result
-                and hipify_result[staged_source_abs].hipified_path is not None
-            )
+            if (staged_source_abs in hipify_result and hipify_result[staged_source_abs].hipified_path is not None)
             else staged_source_abs
         )
 
         if not os.path.exists(hipified_abs):
-            raise FileNotFoundError(
-                f"Hipified file not found for {orig_source_abs}: {hipified_abs}"
-            )
+            raise FileNotFoundError(f"Hipified file not found for {orig_source_abs}: {hipified_abs}")
 
         rel_out = map_output_relpath(orig_source_abs, src_project_dir)
         final_path = os.path.abspath(os.path.join(final_output_dir, rel_out))
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
 
-        with open(hipified_abs, "r", encoding="utf-8") as f:
+        with open(hipified_abs, encoding="utf-8") as f:
             text = f.read()
 
         text = rewrite_generated_includes(text)

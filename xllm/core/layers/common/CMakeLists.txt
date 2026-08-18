@@ -15,14 +15,17 @@ cc_library(
     rms_norm.h
     rotary_embedding.h
     rotary_embedding_util.h
-    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
+    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
     dense_mlp.h
     linear.h
+    $<$<BOOL:${USE_MUSA}>:${CMAKE_CURRENT_SOURCE_DIR}/../musa/linear_block_fp8.h>
     word_embedding_impl.h
     deep_ep.h
     activation.h
     attention_metadata.h
     attention_metadata_builder.h
+    kv_shard_batch_metadata.h
+    expanded_decode_metadata_builder.h
     dsa_metadata.h
     dsa_metadata_builder.h
     dsa_topk_share_plan.h
@@ -41,13 +44,16 @@ cc_library(
     rms_norm.cpp
     rotary_embedding.cpp
     rotary_embedding_util.cpp
-    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
+    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
     dense_mlp.cpp
     linear.cpp
+    $<$<BOOL:${USE_MUSA}>:${CMAKE_CURRENT_SOURCE_DIR}/../musa/linear_block_fp8.cpp>
     word_embedding_impl.cpp
     deep_ep.cpp
     activation.cpp
     attention_metadata_builder.cpp
+    kv_shard_batch_metadata.cpp
+    expanded_decode_metadata_builder.cpp
     dsa_metadata_builder.cpp
     dp_utils.cpp
     add_matmul.cpp

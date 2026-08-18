@@ -29,6 +29,9 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/service_config.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "core/platform/device_name_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -51,7 +54,42 @@ bool should_use_ssm_engine(const Options& options) {
           options.num_speculative_tokens() > 0);
 }
 
+bool get_enable_thinking(const nlohmann::json& chat_template_kwargs) {
+  const bool default_value =
+      !ModelConfig::get_instance().reasoning_parser().empty();
+  if (!chat_template_kwargs.contains("enable_thinking") &&
+      !chat_template_kwargs.contains("thinking")) {
+    return default_value;
+  }
+  bool enabled = false;
+  for (const char* key : {"enable_thinking", "thinking"}) {
+    const auto it = chat_template_kwargs.find(key);
+    if (it != chat_template_kwargs.end() && it->is_boolean()) {
+      enabled = enabled || it->get<bool>();
+    }
+  }
+  return enabled;
+}
+
 }  // namespace
+
+std::shared_ptr<const JsonObjectGrammar> LLMMaster::get_json_object_grammar(
+    bool reasoning_enabled,
+    std::string* error) {
+  std::lock_guard<std::mutex> lock(json_object_grammar_mutex_);
+  std::shared_ptr<const JsonObjectGrammar>& grammar =
+      reasoning_enabled ? json_reasoning_grammar_ : json_object_grammar_;
+  if (grammar == nullptr) {
+    grammar =
+        JsonObjectGrammar::create_from_tokenizer(*tokenizer_,
+                                                 model_args_.eos_token_id(),
+                                                 model_args_.stop_token_ids(),
+                                                 model_args_.vocab_size(),
+                                                 reasoning_enabled,
+                                                 error);
+  }
+  return grammar;
+}
 
 volatile bool LLMAssistantMaster::running_ = false;
 
@@ -193,12 +231,19 @@ void LLMMaster::handle_request(std::string prompt,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry. If we bail
+    // before generate_request has a chance to create the Request, this
+    // releases the slot; otherwise Request itself takes ownership.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     Timer timer;
     // verify the prompt
     if (!sp.verify_params(callback)) {
       return;
     }
 
+    rate_limit_guard.dismiss();
     auto request = generate_request(
         std::move(prompt), std::move(prompt_token), sp, call, callback);
     if (!request) {
@@ -232,11 +277,16 @@ void LLMMaster::handle_request(std::vector<Message> messages,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     // verify the prompt
     if (!sp.verify_params(callback)) {
       return;
     }
 
+    rate_limit_guard.dismiss();
     auto request =
         generate_request(messages, std::move(prompt_token), sp, call, callback);
     if (!request) {
@@ -288,7 +338,14 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     std::optional<std::vector<int>> prompt_tokens,
     const RequestParams& sp,
     std::optional<Call*> call,
-    OutputCallback callback) {
+    OutputCallback callback,
+    std::optional<ChatTemplateGenerationMode> generation_mode) {
+  // The caller (service_impl) has already incremented the rate limiter's
+  // slot via is_limited() returning false. This guard releases it on any
+  // early return below; we dismiss it right before Request takes ownership.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   // A request is valid as long as it carries either text or pre-tokenized
   // prompt tokens; pure-token input (no text) is a first-class input.
   const bool has_prompt_tokens = prompt_tokens.has_value();
@@ -385,6 +442,10 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   sampling_param.logprobs = sp.logprobs;
   sampling_param.top_logprobs = sp.top_logprobs;
   sampling_param.is_embeddings = sp.is_embeddings;
+  sampling_param.json_object =
+      ServiceConfig::get_instance().enable_json_object_output() &&
+      sp.response_format == ResponseFormatType::JSON_OBJECT;
+  const bool json_object = sampling_param.json_object;
   sampling_param.beam_width = sp.beam_width;
   if (best_of > sp.n) {
     // enable logprobs for best_of to generate sequence logprob
@@ -469,21 +530,9 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   OutputsFunc batch_callback = nullptr;
   if (options_.enable_service_routing()) {
     batch_callback = [this](const std::vector<RequestOutput>& req_outputs) {
-      size_t decrease_requests_num = 0;
       for (const auto& req_output : req_outputs) {
         req_output.log_request_status();
-        if (req_output.status.has_value() && !req_output.status.value().ok()) {
-          decrease_requests_num++;
-          continue;
-        }
-        // Reduce the number of concurrent requests when a request is
-        // finished or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          decrease_requests_num++;
-        }
       }
-      get_rate_limiter()->decrease_requests(decrease_requests_num);
       return handle_rpc_responses(req_outputs);
     };
   }
@@ -506,14 +555,46 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                          sp.decode_address,
                          call);
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
+  if (json_object) {
+    std::string grammar_error;
+    bool reasoning_enabled = false;
+    if (generation_mode.has_value()) {
+      if (generation_mode == ChatTemplateGenerationMode::UNKNOWN) {
+        CALLBACK_WITH_ERROR(
+            StatusCode::INVALID_ARGUMENT,
+            "JSON object constraint requires a recognizable chat generation "
+            "mode",
+            sp.service_request_id,
+            sp.source_xservice_addr);
+        return nullptr;
+      }
+      reasoning_enabled =
+          generation_mode == ChatTemplateGenerationMode::REASONING;
+    } else {
+      reasoning_enabled = get_enable_thinking(sp.chat_template_kwargs);
+    }
+    req_state.json_object_grammar =
+        get_json_object_grammar(reasoning_enabled, &grammar_error);
+    if (req_state.json_object_grammar == nullptr) {
+      CALLBACK_WITH_ERROR(
+          StatusCode::INVALID_ARGUMENT,
+          "Failed to initialize json_object constraint: " + grammar_error,
+          sp.service_request_id,
+          sp.source_xservice_addr);
+      return nullptr;
+    }
+    req_state.json_reasoning_enabled = reasoning_enabled;
+  }
   req_state.sample_slots = sp.sample_slots;
 
+  rate_limit_guard.dismiss();
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.source_xservice_addr);
+                                           sp.source_xservice_addr,
+                                           get_rate_limiter());
 
   // add one sequence, rest will be added by scheduler
   return request;
@@ -525,11 +606,19 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     const RequestParams& sp,
     std::optional<Call*> call,
     OutputCallback callback) {
+  // Guard the rate-limit slot the caller acquired via is_limited(). The
+  // string-prompt overload installs its own guard once we forward there;
+  // we dismiss ours right before that call so the slot is not released
+  // twice.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   Timer timer;
 
-  std::optional<std::string> prompt;
-  prompt = chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
-  if (!prompt.has_value()) {
+  const std::optional<ChatTemplateRenderResult> render_result =
+      chat_template_->apply_with_generation_mode(
+          messages, sp.tools, sp.chat_template_kwargs);
+  if (!render_result.has_value()) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Failed to construct prompt from messages",
                         sp.service_request_id,
@@ -540,8 +629,13 @@ std::shared_ptr<Request> LLMMaster::generate_request(
 
   COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
 
-  return generate_request(
-      std::move(prompt.value()), std::move(prompt_tokens), sp, call, callback);
+  rate_limit_guard.dismiss();
+  return generate_request(std::move(render_result->prompt),
+                          std::move(prompt_tokens),
+                          sp,
+                          call,
+                          callback,
+                          render_result->generation_mode);
 }
 
 bool LLMMaster::handle_rpc_response(const RequestOutput& output) {

@@ -86,6 +86,10 @@ struct Options {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
+  PROPERTY(bool, enable_adaptive_speculative_decode) = false;
+
+  PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
+
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 
@@ -215,6 +219,9 @@ struct Options {
 
   // Prefetch from kvcache store copy batch size
   PROPERTY(uint32_t, prefetch_batch_size) = 2;
+
+  // Maximum idle time for a Store prefetch stream. Zero disables the timeout.
+  PROPERTY(uint32_t, prefetch_timeout) = 0;
 
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;

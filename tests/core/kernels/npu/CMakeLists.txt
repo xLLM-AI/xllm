@@ -51,4 +51,26 @@ if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
     "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
 endif()
 
+# build_cp_context is CompositeExplicitAutograd pure host index math, so this
+# runs on CPU with no NPU; it only needs the xllm_ops registrations linked in.
+cc_test(
+  NAME
+    cp_context_builder_test
+  SRCS
+    cp_context_builder_test.cpp
+  DEPS
+    :xllm_ops
+    ascendcl
+    torch
+    torch_npu
+    kernels
+    npu_kernels
+    GTest::gtest_main
+    glog::glog
+)
+if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+  target_link_options(cp_context_builder_test PRIVATE
+    "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+endif()
+
 add_subdirectory(tilelang)

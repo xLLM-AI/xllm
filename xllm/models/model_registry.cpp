@@ -72,7 +72,9 @@ constexpr char kTorchBackend[] = "TORCH";
 bool is_torch_only_model_type(const std::string& model_type) {
   static const std::unordered_set<std::string> kTorchOnlyModelTypes = {
       "deepseek_v4",
+      "deepseek_v4_dspark",
       "deepseek_v4_mtp",
+      "glm5_next",
       "qwen3_5",
       "qwen3_5_text",
       "qwen3_5_moe",
@@ -117,9 +119,11 @@ bool resolve_model_registration(const std::string& model_type,
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
-             model_type == "deepseek_v32" || model_type == "glm_moe_dsa"
-             || model_type == "qwen3_vl") {
-    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/qwen3_vl support both backends.
+             model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
+             model_type == "qwen3_vl" || model_type == "deepseek_v32_mtp") {
+    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/qwen3_vl/deepseek_v32_mtp
+    // support both backends. qwen3_vl on TORCH is used by the Python model
+    // executor (--model_impl=python implements its own ViT + deepstack).
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {
@@ -143,6 +147,10 @@ bool resolve_model_registration(const std::string& model_type,
     *resolved_name = "qwen3_atb";
   } else if (model_type == "qwen3_moe" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_moe_atb";
+  } else if (model_type == "qwen2" && effective_backend == kAtbBackend) {
+    *resolved_name = "qwen2_atb";
+  } else if (model_type == "qwen2_5_vl" && effective_backend == kAtbBackend) {
+    *resolved_name = "qwen2_5_vl_atb";
   } else if (model_type == "qwen3_vl" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_vl_atb";
   } else {
@@ -250,6 +258,17 @@ void ModelRegistry::register_dit_model_factory(const std::string& name,
   } else {
     instance->model_registry_[name].dit_model_factory = factory;
     instance->model_backend_[name] = "dit";
+  }
+}
+
+void ModelRegistry::register_model_backend(const std::string& name,
+                                           const std::string& backend) {
+  ModelRegistry* instance = get_instance();
+  auto [it, inserted] = instance->model_backend_.emplace(name, backend);
+  if (!inserted && it->second != backend) {
+    SAFE_LOG_WARNING("model backend for "
+                     << name << " already registered as " << it->second
+                     << "; ignoring conflicting backend " << backend << ".");
   }
 }
 
@@ -515,6 +534,16 @@ std::unique_ptr<CausalLM> create_rec_model(const ModelContext& context) {
 }
 
 std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
+  // Python model executor: build the graph in Python (Qwen3VLForConditional-
+  // Generation etc.). PyCausalLM is-a CausalVLM so it satisfies this factory's
+  // return type; PyExecutorImpl drives encode/get_input_embeddings via pybind.
+  // Read from the global ModelConfig (the VLM worker does not populate
+  // context.model_impl, unlike the LLM worker).
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    return std::make_unique<PyCausalLM>(context);
+  }
+
   std::string resolved_name;
   std::string error_message;
   if (!resolve_model_registration_name(context.get_model_args().model_type(),

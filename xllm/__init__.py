@@ -29,10 +29,7 @@ def _find_export_so_path() -> str:
         if fname.startswith("xllm_export") and fname.endswith(".so"):
             return os.path.abspath(os.path.join(pkg_dir, fname))
 
-    raise ImportError(
-        f"cannot find xllm_export shared library under {pkg_dir!r}. "
-        f"Expected one of: {candidates!r}"
-    )
+    raise ImportError(f"cannot find xllm_export shared library under {pkg_dir!r}. Expected one of: {candidates!r}")
 
 
 def _load_xllm_export() -> ModuleType:
@@ -142,6 +139,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | _PUBLIC_NAMES)
+
 
 __all__ = [
     "ArgumentParser",

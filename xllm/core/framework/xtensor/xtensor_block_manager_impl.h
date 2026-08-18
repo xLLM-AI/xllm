@@ -70,6 +70,10 @@ class XTensorBlockManagerImpl : public BlockManager {
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
       size_t num_tokens) override;
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
+      size_t num_tokens) override;
 
   // Allocate shared blocks (prefix cache not supported)
   std::vector<Block> allocate_shared(

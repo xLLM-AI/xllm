@@ -379,7 +379,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
 
   tensor.set_(storage, 0, dims);
   return tensor;
-#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   auto options = torch::TensorOptions()
                      .dtype(dtype)
 #if defined(USE_CUDA) || defined(USE_DCU)
@@ -391,7 +392,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                          /*requires_grad=*/false);
   return torch::from_blob(const_cast<void*>(dev_addr), dims, options);
 #else
-  LOG(FATAL) << "get_tensor_from_blob only supports NPU, CUDA and MLU devices";
+  LOG(FATAL)
+      << "get_tensor_from_blob only supports NPU, CUDA, MUSA, MLU and DCU";
 #endif
 }
 
@@ -399,7 +401,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                                           const torch::ScalarType dtype,
                                           const void* dev_addr,
                                           const torch::Tensor& owner) {
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   CHECK(owner.defined())
       << "get_tensor_from_blob requires a valid owner tensor";
 

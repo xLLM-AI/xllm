@@ -2,23 +2,6 @@ include(cc_test)
 
 cc_test(
   NAME
-    embedding_cache_test
-  SRCS
-    embedding_cache_test.cpp
-  DEPS
-    :kv_cache
-    GTest::gtest_main
-)
-target_link_libraries(embedding_cache_test
-                      PUBLIC
-                      Python::Python
-                      $<$<BOOL:${USE_NPU}>:ascendcl>
-                      $<$<BOOL:${USE_NPU}>:hccl>
-                      $<$<BOOL:${USE_NPU}>:c_sec>
-                      $<$<BOOL:${USE_NPU}>:nnopbase>)
-
-cc_test(
-  NAME
     kv_cache_estimation_test
   SRCS
     kv_cache_estimation_test.cpp
@@ -50,3 +33,14 @@ target_link_libraries(kv_cache_test
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
+
+cc_test(
+  NAME
+    linear_state_restore_test
+  SRCS
+    linear_state_restore_test.cpp
+  DEPS
+    :linear_state_restore
+    GTest::gtest_main
+)
+target_link_libraries(linear_state_restore_test PUBLIC Python::Python)

@@ -23,10 +23,12 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "common/flash_comm1_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "kernels/ops_api.h"
+#include "layers/common/dense_mlp.h"
 #include "layers/common/linear.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -261,6 +263,90 @@ TEST_F(NpuLinearW8A8DynamicTest, ColumnParallelLinearLoadAndForward) {
   Device(options_.device()).synchronize_default_stream();
 
   auto expected = make_reference_output(input, weight, weight_scale, bias);
+  ASSERT_TRUE(output.sizes() == expected.sizes());
+  expect_output_close(output, expected);
+}
+
+TEST_F(NpuLinearW8A8DynamicTest, DenseMlpGathersQuantizedActivation) {
+  const int32_t num_tokens = 4;
+  const int64_t hidden_size = 16;
+  const int64_t intermediate_size = 20;
+  const std::string prefix = "npu.mlp.quantized_gather";
+  add_quant_desc(prefix + ".gate_proj");
+  add_quant_desc(prefix + ".up_proj");
+  add_quant_desc(prefix + ".down_proj");
+
+  mock_process_group_ = std::make_unique<test::MockProcessGroup>(
+      options_.device(), /*rank=*/0, /*world_size=*/2);
+  test::MockProcessGroup* mock_group =
+      static_cast<test::MockProcessGroup*>(mock_process_group_.get());
+  auto mlp = DenseMLP(DenseMLPImpl(hidden_size,
+                                   intermediate_size,
+                                   /*is_gated=*/true,
+                                   /*has_bias=*/false,
+                                   /*hidden_act=*/"silu",
+                                   /*enable_result_reduction=*/true,
+                                   quant_args_,
+                                   mock_group,
+                                   options_,
+                                   prefix));
+
+  std::unordered_map<std::string, torch::Tensor> weight_dict = {
+      {"gate_proj.weight",
+       make_qweight("npu.mlp.quantized_gather.gate.weight",
+                    intermediate_size,
+                    hidden_size)},
+      {"gate_proj.weight_scale",
+       make_weight_scale("npu.mlp.quantized_gather.gate.scale",
+                         intermediate_size)},
+      {"gate_proj.weight_offset",
+       torch::zeros({intermediate_size}, options_.dtype(torch::kFloat32))},
+      {"up_proj.weight",
+       make_qweight("npu.mlp.quantized_gather.up.weight",
+                    intermediate_size,
+                    hidden_size)},
+      {"up_proj.weight_scale",
+       make_weight_scale("npu.mlp.quantized_gather.up.scale",
+                         intermediate_size)},
+      {"up_proj.weight_offset",
+       torch::zeros({intermediate_size}, options_.dtype(torch::kFloat32))},
+      {"down_proj.weight",
+       make_qweight("npu.mlp.quantized_gather.down.weight",
+                    hidden_size,
+                    intermediate_size)},
+      {"down_proj.weight_scale",
+       make_weight_scale("npu.mlp.quantized_gather.down.scale", hidden_size)},
+      {"down_proj.weight_offset",
+       torch::zeros({hidden_size}, options_.dtype(torch::kFloat32))},
+  };
+  mlp->load_state_dict(StateDict(std::move(weight_dict), prefix + "."));
+
+  torch::Tensor local_input =
+      make_input("npu.mlp.quantized_gather.input", num_tokens / 2, hidden_size);
+  torch::Tensor expected = mlp->forward(local_input);
+  Device(options_.device()).synchronize_default_stream();
+
+  FlashComm1Context context;
+  context.enabled = true;
+  context.tp_rank = 0;
+  context.tp_world_size = 2;
+  context.original_num_tokens = num_tokens;
+  context.padded_num_tokens = num_tokens;
+  context.padded_local_num_tokens = num_tokens / context.tp_world_size;
+  context.tp_group = mock_group;
+  mock_group->clear_allgather_input_dtypes();
+  torch::Tensor output;
+  {
+    FlashComm1ContextScope context_scope(&context);
+    output = mlp->forward(local_input);
+  }
+  Device(options_.device()).synchronize_default_stream();
+
+  const std::vector<torch::ScalarType>& gathered_dtypes =
+      mock_group->allgather_input_dtypes();
+  ASSERT_EQ(gathered_dtypes.size(), 2);
+  EXPECT_EQ(gathered_dtypes[0], torch::kInt8);
+  EXPECT_EQ(gathered_dtypes[1], torch::kFloat32);
   ASSERT_TRUE(output.sizes() == expected.sizes());
   expect_output_close(output, expected);
 }

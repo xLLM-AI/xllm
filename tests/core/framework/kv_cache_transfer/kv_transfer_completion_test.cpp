@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <chrono>
 #include <future>
+#include <memory>
 
 namespace xllm {
 namespace {
@@ -80,6 +81,59 @@ TEST(KVTransferCompletionTest, RejectsPendingTransferAtDestruction) {
         completion.add(promise.getSemiFuture());
       },
       "pending KV transfers");
+}
+
+TEST(KVTransferTrackerTest, WaitsForEveryTrackedTransfer) {
+  KVTransferTracker tracker;
+  std::shared_ptr<KVTransferTracker::Completion> first = tracker.track();
+  std::shared_ptr<KVTransferTracker::Completion> second = tracker.track();
+
+  std::promise<void> waiter_started;
+  std::future<void> started = waiter_started.get_future();
+  std::future<void> result = std::async(std::launch::async, [&]() {
+    waiter_started.set_value();
+    tracker.wait();
+  });
+
+  started.wait();
+  first.reset();
+  EXPECT_EQ(result.wait_for(50ms), std::future_status::timeout);
+  second.reset();
+  EXPECT_EQ(result.wait_for(1s), std::future_status::ready);
+}
+
+TEST(KVTransferTrackerTest, ReportsPendingUntilEveryTransferFinishes) {
+  KVTransferTracker tracker;
+  EXPECT_FALSE(tracker.has_pending());
+
+  std::shared_ptr<KVTransferTracker::Completion> first = tracker.track();
+  std::shared_ptr<KVTransferTracker::Completion> second = tracker.track();
+  EXPECT_TRUE(tracker.has_pending());
+
+  first.reset();
+  EXPECT_TRUE(tracker.has_pending());
+
+  second.reset();
+  EXPECT_FALSE(tracker.has_pending());
+}
+
+TEST(KVTransferTrackerTest, DestructionWaitsForTrackedTransfer) {
+  auto tracker = std::make_unique<KVTransferTracker>();
+  std::shared_ptr<KVTransferTracker::Completion> completion = tracker->track();
+
+  std::promise<void> destruction_started;
+  std::future<void> started = destruction_started.get_future();
+  std::future<void> result = std::async(
+      std::launch::async,
+      [tracker = std::move(tracker), &destruction_started]() mutable {
+        destruction_started.set_value();
+        tracker.reset();
+      });
+
+  started.wait();
+  EXPECT_EQ(result.wait_for(50ms), std::future_status::timeout);
+  completion.reset();
+  EXPECT_EQ(result.wait_for(1s), std::future_status::ready);
 }
 
 }  // namespace

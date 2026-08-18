@@ -80,13 +80,13 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `prefetch_timeout` | `uint32` | `0` | Timeout for prefetching from KV Cache Store. |
+| `prefetch_timeout` | `uint32` | `0` | Stops issuing new KV Cache Store prefetch batches after the timeout and waits for in-flight batches; `0` waits indefinitely. |
 | `prefetch_batch_size` | `uint32` | `2` | Copy batch size for prefetching from KV Cache Store. |
 | `layers_wise_copy_batchs` | `uint32` | `4` | Number of batches for layer-wise H2D copy. |
 | `host_blocks_factor` | `double` | `0.0` | Host block factor, for example `host block num = host_blocks_factor * hbm block num`. |
 | `enable_kvcache_store` | `bool` | `false` | Whether to enable KV Cache Store. |
 | `store_protocol` | `string` | `"tcp"` | KV Cache Store protocol, for example `tcp` or `rdma`. |
-| `store_master_server_address` | `string` | `""` | Address information of the Store master service. |
+| `store_master_server_address` | `string` | `""` | Store master address. Use `IP:Port` in standalone mode or `etcd://IP:Port;IP:Port;...` in etcd-backed HA mode. |
 | `store_metadata_server` | `string` | `""` | Address of the KV Cache Store metadata service. |
 | `store_local_hostname` | `string` | `""` | Local host name of the KV Cache Store client. |
 | `enable_control_h2d_block_num` | `bool` | `false` | Whether to control the number of H2D copy blocks. |
@@ -171,7 +171,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_pd_ooc` | `bool` | `false` | Whether to enable online-offline co-location in disaggregated PD mode. |
 | `disagg_pd_port` | `int32` | `7777` | Listening port for the disaggregated PD bRPC server. |
 | `instance_role` | `string` | `"DEFAULT"` | Instance role, for example `DEFAULT`, `PREFILL`, `DECODE`, or `MIX`. |
-| `kv_cache_transfer_type` | `string` | `"LlmDataDist"` | KV Cache transfer type, for example `LlmDataDist`, `Mooncake`, or `HCCL`. |
+| `kv_cache_transfer_type` | `string` | `"Mooncake"` | KV Cache transfer type, for example `Mooncake`, `LlmDataDist`, or `HCCL`. |
 | `kv_cache_transfer_mode` | `string` | `"PUSH"` | KV Cache transfer mode, for example `PUSH` or `PULL`. |
 | `transfer_listen_port` | `int32` | `26000` | Listening port for KV Cache Transfer. |
 | `kv_push_dst_rotate` | `bool` | `false` | Rotate the destination-worker traversal order in `push_kv_blocks` per KV-split rank to spread incast across decode workers. |
@@ -182,7 +182,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `draft_model` | `string` | `""` | Draft model path. See [MTP](/en/features/mtp/) for MTP usage. |
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
-| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`. |
+| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`, `DSpark`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |
 | `speculative_suffix_max_spec_factor` | `double` | `1.0` | Maximum suffix speculation token factor relative to match length. |
 | `speculative_suffix_max_spec_offset` | `double` | `0.0` | Maximum additive token offset for suffix speculation. |
@@ -238,6 +238,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_split_rmsnorm_rope` | `bool` | `false` | Whether to enable fused split rmsnorm rope ops. |
 | `enable_aclnn_matmul` | `bool` | `false` | Whether to enable the ACLNN matmul backend for supported NPU ATB layers. |
 | `enable_aclnn_swiglu` | `bool` | `false` | Whether to enable the ACLNN SwiGLU backend for supported NPU ATB layers. |
+| `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig
 

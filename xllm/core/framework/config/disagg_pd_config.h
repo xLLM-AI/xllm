@@ -66,7 +66,7 @@ class DisaggPDConfig final {
 
   PROPERTY(std::string, instance_role) = "DEFAULT";
 
-  PROPERTY(std::string, kv_cache_transfer_type) = "LlmDataDist";
+  PROPERTY(std::string, kv_cache_transfer_type) = "Mooncake";
 
   PROPERTY(std::string, kv_cache_transfer_mode) = "PUSH";
 

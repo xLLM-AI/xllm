@@ -187,12 +187,7 @@ class CausalConv1dDecodeKernel(TilelangKernel):
             "dtype": "bfloat16",
         }
         for d in sorted(
-            {
-                dim // tp
-                for dim in [2048, 4096, 5120, 6144, 8192, 10240]
-                for tp in [1, 2, 4, 8]
-                if dim % tp == 0
-            }
+            {dim // tp for dim in [2048, 4096, 5120, 6144, 8192, 10240] for tp in [1, 2, 4, 8] if dim % tp == 0}
         )
         for s in [0, 1]
     ]
@@ -205,10 +200,7 @@ class CausalConv1dDecodeKernel(TilelangKernel):
         dtype: str,
     ) -> str:
         if dtype not in ("float16", "bfloat16"):
-            raise ValueError(
-                f"CausalConv1D Decode TileLang kernel only supports "
-                f"dtype=float16/bfloat16, got {dtype}"
-            )
+            raise ValueError(f"CausalConv1D Decode TileLang kernel only supports dtype=float16/bfloat16, got {dtype}")
         dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
         tilelang.disable_cache()
         tilelang_kernel = build_causal_conv1d_decode_kernel(
@@ -330,9 +322,7 @@ def causal_conv1d_decode(
 
     initial_state_mode = torch.ones(batch, dtype=torch.int32, device=conv_state.device)
 
-    kernel = get_decode_kernel(
-        width, dim, "bfloat16", has_silu
-    )
+    kernel = get_decode_kernel(width, dim, "bfloat16", has_silu)
     output = kernel(
         x_kernel,
         weight_t,
@@ -343,9 +333,7 @@ def causal_conv1d_decode(
         bias_work,
     )
 
-    conv_state.copy_(
-        conv_state_t.transpose(1, 2).contiguous().to(original_dtype)
-    )
+    conv_state.copy_(conv_state_t.transpose(1, 2).contiguous().to(original_dtype))
 
     if query_start_loc is None and x.dim() == 2:
         output = output.squeeze(-1) if output.dim() == 3 and output.shape[-1] == 1 else output

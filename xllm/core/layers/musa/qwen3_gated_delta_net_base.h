@@ -30,7 +30,7 @@ limitations under the License.
 #include "framework/state_dict/utils.h"
 #include "layers/common/attention.h"
 #include "layers/common/linear.h"
-#include "layers/common/rms_norm_gated.h"
+#include "layers/musa/rms_norm_gated.h"
 
 namespace xllm {
 namespace layer {
@@ -89,40 +89,22 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
 
   ColumnParallelLinear conv1d_{nullptr};
   RowParallelLinear o_proj_{nullptr};
-  RmsNormGated norm_{nullptr};
+  musa::RmsNormGated norm_{nullptr};
 
   DEFINE_WEIGHT(dt_bias);
   DEFINE_WEIGHT(A_log);
 
-#if defined(USE_CUDA) || defined(USE_MUSA)
-  // Persistent output buffers consumed by xllm::kernel::
-  // fused_qkvzba_split_reshape_cat in lieu of the libtorch
-  // `reshape().contiguous() ... torch::cat()` chain. Same lazy / grow-only
-  // pattern used by ColumnParallelLinearImpl::output_buf_ and
-  // AttentionImpl::output_buf_: sized on the first forward (during graph
-  // warmup), reused on every replay via narrow() views. Eager calls also
-  // benefit (one allocation per process instead of per-step).
+  // Persistent buffers used by the fused GDN split and decode kernels.
   mutable torch::Tensor mixed_qkv_out_buf_;
   mutable torch::Tensor z_out_buf_;
   mutable torch::Tensor b_out_buf_;
   mutable torch::Tensor a_out_buf_;
 
-  // Persistent output buffer for the decode-path causal_conv1d_update call.
-  // Without this, the kernel falls through to its libtorch slow path
-  // (`weight.to(fp32)` / `x.to(fp32)` / `torch::empty_like(x_f32)`) which
-  // triggers EmptyStridedMUSA -> MUSA stream-capture abort. Providing a
-  // pre-allocated buffer unlocks the in-house `causal_conv1d_decode_fused`
-  // fast path (see gdn_ops.cpp::causal_conv1d_update fast-path guard).
+  // Persistent output for causal convolution during decode.
   mutable torch::Tensor conv1d_decode_out_buf_;
 
-  // Persistent output buffer for the in-house fused_gated_delta_rule_decode
-  // kernel. Wired into `MateGatedDeltaRuleDecodeParams::decode_output` so
-  // the kernel skips its `torch::empty({B, Hv, V}, ...)` fallback (which
-  // hits EmptyMUSA mid-capture) and writes directly into pre-allocated
-  // storage. Reused across replays; same lazy / grow-only contract as the
-  // other graph-safe buffers above.
+  // Persistent output for the fused gated-delta-rule decode kernel.
   mutable torch::Tensor fused_gdn_decode_out_buf_;
-#endif
 };
 
 }  // namespace layer

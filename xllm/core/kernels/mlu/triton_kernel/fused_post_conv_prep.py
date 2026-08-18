@@ -15,10 +15,10 @@
 import triton
 import triton.language as tl
 
-
 # ==========================================================
 # Triton Kernel Code (from Step 3)
 # ==========================================================
+
 
 @triton.jit
 def tmo_fused_post_conv_prep_kernel(
@@ -72,7 +72,7 @@ def tmo_fused_post_conv_prep_kernel(
     ones_raw = tl.full((BK, 1), 1, dtype=tl.float32)
     offs_k = tl.arange(0, BK)  # [BK]
     offs_v = tl.arange(0, BV)  # [BV]
-    offs_A_dt = tl.arange(0, HV) # [HV]
+    offs_A_dt = tl.arange(0, HV)  # [HV]
     for i_tb in range(pid, num_t, num_jobs):
         # ============ gating processing ============
         offs_t = i_tb * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
@@ -82,27 +82,23 @@ def tmo_fused_post_conv_prep_kernel(
         dt_bias_val = tl.load(dt_bias_ptr + offs_A_dt).to(tl.float32)
         a_offsets = offs_t[:, None] * stride_a_tok + offs_A_dt[None, :]
         b_offsets = offs_t[:, None] * stride_b_tok + offs_A_dt[None, :]
-        a_vals = tl.load(a_ptr + a_offsets, mask=mask_t[:,None], other=0).to(tl.float32)
-        b_vals = tl.load(b_ptr + b_offsets, mask=mask_t[:,None], other=0).to(tl.float32)
+        a_vals = tl.load(a_ptr + a_offsets, mask=mask_t[:, None], other=0).to(tl.float32)
+        b_vals = tl.load(b_ptr + b_offsets, mask=mask_t[:, None], other=0).to(tl.float32)
 
         # g = -exp(A_log) * softplus(a + dt_bias)
         x = a_vals + dt_bias_val[None, :]
         sp = tl.where(
             x > 0,
-            x + tl.extra.mlu.libdevice.fast_log(
-                1.0 + tl.extra.mlu.libdevice.fast_expf(-x)
-            ),
-            tl.extra.mlu.libdevice.fast_log(
-                1.0 + tl.extra.mlu.libdevice.fast_expf(x)
-            ),
+            x + tl.extra.mlu.libdevice.fast_log(1.0 + tl.extra.mlu.libdevice.fast_expf(-x)),
+            tl.extra.mlu.libdevice.fast_log(1.0 + tl.extra.mlu.libdevice.fast_expf(x)),
         )
         sp = tl.where(x <= SOFTPLUS_THRESHOLD, sp, x)
         g_vals = -tl.exp(A_log_val) * sp
 
         beta_vals = tl.extra.mlu.libdevice.fast_sigmoid(b_vals)
         gb_offsets = offs_t[:, None] * HV + offs_A_dt[None, :]
-        tl.store(g_ptr + gb_offsets, g_vals, mask=mask_t[:,None])
-        tl.store(beta_ptr + gb_offsets, beta_vals, mask=mask_t[:,None])
+        tl.store(g_ptr + gb_offsets, g_vals, mask=mask_t[:, None])
+        tl.store(beta_ptr + gb_offsets, beta_vals, mask=mask_t[:, None])
 
     for flat_pid in range(pid, total_blocks, num_jobs):
         i_tb = flat_pid % num_t
@@ -125,18 +121,13 @@ def tmo_fused_post_conv_prep_kernel(
             k_offsets = offs_t[:, None] * stride_x_tok + HK + i_h * K + offs_k[None, :]
             k_f32 = tl.load(mixed_qkv_ptr + k_offsets, mask=mask_2d, other=0).to(tl.float32)
             if APPLY_L2NORM:
-
                 q_sq_sum = tl.dot(ones_col, (q_f32 * q_f32).trans(), allow_tf32=False)  # [BLOCK_T]
                 k_sq_sum = tl.dot(ones_col, (k_f32 * k_f32).trans(), allow_tf32=False)
-                q_inv = tl.extra.mlu.libdevice.fast_rcp(
-                    tl.extra.mlu.libdevice.fast_sqrt(q_sq_sum + L2NORM_EPS)
-                )
+                q_inv = tl.extra.mlu.libdevice.fast_rcp(tl.extra.mlu.libdevice.fast_sqrt(q_sq_sum + L2NORM_EPS))
 
                 q_f32 = q_f32 * tl.dot(q_inv.trans(), ones_col, allow_tf32=False)
 
-                k_inv = tl.extra.mlu.libdevice.fast_rcp(
-                    tl.extra.mlu.libdevice.fast_sqrt(k_sq_sum + L2NORM_EPS)
-                )
+                k_inv = tl.extra.mlu.libdevice.fast_rcp(tl.extra.mlu.libdevice.fast_sqrt(k_sq_sum + L2NORM_EPS))
 
                 k_f32 = k_f32 * tl.dot(k_inv.trans(), ones_col, allow_tf32=False)
 
@@ -164,13 +155,9 @@ def tmo_fused_post_conv_prep_kernel(
             V_OFFSET: tl.constexpr = 2 * H * K
 
             # Load V features: mixed_qkv[t, 2*H*K + i_hv*V + v]
-            v_offsets = (
-                offs_t[:, None] * stride_x_tok + V_OFFSET + i_hv * V + offs_v[None, :]
-            )
+            v_offsets = offs_t[:, None] * stride_x_tok + V_OFFSET + i_hv * V + offs_v[None, :]
             v_vals = tl.load(mixed_qkv_ptr + v_offsets, mask=mask_2d, other=0)
 
             # Store V
             v_out = offs_t[:, None] * stride_v_tok + i_hv * V + offs_v[None, :]
             tl.store(v_ptr + v_out, v_vals, mask=mask_2d)
-
-

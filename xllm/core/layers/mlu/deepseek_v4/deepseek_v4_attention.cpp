@@ -293,9 +293,48 @@ void DeepseekV4AttentionImpl::apply_last_rope(
   xllm::kernel::apply_rotary(params);
 }
 
-torch::Tensor DeepseekV4AttentionImpl::project_q(torch::Tensor& q_down,
-                                                 torch::Tensor& qr) {
+torch::Tensor DeepseekV4AttentionImpl::project_q(
+    torch::Tensor& q_down,
+    torch::Tensor& qr,
+    bool use_fused_decode,
+    const torch::Tensor& sin_table,
+    const torch::Tensor& cos_table,
+    const torch::Tensor& input_positions) {
   // q_down is the segment-0 slice of the fused hidden->* projection.
+  if (use_fused_decode) {
+    torch::Tensor input = q_down.unsqueeze(1).contiguous();
+    torch::Tensor output = torch::empty(
+        {q_down.size(0), 1, n_local_heads_, head_dim_}, q_down.options());
+    torch::Tensor output_norm = torch::empty_like(input);
+    torch::Tensor weight =
+        wq_b_->weight().view({n_local_heads_, head_dim_, q_lora_rank_});
+    std::optional<torch::Tensor> weight_scale = std::nullopt;
+    std::optional<torch::Tensor> smooth = wq_b_->smooth();
+    if (weight.scalar_type() != input.scalar_type()) {
+      torch::Tensor scale = wq_b_->per_channel_scale();
+      CHECK(has_tensor(scale))
+          << "fused_mla_q_v2 requires scales for quantized wq_b";
+      weight_scale = scale.view({n_local_heads_, head_dim_});
+      if (!smooth.has_value()) {
+        smooth = torch::ones({q_lora_rank_}, scale.options());
+      }
+    }
+    xllm::kernel::mlu::fused_mla_q_v2(input,
+                                      output,
+                                      output_norm,
+                                      q_norm_->weight(),
+                                      smooth,
+                                      weight,
+                                      weight_scale,
+                                      sin_table,
+                                      cos_table,
+                                      input_positions,
+                                      eps_,
+                                      /*interleaved=*/true);
+    qr = output_norm.view_as(q_down);
+    return output.view({q_down.size(0), n_local_heads_, head_dim_});
+  }
+
   qr = std::get<0>(q_norm_->forward(q_down));
   torch::Tensor q = wq_b_->forward(qr).view({-1, n_local_heads_, head_dim_});
   torch::Tensor output = torch::empty_like(q);
@@ -331,8 +370,13 @@ torch::Tensor DeepseekV4AttentionImpl::project_output(
       attn_output.reshape({num_tokens, n_local_groups_, -1});
   torch::Tensor wo_a =
       wo_a_->weight().view({n_local_groups_, o_lora_rank_, -1});
+  torch::Tensor grouped_output =
+      xllm::kernel::mlu::batch_matmul(grouped.transpose(0, 1).contiguous(),
+                                      wo_a,
+                                      /*trans_a=*/false,
+                                      /*trans_b=*/true);
   torch::Tensor low_rank =
-      torch::einsum("tgd,grd->tgr", {grouped, wo_a}).reshape({num_tokens, -1});
+      grouped_output.transpose(0, 1).contiguous().reshape({num_tokens, -1});
   return wo_b_->forward(low_rank);
 }
 
@@ -364,10 +408,6 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
   std::vector<torch::Tensor> parts =
       hidden_proj.split(/*split_size=*/hidden_proj_sizes_, /*dim=*/-1);
 
-  torch::Tensor qr;
-  torch::Tensor q = project_q(parts[0], qr);
-  torch::Tensor kv = project_kv(parts[1]);
-
   const bool uses_compressed_rope =
       compress_ratio_ == 4 || compress_ratio_ == 128;
   const torch::Tensor& active_sin_table =
@@ -377,11 +417,22 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
   const torch::Tensor& active_inverse_sin_table =
       uses_compressed_rope ? dsa.compressed_inverse_sin_table
                            : dsa.inverse_sin_table;
-  apply_last_rope(q,
-                  active_sin_table,
-                  active_cos_table,
-                  dsa.input_positions,
-                  rope_head_dim_);
+  torch::Tensor qr;
+  const bool use_fused_decode = !is_prefill && !is_chunked_prefill;
+  torch::Tensor q = project_q(parts[0],
+                              qr,
+                              use_fused_decode,
+                              active_sin_table,
+                              active_cos_table,
+                              dsa.input_positions);
+  torch::Tensor kv = project_kv(parts[1]);
+  if (!use_fused_decode) {
+    apply_last_rope(q,
+                    active_sin_table,
+                    active_cos_table,
+                    dsa.input_positions,
+                    rope_head_dim_);
+  }
   apply_last_rope(kv,
                   active_sin_table,
                   active_cos_table,

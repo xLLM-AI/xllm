@@ -107,4 +107,57 @@ at::Tensor sparse_flash_attention(
   return out;
 }
 
+at::Tensor sparse_flash_attention_out(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& sparse_indices,
+    const c10::optional<at::Tensor>& block_table,
+    const c10::optional<at::Tensor>& actual_seq_lengths_query,
+    const c10::optional<at::Tensor>& actual_seq_lengths_kv,
+    const c10::optional<at::Tensor>& query_rope,
+    const c10::optional<at::Tensor>& key_rope,
+    double scale_value,
+    int64_t sparse_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode,
+    at::Tensor& output) {
+  check_sparse_flash_attention_shape_and_dtype(query,
+                                               key,
+                                               value,
+                                               sparse_indices,
+                                               sparse_block_size,
+                                               layout_query,
+                                               layout_kv);
+  CHECK(output.is_contiguous()) << "output must be contiguous";
+  CHECK(output.sizes() == query.sizes())
+      << "output shape must match query shape";
+  CHECK(output.scalar_type() == query.scalar_type())
+      << "output dtype must match query dtype";
+
+  std::string query_layout_str = std::string(layout_query);
+  std::string kv_layout_str = std::string(layout_kv);
+  char* query_layout_ptr = const_cast<char*>(query_layout_str.c_str());
+  char* kv_layout_ptr = const_cast<char*>(kv_layout_str.c_str());
+
+  EXEC_NPU_CMD(aclnnSparseFlashAttention,
+               query,
+               key,
+               value,
+               sparse_indices,
+               block_table,
+               actual_seq_lengths_query,
+               actual_seq_lengths_kv,
+               query_rope,
+               key_rope,
+               scale_value,
+               sparse_block_size,
+               query_layout_ptr,
+               kv_layout_ptr,
+               sparse_mode,
+               output);
+  return output;
+}
+
 }  // namespace xllm::kernel::npu

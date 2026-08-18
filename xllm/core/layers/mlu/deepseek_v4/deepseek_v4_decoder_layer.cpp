@@ -147,8 +147,11 @@ std::optional<torch::Tensor> DeepseekV4DecoderLayerImpl::route_input_ids(
 
   CHECK(input_ids.has_value() && input_ids.value().defined())
       << "DeepseekV4 hash routing requires input_ids.";
-  torch::Tensor flat_ids =
-      input_ids.value().reshape({-1}).to(ffn_input.device()).contiguous();
+  torch::Tensor flat_ids = input_ids.value()
+                               .reshape({-1})
+                               .to(ffn_input.device())
+                               .to(torch::kInt32)
+                               .contiguous();
   const int64_t id_count = flat_ids.size(0);
   const int64_t token_count =
       ffn_input.reshape({-1, ffn_input.size(-1)}).size(0);
@@ -171,29 +174,65 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params,
-    const std::optional<torch::Tensor>& input_ids) {
+    const std::optional<torch::Tensor>& input_ids,
+    std::optional<DeepseekV4PendingMHC>* pending_mhc,
+    bool is_last_layer) {
   (void)positions;
 
   residual = std::nullopt;
+  const bool use_fused_mhc =
+      pending_mhc != nullptr && !attn_metadata.is_prefill &&
+      !attn_metadata.is_chunked_prefill && attn_hc_pre_->supports_fused_mhc() &&
+      ffn_hc_pre_->supports_fused_mhc();
 
-  torch::Tensor residual_attn = x;
-  DeepseekV4HCPreOutput attn_hc = attn_hc_pre_->forward(x);
-  torch::Tensor attn_input = attn_hc.output;
-  attn_input = std::get<0>(attn_norm_->forward(attn_input));
+  torch::Tensor residual_attn;
+  DeepseekV4HCPreOutput attn_hc;
+  torch::Tensor attn_input;
+  if (use_fused_mhc && pending_mhc->has_value()) {
+    DeepseekV4PendingMHC& pending = pending_mhc->value();
+    std::tie(attn_input, residual_attn, attn_hc.post, attn_hc.comb) =
+        attn_hc_pre_->fused_post_pre_norm(pending.x,
+                                          pending.residual,
+                                          pending.post,
+                                          pending.comb,
+                                          attn_norm_->weight());
+    pending_mhc->reset();
+  } else {
+    residual_attn = x;
+    attn_hc = attn_hc_pre_->forward(x);
+    attn_input = std::get<0>(attn_norm_->forward(attn_hc.output));
+  }
   torch::Tensor attn_output;
   std::tie(attn_output, std::ignore) =
       attention_->forward(attn_metadata, attn_input, kv_cache);
-  std::tie(x, std::ignore) =
-      hc_post_->forward(attn_output, residual_attn, attn_hc.post, attn_hc.comb);
 
-  torch::Tensor residual_ffn = x;
-  DeepseekV4HCPreOutput ffn_hc = ffn_hc_pre_->forward(x);
-  torch::Tensor ffn_input = ffn_hc.output;
-  ffn_input = std::get<0>(ffn_norm_->forward(ffn_input));
+  torch::Tensor residual_ffn;
+  DeepseekV4HCPreOutput ffn_hc;
+  torch::Tensor ffn_input;
+  if (use_fused_mhc) {
+    std::tie(ffn_input, residual_ffn, ffn_hc.post, ffn_hc.comb) =
+        ffn_hc_pre_->fused_post_pre_norm(attn_output,
+                                         residual_attn,
+                                         attn_hc.post,
+                                         attn_hc.comb,
+                                         ffn_norm_->weight());
+  } else {
+    std::tie(x, std::ignore) = hc_post_->forward(
+        attn_output, residual_attn, attn_hc.post, attn_hc.comb);
+    residual_ffn = x;
+    ffn_hc = ffn_hc_pre_->forward(x);
+    ffn_input = std::get<0>(ffn_norm_->forward(ffn_hc.output));
+  }
   std::optional<torch::Tensor> ids = route_input_ids(ffn_input, input_ids);
   FusedMoEImpl::RouteInfo route_info = sparse_moe_->prep_route(ffn_input, ids);
   torch::Tensor ffn_output = sparse_moe_->forward_selected(
       ffn_input, route_info.reduce_weight, route_info.expert_id, input_params);
+  if (use_fused_mhc && !is_last_layer) {
+    pending_mhc->emplace(DeepseekV4PendingMHC{
+        ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb});
+    x = ffn_output;
+    return x;
+  }
   std::tie(x, std::ignore) =
       hc_post_->forward(ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb);
   return x;

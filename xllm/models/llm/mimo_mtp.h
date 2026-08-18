@@ -175,6 +175,9 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < mtp_layers_.size(); i++) {
+      if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return ModelOutput();
+      }
 #if defined(USE_CUDA)
       attn_metadata.plan_info->layer_id = static_cast<int32_t>(i);
 #endif

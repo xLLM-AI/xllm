@@ -194,11 +194,17 @@ class ContinuousScheduler : public Scheduler {
   }
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size() + chunk_queue_->size();
+    return prefill_queue_->size() + chunk_queue_->size() +
+           num_prefetch_pending_requests();
   }
+
+  size_t num_prefetch_pending_requests() const;
 
   // for test only
   std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+  void process_batch_output_test(bool enable_schedule_overlap) {
+    process_batch_output(enable_schedule_overlap);
+  }
   std::vector<std::shared_ptr<Request>> get_running_requests() {
     return running_requests_;
   }
@@ -280,9 +286,13 @@ class ContinuousScheduler : public Scheduler {
 
  protected:
   void clear_mtp_bootstrap(Request* request);
+  void drain_prefetched_requests();
+  void release_prefetch_admission_slot();
+  virtual bool enqueue_ready_request(std::shared_ptr<Request> request);
 
-  // i.e. round(tbt_ms / num_tokens). num_tokens must be > 0.
-  static int64_t amortized_token_latency_ms(int64_t tbt_ms, size_t num_tokens);
+  static int64_t microseconds_to_milliseconds(int64_t microseconds);
+  // i.e. round(latency / num_tokens). num_tokens must be > 0.
+  static int64_t amortized_token_latency(int64_t latency, size_t num_tokens);
 
   const Options options_;
 
@@ -302,6 +312,13 @@ class ContinuousScheduler : public Scheduler {
   // ::xllm::RecConfig::get_instance().request_queue_size() the schedule
   // owns the requests and manages their lifetimes.
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
+
+  // Requests waiting for Mooncake prefetch completion. This is an admission
+  // barrier only; SchedulerPolicy never sees these requests.
+  mutable std::mutex prefetch_admission_mutex_;
+  std::deque<std::shared_ptr<Request>> prefetch_admission_queue_;
+  size_t prefetch_admission_slots_ = 0;
+  size_t prefetch_admission_limit_ = 0;
 
   // a batch of requests in running state, sorted by priority from high to low.
   // This may include decoding requests and prefill requests in chunked prefill

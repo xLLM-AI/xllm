@@ -160,6 +160,32 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
     norm_->weight.set_data(norm_->weight.to(options));
     norm_->bias.set_data(norm_->bias.to(options));
 
+    is_smoothquant_ = quant_args.quant_method() == kQuantMethodSmoothquant;
+    if (is_smoothquant_) {
+      quant_fc1_ =
+          register_module("linear_fc1",
+                          layer::ColumnParallelLinear(hidden_size_,
+                                                      hidden_size_,
+                                                      /*bias=*/true,
+                                                      /*gather_output=*/false,
+                                                      quant_args,
+                                                      parallel_args.tp_group_,
+                                                      options));
+      quant_fc2_ = register_module(
+          "linear_fc2",
+          layer::RowParallelLinear(
+              hidden_size_,
+              d_model,
+              /*bias=*/true,
+              /*input_is_parallelized=*/true,
+              /*enable_result_reduction=*/true,
+              quant_args,
+              parallel_args.tp_group_,
+              options,
+              layer::LinearExtraArgs("gelu", /*is_gated=*/false)));
+      return;
+    }
+
     auto fc1 = torch::nn::Linear(
         torch::nn::LinearOptions(hidden_size_, hidden_size_).bias(true));
     fc1->weight.set_data(fc1->weight.to(options));
@@ -178,6 +204,9 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
       x = norm_(x.view({-1, hidden_size_}));
     else
       x = norm_(x).view({-1, hidden_size_});
+    if (is_smoothquant_) {
+      return quant_fc2_->forward(quant_fc1_->forward(x));
+    }
     return mlp_->forward(x);
   }
 
@@ -197,6 +226,14 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
           << "bias size mismatch for " << name();
       norm_->bias.data().copy_(norm_bias);
       is_norm_bias_loaded = true;
+    }
+
+    if (is_smoothquant_) {
+      quant_fc1_->load_state_dict(
+          state_dict.get_dict_with_prefix("linear_fc1."));
+      quant_fc2_->load_state_dict(
+          state_dict.get_dict_with_prefix("linear_fc2."));
+      return;
     }
 
     const auto& fc1_dict = state_dict.get_dict_with_prefix("linear_fc1.");
@@ -233,6 +270,17 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
+    if (is_smoothquant_) {
+      CHECK(quant_fc1_->is_weight_loaded())
+          << "quantized weights are not loaded for " << prefix + "linear_fc1";
+      CHECK(quant_fc2_->is_weight_loaded())
+          << "quantized weights are not loaded for " << prefix + "linear_fc2";
+      CHECK(is_norm_weight_loaded)
+          << "weight is not loaded for " << prefix + "norm" + ".weight";
+      CHECK(is_norm_bias_loaded)
+          << "bias is not loaded for " << prefix + "norm" + ".bias";
+      return;
+    }
     CHECK(is_fc1_weight_loaded)
         << "weight is not loaded for " << prefix + "linear_fc1" + ".weight";
     CHECK(is_fc1_bias_loaded)
@@ -252,6 +300,8 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
   bool use_postshuffle_norm_;
   torch::nn::LayerNorm norm_{nullptr};
   torch::nn::Sequential mlp_{nullptr};
+  layer::ColumnParallelLinear quant_fc1_{nullptr};
+  layer::RowParallelLinear quant_fc2_{nullptr};
   std::tuple<torch::nn::Linear, torch::nn::GELU, torch::nn::Linear> layers_ = {
       nullptr,
       nullptr,
@@ -262,6 +312,7 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
   bool is_fc2_bias_loaded = false;
   bool is_norm_weight_loaded = false;
   bool is_norm_bias_loaded = false;
+  bool is_smoothquant_ = false;
 };
 TORCH_MODULE(Qwen3_VisionPatchMerger);
 

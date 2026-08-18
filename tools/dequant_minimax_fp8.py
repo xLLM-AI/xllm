@@ -24,9 +24,7 @@ from safetensors.torch import save_file
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Offline dequantize MiniMax-M2.5 FP8 safetensors to BF16."
-    )
+    parser = argparse.ArgumentParser(description="Offline dequantize MiniMax-M2.5 FP8 safetensors to BF16.")
     parser.add_argument(
         "--input-dir",
         type=Path,
@@ -68,14 +66,9 @@ def dequantize_fp8_block_weight(
     block_size: tuple[int, int],
 ) -> torch.Tensor:
     if fp8_weight.dim() != 2:
-        raise ValueError(
-            f"Only 2D fp8 weights are supported, got shape {tuple(fp8_weight.shape)}"
-        )
+        raise ValueError(f"Only 2D fp8 weights are supported, got shape {tuple(fp8_weight.shape)}")
     if weight_scale_inv.dim() != 2:
-        raise ValueError(
-            "FP8 weight scale tensor must be 2D, "
-            f"got shape {tuple(weight_scale_inv.shape)}"
-        )
+        raise ValueError(f"FP8 weight scale tensor must be 2D, got shape {tuple(weight_scale_inv.shape)}")
 
     block_n, block_k = block_size
     n, k = fp8_weight.shape
@@ -84,22 +77,15 @@ def dequantize_fp8_block_weight(
 
     if tuple(weight_scale_inv.shape) != (n_tiles, k_tiles):
         raise ValueError(
-            "Unexpected fp8 scale shape "
-            f"{tuple(weight_scale_inv.shape)} for weight shape {tuple(fp8_weight.shape)}"
+            f"Unexpected fp8 scale shape {tuple(weight_scale_inv.shape)} for weight shape {tuple(fp8_weight.shape)}"
         )
 
     if n % block_n == 0 and k % block_k == 0:
-        weight_bf16 = fp8_weight.to(torch.bfloat16).reshape(
-            n_tiles, block_n, k_tiles, block_k
-        )
-        scale_bf16 = weight_scale_inv.to(torch.bfloat16).reshape(
-            n_tiles, 1, k_tiles, 1
-        )
+        weight_bf16 = fp8_weight.to(torch.bfloat16).reshape(n_tiles, block_n, k_tiles, block_k)
+        scale_bf16 = weight_scale_inv.to(torch.bfloat16).reshape(n_tiles, 1, k_tiles, 1)
         return (weight_bf16 * scale_bf16).reshape(n, k)
 
-    expanded_scale = weight_scale_inv.repeat_interleave(block_n, 0).repeat_interleave(
-        block_k, 1
-    )
+    expanded_scale = weight_scale_inv.repeat_interleave(block_n, 0).repeat_interleave(block_k, 1)
     expanded_scale = expanded_scale[:n, :k].to(torch.bfloat16)
     return fp8_weight.to(torch.bfloat16) * expanded_scale
 
@@ -114,19 +100,14 @@ def discover_safetensor_files(input_dir: Path) -> tuple[list[str], dict[str, str
 
     shard_paths = sorted(p.name for p in input_dir.glob("*.safetensors"))
     if len(shard_paths) != 1:
-        raise ValueError(
-            "Expected model.safetensors.index.json or a single .safetensors shard "
-            f"under {input_dir}"
-        )
+        raise ValueError(f"Expected model.safetensors.index.json or a single .safetensors shard under {input_dir}")
     return shard_paths, {}
 
 
 def prepare_output_dir(output_dir: Path) -> None:
     if output_dir.exists():
         if any(output_dir.iterdir()):
-            raise ValueError(
-                f"Output directory {output_dir} already exists and is not empty"
-            )
+            raise ValueError(f"Output directory {output_dir} already exists and is not empty")
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -147,16 +128,11 @@ def update_config(input_dir: Path, output_dir: Path) -> tuple[int, int]:
     config = load_json(config_path)
     quant_config = config.get("quantization_config", {})
     if quant_config.get("quant_method") != "fp8":
-        raise ValueError(
-            "This converter expects quantization_config.quant_method == 'fp8'"
-        )
+        raise ValueError("This converter expects quantization_config.quant_method == 'fp8'")
 
     block_size = quant_config.get("weight_block_size")
     if not isinstance(block_size, list) or len(block_size) != 2:
-        raise ValueError(
-            "This converter expects quantization_config.weight_block_size to be a "
-            "2-element list"
-        )
+        raise ValueError("This converter expects quantization_config.weight_block_size to be a 2-element list")
 
     config["torch_dtype"] = "bfloat16"
     config.pop("quantization_config", None)
@@ -168,9 +144,7 @@ def tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
 
 
-def convert_shard(
-    input_path: Path, output_path: Path, block_size: tuple[int, int]
-) -> tuple[dict[str, str], int, int]:
+def convert_shard(input_path: Path, output_path: Path, block_size: tuple[int, int]) -> tuple[dict[str, str], int, int]:
     converted: dict[str, torch.Tensor] = {}
     shard_weight_map: dict[str, str] = {}
     converted_fp8_tensors = 0
@@ -197,9 +171,7 @@ def convert_shard(
             if is_fp8_dtype(tensor.dtype):
                 scale_name = f"{name}_scale_inv"
                 if scale_name not in key_set:
-                    raise ValueError(
-                        f"Missing paired scale tensor {scale_name} for FP8 weight {name}"
-                    )
+                    raise ValueError(f"Missing paired scale tensor {scale_name} for FP8 weight {name}")
                 scale = f.get_tensor(scale_name)
                 tensor = dequantize_fp8_block_weight(tensor, scale, block_size)
                 skipped.add(scale_name)
@@ -232,17 +204,12 @@ def main() -> None:
     total_fp8_tensors = 0
     total_shards = len(shard_names)
 
-    print(
-        f"Dequantizing MiniMax FP8 checkpoint from {input_dir} to {output_dir} "
-        f"with block_size={list(block_size)}"
-    )
+    print(f"Dequantizing MiniMax FP8 checkpoint from {input_dir} to {output_dir} with block_size={list(block_size)}")
     for i, shard_name in enumerate(shard_names, start=1):
         input_path = input_dir / shard_name
         output_path = output_dir / shard_name
         print(f"[{i}/{total_shards}] Processing {shard_name}")
-        shard_weight_map, converted_fp8_tensors, shard_bytes = convert_shard(
-            input_path, output_path, block_size
-        )
+        shard_weight_map, converted_fp8_tensors, shard_bytes = convert_shard(input_path, output_path, block_size)
         total_weight_map.update(shard_weight_map)
         total_fp8_tensors += converted_fp8_tensors
         total_size += shard_bytes
@@ -261,4 +228,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

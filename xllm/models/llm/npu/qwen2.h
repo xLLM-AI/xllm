@@ -82,12 +82,12 @@ class QWen2ForCausalLMImpl : public LlmForCausalLMImplBase<QWen2Model> {
 TORCH_MODULE(QWen2ForCausalLM);
 
 // register the causal model
-REGISTER_CAUSAL_MODEL(qwen2, QWen2ForCausalLM);
+REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen2_atb, qwen2_atb, QWen2ForCausalLM);
 
 // register the model args
 // example config:
 // https://huggingface.co/Qwen/Qwen2-7B-Instruct/blob/main/config.json
-REGISTER_MODEL_ARGS(qwen2, [&] {
+REGISTER_MODEL_ARGS_WITH_VARNAME(qwen2_atb, qwen2_atb, [&] {
   LOAD_ARG_OR(model_type, "model_type", "qwen2");
   LOAD_ARG_OR(dtype, "torch_dtype", "");
   LOAD_ARG_OR(vocab_size, "vocab_size", 152064);

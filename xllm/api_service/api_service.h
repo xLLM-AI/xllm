@@ -46,6 +46,7 @@ class APIService : public proto::XllmAPIService {
  public:
   APIService(Master* master,
              const std::vector<std::string>& model_names,
+             const std::vector<std::string>& model_repository_names,
              const std::vector<std::string>& model_versions);
   ~APIService() = default;
 

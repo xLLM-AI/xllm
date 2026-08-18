@@ -178,7 +178,7 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // (KV / SWA / C4 / C128), not just KV. DSV4 sequences never hold KV, so a
   // KV-only check would treat every DSV4 grow as a fresh allocation and, on
   // failure, wrongly deallocate + reset the already-held SWA/C4/C128 blocks.
-  const bool started_empty = !sequence->kv_state().has_any_blocks();
+  const bool started_empty = !sequence->has_any_blocks();
 
   // The leaves (KV / SWA / C4 / C128 / EMBEDDING / LINEAR) each apply their own
   // strategy; the pool only orchestrates prefix-share-then-beam-then-grow,
@@ -208,15 +208,6 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
     return false;
   }
   return true;
-}
-
-bool BlockManagerPool::allocate(Sequence* sequence,
-                                size_t num_tokens,
-                                size_t needed_copy_in_blocks_num) {
-  LOG(FATAL)
-      << "allocate(Sequence* sequence, size_t num_tokens, size_t "
-         "needed_copy_in_blocks_num) is not implemented in BlockManagerPool.";
-  return false;
 }
 
 std::vector<Block> BlockManagerPool::allocate(size_t num_tokens,
@@ -296,8 +287,14 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
     return;
   }
   int32_t dp_rank = get_dp_rank(sequence);
-  static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->allocate_shared_for_sequence(sequence);
+  auto* composite =
+      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  if (composite->leaf_combination() ==
+          CompositeBlockManager::LeafCombination::SWA_COMPRESSED &&
+      sequence->kv_state().prefix_cache_matched()) {
+    return;
+  }
+  composite->allocate_shared_for_sequence(sequence);
 }
 
 void BlockManagerPool::cache(Sequence* sequence) {

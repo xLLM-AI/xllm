@@ -86,6 +86,34 @@ python3 tools/export_mtp.py \
 
 使用MTP进行推理时，需要同时指定主模型和草稿模型（MTP模型）。
 
+## JSON 对象输出
+
+OpenAI 兼容的 Chat Completions 接口支持基于 tokenizer token piece 的通用
+token 级 JSON 对象约束。请求中设置：
+
+```json
+{
+  "response_format": {"type": "json_object"}
+}
+```
+
+该模式支持普通生成和 MTP，也支持流式与非流式返回。开启 PD 分离时，prefill
+实例会把格式标志和 reasoning 状态传递给 decode 实例；decode 侧会先提交并校验
+prefill 产出的第一个 token，再生成后续 token 的约束 mask。
+
+该能力在 runtime 层不依赖具体模型类型。如果模型 tokenizer 无法提供构建
+grammar 所需的稳定 token piece，请求会被拒绝。对于启用 reasoning 的模型，
+tokenizer 还必须能够编码已有的 `</think>` 边界，runtime 才能在 reasoning
+结束后开始 JSON 约束。
+
+开启 reasoning 时，`</think>` 标记之前的 reasoning token 不受 JSON 约束，标记
+之后才开始约束；通过现有 chat-template kwargs 关闭 thinking 时，从第一个生成
+token 开始约束。
+
+当前 MVP 只支持 `json_object`。暂不支持 `json_schema`、正则/自定义 grammar、
+legacy Completion、C API 请求结构体以及 tool-call 结构化标签。其他
+`response_format.type` 会作为非法请求拒绝。
+
 #### DeepSeek-V3/V3.2/R1 启动示例
 ```bash
 MODEL_PATH="/models/DeepSeek-V3"

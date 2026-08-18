@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
 #include "framework/model/causal_vlm.h"
+#include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
 #include "vlm_executor_impl.h"
 
@@ -90,27 +91,10 @@ GraphPoolMemoryUsage get_graph_pool_usage(
   return usage;
 }
 
-// bucket will be [1, 2, 4, 8, 16, 32, 48, 64, ..., max_seqs_per_batch]
-uint32_t get_bucket_num_tokens(uint32_t num_tokens) {
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding()) {
-    return num_tokens;
-  }
-  const uint32_t graph_step = 16;
-  if (num_tokens <= 1) {
-    return 1;
-  }
-  if (num_tokens <= 2) {
-    return 2;
-  }
-  if (num_tokens <= 4) {
-    return 4;
-  }
-  if (num_tokens <= 8) {
-    return 8;
-  }
-
-  return ((num_tokens + graph_step - 1) / graph_step) * graph_step;
+uint32_t get_bucket_num_tokens(uint32_t num_tokens,
+                               const xllm::runtime::Options& options) {
+  return static_cast<uint32_t>(xllm::runtime::get_decode_graph_token_bucket(
+      num_tokens, options.enable_graph_mode_decode_no_padding()));
 }
 
 xllm::ModelOutput make_graph_output(const torch::Tensor& hidden_states,
@@ -180,7 +164,7 @@ int64_t get_graph_token_capacity(const xllm::runtime::Options& options) {
   }
 
   capacity = static_cast<int64_t>(get_bucket_num_tokens(
-      static_cast<uint32_t>(std::max<int64_t>(capacity, 1))));
+      static_cast<uint32_t>(std::max<int64_t>(capacity, 1)), options));
 
   const uint32_t tp_size = get_tp_size(options);
   capacity = static_cast<int64_t>(align_tokens(
@@ -193,7 +177,7 @@ uint32_t get_graph_dp_tokens(uint32_t actual_tokens,
                              const xllm::ModelInputParams& params,
                              const xllm::runtime::Options& options) {
   if (params.parallel.dp_global_token_nums.size() <= 1) {
-    return get_bucket_num_tokens(actual_tokens);
+    return get_bucket_num_tokens(actual_tokens, options);
   }
 
   const auto max_token_num =
@@ -202,7 +186,7 @@ uint32_t get_graph_dp_tokens(uint32_t actual_tokens,
   CHECK(max_token_num != params.parallel.dp_global_token_nums.end())
       << "dp_global_token_nums is empty";
   uint32_t bucket_tokens =
-      get_bucket_num_tokens(static_cast<uint32_t>(*max_token_num));
+      get_bucket_num_tokens(static_cast<uint32_t>(*max_token_num), options);
   uint32_t tp_size = get_tp_size(options);
   return align_tokens(std::max(bucket_tokens, tp_size), tp_size);
 }

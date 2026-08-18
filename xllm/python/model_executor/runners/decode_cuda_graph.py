@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import kernels
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 from xllm.python.model_executor.forward_context import (
     ForwardContext,
@@ -42,6 +42,14 @@ def _decode_bucket(batch_size: int) -> int:
     return ((batch_size + 15) // 16) * 16
 
 
+def _decode_graph_buckets(max_batch: int, dp_size: int) -> list[int]:
+    max_local_batch = (max_batch + dp_size - 1) // dp_size
+    max_graph_batch = min(_decode_bucket(max_local_batch), max_batch)
+    buckets = [size for size in (1, 2, 4, 8) if size <= max_graph_batch]
+    buckets.extend(range(16, max_graph_batch + 1, 16))
+    return buckets
+
+
 @dataclass(slots=True)
 class _StaticAttentionMetadata:
     slot_mapping: torch.Tensor
@@ -56,6 +64,9 @@ class _StaticAttentionMetadata:
     paged_kv_last_page_len_host: torch.Tensor | None = None
     is_prefill: bool = False
     is_chunked_prefill: bool = False
+    linear_state_indices: torch.Tensor | None = None
+    has_initial_state: torch.Tensor | None = None
+    dp_token_counts: tuple[int, ...] = ()
 
 
 class _DecodeGraphEntry:
@@ -80,76 +91,105 @@ class DecodeCudaGraphRunner(BaseRunner):
         device: torch.device,
         max_batch: int,
         max_model_len: int,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ) -> None:
         super().__init__(model, attention_backend, device)
+        if dp_size <= 0:
+            raise ValueError("dp_size must be positive")
+        if not 0 <= dp_rank < dp_size:
+            raise ValueError("dp_rank must be in [0, dp_size)")
         self.max_batch = max_batch
         self.max_model_len = max_model_len
-        self._graphs: dict[int, _DecodeGraphEntry] = {}
+        self.dp_size = dp_size
+        self.dp_rank = dp_rank
+        self._graphs: dict[tuple[int, tuple[int, ...]], _DecodeGraphEntry] = {}
         self._paged_kv_indices_buffer: torch.Tensor | None = None
         self._stream: torch.cuda.Stream | None = None
         self._warmed_up = False
 
     def can_execute(
-        self, input_ids: torch.Tensor, metadata: AttentionMetadata
+        self,
+        input_ids: torch.Tensor,
+        metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
     ) -> bool:
+        graph_key = self._graph_key(input_ids, metadata)
         return (
-            not metadata.is_prefill
+            input_embedding is None
+            and not metadata.is_prefill
             and not metadata.is_chunked_prefill
-            and _decode_bucket(input_ids.shape[0]) <= self.max_batch
+            and graph_key is not None
+            and graph_key in self._graphs
         )
 
-    def warmup(self, device: torch.device, _dtype: torch.dtype) -> None:
+    def warmup(
+        self,
+        device: torch.device,
+        _dtype: torch.dtype,
+        _input_embedding: torch.Tensor | None = None,
+    ) -> None:
         if self._warmed_up:
             return
-        self._warmed_up = True
 
-        buckets = [size for size in (1, 2, 4, 8) if size <= self.max_batch]
-        buckets.extend(range(16, self.max_batch + 1, 16))
-        for batch_size in buckets:
+        if self._stream is None:
+            self._stream = torch.cuda.Stream(device=device)
+        self._stream.wait_stream(torch.cuda.current_stream())
+        for batch_size in reversed(_decode_graph_buckets(self.max_batch, self.dp_size)):
             metadata = _StaticAttentionMetadata(
-                slot_mapping=torch.zeros(
-                    batch_size, dtype=torch.int32, device=device
-                ),
-                paged_kv_indptr=torch.arange(
-                    batch_size + 1, dtype=torch.int32, device=device
-                ),
-                paged_kv_indices=torch.zeros(
-                    batch_size, dtype=torch.int32, device=device
-                ),
-                paged_kv_last_page_len=torch.ones(
-                    batch_size, dtype=torch.int32, device=device
-                ),
-                kv_seq_lens_host=torch.arange(
-                    batch_size + 1, dtype=torch.int32, device="cpu"
-                ),
-                kv_cu_seq_lens=torch.arange(
-                    batch_size + 1, dtype=torch.int32, device=device
-                ),
+                slot_mapping=torch.zeros(batch_size, dtype=torch.int32, device=device),
+                paged_kv_indptr=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
+                paged_kv_indices=torch.zeros(batch_size, dtype=torch.int32, device=device),
+                paged_kv_last_page_len=torch.ones(batch_size, dtype=torch.int32, device=device),
+                kv_seq_lens_host=torch.arange(batch_size + 1, dtype=torch.int32, device="cpu"),
+                kv_cu_seq_lens=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
+                dp_token_counts=(batch_size,) * self.dp_size,
             )
-            self.execute(
-                torch.zeros(batch_size, dtype=torch.int32, device=device),
-                torch.zeros(batch_size, dtype=torch.int32, device=device),
+            input_ids = torch.zeros(batch_size, dtype=torch.int32, device=device)
+            positions = torch.zeros(batch_size, dtype=torch.int32, device=device)
+            graph_key = self._graph_key(input_ids, metadata)
+            if graph_key is None:
+                raise RuntimeError("invalid decode CUDA graph warmup bucket")
+            entry = self._allocate_entry(
+                batch_size,
+                input_ids,
+                positions,
                 metadata,
+                graph_key[1],
             )
+            with torch.cuda.stream(self._stream):
+                self._fill_entry(entry, input_ids, positions, metadata, batch_size)
+                self.attention_backend.prepare(entry.static_metadata, graph_mode=True)
+                with forward_context(
+                    ForwardContext(
+                        self.attention_backend,
+                        self.device,
+                        entry.static_metadata,
+                        self.layer_caches,
+                    )
+                ):
+                    self._capture(entry)
+            self._graphs[graph_key] = entry
+
+        torch.cuda.current_stream().wait_stream(self._stream)
+        self._warmed_up = True
 
     def execute(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = input_ids.shape[0]
-        padded_batch_size = _decode_bucket(batch_size)
-        if padded_batch_size > self.max_batch:
+        graph_key = self._graph_key(input_ids, metadata)
+        if graph_key is None:
             raise ValueError("decode batch exceeds CUDA graph capacity")
+        padded_batch_size, _ = graph_key
 
-        entry = self._graphs.get(padded_batch_size)
-        first_capture = entry is None
-        if first_capture:
-            entry = self._allocate_entry(
-                padded_batch_size, input_ids, positions, metadata
-            )
-            self._graphs[padded_batch_size] = entry
+        entry = self._graphs.get(graph_key)
+        if entry is None:
+            raise RuntimeError("decode CUDA graph bucket was not warmed up")
 
         if self._stream is None:
             self._stream = torch.cuda.Stream(device=input_ids.device)
@@ -158,14 +198,44 @@ class DecodeCudaGraphRunner(BaseRunner):
         with torch.cuda.stream(self._stream):
             self._fill_entry(entry, input_ids, positions, metadata, batch_size)
             self.attention_backend.prepare(entry.static_metadata, graph_mode=True)
-            with forward_context(ForwardContext(self.attention_backend, self.device)):
-                if first_capture:
-                    self._capture(entry)
+            with forward_context(
+                ForwardContext(
+                    self.attention_backend,
+                    self.device,
+                    entry.static_metadata,
+                    self.layer_caches,
+                )
+            ):
                 entry.graph.replay()
                 output = entry.static_output[:batch_size].clone()
 
         torch.cuda.current_stream().wait_stream(self._stream)
         return output
+
+    def _graph_key(
+        self,
+        input_ids: torch.Tensor,
+        metadata: AttentionMetadata,
+    ) -> tuple[int, tuple[int, ...]] | None:
+        max_graph_batch = _decode_graph_buckets(self.max_batch, self.dp_size)[-1]
+        if self.dp_size == 1:
+            padded_batch_size = _decode_bucket(input_ids.shape[0])
+            if padded_batch_size > max_graph_batch:
+                return None
+            return padded_batch_size, (padded_batch_size,)
+
+        dp_token_counts = tuple(int(count) for count in metadata.dp_token_counts)
+        if len(dp_token_counts) != self.dp_size:
+            return None
+        if any(count < 0 for count in dp_token_counts):
+            return None
+        if dp_token_counts[self.dp_rank] > input_ids.shape[0]:
+            return None
+        global_batch_size = max(max(dp_token_counts, default=0), input_ids.shape[0])
+        padded_batch_size = _decode_bucket(global_batch_size)
+        if padded_batch_size > max_graph_batch:
+            return None
+        return padded_batch_size, (padded_batch_size,) * self.dp_size
 
     def _allocate_entry(
         self,
@@ -173,13 +243,12 @@ class DecodeCudaGraphRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        dp_token_counts: tuple[int, ...],
     ) -> _DecodeGraphEntry:
         device = input_ids.device
         if self._paged_kv_indices_buffer is None:
             page_size = self.attention_backend.page_size
-            max_blocks_per_sequence = (
-                self.max_model_len + page_size - 1
-            ) // page_size
+            max_blocks_per_sequence = (self.max_model_len + page_size - 1) // page_size
             self._paged_kv_indices_buffer = torch.zeros(
                 self.max_batch * max_blocks_per_sequence,
                 dtype=metadata.paged_kv_indices.dtype,
@@ -190,12 +259,8 @@ class DecodeCudaGraphRunner(BaseRunner):
         entry.batch_size = padded_batch_size
         entry.graph = None
         entry.static_output = None
-        entry.static_input_ids = torch.zeros(
-            padded_batch_size, dtype=input_ids.dtype, device=device
-        )
-        entry.static_positions = torch.zeros(
-            padded_batch_size, dtype=torch.int32, device=device
-        )
+        entry.static_input_ids = torch.zeros(padded_batch_size, dtype=input_ids.dtype, device=device)
+        entry.static_positions = torch.zeros(padded_batch_size, dtype=torch.int32, device=device)
         entry.static_metadata = _StaticAttentionMetadata(
             slot_mapping=torch.zeros(
                 padded_batch_size,
@@ -218,22 +283,14 @@ class DecodeCudaGraphRunner(BaseRunner):
                 dtype=torch.int32,
                 device=device,
             ),
-            paged_kv_indptr_host=torch.zeros(
-                padded_batch_size + 1, dtype=torch.int32, device="cpu"
-            ),
-            paged_kv_last_page_len_host=torch.ones(
-                padded_batch_size, dtype=torch.int32, device="cpu"
-            ),
+            linear_state_indices=torch.zeros(padded_batch_size, dtype=torch.int32, device=device),
+            dp_token_counts=dp_token_counts,
+            paged_kv_indptr_host=torch.zeros(padded_batch_size + 1, dtype=torch.int32, device="cpu"),
+            paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
         )
-        entry.kv_seq_lens_delta = torch.empty(
-            padded_batch_size, dtype=torch.int32, device=device
-        )
-        entry.host_seq_lens = torch.empty(
-            padded_batch_size, dtype=torch.int32, device="cpu"
-        )
-        entry.host_block_counts = torch.empty(
-            padded_batch_size, dtype=torch.int32, device="cpu"
-        )
+        entry.kv_seq_lens_delta = torch.empty(padded_batch_size, dtype=torch.int32, device=device)
+        entry.host_seq_lens = torch.empty(padded_batch_size, dtype=torch.int32, device="cpu")
+        entry.host_block_counts = torch.empty(padded_batch_size, dtype=torch.int32, device="cpu")
         return entry
 
     def _fill_entry(
@@ -249,7 +306,7 @@ class DecodeCudaGraphRunner(BaseRunner):
         if metadata.kv_cu_seq_lens is None:
             raise RuntimeError("decode CUDA graph requires device cumulative KV lengths")
         graph_positions = positions.to(torch.int32).contiguous()
-        ops.update_decode_graph_metadata(
+        kernels.update_decode_graph_metadata(
             input_ids,
             graph_positions,
             metadata.slot_mapping,
@@ -267,6 +324,11 @@ class DecodeCudaGraphRunner(BaseRunner):
             static_metadata.paged_kv_last_page_len,
             padded_batch_size,
         )
+        linear_state_indices = getattr(metadata, "linear_state_indices", None)
+        if linear_state_indices is not None:
+            static_metadata.linear_state_indices[:batch_size].copy_(linear_state_indices)
+        if padded_batch_size > batch_size:
+            static_metadata.linear_state_indices[batch_size:].zero_()
         self._fill_host_metadata(entry, metadata, batch_size)
 
     def _fill_host_metadata(
@@ -276,19 +338,14 @@ class DecodeCudaGraphRunner(BaseRunner):
         batch_size: int,
     ) -> None:
         cumulative_seq_lens = metadata.kv_seq_lens_host
-        if (
-            cumulative_seq_lens is None
-            or cumulative_seq_lens.numel() != batch_size + 1
-        ):
+        if cumulative_seq_lens is None or cumulative_seq_lens.numel() != batch_size + 1:
             raise RuntimeError("decode CUDA graph requires cumulative host KV lengths")
 
         padded_batch_size = entry.batch_size
         static_metadata = entry.static_metadata
         page_size = self.attention_backend.page_size
         if page_size == 1:
-            static_metadata.paged_kv_indptr_host[: batch_size + 1].copy_(
-                cumulative_seq_lens
-            )
+            static_metadata.paged_kv_indptr_host[: batch_size + 1].copy_(cumulative_seq_lens)
             static_metadata.paged_kv_last_page_len_host.fill_(1)
         else:
             # TODO: Fuse these host metadata updates into one C++ loop to avoid
@@ -335,20 +392,16 @@ class DecodeCudaGraphRunner(BaseRunner):
                 out=static_metadata.paged_kv_last_page_len_host,
             )
             if padded_batch_size > batch_size:
-                static_metadata.paged_kv_last_page_len_host[
-                    batch_size:padded_batch_size
-                ].fill_(1)
+                static_metadata.paged_kv_last_page_len_host[batch_size:padded_batch_size].fill_(1)
 
         if page_size == 1 and padded_batch_size > batch_size:
-            static_metadata.paged_kv_indptr_host[
-                batch_size + 1 : padded_batch_size + 1
-            ].fill_(int(cumulative_seq_lens[-1]))
+            static_metadata.paged_kv_indptr_host[batch_size + 1 : padded_batch_size + 1].fill_(
+                int(cumulative_seq_lens[-1])
+            )
 
     def _capture(self, entry: _DecodeGraphEntry) -> None:
         for _ in range(_CAPTURE_WARMUP_STEPS):
             self.model(entry.static_input_ids, entry.static_positions)
         entry.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(entry.graph, stream=self._stream):
-            entry.static_output = self.model(
-                entry.static_input_ids, entry.static_positions
-            )
+            entry.static_output = self.model(entry.static_input_ids, entry.static_positions)

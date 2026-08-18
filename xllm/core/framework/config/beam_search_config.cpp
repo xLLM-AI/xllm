@@ -24,7 +24,8 @@ DEFINE_bool(enable_beam_search_kernel,
 
 DEFINE_int32(beam_width, 1, "Beam width for beam search.");
 
-#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_DCU)
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MUSA) || \
+    defined(USE_DCU)
 DEFINE_bool(enable_block_copy_kernel,
             true,
             "Whether to use block copy kernel on supported backends.");

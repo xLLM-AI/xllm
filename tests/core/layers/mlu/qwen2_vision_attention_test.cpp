@@ -145,5 +145,71 @@ TEST_F(Qwen2VisionAttentionTest, ForwardTest) {
                               /*atol=*/1e-5));
 }
 
+TEST_F(Qwen2VisionAttentionTest, SmoothQuantQkvLoadsAndRuns) {
+  const int64_t hidden_size = 32;
+  const int64_t num_heads = 4;
+  const int64_t head_size = 8;
+  const int64_t output_size = num_heads * head_size * 3;
+  QuantArgs quant_args;
+  quant_args.quant_method() = kQuantMethodSmoothquant;
+  quant_args.bits() = 8;
+  quant_args.activation_dynamic() = true;
+  QKVParallelLinear qkv(hidden_size,
+                        num_heads,
+                        num_heads,
+                        head_size,
+                        /*num_kv_head_replicas=*/1,
+                        /*bias=*/true,
+                        /*gather_output=*/false,
+                        parallel_args_,
+                        options_,
+                        quant_args);
+
+  torch::Tensor qweight =
+      torch::randint(-8,
+                     8,
+                     {output_size, hidden_size},
+                     torch::TensorOptions().dtype(torch::kInt8))
+          .to(options_.device());
+  torch::Tensor scale = torch::linspace(
+      0.005, 0.02, output_size, options_.dtype(torch::kFloat32));
+  torch::Tensor smooth =
+      torch::linspace(0.5, 1.5, hidden_size, options_.dtype(torch::kFloat32));
+  torch::Tensor bias =
+      torch::linspace(-0.1, 0.1, output_size, options_.dtype(torch::kBFloat16));
+  std::unordered_map<std::string, torch::Tensor> weight_dict = {
+      {"qweight", qweight},
+      {"per_channel_scale", scale},
+      {"smooth", smooth},
+      {"bias", bias},
+  };
+  qkv->load_state_dict(StateDict(weight_dict, ""));
+
+  ASSERT_TRUE(qkv->is_weight_loaded());
+  EXPECT_TRUE(torch::equal(qkv->weight(), qweight));
+  EXPECT_TRUE(torch::equal(qkv->per_channel_scale(), scale));
+  ASSERT_TRUE(qkv->smooth().has_value());
+  EXPECT_TRUE(torch::equal(qkv->smooth().value(), smooth));
+
+  torch::Tensor input = test::seeded_tensor("qwen2_vision_qkv.smoothquant",
+                                            {4, hidden_size},
+                                            torch::kBFloat16,
+                                            options_.device());
+  torch::Tensor output = qkv->forward(input);
+  Device device(options_.device());
+  device.synchronize_default_stream();
+
+  EXPECT_EQ(output.sizes(), torch::IntArrayRef({4, output_size}));
+  EXPECT_TRUE(torch::isfinite(output).all().item<bool>());
+  torch::Tensor expected =
+      torch::matmul(input.to(torch::kFloat32) * smooth,
+                    (qweight.to(torch::kFloat32) * scale.unsqueeze(1)).t()) +
+      bias.to(torch::kFloat32);
+  EXPECT_TRUE(torch::allclose(output.to(torch::kFloat32),
+                              expected,
+                              /*rtol=*/3e-2,
+                              /*atol=*/3e-2));
+}
+
 }  // namespace layer
 }  // namespace xllm

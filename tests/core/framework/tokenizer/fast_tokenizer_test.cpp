@@ -20,10 +20,14 @@ limitations under the License.
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "framework/tokenizer/tokenizer_args.h"
+#include "framework/tokenizer/tokenizer_proxy.h"
 
 namespace xllm {
 
@@ -35,6 +39,71 @@ std::string CreateTestTokenizerJson(const std::string& filepath,
 // This creates a simple BPE tokenizer with a small vocabulary
 std::string CreateTestTokenizerJson(const std::string& filepath) {
   return CreateTestTokenizerJson(filepath, "null", "null");
+}
+
+std::string CreateByteLevelTokenizerJson(const std::string& filepath) {
+  const std::string tokenizer_json = R"({
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true,
+    "use_regex": false
+  },
+  "post_processor": null,
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": null,
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "vocab": {
+      "{": 0,
+      "}": 1,
+      "\"": 2,
+      "\u0120": 3,
+      "\u00e4\u00b8\u0122": 4,
+      "\u00e5\u012e\u0139": 5,
+      "city": 6,
+      "\u00c3": 7,
+      "\u00a9": 8
+    },
+    "merges": []
+  }
+})";
+
+  std::ofstream file(filepath);
+  if (!file.is_open()) {
+    return "";
+  }
+  file << tokenizer_json;
+  file.close();
+  return filepath;
+}
+
+std::string CreateNonByteLevelTokenizerJson(const std::string& filepath) {
+  CreateTestTokenizerJson(filepath);
+  std::ifstream input(filepath);
+  nlohmann::json tokenizer_json = nlohmann::json::parse(input);
+  tokenizer_json["decoder"] = {
+      {"type", "WordPiece"}, {"prefix", "##"}, {"cleanup", true}};
+  tokenizer_json["model"]["vocab"]["\u00a1"] = 15;
+
+  std::ofstream output(filepath);
+  output << tokenizer_json.dump();
+  return filepath;
 }
 
 std::string CreateTestTokenizerJson(const std::string& filepath,
@@ -231,6 +300,84 @@ TEST_F(FastTokenizerTest, NoSpecialTokens) {
 
   // Check that EOS token (ID 1) is NOT at the end
   EXPECT_NE(ids.back(), 1) << "EOS token should not be present";
+}
+
+TEST_F(FastTokenizerTest, CallLevelFalseSuppressesConfiguredSpecialTokens) {
+  TokenizerArgs args;
+  args.tokenizer_type() = "fast";
+  args.vocab_file() = tokenizer_json_path_.string();
+  args.add_bos_token() = true;
+  args.bos_token() = "<|bos|>";
+  args.add_eos_token() = true;
+  args.eos_token() = "<|eos|>";
+
+  FastTokenizer tokenizer(args);
+  std::vector<int32_t> ids_without_special_tokens;
+  std::vector<int32_t> ids_with_special_tokens;
+  ASSERT_TRUE(tokenizer.encode("hello",
+                               &ids_without_special_tokens,
+                               /*add_special_tokens=*/false));
+  ASSERT_TRUE(tokenizer.encode("hello",
+                               &ids_with_special_tokens,
+                               /*add_special_tokens=*/true));
+
+  ASSERT_FALSE(ids_without_special_tokens.empty());
+  ASSERT_FALSE(ids_with_special_tokens.empty());
+  EXPECT_NE(ids_without_special_tokens.front(), 0);
+  EXPECT_NE(ids_without_special_tokens.back(), 1);
+  EXPECT_EQ(ids_with_special_tokens.front(), 0);
+  EXPECT_EQ(ids_with_special_tokens.back(), 1);
+}
+
+TEST_F(FastTokenizerTest, DecodeTokenPreservesByteLevelPieces) {
+  const std::filesystem::path byte_level_path =
+      test_dir_ / "byte_level_tokenizer.json";
+  CreateByteLevelTokenizerJson(byte_level_path.string());
+
+  TokenizerArgs args;
+  args.tokenizer_type() = "fast";
+  args.vocab_file() = byte_level_path.string();
+  FastTokenizer tokenizer(args);
+
+  EXPECT_EQ(tokenizer.decode_token(0), "{");
+  EXPECT_EQ(tokenizer.decode_token(2), "\"");
+  EXPECT_EQ(tokenizer.decode_token(3), " ");
+  EXPECT_EQ(tokenizer.decode_token(4), "\xE4\xB8\x80");
+  EXPECT_EQ(tokenizer.decode_token(5), "\xE5\x8C\x97");
+  EXPECT_EQ(tokenizer.decode_token(7), "\xC3");
+  EXPECT_EQ(tokenizer.decode_token(8), "\xA9");
+
+  const std::vector<int32_t> split_utf8_ids = {7, 8};
+  EXPECT_EQ(tokenizer.decode(split_utf8_ids, /*skip_special_tokens=*/false),
+            "\xC3\xA9");
+}
+
+TEST_F(FastTokenizerTest, DecodeTokenKeepsNonByteLevelPieces) {
+  const std::filesystem::path non_byte_level_path =
+      test_dir_ / "non_byte_level_tokenizer.json";
+  CreateNonByteLevelTokenizerJson(non_byte_level_path.string());
+
+  TokenizerArgs args;
+  args.tokenizer_type() = "fast";
+  args.vocab_file() = non_byte_level_path.string();
+  FastTokenizer tokenizer(args);
+
+  EXPECT_EQ(tokenizer.decode_token(15), "\xC2\xA1");
+}
+
+TEST_F(FastTokenizerTest, ProxyForwardsDecodeToken) {
+  const std::filesystem::path byte_level_path =
+      test_dir_ / "byte_level_proxy_tokenizer.json";
+  CreateByteLevelTokenizerJson(byte_level_path.string());
+
+  TokenizerArgs args;
+  args.tokenizer_type() = "fast";
+  args.vocab_file() = byte_level_path.string();
+  std::unique_ptr<Tokenizer> tokenizer = std::make_unique<FastTokenizer>(args);
+  TokenizerProxy proxy(std::move(tokenizer));
+
+  EXPECT_EQ(proxy.decode_token(3), " ");
+  EXPECT_EQ(proxy.decode_token(4), "\xE4\xB8\x80");
 }
 
 // Test that BOS token is not added when bos_token is empty

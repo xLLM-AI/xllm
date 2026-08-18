@@ -167,7 +167,7 @@ torch::Tensor fa3_decode_scheduler_metadata(const torch::Device& device,
   torch::Tensor metadata =
       torch::empty({static_cast<int64_t>(batch_size) * 4}, options);
 
-  MusaTvmffiStreamGuard stream_guard(device);
+  TvmffiStreamGuard stream_guard(device);
 
   const int64_t b = batch_size;
   auto num_splits_dynamic = metadata.slice(/*dim=*/0, /*start=*/0, /*end=*/b);
@@ -272,7 +272,7 @@ void fa3_decode(const torch::Tensor& query,
   CHECK_EQ(query.size(-2) % k_cache.size(-2), 0);
   const int64_t gqa_ratio = query.size(-2) / k_cache.size(-2);
   const std::string uri = fa3_fwd_uri(gqa_ratio);
-  MusaTvmffiStreamGuard stream_guard(query.device());
+  TvmffiStreamGuard stream_guard(query.device());
 
   // Match the current Mate ABI used by the GQA=8 artifact: one
   // scheduler_metadata tensor followed by the optional learnable sink.
@@ -441,7 +441,7 @@ void fa3_prefill(const torch::Tensor& query,
   CHECK_GT(max_seqlen_k, 0);
 
   const std::string uri = fa3_prefill_fwd_uri(gqa_ratio);
-  MusaTvmffiStreamGuard stream_guard(query.device());
+  TvmffiStreamGuard stream_guard(query.device());
 
   // Arg order matches mate jit `_fmha_fwd` / flash_attn_varlen_func mutlass
   // path for dense ragged Q/K (has_metadata=False).
@@ -519,7 +519,7 @@ torch::Tensor fa3_prefill_scheduler_metadata(
   torch::Tensor metadata =
       torch::empty({static_cast<int64_t>(batch_size) * 4}, options);
 
-  MusaTvmffiStreamGuard stream_guard(device);
+  TvmffiStreamGuard stream_guard(device);
   const std::string uri = fa3_metadata_uri(gqa_ratio);
   const int64_t b = batch_size;
   if (gqa_ratio == 8) {
@@ -639,7 +639,7 @@ void fa3_prefill_paged(const torch::Tensor& query,
   CHECK_GT(max_seqlen_q, 0);
 
   const std::string uri = fa3_fwd_uri(gqa_ratio);
-  MusaTvmffiStreamGuard stream_guard(query.device());
+  TvmffiStreamGuard stream_guard(query.device());
 
   // This is the Mate ABI used by MUSA FA3
   // flash_attn_with_kvcache call.  The KV values are already in
@@ -719,7 +719,7 @@ void batch_decode(const std::string& uri,
     (void)paged_kv_indices_host;
     (void)paged_kv_last_page_len_host;
 
-    MusaTvmffiStreamGuard stream_guard(query.device());
+    TvmffiStreamGuard stream_guard(query.device());
     get_function(uri, "run")(
         to_ffi_tensor(float_workspace_buffer),
         to_ffi_tensor(int_workspace_buffer),

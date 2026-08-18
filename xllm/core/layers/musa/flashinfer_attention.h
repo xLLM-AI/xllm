@@ -27,13 +27,6 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-// MUSA-native FlashInfer attention. Mirrors the CUDA
-// layers/cuda/flashinfer_attention.h declaration but is owned by the MUSA
-// backend so MUSA-only state (the FA3 decode LSE scratch) stays out of the
-// shared CUDA header. Only the MUSA backend links this class
-// (layers/musa/flashinfer_attention.cpp provides the definitions); a pure
-// CUDA build links its own layers/cuda copy instead, so the two declarations
-// never coexist in one binary.
 class FlashInferAttentionImpl final : public BaseAttentionImpl {
  public:
   FlashInferAttentionImpl(int64_t num_heads,
@@ -80,12 +73,8 @@ class FlashInferAttentionImpl final : public BaseAttentionImpl {
   torch::Tensor float_workspace_buffer_;
   torch::Tensor int_workspace_buffer_;
   torch::Tensor page_locked_int_workspace_buffer_;
-
-  // Persistent grow-only scratch for FA3 LSE ([num_qo_heads, total_q] fp32).
-  // Shared by FA3 decode and dense FA3 prefill; both paths may discard the
-  // contents when output_lse stays nullopt. Avoids torch::empty under MUSA
-  // stream capture (see AttentionImpl::forward output_buf_ rationale).
-  torch::Tensor lse_buf_;
+  torch::Tensor prefill_lse_buf_;
+  torch::Tensor decode_lse_buf_;
 };
 
 }  // namespace layer

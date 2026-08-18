@@ -1450,6 +1450,7 @@ struct DispatchFFNCombineParams {
   torch::TensorList scale2;
   // Router probabilities. Shape: [num_tokens, topk], dtype fp32.
   torch::Tensor probs;
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
   // HCCL communication group name.
   std::string group;
   int64_t max_output_size = 0;

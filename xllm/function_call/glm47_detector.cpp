@@ -755,12 +755,15 @@ StreamingParseResult Glm47Detector::parse_streaming_increment(
       }
 
       if (is_tool_end_flag) {
+        // Root '{' is emitted on the first <arg_key>. Always close it here.
+        // Do NOT use last_arguments_.back()=='}' as a proxy: an object/array
+        // arg_value also ends with '}', which previously skipped the root '}'.
         if (is_first_param_) {
           std::string empty_object = "{}";
           calls.push_back(
               ToolCallItem(current_tool_id_, std::nullopt, empty_object));
           last_arguments_ += empty_object;
-        } else if (last_arguments_.empty() || last_arguments_.back() != '}') {
+        } else {
           std::string closing_brace = "}";
           calls.push_back(
               ToolCallItem(current_tool_id_, std::nullopt, closing_brace));

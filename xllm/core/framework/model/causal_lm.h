@@ -115,7 +115,16 @@ class CausalLM : public torch::nn::Module {
   virtual void prepare_expert_weight(
       int32_t layer_id,
       const std::vector<int32_t>& expert_ids) = 0;
+  virtual void start_expert_weight_transfer(int32_t /*layer_id*/) {}
   virtual void update_expert_weight(int32_t layer_id) = 0;
+
+  // Returns whether the last prepare_expert_weight() call for the given layer
+  // succeeded. Default is true so models that do not fail-report keep the old
+  // behavior; DSV4 (npu_torch) overrides this to expose real prepare status
+  // so EplbExecutor does not advance ready_layer_id on silent failures.
+  virtual bool last_prepare_expert_weight_ok(int32_t /*layer_id*/) const {
+    return true;
+  }
 
   virtual const torch::TensorOptions& options() const = 0;
 
@@ -158,6 +167,8 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
   }
 
+  virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
+
   // DFlash-specific interface. Attention-free scatter-only pass that projects
   // target hidden into the draft's per-layer KV cache. Not part of forward()
   // because it has no attention and its shape doesn't match forward's decode
@@ -171,6 +182,33 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
     return {};
   }
+
+  // DSpark-specific low-rank Markov projection. The draft worker owns the
+  // sequential sampling lifecycle; the model owns only the trained weights and
+  // bias computation.
+  virtual torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
+
+  // DSpark ConfidenceHead: acceptance-prob estimate for adaptive-speculative
+  // pruning. Returns [num_reqs] fp32 in [0, 1]. When the confidence head is
+  // absent (not built or feature disabled), returns an undefined tensor; the
+  // worker falls back to the sampler-gathered draft prob.
+  virtual torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) {
+    return {};
+  }
+  // Batched over the whole draft block: hidden [num_reqs, num_spec, H],
+  // prev_matrix [num_reqs, num_spec]; returns [num_reqs, num_spec] fp32.
+  virtual torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) {
+    return {};
+  }
+  virtual bool has_dspark_confidence_head() const { return false; }
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
@@ -281,6 +319,39 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) override {
+    if constexpr (detail::has_dspark_markov_bias<Model>::value) {
+      return model_->dspark_markov_bias(previous_token_ids);
+    }
+    return CausalLM::dspark_markov_bias(previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) override {
+    if constexpr (detail::has_dspark_confidence_probs<Model>::value) {
+      return model_->dspark_confidence_probs(hidden, previous_token_ids);
+    }
+    return CausalLM::dspark_confidence_probs(hidden, previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) override {
+    if constexpr (detail::has_dspark_confidence_probs_batched<Model>::value) {
+      return model_->dspark_confidence_probs_batched(hidden_all, prev_matrix);
+    }
+    return CausalLM::dspark_confidence_probs_batched(hidden_all, prev_matrix);
+  }
+
+  bool has_dspark_confidence_head() const override {
+    if constexpr (detail::has_has_dspark_confidence_head<Model>::value) {
+      return model_->has_dspark_confidence_head();
+    }
+    return false;
+  }
+
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
     if constexpr (detail::has_lazy_load_model<Model>::value) {
       model_->lazy_load_model(std::move(loader));
@@ -318,8 +389,22 @@ class CausalLMImpl : public CausalLM {
     return model_->prepare_expert_weight(layer_id, expert_ids);
   }
 
+  void start_expert_weight_transfer(int32_t layer_id) override {
+    if constexpr (detail::has_start_expert_weight_transfer<Model>::value) {
+      model_->start_expert_weight_transfer(layer_id);
+    }
+  }
+
   void update_expert_weight(int32_t layer_id) override {
     return model_->update_expert_weight(layer_id);
+  }
+
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const override {
+    if constexpr (detail::has_last_prepare_expert_weight_ok<Model>::value) {
+      return model_->last_prepare_expert_weight_ok(layer_id);
+    } else {
+      return CausalLM::last_prepare_expert_weight_ok(layer_id);
+    }
   }
 
 #if defined(USE_NPU)

@@ -328,6 +328,72 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
 #endif
 }
 
+TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4_dspark")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 1, 1});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 2818048;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 19);
+  EXPECT_EQ(capacity.c4_count(), 0);
+  EXPECT_EQ(capacity.c128_count(), 0);
+  EXPECT_EQ(capacity.n_blocks(), 1);
+}
+
+TEST(KVCacheEstimationTest,
+     DeepSeekV4SpeculativeBudgetIncludesDSparkDraftSwaPool) {
+  ModelArgs target_args;
+  target_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+  ModelArgs draft_args;
+  draft_args.model_type("deepseek_v4_dspark")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 1, 1});
+
+  KVCacheEstimateOptions target_options;
+  target_options.dtype = torch::kFloat32;
+  target_options.kv_cache_dtype = "auto";
+  target_options.cache_size_in_bytes = 2818048;
+  target_options.block_size = 128;
+  target_options.max_seqs_per_batch = 4;
+  KVCacheEstimateOptions draft_options = target_options;
+  draft_options.is_draft_engine = true;
+  target_options.draft_model_args = &draft_args;
+  target_options.draft_options = &draft_options;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(target_args, target_options);
+
+  constexpr int64_t kDraftSwaBytes =
+      /*layers=*/3 * /*swa_count=*/19 * /*block_size=*/128 *
+      /*head_dim=*/16 * /*float32_bytes=*/4;
+  EXPECT_LE(capacity.cache_size_in_bytes() + kDraftSwaBytes,
+            target_options.cache_size_in_bytes);
+  EXPECT_EQ(capacity.swa_count(), 19);
+  EXPECT_EQ(capacity.c4_count(), 64);
+  EXPECT_EQ(capacity.c128_count(), 2);
+}
+
 TEST(KVCacheEstimationTest,
      SpeculativeDecodePreservesDeepSeekV4PoolBlockCount) {
   ModelArgs model_args;

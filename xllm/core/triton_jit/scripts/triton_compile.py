@@ -31,7 +31,7 @@ import importlib.util
 import os
 import re
 from pathlib import Path
-from typing import Any, List, Tuple, Union
+from typing import Any
 
 import triton
 from packaging.version import Version
@@ -105,7 +105,7 @@ def _import_dotted_module(py_path: str):
         return mod
 
 
-def signature(py_path: str, fn_name: str) -> List[dict]:
+def signature(py_path: str, fn_name: str) -> list[dict]:
     """Return the upstream .py's per-parameter constexpr/specialize info.
 
     Each entry is ``{"is_constexpr": bool, "do_not_specialize": bool}``, in
@@ -115,10 +115,7 @@ def signature(py_path: str, fn_name: str) -> List[dict]:
     and crashes the kernel at launch).
     """
     fn = _load_jit_function(py_path, fn_name)
-    return [
-        {"is_constexpr": p.is_constexpr, "do_not_specialize": p.do_not_specialize}
-        for p in fn.params
-    ]
+    return [{"is_constexpr": p.is_constexpr, "do_not_specialize": p.do_not_specialize} for p in fn.params]
 
 
 def _dump_signature(py_path: str, fn_name: str) -> None:
@@ -130,8 +127,7 @@ def _dump_signature(py_path: str, fn_name: str) -> None:
     """
     fn = _load_jit_function(py_path, fn_name)
     for i, p in enumerate(fn.params):
-        print(f"{i}\t{p.name}\tconstexpr={p.is_constexpr}\t"
-              f"do_not_specialize={p.do_not_specialize}")
+        print(f"{i}\t{p.name}\tconstexpr={p.is_constexpr}\tdo_not_specialize={p.do_not_specialize}")
 
 
 def _resolve_py_path(py_path: str) -> str:
@@ -145,7 +141,7 @@ def _resolve_py_path(py_path: str) -> str:
       subprocess, where the package is importable.
     """
     if py_path.startswith("pkg://"):
-        rest = py_path[len("pkg://"):]
+        rest = py_path[len("pkg://") :]
         pkg, _, relpath = rest.partition("/")
         if not pkg or not relpath:
             raise ValueError(f"invalid pkg:// path: {py_path!r}")
@@ -154,7 +150,7 @@ def _resolve_py_path(py_path: str) -> str:
     return py_path
 
 
-def _parse_const(spec: dict) -> Union[bool, int, float]:
+def _parse_const(spec: dict) -> bool | int | float:
     """Type-aware constexpr parsing -- no int/float guessing."""
     t = spec["type"]
     v = spec["const_val"]
@@ -166,14 +162,14 @@ def _parse_const(spec: dict) -> Union[bool, int, float]:
 
 
 def _build_ast_inputs(
-    args_spec: List[dict],
-) -> Tuple[dict, dict, Tuple[int, ...], Tuple[int, ...]]:
+    args_spec: list[dict],
+) -> tuple[dict, dict, tuple[int, ...], tuple[int, ...]]:
     """Turn structured descriptors into (constants, signature, divisible_by_16,
     equal_to_1) for triton.compile."""
     constants: dict = {}
     signature: dict = {}
-    divisible_by_16: List[int] = []
-    equal_to_1: List[int] = []
+    divisible_by_16: list[int] = []
+    equal_to_1: list[int] = []
 
     for i, s in enumerate(args_spec):
         kind = s["kind"]
@@ -203,13 +199,9 @@ def _build_ast_inputs(
     return constants, signature, tuple(divisible_by_16), tuple(equal_to_1)
 
 
-def _make_attrs(
-    divisible_by_16: Tuple[int, ...], equal_to_1: Tuple[int, ...]
-) -> Any:
+def _make_attrs(divisible_by_16: tuple[int, ...], equal_to_1: tuple[int, ...]) -> Any:
     if triton_version.major == 3 and triton_version.minor == 1:
-        return triton.compiler.AttrsDescriptor(
-            divisible_by_16=divisible_by_16, equal_to_1=equal_to_1
-        )
+        return triton.compiler.AttrsDescriptor(divisible_by_16=divisible_by_16, equal_to_1=equal_to_1)
     if triton_version.major == 3 and triton_version.minor == 2:
         return triton.backends.compiler.AttrsDescriptor.from_dict(
             {
@@ -233,9 +225,7 @@ def _make_ast_source(
     num_args: int,
 ) -> Any:
     if Version("3.1.0") <= triton_version < Version("3.2.0"):
-        return triton.compiler.ASTSource(
-            fn=fn, constants=constants, signature=signature, attrs=attrs
-        )
+        return triton.compiler.ASTSource(fn=fn, constants=constants, signature=signature, attrs=attrs)
     if Version("3.2.0") <= triton_version < Version("3.3.0"):
         arg_names = fn.arg_names
         c = {arg_names[i]: v for i, v in constants.items()}
@@ -252,9 +242,7 @@ def _make_ast_source(
                 sig[arg_names[i]] = "constexpr"
             else:
                 raise ValueError(f"argument {i} neither in signature nor constants")
-        return triton.compiler.ASTSource(
-            fn=fn, signature=sig, constexprs=c, attrs=attrs
-        )
+        return triton.compiler.ASTSource(fn=fn, signature=sig, constexprs=c, attrs=attrs)
     raise RuntimeError(f"unsupported triton version {triton_version}")
 
 
@@ -267,12 +255,14 @@ def _do_compile(
     """Backend-specific triton.compile invocation."""
     if backend == "mlu":
         import torch  # noqa: F401  -- ensures torch_mlu autoload path is consistent
+
         target = triton.runtime.driver.active.get_current_target()
         mlu_backend = triton.compiler.make_backend(target)
         opts = mlu_backend.parse_options(options).__dict__
         return triton.compile(src, target=target, options=opts)
     if backend == "cuda":
         import torch
+
         with torch.cuda.device(device_id):
             target = triton.runtime.driver.active.get_current_target()
             return triton.compile(src, target=target, options=options)
@@ -294,9 +284,7 @@ def compile(
     and {fn_name}.json metadata."""
     fn = _load_jit_function(py_path, fn_name)
     num_args = len(args_spec)
-    assert num_args == len(fn.params), (
-        f"argument count mismatch: got {num_args}, function has {len(fn.params)}"
-    )
+    assert num_args == len(fn.params), f"argument count mismatch: got {num_args}, function has {len(fn.params)}"
 
     constants, signature, div16, eq1 = _build_ast_inputs(args_spec)
     attrs = _make_attrs(div16, eq1)
@@ -307,6 +295,7 @@ def compile(
     ccinfo = _do_compile(src, backend, options, device_id)
 
     from triton.runtime.cache import get_cache_manager
+
     cache_dir = get_cache_manager(ccinfo.hash).cache_dir
     return str(cache_dir)
 
@@ -321,8 +310,5 @@ if __name__ == "__main__":
         _dump_signature(sys.argv[2], sys.argv[3])
         sys.exit(0)
 
-    sys.stderr.write(
-        "usage: python -m xllm.core.triton_jit.scripts.triton_compile "
-        "--dump-sig <py_path> <fn_name>\n"
-    )
+    sys.stderr.write("usage: python -m xllm.core.triton_jit.scripts.triton_compile --dump-sig <py_path> <fn_name>\n")
     sys.exit(2)

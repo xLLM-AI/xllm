@@ -1,7 +1,7 @@
 # ASCEND_RT_VISIBLE_DEVICES=0 python examples/generate_embedding.py --model='/path/models/Qwen3-8B' --runner pooling
 # ASCEND_RT_VISIBLE_DEVICES=0,1 python generate_embedding.py --model='/path/models/Qwen3-8B'
 
-from xllm import ArgumentParser, LLM, PoolingParams
+from xllm import LLM, ArgumentParser, PoolingParams
 
 # Create an embedding LLM.
 parser = ArgumentParser()
@@ -27,4 +27,3 @@ for i, output in enumerate(outputs):
     print(f"Input: {input_str!r}, Generated embedding: {generated_embedding!r}")
 
 llm.finish()
-

@@ -170,6 +170,9 @@ struct ParallelArgs {
   }
 
   [[nodiscard]] int32_t kv_split_rank() const noexcept {
+    if (dcp_group_ != nullptr) {
+      return dcp_group_->rank();
+    }
     const int32_t kv = kv_split_size_effective();
     if (kv <= 1) {
       return 0;
@@ -218,6 +221,8 @@ struct ParallelArgs {
   ProcessGroup* single_rank_group_ = nullptr;
   // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
+  // DCP ProcessGroup is authoritative for KV ownership and decode merge.
+  ProcessGroup* dcp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   // Dedicated group for EPLB weight migration. It has the same rank set as
   // moe_ep_group_ but isolates migration P2P from forward collectives.
@@ -227,10 +232,10 @@ struct ParallelArgs {
   ProcessGroup* mc2_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 
-  // PyTorch creates its own TP process group. These fields only reserve the
-  // TCPStore endpoint after the native process-group port range.
-  std::string python_tp_rendezvous_host_;
-  int32_t python_tp_rendezvous_port_ = 0;
+  // Python process groups reuse the native world TCPStore. PrefixStore keeps
+  // the bootstrap keys for each logical group independent.
+  std::string python_rendezvous_host_;
+  int32_t python_rendezvous_port_ = 0;
 
   // ProcessGroups for DiT models
   ProcessGroup* dit_tp_group_ = nullptr;

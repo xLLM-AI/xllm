@@ -65,13 +65,12 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
   const bool use_qwen35_moe =
       is_moe_layer && model_args.model_type() == "qwen3_5_moe_text";
   if (use_qwen35_moe) {
-    moe_mlp_ =
-        register_module("mlp",
-                        Qwen3_5MusaFusedMoE(model_args,
-                                            FusedMoEArgs{.is_gated = true},
-                                            quant_args,
-                                            parallel_args,
-                                            options));
+    moe_mlp_ = register_module("mlp",
+                               Qwen3_5FusedMoE(model_args,
+                                               FusedMoEArgs{.is_gated = true},
+                                               quant_args,
+                                               parallel_args,
+                                               options));
   } else {
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),

@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,13 +43,7 @@ class RotaryEmbedding(nn.Module):
     ) -> None:
         super().__init__()
         self.head_dim = head_dim
-        inv_freq = 1.0 / (
-            rope_theta
-            ** (
-                torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
-                / head_dim
-            )
-        )
+        inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
         t = torch.arange(max_position, dtype=torch.float32, device=device)
         freqs = torch.outer(t, inv_freq)  # [max_position, head_dim/2]
         cos_half = freqs.cos()  # [max_position, head_dim/2]
@@ -60,13 +54,9 @@ class RotaryEmbedding(nn.Module):
 
         device_type = torch.device(device).type if device else "cpu"
         cos_sin_cache = torch.cat([cos_half, sin_half], dim=-1)
-        self.register_buffer(
-            "cos_sin_cache", cos_sin_cache.contiguous(), persistent=False
-        )
+        self.register_buffer("cos_sin_cache", cos_sin_cache.contiguous(), persistent=False)
 
-    def forward(
-        self, positions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Index into the cache and return per-token (cos, sin).
 
         Returns cos/sin as ``[1, num_tokens, 1, head_dim]`` via index + view

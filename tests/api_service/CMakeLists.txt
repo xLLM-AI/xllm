@@ -116,6 +116,17 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    models_service_impl_test
+  SRCS
+    models_service_impl_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
 # Integration smoke tests for OpenAI-compatible endpoints. These require a
 # running server and are disabled by default in code.
 cc_test(

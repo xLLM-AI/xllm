@@ -53,6 +53,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
  private:
   PyCausalLM* py_causal_lm_;
   ModelArgs args_;
+  torch::Device device_;
   runtime::Options options_;
   bool enable_mla_ = false;
 

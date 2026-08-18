@@ -2,10 +2,29 @@
 # pre-commit run --all-files
 
 repos:
--   repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v20.1.6
-    hooks:
-      - id: clang-format
-        types_or: [c++, c, cuda]
-        exclude: ^(cibuild/|tools/|third_party/|cmake/|build/|.*\.ptx\.h$)
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.0
+  hooks:
+  - id: ruff-check
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.4.1
+  hooks:
+  - id: codespell
+    args: [
+      --toml, pyproject.toml,
+      '--skip', 'build/**,third_party/**,*.svg,*.ptx.h',
+      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt'
+    ]
+    additional_dependencies:
+      - tomli
+
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v20.1.6
+  hooks:
+  - id: clang-format
+    types_or: [c++, c, cuda]
+    exclude: ^(cibuild/|tools/|third_party/|cmake/|build/|.*\.ptx\.h$)
 

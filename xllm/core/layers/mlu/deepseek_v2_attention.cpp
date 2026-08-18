@@ -23,7 +23,6 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
-
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     const ModelArgs& args,
     const QuantArgs& quant_args,
@@ -41,8 +40,24 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       eps_(args.rms_norm_eps()),
       interleaved_(true) {
   has_indexer_ = enable_lighting_indexer_ && enable_indexer;
+  kv_split_size_ = parallel_args.kv_split_size_effective();
+  kv_split_rank_ = parallel_args.kv_split_rank();
+  tp_group_ = parallel_args.tp_group_;
+  tp_rank_ = tp_group_->rank();
+  block_size_ = ::xllm::KVCacheConfig::get_instance().block_size();
+  enable_mla_cache_sharding_ = kv_split_size_ > 1;
+  if (enable_mla_cache_sharding_) {
+    CHECK(parallel_args.dcp_group_ != nullptr)
+        << "MLA cache sharding requires a DCP process group";
+    dcp_decode_context_ = std::make_unique<DcpDecodeContext>(
+        KVShardLayout(block_size_, kv_split_size_, kv_split_rank_),
+        parallel_args.dcp_group_);
+    dcp_spans_tp_ =
+        parallel_args.dcp_group_->world_size() > parallel_args.cp_size();
+  }
   use_full_replicated_attention_weights_ =
-      parallel_args.cp_size() > 1 && Platform::uses_model_cp_sharding();
+      parallel_args.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
+      parallel_args.world_size() == parallel_args.cp_size();
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();
@@ -173,6 +188,19 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
                                     use_fused_mla_qkv_,
                                     enable_lighting_indexer_,
                                     args.enable_mla()));
+  if (dcp_spans_tp_) {
+    dcp_full_head_attn_ =
+        register_module("dcp_full_head_attn",
+                        Attention(full_heads().attn,
+                                  kv_lora_rank_ + qk_rope_head_dim_,
+                                  /*num_local_heads=*/1,
+                                  kv_lora_rank_,
+                                  args.sliding_window(),
+                                  scaling,
+                                  use_fused_mla_qkv_,
+                                  enable_lighting_indexer_,
+                                  args.enable_mla()));
+  }
 
   o_proj_ =
       register_module("o_proj",
@@ -486,14 +514,24 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
     KVCache& kv_cache,
     bool is_prefill_or_chunked_prefill,
     DsaTopkTransfer* topk_transfer) {
-  const auto& heads = active_heads();
-  torch::Tensor q, q_norm;
+  if (enable_mla_cache_sharding_ && !attn_metadata.is_dummy) {
+    return forward_dcp(positions,
+                       hidden_states,
+                       attn_metadata,
+                       kv_cache,
+                       is_prefill_or_chunked_prefill,
+                       topk_transfer);
+  }
+
+  const HeadInfo& heads = active_heads();
+  torch::Tensor q;
+  torch::Tensor q_norm;
   torch::Tensor q_input = torch::empty(
       {hidden_states.size(0), heads.attn, kv_lora_rank_ + qk_rope_head_dim_},
       hidden_states.options());
-  auto latent_cache = torch::Tensor();
-  auto k_cache = kv_cache.get_k_cache();
-  auto k_cache_scale = kv_cache.get_k_cache_scale();
+  torch::Tensor latent_cache;
+  torch::Tensor k_cache = kv_cache.get_k_cache();
+  std::optional<torch::Tensor> k_cache_scale = kv_cache.get_k_cache_scale();
   const bool enable_fused_qkv =
       use_fused_mla_qkv_ && !is_prefill_or_chunked_prefill;
   const bool use_prompt_rope = attn_metadata.is_prefill;
@@ -510,9 +548,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
                      enable_fused_qkv,
                      use_prompt_rope);
 
-  // reshape q,k,v
-  auto v_input = latent_cache.slice(-1, 0, kv_lora_rank_);
-  auto k_input = latent_cache;
+  torch::Tensor v_input = latent_cache.slice(-1, 0, kv_lora_rank_);
+  torch::Tensor k_input = latent_cache;
   q_input = q_input.view({q_input.size(0), -1});
   k_input = k_input.view({k_input.size(0), -1});
   v_input = v_input.view({v_input.size(0), -1});
@@ -538,11 +575,9 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
   }
   AttentionMetadata kernel_metadata =
       build_mla_attention_metadata(attn_metadata, topk_state);
-
-  // mla forward
-  auto [attn_output, output_lse] =
+  torch::Tensor attn_output;
+  std::tie(attn_output, std::ignore) =
       attn_(kernel_metadata, q_input, k_input, v_input, kv_cache);
-
   return project_output(attn_output, heads);
 }
 

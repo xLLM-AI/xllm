@@ -43,9 +43,9 @@ void NPUBatchMemcpy::init(int32_t device_id) {
   initialized_ = true;
 }
 
-bool NPUBatchMemcpy::copy_h2d(const std::vector<torch::Tensor>& src_tensors,
-                              const std::vector<torch::Tensor>& dst_tensors,
-                              Stream* stream) {
+bool NPUBatchMemcpy::submit_h2d(const std::vector<torch::Tensor>& src_tensors,
+                                const std::vector<torch::Tensor>& dst_tensors,
+                                Stream* stream) {
   return copy(src_tensors, dst_tensors, h2d_attr_, stream);
 }
 
