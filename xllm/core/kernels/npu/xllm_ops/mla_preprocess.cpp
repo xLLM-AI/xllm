@@ -194,4 +194,111 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_preprocess(
   return std::make_tuple(q_out, kv_cache_out, q_rope_out, kr_cache_out);
 }
 
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor>
+mla_preprocess_v2(const torch::Tensor& input,
+                  const torch::Tensor& gamma0,
+                  const torch::Tensor& beta0,
+                  const torch::Tensor& quant_scale0,
+                  const torch::Tensor& quant_offset0,
+                  const torch::Tensor& wdqkv,
+                  const torch::Tensor& descale0,
+                  const torch::Tensor& bias0,
+                  const torch::Tensor& gamma1,
+                  const torch::Tensor& beta1,
+                  const torch::Tensor& quant_scale1,
+                  const torch::Tensor& quant_offset1,
+                  const torch::Tensor& wuq,
+                  const torch::Tensor& descale1,
+                  const torch::Tensor& bias1,
+                  const torch::Tensor& gamma2,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& sin,
+                  const torch::Tensor& wuk,
+                  torch::Tensor& kv_cache,
+                  torch::Tensor& kv_cache_rope,
+                  const torch::Tensor& slot_mapping,
+                  const torch::Tensor& ctkv_scale,
+                  const torch::Tensor& q_nope_scale,
+                  int64_t wdq_dim,
+                  int64_t q_rope_dim,
+                  int64_t k_rope_dim,
+                  double epsilon,
+                  int64_t q_rotary_coeff,
+                  int64_t k_rotary_coeff,
+                  bool transpose_wdq,
+                  bool transpose_wuq,
+                  bool transpose_wuk,
+                  int64_t cache_mode,
+                  int64_t quant_mode,
+                  bool do_rms_norm,
+                  int64_t wdkv_split_count,
+                  bool q_down_out_flag) {
+  CHECK_GE(input.dim(), 1);
+  CHECK_GE(wuk.dim(), 1);
+  CHECK_GT(q_rope_dim, 0);
+  CHECK_GT(k_rope_dim, 0);
+  CHECK_GT(wdq_dim, 0);
+
+  const int64_t token_num = input.size(0);
+  const int64_t head_num = wuk.size(0);
+  torch::Tensor q_out = torch::empty(
+      {token_num, head_num, kQOutDimOtherCacheMode}, kv_cache.options());
+  torch::Tensor q_rope_out =
+      torch::empty({token_num, head_num, q_rope_dim}, input.options());
+  torch::Tensor q_down_out =
+      torch::empty({token_num, gamma1.numel()}, input.options());
+
+  EXEC_NPU_CMD(aclnnMlaPreprocessV2,
+               input,
+               gamma0,
+               beta0,
+               quant_scale0,
+               quant_offset0,
+               wdqkv,
+               descale0,
+               bias0,
+               gamma1,
+               beta1,
+               quant_scale1,
+               quant_offset1,
+               wuq,
+               descale1,
+               bias1,
+               gamma2,
+               cos,
+               sin,
+               wuk,
+               kv_cache,
+               kv_cache_rope,
+               slot_mapping,
+               ctkv_scale,
+               q_nope_scale,
+               wdq_dim,
+               q_rope_dim,
+               k_rope_dim,
+               epsilon,
+               q_rotary_coeff,
+               k_rotary_coeff,
+               transpose_wdq,
+               transpose_wuq,
+               transpose_wuk,
+               cache_mode,
+               quant_mode,
+               do_rms_norm,
+               wdkv_split_count,
+               q_down_out_flag,
+               q_out,
+               kv_cache,
+               q_rope_out,
+               kv_cache_rope,
+               q_down_out);
+
+  return std::make_tuple(
+      q_out, kv_cache, q_rope_out, kv_cache_rope, q_down_out);
+}
+
 }  // namespace xllm::kernel::npu

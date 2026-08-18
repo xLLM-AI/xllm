@@ -44,10 +44,11 @@ class LayerCache:
     index: torch.Tensor | None = None
     conv: torch.Tensor | None = None
     ssm: torch.Tensor | None = None
+    index_scale: torch.Tensor | None = None
 
 
 #: Field order of the tuple form, which is what the C++ executor hands over.
-_LAYER_CACHE_SLOTS = ("key", "value", "index", "conv", "ssm")
+_LAYER_CACHE_SLOTS = ("key", "value", "index", "conv", "ssm", "index_scale")
 
 LayerCacheInput = LayerCache | tuple[torch.Tensor | None, ...]
 
@@ -106,7 +107,18 @@ class MlaIndexContext:
     block_table: torch.Tensor | None
     actual_seq_q: torch.Tensor
     actual_seq_kv: torch.Tensor
-    update_index_cache: Callable[[torch.Tensor], None]
+    index_cache_scale: torch.Tensor | None
+    get_quant_indexer_metadata: Callable[[int, int, int, int], torch.Tensor]
+    update_index_cache: Callable[[torch.Tensor, torch.Tensor | None], None]
+
+
+@dataclass(frozen=True)
+class MlaPreprocessContext:
+    """Decode cache tensors consumed by fused MLA preprocessing."""
+
+    kv_cache: torch.Tensor
+    rope_cache: torch.Tensor
+    slot_mapping: torch.Tensor
 
 
 class AttentionBackend(ABC):
@@ -147,10 +159,11 @@ class AttentionBackend(ABC):
         self,
         q_latent: torch.Tensor,
         q_pe: torch.Tensor,
-        k_latent: torch.Tensor,
-        k_pe: torch.Tensor,
+        k_latent: torch.Tensor | None,
+        k_pe: torch.Tensor | None,
         layer: Attention,
         topk: torch.Tensor | None = None,
+        cache_is_preprocessed: bool = False,
     ) -> torch.Tensor:
         """Absorbed-MLA attention over paged latent (nope) + rope caches.
 
@@ -160,6 +173,14 @@ class AttentionBackend(ABC):
         that do not implement MLA raise.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support MLA")
+
+    def mla_preprocess_context(
+        self,
+        layer: Attention,
+    ) -> MlaPreprocessContext | None:
+        """Return decode cache tensors for a fused preprocessing region."""
+        del layer
+        return None
 
     def mla_index_context(self, layer: Attention) -> MlaIndexContext:
         """Public hook for an optional LightningIndexer.

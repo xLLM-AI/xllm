@@ -25,6 +25,11 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
+#include <optional>
+#include <string>
+#include <tuple>
+#include <vector>
+
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 
@@ -50,6 +55,15 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rms_norm_npu(
 
 torch::Tensor silu_and_mul_npu(const torch::Tensor& input) {
   return xllm::kernel::npu::active(input, "swiglu");
+}
+
+void inplace_partial_rotary_mul_npu(torch::Tensor& input,
+                                    const torch::Tensor& cosine,
+                                    const torch::Tensor& sine,
+                                    const std::string& rotary_mode,
+                                    const std::vector<int64_t>& partial_slice) {
+  xllm::kernel::npu::npu_inplace_partial_rotary_mul(
+      input, cosine, sine, rotary_mode, partial_slice);
 }
 
 torch::Tensor reshape_paged_cache_npu(const torch::Tensor& slot_mapping,
@@ -285,6 +299,9 @@ TORCH_LIBRARY(xllm_ops, m) {
       "float eps) -> (Tensor, Tensor)");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   m.def(
+      "inplace_partial_rotary_mul(Tensor(a!) input, Tensor cosine, Tensor "
+      "sine, str rotary_mode, int[] partial_slice) -> ()");
+  m.def(
       "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
       "int "
       "num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
@@ -314,6 +331,21 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
       "ScalarType? dst_type) -> (Tensor, Tensor?)");
+  m.def(
+      "quant_lightning_indexer(Tensor query, Tensor key, Tensor weights, "
+      "Tensor query_dequant_scale, Tensor key_dequant_scale, int "
+      "query_quant_mode, int key_quant_mode, Tensor? "
+      "actual_seq_lengths_query, Tensor? actual_seq_lengths_key, Tensor? "
+      "block_table, Tensor? metadata, str layout_query, str layout_key, int "
+      "sparse_count, int sparse_mode, int pre_tokens, int next_tokens, int "
+      "cmp_ratio, bool return_value) -> (Tensor, Tensor)");
+  m.def(
+      "quant_lightning_indexer_metadata(int num_heads_q, int num_heads_k, "
+      "int head_dim, int query_quant_mode, int key_quant_mode, Tensor? "
+      "actual_seq_lengths_query, Tensor? actual_seq_lengths_key, int "
+      "batch_size, int max_seqlen_q, int max_seqlen_k, str layout_query, "
+      "str layout_key, int sparse_count, int sparse_mode, int pre_tokens, "
+      "int next_tokens, int cmp_ratio, str device) -> Tensor");
   m.def(
       "lightning_indexer(Tensor query, Tensor key, Tensor weights, "
       "Tensor? query_seq_lengths, Tensor? key_seq_lengths, Tensor? "
@@ -349,12 +381,27 @@ TORCH_LIBRARY(xllm_ops, m) {
       "shard_valid_mask, Tensor restore_index, Tensor query_index, Tensor "
       "kv_gather_index, int[] q_cu_seqlens, int[] kv_cu_seqlens, int "
       "total_local)");
+  m.def(
+      "mla_preprocess_v2(Tensor input, Tensor gamma0, Tensor beta0, Tensor "
+      "quant_scale0, Tensor quant_offset0, Tensor wdqkv, Tensor descale0, "
+      "Tensor bias0, Tensor gamma1, Tensor beta1, Tensor quant_scale1, Tensor "
+      "quant_offset1, Tensor wuq, Tensor descale1, Tensor bias1, Tensor "
+      "gamma2, Tensor cos, Tensor sin, Tensor wuk, Tensor(a!) kv_cache, "
+      "Tensor(b!) kv_cache_rope, Tensor slot_mapping, Tensor ctkv_scale, "
+      "Tensor q_nope_scale, int wdq_dim, int q_rope_dim, int k_rope_dim, "
+      "float epsilon, int q_rotary_coeff, int k_rotary_coeff, bool "
+      "transpose_wdq, bool transpose_wuq, bool transpose_wuk, int "
+      "cache_mode, int quant_mode, bool do_rms_norm, int "
+      "wdkv_split_count, bool q_down_out_flag) -> (Tensor, Tensor(a!), "
+      "Tensor, Tensor(b!), Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("fused_add_rms_norm", TORCH_FN(xllm::fused_add_rms_norm_npu));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul_npu));
+  m.impl("inplace_partial_rotary_mul",
+         TORCH_FN(xllm::inplace_partial_rotary_mul_npu));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_npu));
   m.impl("apply_rotary_embedding", TORCH_FN(xllm::apply_rotary_embedding_npu));
   m.impl("update_decode_graph_metadata",
@@ -363,6 +410,10 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("quantize_per_tensor",
          TORCH_FN(xllm::kernel::npu::quantize_per_tensor));
   m.impl("dynamic_quant", TORCH_FN(xllm::kernel::npu::dynamic_quant));
+  m.impl("quant_lightning_indexer",
+         TORCH_FN(xllm::kernel::npu::quant_lightning_indexer));
+  m.impl("quant_lightning_indexer_metadata",
+         TORCH_FN(xllm::kernel::npu::quant_lightning_indexer_metadata));
   m.impl("lightning_indexer", TORCH_FN(xllm::kernel::npu::lightning_indexer));
   m.impl("lightning_indexer_out",
          TORCH_FN(xllm::kernel::npu::lightning_indexer_out));
@@ -371,6 +422,7 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention));
   m.impl("sparse_flash_attention_out",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_out));
+  m.impl("mla_preprocess_v2", TORCH_FN(xllm::kernel::npu::mla_preprocess_v2));
 }
 
 // build_cp_context is pure host index math with no Tensor input, so the

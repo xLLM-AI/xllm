@@ -78,6 +78,8 @@ class ModelExecutor:
         model: nn.Module,
         config: dict,
         max_seqs_per_batch: int,
+        num_decoding_tokens: int = 1,
+        acl_graph_decode_batch_size_limit: int | None = None,
     ) -> None:
         self.model = model
         self._kv_bound = False
@@ -139,14 +141,27 @@ class ModelExecutor:
                 DecodeAclGraphRunner,
             )
 
+            num_decoding_tokens = max(1, int(num_decoding_tokens))
+            decode_batch_size_limit = (
+                None if acl_graph_decode_batch_size_limit is None else max(1, int(acl_graph_decode_batch_size_limit))
+            )
+            graph_sequence_capacity = max_seqs_per_batch
+            if decode_batch_size_limit is not None:
+                graph_sequence_capacity = min(
+                    graph_sequence_capacity,
+                    decode_batch_size_limit,
+                )
+            max_graph_tokens = graph_sequence_capacity * num_decoding_tokens
             self.decode_graph_runner = DecodeAclGraphRunner(
                 execution_model,
                 self.attention_backend,
                 device,
-                max_seqs_per_batch,
+                max_graph_tokens,
                 int(config["max_position_embeddings"]),
                 dp_size,
                 dp_rank,
+                decode_batch_size_limit,
+                num_decoding_tokens,
             )
         else:
             if self.eager_runner.cp_size > 1:
@@ -202,7 +217,12 @@ class ModelExecutor:
 
         graph_runner = self.decode_graph_runner
         if graph_runner is not None and graph_runner.can_execute(input_ids, metadata, input_embedding):
-            graph_runner.warmup(input_ids.device, input_ids.dtype, input_embedding)
+            graph_runner.warmup(
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+            )
             return graph_runner.execute(input_ids, positions, metadata, input_embedding)
         if self.inductor_runner is not None:
             return self.inductor_runner.execute(

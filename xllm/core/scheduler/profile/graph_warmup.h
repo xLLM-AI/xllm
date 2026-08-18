@@ -34,7 +34,7 @@ GraphWarmupPlan graph_warmup_plan(InstanceRole role);
 
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
-                                  int32_t bucket,
+                                  int32_t token_bucket,
                                   double latency_ms);
 
 // Returns a process-unique request id for synthetic profiling/warmup requests.

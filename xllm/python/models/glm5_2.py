@@ -418,8 +418,7 @@ class Glm52Indexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         if index_cache is not None and slot_mapping is not None:
-            k_view = index_cache.view(-1, index_cache.size(-1))
-            kernels.scatter_nd_update(k_view, slot_mapping.reshape(-1, 1).clamp_min(0), k)
+            ctx.update_index_cache(k, None)
         weights = self.weights_proj(hidden.to(torch.float32)).to(torch.bfloat16)
         topk = kernels.lightning_indexer(
             q,

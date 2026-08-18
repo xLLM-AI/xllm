@@ -106,17 +106,21 @@ IndexedKVCacheImpl::IndexedKVCacheImpl(
         &index_cache_,
         &index_cache_shape_);
   }
-  // The INT8 indexer cache keeps a per-token fp32 scale that must move with the
-  // int8 values during offload/reload, otherwise dequantization reads
-  // mismatched coefficients. Allocate it on host alongside the index cache.
+  // Keep INT8 per-token scales with their values during offload/reload.
   if (create_options.enable_indexer_cache_quant() &&
       kv_cache_shape.has_index_cache_scale_shape()) {
     torch::Tensor index_scale;
+    const torch::ScalarType index_scale_dtype =
+#if defined(USE_NPU)
+        torch::kFloat16;
+#else
+        torch::kFloat32;
+#endif
     create_host_tensor(
         build_host_group_tensor_shape(kv_cache_shape.index_cache_scale_shape(),
                                       create_options.host_blocks_factor(),
                                       layer_count),
-        torch::kFloat32,
+        index_scale_dtype,
         &index_scale,
         &index_cache_scale_shape_);
     index_cache_scale_ = index_scale;

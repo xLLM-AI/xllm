@@ -125,7 +125,6 @@ class AclGraph {
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const c10_npu::NPUStream& signal_stream);
 
-  // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens = 0) const {
     return persistent_param_.hidden_states(actual_num_tokens);
   }

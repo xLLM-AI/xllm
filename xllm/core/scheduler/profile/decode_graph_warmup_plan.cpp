@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "scheduler/profile/decode_graph_warmup_plan.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <utility>
@@ -98,6 +99,46 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   }
 
   const int32_t max_local_batch_size = max_global_batch_size / dp_size;
+
+  if (execution_shape.max_graph_batch_size > 0) {
+    const int32_t max_graph_global_batch_size =
+        std::min(max_global_batch_size, execution_shape.max_graph_batch_size);
+    const int32_t max_graph_local_batch_size =
+        max_graph_global_batch_size / dp_size;
+    std::vector<int32_t> graph_batch_sizes;
+    int64_t current_token_bucket = 0;
+    for (int32_t local_batch_size = 1;
+         local_batch_size <= max_graph_local_batch_size;
+         ++local_batch_size) {
+      const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
+                                 execution_shape.num_decoding_tokens;
+      const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
+          num_tokens, execution_shape.enable_graph_mode_decode_no_padding);
+      const int32_t global_batch_size = local_batch_size * dp_size;
+      if (graph_batch_sizes.empty() || token_bucket != current_token_bucket) {
+        graph_batch_sizes.emplace_back(global_batch_size);
+        current_token_bucket = token_bucket;
+      } else {
+        graph_batch_sizes.back() = global_batch_size;
+      }
+    }
+
+    std::vector<int32_t> batch_sizes;
+    batch_sizes.reserve(plan.batch_sizes.size() + graph_batch_sizes.size());
+    for (int32_t batch_size : plan.batch_sizes) {
+      if (batch_size > max_graph_global_batch_size) {
+        batch_sizes.emplace_back(batch_size);
+      }
+    }
+    batch_sizes.insert(
+        batch_sizes.end(), graph_batch_sizes.begin(), graph_batch_sizes.end());
+    std::sort(batch_sizes.begin(), batch_sizes.end());
+    batch_sizes.erase(std::unique(batch_sizes.begin(), batch_sizes.end()),
+                      batch_sizes.end());
+    plan.batch_sizes = std::move(batch_sizes);
+    return plan;
+  }
+
   std::vector<int32_t> batch_sizes;
   batch_sizes.reserve(static_cast<size_t>(max_local_batch_size) + 1);
   int64_t last_token_bucket = 0;

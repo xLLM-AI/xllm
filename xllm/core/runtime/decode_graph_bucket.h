@@ -26,6 +26,7 @@ struct DecodeGraphExecutionShape {
   int64_t num_decoding_tokens = 1;
   int32_t num_speculative_tokens = 0;
   bool enable_graph_mode_decode_no_padding = false;
+  int32_t max_graph_batch_size = 0;
 };
 
 // Returns the padded token-row bucket shared by decode graph executors. When

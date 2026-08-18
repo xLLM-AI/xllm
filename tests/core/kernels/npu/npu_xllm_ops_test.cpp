@@ -30,6 +30,7 @@ limitations under the License.
 #include <limits>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/xllm_torch_ops.h"
@@ -184,6 +185,40 @@ TEST_F(NpuXllmOpsTest, DispatcherSiluAndMulMatchesReference) {
              .abs()
              .max()
              .item<float>();
+}
+
+TEST_F(NpuXllmOpsTest, DispatcherQuantizeMatchesStaticW8A8Reference) {
+  py::gil_scoped_acquire gil;
+  const auto input_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto scale_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto zero_point_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto input_cpu = torch::tensor(
+      std::vector<float>{-40.0F, -1.0F, -0.25F, 0.0F, 0.25F, 1.0F, 40.0F},
+      input_opts);
+  const auto scale_cpu = torch::full({1}, 0.25, scale_opts);
+  const auto zero_point_cpu = torch::full({1}, 2, zero_point_opts);
+  const auto input = input_cpu.to(torch::kPrivateUse1);
+  const auto scale = scale_cpu.to(torch::kPrivateUse1);
+  const auto zero_point = zero_point_cpu.to(torch::kPrivateUse1);
+
+  auto op = c10::Dispatcher::singleton().findSchemaOrThrow(
+      "xllm_ops::quantize_per_tensor", "");
+  auto actual = op.typed<torch::Tensor(const torch::Tensor&,
+                                       const torch::Tensor&,
+                                       const torch::Tensor&,
+                                       at::ScalarType,
+                                       int64_t)>()
+                    .call(input, scale, zero_point, at::ScalarType::QInt8, -1);
+
+  const auto expected =
+      torch::clamp(torch::round(input_cpu.to(torch::kFloat32) /
+                                    scale_cpu.to(torch::kFloat32) +
+                                zero_point_cpu.to(torch::kFloat32)),
+                   -128,
+                   127)
+          .to(torch::kInt8);
+  EXPECT_EQ(actual.scalar_type(), torch::kInt8);
+  EXPECT_TRUE(torch::equal(actual.cpu(), expected));
 }
 
 TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {

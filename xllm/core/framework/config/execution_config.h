@@ -42,6 +42,7 @@ class ExecutionConfig final {
     static const OptionCategory kOptionCategory = {
         "EXECUTION OPTIONS",
         {"enable_graph",
+         "disable_graph_warmup",
          "enable_graph_double_buffer",
          "enable_graph_mode_decode_no_padding",
          "enable_prefill_piecewise_graph",
@@ -58,6 +59,8 @@ class ExecutionConfig final {
   }
 
   PROPERTY(bool, enable_graph) = false;
+
+  PROPERTY(bool, disable_graph_warmup) = false;
 
   PROPERTY(bool, enable_graph_double_buffer) = true;
 

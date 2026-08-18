@@ -237,7 +237,8 @@ TEST(MtpAsyncInputBuilderTest, PybindViewSelectsExpandedGraphMetadata) {
   runner.attr("attention_backend") = types.attr("SimpleNamespace")(
       py::arg("page_size") = kBlockSize, py::arg("is_mla") = false);
 
-  py::object py_metadata = py::cast(PyAttentionMetadataView(metadata));
+  ModelInputParams params;
+  py::object py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
   py::tuple selected = runner.attr("_decode_metadata")(py_metadata);
 
   EXPECT_TRUE(torch::equal(selected[0].cast<torch::Tensor>(),

@@ -165,7 +165,6 @@ class GraphPersistentParam final {
     }
     return hidden_states_;
   }
-  // Setter for hidden_states (for assignment)
   void set_hidden_states(const torch::Tensor& value) {
     const uint32_t result_tokens = value.size(0);
     hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens)
@@ -235,7 +234,6 @@ class GraphPersistentParam final {
     }
     return aux_hidden_states_;
   }
-  // Setter for aux_hidden_states (for assignment)
   void set_aux_hidden_states(const torch::Tensor& value);
 
  private:
@@ -310,7 +308,6 @@ class GraphPersistentParam final {
   // for mrope (multimodal rotary position embedding)
   bool use_mrope_ = false;
 
-  // ModelOutput fields
   torch::Tensor aux_hidden_states_;
 
   // ATB context and operation for paged attention plan

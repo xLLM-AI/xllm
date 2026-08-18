@@ -78,12 +78,9 @@ class Platform final {
     return is_npu() || is_mlu();
   }
 
-  // MTP decode expands one sequence into num_decoding_tokens token rows. The
-  // MLU graph executor reuses graphs by padded token-row buckets, so graph
-  // warmup must visit every batch size that starts a new MTP token bucket.
-  // Other backends retain the compatibility warmup buckets until their graph
-  // keying and MTP replay contracts are verified against the same strategy.
-  static constexpr bool supports_mtp_decode_graph_warmup() { return is_mlu(); }
+  static constexpr bool supports_mtp_decode_graph_warmup() {
+    return is_mlu() || is_npu();
+  }
 
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)

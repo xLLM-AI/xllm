@@ -40,11 +40,31 @@ limitations under the License.
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
+#include "platform/platform.h"
 #include "scheduler/profile/graph_warmup.h"
 #include "util/rec_model_utils.h"
 #include "util/utils.h"
 
 namespace xllm {
+namespace {
+
+int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
+                                   int32_t global_batch_size,
+                                   int32_t dp_size) {
+  CHECK_GT(global_batch_size, 0);
+  CHECK_GT(dp_size, 0);
+  CHECK_GT(plan.execution_shape.num_decoding_tokens, 0);
+  const int32_t local_sequence_batch_size =
+      (global_batch_size + dp_size - 1) / dp_size;
+  const int64_t num_token_rows =
+      static_cast<int64_t>(local_sequence_batch_size) *
+      plan.execution_shape.num_decoding_tokens;
+  return static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
+      num_token_rows,
+      plan.execution_shape.enable_graph_mode_decode_no_padding));
+}
+
+}  // namespace
 
 ProfileManager::ProfileManager(Engine* engine, const Options& options)
     : options_(options), engine_(engine) {
@@ -56,12 +76,14 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  const int32_t decode_batch_size_limit =
-      std::max<int32_t>(1,
-                        ::xllm::ExecutionConfig::get_instance()
-                            .acl_graph_decode_batch_size_limit());
-  max_decode_batch_size =
-      std::min(max_decode_batch_size, decode_batch_size_limit);
+  if (Platform::is_npu()) {
+    const int32_t decode_batch_size_limit =
+        std::max<int32_t>(1,
+                          ::xllm::ExecutionConfig::get_instance()
+                              .acl_graph_decode_batch_size_limit());
+    max_decode_batch_size =
+        std::min(max_decode_batch_size, decode_batch_size_limit);
+  }
   decode_graph_warmup_plan_ =
       build_decode_graph_warmup_plan(engine_->decode_graph_execution_shape(),
                                      max_decode_batch_size,
@@ -91,8 +113,14 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
 
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
   if (!is_rec_multi_round_mode()) {
-    if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-      warmup_for_graph();
+    const auto& execution_config = ::xllm::ExecutionConfig::get_instance();
+    if (execution_config.enable_graph()) {
+      if (execution_config.disable_graph_warmup()) {
+        LOG(INFO) << "Graph warmup disabled by execution config; graphs will "
+                     "be captured lazily from real requests";
+      } else {
+        warmup_for_graph();
+      }
 #if defined(USE_NPU)
     } else {
       warmup_for_eager();
@@ -1264,12 +1292,14 @@ void ProfileManager::warmup_decode_for_graph() {
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  const int32_t decode_batch_size_limit =
-      std::max<int32_t>(1,
-                        ::xllm::ExecutionConfig::get_instance()
-                            .acl_graph_decode_batch_size_limit());
-  max_decode_batch_size =
-      std::min(max_decode_batch_size, decode_batch_size_limit);
+  if (Platform::is_npu()) {
+    const int32_t decode_batch_size_limit =
+        std::max<int32_t>(1,
+                          ::xllm::ExecutionConfig::get_instance()
+                              .acl_graph_decode_batch_size_limit());
+    max_decode_batch_size =
+        std::min(max_decode_batch_size, decode_batch_size_limit);
+  }
   int32_t decode_seq_len = std::min(16, max_context_len);
 
   const int32_t allocatable_sequences =
@@ -1298,21 +1328,32 @@ void ProfileManager::warmup_decode_for_graph() {
   double decode_total_latency = 0.0;
   for (int32_t bucket_index = decode_bucket_count - 1; bucket_index >= 0;
        --bucket_index) {
-    const int32_t batch_size =
+    const int32_t sequence_batch_size =
         decode_batch_sizes[static_cast<size_t>(bucket_index)];
-    std::vector<int32_t> total_length_vec(batch_size, decode_seq_len);
+    const int32_t token_bucket = decode_warmup_token_bucket(
+        decode_graph_warmup_plan_, sequence_batch_size, options_.dp_size());
+    std::vector<int32_t> total_length_vec(sequence_batch_size, decode_seq_len);
     const double decode_latency = run_graph_decode_request(total_length_vec);
     decode_total_latency += decode_latency;
     LOG(INFO) << graph_warmup_progress(
-        /*completed=*/decode_bucket_count - bucket_index,
-        /*total=*/decode_bucket_count,
-        /*bucket=*/batch_size,
-        /*latency_ms=*/decode_latency);
+                     /*completed=*/decode_bucket_count - bucket_index,
+                     /*total=*/decode_bucket_count,
+                     /*token_bucket=*/token_bucket,
+                     /*latency_ms=*/decode_latency)
+              << ", sequence_batch=" << sequence_batch_size;
   }
 
+  const int32_t max_sequence_batch_size =
+      decode_batch_sizes.empty() ? 0 : decode_batch_sizes.back();
+  const int32_t max_token_bucket =
+      max_sequence_batch_size == 0
+          ? 0
+          : decode_warmup_token_bucket(decode_graph_warmup_plan_,
+                                       max_sequence_batch_size,
+                                       options_.dp_size());
   LOG(INFO) << "Decode warmup completed: bucket_count=" << decode_bucket_count
-            << ", decode_max_batch_size="
-            << (decode_batch_sizes.empty() ? 0 : decode_batch_sizes.back())
+            << ", decode_max_token_bucket=" << max_token_bucket
+            << ", decode_max_sequence_batch=" << max_sequence_batch_size
             << ", decode_seq_len=" << decode_seq_len
             << ", decode_total_latency=" << decode_total_latency << " ms";
 }

@@ -40,6 +40,7 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "max_tokens_per_batch": 8192,
   "max_seqs_per_batch": 64,
   "model_impl": "py",
+  "disable_graph_warmup": true,
   "python_graph_backend": "cudagraphs"
 })json";
 
@@ -112,6 +113,7 @@ class ConfigFlagGuard final {
         old_max_seqs_per_batch_(FLAGS_max_seqs_per_batch),
         old_model_impl_(FLAGS_model_impl),
         old_python_model_path_(FLAGS_python_model_path),
+        old_disable_graph_warmup_(FLAGS_disable_graph_warmup),
         old_python_graph_backend_(FLAGS_python_graph_backend) {}
 
   ~ConfigFlagGuard() {
@@ -122,6 +124,7 @@ class ConfigFlagGuard final {
     FLAGS_max_seqs_per_batch = old_max_seqs_per_batch_;
     FLAGS_model_impl = old_model_impl_;
     FLAGS_python_model_path = old_python_model_path_;
+    FLAGS_disable_graph_warmup = old_disable_graph_warmup_;
     FLAGS_python_graph_backend = old_python_graph_backend_;
   }
 
@@ -133,6 +136,7 @@ class ConfigFlagGuard final {
   int32_t old_max_seqs_per_batch_;
   std::string old_model_impl_;
   std::string old_python_model_path_;
+  bool old_disable_graph_warmup_;
   std::string old_python_graph_backend_;
 };
 
@@ -263,15 +267,23 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   // model and python_model_path are command-line-only: from_json neither reads
   // them nor touches their gflags, so both keep their pre-call values.
   EXPECT_EQ(model_config.python_model_path(), "");
+  EXPECT_TRUE(execution_config.disable_graph_warmup());
   EXPECT_EQ(execution_config.python_graph_backend(), "cudagraphs");
 
   EXPECT_EQ(FLAGS_model_impl, "py");
   EXPECT_EQ(FLAGS_python_model_path, old_python_model_path);
+  EXPECT_TRUE(FLAGS_disable_graph_warmup);
   EXPECT_EQ(FLAGS_python_graph_backend, "cudagraphs");
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
+}
+
+TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {
+  const ExecutionConfig execution_config;
+
+  EXPECT_FALSE(execution_config.disable_graph_warmup());
 }
 
 TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {

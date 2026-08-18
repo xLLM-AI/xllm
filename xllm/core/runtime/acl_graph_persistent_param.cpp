@@ -279,7 +279,6 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       torch::zeros({max_graph_tokens, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
 
-  // Output tensor for hidden states
   torch::Dtype dtype = util::parse_dtype(args.dtype(), device);
   if (args.dtype() == "float" || args.dtype() == "float32") {
     LOG(WARNING)
@@ -551,8 +550,6 @@ void GraphPersistentParam::set_aux_hidden_states(const torch::Tensor& value) {
   }
   const uint32_t result_tokens = value.size(0);
   if (aux_hidden_states_.numel() == 0) {
-    // Lazy initialization: create aux_hidden_states tensor if not already
-    // created
     const int64_t graph_token_capacity =
         get_decode_graph_token_capacity(options_);
     auto shape = value.sizes().vec();
@@ -566,10 +563,8 @@ void GraphPersistentParam::set_aux_hidden_states(const torch::Tensor& value) {
   }
   CHECK_LE(result_tokens, aux_hidden_states_.size(0))
       << "aux hidden state output exceeds graph token capacity";
-  // Slice to match the actual shape
   auto slice =
       aux_hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens);
-  // Reshape slice if needed to match value shape
   if (slice.sizes() == value.sizes()) {
     slice.copy_(value, /*non_blocking=*/true);
   }

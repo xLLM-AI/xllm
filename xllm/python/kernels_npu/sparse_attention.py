@@ -108,6 +108,78 @@ def lightning_indexer_out(
     )
 
 
+def quant_lightning_indexer(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_dequant_scale: torch.Tensor,
+    key_dequant_scale: torch.Tensor,
+    metadata: torch.Tensor,
+    query_seq_lengths: torch.Tensor | None,
+    key_seq_lengths: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    selected_count: int,
+    cmp_ratio: int = 1,
+) -> torch.Tensor:
+    """Run INT8 LightningIndexer with per-token Q/K dequant scales."""
+    indices, _ = torch.ops.xllm_ops.quant_lightning_indexer(
+        query,
+        key,
+        weights,
+        query_dequant_scale,
+        key_dequant_scale,
+        0,
+        0,
+        query_seq_lengths,
+        key_seq_lengths,
+        block_table,
+        metadata,
+        "TND",
+        "PA_BSND",
+        selected_count,
+        3,
+        9223372036854775807,
+        9223372036854775807,
+        cmp_ratio,
+        False,
+    )
+    return indices
+
+
+def quant_lightning_indexer_metadata(
+    num_heads_q: int,
+    num_heads_k: int,
+    head_dim: int,
+    actual_seq_lengths_query: torch.Tensor,
+    actual_seq_lengths_key: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    sparse_count: int,
+    cmp_ratio: int,
+) -> torch.Tensor:
+    """Create reusable tiling metadata for QuantLightningIndexer."""
+    return torch.ops.xllm_ops.quant_lightning_indexer_metadata(
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        0,
+        0,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        actual_seq_lengths_key.numel(),
+        max_seqlen_q,
+        max_seqlen_k,
+        "TND",
+        "PA_BSND",
+        sparse_count,
+        3,
+        9223372036854775807,
+        9223372036854775807,
+        cmp_ratio,
+        str(actual_seq_lengths_query.device),
+    )
+
+
 def scatter_nd_update(
     value: torch.Tensor,
     indices: torch.Tensor,
@@ -218,6 +290,8 @@ def sparse_flash_attention_out(
 __all__ = [
     "lightning_indexer",
     "lightning_indexer_out",
+    "quant_lightning_indexer",
+    "quant_lightning_indexer_metadata",
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",

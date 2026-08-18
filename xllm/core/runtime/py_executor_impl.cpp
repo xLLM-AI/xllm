@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
+#include "core/framework/config/execution_config.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/py_attention_metadata.h"
@@ -89,10 +90,12 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   py::module_::import("xllm_runtime");
   py::module_ executor_module =
       py::module_::import("xllm.python.model_executor.executor");
-  py_executor_ =
-      executor_module.attr("ModelExecutor")(py_causal_lm_->python_model(),
-                                            py_causal_lm_->config_dict(),
-                                            options_.max_seqs_per_batch());
+  py_executor_ = executor_module.attr("ModelExecutor")(
+      py_causal_lm_->python_model(),
+      py_causal_lm_->config_dict(),
+      options_.max_seqs_per_batch(),
+      options_.num_decoding_tokens(),
+      ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
 }
 
 PyExecutorImpl::~PyExecutorImpl() { clear_python_object(py_executor_); }
@@ -126,11 +129,18 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     py::list kv_caches_py;
     for (auto& kv : kv_caches) {
       // Slot order must match ``LayerCache`` on the Python side.
+      const std::optional<torch::Tensor> indexer_cache_scale =
+          kv.get_indexer_cache_scale();
+      py::object indexer_cache_scale_py =
+          indexer_cache_scale.has_value()
+              ? py::cast(indexer_cache_scale.value())
+              : py::none();
       kv_caches_py.append(py::make_tuple(optional_tensor(kv.get_k_cache()),
                                          optional_tensor(kv.get_v_cache()),
                                          optional_tensor(kv.get_index_cache()),
                                          optional_tensor(kv.get_conv_cache()),
-                                         optional_tensor(kv.get_ssm_cache())));
+                                         optional_tensor(kv.get_ssm_cache()),
+                                         indexer_cache_scale_py));
     }
     py_executor_.attr("bind_kv_caches")(kv_caches_py);
     kv_bound_ = true;

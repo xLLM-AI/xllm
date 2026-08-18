@@ -408,7 +408,6 @@ bool AclGraph::capture(CausalLM* model,
                          kv_cache,
                          {graph_params.value()});
 
-      // Store result in persistent buffer owned by NPUGraph mempool
       persistent_param_.set_hidden_states(forward_result.hidden_states);
       if (options.enable_graph_aux_hidden_states() &&
           forward_result.aux_hidden_states.defined()) {
@@ -669,10 +668,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
       COUNTER_INC(num_model_execution_total_eager);
       return forward_eager(model, tokens, positions, kv_cache, params);
     }
-    // Raw TileLang launches are not replayed as part of the captured ACL
-    // graph on this runtime. Refresh the persistent metadata and the
-    // graph-owned paged-attention tiling explicitly on the producer stream,
-    // then let make_graph_wait_for_current_stream() carry the dependency.
+    // Raw TileLang launches require an explicit metadata refresh.
     persistent_param_.update_spec_verify_inputs(
         tokens,
         positions,
@@ -706,14 +702,9 @@ ModelOutput AclGraph::replay(CausalLM* model,
     }
   }
 
-  // Replay captured graph - NPUGraph mempool reuses temporary tensors
-  // Get current NPU stream from libtorch NPU API
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
   if (graph_paged_attention_tiling_data_.defined()) {
-    // The producer stream has refreshed inputs that include the final draft
-    // token. Make graph replay wait for those updates on device; a host
-    // synchronize here would recreate the bubble we remove.
     make_graph_wait_for_current_stream(stream);
   }
   const bool use_static_graph_tasks =

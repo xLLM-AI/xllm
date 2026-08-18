@@ -17,9 +17,28 @@
 from __future__ import annotations
 
 import torch
+import torch_npu
 
 rms_norm = torch.ops.xllm_ops.rms_norm
 fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
+_FUSED_ADD_RMS_NORM_DYNAMIC_QUANT = torch_npu.npu_add_rms_norm_dynamic_quant
+
+
+def fused_add_rms_norm_dynamic_quant(
+    value: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Add residual, apply RMSNorm, and dynamically quantize the result."""
+    outputs = _FUSED_ADD_RMS_NORM_DYNAMIC_QUANT(
+        value,
+        residual,
+        weight,
+        epsilon=eps,
+        output_mask=[True, False],
+    )
+    return outputs[0], outputs[3], outputs[2]
 
 
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -61,4 +80,10 @@ def rms_norm_gated(
     )
 
 
-__all__ = ["rms_norm", "fused_add_rms_norm", "l2_norm", "rms_norm_gated"]
+__all__ = [
+    "rms_norm",
+    "fused_add_rms_norm",
+    "fused_add_rms_norm_dynamic_quant",
+    "l2_norm",
+    "rms_norm_gated",
+]

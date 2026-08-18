@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import sys
 import types
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -283,6 +284,39 @@ class TestModelExecutorConstruction:
                 max_seqs_per_batch=4,
             )
 
+    @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
+    @patch("xllm.python.model_executor.executor._create_attention_backend")
+    def test_acl_graph_capacity_respects_decode_batch_limit(
+        self,
+        mock_create,
+        mock_graph_runner,
+    ):
+        mock_create.return_value = StubAttentionBackend()
+        model = _FakeModel(num_layers=1)
+
+        ModelExecutor(
+            model,
+            {
+                "max_position_embeddings": 128,
+                "python_graph_backend": "aclgraph",
+            },
+            max_seqs_per_batch=256,
+            num_decoding_tokens=4,
+            acl_graph_decode_batch_size_limit=16,
+        )
+
+        mock_graph_runner.assert_called_once_with(
+            model.model,
+            mock_create.return_value,
+            torch.device("cpu"),
+            64,
+            128,
+            1,
+            0,
+            16,
+            4,
+        )
+
 
 class TestDecodeCudaGraphDataParallelKeys:
     @staticmethod
@@ -430,11 +464,107 @@ class TestDecodeAclGraphSpeculativeMetadata:
         assert paged_kv_indices.tolist() == [10, 10, 20, 21, 20, 21]
         assert paged_kv_last_page_len.tolist() == [3, 4, 3, 4]
 
+    def test_decode_metadata_rebuilds_token_row_paging_metadata(self) -> None:
+        metadata = self._metadata()
+        metadata.expanded_decode_metadata = None
+        metadata.slot_mapping = torch.arange(4, dtype=torch.int32)
+        metadata.block_table = torch.tensor(
+            [[10, 11], [10, 11], [20, 21], [20, 21]],
+            dtype=torch.int32,
+        )
+        metadata.kv_seq_lens = torch.tensor([3, 4, 7, 8], dtype=torch.int32)
+        metadata.kv_seq_lens_host_values = [3, 4, 7, 8]
+        metadata.paged_kv_indptr = torch.tensor([0, 1, 3], dtype=torch.int32)
+        metadata.paged_kv_indices = torch.tensor([10, 20, 21], dtype=torch.int32)
+        metadata.paged_kv_last_page_len = torch.tensor([4, 4], dtype=torch.int32)
+
+        (
+            _,
+            _,
+            _,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+        ) = self._runner()._decode_metadata(metadata)
+
+        assert paged_kv_indptr.tolist() == [0, 1, 2, 4, 6]
+        assert paged_kv_indices.tolist() == [10, 10, 20, 21, 20, 21]
+        assert paged_kv_last_page_len.tolist() == [3, 4, 3, 4]
+
     def test_expanded_chunked_verify_can_use_decode_graph(self) -> None:
         runner = self._runner()
         input_ids = torch.arange(4, dtype=torch.int32)
 
         assert runner.can_execute(input_ids, self._metadata())
+
+    def test_decode_batch_limit_uses_speculative_tokens_and_dp_global_max(
+        self,
+    ) -> None:
+        runner = DecodeAclGraphRunner(
+            nn.Identity(),
+            _PagedStubAttentionBackend(),
+            torch.device("cpu"),
+            max_batch=64,
+            max_model_len=8,
+            decode_batch_size_limit=16,
+            num_decoding_tokens=4,
+        )
+        metadata = SimpleNamespace(dp_token_counts=(32, 64))
+
+        assert runner._decode_batch_sizes(
+            torch.zeros(32, dtype=torch.int32),
+            metadata,
+        ) == (8, 16)
+
+    def test_mtp3_batch_eight_uses_32_row_graph_bucket(self) -> None:
+        runner = DecodeAclGraphRunner(
+            nn.Identity(),
+            _PagedStubAttentionBackend(),
+            torch.device("cpu"),
+            max_batch=64,
+            max_model_len=8,
+            decode_batch_size_limit=16,
+            num_decoding_tokens=4,
+        )
+        metadata = SimpleNamespace(
+            is_prefill=False,
+            is_chunked_prefill=False,
+            dp_token_counts=(),
+        )
+
+        with patch.object(
+            runner,
+            "_has_compatible_decode_metadata",
+            return_value=True,
+        ):
+            assert runner.can_execute(
+                torch.zeros(32, dtype=torch.int32),
+                metadata,
+            )
+
+    def test_warmup_captures_with_scheduler_metadata_once(self) -> None:
+        runner = self._runner()
+        input_ids = torch.arange(4, dtype=torch.int32)
+        positions = torch.arange(4, dtype=torch.int32)
+        metadata = self._metadata()
+        graph_key = runner._graph_key(
+            padded_batch_size=4,
+            is_expanded=True,
+            input_embedding=None,
+        )
+
+        with patch.object(runner, "_prepare_graph_entry") as prepare:
+            runner.warmup(input_ids, positions, metadata)
+            prepare.assert_called_once_with(
+                input_ids,
+                positions,
+                metadata,
+                None,
+            )
+
+            runner._graphs[graph_key] = object()
+            runner.warmup(input_ids, positions, metadata)
+            prepare.assert_called_once()
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),
@@ -538,7 +668,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             (
                 torch.arange(3, dtype=torch.int32),
                 torch.arange(4, dtype=torch.int32),
-                "input_ids must contain one token per sequence",
+                "input_ids must contain one token per metadata row",
             ),
             (
                 torch.arange(4, dtype=torch.int32),
@@ -558,8 +688,63 @@ class TestDecodeAclGraphSpeculativeMetadata:
                 input_ids,
                 torch.arange(4, dtype=torch.int32),
                 slot_mapping,
-                sequence_count=4,
+                metadata_row_count=4,
             )
+
+    def test_replay_returns_static_output_view(self) -> None:
+        runner = self._runner()
+        batch_size = 3
+        padded_batch_size = 4
+        static_output = torch.arange(12).reshape(padded_batch_size, 3)
+        graph = MagicMock()
+        entry = SimpleNamespace(
+            graph=graph,
+            static_output=static_output,
+            static_metadata=SimpleNamespace(),
+            graph_tasks=[],
+            execution_state=SimpleNamespace(persistent_buffers={}),
+        )
+        graph_key = runner._graph_key(
+            padded_batch_size,
+            is_expanded=False,
+            input_embedding=None,
+        )
+        runner._graphs[graph_key] = entry
+
+        replay_stream = MagicMock()
+        update_stream = MagicMock()
+        replay_done_event = MagicMock()
+        current_stream = MagicMock()
+        runner._stream = replay_stream
+        runner._update_stream = update_stream
+        runner._replay_done_event = replay_done_event
+        fake_npu = SimpleNamespace(
+            current_stream=MagicMock(return_value=current_stream),
+            stream=MagicMock(return_value=nullcontext()),
+        )
+        metadata = SimpleNamespace(expanded_decode_metadata=None)
+
+        with (
+            patch.object(torch, "npu", fake_npu, create=True),
+            patch.object(
+                runner,
+                "_prepare_graph_entry",
+                return_value=entry,
+            ),
+        ):
+            output = runner.execute(
+                torch.arange(batch_size, dtype=torch.int32),
+                torch.arange(batch_size, dtype=torch.int32),
+                metadata,
+            )
+
+        assert output.shape == (batch_size, 3)
+        assert output.data_ptr() == static_output.data_ptr()
+        output[0, 0] = -1
+        assert static_output[0, 0].item() == -1
+        replay_stream.wait_stream.assert_called_once_with(current_stream)
+        current_stream.wait_stream.assert_called_once_with(replay_stream)
+        graph.replay.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -670,3 +855,38 @@ class TestExecuteRouting:
         result = executor.execute(torch.zeros(1), torch.zeros(1), metadata)
         executor.inductor_runner.execute.assert_called_once()
         assert torch.equal(result, torch.ones(3))
+
+    @patch(
+        "xllm.python.model_executor.executor._create_attention_backend",
+    )
+    def test_acl_graph_warmup_uses_scheduler_inputs(self, mock_create):
+        mock_create.return_value = StubAttentionBackend()
+        model = _FakeModel(num_layers=1)
+        executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
+
+        kv = (torch.zeros(1), torch.zeros(1))
+        executor.bind_kv_caches([kv])
+
+        input_ids = torch.zeros(4, dtype=torch.int32)
+        positions = torch.arange(4, dtype=torch.int32)
+        metadata = MagicMock(spec=AttentionMetadata)
+        graph_runner = MagicMock()
+        graph_runner.can_execute.return_value = True
+        graph_runner.execute.return_value = torch.ones(4)
+        executor.decode_graph_runner = graph_runner
+
+        result = executor.execute(input_ids, positions, metadata)
+
+        graph_runner.warmup.assert_called_once_with(
+            input_ids,
+            positions,
+            metadata,
+            None,
+        )
+        graph_runner.execute.assert_called_once_with(
+            input_ids,
+            positions,
+            metadata,
+            None,
+        )
+        assert torch.equal(result, torch.ones(4))
