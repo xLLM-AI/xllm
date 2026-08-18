@@ -20,10 +20,12 @@ limitations under the License.
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "common/global_flags.h"
+#include "core/util/rec_model_utils.h"
 
 namespace xllm {
 namespace {
@@ -41,6 +43,20 @@ class ScopedConstrainedDecodingFlag final {
 
  private:
   bool old_value_;
+};
+
+class ScopedInt32Flag final {
+ public:
+  ScopedInt32Flag(int32_t* flag, int32_t value)
+      : flag_(flag), old_value_(*flag) {
+    *flag_ = value;
+  }
+
+  ~ScopedInt32Flag() { *flag_ = old_value_; }
+
+ private:
+  int32_t* flag_;
+  int32_t old_value_;
 };
 
 void write_vocab_file(
@@ -166,6 +182,121 @@ TEST(RecVocabDictTest, BuildConstraintTablesMatchesLegacyPrefixMap) {
             prefix2_values_for_tokens(tables, /*t0=*/1, /*t1=*/2));
 
   std::filesystem::remove(vocab_path);
+}
+
+TEST(RecVocabDictTest, SamplesOneItemWhenConversionThresholdIsOne) {
+  ScopedConstrainedDecodingFlag constrained(/*value=*/false);
+  ScopedInt32Flag threshold(&FLAGS_each_conversion_threshold, 1);
+  ScopedInt32Flag seed(&FLAGS_random_seed, 7);
+
+  const std::filesystem::path vocab_path =
+      std::filesystem::path(::testing::TempDir()) /
+      "rec_vocab_dict_sample_one.bin";
+  const RecTokenTriple triple{1, 2, 3};
+  std::vector<std::pair<int64_t, RecTokenTriple>> records;
+  records.reserve(100);
+  std::unordered_set<int64_t> expected_ids;
+  for (int64_t i = 0; i < 100; ++i) {
+    records.emplace_back(1000 + i, triple);
+    expected_ids.insert(1000 + i);
+  }
+  write_vocab_file(vocab_path, records);
+
+  RecVocabDict vocab_dict;
+  ASSERT_TRUE(vocab_dict.initialize(vocab_path.string()));
+
+  std::vector<RecItemInfo> item_infos;
+  ASSERT_TRUE(vocab_dict.get_item_infos_by_tokens(triple, &item_infos));
+  ASSERT_EQ(item_infos.size(), 1);
+  EXPECT_TRUE(expected_ids.count(item_infos.front().item_id));
+
+  std::vector<RecItemInfo> again;
+  ASSERT_TRUE(vocab_dict.get_item_infos_by_tokens(triple, &again));
+  ASSERT_EQ(again.size(), 1);
+  EXPECT_EQ(again.front().item_id, item_infos.front().item_id);
+
+  std::vector<int64_t> item_ids;
+  ASSERT_TRUE(vocab_dict.get_items_by_tokens(triple, &item_ids));
+  ASSERT_EQ(item_ids.size(), 1);
+  EXPECT_EQ(item_ids.front(), item_infos.front().item_id);
+
+  std::filesystem::remove(vocab_path);
+}
+
+TEST(RecVocabDictTest, SamplesKItemsWithoutReturningFullCollisionList) {
+  ScopedConstrainedDecodingFlag constrained(/*value=*/false);
+  ScopedInt32Flag threshold(&FLAGS_each_conversion_threshold, 3);
+  ScopedInt32Flag seed(&FLAGS_random_seed, 11);
+
+  const std::filesystem::path vocab_path =
+      std::filesystem::path(::testing::TempDir()) /
+      "rec_vocab_dict_sample_k.bin";
+  const RecTokenTriple triple{4, 5, 6};
+  std::vector<std::pair<int64_t, RecTokenTriple>> records;
+  std::unordered_set<int64_t> expected_ids;
+  for (int64_t i = 0; i < 20; ++i) {
+    records.emplace_back(2000 + i, triple);
+    expected_ids.insert(2000 + i);
+  }
+  write_vocab_file(vocab_path, records);
+
+  RecVocabDict vocab_dict;
+  ASSERT_TRUE(vocab_dict.initialize(vocab_path.string()));
+
+  std::vector<RecItemInfo> item_infos;
+  ASSERT_TRUE(vocab_dict.get_item_infos_by_tokens(triple, &item_infos));
+  ASSERT_EQ(item_infos.size(), 3);
+  std::unordered_set<int64_t> sampled_ids;
+  for (const RecItemInfo& info : item_infos) {
+    EXPECT_TRUE(expected_ids.count(info.item_id));
+    EXPECT_TRUE(sampled_ids.insert(info.item_id).second);
+  }
+
+  std::filesystem::remove(vocab_path);
+}
+
+TEST(RecVocabDictTest, ReturnsFullListWhenConversionThresholdDisabled) {
+  ScopedConstrainedDecodingFlag constrained(/*value=*/false);
+  ScopedInt32Flag threshold(&FLAGS_each_conversion_threshold, 0);
+
+  const std::filesystem::path vocab_path =
+      std::filesystem::path(::testing::TempDir()) /
+      "rec_vocab_dict_sample_all.bin";
+  const RecTokenTriple triple{7, 8, 9};
+  write_vocab_file(vocab_path,
+                   {
+                       {1, triple},
+                       {2, triple},
+                       {3, triple},
+                   });
+
+  RecVocabDict vocab_dict;
+  ASSERT_TRUE(vocab_dict.initialize(vocab_path.string()));
+
+  std::vector<int64_t> item_ids;
+  ASSERT_TRUE(vocab_dict.get_items_by_tokens(triple, &item_ids));
+  EXPECT_EQ(item_ids, (std::vector<int64_t>{1, 2, 3}));
+
+  std::filesystem::remove(vocab_path);
+}
+
+TEST(RecVocabDictTest, NormalizeSamplesWithoutKeepingFullList) {
+  ScopedInt32Flag threshold(&FLAGS_each_conversion_threshold, 1);
+  ScopedInt32Flag seed(&FLAGS_random_seed, 13);
+
+  std::vector<RecItemInfo> raw;
+  raw.reserve(50);
+  for (int64_t i = 0; i < 50; ++i) {
+    RecItemInfo info;
+    info.item_id = i;
+    raw.push_back(std::move(info));
+  }
+
+  const std::vector<RecItemInfo> sampled =
+      normalize_rec_item_infos(raw, /*sequence_index=*/0);
+  ASSERT_EQ(sampled.size(), 1);
+  EXPECT_GE(sampled.front().item_id, 0);
+  EXPECT_LT(sampled.front().item_id, 50);
 }
 
 }  // namespace xllm

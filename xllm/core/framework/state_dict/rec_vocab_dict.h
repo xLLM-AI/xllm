@@ -84,6 +84,12 @@ class RecVocabDict final {
   bool get_items_by_tokens(const RecTokenTriple& rec_token_triple,
                            std::vector<int64_t>* item_ids) const;
 
+  /**
+   * @brief Get item infos mapped from a token ID triplet.
+   * When `each_conversion_threshold > 0` and the triple hits more items than
+   * that, only a sampled subset is returned (O(k), k=threshold). Threshold
+   * 1 is a single O(1) pick. `<= 0` returns the full list.
+   */
   bool get_item_infos_by_tokens(const RecTokenTriple& rec_token_triple,
                                 std::vector<RecItemInfo>* item_infos) const;
 
