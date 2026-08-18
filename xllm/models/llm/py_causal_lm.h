@@ -68,6 +68,25 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override;
 
+  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                               const torch::Tensor& positions,
+                               const torch::Tensor& device_cache_slots,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& input_params) override;
+
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) override;
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) override;
+
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& previous_token_ids) override;
+
+  bool has_dspark_confidence_head() const override;
+
   void load_model(std::unique_ptr<ModelLoader> loader) override;
 
   torch::Device device() const override { return device_; }

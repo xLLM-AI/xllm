@@ -240,6 +240,14 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   // mRoPE [3,N]->1-D decode collapse.
   py::object hidden_obj = py_executor_.attr("execute")(
       tokens, positions_arg, py_metadata, input_embedding, py_sync);
+  if (py::isinstance<py::tuple>(hidden_obj)) {
+    py::tuple output = hidden_obj.cast<py::tuple>();
+    CHECK_EQ(output.size(), 2) << "Python model tuple output must be "
+                                  "(hidden_states, aux_hidden_states)";
+    return ModelOutput(output[0].cast<torch::Tensor>(),
+                       torch::Tensor(),
+                       output[1].cast<torch::Tensor>());
+  }
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
 }
 

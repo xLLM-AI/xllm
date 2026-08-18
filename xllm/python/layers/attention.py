@@ -37,6 +37,7 @@ class Attention(nn.Module):
         scale: float,
         sliding_window: int,
         layer_id: int,
+        causal: bool = True,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -45,6 +46,7 @@ class Attention(nn.Module):
         self.scale = scale
         self.sliding_window = sliding_window
         self.layer_id = layer_id
+        self.causal = causal
 
     def forward(
         self,

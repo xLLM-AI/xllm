@@ -30,6 +30,10 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "models/py_model_helper.h"
 
+#if defined(USE_NPU)
+#include "platform/npu/npu_layer_synchronizer.h"
+#endif
+
 namespace py = pybind11;
 
 namespace xllm {
@@ -46,6 +50,23 @@ void share_python_model_weights(py::object& draft_model,
 }  // namespace detail
 
 namespace {
+
+py::object optional_tensor(const torch::Tensor& tensor) {
+  return tensor.defined() ? py::cast(tensor) : py::none();
+}
+
+py::list build_python_kv_caches(std::vector<KVCache>& kv_caches) {
+  py::list python_caches;
+  for (KVCache& kv_cache : kv_caches) {
+    python_caches.append(
+        py::make_tuple(optional_tensor(kv_cache.get_k_cache()),
+                       optional_tensor(kv_cache.get_v_cache()),
+                       optional_tensor(kv_cache.get_index_cache()),
+                       optional_tensor(kv_cache.get_conv_cache()),
+                       optional_tensor(kv_cache.get_ssm_cache())));
+  }
+  return python_caches;
+}
 
 void clear_python_object(py::object& object) {
   if (!object) {
@@ -205,9 +226,16 @@ py::dict PyCausalLM::build_config_dict(
   // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
   // a derived member function, so pass it explicitly for the Python executor.
   d["cp_rank"] = cp_rank_;
-  d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
+  const bool requires_eager_execution =
+      !model_args_.layers_to_capture().empty() ||
+      model_args_.model_type() == "DSparkDraftModel";
+  d["enable_graph"] = requires_eager_execution
+                          ? false
+                          : ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
-      ExecutionConfig::get_instance().python_graph_backend();
+      requires_eager_execution
+          ? std::string("off")
+          : ExecutionConfig::get_instance().python_graph_backend();
   return d;
 }
 
@@ -245,6 +273,69 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                             : py::object(py::none());
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
+}
+
+ModelOutput PyCausalLM::write_context_kv(
+    const torch::Tensor& target_hidden,
+    const torch::Tensor& positions,
+    const torch::Tensor& device_cache_slots,
+    std::vector<KVCache>& kv_caches,
+    const ModelInputParams& input_params) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  py::object layer_synchronizer = py::none();
+#if defined(USE_NPU)
+  if (input_params.parallel.layer_synchronizer != nullptr) {
+    layer_synchronizer = py::cast(input_params.parallel.layer_synchronizer);
+  }
+#endif
+  py::object output =
+      py_model_.attr("write_context_kv")(target_hidden,
+                                         positions,
+                                         device_cache_slots,
+                                         build_python_kv_caches(kv_caches),
+                                         layer_synchronizer);
+  if (output.is_none()) {
+    return ModelOutput();
+  }
+  return ModelOutput(output.cast<torch::Tensor>());
+}
+
+torch::Tensor PyCausalLM::dspark_markov_bias(
+    const torch::Tensor& previous_token_ids) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  return py_model_.attr("dspark_markov_bias")(previous_token_ids)
+      .cast<torch::Tensor>();
+}
+
+torch::Tensor PyCausalLM::dspark_confidence_probs(
+    const torch::Tensor& hidden,
+    const torch::Tensor& previous_token_ids) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  py::object previous = previous_token_ids.defined()
+                            ? py::object(py::cast(previous_token_ids))
+                            : py::object(py::none());
+  return py_model_.attr("dspark_confidence_probs")(hidden, previous)
+      .cast<torch::Tensor>();
+}
+
+torch::Tensor PyCausalLM::dspark_confidence_probs_batched(
+    const torch::Tensor& hidden_all,
+    const torch::Tensor& previous_token_ids) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  py::object previous = previous_token_ids.defined()
+                            ? py::object(py::cast(previous_token_ids))
+                            : py::object(py::none());
+  return py_model_.attr("dspark_confidence_probs_batched")(hidden_all, previous)
+      .cast<torch::Tensor>();
+}
+
+bool PyCausalLM::has_dspark_confidence_head() const {
+  py::gil_scoped_acquire gil;
+  return py_model_.attr("has_dspark_confidence_head")().cast<bool>();
 }
 
 bool PyCausalLM::share_weights_from(CausalLM& source) {

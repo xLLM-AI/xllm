@@ -19,12 +19,20 @@ import pytest
 from xllm.python import registry
 
 
-def test_unsupported_model_fails_before_import(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unsupported_dspark_platform_fails_before_import(monkeypatch: pytest.MonkeyPatch) -> None:
     import_model = Mock()
-    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
+    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "cuda")
     monkeypatch.setattr(registry, "import_module", import_model)
 
-    with pytest.raises(NotImplementedError, match="qwen3_5.*npu"):
-        registry.get_model_class("qwen3_5")
+    with pytest.raises(NotImplementedError, match="DSparkDraftModel.*cuda"):
+        registry.get_model_class("DSparkDraftModel")
 
     import_model.assert_not_called()
+
+
+def test_dspark_model_is_registered_for_npu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
+
+    model_class = registry.get_model_class("DSparkDraftModel")
+
+    assert model_class.__name__ == "Qwen3DSparkForCausalLM"

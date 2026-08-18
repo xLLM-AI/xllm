@@ -245,6 +245,27 @@ TEST(HFModelLoaderTest, RecFactoryCreatesRecCausalLmInstance) {
 
 #if defined(USE_NPU) || defined(USE_MLU)
 #if defined(USE_NPU)
+TEST(HFModelLoaderTest, Qwen3DSparkFieldsFromTorchConfig) {
+  auto loader = ModelRegistry::get_model_args_loader("qwen3");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "qwen3",
+      "markov_rank": 256,
+      "enable_confidence_head": true,
+      "confidence_head_with_markov": true
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_EQ(args.markov_rank(), 256);
+  EXPECT_TRUE(args.enable_confidence_head());
+  EXPECT_TRUE(args.confidence_head_with_markov());
+}
+
 TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
   auto loader = ModelRegistry::get_model_args_loader("deepseek_v4");
   ASSERT_NE(loader, nullptr);
