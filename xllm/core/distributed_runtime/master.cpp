@@ -86,14 +86,13 @@ void apply_runtime_kv_cache_options(const Options& source,
       .kv_cache_dtype(source.kv_cache_dtype());
 }
 
-void validate_layerwise_split_size_startup_config(
-    const Options& options,
-    const std::string& model_type,
-    int32_t global_world_size) {
+void validate_layerwise_split_size_startup_config(const Options& options,
+                                                  const std::string& model_type,
+                                                  int32_t global_world_size) {
   const ParallelConfig& parallel_config = ParallelConfig::get_instance();
   const int32_t layerwise_split_size = parallel_config.layerwise_split_size();
   validate_layerwise_split_size_config(layerwise_split_size);
-  if (layerwise_split_size <= 1 || options.is_draft_engine()) {
+  if (layerwise_split_size <= 1) {
     return;
   }
 
