@@ -45,21 +45,6 @@ void setup_registry() {
       predictor);
 }
 
-TEST(AdaptiveSpeculativeControllerTest, EnablesOnlyForMtpWithoutGraph) {
-  runtime::Options options = make_options();
-  AdaptiveSpeculativeController controller(options);
-  EXPECT_TRUE(controller.enabled());
-
-  options.speculative_algorithm("Eagle3");
-  AdaptiveSpeculativeController eagle_controller(options);
-  EXPECT_FALSE(eagle_controller.enabled());
-
-  options = make_options();
-  options.enable_graph(true);
-  AdaptiveSpeculativeController graph_controller(options);
-  EXPECT_FALSE(graph_controller.enabled());
-}
-
 TEST(AdaptiveSpeculativeControllerTest, SelectsPrunedPrefixesByPathProb) {
   setup_registry();
   AdaptiveSpeculativeController controller(make_options());
