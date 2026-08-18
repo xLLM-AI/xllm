@@ -36,11 +36,6 @@ namespace {
 constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
 constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
 
-uint32_t ceil_div(uint32_t numerator, uint32_t denominator) {
-  CHECK_GT(denominator, 0u);
-  return (numerator + denominator - 1) / denominator;
-}
-
 // Whether a leaf of the given BlockType participates in prefix cache under
 // the current role. On the PREFILL side (instance_is_decode == false) every
 // cache-bearing leaf participates. On the DECODE side we skip SWA and
@@ -228,13 +223,9 @@ CompositeBlockManager::LeafMap build_composite_leaves(
       CHECK_GT(options.block_size(), 0) << "block_size must be positive";
       const uint32_t sliding_window_size =
           std::max(options.sliding_window_size(), 1u);
-      const uint32_t max_seqs = std::max(options.max_seqs_per_batch(), 1u);
-      const uint32_t burst_blocks =
-          ceil_div(std::max(options.max_tokens_per_batch(), 1u),
-                   static_cast<uint32_t>(options.block_size()));
-      // Slack fits the peak "old blocks not yet released + new tail".
-      const uint32_t swa_total_blocks =
-          swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
+      const uint32_t swa_total_blocks = options.swa_num_blocks();
+      CHECK_GT(swa_total_blocks, 0u)
+          << "swa_num_blocks must be provided by the KV cache estimator";
       const bool swa_prefix_cache = prefix_cache_on && swa_participates;
       opts.num_blocks(swa_total_blocks)
           .swa_blocks_per_seq(swa_blocks_per_seq)
@@ -367,6 +358,11 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     return false;
   }
   KVCacheState& kv_state = seq->kv_state();
+
+  // Publish blocks completed by the previous forward before growing again.
+  // SlidingWindowBlockManager can then release a cached, slid-out block and
+  // retry when its first allocation attempt exhausts the SWA pool.
+  cache_full_blocks_for_sequence(seq);
 
   // Fan out growth. Each leaf returns its newly allocated blocks (or nullopt
   // on failure). Stage keyed by BlockType; commit only after every leaf

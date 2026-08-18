@@ -517,11 +517,19 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       static_cast<int64_t>(options_.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options_.max_tokens_per_batch());
+  estimate_options.max_tokens_per_chunk_for_prefill =
+      static_cast<int64_t>(options_.max_tokens_per_chunk_for_prefill());
   estimate_options.max_linear_state_cache_slots =
       options_.max_linear_state_cache_slots();
   estimate_options.is_draft_engine = options_.is_draft_engine();
+  estimate_options.enable_chunked_prefill = options_.enable_chunked_prefill();
+  estimate_options.enable_schedule_overlap = options_.enable_schedule_overlap();
+  const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   estimate_options.enable_prefix_cache =
-      ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+      kv_cache_config.enable_prefix_cache() &&
+      !kv_cache_config.enable_xtensor();
+  estimate_options.enable_disagg_pd = options_.enable_disagg_pd();
+  estimate_options.instance_role = options_.instance_role();
   if (options_.enable_mtp_draft_body_tp1() && options_.is_draft_engine()) {
     estimate_options.world_size = 1;
     estimate_options.n_local_kv_heads =
@@ -690,9 +698,14 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
                           : semantic_window;
     const uint32_t swa_blocks_per_seq = static_cast<uint32_t>(
         get_swa_blocks_per_seq(effective_window, block_size));
+    CHECK_LE(kv_cache_cap.swa_count(),
+             static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
+        << "DSV4 swa_count exceeds uint32_t range: "
+        << kv_cache_cap.swa_count();
 
     options.sliding_window_size(static_cast<uint32_t>(effective_window))
         .swa_blocks_per_seq(swa_blocks_per_seq)
+        .swa_num_blocks(static_cast<uint32_t>(kv_cache_cap.swa_count()))
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .manager_types(std::move(manager_types))
         .compress_ratios(std::move(manager_compress_ratios));

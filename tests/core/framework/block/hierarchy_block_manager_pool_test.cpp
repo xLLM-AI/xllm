@@ -163,6 +163,7 @@ BlockManagerPool::Options make_typed_cache_options() {
       .enable_host_offload(true)
       .sliding_window_size(kWindow)
       .swa_blocks_per_seq(swa_blocks_per_seq)
+      .swa_num_blocks(266)
       .max_tokens_per_batch(32768)
       .max_seqs_per_batch(4)
       // SlidingWindow + BlockManagerImpl (C4) + BlockManagerImpl (C128).
@@ -385,9 +386,10 @@ TEST(HierarchyBlockManagerPoolTest,
   sequence.kv_state().set_kv_cache_tokens_num(kPromptTokens);
   pool.deallocate(&sequence);
 
-  // Only completed blocks are offloaded: 156 SWA blocks, 39 C4 blocks, and
-  // one C128 checkpoint. The partial SWA tail is not inserted or offloaded.
-  EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 196u);
+  // Decode allocates only the active SWA window. Here that window is the
+  // partial tail block, so no SWA block is offloaded. The 39 completed C4
+  // blocks and one C128 checkpoint are still offloaded.
+  EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 40u);
 }
 
 TEST(HierarchyBlockManagerPoolTest, AllocateSharedMountsMatchesWithoutH2d) {

@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "framework/model/model_args.h"
@@ -326,6 +327,237 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
   EXPECT_EQ(capacity.c128_count(), 3);
   EXPECT_EQ(capacity.n_blocks(), 384);
 #endif
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesChunkCapacity) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 16 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_chunk_for_prefill = 385;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  // W=3, ceil(385/128)=4: 4 * (3 + 4 + 1) usable rows + padding row.
+  EXPECT_EQ(capacity.swa_count(), 33);
+}
+
+TEST(KVCacheEstimationTest,
+     DeepSeekV4PdPrefillWithoutChunkingUsesBatchCapacity) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 16 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 385;
+  options.max_tokens_per_chunk_for_prefill = 129;
+  options.enable_chunked_prefill = false;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  // W=3, ceil(385/128)=4: full-prefill mode uses the batch token bound.
+  EXPECT_EQ(capacity.swa_count(), 33);
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesTwoWindows) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 16 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::DECODE;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  // W=3: 4 * 3 * 2 usable rows + padding row.
+  EXPECT_EQ(capacity.swa_count(), 25);
+}
+
+TEST(KVCacheEstimationTest,
+     DeepSeekV4PdDecodeAccountsForScheduleOverlapSpeculativeReserve) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(128)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 16 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 1;
+  options.num_speculative_tokens = 65;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::DECODE;
+
+  options.enable_schedule_overlap = false;
+  const KVCacheCapacity non_overlap_capacity =
+      estimate_kv_cache_capacity(model_args, options);
+  // ceil((128 + 65) / 128)=2 rows per window, two windows plus padding.
+  EXPECT_EQ(non_overlap_capacity.swa_count(), 5);
+
+  options.enable_schedule_overlap = true;
+  const KVCacheCapacity overlap_capacity =
+      estimate_kv_cache_capacity(model_args, options);
+  // ceil((128 + 2*65) / 128)=3 rows per window, two windows plus padding.
+  EXPECT_EQ(overlap_capacity.swa_count(), 7);
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4PrefixCacheKeepsOperationalSwaPool) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 128 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_chunk_for_prefill = 385;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+  options.enable_prefix_cache = true;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  ASSERT_GT(capacity.c128_count(), 0);
+  EXPECT_EQ(capacity.c4_count(), 32 * capacity.c128_count());
+  EXPECT_EQ(capacity.swa_count(), 33);
+}
+
+TEST(KVCacheEstimationTest,
+     DeepSeekV4RealisticPrefixBudgetRetainsCompressedPools) {
+  std::vector<int32_t> compress_ratios{0, 0};
+  compress_ratios.reserve(43);
+  for (int32_t layer_id = 2; layer_id < 43; ++layer_id) {
+    compress_ratios.emplace_back(layer_id % 2 == 0 ? 4 : 128);
+  }
+
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(43)
+      .head_dim(512)
+      .index_head_dim(128)
+      .window_size(128)
+      .max_seq_len(1048576)
+      .compress_ratios(std::move(compress_ratios));
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kBFloat16;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = int64_t{16} * 1024 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 80;
+  options.max_tokens_per_batch = 25000;
+  options.enable_prefix_cache = true;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 358);
+  EXPECT_GT(capacity.c4_count(), 0);
+  EXPECT_GT(capacity.c128_count(), 0);
+  EXPECT_EQ(capacity.c4_count(), 32 * capacity.c128_count());
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 128 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::DECODE;
+  options.enable_prefix_cache = true;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 25);
+  EXPECT_GT(capacity.c128_count(), 0);
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixUsesRemainingMemory) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4_dspark")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 1, 1});
+
+  constexpr int64_t kSwaBytesPerBlock = 3 * 128 * 16 * 4;
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 43 * kSwaBytesPerBlock;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_chunk_for_prefill = 385;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+  options.enable_prefix_cache = true;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 43);
+  EXPECT_EQ(capacity.c4_count(), 0);
+  EXPECT_EQ(capacity.c128_count(), 0);
 }
 
 TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
