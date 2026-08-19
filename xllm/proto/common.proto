@@ -108,7 +108,7 @@ message Routing {
 message Empty {}
 
 message AddressInfo {
-  // the ip adderss of worker process.
+  // the ip address of worker process.
   string address = 1;
   int32 global_rank = 2;
 }

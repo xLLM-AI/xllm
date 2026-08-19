@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     return -1;
   }
 
-  std::cout << "LLM init succefully." << std::endl;
+  std::cout << "LLM init successfully." << std::endl;
 
   const std::string model_name = "Qwen3-4B";
 

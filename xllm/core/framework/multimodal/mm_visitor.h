@@ -50,10 +50,10 @@ class MMInputGatherVisitor final : public MMInputItem::IVisitor {
 class CollectItemTensorVisitor : public MMData::IItemVisitor {
  public:
   CollectItemTensorVisitor(
-      std::unordered_map<MMKey, std::vector<torch::Tensor>>& datas,
+      std::unordered_map<MMKey, std::vector<torch::Tensor>>& data,
       const std::unordered_set<MMKey>& black_keys = {},
       const std::unordered_set<MMKey>& white_keys = {})
-      : datas_(datas), black_keys_(black_keys), white_keys_(white_keys) {};
+      : datas_(data), black_keys_(black_keys), white_keys_(white_keys) {};
 
   CollectItemTensorVisitor(const std::unordered_set<MMKey>& black_keys = {},
                            const std::unordered_set<MMKey>& white_keys = {})

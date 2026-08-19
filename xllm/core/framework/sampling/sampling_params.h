@@ -118,7 +118,7 @@ struct SamplingParameters {
   // request itself does not ask for logprobs.
   bool return_probs = false;
 
-  // wheteher to get the embeddings of the tokens. used by embeddings model.
+  // whether to get the embeddings of the tokens. used by embeddings model.
   bool is_embeddings = false;
 
   // max number of top logprobs in the batch.

@@ -26,7 +26,7 @@ namespace xllm {
 
 // an thin wrapper around nlohmann/json to read json files.
 // it supports read keys with dot notation from json.
-// for exmaple: value_or("a.b.c", 0) will return 100 for following json:
+// for example: value_or("a.b.c", 0) will return 100 for following json:
 // {
 //   "a": {
 //     "b": {

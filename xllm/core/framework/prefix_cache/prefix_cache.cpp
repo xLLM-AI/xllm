@@ -30,7 +30,7 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                                       const Slice<Block>& existed_shared_blocks,
                                       const MMData& mm_data,
                                       const Slice<XXH3Key>& block_hashes) {
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
     return std::vector<Block>();
@@ -109,7 +109,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            const MMData& mm_data,
                            const Slice<XXH3Key>& block_hashes) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_blocks =
       std::min(token_ids.size() / block_size_, blocks.size());
 

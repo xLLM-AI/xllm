@@ -41,7 +41,7 @@ struct SchedulerState {
   // Queues (unified -- no separate online/offline distinction).
   // prefill_queue: holds new prefill requests (kv_cache_tokens_num == 0)
   // chunk_queue: holds chunked prefill continuations (has partial KV,
-  // preemptable) decode_queue: holds decode requests unified_queue: used by
+  // preemptible) decode_queue: holds decode requests unified_queue: used by
   // UnifiedPolicy (all requests in one list)
   RequestPriorityQueue& prefill_queue;
   RequestPriorityQueue& chunk_queue;

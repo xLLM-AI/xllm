@@ -56,7 +56,7 @@ class MLUHostMemoryRegion;
 
 struct KVCacheCreateOptions {
   PROPERTY(torch::Device, device) = torch::Device(torch::kCPU);
-  // kvcache dtype for key/value cacahe, index cache
+  // kvcache dtype for key/value cache, index cache
   PROPERTY(torch::ScalarType, dtype) = torch::kBFloat16;
   // ssm dtype for linear attention layers
   PROPERTY(torch::ScalarType, ssm_dtype) = torch::kBFloat16;

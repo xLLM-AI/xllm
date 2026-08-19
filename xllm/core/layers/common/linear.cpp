@@ -376,7 +376,7 @@ bool load_shared_tensor_from_prefixes_or_fail(
     const std::string& name,
     torch::Tensor& tensor,
     bool& tensor_is_loaded) {
-  // W8A8 fused input_scale/offset shoul be same
+  // W8A8 fused input_scale/offset should be same
   if (tensor_is_loaded || !tensor.defined()) {
     return tensor_is_loaded;
   }
@@ -413,7 +413,7 @@ bool load_shared_tensor_from_prefixes_or_fail(
 
 void collapse_shared_tensor_to_scalar_or_fail(torch::Tensor& tensor,
                                               const char* name) {
-  // W8A8 fused input_scale/offset shoul be same
+  // W8A8 fused input_scale/offset should be same
   CHECK(tensor.defined()) << name << " must be defined.";
   CHECK_GT(tensor.numel(), 0) << name << " must contain at least one element.";
   if (tensor.numel() <= 1) {

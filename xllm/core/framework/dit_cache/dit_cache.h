@@ -35,9 +35,9 @@ class DiTCache {
 
   bool init(const DiTCacheConfig& cfg, const ParallelArgs& parallel_args);
 
-  bool on_before_block(const CacheBlockIn& blockin, bool use_cfg = false);
+  bool on_before_block(const CacheBlockIn& block_input, bool use_cfg = false);
 
-  CacheBlockOut on_after_block(const CacheBlockIn& blockin,
+  CacheBlockOut on_after_block(const CacheBlockIn& block_input,
                                bool use_cfg = false);
 
   bool on_before_step(const CacheStepIn& stepin, bool use_cfg = false);

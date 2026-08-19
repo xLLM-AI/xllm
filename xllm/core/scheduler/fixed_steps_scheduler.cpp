@@ -66,7 +66,7 @@ void FixedStepsScheduler::handle_prefill_requests(
   // longer be scheduled to avoid frequent preemption.
   //
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
-  // they may contian many sequences, so we should check here.
+  // they may contain many sequences, so we should check here.
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
   const bool requires_kv_cache =
@@ -180,7 +180,7 @@ void FixedStepsScheduler::handle_prefill_requests(
 std::vector<Batch> FixedStepsScheduler::prepare_batch() {
   Timer timer;
   drain_prefetched_requests();
-  // propogate new requests to prefill_queue_
+  // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   auto propagate_request = [this](std::shared_ptr<Request>& request) {
     CHECK(request);

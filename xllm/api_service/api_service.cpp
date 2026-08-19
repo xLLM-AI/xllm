@@ -85,7 +85,7 @@ void process_typed_brpc_request(std::unique_ptr<Service>& service_impl,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -159,7 +159,7 @@ void APIService::Completions(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null.";
+    LOG(ERROR) << "brpc request | response | controller is null.";
     return;
   }
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
@@ -189,7 +189,7 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -246,7 +246,7 @@ void APIService::Sample(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null.";
+    LOG(ERROR) << "brpc request | response | controller is null.";
     return;
   }
 
@@ -274,7 +274,7 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -428,7 +428,7 @@ void APIService::ChatCompletions(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -450,7 +450,7 @@ void APIService::ChatCompletionsHttp(
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -475,7 +475,7 @@ void APIService::Embeddings(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -516,7 +516,7 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
   auto arena = GetArenaWithCheck<EmbeddingCall>(response);
@@ -594,7 +594,7 @@ void APIService::ImageGenerationHttp(
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -771,7 +771,7 @@ void APIService::VideoGenerationHttp(
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -824,7 +824,7 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
         request_out_metric(static_cast<void*>(controller));
       });
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -864,7 +864,7 @@ void APIService::Models(::google::protobuf::RpcController* controller,
   // TODO with xllm-service
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -884,7 +884,7 @@ void APIService::ModelsHttp(::google::protobuf::RpcController* controller,
                             ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -917,7 +917,7 @@ void APIService::ModelVersionsHttp(
     ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -995,7 +995,7 @@ void APIService::AnthropicMessagesHttp(
       });
 
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1103,7 +1103,7 @@ void APIService::ForkMaster(::google::protobuf::RpcController* controller,
                             ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1124,7 +1124,7 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
   brpc::ClosureGuard done_guard(done);
 
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1202,7 +1202,7 @@ void APIService::Sleep(::google::protobuf::RpcController* controller,
                        ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1221,7 +1221,7 @@ void APIService::SleepHttp(::google::protobuf::RpcController* controller,
                            ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1311,7 +1311,7 @@ void APIService::Wakeup(::google::protobuf::RpcController* controller,
                         ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1330,7 +1330,7 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
                             ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1364,7 +1364,7 @@ void APIService::StartProfileHttp(::google::protobuf::RpcController* controller,
                                   ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -1400,7 +1400,7 @@ void APIService::StopProfileHttp(::google::protobuf::RpcController* controller,
                                  ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 

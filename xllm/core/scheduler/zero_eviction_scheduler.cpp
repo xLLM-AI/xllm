@@ -357,7 +357,7 @@ void ZeroEvictionScheduler::handle_prefill_requests(
   // longer be scheduled to avoid frequent preemption.
   //
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
-  // they may contian many sequences, so we should check here.
+  // they may contain many sequences, so we should check here.
 
   while (!prefill_queue_->empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 &&

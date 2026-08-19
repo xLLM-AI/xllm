@@ -163,7 +163,7 @@ bool BlockManagerPool::allocate(std::vector<Sequence*>& sequences) {
   for (auto* sequence : sequences) {
     DCHECK(sequence != nullptr);
     if (!allocate(sequence, sequence->num_tokens())) {
-      // should we gurantee the atomicity of the allocation? all or nothing?
+      // should we guarantee the atomicity of the allocation? all or nothing?
       return false;
     }
   }

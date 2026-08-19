@@ -74,8 +74,8 @@ PyWarpperInputProcessor::PyWarpperInputProcessor(const ModelArgs&) {
   PyWrapperImpl::instance();
 }
 
-bool PyWarpperInputProcessor::process(const MMInput& inputs, MMData& datas) {
-  return PyWrapperImpl::instance().execute(inputs, datas);
+bool PyWarpperInputProcessor::process(const MMInput& inputs, MMData& data) {
+  return PyWrapperImpl::instance().execute(inputs, data);
 }
 
 }  // namespace xllm

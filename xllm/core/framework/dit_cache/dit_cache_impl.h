@@ -36,8 +36,8 @@ class DitCacheImpl {
   virtual void init(const DiTCacheConfig& cfg,
                     const ParallelArgs& parallel_args) = 0;
 
-  virtual bool on_before_block(const CacheBlockIn& blockin) = 0;
-  virtual CacheBlockOut on_after_block(const CacheBlockIn& blockin) = 0;
+  virtual bool on_before_block(const CacheBlockIn& block_input) = 0;
+  virtual CacheBlockOut on_after_block(const CacheBlockIn& block_input) = 0;
 
   virtual bool on_before_step(const CacheStepIn& stepin) = 0;
   virtual CacheStepOut on_after_step(const CacheStepIn& stepin) = 0;

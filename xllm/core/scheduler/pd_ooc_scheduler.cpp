@@ -192,7 +192,7 @@ void PDOOCScheduler::handle_abnormal_request(
 
 void PDOOCScheduler::handle_running_requests(std::shared_ptr<Request> request) {
   if (request->finished() || request->cancelled()) {
-    LOG(FATAL) << "Unknow error, finished/cancelled request have be handled "
+    LOG(FATAL) << "Unknown error, finished/cancelled request have be handled "
                   "before. request_id is "
                << request->request_id();
   }
@@ -340,7 +340,7 @@ void PDOOCScheduler::prefill_step(const absl::Duration& timeout) {
     prefill_send_first_generation();
     prefill_send_multi_generations();
   } catch (const ForwardInterruptedException& e) {
-    VLOG(1) << "PDOOCScheduler catched a ForwardInterruptedException";
+    VLOG(1) << "PDOOCScheduler caught a ForwardInterruptedException";
     handle_prefill_interruption();
   }
 }
@@ -348,7 +348,7 @@ void PDOOCScheduler::prefill_step(const absl::Duration& timeout) {
 std::vector<Batch> PDOOCScheduler::prepare_batch() {
   Timer timer;
   drain_prefetched_requests();
-  // propogate new requests to prefill_queue_
+  // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   std::shared_ptr<Request> request;
   // read from request queue then push to waiting priority queue
@@ -670,7 +670,7 @@ void PDOOCScheduler::handle_prefill_requests_impl(
   // longer be scheduled to avoid frequent preemption.
   //
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
-  // they may contian many sequences, so we should check here.
+  // they may contain many sequences, so we should check here.
 
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
@@ -1054,7 +1054,7 @@ void PDOOCScheduler::handle_decode_requests_impl(
       clear_mtp_bootstrap(request_to_preempt.get());
       kv_cache_manager_->deallocate(request_to_preempt.get());
       decode_queue_->pop_back();
-      // add preemptable request to waiting priority queue
+      // add preemptible request to waiting priority queue
       request_to_preempt->set_preempted();
       prefill_queue_offline_->push(request_to_preempt);
       continue;
@@ -1065,7 +1065,7 @@ void PDOOCScheduler::handle_decode_requests_impl(
         clear_mtp_bootstrap(request_to_preempt.get());
         kv_cache_manager_->deallocate(request_to_preempt.get());
         running_queue->pop_back();
-        // add preemptable request to waiting priority queue
+        // add preemptible request to waiting priority queue
         request_to_preempt->set_preempted();
         if (request_to_preempt->offline()) {
           ++num_offline_decode_preempt_offline_requests;
@@ -1275,7 +1275,7 @@ void PDOOCScheduler::handle_decode_requests(
       ++num_online_decode_preempt_offline_requests;
       kv_cache_manager_->deallocate(request_to_preempt.get());
       decode_queue_->pop_back();
-      // add preemptable request to waiting priority queue
+      // add preemptible request to waiting priority queue
       request_to_preempt->set_preempted();
       prefill_queue_offline_->push(request_to_preempt);
       continue;
@@ -1285,7 +1285,7 @@ void PDOOCScheduler::handle_decode_requests(
         // TO IMPROVE: kv cache offload to cpu
         kv_cache_manager_->deallocate(request_to_preempt.get());
         running_queue->pop_back();
-        // add preemptable request to waiting priority queue
+        // add preemptible request to waiting priority queue
         request_to_preempt->set_preempted();
         if (request_to_preempt->offline()) {
           ++num_offline_decode_preempt_offline_requests;
@@ -1656,7 +1656,7 @@ void PDOOCScheduler::prefill_send_first_generation() {
 
       if (cntl.Failed() || !resp.ok()) {
         LOG(ERROR) << "Failed to send first generation, " << cntl.ErrorText()
-                   << ", staus: " << resp.ok();
+                   << ", status: " << resp.ok();
       }
       {
         std::lock_guard<std::mutex> lock(remote_requests_map_mutex_);

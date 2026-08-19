@@ -51,7 +51,7 @@ class Options {
   PROPERTY(int32_t, block_size) = 128;
 
   // the maximum cache size in bytes, default is 0 which means cache size is
-  // caculated by available memory * max_memory_utilization
+  // calculated by available memory * max_memory_utilization
   PROPERTY(int64_t, max_cache_size) = 0;
 
   // maximum memory utilization allowed, default 0.9

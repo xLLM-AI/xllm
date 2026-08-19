@@ -15,8 +15,8 @@ repos:
   - id: codespell
     args: [
       --toml, pyproject.toml,
-      '--skip', 'build/**,third_party/**,*.svg,*.ptx.h',
-      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt'
+      '--skip', 'build/**,third_party/**,*.svg,*.ptx.h,docs/package-lock.json',
+      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt,Collet,MAPE,MultiDimension,mape,offen,statics,subtile,thw'
     ]
     additional_dependencies:
       - tomli
@@ -27,4 +27,3 @@ repos:
   - id: clang-format
     types_or: [c++, c, cuda]
     exclude: ^(cibuild/|tools/|third_party/|cmake/|build/|.*\.ptx\.h$)
-

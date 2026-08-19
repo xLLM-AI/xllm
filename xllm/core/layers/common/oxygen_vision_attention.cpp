@@ -56,7 +56,7 @@ torch::Tensor OxygenVisionAttentionImpl::forward(
   q = q.reshape({B * S, num_attention_heads_per_partition_, head_dim});
   k = k.reshape({B * S, num_attention_heads_per_partition_, head_dim});
 
-  // Apply rotary position embedding to both q and k seperately.
+  // Apply rotary position embedding to both q and k separately.
   xllm::kernel::RotaryParams rotary_params;
   rotary_params.q = q;
   rotary_params.sin = m_sin_pos;

@@ -46,7 +46,7 @@ TEST(ThreadPoolTest, ScheduleMultipleTasks) {
   std::vector<std::string> completed_tasks;
   absl::Notification notification;
 
-  // run frist task
+  // run first task
   threadpool.schedule([&completed_tasks, &notification]() {
     completed_tasks.emplace_back("first");
     if (completed_tasks.size() == 2) {

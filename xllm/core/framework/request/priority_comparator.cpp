@@ -46,7 +46,7 @@ bool DeadlineComparator::operator()(const std::shared_ptr<Request>& a,
   return remain_time_a > remain_time_b;
 }
 
-// density-first strategy. denisty = weight / latency
+// density-first strategy. density = weight / latency
 bool DensityComparator::operator()(const std::shared_ptr<Request>& a,
                                    const std::shared_ptr<Request>& b) const {
   auto& sequence_a = a->sequences()[0];

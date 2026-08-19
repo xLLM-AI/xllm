@@ -23,9 +23,7 @@ limitations under the License.
 
 namespace xllm {
 
-MMBatchData::MMBatchData(const std::vector<MMData>& datas) {
-  this->batch(datas);
-}
+MMBatchData::MMBatchData(const std::vector<MMData>& data) { this->batch(data); }
 
 MMBatchData::MMBatchData(uint32_t type, const MMDict& items)
     : type_(type), data_(std::move(items)) {}

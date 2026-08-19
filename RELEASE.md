@@ -225,7 +225,7 @@
 - Support dp+ep moe and all2all computation on mlu device.
 - Support parallelized shared experts in fused moe on mlu device.
 - Support qwen3 0.6B model on iluvatar device.
-- Add rec proto,serivce and utils for rec framework
+- Add rec proto,service and utils for rec framework
 - Support C api for llm inference.
 - Add constrained decoding for generative recommendation.
 - Add rec scheduler master and engine for rec framework.
@@ -234,11 +234,11 @@
 - Add qwen3/LlmRec support in rec framework.
 
 ### Bugfix
-- Reslove core dump of stream chat completion request when backend is VLM.
+- Resolve core dump of stream chat completion request when backend is VLM.
 - Resolve duplicate content in multi-turn tool call conversations.
 - Fix core dump issue triggered by client disconnection.
 - Fix the memory leak issue in the completions interface.
-- Fix wrong positons of validate input when enable MTP.
+- Fix wrong positions of validate input when enable MTP.
 - Resolve kv_cache_num mismatch in ChunkedPrefill due to H2D block copy.
 - Fix the missing index shape in the allocate kv cache transfer.
 - Fix MiMo-VL weights loading crash on NPU device.

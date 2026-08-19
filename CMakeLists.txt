@@ -478,7 +478,7 @@ if(USE_NPU)
   add_definitions(-DTORCH_HIGHER_THAN_PTA6)
 
   # Use vcpkg header files as the first priority search directory,
-  #-> because the scope of third-party softwares managed by vcpkg is used throughout the entire xllm.
+  #-> because the scope of third-party software managed by vcpkg is used throughout the entire xllm.
   message(STATUS "VCPKG_INCLUDE_DIR = ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
   include_directories("${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
 

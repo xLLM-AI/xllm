@@ -208,7 +208,7 @@ class SetQueue final : public RequestPriorityQueue {
 };
 
 class DequeQueue final : public RequestPriorityQueue {
-  // use deque to implement FCFS queue for insert and evict effeciency
+  // use deque to implement FCFS queue for insert and evict efficiency
  private:
   std::deque<std::shared_ptr<Request>> queue_;
 

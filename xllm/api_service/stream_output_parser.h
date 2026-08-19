@@ -57,7 +57,7 @@ class StreamOutputParser {
   }
 
  private:
-  // candidate tools of requets
+  // candidate tools of requests
   std::vector<function_call::JsonTool> tools_;
   // list of parsers for each sequence
   std::vector<SequenceParser> sequence_parsers_;

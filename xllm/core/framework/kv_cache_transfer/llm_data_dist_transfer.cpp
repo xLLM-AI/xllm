@@ -37,7 +37,7 @@ const std::map<torch::ScalarType, ge::DataType> kScalarTypeToDtype = {
 
 ge::DataType dtype_to_ge_dtype(torch::ScalarType dtype) {
   const auto& it = kScalarTypeToDtype.find(dtype);
-  CHECK(it != kScalarTypeToDtype.cend()) << "Unsupport data type : " << dtype;
+  CHECK(it != kScalarTypeToDtype.cend()) << "Unsupported data type : " << dtype;
   return it->second;
 }
 

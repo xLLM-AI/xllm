@@ -180,7 +180,7 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
 
   // CPU affinity settings, format be like:
   // 1,2,3
-  // meaing ith thread attach to logical processor 1,2,3
+  // meaning ith thread attach to logical processor 1,2,3
   // or
   // 1-8
   // meaning ith thread will be attached to first 8 logical processors

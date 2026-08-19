@@ -210,7 +210,7 @@ SharedMemoryManager::~SharedMemoryManager() {
 void SharedMemoryManager::cleanup_handler(int sig) {
   // Avoid non-async-signal-safe operations (mutex, logging, shm_unlink, exit).
   // Just restore default handler and re-raise to terminate normally.
-  // TODO: support cleaning up shared memory properly when singal is received.
+  // TODO: support cleaning up shared memory properly when signal is received.
   signal(sig, SIG_DFL);
   kill(getpid(), sig);
 }

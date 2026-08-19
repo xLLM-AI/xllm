@@ -89,7 +89,7 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor dispatch_recv_token_tensor_head_;
   torch::Tensor dispatch_recv_token_tensor_tail_;
 
-  // steams for parallel shared experts
+  // streams for parallel shared experts
   std::unique_ptr<Stream> shared_stream_;
   std::unique_ptr<Stream> routed_stream_;
   xllm::Device device_;

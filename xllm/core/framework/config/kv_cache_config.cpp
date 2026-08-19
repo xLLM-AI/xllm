@@ -27,7 +27,7 @@ DEFINE_int32(block_size,
 DEFINE_int64(max_cache_size,
              0,
              "Max gpu memory size for kv cache. Default is 0, which means "
-             "cache size is caculated by available memory.");
+             "cache size is calculated by available memory.");
 
 DEFINE_double(max_memory_utilization,
               0.8,

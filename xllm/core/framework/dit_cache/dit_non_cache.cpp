@@ -22,14 +22,16 @@ void DiTNonCache::init(const DiTCacheConfig& /*cfg*/,
   // NonCache: nothing to initialize.
 }
 
-bool DiTNonCache::on_before_block(const CacheBlockIn& blockin) { return false; }
+bool DiTNonCache::on_before_block(const CacheBlockIn& block_input) {
+  return false;
+}
 
-CacheBlockOut DiTNonCache::on_after_block(const CacheBlockIn& blockin) {
+CacheBlockOut DiTNonCache::on_after_block(const CacheBlockIn& block_input) {
   TensorMap out_map;
   out_map["hidden_states"] =
-      get_tensor_or_empty(blockin.tensors, "hidden_states");
+      get_tensor_or_empty(block_input.tensors, "hidden_states");
   out_map["encoder_hidden_states"] =
-      get_tensor_or_empty(blockin.tensors, "encoder_hidden_states");
+      get_tensor_or_empty(block_input.tensors, "encoder_hidden_states");
   return CacheBlockOut(out_map);
 }
 

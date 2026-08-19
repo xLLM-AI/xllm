@@ -223,7 +223,7 @@ TEST(JsonObjectGrammarTest, RejectsNonEmptyStopTokensBeforeRootCompletion) {
                              " ",
                              "e",
                              "}",
-                             "tru",
+                             "tru",  // codespell:ignore tru
                              "<think>",
                              "</think>"},
                             /*stop_token_ids=*/{5, 6, 7},
@@ -246,7 +246,8 @@ TEST(JsonObjectGrammarTest, RejectsNonEmptyStopTokensBeforeRootCompletion) {
   EXPECT_FALSE(number_state.can_accept_token(/*stop_space=*/6));
 
   JsonObjectGrammarState literal_state = grammar.initial_state();
-  ASSERT_TRUE(literal_state.accept_piece("{\"a\":tru"));
+  ASSERT_TRUE(
+      literal_state.accept_piece("{\"a\":tru"));  // codespell:ignore tru
   EXPECT_FALSE(literal_state.can_accept_token(/*stop_e=*/7));
 }
 

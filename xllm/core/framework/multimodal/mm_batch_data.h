@@ -32,7 +32,7 @@ namespace xllm {
 class MMBatchData {
  public:
   MMBatchData() = default;
-  MMBatchData(const std::vector<MMData>& datas);
+  MMBatchData(const std::vector<MMData>& data);
   MMBatchData(uint32_t type, const MMDict& items);
 
   bool has(uint32_t type) const { return type & type_ != 0; }

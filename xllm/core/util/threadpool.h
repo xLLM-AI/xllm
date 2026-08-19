@@ -106,7 +106,7 @@ class TaskGroup final {
 class ThreadPool final {
  public:
   // a runnable is an object intended to be executed by the threadpool
-  // it must be invokable with no arguments and return void.
+  // it must be invocable with no arguments and return void.
   using Runnable = folly::Function<void()>;
 
   // constructors
@@ -173,7 +173,7 @@ class ThreadPool final {
 class MPMCThreadPool final {
  public:
   // a runnable is an object intended to be executed by the threadpool
-  // it must be invokable with no arguments and return void.
+  // it must be invocable with no arguments and return void.
   using Runnable = folly::Function<void()>;
 
   // constructors

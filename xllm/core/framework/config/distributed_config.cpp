@@ -32,7 +32,7 @@ DEFINE_int32(nnodes, 1, "The number of multi-nodes.");
 
 DEFINE_int32(node_rank, 0, "The node rank.");
 
-DEFINE_string(etcd_addr, "", "Etcd adderss for save instance meta info.");
+DEFINE_string(etcd_addr, "", "Etcd address for save instance meta info.");
 
 DEFINE_string(etcd_namespace,
               "",

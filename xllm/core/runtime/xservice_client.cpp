@@ -35,7 +35,7 @@ namespace xllm {
 namespace {
 static std::string ETCD_MASTER_SERVICE_KEY = "XLLM:SERVICE:MASTER";
 static std::string ETCD_XSERVICES_KEY_PREFIX =
-    "XLLM:SERVICE:";  // all xllm_service registeration prefix
+    "XLLM:SERVICE:";  // all xllm_service registration prefix
 constexpr const char* kEtcdUsernameEnvVar = "ETCD_USERNAME";
 constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 static std::unordered_map<xllm_service::proto::InstanceType, std::string>

@@ -113,7 +113,7 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
   }
 
   if (max_context_len_ > 0 && total_tokens >= max_context_len_) {
-    CHECK_GE(total_tokens, num_prompt_tokens) << "Unknow error";
+    CHECK_GE(total_tokens, num_prompt_tokens) << "Unknown error";
     return FinishReason::LENGTH;
   }
 

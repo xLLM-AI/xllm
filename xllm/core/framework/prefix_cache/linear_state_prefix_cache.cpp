@@ -118,7 +118,7 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
                                       const MMData& mm_data,
                                       const Slice<XXH3Key>& block_hashes) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_blocks =
       std::min(token_ids.size() / block_size_, blocks.size());
 

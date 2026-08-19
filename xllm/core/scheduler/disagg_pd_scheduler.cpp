@@ -421,7 +421,7 @@ void DisaggPDScheduler::dispatch_requests() {
     }
 
     // NOTE: TODO: maybe we need to support batch disatch
-    // later, this meybe decrease the communication cost.
+    // later, this maybe decrease the communication cost.
     // currently we only support one request per dispatch.
 
     // TODO: try to get a batch request.

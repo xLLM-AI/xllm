@@ -47,7 +47,7 @@ struct Options {
   // the number of slots per block, default 128, value must be multiple of 16
   PROPERTY(int32_t, block_size) = 128;
 
-  // 0 means that cache size is caculated by available memory
+  // 0 means that cache size is calculated by available memory
   PROPERTY(int64_t, max_cache_size) = 0;
 
   // maximum memory utilization allowed, default 0.9

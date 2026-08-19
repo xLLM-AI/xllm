@@ -780,7 +780,7 @@ void Batch::append_token_for_sequence(Sequence* seq,
       }
     }
   } else if (!seq->cancelled()) {
-    // truely update the real token if replace_fake_token
+    // truly update the real token if replace_fake_token
     seq->update_last_step_token(token, token_idx);
     if (seq->error_status().has_value()) {
       return;

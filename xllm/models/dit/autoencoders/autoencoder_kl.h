@@ -848,7 +848,7 @@ class VAEEncoderImpl : public torch::nn::Module {
 };
 TORCH_MODULE(VAEEncoder);
 
-// VAE standart decoder implementation
+// VAE standard decoder implementation
 //  This class is used to decode the latent representations into images.
 class VAEDecoderImpl : public torch::nn::Module {
  public:

@@ -77,7 +77,7 @@ message VideoParameters {
   // high-low noise separation ratio
   optional float boundary_ratio = 11;
 
-  // scheduler flow shif
+  // scheduler flow shift
   optional float flow_shift = 12;
 
   // True CFG scale value for balancing generation

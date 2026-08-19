@@ -191,7 +191,7 @@ pub struct View {
 ///
 /// # Arguments
 ///
-/// * `handle`: In-Out pointer to store the resulting safetensors reference is sucessfully deserialized
+/// * `handle`: In-Out pointer to store the resulting safetensors reference is successfully deserialized
 /// * `buffer`: Buffer to attempt to read data from
 /// * `buffer_len`: Number of bytes we can safely read from the deserialize the safetensors
 ///
@@ -221,7 +221,7 @@ pub extern "C" fn safetensors_deserialize(
 ///
 /// # Arguments
 ///
-/// * `handle`: Pointer ot the safetensors we want to release the resources of
+/// * `handle`: Pointer to the safetensors we want to release the resources of
 ///
 /// returns: `Status::Ok == 0` if success, any other status code if an error what caught up
 #[no_mangle]
@@ -441,4 +441,3 @@ unsafe fn _get_tensor(
 
     Ok(())
 }
-

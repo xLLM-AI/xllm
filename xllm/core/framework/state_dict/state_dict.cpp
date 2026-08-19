@@ -157,7 +157,7 @@ torch::Tensor StateDict::get_sharded_tensor(const std::string& tensor_name,
   }
 
   CHECK(dim_size % world_size == 0)
-      << "can't devide tensor evenly on " << dim << " with dim: " << dim_size
+      << "can't divide tensor evenly on " << dim << " with dim: " << dim_size
       << " world_size: " << world_size;
   const auto chunks = tensor.chunk(world_size, dim);
   return chunks[rank];

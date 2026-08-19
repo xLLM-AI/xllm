@@ -45,7 +45,7 @@ std::string IncrementalDecoder::decode(const Slice<int32_t>& token_ids,
   // return prompt directly if prompt string is not empty
   if (output_offset_ < num_prompt_tokens_ && !prompt_.empty()) {
     // leave 6 tokens for the prefix to defeat cleanup algorithms in decode
-    // which decide to add a space or not depending on the surrouding ids.
+    // which decide to add a space or not depending on the surrounding ids.
     prefix_offset_ = num_prompt_tokens_ <= 6 ? 0 : num_prompt_tokens_ - 6;
     output_offset_ = num_prompt_tokens_;
     ss << prompt_;

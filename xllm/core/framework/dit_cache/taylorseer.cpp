@@ -106,12 +106,12 @@ void TaylorSeer::update(const torch::Tensor& Y) {
 
 bool TaylorSeer::on_before_block(const CacheBlockIn&) { return false; }
 
-CacheBlockOut TaylorSeer::on_after_block(const CacheBlockIn& blockin) {
+CacheBlockOut TaylorSeer::on_after_block(const CacheBlockIn& block_input) {
   TensorMap out_map;
   out_map["hidden_states"] =
-      get_tensor_or_empty(blockin.tensors, "hidden_states");
+      get_tensor_or_empty(block_input.tensors, "hidden_states");
   out_map["encoder_hidden_states"] =
-      get_tensor_or_empty(blockin.tensors, "encoder_hidden_states");
+      get_tensor_or_empty(block_input.tensors, "encoder_hidden_states");
   return CacheBlockOut(out_map);
 }
 
