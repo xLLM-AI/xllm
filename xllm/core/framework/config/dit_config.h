@@ -51,6 +51,11 @@ class DiTConfig final {
          "dit_cache_end_steps",
          "dit_cache_start_blocks",
          "dit_cache_end_blocks",
+         "dit_regione_refresh_steps",
+         "dit_regione_region_threshold",
+         "dit_regione_cache_threshold",
+         "dit_regione_use_avd_gamma",
+         "dit_regione_erosion_dilation",
          "dit_sp_communication_overlap",
          "dit_debug_print",
          "dit_laser_attention_enabled",
@@ -86,6 +91,16 @@ class DiTConfig final {
   PROPERTY(int64_t, dit_cache_start_blocks) = 5;
 
   PROPERTY(int64_t, dit_cache_end_blocks) = 5;
+
+  PROPERTY(std::string, dit_regione_refresh_steps) = "16";
+
+  PROPERTY(double, dit_regione_region_threshold) = 0.80;
+
+  PROPERTY(double, dit_regione_cache_threshold) = 0.02;
+
+  PROPERTY(bool, dit_regione_use_avd_gamma) = true;
+
+  PROPERTY(bool, dit_regione_erosion_dilation) = true;
 
   PROPERTY(bool, dit_sp_communication_overlap) = true;
 

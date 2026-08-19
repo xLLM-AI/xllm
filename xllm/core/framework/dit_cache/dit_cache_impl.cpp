@@ -82,6 +82,8 @@ std::unique_ptr<DitCacheImpl> create_dit_cache(const DiTCacheConfig& cfg) {
       return std::make_unique<FBCacheTaylorSeer>();
     case PolicyType::ResidualCache:
       return std::make_unique<ResidualCache>();
+    case PolicyType::RegionE:
+      return std::make_unique<DiTNonCache>();
     default:
       return std::make_unique<DiTNonCache>();
   }

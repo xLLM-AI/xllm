@@ -15,6 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
 namespace xllm {
 
 enum class PolicyType {
@@ -22,7 +26,8 @@ enum class PolicyType {
   FBCache,
   TaylorSeer,
   FBCacheTaylorSeer,
-  ResidualCache
+  ResidualCache,
+  RegionE
 };
 
 struct DiTBaseCacheOptions {
@@ -49,6 +54,21 @@ struct FBCacheTaylorSeerOptions : public DiTBaseCacheOptions {
 
   // the number of derivatives to use in TaylorSeer.
   int n_derivatives = 3;
+};
+
+struct RegionEOptions : public DiTBaseCacheOptions {
+  // Fallback fixed-interval AVD when gamma is disabled or step count
+  // mismatches.
+  int64_t skip_interval_steps = 3;
+  int64_t tail_steps = 1;
+  std::vector<int64_t> refresh_steps = {16};
+  float region_threshold = 0.80f;
+  // AVDCache δ in paper Eq.8/9.
+  float cache_threshold = 0.02f;
+  // Use fitted γ_t AVDCache (paper) instead of fixed skip_interval.
+  bool use_avd_gamma = true;
+  // Enable erosion/dilation morphological cleanup after ARP mask selection.
+  bool erosion_dilation = true;
 };
 
 struct ResidualCacheOptions {
@@ -85,6 +105,9 @@ struct DiTCacheConfig {
 
   // the configuration for ResidualCache policy.
   ResidualCacheOptions residual_cache;
+
+  // the configuration for RegionE policy.
+  RegionEOptions regione;
 };
 
 }  // namespace xllm

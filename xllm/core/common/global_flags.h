@@ -360,6 +360,12 @@ DECLARE_int64(dit_cache_start_blocks);
 
 DECLARE_int64(dit_cache_end_blocks);
 
+DECLARE_string(dit_regione_refresh_steps);
+DECLARE_double(dit_regione_region_threshold);
+DECLARE_double(dit_regione_cache_threshold);
+DECLARE_bool(dit_regione_use_avd_gamma);
+DECLARE_bool(dit_regione_erosion_dilation);
+
 DECLARE_bool(dit_sp_communication_overlap);
 
 DECLARE_int64(dit_generation_image_area_max);

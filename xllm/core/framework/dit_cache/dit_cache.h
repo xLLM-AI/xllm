@@ -14,7 +14,12 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+
+#include <memory>
+#include <utility>
+
 #include "dit_cache_impl.h"
+#include "regione.h"
 
 namespace xllm {
 
@@ -36,24 +41,30 @@ class DiTCache {
   bool init(const DiTCacheConfig& cfg, const ParallelArgs& parallel_args);
 
   bool on_before_block(const CacheBlockIn& blockin, bool use_cfg = false);
-
   CacheBlockOut on_after_block(const CacheBlockIn& blockin,
                                bool use_cfg = false);
-
   bool on_before_step(const CacheStepIn& stepin, bool use_cfg = false);
-
   CacheStepOut on_after_step(const CacheStepIn& stepin, bool use_cfg = false);
 
   void set_context(const CacheContext& context) {
+    if (regione_cache_) {
+      regione_cache_->set_infer_steps(context.infer_steps);
+      regione_cache_->set_num_blocks(context.num_blocks);
+    }
     active_cache_->set_context(context);
     active_cond_cache_->set_context(context);
   }
 
+  RegionECache* regione() { return regione_cache_.get(); }
+  const RegionECache* regione() const { return regione_cache_.get(); }
+
  private:
-  torch::Tensor get_tensor_or_empty(const TensorMap& m, const std::string& k);
+  static torch::Tensor get_tensor_or_empty(const TensorMap& m,
+                                           const std::string& k);
 
   std::unique_ptr<DitCacheImpl> active_cache_;
   std::unique_ptr<DitCacheImpl> active_cond_cache_;
+  std::unique_ptr<RegionECache> regione_cache_;
 };
 
 }  // namespace xllm

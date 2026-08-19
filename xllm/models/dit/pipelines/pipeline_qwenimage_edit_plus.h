@@ -1055,35 +1055,74 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
         do_true_cfg ? get_image_rotary_emb(negative_prompt_embeds.size(1))
                     : image_rotary_emb_pos;
 
+    auto* regione = DiTCache::get_instance().regione();
+
+    if (regione) {
+      const auto sp_group = parallel_args_.dit_sp_group_;
+      const int64_t sp_rank = sp_group ? sp_group->rank() : 0;
+      const int64_t sp_size = sp_group ? sp_group->world_size() : 1;
+      regione->regione_prepare_inference(final_latents,
+                                         image_latents,
+                                         main_shape[0][1],
+                                         main_shape[0][2],
+                                         sp_rank,
+                                         sp_size);
+    }
+
     for (int64_t i = 0; i < timesteps.size(0); ++i) {
       auto t = timesteps[i];
       current_timestep_ = t;
 
-      auto latent_model_input = final_latents;
-      if (image_latents.defined()) {
-        latent_model_input = torch::cat({final_latents, image_latents}, 1);
+      double prev_t_value = 0.0;
+      double t_value = 0.0;
+      if (regione) {
+        t_value = t.item<double>();
+        if (i > 0) {
+          prev_t_value = timesteps[i - 1].item<double>();
+        }
       }
 
+      RegionEStepPlan regione_plan;
+      RegionEStepInput regione_input;
+      if (regione) {
+        regione_plan = regione->begin_step(i, t_value, prev_t_value);
+        regione_input = regione->prepare_step_input(
+            final_latents, image_latents, main_shape, regione_plan);
+      }
+
+      auto step_latents =
+          regione_plan.enabled ? regione_input.step_latents : final_latents;
+      auto latent_model_input = step_latents;
+      if (regione_plan.enabled) {
+        latent_model_input = regione_input.latent_model_input;
+      } else if (image_latents.defined()) {
+        latent_model_input = torch::cat({final_latents, image_latents}, 1);
+      }
+      auto step_main_shape =
+          regione_plan.enabled ? regione_input.main_shape : main_shape;
+
       auto timestep_expanded =
-          t.expand({final_latents.size(0)}).to(final_latents.dtype());
+          t.expand({step_latents.size(0)}).to(step_latents.dtype());
 
       torch::Tensor noise_pred;
       torch::Tensor neg_noise_pred;
       torch::Tensor pos_neg_noise_preds;
-      if (::xllm::ParallelConfig::get_instance().cfg_size() == 2 &&
-          do_true_cfg) {
+      if (regione_plan.use_velocity_cache) {
+        noise_pred = regione_input.cached_velocity;
+      } else if (::xllm::ParallelConfig::get_instance().cfg_size() == 2 &&
+                 do_true_cfg) {
         auto rank = parallel_args_.dit_cfg_group_->rank();
         if (rank == 0) {
           noise_pred = transformer_->forward(latent_model_input,
                                              prompt_embeds,
                                              prompt_embeds_mask,
                                              timestep_expanded / 1000.0,
-                                             main_shape,
+                                             step_main_shape,
                                              txt_seq_lens,
                                              image_rotary_emb_pos,
                                              /*use_cfg=*/false,
                                              /*step_index=*/i + 1);
-          noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
+          noise_pred = noise_pred.slice(1, 0, step_latents.size(1));
           pos_neg_noise_preds =
               xllm::parallel_state::gather(noise_pred,
                                            parallel_args_.dit_cfg_group_,
@@ -1093,13 +1132,13 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
                                                  negative_prompt_embeds,
                                                  negative_prompt_embeds_mask,
                                                  timestep_expanded / 1000.0,
-                                                 main_shape,
+                                                 step_main_shape,
                                                  negative_txt_seq_lens,
                                                  image_rotary_emb_neg,
                                                  /*use_cfg=*/true,
                                                  /*step_index=*/i + 1);
 
-          neg_noise_pred = neg_noise_pred.slice(1, 0, final_latents.size(1));
+          neg_noise_pred = neg_noise_pred.slice(1, 0, step_latents.size(1));
           pos_neg_noise_preds =
               xllm::parallel_state::gather(neg_noise_pred,
                                            parallel_args_.dit_cfg_group_,
@@ -1117,24 +1156,24 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
                                            prompt_embeds,
                                            prompt_embeds_mask,
                                            timestep_expanded / 1000.0,
-                                           main_shape,
+                                           step_main_shape,
                                            txt_seq_lens,
                                            image_rotary_emb_pos,
                                            /*use_cfg=*/false,
                                            /*step_index=*/i + 1);
-        noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
+        noise_pred = noise_pred.slice(1, 0, step_latents.size(1));
         if (do_true_cfg) {
           neg_noise_pred = transformer_->forward(latent_model_input,
                                                  negative_prompt_embeds,
                                                  negative_prompt_embeds_mask,
                                                  timestep_expanded / 1000.0,
-                                                 main_shape,
+                                                 step_main_shape,
                                                  negative_txt_seq_lens,
                                                  image_rotary_emb_neg,
                                                  /*use_cfg=*/true,
                                                  /*step_index=*/i + 1);
 
-          neg_noise_pred = neg_noise_pred.slice(1, 0, final_latents.size(1));
+          neg_noise_pred = neg_noise_pred.slice(1, 0, step_latents.size(1));
 
           auto comb_pred =
               neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred);
@@ -1143,9 +1182,49 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
           noise_pred = comb_pred * (cond_norm / noise_norm);
         }
       }
+      if (regione_plan.enabled) {
+        regione->observe_velocity(
+            final_latents, noise_pred, scheduler_->sigmas(), i, regione_plan);
+        if (regione_plan.run_partition) {
+          regione_plan.direct_unedited =
+              regione->regione_should_direct_unedited(i);
+        }
+      }
 
       auto latents_dtype = final_latents.dtype();
-      final_latents = scheduler_->step(noise_pred, t, final_latents);
+      if (regione_plan.enabled) {
+        if (regione_plan.partial_step) {
+          auto edited_prev = scheduler_->step(noise_pred, t, step_latents);
+          auto partial_latents =
+              regione->regione_scatter_edited(edited_prev, final_latents);
+          if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
+            auto update_mask =
+                regione->regione_local_update_mask(final_latents);
+            auto update_values =
+                (partial_latents - final_latents) * update_mask;
+            auto reduced_values = xllm::parallel_state::reduce(
+                update_values, parallel_args_.dit_sp_group_);
+            auto reduced_mask = xllm::parallel_state::reduce(
+                                    update_mask, parallel_args_.dit_sp_group_)
+                                    .clamp(0, 1);
+            final_latents = final_latents + reduced_values * reduced_mask;
+          } else {
+            final_latents = partial_latents;
+          }
+        } else {
+          auto prev_latents = scheduler_->step(noise_pred, t, final_latents);
+          if (regione_plan.direct_unedited) {
+            prev_latents = regione->apply_direct_unedited(prev_latents,
+                                                          final_latents,
+                                                          noise_pred,
+                                                          scheduler_->sigmas(),
+                                                          i);
+          }
+          final_latents = prev_latents;
+        }
+      } else {
+        final_latents = scheduler_->step(noise_pred, t, final_latents);
+      }
       if (final_latents.dtype() != latents_dtype) {
         final_latents = final_latents.to(latents_dtype);
       }
