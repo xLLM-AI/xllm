@@ -651,7 +651,10 @@ void masked_indexer_select_paged_kv(MaskedIndexerSelectPagedKVParams& params) {
                                       params.q_scale,
                                       params.k_scale_cache,
                                       params.sparse_block_table,
-                                      params.sparse_context_lens);
+                                      params.sparse_context_lens,
+                                      params.is_score_float,
+                                      params.compress_ratio,
+                                      params.kv_cache_block_table_offset);
 #else
   NOT_IMPLEMENTED();
 #endif

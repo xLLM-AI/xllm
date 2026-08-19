@@ -1,10 +1,12 @@
 include(cc_library)
+include(cc_test)
 
 cc_library(
   NAME
     mlu_layers
   HDRS
     attention.h
+    xattention.h
     deepseek_v2_attention.h
     deepseek_v2_decoder_layer_impl.h
     deepseek_v2_sparse_moe_block.h
@@ -15,6 +17,7 @@ cc_library(
     fused_moe.h
   SRCS
     attention.cpp
+    xattention.cpp
     deepseek_v2_attention.cpp
     deepseek_v2_attention_sp.cpp
     deepseek_v2_decoder_layer_impl.cpp
@@ -25,5 +28,20 @@ cc_library(
     fused_moe_base.cpp
     fused_moe_all2all.cpp
   DEPS
+    :mlu_kernels
     :common_layers
+)
+
+cc_test(
+  NAME
+    mlu_xattention_test
+  SRCS
+    xattention_test.cpp
+  DEPS
+    :mlu_layers
+    :common_layers
+    torch
+    torch_mlu
+    GTest::gtest_main
+    glog::glog
 )

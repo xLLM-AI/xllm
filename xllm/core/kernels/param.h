@@ -903,6 +903,12 @@ struct MaskedIndexerSelectPagedKVParams {
   // New sparse block table output tensor. Shape: [batch_num] (prefill) or
   // [batch_num] (decode). Type: int32. Must be contiguous.
   torch::Tensor sparse_context_lens;
+  // Whether attention scores are accumulated in float. Defaults to false.
+  bool is_score_float = false;
+  // Compression ratio used by compressed KV cache layout.
+  int64_t compress_ratio = 1;
+  // Optional block table offset for compressed KV cache layout.
+  std::optional<torch::Tensor> kv_cache_block_table_offset = std::nullopt;
 };
 
 struct GatherSplitParams {

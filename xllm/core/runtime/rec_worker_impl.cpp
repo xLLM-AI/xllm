@@ -49,6 +49,9 @@ limitations under the License.
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "platform/npu/device_capture_lock.h"
 #endif
+#if defined(USE_MLU)
+#include "kernels/mlu/mlu_ops_api.h"
+#endif
 #include "common/version_singleton.h"
 #include "framework/model_loader.h"
 #include "framework/sampling/rec_constrained_decoding.h"
@@ -2340,6 +2343,17 @@ RecWorkerImpl::LlmRecMultiRoundPipeline::LlmRecMultiRoundPipeline(
                            : 0;
   beam_width_ = runtime_.worker.options_.beam_width();
 
+#if defined(USE_MLU)
+  CHECK_EQ(FLAGS_enable_xattention_one_stage, false)
+      << "MLU REC multi-round pipeline requires two-stage xAttention; set "
+         "enable_xattention_one_stage=false";
+  CHECK_GE(get_rec_multi_round_decode_rounds(), 2)
+      << "MLU REC multi-round pipeline requires max_decode_rounds >= 2";
+  CHECK_EQ(FLAGS_enable_graph, false)
+      << "MLU REC multi-round pipeline supports eager mode only; set "
+         "enable_graph=false";
+#endif
+
   full_kv_cache_offsets_ = std::make_unique<FullKvCacheOffsets>(this);
   allocate_kv_caches_related();
 }
@@ -2365,7 +2379,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_work_before_execute(
 
   runtime_.worker.prepare_multi_modal_data(processed_inputs);
 
-#if defined(USE_NPU) || defined(USE_CUDA)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
   prepare_kv_caches_related_for_input(inputs, processed_inputs);
 #endif
 }
@@ -2434,8 +2448,13 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::allocate_kv_caches_related() {
       torch::zeros({max_total_beam, num_heads, 1}, fp32_options);
   cached_two_stage_unshared_o_ =
       torch::zeros({max_total_beam, num_heads, head_dim}, kv_cache_options);
-  cached_two_stage_q_cu_seq_lens_shared_ =
-      torch::zeros({max_seqs_per_batch_ + 1}, int_options);
+  cached_two_stage_q_cu_seq_lens_shared_ = torch::arange(
+      0, (max_seqs_per_batch_ + 1) * beam_width_, beam_width_, int_options);
+#if defined(USE_MLU)
+  cached_mlu_lse_ = torch::zeros({num_heads * max_total_beam}, fp32_options);
+  cached_slot_map_ = torch::zeros({max_total_beam}, int_options);
+  cached_unshared_lens_ = torch::zeros({max_total_beam}, int_options);
+#else
   cached_two_stage_qo_indptr_expanded_ =
       torch::zeros({max_total_beam + 1}, int_options);
   cached_two_stage_paged_kv_indptr_expanded_ =
@@ -2444,6 +2463,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::allocate_kv_caches_related() {
       torch::zeros({max_total_beam}, int_options);
   cached_two_stage_paged_kv_last_page_len_expanded_ =
       torch::zeros({max_total_beam}, int_options);
+#endif
 }
 
 void RecWorkerImpl::LlmRecMultiRoundPipeline::
@@ -2471,6 +2491,49 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
   int32_t num_layers = runtime_.context->get_model_args().n_layers();
   int32_t max_decode_step = total_round - 1;
   int32_t unshared_offset = max_tokens_per_batch_;
+
+#if defined(USE_MLU)
+  const int32_t configured_rounds = get_rec_multi_round_decode_rounds();
+  const int64_t max_total_beam =
+      static_cast<int64_t>(max_seqs_per_batch_) * beam_width_;
+  CHECK_GT(batch_size, 0) << "MLU REC batch_size must be positive";
+  CHECK_LE(batch_size, max_seqs_per_batch_)
+      << "MLU REC batch_size overflow: actual " << batch_size << ", capacity "
+      << max_seqs_per_batch_;
+  CHECK_EQ(beam_width, beam_width_)
+      << "MLU REC beam_width mismatch: actual " << beam_width << ", expected "
+      << beam_width_;
+  CHECK_EQ(total_round, configured_rounds)
+      << "MLU REC total_round mismatch: actual " << total_round << ", expected "
+      << configured_rounds;
+  CHECK_GE(configured_rounds, 2)
+      << "MLU REC configured total_round must be at least 2";
+  CHECK_LE(static_cast<int64_t>(batch_size) * beam_width, max_total_beam)
+      << "MLU REC total_beam overflow: actual "
+      << static_cast<int64_t>(batch_size) * beam_width << ", capacity "
+      << max_total_beam;
+  CHECK_EQ(full_kv_len, cached_full_k_caches_[0].size(0))
+      << "MLU REC full_kv_shape length mismatch: actual " << full_kv_len
+      << ", expected " << cached_full_k_caches_[0].size(0);
+  CHECK_EQ(num_kv_heads, cached_full_k_caches_[0].size(1))
+      << "MLU REC full_kv_shape kv heads mismatch: actual " << num_kv_heads
+      << ", expected " << cached_full_k_caches_[0].size(1);
+  CHECK_EQ(head_dim, cached_full_k_caches_[0].size(2))
+      << "MLU REC full_kv_shape head dim mismatch: actual " << head_dim
+      << ", expected " << cached_full_k_caches_[0].size(2);
+  CHECK_EQ(input_params.kv_seq_lens_vec.size(),
+           static_cast<size_t>(batch_size + 1))
+      << "MLU REC kv_seq_lens_vec size mismatch: actual "
+      << input_params.kv_seq_lens_vec.size() << ", expected " << batch_size + 1;
+  CHECK_EQ(input_params.kv_seq_lens_vec.front(), 0)
+      << "MLU REC kv_seq_lens_vec must start at zero";
+  CHECK(std::is_sorted(input_params.kv_seq_lens_vec.begin(),
+                       input_params.kv_seq_lens_vec.end()))
+      << "MLU REC kv_seq_lens_vec must be monotonically non-decreasing";
+  CHECK_LE(input_params.kv_seq_lens_vec.back(), max_tokens_per_batch_)
+      << "MLU REC packed prompt length " << input_params.kv_seq_lens_vec.back()
+      << " exceeds max_tokens_per_batch " << max_tokens_per_batch_;
+#endif
 
   if (!cached_full_k_caches_.empty() && cached_full_k_caches_[0].defined()) {
     llm_rec_params.full_k_caches.reserve(num_layers);
@@ -2524,6 +2587,26 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
               .slice(0, 0, batch_size);
       llm_rec_params.shared_k_caches.emplace_back(layer_shared_k_cache);
       llm_rec_params.shared_v_caches.emplace_back(layer_shared_v_cache);
+#elif defined(USE_MLU)
+      auto layer_full_k_cache = cached_full_k_caches_[layer_id];
+      auto layer_full_v_cache = cached_full_v_caches_[layer_id];
+
+      auto layer_unshared_k_cache =
+          layer_full_k_cache.slice(0, unshared_offset, full_kv_len)
+              .view({static_cast<int64_t>(max_seqs_per_batch_),
+                     static_cast<int64_t>(beam_width_),
+                     num_kv_heads,
+                     static_cast<int64_t>(max_decode_step),
+                     head_dim})
+              .slice(0, 0, batch_size);
+      auto layer_unshared_v_cache =
+          layer_full_v_cache.slice(0, unshared_offset, full_kv_len)
+              .view({static_cast<int64_t>(max_seqs_per_batch_),
+                     static_cast<int64_t>(beam_width_),
+                     num_kv_heads,
+                     static_cast<int64_t>(max_decode_step),
+                     head_dim})
+              .slice(0, 0, batch_size);
 #else
       auto layer_full_k_cache = cached_full_k_caches_[layer_id];
       auto layer_full_v_cache = cached_full_v_caches_[layer_id];
@@ -2567,6 +2650,11 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
 
   const auto& decode_positions = step_meta->decode_positions_vec;
   llm_rec_params.decode_positions_tensor_list.clear();
+#if defined(USE_MLU)
+  CHECK_EQ(decode_positions.size(), static_cast<size_t>(batch_size))
+      << "MLU REC decode_positions count mismatch: actual "
+      << decode_positions.size() << ", expected " << batch_size;
+#endif
   if (!decode_positions.empty() && beam_width > 0 && total_round > 1) {
     const int32_t num_sequences = static_cast<int32_t>(decode_positions.size());
     std::vector<int32_t> position_buffer;
@@ -2583,6 +2671,17 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
           torch::tensor(position_buffer, int_options));
     }
   }
+#if defined(USE_MLU)
+  CHECK_EQ(llm_rec_params.decode_positions_tensor_list.size(),
+           static_cast<size_t>(total_round - 1))
+      << "MLU REC decode position tensor count mismatch";
+  for (const auto& positions : llm_rec_params.decode_positions_tensor_list) {
+    CHECK_EQ(positions.numel(), static_cast<int64_t>(batch_size) * beam_width)
+        << "MLU REC decode positions shape mismatch: actual "
+        << positions.sizes() << ", expected [" << batch_size * beam_width
+        << "]";
+  }
+#endif
 }
 
 std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
@@ -2603,6 +2702,18 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
   int32_t num_layers =
       static_cast<int32_t>(runtime_.context->get_model_args().n_layers());
 
+#if defined(USE_MLU)
+  const int32_t mlu_result_width =
+      mutable_input.decoder_sampling_params.num_return_sequences > 0
+          ? mutable_input.decoder_sampling_params.num_return_sequences
+          : beam_width;
+  CHECK(runtime::detail::has_mlu_fixed_result_width(
+      beam_width, mutable_input.decoder_sampling_params.num_return_sequences))
+      << "MLU fixed-width beam search requires num_return_sequences ("
+      << mlu_result_width << ") to equal beam_width (" << beam_width << ")";
+  runtime::detail::MluDecodeRoundState mlu_round_state;
+#endif
+
   CHECK_GT(runtime_.worker.kv_caches_.size(), 0)
       << "KV caches are not initialized.";
 
@@ -2614,8 +2725,10 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
   SampleOutput sample_output;
   torch::Tensor top_tokens;
   torch::Tensor top_logprobs;
+#if !defined(USE_NPU) && !defined(USE_MLU)
   std::optional<folly::SemiFuture<NextRoundInputResults>>
       next_round_async_result;
+#endif
 
   for (int32_t round = 0; round < total_rounds; ++round) {
     const auto& sampling_params = round > 0
@@ -2636,6 +2749,11 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
     // Prepare round input according to the active backend.
 #if defined(USE_NPU)
     prepare_round_input_for_npu(mutable_input, round, top_tokens, beam_tensors);
+#elif defined(USE_MLU)
+    if (round > 0) {
+      mlu_round_state.require_prev_beam(round);
+    }
+    prepare_mlu_round_input(mutable_input, round, beam_tensors.out_token_ids);
 #else
     prepare_round_input_and_schedule_next(mutable_input,
                                           round,
@@ -2657,11 +2775,19 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
     }
     torch::Tensor hidden_states = model_output.hidden_states;
 
+    sample_output = SampleOutput{};
     if (sampling_params.selected_token_idxes.defined()) {
       logits = runtime_.model->logits(hidden_states,
                                       sampling_params.selected_token_idxes);
       sample_output = rec_sampler_->forward(logits, round_sampling_params);
     }
+
+#if defined(USE_MLU)
+    CHECK(sample_output.top_tokens.defined())
+        << "MLU REC sampler did not produce top_tokens for round " << round;
+    CHECK(sample_output.top_logprobs.defined())
+        << "MLU REC sampler did not produce top_logprobs for round " << round;
+#endif
 
     if (sample_output.top_tokens.defined() &&
         sample_output.top_logprobs.defined()) {
@@ -2681,9 +2807,20 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
       top_logprobs = sample_output.top_logprobs;
 #else
       const int64_t candidate_top_k = sample_output.top_tokens.size(-1);
+      CHECK_GT(candidate_top_k, 0) << "sampler top_tokens must have candidates";
       top_tokens = sample_output.top_tokens.to(torch::kInt32)
                        .reshape({-1, candidate_top_k});
       top_logprobs = sample_output.top_logprobs.reshape({-1, candidate_top_k});
+#endif
+#if defined(USE_MLU)
+      const int64_t expected_sampler_rows =
+          round == 0 ? batch_size
+                     : static_cast<int64_t>(batch_size) * beam_width;
+      CHECK_EQ(top_tokens.size(0), expected_sampler_rows)
+          << "MLU REC sampler top_tokens row count mismatch for round "
+          << round;
+      CHECK_EQ(top_logprobs.sizes(), top_tokens.sizes())
+          << "MLU REC sampler top_logprobs shape mismatch for round " << round;
 #endif
       if (final_round && requested_result_width != beam_width) {
         execute_final_beam_search(top_tokens,
@@ -2703,7 +2840,14 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
                             total_rounds);
       }
 
-      if (round > 0 && round < total_rounds - 1) {
+#if defined(USE_MLU)
+      mlu_round_state.mark_beam_complete(round);
+      const bool should_reparent =
+          runtime::detail::should_reparent_mlu_cache(round, total_rounds);
+#else
+      const bool should_reparent = round > 0 && round < total_rounds - 1;
+#endif
+      if (should_reparent) {
         execute_cache_select(
             beam_tensors, mutable_input, round, beam_width, num_layers);
       }
@@ -2795,6 +2939,19 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_beam_search(
                                   batch_size,
                                   requested_result_width,
                                   round);
+#elif defined(USE_MLU)
+  xllm::kernel::mlu::beam_search(beam_tensors.acc_logprob,
+                                 beam_tensors.sequence_group,
+                                 top_tokens,
+                                 top_logprobs,
+                                 beam_tensors.out_log_probs,
+                                 beam_tensors.out_token_ids,
+                                 beam_tensors.out_token_index,
+                                 beam_tensors.out_beam_count_prefix_sums,
+                                 beam_tensors.out_seqgroup,
+                                 batch_size,
+                                 requested_result_width,
+                                 round);
 #endif
   if (FLAGS_enable_output_sku_logprobs) {
     runtime::detail::write_beam_round_step_logprobs(
@@ -2815,6 +2972,9 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_final_beam_search(
     int32_t batch_size,
     int32_t beam_width,
     int32_t requested_result_width) {
+#if defined(USE_MLU)
+  LOG(FATAL) << "MLU fixed-width final beam search branch is unreachable.";
+#else
   OneRecBeamSearchOutputTensors final_tensors =
       prepare_onerec_beam_search_output_tensors(
           batch_size,
@@ -2883,6 +3043,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_final_beam_search(
 
   std::swap(beam_tensors.sequence_group, beam_tensors.out_seqgroup);
   std::swap(beam_tensors.acc_logprob, beam_tensors.out_log_probs);
+#endif
 }
 
 void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_cache_select(
@@ -2932,6 +3093,19 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_cache_select(
       round - 1,
       beam_width,
       num_layers);
+#elif defined(USE_MLU)
+  auto& llmrec_params = input.input_params.mutable_llmrec_params();
+  auto& unshared_k_caches = llmrec_params.unshared_k_caches;
+  auto& unshared_v_caches = llmrec_params.unshared_v_caches;
+  TORCH_CHECK(unshared_k_caches.size() == static_cast<size_t>(num_layers),
+              "MLU cache-select requires one K cache per model layer");
+  TORCH_CHECK(unshared_v_caches.size() == static_cast<size_t>(num_layers),
+              "MLU cache-select requires one V cache per model layer");
+  xllm::kernel::mlu::cache_select(beam_tensors.out_token_index,
+                                  unshared_k_caches,
+                                  unshared_v_caches,
+                                  round - 1,
+                                  beam_width);
 #endif
 }
 
@@ -3105,6 +3279,123 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_round_input_for_npu(
     input.input_params.batch_forward_type = BatchForwardType::DECODE;
     input.input_params.input_embedding = torch::Tensor();
   }
+}
+
+void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_mlu_round_input(
+    ForwardInput& input,
+    int32_t round,
+    const torch::Tensor& prev_tokens) {
+#if defined(USE_MLU)
+  if (round == 0) {
+    return;
+  }
+
+  auto& params = input.input_params;
+  auto& llm_rec_params = params.mutable_llmrec_params();
+  const int32_t decode_step = round - 1;
+  const int32_t configured_rounds = get_rec_multi_round_decode_rounds();
+  const int32_t max_decode_steps = configured_rounds - 1;
+  const int32_t batch_size = llm_rec_params.batch_size;
+  const int32_t beam_width = llm_rec_params.beam_width;
+  const int64_t total_beam = static_cast<int64_t>(batch_size) * beam_width;
+  const int64_t max_total_beam =
+      static_cast<int64_t>(max_seqs_per_batch_) * beam_width_;
+  const int64_t num_heads = runtime_.context->get_model_args().n_heads();
+  const int64_t head_dim = runtime_.context->get_model_args().head_dim();
+
+  CHECK_GT(batch_size, 0) << "MLU REC batch_size must be positive";
+  CHECK_LE(batch_size, max_seqs_per_batch_)
+      << "MLU REC batch_size overflow: actual " << batch_size << ", capacity "
+      << max_seqs_per_batch_;
+  CHECK_EQ(beam_width, beam_width_)
+      << "MLU REC beam_width mismatch: actual " << beam_width << ", expected "
+      << beam_width_;
+  CHECK_EQ(llm_rec_params.total_round, configured_rounds)
+      << "MLU REC total_round mismatch: actual " << llm_rec_params.total_round
+      << ", expected " << configured_rounds;
+  CHECK_GE(configured_rounds, 2)
+      << "MLU REC configured total_round must be at least 2";
+  CHECK_GE(decode_step, 0);
+  CHECK_LT(decode_step, max_decode_steps)
+      << "MLU REC decode step exceeds configured capacity";
+  CHECK_LE(total_beam, max_total_beam)
+      << "MLU REC total_beam overflow: actual " << total_beam << ", capacity "
+      << max_total_beam;
+  CHECK_EQ(prev_tokens.device(), runtime_.worker.device())
+      << "MLU REC selected beam token device mismatch: actual "
+      << prev_tokens.device() << ", expected " << runtime_.worker.device();
+  CHECK_EQ(llm_rec_params.decode_positions_tensor_list.size(),
+           static_cast<size_t>(max_decode_steps))
+      << "MLU REC decode position tensor count mismatch";
+  const auto& positions =
+      llm_rec_params.decode_positions_tensor_list[decode_step];
+  CHECK_EQ(positions.numel(), total_beam)
+      << "MLU REC decode positions count mismatch: actual " << positions.numel()
+      << ", expected " << total_beam;
+  CHECK_EQ(positions.device(), runtime_.worker.device())
+      << "MLU REC decode positions device mismatch";
+  CHECK_EQ(params.block_tables.sizes(), torch::IntArrayRef({total_beam, 1}))
+      << "MLU REC block_table shape mismatch: actual "
+      << params.block_tables.sizes() << ", expected [" << total_beam << ", 1]";
+  CHECK(!llm_rec_params.unshared_k_caches.empty())
+      << "MLU REC unshared K caches are required";
+  CHECK_EQ(llm_rec_params.unshared_k_caches[0].dim(), 5)
+      << "MLU REC unshared K cache must be rank 5";
+  CHECK_EQ(llm_rec_params.unshared_k_caches[0].size(0), batch_size);
+  CHECK_EQ(llm_rec_params.unshared_k_caches[0].size(1), beam_width);
+  CHECK_EQ(llm_rec_params.unshared_k_caches[0].size(3), max_decode_steps)
+      << "MLU REC unshared cache decode capacity mismatch";
+
+  input.token_ids =
+      runtime::detail::get_mlu_decode_tokens(prev_tokens, total_beam);
+  input.positions = positions;
+  params.batch_forward_type = BatchForwardType::DECODE;
+  params.input_embedding = torch::Tensor();
+  params.num_sequences = total_beam;
+  params.attn_metadata = nullptr;
+  cached_current_round_tensor_.fill_(decode_step);
+  llm_rec_params.current_round_tensor = cached_current_round_tensor_;
+
+  llm_rec_params.two_stage_shared_lse =
+      cached_two_stage_shared_lse_.narrow(0, 0, total_beam);
+  llm_rec_params.two_stage_shared_o =
+      cached_two_stage_shared_o_.narrow(0, 0, total_beam);
+  llm_rec_params.two_stage_unshared_lse =
+      cached_two_stage_unshared_lse_.narrow(0, 0, total_beam);
+  llm_rec_params.two_stage_unshared_o =
+      cached_two_stage_unshared_o_.narrow(0, 0, total_beam);
+  llm_rec_params.two_stage_q_cu_seq_lens_shared =
+      cached_two_stage_q_cu_seq_lens_shared_.narrow(0, 0, batch_size + 1);
+  llm_rec_params.two_stage_shared_lse_kernel =
+      cached_mlu_lse_.narrow(0, 0, num_heads * total_beam)
+          .view({num_heads, total_beam});
+  llm_rec_params.two_stage_decode_slot_mapping =
+      cached_slot_map_.narrow(0, 0, total_beam);
+  llm_rec_params.two_stage_unshared_seq_lens =
+      cached_unshared_lens_.narrow(0, 0, total_beam);
+
+  CHECK_EQ(llm_rec_params.two_stage_shared_lse.sizes(),
+           torch::IntArrayRef({total_beam, num_heads, 1}));
+  CHECK_EQ(llm_rec_params.two_stage_shared_o.sizes(),
+           torch::IntArrayRef({total_beam, num_heads, head_dim}));
+  CHECK_EQ(llm_rec_params.two_stage_unshared_lse.sizes(),
+           torch::IntArrayRef({total_beam, num_heads, 1}));
+  CHECK_EQ(llm_rec_params.two_stage_unshared_o.sizes(),
+           torch::IntArrayRef({total_beam, num_heads, head_dim}));
+  CHECK(llm_rec_params.two_stage_shared_lse_kernel.is_contiguous())
+      << "MLU REC shared_lse_kernel must be contiguous";
+
+  runtime::detail::update_mlu_two_stage(
+      params.block_tables,
+      decode_step,
+      max_decode_steps,
+      llm_rec_params.two_stage_decode_slot_mapping,
+      llm_rec_params.two_stage_unshared_seq_lens);
+#else
+  (void)input;
+  (void)round;
+  (void)prev_tokens;
+#endif
 }
 
 void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_input_for_current_round(

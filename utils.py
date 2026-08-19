@@ -298,8 +298,13 @@ def _run_dependencies_script_or_exit(script_path: str) -> None:
         exit(1)
 
 
-def _validate_submodules_or_exit(repo_root: str) -> None:
+def _validate_submodules_or_exit(
+    repo_root: str,
+    ignored_paths: Optional[set[str]] = None,
+) -> None:
     issues = _collect_submodule_init_issues(repo_root)
+    for path in ignored_paths or set():
+        issues.pop(path, None)
 
     if issues:
         print("❌ Submodule commit check failed. Repositories not correctly initialized:")
@@ -374,9 +379,16 @@ def _ensure_xllm_ops_rebuild_on_missing_marker() -> None:
         print("✅ Cleared XLLM_OPS_GIT_HEAD_CACHED from CMake cache to trigger xllm_ops rebuild.")
         return
 
-def pre_build() -> None:
+def pre_build(device: str) -> None:
     script_path = os.path.dirname(os.path.abspath(__file__))
+    ignored_paths: set[str] = set()
+    if device != "npu":
+        ignored_paths = {
+            "third_party/xllm_atb_layers",
+            "third_party/xllm_ops",
+        }
 
-    _validate_submodules_or_exit(script_path)
+    _validate_submodules_or_exit(script_path, ignored_paths)
     _ensure_prebuild_dependencies_installed(script_path)
-    _ensure_xllm_ops_rebuild_on_missing_marker()
+    if device == "npu":
+        _ensure_xllm_ops_rebuild_on_missing_marker()

@@ -320,6 +320,10 @@ class RecWorkerImpl : public LLMWorkerImpl {
                                      const torch::Tensor& top_tokens,
                                      const BeamSearchTensors& beam_tensors);
 
+    void prepare_mlu_round_input(ForwardInput& input,
+                                 int32_t round,
+                                 const torch::Tensor& prev_tokens);
+
     void prepare_two_stage_round_input(ForwardInput& input,
                                        int32_t round,
                                        const torch::Tensor& top_tokens,
@@ -367,6 +371,9 @@ class RecWorkerImpl : public LLMWorkerImpl {
     torch::Tensor cached_two_stage_unshared_lse_;
     torch::Tensor cached_two_stage_unshared_o_;
     torch::Tensor cached_two_stage_q_cu_seq_lens_shared_;
+    torch::Tensor cached_mlu_lse_;
+    torch::Tensor cached_slot_map_;
+    torch::Tensor cached_unshared_lens_;
     torch::Tensor cached_two_stage_qo_indptr_expanded_;
     torch::Tensor cached_two_stage_paged_kv_indptr_expanded_;
     torch::Tensor cached_two_stage_paged_kv_indices_expanded_;

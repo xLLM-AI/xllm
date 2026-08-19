@@ -236,6 +236,9 @@ struct LlmRecMultiRoundParams {
   torch::Tensor two_stage_unshared_lse;
   torch::Tensor two_stage_unshared_o;
   torch::Tensor two_stage_q_cu_seq_lens_shared;
+  torch::Tensor two_stage_shared_lse_kernel;
+  torch::Tensor two_stage_decode_slot_mapping;
+  torch::Tensor two_stage_unshared_seq_lens;
   torch::Tensor two_stage_qo_indptr_expanded;
   torch::Tensor two_stage_paged_kv_indptr_expanded;
   torch::Tensor two_stage_paged_kv_indices_expanded;
@@ -291,6 +294,18 @@ struct LlmRecMultiRoundParams {
     if (two_stage_q_cu_seq_lens_shared.defined()) {
       result.two_stage_q_cu_seq_lens_shared =
           safe_to(two_stage_q_cu_seq_lens_shared, device);
+    }
+    if (two_stage_shared_lse_kernel.defined()) {
+      result.two_stage_shared_lse_kernel =
+          safe_to(two_stage_shared_lse_kernel, device);
+    }
+    if (two_stage_decode_slot_mapping.defined()) {
+      result.two_stage_decode_slot_mapping =
+          safe_to(two_stage_decode_slot_mapping, device);
+    }
+    if (two_stage_unshared_seq_lens.defined()) {
+      result.two_stage_unshared_seq_lens =
+          safe_to(two_stage_unshared_seq_lens, device);
     }
     if (two_stage_qo_indptr_expanded.defined()) {
       result.two_stage_qo_indptr_expanded =

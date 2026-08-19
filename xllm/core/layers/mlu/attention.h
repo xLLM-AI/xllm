@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <memory>
 #include <tuple>
 
 #include "framework/kv_cache/kv_cache.h"
@@ -25,6 +26,8 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+class MluXAttentionImpl;
+
 class AttentionImpl : public torch::nn::Module {
  public:
   AttentionImpl() = default;
@@ -81,6 +84,7 @@ class AttentionImpl : public torch::nn::Module {
   bool enable_lighting_indexer_;
   bool enable_mla_;
   int64_t sliding_window_;
+  std::shared_ptr<MluXAttentionImpl> xattention_impl_;
 };
 TORCH_MODULE(Attention);
 
