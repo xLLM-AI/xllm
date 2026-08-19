@@ -60,12 +60,18 @@ def prepend_pythonpath(env: dict[str, str], path: str) -> None:
 def prepare_tilelang_import(tilelang_root: str | Path | None = None) -> Path:
     tl_root = Path(tilelang_root).resolve() if tilelang_root is not None else resolve_tilelang_root()
     import_path = tl_root.parent
+    source_root = repo_root()
+    import_paths = [
+        str(source_root),
+        str(source_root / "xllm"),
+        str(import_path),
+    ]
     os.environ["TL_ROOT"] = str(tl_root)
-    prepend_pythonpath(os.environ, str(import_path))
+    for path in reversed(import_paths):
+        prepend_pythonpath(os.environ, path)
 
-    import_path_str = str(import_path)
-    sys.path = [path for path in sys.path if path != import_path_str]
-    sys.path.insert(0, import_path_str)
+    sys.path = [path for path in sys.path if path not in import_paths]
+    sys.path[:0] = import_paths
     os.environ.setdefault("ACL_OP_INIT_MODE", "1")
     return tl_root
 
