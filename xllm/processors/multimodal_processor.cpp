@@ -47,6 +47,16 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
   return true;
 }
 
+void MultimodalProcessorBase::run_mm_token_expansion(
+    PromptProcessor* prompt_processor,
+    std::vector<int32_t>& token_ids,
+    MMData& mm_data) {
+  Timer timer;
+  prompt_processor->expand_mm_tokens(token_ids, mm_data, tokenizer_.get());
+  COUNTER_ADD(mm_prompt_expansion_latency_seconds, timer.elapsed_seconds());
+  prompt_processor->find_mm_spans(token_ids, mm_data);
+}
+
 void MultimodalProcessorBase::assign_mm_hash_keys(const MMInput& mm_input,
                                                   MMData& mm_data) const {
   const std::vector<MMInputItem>& input_items = mm_input.items();

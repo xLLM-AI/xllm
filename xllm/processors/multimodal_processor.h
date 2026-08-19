@@ -59,6 +59,10 @@ class MultimodalProcessorBase {
   bool tokenize(const std::string& prompt,
                 std::vector<int32_t>& token_ids) const;
 
+  void run_mm_token_expansion(PromptProcessor* prompt_processor,
+                              std::vector<int32_t>& token_ids,
+                              MMData& mm_data);
+
   void assign_mm_hash_keys(const MMInput& mm_input, MMData& mm_data) const;
 
   void pad_to_max_length(std::vector<int32_t>& token_ids) const;
@@ -94,6 +98,14 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
   bool process_prompt(std::string& prompt,
                       MMData& mm_data,
                       std::vector<int32_t>& token_ids) override {
+    if (prompt_processor_->uses_token_level_expansion()) {
+      if (!tokenize(prompt, token_ids)) {
+        return false;
+      }
+      run_mm_token_expansion(prompt_processor_.get(), token_ids, mm_data);
+      return true;
+    }
+
     prompt_processor_->process(prompt, mm_data);
     if (!tokenize(prompt, token_ids)) {
       return false;

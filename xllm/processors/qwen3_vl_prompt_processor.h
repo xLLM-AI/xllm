@@ -38,6 +38,12 @@ class Qwen3VLPromptProcessor final : public PromptProcessor {
   void process(std::string& prompt, const MMData& mm_data) override;
   void find_mm_spans(const std::vector<int32_t>& token_ids,
                      MMData& mm_data) override;
+  bool uses_token_level_expansion() const override {
+    return !force_legacy_mm_expansion();
+  }
+  void expand_mm_tokens(std::vector<int32_t>& token_ids,
+                        MMData& mm_data,
+                        const Tokenizer* tokenizer = nullptr) override;
 
  private:
   std::pair<TokenType, size_t> find_vision_token(const std::string& prompt,

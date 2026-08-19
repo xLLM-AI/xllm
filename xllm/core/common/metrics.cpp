@@ -41,6 +41,8 @@ DEFINE_COUNTER(request_handling_latency_seconds_completion,
 
 DEFINE_COUNTER(tokenization_latency_seconds,
                "Prompt tokenization latency in seconds");
+DEFINE_COUNTER(mm_prompt_expansion_latency_seconds,
+               "Multimodal prompt token expansion latency in seconds");
 DEFINE_COUNTER(chat_template_latency_seconds,
                "Chat template latency in seconds");
 

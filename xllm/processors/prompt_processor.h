@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,13 @@ limitations under the License.
 
 namespace xllm {
 
+class Tokenizer;
+
+inline bool force_legacy_mm_expansion() {
+  const char* env = std::getenv("XLLM_FORCE_LEGACY_MM_EXPANSION");
+  return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 class PromptProcessor {
  public:
   virtual ~PromptProcessor() = default;
@@ -34,6 +42,14 @@ class PromptProcessor {
   virtual void process(std::string& prompt, const MMData& mm_data) = 0;
   virtual void find_mm_spans(const std::vector<int32_t>& token_ids,
                              MMData& mm_data) = 0;
+
+  // Token-level expansion tokenizes the unexpanded prompt, then inserts N
+  // identical placeholder ids. Processors that return true implement
+  // expand_mm_tokens() and leave process() as a no-op.
+  virtual bool uses_token_level_expansion() const { return false; }
+  virtual void expand_mm_tokens(std::vector<int32_t>& token_ids,
+                                MMData& mm_data,
+                                const Tokenizer* tokenizer = nullptr) {}
 };
 
 }  // namespace xllm
