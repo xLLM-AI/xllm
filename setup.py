@@ -1077,7 +1077,7 @@ if __name__ == "__main__":
         description="A high-performance inference system for large language models.",
         long_description=read_readme(),
         long_description_content_type="text/markdown",
-        url="https://github.com/jd-opensource/xllm",
+        url="https://github.com/xLLM-AI/xllm",
         project_urls={
             "Homepage": "https://xllm-ai.com/",
             "Documentation": "https://docs.xllm-ai.com/",

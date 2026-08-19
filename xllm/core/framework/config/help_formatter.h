@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -106,7 +106,7 @@ class HelpFormatter {
     }
 
     oss << "For more information and all available options, visit:\n";
-    oss << "  https://github.com/jd-opensource/xllm/blob/main/xllm/core/"
+    oss << "  https://github.com/xLLM-AI/xllm/blob/main/xllm/core/"
            "framework/config/\n";
     oss << "Documentation: "
            "https://docs.xllm-ai.com/en/cli_reference/\n";

@@ -26,7 +26,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://docs.xllm-ai.com/"
 Documentation = "https://docs.xllm-ai.com/"
-Repository = "https://github.com/jd-opensource/xllm"
+Repository = "https://github.com/xLLM-AI/xllm"
 
 [project.scripts]
 xllm = "xllm.launch_server:main"

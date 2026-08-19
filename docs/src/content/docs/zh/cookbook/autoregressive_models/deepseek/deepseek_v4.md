@@ -4,7 +4,7 @@ description: "DeepSeek-V4 在 Ascend A3 设备上的 xLLM 推理实践指南"
 ---
 # 使用 xLLM 在 Ascend A3 设备 推理
 
-源码地址：https://github.com/jd-opensource/xllm
+源码地址：https://github.com/xLLM-AI/xllm
 
 国内可用: https://gitcode.com/xLLM-AI/xllm
 
@@ -58,7 +58,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
 下载官方仓库与模块依赖：
 
 ```bash
-git clone https://github.com/jd-opensource/xllm
+git clone https://github.com/xLLM-AI/xllm
 cd xllm 
 git submodule update --init --recursive
 ```

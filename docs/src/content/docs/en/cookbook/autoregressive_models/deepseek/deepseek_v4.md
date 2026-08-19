@@ -5,7 +5,7 @@ description: "DeepSeek-V4 inference guide with xLLM on Ascend A3 devices"
 
 # Inference with xLLM on Ascend A3 Devices
 
-Source code: https://github.com/jd-opensource/xllm
+Source code: https://github.com/xLLM-AI/xllm
 
 China mirror: https://gitcode.com/xLLM-AI/xllm
 
@@ -58,7 +58,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
 Clone the official repository and module dependencies:
 
 ```bash
-git clone https://github.com/jd-opensource/xllm
+git clone https://github.com/xLLM-AI/xllm
 cd xllm 
 git submodule update --init --recursive
 ```
