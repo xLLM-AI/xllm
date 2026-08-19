@@ -27,6 +27,7 @@ cc_test(
     kv_transfer_completion_test.cpp
   DEPS
     :kv_transfer_completion
+    :kv_cache_transfer
     GTest::gtest_main
 )
 

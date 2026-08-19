@@ -530,6 +530,14 @@ bool WorkerImpl::allocate_kv_cache_storage(
   // KV cache over a VMM-backed SleepableAllocator region (see kv_cache.cpp), so
   // sleep()/wake_up() can release / re-acquire it.
   allocate_kv_caches(kv_caches_, kv_cache_shape, create_options);
+  HierarchyKVCacheAllocationDescriptor allocation_descriptor;
+  allocation_descriptor.device_caches = &kv_caches_;
+  allocation_descriptor.cache_shape = kv_cache_shape;
+  allocation_descriptor.create_options = create_options;
+  allocation_descriptor.create_options.tensor_allocator(nullptr);
+  allocation_descriptor.model_identity =
+      options_.model_id() + "|" + args.model_type();
+  hierarchy_kv_cache_allocation_descriptor_ = std::move(allocation_descriptor);
   init_hierarchy_kv_cache_transfer(kv_cache_shape, create_options);
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
@@ -2217,31 +2225,38 @@ uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   if (hierarchy_kv_cache_transfer_ != nullptr) {
-    if (!block_transfer_info.empty() &&
-        block_transfer_info.front().transfer_type == TransferType::D2H2G) {
-      // Schedule-overlap can deliver the D2H RPC before the preceding forward
-      // task has enqueued its kernels. Queue D2H on the same single-threaded
-      // worker executor so it runs after that forward; the hierarchy transfer
-      // then makes its copy stream wait on compute_stream_. H2D must remain on
-      // the RPC thread because it is registered before the matching forward.
-      auto result = std::make_shared<std::promise<uint32_t>>();
-      std::future<uint32_t> future = result->get_future();
-      threadpool_.schedule(
-          [this, batch_id, block_transfer_info, result]() mutable {
-            try {
-              result->set_value(
-                  hierarchy_kv_cache_transfer_->transfer_kv_blocks(
-                      batch_id, block_transfer_info));
-            } catch (...) {
-              result->set_exception(std::current_exception());
-            }
-          });
-      return future.get();
-    }
-    return hierarchy_kv_cache_transfer_->transfer_kv_blocks(
-        batch_id, block_transfer_info);
+    return schedule_hierarchy_kv_cache_transfer(
+        hierarchy_kv_cache_transfer_.get(), batch_id, block_transfer_info);
   }
   return 0;
+}
+
+uint32_t WorkerImpl::schedule_hierarchy_kv_cache_transfer(
+    HierarchyKVCacheTransfer* transfer,
+    uint64_t batch_id,
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  CHECK(transfer != nullptr);
+  if (!block_transfer_info.empty() &&
+      block_transfer_info.front().transfer_type == TransferType::D2H2G) {
+    // Schedule-overlap can deliver the D2H RPC before the preceding forward
+    // task has enqueued its kernels. Queue D2H on the same single-threaded
+    // worker executor so it runs after that forward; the hierarchy transfer
+    // then makes its copy stream wait on the actual compute stream. H2D must
+    // remain on the RPC thread because it is registered before the forward.
+    auto result = std::make_shared<std::promise<uint32_t>>();
+    std::future<uint32_t> future = result->get_future();
+    threadpool_.schedule(
+        [transfer, batch_id, block_transfer_info, result]() mutable {
+          try {
+            result->set_value(
+                transfer->transfer_kv_blocks(batch_id, block_transfer_info));
+          } catch (...) {
+            result->set_exception(std::current_exception());
+          }
+        });
+    return future.get();
+  }
+  return transfer->transfer_kv_blocks(batch_id, block_transfer_info);
 }
 
 uint32_t WorkerImpl::transfer_kv_blocks(

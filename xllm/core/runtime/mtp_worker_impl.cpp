@@ -276,22 +276,6 @@ void clear_ready_events(ForwardInput& input) {
   input.metadata_ready_event.reset();
 }
 
-std::optional<ForwardOutput> run_llm_no_sync_impl(
-    LLMWorkerImpl& worker,
-    const ForwardInput& input,
-    Stream& prepare_stream,
-    Stream& compute_stream,
-    ForwardInput& processed_input) {
-  worker.prepare_work_before_execute_on_stream(
-      input,
-      processed_input,
-      prepare_stream,
-      /*record_ready_event=*/&prepare_stream != &compute_stream);
-  worker.set_hierarchy_layer_synchronizer(processed_input.input_params);
-  return worker.execute_no_sync_on_stream(
-      processed_input, compute_stream, /*record_ready_event=*/false);
-}
-
 torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {
   if (!tensor.defined()) {
     return tensor;
@@ -441,6 +425,17 @@ runtime::Options mtp_draft_options(const runtime::Options& options) {
       .num_speculative_tokens(0)
       .enable_graph_aux_hidden_states(true);
   return draft_options;
+}
+
+runtime::Options hierarchy_child_options(
+    const runtime::Options& options,
+    MTPWorkerImpl::HierarchyCacheOwnershipMode ownership_mode) {
+  runtime::Options child_options = options;
+  if (ownership_mode ==
+      MTPWorkerImpl::HierarchyCacheOwnershipMode::PARENT_COMPOSITE) {
+    child_options.host_blocks_factor(0.0).enable_kvcache_store(false);
+  }
+  return child_options;
 }
 
 ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
@@ -781,21 +776,31 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
           MTPTargetOptions(options),
           mtp_draft_options(options),
           ::xllm::SpeculativeConfig::get_instance().enable_opt_validate_probs(),
-          /*enable_adaptive_speculative_decode=*/true) {}
+          /*enable_adaptive_speculative_decode=*/true,
+          HierarchyCacheOwnershipMode::PARENT_COMPOSITE) {}
 
-MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
-                             const torch::Device& device,
-                             const runtime::Options& options,
-                             const runtime::Options& target_options,
-                             const runtime::Options& draft_options,
-                             bool enable_opt_validate_probs,
-                             bool enable_adaptive_speculative_decode)
-    : SpeculativeWorkerImpl(parallel_args, device, options, target_options),
-      enable_opt_validate_probs_(enable_opt_validate_probs) {
+MTPWorkerImpl::MTPWorkerImpl(
+    const ParallelArgs& parallel_args,
+    const torch::Device& device,
+    const runtime::Options& options,
+    const runtime::Options& target_options,
+    const runtime::Options& draft_options,
+    bool enable_opt_validate_probs,
+    bool enable_adaptive_speculative_decode,
+    HierarchyCacheOwnershipMode hierarchy_cache_ownership_mode)
+    : SpeculativeWorkerImpl(
+          parallel_args,
+          device,
+          options,
+          hierarchy_child_options(target_options,
+                                  hierarchy_cache_ownership_mode)),
+      enable_opt_validate_probs_(enable_opt_validate_probs),
+      hierarchy_cache_ownership_mode_(hierarchy_cache_ownership_mode) {
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       MTPDraftParallelArgs(parallel_args, options),
       device,
-      mtp_draft_options(draft_options));
+      hierarchy_child_options(mtp_draft_options(draft_options),
+                              hierarchy_cache_ownership_mode));
   const bool enable_parallel_adaptive_sl =
       parallel_args.dp_size() <= 1 && parallel_args.ep_size() <= 1;
   if (enable_adaptive_speculative_decode && enable_parallel_adaptive_sl) {
@@ -811,6 +816,34 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
 }
 
 MTPWorkerImpl::~MTPWorkerImpl() = default;
+
+std::optional<ForwardOutput> MTPWorkerImpl::run_child_llm_no_sync(
+    CacheParticipant participant,
+    LLMWorkerImpl& worker,
+    const ForwardInput& input,
+    Stream& prepare_stream,
+    Stream& compute_stream,
+    ForwardInput& processed_input) {
+  if (participant == CacheParticipant::TARGET) {
+    CHECK_EQ(&worker, impl_.get());
+  } else {
+    CHECK(participant == CacheParticipant::DRAFT);
+    CHECK_EQ(&worker, draft_impl_.get());
+  }
+  worker.prepare_work_before_execute_on_stream(
+      input,
+      processed_input,
+      prepare_stream,
+      /*record_ready_event=*/&prepare_stream != &compute_stream);
+  if (composite_hierarchy_kv_cache_transfer_ != nullptr) {
+    composite_hierarchy_kv_cache_transfer_->set_layer_synchronizer(
+        participant, processed_input.input_params);
+  } else {
+    worker.set_hierarchy_layer_synchronizer(processed_input.input_params);
+  }
+  return worker.execute_no_sync_on_stream(
+      processed_input, compute_stream, /*record_ready_event=*/false);
+}
 
 bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
                                int32_t random_seed,
@@ -1015,7 +1048,90 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
 
-  return target_allocated && draft_allocated;
+  const bool allocated = target_allocated && draft_allocated;
+  if (allocated) {
+    initialize_composite_hierarchy_kv_cache_transfer();
+  }
+  return allocated;
+}
+
+void MTPWorkerImpl::initialize_composite_hierarchy_kv_cache_transfer() {
+  if (hierarchy_cache_ownership_mode_ !=
+          HierarchyCacheOwnershipMode::PARENT_COMPOSITE ||
+      composite_hierarchy_kv_cache_transfer_ != nullptr ||
+      options_.host_blocks_factor() <= 1.0) {
+    return;
+  }
+  CHECK(impl_ != nullptr);
+  CHECK(draft_impl_ != nullptr);
+  CHECK(compute_stream_ != nullptr);
+  if (options_.enable_kvcache_store()) {
+    CHECK_GT(options_.host_blocks_factor(), 1.0)
+        << "KV cache Store requires Host cache blocks.";
+  }
+
+  CHECK_GT(options_.dp_size(), 0u);
+  CHECK_EQ(options_.world_size() % options_.dp_size(), 0u);
+  CHECK_GT(options_.cp_size(), 0u);
+  const uint32_t dp_local_size =
+      static_cast<uint32_t>(options_.world_size() / options_.dp_size());
+  CHECK_EQ(dp_local_size % options_.cp_size(), 0u);
+  const bool mlu_overlap = options_.cp_size() > 1 &&
+                           Platform::uses_model_cp_sharding() &&
+                           Platform::is_mlu();
+  const uint32_t target_tp_size =
+      mlu_overlap ? dp_local_size : dp_local_size / options_.cp_size();
+  CHECK_GT(target_tp_size, 0u);
+  const int32_t worker_rank = context_.get_parallel_args().rank();
+  CHECK_GE(worker_rank, 0);
+  const uint32_t worker_id = static_cast<uint32_t>(worker_rank);
+
+  HierarchyKVCacheTransfer::Options transfer_options;
+  transfer_options.tp_rank(worker_id % target_tp_size)
+      .tp_size(target_tp_size)
+      .layers(context_.get_model_args().n_layers())
+      .host_blocks_factor(options_.host_blocks_factor())
+      .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
+      .enable_mla(options_.enable_mla())
+      .enable_kvcache_store(options_.enable_kvcache_store())
+      .store_protocol(options_.store_protocol())
+      .store_master_server_address(options_.store_master_server_address())
+      .store_metadata_server(options_.store_metadata_server())
+      .store_local_hostname(options_.store_local_hostname())
+      .store_namespace(options_.model_id())
+      .store_worker_id(worker_id);
+  auto transfer =
+      std::make_unique<HierarchyKVCacheTransfer>(transfer_options, device_);
+
+  const HierarchyKVCacheAllocationDescriptor& target_descriptor =
+      impl_->hierarchy_kv_cache_allocation_descriptor();
+  HierarchyKVCacheTransfer::ParticipantRegistration target_registration;
+  target_registration.participant = CacheParticipant::TARGET;
+  target_registration.actual_compute_stream = compute_stream_.get();
+  target_registration.device_caches = target_descriptor.device_caches;
+  target_registration.cache_shape = target_descriptor.cache_shape;
+  target_registration.create_options = target_descriptor.create_options;
+  target_registration.model_identity = target_descriptor.model_identity;
+  target_registration.tp_rank = worker_id % target_tp_size;
+  target_registration.tp_size = target_tp_size;
+  transfer->register_participant(std::move(target_registration));
+
+  const HierarchyKVCacheAllocationDescriptor& draft_descriptor =
+      draft_impl_->hierarchy_kv_cache_allocation_descriptor();
+  HierarchyKVCacheTransfer::ParticipantRegistration draft_registration;
+  draft_registration.participant = CacheParticipant::DRAFT;
+  draft_registration.actual_compute_stream = compute_stream_.get();
+  draft_registration.device_caches = draft_descriptor.device_caches;
+  draft_registration.cache_shape = draft_descriptor.cache_shape;
+  draft_registration.create_options = draft_descriptor.create_options;
+  draft_registration.model_identity = draft_descriptor.model_identity;
+  draft_registration.tp_rank =
+      options_.enable_mtp_draft_body_tp1() ? 0 : worker_id % target_tp_size;
+  draft_registration.tp_size =
+      options_.enable_mtp_draft_body_tp1() ? 1 : target_tp_size;
+  transfer->register_participant(std::move(draft_registration));
+  CHECK(transfer->finalize_registration());
+  composite_hierarchy_kv_cache_transfer_ = std::move(transfer);
 }
 
 uint32_t MTPWorkerImpl::transfer_kv_blocks(
@@ -1023,6 +1139,13 @@ uint32_t MTPWorkerImpl::transfer_kv_blocks(
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   CHECK(impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
+
+  if (composite_hierarchy_kv_cache_transfer_ != nullptr) {
+    return schedule_hierarchy_kv_cache_transfer(
+        composite_hierarchy_kv_cache_transfer_.get(),
+        batch_id,
+        block_transfer_info);
+  }
 
   const uint32_t target_transferred =
       impl_->transfer_kv_blocks(batch_id, block_transfer_info);
@@ -1037,11 +1160,37 @@ uint32_t MTPWorkerImpl::transfer_kv_blocks(
   CHECK(impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
 
+  if (composite_hierarchy_kv_cache_transfer_ != nullptr) {
+    return composite_hierarchy_kv_cache_transfer_->transfer_kv_blocks(
+        batch_id, block_transfer_info);
+  }
+
   const uint32_t target_transferred =
       impl_->transfer_kv_blocks(batch_id, block_transfer_info);
   const uint32_t draft_transferred =
       draft_impl_->transfer_kv_blocks(batch_id, block_transfer_info);
   return validate_paired_transfer_counts(target_transferred, draft_transferred);
+}
+
+std::vector<uint8_t> MTPWorkerImpl::prefetch_kv_blocks(
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  CHECK(impl_ != nullptr);
+  CHECK(draft_impl_ != nullptr);
+  if (composite_hierarchy_kv_cache_transfer_ != nullptr) {
+    return composite_hierarchy_kv_cache_transfer_->prefetch_kv_blocks(
+        block_transfer_info);
+  }
+
+  std::vector<uint8_t> target_hits =
+      impl_->prefetch_kv_blocks(block_transfer_info);
+  const std::vector<uint8_t> draft_hits =
+      draft_impl_->prefetch_kv_blocks(block_transfer_info);
+  CHECK_EQ(target_hits.size(), draft_hits.size());
+  for (size_t index = 0; index < target_hits.size(); ++index) {
+    target_hits[index] =
+        target_hits[index] == 1 && draft_hits[index] == 1 ? 1 : 0;
+  }
+  return target_hits;
 }
 
 #if defined(USE_NPU) || defined(USE_MLU)
@@ -1121,7 +1270,11 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
           torch::zeros({size}, torch::dtype(dtype_).device(device_)));
     }
   }
-  return target_allocated && draft_allocated;
+  const bool allocated = target_allocated && draft_allocated;
+  if (allocated) {
+    initialize_composite_hierarchy_kv_cache_transfer();
+  }
+  return allocated;
 }
 #endif
 
@@ -1140,7 +1293,7 @@ MTPWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
 
 void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
                                                 ForwardInput& processed_input) {
-  // Composite skips CP prepare; leaves run it in run_llm_no_sync_impl.
+  // Composite skips CP prepare; leaves run it in run_child_llm_no_sync.
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
 }
 
@@ -1167,13 +1320,18 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     ForwardInput target_prepared;
     ForwardInput draft_prepared;
-    auto output = run_llm_no_sync_impl(
-        *impl_, input, *prepare_stream_, *compute_stream_, target_prepared);
-    auto draft_output = run_llm_no_sync_impl(*draft_impl_,
-                                             input,
-                                             *prepare_stream_,
-                                             *compute_stream_,
-                                             draft_prepared);
+    auto output = run_child_llm_no_sync(CacheParticipant::TARGET,
+                                        *impl_,
+                                        input,
+                                        *prepare_stream_,
+                                        *compute_stream_,
+                                        target_prepared);
+    auto draft_output = run_child_llm_no_sync(CacheParticipant::DRAFT,
+                                              *draft_impl_,
+                                              input,
+                                              *prepare_stream_,
+                                              *compute_stream_,
+                                              draft_prepared);
     if (draft_output.has_value()) {
       transfer_retained_inputs(*output, draft_output.value());
     }
@@ -1204,20 +1362,22 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
       draft_extend_prepared = std::move(pending_draft_context_.prepared_input);
       pending_draft_context_ = PendingDraftContext();
     } else {
-      draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
-                                                      new_input,
-                                                      *prepare_stream_,
-                                                      *compute_stream_,
-                                                      draft_extend_prepared)
+      draft_outputs.emplace_back(run_child_llm_no_sync(CacheParticipant::DRAFT,
+                                                       *draft_impl_,
+                                                       new_input,
+                                                       *prepare_stream_,
+                                                       *compute_stream_,
+                                                       draft_extend_prepared)
                                      .value());
     }
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
-      draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
-                                                      input,
-                                                      *prepare_stream_,
-                                                      *compute_stream_,
-                                                      draft_step_prepared[i])
+      draft_outputs.emplace_back(run_child_llm_no_sync(CacheParticipant::DRAFT,
+                                                       *draft_impl_,
+                                                       input,
+                                                       *prepare_stream_,
+                                                       *compute_stream_,
+                                                       draft_step_prepared[i])
                                      .value());
     }
 
@@ -1230,11 +1390,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= options_.num_speculative_tokens() + 1;
     }
-    ForwardOutput output = run_llm_no_sync_impl(*impl_,
-                                                new_input,
-                                                *prepare_stream_,
-                                                *compute_stream_,
-                                                target_prepared)
+    ForwardOutput output = run_child_llm_no_sync(CacheParticipant::TARGET,
+                                                 *impl_,
+                                                 new_input,
+                                                 *prepare_stream_,
+                                                 *compute_stream_,
+                                                 target_prepared)
                                .value();
     for (ForwardOutput& draft_output : draft_outputs) {
       transfer_retained_inputs(output, draft_output);
@@ -1267,10 +1428,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   ForwardInput draft_prepared;
 
   // run the target model to get first token and hidden states
-  ForwardOutput output =
-      run_llm_no_sync_impl(
-          *impl_, input, *prepare_stream_, *compute_stream_, target_prepared)
-          .value();
+  ForwardOutput output = run_child_llm_no_sync(CacheParticipant::TARGET,
+                                               *impl_,
+                                               input,
+                                               *prepare_stream_,
+                                               *compute_stream_,
+                                               target_prepared)
+                             .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
@@ -1308,11 +1472,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   }
   // generate kv cache for draft model
   timer.reset();
-  ForwardOutput draft_output = run_llm_no_sync_impl(*draft_impl_,
-                                                    prefill_input,
-                                                    *prepare_stream_,
-                                                    *compute_stream_,
-                                                    draft_prepared)
+  ForwardOutput draft_output = run_child_llm_no_sync(CacheParticipant::DRAFT,
+                                                     *draft_impl_,
+                                                     prefill_input,
+                                                     *prepare_stream_,
+                                                     *compute_stream_,
+                                                     draft_prepared)
                                    .value();
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
@@ -1672,11 +1837,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
           std::move(pending_draft_context_.prepared_input);
       pending_draft_context_ = PendingDraftContext();
     } else {
-      draft_output_opt = run_llm_no_sync_impl(*draft_impl_,
-                                              current_draft_input,
-                                              *compute_stream_,
-                                              *compute_stream_,
-                                              draft_prepared[draft_idx]);
+      draft_output_opt = run_child_llm_no_sync(CacheParticipant::DRAFT,
+                                               *draft_impl_,
+                                               current_draft_input,
+                                               *compute_stream_,
+                                               *compute_stream_,
+                                               draft_prepared[draft_idx]);
     }
 
     if ((use_device_target_context || use_prelaunched_first_draft) &&
@@ -2170,11 +2336,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                                          per_seq_val_tokens,
                                          json_scratch,
                                          *compute_stream_);
-  ForwardOutput target_output = run_llm_no_sync_impl(*impl_,
-                                                     validate_input,
-                                                     *compute_stream_,
-                                                     *compute_stream_,
-                                                     target_prepared)
+  ForwardOutput target_output = run_child_llm_no_sync(CacheParticipant::TARGET,
+                                                      *impl_,
+                                                      validate_input,
+                                                      *compute_stream_,
+                                                      *compute_stream_,
+                                                      target_prepared)
                                     .value();
   const double target_latency_ms = timer.elapsed_milliseconds();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
@@ -2777,11 +2944,12 @@ void MTPWorkerImpl::submit_pending_first_draft(
   pending_draft_context_.dp_global_batch_generations =
       batch_identity_input.input_params.parallel.dp_global_batch_generations;
   pending_draft_context_.output =
-      run_llm_no_sync_impl(*draft_impl_,
-                           draft_input,
-                           *compute_stream_,
-                           *compute_stream_,
-                           pending_draft_context_.prepared_input);
+      run_child_llm_no_sync(CacheParticipant::DRAFT,
+                            *draft_impl_,
+                            draft_input,
+                            *compute_stream_,
+                            *compute_stream_,
+                            pending_draft_context_.prepared_input);
   CHECK(pending_draft_context_.output.has_value())
       << "failed to prelaunch next MTP first draft";
 }

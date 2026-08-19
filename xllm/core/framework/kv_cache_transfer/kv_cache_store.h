@@ -15,21 +15,16 @@ limitations under the License.
 
 #pragma once
 
-#include <Mooncake/mooncake-store/include/client_service.h>
-
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "framework/kv_cache/kv_cache.h"
-#include "framework/model/model_input_params.h"
+#include "framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
 #include "util/slice.h"
 
 namespace xllm {
-
-using HostGroupedCaches = std::map<BlockType, std::unique_ptr<KVCache>>;
 
 struct KVCacheStoreInitConfig {
   std::string localhost_name = "127.0.0.1";
@@ -44,11 +39,11 @@ struct KVCacheStoreInitConfig {
 
 class KVCacheStore final {
  public:
-  KVCacheStore() = default;
+  KVCacheStore();
   ~KVCacheStore();
 
   bool init(const KVCacheStoreInitConfig& config,
-            HostGroupedCaches* host_kv_caches);
+            const HostCacheSliceProvider* slice_provider);
 
   uint32_t batch_put(
       const std::vector<BlockTransferInfo>& block_transfer_info) {
@@ -70,21 +65,24 @@ class KVCacheStore final {
   uint32_t batch_exist(std::vector<std::string>&& keys);
 
  private:
+  friend class KVCacheStoreTestPeer;
+  struct Impl;
+
   KVCacheStore(const KVCacheStore&) = delete;
   KVCacheStore& operator=(const KVCacheStore&) = delete;
 
-  std::string build_key(const BlockTransferInfo& block_info) const;
-  std::vector<mooncake::Slice> generate_mooncake_slices(BlockType type,
-                                                        int32_t block_id) const;
+  std::string build_component_key(const HostCacheComponentSchema& component,
+                                  const BlockTransferInfo& block_info) const;
+  std::vector<const HostCacheComponentSchema*> required_components(
+      BlockType block_type) const;
 
  private:
   bool is_initialized_ = false;
   KVCacheStoreInitConfig config_;
-  std::string cache_schema_hash_;
-  mooncake::ReplicateConfig rep_config_;
-  HostGroupedCaches* host_kv_caches_ = nullptr;
+  const HostCacheSliceProvider* slice_provider_ = nullptr;
+  std::vector<HostCacheComponentSchema> components_;
   std::vector<void*> registered_addresses_;
-  std::shared_ptr<mooncake::Client> client_ptr_;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace xllm

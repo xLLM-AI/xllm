@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "util/utils.h"
 
@@ -519,6 +520,130 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
             (std::vector<size_t>{kPromptTokens - kRestoreTokens}));
   EXPECT_EQ(budget.num_preempted_requests, 1u);
   EXPECT_TRUE(finished.empty());
+}
+
+TEST(SchedulerPolicyTest, PrefillFirstHostColdRequestAllocatesAllDsv4Chunks) {
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/25000,
+      /*max_seqs_per_batch=*/8,
+      /*num_speculative_tokens=*/1,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1,
+      /*priority_strategy=*/"fcfs");
+  options.enable_schedule_overlap() = true;
+  BatchMode mode{
+      .enable_mix_batch = false,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  PrefillFirstPolicy policy(mode, options);
+
+  BlockManagerPool::Options block_options;
+  block_options.num_blocks(6400)
+      .block_size(128)
+      .enable_prefix_cache(true)
+      .enable_host_offload(true)
+      .sliding_window_size(128)
+      .swa_blocks_per_seq(1)
+      .max_tokens_per_batch(25000)
+      .max_seqs_per_batch(8)
+      .num_speculative_tokens(1)
+      .num_embedding_blocks(214)
+      .manager_types({1u, 0u, 0u})
+      .compress_ratios({0u, 4u, 128u})
+      .host_num_blocks_by_type({{BlockType::SWA, 856},
+                                {BlockType::C4, 6400},
+                                {BlockType::C128, 200}});
+  HierarchyBlockManagerPool block_manager_pool(block_options,
+                                               /*engine=*/nullptr,
+                                               /*dp_size=*/1);
+  auto profile_engine = std::make_unique<FakeEngine>(6400, 128);
+  ProfileManager::Options profile_options;
+  profile_options.max_tokens_per_batch(25000).max_seqs_per_batch(8);
+  ProfileManager profile_manager(profile_engine.get(), profile_options);
+
+  std::vector<std::shared_ptr<Request>> requests = generate_request(
+      {36025}, {32}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
+  DequeQueue prefill_queue;
+  prefill_queue.push(requests.front());
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = &profile_manager,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 2,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget budget{
+      .remaining_token_budget = 25000,
+      .remaining_seq_budget = 8,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, budget, finished);
+
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequence_budgets, (std::vector<size_t>{16384}));
+  EXPECT_GE(running_sequences.front()->kv_state().current_max_tokens_capacity(),
+            16384u);
+  EXPECT_TRUE(prefill_queue.empty());
+  EXPECT_TRUE(unified_queue.empty());
+  EXPECT_TRUE(finished.empty());
+
+  running_sequences.front()->kv_state().set_kv_cache_tokens_num(16384);
+  ScheduleBudget second_budget{
+      .remaining_token_budget = 25000,
+      .remaining_seq_budget = 8,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  policy.schedule(state, second_budget, finished);
+
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequence_budgets, (std::vector<size_t>{16384}));
+  EXPECT_GE(running_sequences.front()->kv_state().current_max_tokens_capacity(),
+            32768u);
+  EXPECT_TRUE(chunk_queue.empty());
+  EXPECT_TRUE(finished.empty());
+
+  running_sequences.front()->kv_state().set_kv_cache_tokens_num(32768);
+  ScheduleBudget final_budget{
+      .remaining_token_budget = 25000,
+      .remaining_seq_budget = 8,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  policy.schedule(state, final_budget, finished);
+
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequence_budgets, (std::vector<size_t>{3257}));
+  EXPECT_GE(running_sequences.front()->kv_state().current_max_tokens_capacity(),
+            36025u);
+  EXPECT_TRUE(chunk_queue.empty());
+  EXPECT_TRUE(finished.empty());
+
+  block_manager_pool.deallocate(running_sequences.front());
 }
 
 TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {

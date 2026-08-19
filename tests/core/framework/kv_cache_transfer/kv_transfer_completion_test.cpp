@@ -17,14 +17,137 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <future>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "core/framework/kv_cache_transfer/kv_cache_store.h"
 
 namespace xllm {
+
+class KVCacheStoreTestPeer final {
+ public:
+  static void set_config(KVCacheStore* store,
+                         const KVCacheStoreInitConfig& config) {
+    store->config_ = config;
+  }
+
+  static void set_components(KVCacheStore* store,
+                             std::vector<HostCacheComponentSchema> components) {
+    store->components_ = std::move(components);
+  }
+
+  static std::string build_component_key(
+      const KVCacheStore& store,
+      const HostCacheComponentSchema& component,
+      const BlockTransferInfo& block_info) {
+    return store.build_component_key(component, block_info);
+  }
+
+  static size_t required_component_count(const KVCacheStore& store,
+                                         BlockType block_type) {
+    return store.required_components(block_type).size();
+  }
+};
+
 namespace {
 
 using namespace std::chrono_literals;
+
+BlockTransferInfo make_block_info(BlockType block_type) {
+  std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash_key{};
+  for (size_t index = 0; index < hash_key.size(); ++index) {
+    hash_key[index] = static_cast<uint8_t>(index + 1);
+  }
+  return BlockTransferInfo(/*src_id=*/3,
+                           /*dst_id=*/7,
+                           hash_key.data(),
+                           TransferType::D2H2G,
+                           block_type);
+}
+
+HostCacheComponentSchema make_component(CacheParticipant participant,
+                                        const std::string& model_identity,
+                                        BlockType block_type = BlockType::KV) {
+  HostCacheComponentSchema component;
+  component.participant = participant;
+  component.block_type = block_type;
+  component.model_identity = model_identity;
+  component.schema_fingerprint = "schema-fingerprint";
+  component.tp_rank = 0;
+  component.tp_size = 8;
+  return component;
+}
+
+TEST(KVCacheStoreKeyTest, SeparatesTargetAndDraftComponents) {
+  KVCacheStore store;
+  KVCacheStoreInitConfig config;
+  config.model_id = "deepseek-v4";
+  KVCacheStoreTestPeer::set_config(&store, config);
+  const BlockTransferInfo block_info = make_block_info(BlockType::C128);
+  HostCacheComponentSchema target = make_component(
+      CacheParticipant::TARGET, "deepseek-v4-target", BlockType::C128);
+  HostCacheComponentSchema draft = target;
+  draft.participant = CacheParticipant::DRAFT;
+
+  const std::string target_key =
+      KVCacheStoreTestPeer::build_component_key(store, target, block_info);
+  const std::string draft_key =
+      KVCacheStoreTestPeer::build_component_key(store, draft, block_info);
+
+  EXPECT_EQ(target_key.rfind("xllm-kv-v3:", 0), 0u);
+  EXPECT_EQ(draft_key.rfind("xllm-kv-v3:", 0), 0u);
+  EXPECT_NE(target_key, draft_key);
+}
+
+TEST(KVCacheStoreKeyTest, SeparatesParticipantModelAndSchemaIdentity) {
+  KVCacheStore store;
+  KVCacheStoreInitConfig config;
+  config.model_id = "deepseek-v4";
+  KVCacheStoreTestPeer::set_config(&store, config);
+  const BlockTransferInfo block_info = make_block_info(BlockType::SWA);
+  HostCacheComponentSchema first = make_component(
+      CacheParticipant::DRAFT, "draft-revision-a", BlockType::SWA);
+  HostCacheComponentSchema second = first;
+  second.model_identity = "draft-revision-b";
+  HostCacheComponentSchema third = first;
+  third.schema_fingerprint = "different-schema";
+
+  const std::string first_key =
+      KVCacheStoreTestPeer::build_component_key(store, first, block_info);
+  const std::string second_key =
+      KVCacheStoreTestPeer::build_component_key(store, second, block_info);
+  const std::string third_key =
+      KVCacheStoreTestPeer::build_component_key(store, third, block_info);
+
+  EXPECT_NE(first_key, second_key);
+  EXPECT_NE(first_key, third_key);
+}
+
+TEST(KVCacheStoreKeyTest, ExpandsLogicalTypeToEveryRequiredParticipant) {
+  KVCacheStore store;
+  std::vector<HostCacheComponentSchema> components;
+  components.emplace_back(
+      make_component(CacheParticipant::TARGET, "target", BlockType::C4));
+  components.emplace_back(
+      make_component(CacheParticipant::DRAFT, "draft", BlockType::C4));
+  components.emplace_back(
+      make_component(CacheParticipant::TARGET, "target", BlockType::SWA));
+  KVCacheStoreTestPeer::set_components(&store, std::move(components));
+
+  EXPECT_EQ(
+      KVCacheStoreTestPeer::required_component_count(store, BlockType::C4), 2u);
+  EXPECT_EQ(
+      KVCacheStoreTestPeer::required_component_count(store, BlockType::SWA),
+      1u);
+  EXPECT_EQ(
+      KVCacheStoreTestPeer::required_component_count(store, BlockType::C128),
+      0u);
+}
 
 TEST(KVTransferCompletionTest, WaitsForEveryTransfer) {
   folly::Promise<bool> first_promise;

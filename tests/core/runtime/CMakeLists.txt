@@ -116,7 +116,9 @@ if(USE_MLU)
       GTest::gtest_main
       torch_mlu
   )
+endif()
 
+if(USE_NPU OR USE_MLU)
   cc_test(
     NAME
       mtp_host_offload_test
@@ -129,8 +131,10 @@ if(USE_MLU)
       :kv_cache
       :platform
       GTest::gtest_main
-      torch_mlu
   )
+  if(USE_MLU)
+    target_link_libraries(mtp_host_offload_test PRIVATE torch_mlu)
+  endif()
 endif()
 
 if(USE_CUDA)

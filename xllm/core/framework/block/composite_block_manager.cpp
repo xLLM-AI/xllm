@@ -368,6 +368,12 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   }
   KVCacheState& kv_state = seq->kv_state();
 
+  // Publish completed blocks before any growth. SWA retirement is deferred
+  // until every independent leaf has allocated successfully: releasing SWA
+  // mutates the sequence in place and therefore must be the final operation
+  // that can precede an allocation failure.
+  cache_full_blocks_for_sequence(seq);
+
   // Fan out growth. Each leaf returns its newly allocated blocks (or nullopt
   // on failure). Stage keyed by BlockType; commit only after every leaf
   // succeeds so a failure rolls back cleanly.
@@ -380,15 +386,40 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     staged.clear();
   };
 
-  for (auto& [type, entry] : leaves_) {
+  auto allocate_leaf = [&](BlockType type, LeafEntry& entry) {
     std::optional<std::vector<Block>> blocks =
         entry.leaf->allocate_for_sequence(seq, num_tokens);
     if (!blocks.has_value()) {
+      VLOG(1) << "Composite block allocation failed: type="
+              << static_cast<int32_t>(type) << ", num_tokens=" << num_tokens
+              << ", held=" << kv_state.num_blocks(type)
+              << ", free=" << entry.leaf->num_free_blocks()
+              << ", total=" << entry.leaf->num_total_blocks();
       release_staged();
       return false;
     }
     if (!blocks->empty()) {
       staged.emplace(type, std::move(*blocks));
+    }
+    return true;
+  };
+
+  for (auto& [type, entry] : leaves_) {
+    if (type == BlockType::SWA) {
+      continue;
+    }
+    if (!allocate_leaf(type, entry)) {
+      return false;
+    }
+  }
+
+  const auto swa_it = leaves_.find(BlockType::SWA);
+  if (swa_it != leaves_.end()) {
+    // SlidingWindowBlockManager performs its capacity preflight and prefix
+    // retirement atomically inside allocate_for_sequence(). Keep it last so
+    // no independent leaf failure can follow that in-place mutation.
+    if (!allocate_leaf(swa_it->first, swa_it->second)) {
+      return false;
     }
   }
 
@@ -412,6 +443,13 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
         staged_it == staged.end() ? 0 : staged_it->second.size();
     const size_t total = seq->kv_state().num_blocks(type) + staged_for_type;
     if (total < needed) {
+      VLOG(1) << "Composite block coverage failed: type="
+              << static_cast<int32_t>(type) << ", num_tokens=" << num_tokens
+              << ", needed=" << needed
+              << ", held=" << seq->kv_state().num_blocks(type)
+              << ", staged=" << staged_for_type
+              << ", free=" << entry.leaf->num_free_blocks()
+              << ", total=" << entry.leaf->num_total_blocks();
       release_staged();
       return false;
     }

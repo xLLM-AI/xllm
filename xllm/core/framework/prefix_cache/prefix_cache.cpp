@@ -30,7 +30,7 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                                       const Slice<Block>& existed_shared_blocks,
                                       const MMData& mm_data,
                                       const Slice<XXH3Key>& block_hashes) {
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
     return std::vector<Block>();
@@ -109,7 +109,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            const MMData& mm_data,
                            const Slice<XXH3Key>& block_hashes) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_blocks =
       std::min(token_ids.size() / block_size_, blocks.size());
 
@@ -272,6 +272,21 @@ size_t PrefixCache::evict(size_t n_blocks) {
   }
 
   return evict_count;
+}
+
+bool PrefixCache::can_evict(size_t n_blocks) const {
+  if (n_blocks == 0) {
+    return true;
+  }
+  size_t evictable = 0;
+  for (const auto& [hash, node] : cached_blocks_) {
+    (void)hash;
+    CHECK(node != nullptr);
+    if (!node->block.is_shared() && ++evictable >= n_blocks) {
+      return true;
+    }
+  }
+  return false;
 }
 
 uint32_t PrefixCache::compute_hash_keys(const Slice<int32_t>& token_ids,

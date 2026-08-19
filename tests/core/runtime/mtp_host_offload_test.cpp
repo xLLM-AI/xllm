@@ -36,9 +36,11 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
   RecordingTransferWorker(const ParallelArgs& parallel_args,
                           const torch::Device& device,
                           const runtime::Options& options,
-                          uint32_t transfer_result)
+                          uint32_t transfer_result,
+                          uint8_t prefetch_hit = 1)
       : LLMWorkerImpl(parallel_args, device, options),
-        transfer_result_(transfer_result) {}
+        transfer_result_(transfer_result),
+        prefetch_hit_(prefetch_hit) {}
 
   uint32_t transfer_kv_blocks(
       uint64_t batch_id,
@@ -47,6 +49,12 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
     last_transfer_size_ = block_transfer_info.size();
     ++vector_transfer_count_;
     return transfer_result_;
+  }
+
+  std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info) override {
+    ++prefetch_count_;
+    return std::vector<uint8_t>(block_transfer_info.size(), prefetch_hit_);
   }
 
   uint32_t transfer_kv_blocks(
@@ -60,6 +68,7 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
 
   uint32_t vector_transfer_count() const { return vector_transfer_count_; }
   uint32_t slice_transfer_count() const { return slice_transfer_count_; }
+  uint32_t prefetch_count() const { return prefetch_count_; }
   uint64_t last_batch_id() const { return last_batch_id_; }
   size_t last_transfer_size() const { return last_transfer_size_; }
 
@@ -67,6 +76,8 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
   uint32_t transfer_result_ = 0;
   uint32_t vector_transfer_count_ = 0;
   uint32_t slice_transfer_count_ = 0;
+  uint32_t prefetch_count_ = 0;
+  uint8_t prefetch_hit_ = 1;
   uint64_t last_batch_id_ = 0;
   size_t last_transfer_size_ = 0;
 };
@@ -89,14 +100,14 @@ class MTPHostOffloadTest : public ::testing::Test {
  protected:
   void SetUp() override {
     if (Platform::device_count() < 1) {
-      GTEST_SKIP() << "MLU device is required for MTP host offload tests.";
+      GTEST_SKIP() << "An accelerator is required for MTP host offload tests.";
     }
   }
 };
 
 TEST_F(MTPHostOffloadTest, TransfersEveryBlockToTargetAndDraft) {
   constexpr uint64_t kBatchId = 42;
-  const torch::Device device("mlu:0");
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   runtime::Options options;
@@ -134,7 +145,7 @@ TEST_F(MTPHostOffloadTest, TransfersEveryBlockToTargetAndDraft) {
 
 TEST_F(MTPHostOffloadTest, RejectsMismatchedTargetAndDraftTransferCounts) {
   constexpr uint64_t kBatchId = 73;
-  const torch::Device device("mlu:0");
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   runtime::Options options;
@@ -158,6 +169,39 @@ TEST_F(MTPHostOffloadTest, RejectsMismatchedTargetAndDraftTransferCounts) {
   EXPECT_EQ(transferred, 0);
   EXPECT_EQ(target_ptr->slice_transfer_count(), 1);
   EXPECT_EQ(draft_ptr->slice_transfer_count(), 1);
+}
+
+TEST_F(MTPHostOffloadTest, PrefetchRequiresEveryParticipantHit) {
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
+  ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  runtime::Options options;
+  options.block_size(16).num_speculative_tokens(1);
+  TestMTPWorker worker(parallel_args, device, options);
+
+  const std::vector<BlockTransferInfo> transfer_info = {
+      BlockTransferInfo(/*src_block_id=*/5, /*dst_block_id=*/6)};
+  auto target = std::make_unique<RecordingTransferWorker>(parallel_args,
+                                                          device,
+                                                          options,
+                                                          /*transfer_result=*/1,
+                                                          /*prefetch_hit=*/1);
+  auto draft = std::make_unique<RecordingTransferWorker>(parallel_args,
+                                                         device,
+                                                         options,
+                                                         /*transfer_result=*/1,
+                                                         /*prefetch_hit=*/0);
+  RecordingTransferWorker* target_ptr = target.get();
+  RecordingTransferWorker* draft_ptr = draft.get();
+  worker.replace_transfer_workers(std::move(target), std::move(draft));
+  Slice<BlockTransferInfo> transfer_slice(transfer_info);
+
+  const std::vector<uint8_t> hits = worker.prefetch_kv_blocks(transfer_slice);
+
+  ASSERT_EQ(hits.size(), 1u);
+  EXPECT_EQ(hits.front(), 0);
+  EXPECT_EQ(target_ptr->prefetch_count(), 1u);
+  EXPECT_EQ(draft_ptr->prefetch_count(), 1u);
 }
 
 }  // namespace

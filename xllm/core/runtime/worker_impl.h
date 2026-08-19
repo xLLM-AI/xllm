@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "common/types.h"
 #include "executor.h"
@@ -55,6 +56,13 @@ class WorkerRendezvous;
 
 class WorkerImpl {
  public:
+  struct HierarchyKVCacheAllocationDescriptor final {
+    std::vector<KVCache>* device_caches = nullptr;
+    KVCacheShape cache_shape;
+    KVCacheCreateOptions create_options;
+    std::string model_identity;
+  };
+
   enum Status : int8_t {
     UNINITIALIZED = 0,
     LOADED,
@@ -205,7 +213,7 @@ class WorkerImpl {
       Slice<BlockTransferInfo>& block_transfer_info);
 
   // Run the model on the given input. async call
-  // the future returns a successfull status with no meaningful value
+  // the future returns a successful status with no meaningful value
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs);
 
@@ -231,6 +239,13 @@ class WorkerImpl {
 
   Status get_status() const { return status_; }
 
+  const HierarchyKVCacheAllocationDescriptor&
+  hierarchy_kv_cache_allocation_descriptor() const {
+    CHECK(hierarchy_kv_cache_allocation_descriptor_.has_value())
+        << "KV cache allocation descriptor is not available.";
+    return hierarchy_kv_cache_allocation_descriptor_.value();
+  }
+
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
 
@@ -255,6 +270,11 @@ class WorkerImpl {
   void init_hierarchy_kv_cache_transfer(
       const KVCacheShape& kv_cache_shape,
       const KVCacheCreateOptions& kv_cache_create_options);
+
+  uint32_t schedule_hierarchy_kv_cache_transfer(
+      HierarchyKVCacheTransfer* transfer,
+      uint64_t batch_id,
+      const std::vector<BlockTransferInfo>& block_transfer_info);
 
   bool can_prepare_npu_graph_decode_input(
       const ModelInputParams& input_params) const;
@@ -363,6 +383,8 @@ class WorkerImpl {
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
+  std::optional<HierarchyKVCacheAllocationDescriptor>
+      hierarchy_kv_cache_allocation_descriptor_;
 
   // causal LM model
   std::unique_ptr<CausalLM> model_;

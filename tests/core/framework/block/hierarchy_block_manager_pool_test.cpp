@@ -315,6 +315,87 @@ TEST(HierarchyBlockManagerPoolTest, TypedLayoutHasPerDpRankLeaves) {
 }
 
 TEST(HierarchyBlockManagerPoolTest,
+     RuntimeSizedTypedLayoutAllocatesColdPromptChunks) {
+  BlockManagerPool::Options options = make_typed_cache_options();
+  options.num_blocks(6400)
+      .max_tokens_per_batch(25000)
+      .max_seqs_per_batch(8)
+      .host_num_blocks_by_type({{BlockType::SWA, 856},
+                                {BlockType::C4, 6400},
+                                {BlockType::C128, 200}});
+  HierarchyBlockManagerPool pool(options,
+                                 /*engine=*/nullptr,
+                                 /*dp_size=*/1);
+
+  std::vector<int32_t> tokens(36025, 97);
+  Sequence sequence = make_test_sequence(/*index=*/0, tokens);
+
+  pool.allocate_shared(&sequence);
+  const HostCacheRestorePoint selected = pool.select_host_cache_restore(
+      &sequence, std::numeric_limits<size_t>::max());
+  pool.trim_host_cache(&sequence, selected);
+  EXPECT_TRUE(pool.allocate(&sequence, /*num_tokens=*/16384));
+  EXPECT_GE(sequence.kv_state().current_max_tokens_capacity(), 16384u);
+
+  sequence.kv_state().set_kv_cache_tokens_num(16384);
+  EXPECT_TRUE(pool.allocate(&sequence, /*num_tokens=*/32768));
+  EXPECT_GE(sequence.kv_state().current_max_tokens_capacity(), 32768u);
+  const Slice<Block> swa_blocks = sequence.kv_state().blocks(BlockType::SWA);
+  ASSERT_EQ(swa_blocks.size(), 256u);
+  EXPECT_FALSE(swa_blocks[0].is_valid());
+  EXPECT_TRUE(swa_blocks[127].is_valid());
+  EXPECT_TRUE(swa_blocks[128].is_valid());
+
+  sequence.kv_state().set_kv_cache_tokens_num(32768);
+  EXPECT_TRUE(pool.allocate(&sequence, /*num_tokens=*/36025));
+  EXPECT_GE(sequence.kv_state().current_max_tokens_capacity(), 36025u);
+
+  pool.deallocate(&sequence);
+}
+
+TEST(HierarchyBlockManagerPoolTest,
+     RuntimeSizedTypedLayoutRestoresColdPromptTail) {
+  BlockManagerPool::Options options = make_typed_cache_options();
+  options.num_blocks(6400)
+      .max_tokens_per_batch(25000)
+      .max_seqs_per_batch(8)
+      .host_num_blocks_by_type({{BlockType::SWA, 856},
+                                {BlockType::C4, 6400},
+                                {BlockType::C128, 200}});
+  HierarchyBlockManagerPool pool(options,
+                                 /*engine=*/nullptr,
+                                 /*dp_size=*/1);
+
+  std::vector<int32_t> tokens(36025, 101);
+  auto& host_leaves =
+      HierarchyPoolTestPeer::mutable_host_block_managers(pool).front();
+  seed_host_prefix(host_leaves.at(BlockType::SWA).leaf.get(), tokens);
+  seed_host_prefix(host_leaves.at(BlockType::C4).leaf.get(), tokens);
+  seed_host_prefix(host_leaves.at(BlockType::C128).leaf.get(), tokens);
+
+  Sequence restored = make_test_sequence(/*index=*/0, tokens);
+  ASSERT_TRUE(allocate_with_host_cache_budget(
+      &pool,
+      &restored,
+      /*num_tokens=*/tokens.size(),
+      /*max_copy_units=*/std::numeric_limits<size_t>::max()));
+  EXPECT_EQ(restored.kv_state().kv_cache_tokens_num(), 32768u);
+
+  const Slice<Block> swa_blocks = restored.kv_state().blocks(BlockType::SWA);
+  ASSERT_EQ(swa_blocks.size(), 282u);
+  EXPECT_FALSE(swa_blocks[254].is_valid());
+  EXPECT_TRUE(swa_blocks[255].is_valid());
+  EXPECT_TRUE(swa_blocks.back().is_valid());
+  const size_t valid_swa_blocks = static_cast<size_t>(std::count_if(
+      swa_blocks.begin(), swa_blocks.end(), [](const Block& block) {
+        return block.is_valid();
+      }));
+  EXPECT_EQ(valid_swa_blocks, 27u);
+
+  pool.deallocate(&restored);
+}
+
+TEST(HierarchyBlockManagerPoolTest,
      DecodeTypedLayoutKeepsSwaHostLeafForOffloadOnly) {
   BlockManagerPool::Options options = make_typed_cache_options();
   options.instance_is_decode(true).enable_disagg_pd(true);

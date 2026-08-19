@@ -106,6 +106,10 @@ class PrefixCache {
   // Evict up to `n_blocks` LRU-oldest entries. Returns the number evicted.
   virtual size_t evict(size_t n_blocks);
 
+  // Return whether at least `n_blocks` entries are currently evictable without
+  // mutating cache state. Shared entries are pinned by active sequence owners.
+  bool can_evict(size_t n_blocks) const;
+
   virtual size_t num_blocks() const {
     CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
     return num_blocks_;

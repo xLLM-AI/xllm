@@ -468,6 +468,11 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   if (!composite->allocate_sequence(sequence, num_tokens)) {
+    VLOG(1) << "[HostCache][AdmissionFailed] sequence_id=" << sequence->seq_id()
+            << " num_tokens=" << num_tokens
+            << " device_tokens=" << hbm_state.kv_cache_tokens_num()
+            << " host_tokens="
+            << sequence->host_kv_state().kv_cache_tokens_num();
     release_host_match(sequence, dp_rank);
     return false;
   }
@@ -486,12 +491,12 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
     staged.clear();
   };
 
-  for (auto& [type, entry] : host_block_managers_[dp_rank]) {
+  auto allocate_host_leaf = [&](BlockType type, auto& entry) {
     std::optional<std::vector<Block>> blocks =
         entry.leaf->allocate_for_sequence(sequence, host_state, num_tokens);
     if (!blocks.has_value()) {
       release_staged();
-      break;
+      return false;
     }
     if (!blocks->empty()) {
       staged.emplace(type, std::move(*blocks));
@@ -504,8 +509,26 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
     const size_t total = host_state.num_blocks(type) + staged_for_type;
     if (total < needed) {
       release_staged();
+      return false;
+    }
+    return true;
+  };
+
+  bool host_growth_succeeded = true;
+  for (auto& [type, entry] : host_block_managers_[dp_rank]) {
+    if (type == BlockType::SWA) {
+      continue;
+    }
+    if (!allocate_host_leaf(type, entry)) {
+      host_growth_succeeded = false;
       break;
     }
+  }
+  const auto host_swa_it = host_block_managers_[dp_rank].find(BlockType::SWA);
+  if (host_growth_succeeded &&
+      host_swa_it != host_block_managers_[dp_rank].end()) {
+    host_growth_succeeded =
+        allocate_host_leaf(host_swa_it->first, host_swa_it->second);
   }
 
   for (auto& [type, blocks] : staged) {

@@ -46,15 +46,22 @@ class HierarchyKVCacheTransferTestPeer final {
   static void set_layer_batch_ranges(
       HierarchyKVCacheTransfer* transfer,
       std::vector<HierarchyKVCacheTransfer::LayerBatchRange> ranges) {
-    transfer->layer_batch_ranges_ = std::move(ranges);
+    transfer->participant_states_.at(CacheParticipant::TARGET)
+        .layer_batch_ranges = std::move(ranges);
   }
 
   static bool load_from_host(
       HierarchyKVCacheTransfer* transfer,
       std::shared_ptr<LayerSynchronizer> synchronizer,
       const std::vector<BlockTransferInfo>& block_transfer_info) {
-    return transfer->load_from_host(std::move(synchronizer),
-                                    block_transfer_info);
+    auto transaction =
+        std::make_shared<HierarchyKVCacheTransfer::LoadTransaction>();
+    transaction->synchronizers[CacheParticipant::TARGET] =
+        std::move(synchronizer);
+    transaction->required_participant_mask =
+        HierarchyKVCacheTransfer::participant_mask(CacheParticipant::TARGET);
+    return transfer->load_from_host(
+        CacheParticipant::TARGET, transaction, block_transfer_info);
   }
 };
 

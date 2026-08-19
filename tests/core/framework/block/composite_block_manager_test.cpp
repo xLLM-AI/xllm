@@ -321,6 +321,28 @@ TEST(CompositeBlockManagerTest, FailedGrowthRollsBackNewBlocks) {
   manager.deallocate_for_sequence(&seq);
 }
 
+TEST(CompositeBlockManagerTest, FreshSequenceEvictsSwaPrefixForCapacity) {
+  BlockManager::Options opts = MakeCompositeOptions(/*base_num_blocks=*/256,
+                                                    kBaseBlockSize,
+                                                    /*window_size=*/12,
+                                                    /*max_seqs_per_batch=*/4);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+  const std::vector<int32_t> first_prompt(kMaxTokensPerBatch, 1);
+  Sequence first = MakeTestSequence(0, first_prompt);
+  ASSERT_TRUE(manager.allocate_sequence(&first, first_prompt.size()));
+  first.kv_state().incr_kv_cache_tokens_num(first_prompt.size());
+  manager.deallocate_for_sequence(&first);
+  first.reset();
+
+  const std::vector<int32_t> second_prompt(kMaxTokensPerBatch, 2);
+  Sequence second = MakeTestSequence(1, second_prompt);
+  EXPECT_TRUE(manager.allocate_sequence(&second, second_prompt.size()));
+  EXPECT_EQ(SwaBlocks(second).size(),
+            ExpectedSwaLogicalBlocks(second_prompt.size()));
+
+  manager.deallocate_for_sequence(&second);
+}
+
 TEST(CompositeBlockManagerTest, DeallocateToleratesRolledBackEmptySequence) {
   BlockManager::Options opts = MakeCompositeOptions(/*base_num_blocks=*/128,
                                                     kBaseBlockSize,

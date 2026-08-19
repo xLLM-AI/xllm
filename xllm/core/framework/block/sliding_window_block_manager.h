@@ -20,7 +20,10 @@ limitations under the License.
 namespace xllm {
 
 // Sliding-window leaf of CompositeBlockManager. Reuses BlockManagerImpl's
-// physical pool and flat-append growth. SWA-specific behavior:
+// physical pool and position-preserving growth. SWA-specific behavior:
+//   - allocate_for_sequence() appends invalid placeholders for positions that
+//     have already slid out, and allocates physical blocks only for the active
+//     window plus the current chunk.
 //   - release_out_of_window() drops leading slid-out blocks; released
 //     positions stay as invalid placeholders so DSA modulo indexing
 //     (`(pos/block_size) % semantic_cols`) remains stable.
@@ -30,6 +33,14 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
  public:
   explicit SlidingWindowBlockManager(const Options& options);
   ~SlidingWindowBlockManager() override = default;
+
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      size_t num_tokens) override;
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
+      size_t num_tokens) override;
 
   // Deallocate leading blocks that have slid out of the window; leaves
   // invalid placeholders in their slots. Called by the composite after a
@@ -49,6 +60,7 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
   uint32_t swa_blocks_per_seq() const { return options_.swa_blocks_per_seq(); }
 
  private:
+  size_t num_slid_out_blocks(size_t cached_tokens) const;
   void release_out_of_window(Sequence* seq,
                              KVCacheState& kv_state,
                              size_t cached_tokens);

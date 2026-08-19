@@ -15,26 +15,120 @@ limitations under the License.
 
 #include "framework/kv_cache_transfer/kv_cache_store.h"
 
+#include <Mooncake/mooncake-store/include/client_service.h>
 #include <Mooncake/mooncake-store/include/utils.h>
 #include <glog/logging.h>
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "util/hash_util.h"
 
 namespace xllm {
+namespace {
+
+std::string participant_name(CacheParticipant participant) {
+  switch (participant) {
+    case CacheParticipant::TARGET:
+      return "TARGET";
+    case CacheParticipant::DRAFT:
+      return "DRAFT";
+  }
+  LOG(FATAL) << "Unsupported cache participant: "
+             << static_cast<int32_t>(participant);
+  return "UNKNOWN";
+}
+
+void append_key_field(std::string& key, const std::string& value) {
+  key.append(std::to_string(value.size()));
+  key.push_back(':');
+  key.append(value);
+  key.push_back(':');
+}
+
+struct ComponentRequest final {
+  size_t logical_index = 0;
+  const HostCacheComponentSchema* component = nullptr;
+  std::string key;
+};
+
+std::vector<mooncake::Slice> generate_mooncake_slices(
+    const HostCacheSliceProvider* slice_provider,
+    const HostCacheComponentSchema& component,
+    int32_t block_id) {
+  CHECK(slice_provider != nullptr);
+  const std::vector<torch::Tensor> tensors = slice_provider->component_tensors(
+      component.participant, component.block_type, block_id);
+  CHECK(!tensors.empty()) << "Missing Host cache slices for participant="
+                          << participant_name(component.participant)
+                          << ", type="
+                          << static_cast<int32_t>(component.block_type);
+
+  std::vector<mooncake::Slice> slices;
+  slices.reserve(tensors.size());
+  for (const torch::Tensor& tensor : tensors) {
+    CHECK(tensor.defined() && tensor.is_contiguous());
+    slices.emplace_back(
+        mooncake::Slice{tensor.data_ptr(),
+                        static_cast<size_t>(tensor.numel()) *
+                            static_cast<size_t>(tensor.element_size())});
+  }
+  return slices;
+}
+
+bool copy_slices(const std::vector<mooncake::Slice>& source,
+                 const std::vector<mooncake::Slice>& destination) {
+  if (source.size() != destination.size()) {
+    return false;
+  }
+  for (size_t index = 0; index < source.size(); ++index) {
+    if (source[index].size != destination[index].size ||
+        source[index].ptr == nullptr || destination[index].ptr == nullptr) {
+      return false;
+    }
+    if (source[index].ptr != destination[index].ptr) {
+      std::memcpy(
+          destination[index].ptr, source[index].ptr, source[index].size);
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+struct KVCacheStore::Impl final {
+  mooncake::ReplicateConfig rep_config;
+  std::shared_ptr<mooncake::Client> client;
+};
+
+KVCacheStore::KVCacheStore() : impl_(std::make_unique<Impl>()) {}
 
 bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
-                        HostGroupedCaches* host_kv_caches) {
+                        const HostCacheSliceProvider* slice_provider) {
   CHECK(!is_initialized_) << "KVCacheStore is already initialized.";
-  CHECK(host_kv_caches != nullptr && !host_kv_caches->empty())
-      << "KVCacheStore requires typed Host caches.";
+  CHECK(slice_provider != nullptr)
+      << "KVCacheStore requires a Host cache slice provider.";
   config_ = config;
-  host_kv_caches_ = host_kv_caches;
+  slice_provider_ = slice_provider;
+  components_ = slice_provider_->store_components();
+  CHECK(!components_.empty())
+      << "KVCacheStore requires at least one Host cache component.";
+  std::sort(components_.begin(),
+            components_.end(),
+            [](const HostCacheComponentSchema& lhs,
+               const HostCacheComponentSchema& rhs) {
+              if (lhs.participant != rhs.participant) {
+                return static_cast<int32_t>(lhs.participant) <
+                       static_cast<int32_t>(rhs.participant);
+              }
+              return static_cast<int32_t>(lhs.block_type) <
+                     static_cast<int32_t>(rhs.block_type);
+            });
 
   std::optional<std::string> device_names = std::nullopt;
   if (config_.protocol == "rdma") {
@@ -58,21 +152,29 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
                << config_.localhost_name;
     return false;
   }
-  client_ptr_ = client.value();
-  rep_config_.replica_num = config_.replica_num;
+  impl_->client = client.value();
+  impl_->rep_config.replica_num = config_.replica_num;
 
-  std::string cache_schema = "tp=" + std::to_string(config_.tp_size);
-  for (const auto& [type, cache] : *host_kv_caches_) {
-    CHECK(cache != nullptr);
-    const BlockTypeTensorMap tensors = cache->get_block_type_tensors(type);
-    CHECK(!tensors.empty()) << "Host cache has no tensors for BlockType "
-                            << static_cast<int32_t>(type);
+  std::unordered_set<std::string> component_ids;
+  for (const HostCacheComponentSchema& component : components_) {
+    CHECK_GT(component.tp_size, 0u);
+    CHECK_LT(component.tp_rank, component.tp_size);
+    CHECK(!component.model_identity.empty());
+    CHECK(!component.schema_fingerprint.empty());
+    const std::string component_id =
+        participant_name(component.participant) + ":" +
+        std::to_string(static_cast<int32_t>(component.block_type));
+    CHECK(component_ids.emplace(component_id).second)
+        << "Duplicate Host cache Store component: " << component_id;
 
-    size_t slot_bytes = 0;
+    const std::vector<torch::Tensor> tensors =
+        slice_provider_->component_storage_tensors(component.participant,
+                                                   component.block_type);
+    CHECK(!tensors.empty())
+        << "Host cache component has no tensors: " << component_id;
     int64_t host_blocks = -1;
-    cache_schema.append("|type=");
-    cache_schema.append(std::to_string(static_cast<int32_t>(type)));
-    for (const auto& [role, tensor] : tensors) {
+    size_t slot_bytes = 0;
+    for (const torch::Tensor& tensor : tensors) {
       CHECK(tensor.defined() && tensor.dim() > 0 && tensor.is_contiguous());
       if (host_blocks < 0) {
         host_blocks = tensor.size(0);
@@ -81,78 +183,80 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
       }
       slot_bytes += static_cast<size_t>(tensor[0].numel()) *
                     static_cast<size_t>(tensor.element_size());
-      cache_schema.append(",role=");
-      cache_schema.append(std::to_string(static_cast<int32_t>(role)));
-      cache_schema.append(",dtype=");
-      cache_schema.append(
-          std::to_string(static_cast<int32_t>(tensor.scalar_type())));
-      cache_schema.append(",shape=");
-      for (int64_t dim = 1; dim < tensor.dim(); ++dim) {
-        cache_schema.append(std::to_string(tensor.size(dim)));
-        cache_schema.push_back('x');
+      if (config_.protocol != "rdma") {
+        continue;
       }
-
-      if (config_.protocol == "rdma") {
-        void* address = tensor.data_ptr();
-        const size_t bytes = static_cast<size_t>(tensor.numel()) *
-                             static_cast<size_t>(tensor.element_size());
-        auto result =
-            client_ptr_->RegisterLocalMemory(address,
+      void* address = tensor.data_ptr();
+      const size_t bytes = static_cast<size_t>(tensor.numel()) *
+                           static_cast<size_t>(tensor.element_size());
+      auto result =
+          impl_->client->RegisterLocalMemory(address,
                                              bytes,
                                              /*location=*/"cpu:0",
                                              /*remote_accessible=*/false,
                                              /*update_metadata=*/false);
-        if (!result.has_value()) {
-          LOG(ERROR) << "Failed to register Mooncake Host tensor: "
-                     << toString(result.error());
-          return false;
-        }
-        registered_addresses_.emplace_back(address);
+      if (!result.has_value()) {
+        LOG(ERROR) << "Failed to register Mooncake Host tensor: "
+                   << toString(result.error());
+        return false;
       }
+      registered_addresses_.emplace_back(address);
     }
-    LOG(INFO) << "KVCacheStore init OK: type=" << static_cast<int32_t>(type)
+    LOG(INFO) << "KVCacheStore init OK: type="
+              << static_cast<int32_t>(component.block_type)
+              << ", participant=" << participant_name(component.participant)
               << ", host_blocks=" << host_blocks
               << ", slot_bytes=" << slot_bytes
               << ", protocol=" << config_.protocol;
   }
-  const XXH3Key schema_hash = hash_string(cache_schema);
-  cache_schema_hash_.assign(reinterpret_cast<const char*>(schema_hash.data),
-                            sizeof(schema_hash.data));
 
   is_initialized_ = true;
   return true;
 }
 
 KVCacheStore::~KVCacheStore() {
-  if (client_ptr_ != nullptr) {
+  if (impl_->client != nullptr) {
     for (void* address : registered_addresses_) {
-      auto result = client_ptr_->unregisterLocalMemory(
+      auto result = impl_->client->unregisterLocalMemory(
           address, /*update_metadata=*/false);
       if (!result.has_value()) {
         LOG(WARNING) << "Failed to unregister Mooncake Host tensor: "
                      << toString(result.error());
       }
     }
-    client_ptr_.reset();
+    impl_->client.reset();
   }
 }
 
-std::string KVCacheStore::build_key(const BlockTransferInfo& block_info) const {
-  std::string key = "xllm-kv-v2:";
-  key.append(std::to_string(config_.model_id.size()));
+std::string KVCacheStore::build_component_key(
+    const HostCacheComponentSchema& component,
+    const BlockTransferInfo& block_info) const {
+  std::string key = "xllm-kv-v3:";
+  append_key_field(key, config_.model_id);
+  append_key_field(key, participant_name(component.participant));
+  append_key_field(key, component.model_identity);
+  append_key_field(key, "composite-host-v1");
+  key.append(std::to_string(component.tp_size));
   key.push_back(':');
-  key.append(config_.model_id);
+  key.append(std::to_string(component.tp_rank));
   key.push_back(':');
-  key.append(std::to_string(config_.tp_size));
+  key.append(std::to_string(static_cast<int32_t>(component.block_type)));
   key.push_back(':');
-  key.append(std::to_string(static_cast<int32_t>(block_info.block_type)));
-  key.push_back(':');
-  key.append(std::to_string(config_.tp_rank));
-  key.push_back(':');
-  key.append(cache_schema_hash_);
+  append_key_field(key, component.schema_fingerprint);
   key.append(reinterpret_cast<const char*>(block_info.hash_key),
              XXH3_128BITS_HASH_VALUE_LEN);
   return key;
+}
+
+std::vector<const HostCacheComponentSchema*> KVCacheStore::required_components(
+    BlockType block_type) const {
+  std::vector<const HostCacheComponentSchema*> components;
+  for (const HostCacheComponentSchema& component : components_) {
+    if (component.block_type == block_type) {
+      components.emplace_back(&component);
+    }
+  }
+  return components;
 }
 
 uint32_t KVCacheStore::batch_put(
@@ -161,37 +265,80 @@ uint32_t KVCacheStore::batch_put(
     return 0;
   }
 
-  std::vector<std::string> all_keys;
-  all_keys.reserve(block_transfer_info.size());
-  for (const BlockTransferInfo& block_info : block_transfer_info) {
-    all_keys.emplace_back(build_key(block_info));
+  std::vector<ComponentRequest> requests;
+  for (size_t logical_index = 0; logical_index < block_transfer_info.size();
+       ++logical_index) {
+    const BlockTransferInfo& block_info = block_transfer_info[logical_index];
+    const std::vector<const HostCacheComponentSchema*> components =
+        required_components(block_info.block_type);
+    for (const HostCacheComponentSchema* component : components) {
+      requests.push_back({logical_index,
+                          component,
+                          build_component_key(*component, block_info)});
+    }
   }
-  const auto exists = client_ptr_->BatchIsExist(all_keys);
+  if (requests.empty()) {
+    return 0;
+  }
+
+  std::vector<std::string> all_keys;
+  all_keys.reserve(requests.size());
+  for (const ComponentRequest& request : requests) {
+    all_keys.emplace_back(request.key);
+  }
+  const auto exists = impl_->client->BatchIsExist(all_keys);
 
   std::vector<std::string> put_keys;
   std::vector<std::vector<mooncake::Slice>> put_slices;
-  put_keys.reserve(block_transfer_info.size());
-  put_slices.reserve(block_transfer_info.size());
-  uint32_t success_count = 0;
-  for (size_t i = 0; i < block_transfer_info.size(); ++i) {
-    const bool already_exists =
-        i < exists.size() && exists[i].has_value() && exists[i].value();
+  std::vector<std::vector<size_t>> put_request_groups;
+  std::unordered_map<std::string, size_t> put_key_indices;
+  std::vector<uint32_t> completed_components(block_transfer_info.size(), 0);
+  std::vector<uint32_t> required_component_counts(block_transfer_info.size(),
+                                                  0);
+  for (size_t request_index = 0; request_index < requests.size();
+       ++request_index) {
+    const ComponentRequest& request = requests[request_index];
+    ++required_component_counts[request.logical_index];
+    const bool already_exists = request_index < exists.size() &&
+                                exists[request_index].has_value() &&
+                                exists[request_index].value();
     if (already_exists) {
-      ++success_count;
+      ++completed_components[request.logical_index];
       continue;
     }
-    put_keys.emplace_back(all_keys[i]);
-    put_slices.emplace_back(
-        generate_mooncake_slices(block_transfer_info[i].block_type,
-                                 block_transfer_info[i].dst_block_id));
+    const auto [put_it, inserted] =
+        put_key_indices.emplace(request.key, put_keys.size());
+    if (inserted) {
+      put_keys.emplace_back(request.key);
+      put_slices.emplace_back(generate_mooncake_slices(
+          slice_provider_,
+          *request.component,
+          block_transfer_info[request.logical_index].dst_block_id));
+      put_request_groups.emplace_back();
+    }
+    put_request_groups[put_it->second].emplace_back(request_index);
   }
 
-  if (put_keys.empty()) {
-    return success_count;
+  if (!put_keys.empty()) {
+    const auto results =
+        impl_->client->BatchPut(put_keys, put_slices, impl_->rep_config);
+    for (size_t i = 0; i < put_request_groups.size() && i < results.size();
+         ++i) {
+      if (!results[i].has_value()) {
+        continue;
+      }
+      for (size_t request_index : put_request_groups[i]) {
+        ++completed_components[requests[request_index].logical_index];
+      }
+    }
   }
-  const auto results = client_ptr_->BatchPut(put_keys, put_slices, rep_config_);
-  for (size_t i = 0; i < put_keys.size() && i < results.size(); ++i) {
-    if (results[i].has_value()) {
+
+  uint32_t success_count = 0;
+  for (size_t logical_index = 0; logical_index < block_transfer_info.size();
+       ++logical_index) {
+    if (required_component_counts[logical_index] > 0 &&
+        completed_components[logical_index] ==
+            required_component_counts[logical_index]) {
       ++success_count;
     }
   }
@@ -213,40 +360,98 @@ std::vector<uint8_t> KVCacheStore::batch_get_with_status(
     return statuses;
   }
 
-  std::vector<std::string> all_keys;
-  all_keys.reserve(block_transfer_info.size());
-  for (const BlockTransferInfo& block_info : block_transfer_info) {
-    all_keys.emplace_back(build_key(block_info));
+  std::vector<ComponentRequest> requests;
+  std::vector<uint32_t> required_component_counts(block_transfer_info.size(),
+                                                  0);
+  for (size_t logical_index = 0; logical_index < block_transfer_info.size();
+       ++logical_index) {
+    const BlockTransferInfo& block_info = block_transfer_info[logical_index];
+    const std::vector<const HostCacheComponentSchema*> components =
+        required_components(block_info.block_type);
+    for (const HostCacheComponentSchema* component : components) {
+      requests.push_back({logical_index,
+                          component,
+                          build_component_key(*component, block_info)});
+      ++required_component_counts[logical_index];
+    }
   }
-  const auto exists = client_ptr_->BatchIsExist(all_keys);
+  if (requests.empty()) {
+    return statuses;
+  }
+
+  std::vector<std::string> all_keys;
+  all_keys.reserve(requests.size());
+  for (const ComponentRequest& request : requests) {
+    all_keys.emplace_back(request.key);
+  }
+  const auto exists = impl_->client->BatchIsExist(all_keys);
+
+  std::vector<uint32_t> existing_component_counts(block_transfer_info.size(),
+                                                  0);
+  for (size_t request_index = 0; request_index < requests.size();
+       ++request_index) {
+    if (request_index < exists.size() && exists[request_index].has_value() &&
+        exists[request_index].value()) {
+      ++existing_component_counts[requests[request_index].logical_index];
+    }
+  }
 
   std::vector<std::string> get_keys;
   std::unordered_map<std::string, std::vector<mooncake::Slice>> get_slices;
-  std::vector<size_t> get_positions;
-  get_keys.reserve(block_transfer_info.size());
-  get_positions.reserve(block_transfer_info.size());
-  get_slices.reserve(block_transfer_info.size());
-  for (size_t i = 0; i < block_transfer_info.size(); ++i) {
-    const bool exists_in_store =
-        i < exists.size() && exists[i].has_value() && exists[i].value();
-    if (!exists_in_store) {
+  std::vector<std::vector<size_t>> get_request_groups;
+  std::unordered_map<std::string, size_t> get_key_indices;
+  for (size_t request_index = 0; request_index < requests.size();
+       ++request_index) {
+    const ComponentRequest& request = requests[request_index];
+    const size_t logical_index = request.logical_index;
+    if (required_component_counts[logical_index] == 0 ||
+        existing_component_counts[logical_index] !=
+            required_component_counts[logical_index]) {
       continue;
     }
-    get_positions.emplace_back(i);
-    get_keys.emplace_back(all_keys[i]);
-    get_slices.emplace(
-        all_keys[i],
-        generate_mooncake_slices(block_transfer_info[i].block_type,
-                                 block_transfer_info[i].dst_block_id));
+    const auto [get_it, inserted] =
+        get_key_indices.emplace(request.key, get_keys.size());
+    if (inserted) {
+      get_keys.emplace_back(request.key);
+      get_slices.emplace(request.key,
+                         generate_mooncake_slices(
+                             slice_provider_,
+                             *request.component,
+                             block_transfer_info[logical_index].dst_block_id));
+      get_request_groups.emplace_back();
+    }
+    get_request_groups[get_it->second].emplace_back(request_index);
   }
-
   if (get_keys.empty()) {
     return statuses;
   }
-  const auto results = client_ptr_->BatchGet(get_keys, get_slices);
-  for (size_t i = 0; i < get_keys.size() && i < results.size(); ++i) {
-    if (results[i].has_value()) {
-      statuses[get_positions[i]] = 1;
+
+  const auto results = impl_->client->BatchGet(get_keys, get_slices);
+  std::vector<uint32_t> fetched_component_counts(block_transfer_info.size(), 0);
+  for (size_t i = 0; i < get_request_groups.size() && i < results.size(); ++i) {
+    if (!results[i].has_value()) {
+      continue;
+    }
+    const std::vector<mooncake::Slice>& source_slices =
+        get_slices.at(get_keys[i]);
+    for (size_t request_index : get_request_groups[i]) {
+      const ComponentRequest& request = requests[request_index];
+      const std::vector<mooncake::Slice> destination_slices =
+          generate_mooncake_slices(
+              slice_provider_,
+              *request.component,
+              block_transfer_info[request.logical_index].dst_block_id);
+      if (copy_slices(source_slices, destination_slices)) {
+        ++fetched_component_counts[request.logical_index];
+      }
+    }
+  }
+  for (size_t logical_index = 0; logical_index < block_transfer_info.size();
+       ++logical_index) {
+    if (required_component_counts[logical_index] > 0 &&
+        fetched_component_counts[logical_index] ==
+            required_component_counts[logical_index]) {
+      statuses[logical_index] = 1;
     }
   }
   return statuses;
@@ -256,37 +461,11 @@ uint32_t KVCacheStore::batch_exist(std::vector<std::string>&& keys) {
   if (!is_initialized_) {
     return 0;
   }
-  const auto exists = client_ptr_->BatchIsExist(keys);
+  const auto exists = impl_->client->BatchIsExist(keys);
   return static_cast<uint32_t>(
       std::count_if(exists.begin(), exists.end(), [](const auto& result) {
         return result.has_value() && result.value();
       }));
-}
-
-std::vector<mooncake::Slice> KVCacheStore::generate_mooncake_slices(
-    BlockType type,
-    int32_t block_id) const {
-  CHECK(host_kv_caches_ != nullptr);
-  const auto cache_it = host_kv_caches_->find(type);
-  CHECK(cache_it != host_kv_caches_->end() && cache_it->second != nullptr)
-      << "Missing Host cache for BlockType " << static_cast<int32_t>(type);
-  const BlockTypeTensorMap tensors =
-      cache_it->second->get_block_type_tensors(type);
-
-  std::vector<mooncake::Slice> slices;
-  slices.reserve(tensors.size());
-  for (const auto& tensor_entry : tensors) {
-    const torch::Tensor& tensor = tensor_entry.second;
-    CHECK_GE(block_id, 0);
-    CHECK_LT(block_id, tensor.size(0));
-    torch::Tensor block = tensor[block_id];
-    CHECK(block.is_contiguous());
-    slices.emplace_back(
-        mooncake::Slice{block.data_ptr(),
-                        static_cast<size_t>(block.numel()) *
-                            static_cast<size_t>(block.element_size())});
-  }
-  return slices;
 }
 
 }  // namespace xllm

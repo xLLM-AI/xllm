@@ -47,6 +47,11 @@ class NpuJsonDraftTokenHandoff;
 // Eagle3WorkerImpl inherits from this class.
 class MTPWorkerImpl : public SpeculativeWorkerImpl {
  public:
+  enum class HierarchyCacheOwnershipMode : int8_t {
+    CHILD_OWNED = 0,
+    PARENT_COMPOSITE = 1,
+  };
+
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
                 const runtime::Options& options);
@@ -64,7 +69,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
                 bool enable_opt_validate_probs = false,
-                bool enable_adaptive_speculative_decode = false);
+                bool enable_adaptive_speculative_decode = false,
+                HierarchyCacheOwnershipMode hierarchy_cache_ownership_mode =
+                    HierarchyCacheOwnershipMode::CHILD_OWNED);
 
  public:
   bool init_model(const std::string& model_weights_path,
@@ -81,6 +88,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   uint32_t transfer_kv_blocks(
       uint64_t batch_id,
+      Slice<BlockTransferInfo>& block_transfer_info) override;
+
+  std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info) override;
 
 #if defined(USE_NPU) || defined(USE_MLU)
@@ -272,6 +282,14 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       int32_t num_speculative_tokens,
       const std::vector<int32_t>* pruned_prefix_lengths = nullptr) const;
   bool adaptive_enabled() const;
+  void initialize_composite_hierarchy_kv_cache_transfer();
+  std::optional<ForwardOutput> run_child_llm_no_sync(
+      CacheParticipant participant,
+      LLMWorkerImpl& worker,
+      const ForwardInput& input,
+      Stream& prepare_stream,
+      Stream& compute_stream,
+      ForwardInput& processed_input);
 
  protected:
   // Draft model worker
@@ -299,6 +317,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
+  HierarchyCacheOwnershipMode hierarchy_cache_ownership_mode_ =
+      HierarchyCacheOwnershipMode::CHILD_OWNED;
   // adaptive_spec_controller_ now lives on SpeculativeWorkerImpl (base class).
 
   // Classified once when the corresponding models are loaded. Decode-path
@@ -329,5 +349,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 #if defined(USE_NPU) || defined(USE_MLU)
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
 #endif
+
+  std::unique_ptr<HierarchyKVCacheTransfer>
+      composite_hierarchy_kv_cache_transfer_;
 };
 }  // namespace xllm

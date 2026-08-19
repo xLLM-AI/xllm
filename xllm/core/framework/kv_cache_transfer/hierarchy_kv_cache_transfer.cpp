@@ -16,18 +16,40 @@ limitations under the License.
 #include "framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
 
 #include <algorithm>
+#include <cstring>
 #include <exception>
-#include <future>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "framework/kv_cache_transfer/kv_cache_store.h"
+#include "util/hash_util.h"
 
 namespace xllm {
 namespace {
 
-constexpr uint32_t TIMEOUT_MS = 60000;
+constexpr uint32_t kTimeoutMs = 60000;
+constexpr size_t kOffloadStreamCount = 4;
+
+const std::vector<BlockType> kBlockTypes = {BlockType::KV,
+                                            BlockType::LINEAR,
+                                            BlockType::SWA,
+                                            BlockType::C4,
+                                            BlockType::C128};
+
+std::string participant_name(CacheParticipant participant) {
+  switch (participant) {
+    case CacheParticipant::TARGET:
+      return "TARGET";
+    case CacheParticipant::DRAFT:
+      return "DRAFT";
+  }
+  LOG(FATAL) << "Unsupported cache participant: "
+             << static_cast<int32_t>(participant);
+  return "UNKNOWN";
+}
 
 std::string make_store_local_hostname(const std::string& configured,
                                       uint32_t worker_id) {
@@ -57,13 +79,10 @@ std::string make_store_local_hostname(const std::string& configured,
   }
   if (port_begin != std::string::npos) {
     const std::string port_text = configured.substr(port_begin);
-    bool numeric = true;
-    for (const char character : port_text) {
-      if (character < '0' || character > '9') {
-        numeric = false;
-        break;
-      }
-    }
+    const bool numeric =
+        std::all_of(port_text.begin(), port_text.end(), [](char character) {
+          return character >= '0' && character <= '9';
+        });
     if (numeric) {
       port = static_cast<uint32_t>(std::stoul(port_text));
       host = configured.substr(0, host_end);
@@ -74,12 +93,6 @@ std::string make_store_local_hostname(const std::string& configured,
       << "Mooncake local endpoint port exceeds 65535.";
   return host + ":" + std::to_string(port + worker_id);
 }
-
-// Streams reserved for concurrent D2H offload callers. D2H runs synchronously
-// on the RemoteWorker copy threadpool (4 threads, see remote_worker.h); reserve
-// one stream per such thread so concurrent offloads never block on the stream
-// queue.
-constexpr size_t kOffloadStreamCount = 4;
 
 using CopyStreamQueue =
     moodycamel::BlockingConcurrentQueue<std::unique_ptr<Stream>>;
@@ -102,7 +115,7 @@ class CopyStreamLease final {
 
   void drain_or_die(const char* reason) const {
     try {
-      const int synchronize_result = stream_->synchronize();
+      const int32_t synchronize_result = stream_->synchronize();
       if (synchronize_result != 0) {
         LOG(FATAL) << "Failed to drain KV Cache copy stream: reason=" << reason
                    << ", result=" << synchronize_result;
@@ -128,13 +141,11 @@ std::vector<HierarchyKVCacheTransfer::LayerBatchRange> build_layer_batch_ranges(
   if (num_layers <= 0) {
     return ranges;
   }
-
   uint32_t layers_per_batch =
       requested_batches == 0
           ? static_cast<uint32_t>(num_layers)
           : static_cast<uint32_t>(num_layers) / requested_batches;
   layers_per_batch = std::max<uint32_t>(layers_per_batch, 1);
-
   for (int64_t begin = 0; begin < num_layers; begin += layers_per_batch) {
     ranges.push_back(
         {begin, std::min<int64_t>(begin + layers_per_batch, num_layers)});
@@ -142,164 +153,82 @@ std::vector<HierarchyKVCacheTransfer::LayerBatchRange> build_layer_batch_ranges(
   return ranges;
 }
 
-bool has_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() && tensor.numel() > 0;
+std::vector<int64_t> device_block_shape(const torch::Tensor& tensor) {
+  CHECK(tensor.defined() && tensor.dim() > 0);
+  std::vector<int64_t> shape;
+  shape.reserve(static_cast<size_t>(tensor.dim() - 1));
+  for (int64_t dim = 1; dim < tensor.dim(); ++dim) {
+    shape.emplace_back(tensor.size(dim));
+  }
+  return shape;
 }
 
-BlockTypeTensorMap build_block_type_tensor_map(const KVCache& kv_cache,
-                                               BlockType type) {
-  BlockTypeTensorMap map;
-
-  const torch::Tensor key_cache = kv_cache.get_k_cache();
-  const torch::Tensor value_cache = kv_cache.get_v_cache();
-  const torch::Tensor index_cache = kv_cache.get_index_cache();
-  const torch::Tensor conv_cache = kv_cache.get_conv_cache();
-  const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
-  const torch::Tensor swa_cache = kv_cache.get_swa_cache();
-  const std::optional<torch::Tensor> index_cache_scale =
-      kv_cache.get_indexer_cache_scale();
-
-  switch (type) {
-    case BlockType::KV:
-      if (has_tensor(conv_cache) || has_tensor(ssm_cache) ||
-          has_tensor(swa_cache)) {
-        return {};
-      }
-      if (has_tensor(key_cache)) {
-        map.emplace(KVCacheTensorRole::KEY, key_cache);
-      }
-      if (has_tensor(value_cache)) {
-        map.emplace(KVCacheTensorRole::VALUE, value_cache);
-      }
-      if (has_tensor(index_cache)) {
-        map.emplace(KVCacheTensorRole::INDEX, index_cache);
-      }
-      // INT8 indexer cache carries a per-token fp32 scale that must travel with
-      // the int8 index values during offload/reload.
-      if (index_cache_scale.has_value() &&
-          has_tensor(index_cache_scale.value())) {
-        map.emplace(KVCacheTensorRole::INDEX_SCALE, index_cache_scale.value());
-      }
-      return map;
-    case BlockType::LINEAR:
-      if (has_tensor(conv_cache)) {
-        map.emplace(KVCacheTensorRole::CONV, conv_cache);
-      }
-      if (has_tensor(ssm_cache)) {
-        map.emplace(KVCacheTensorRole::SSM, ssm_cache);
-      }
-      return map;
-    case BlockType::SWA:
-      // Every DSV4 layer reads the SWA cache, including ratio-4/128 layers.
-      // Host restore is restricted to C128-aligned boundaries by the hierarchy
-      // pool; compressor/index state is partial-block scratch at those
-      // boundaries and is regenerated by the resumed forward. The persistent
-      // SWA window itself must be restored for every layer.
-      if (!has_tensor(swa_cache)) {
-        return {};
-      }
-      map.emplace(KVCacheTensorRole::SWA, swa_cache);
-      return map;
-    case BlockType::C4:
-      // DSV4 compress-ratio-4 layer: has swa + key + index (no value).
-      if (!has_tensor(swa_cache) || has_tensor(value_cache) ||
-          !has_tensor(key_cache) || !has_tensor(index_cache)) {
-        return {};
-      }
-      map.emplace(KVCacheTensorRole::KEY, key_cache);
-      map.emplace(KVCacheTensorRole::INDEX, index_cache);
-      // INT8 indexer cache carries a per-token fp16 scale that must travel
-      // with the int8 index values during offload/reload.
-      if (index_cache_scale.has_value() &&
-          has_tensor(index_cache_scale.value())) {
-        map.emplace(KVCacheTensorRole::INDEX_SCALE, index_cache_scale.value());
-      }
-      return map;
-    case BlockType::C128:
-      // DSV4 compress-ratio-128 layer: has swa + key, but no index/value.
-      if (!has_tensor(swa_cache) || has_tensor(value_cache) ||
-          !has_tensor(key_cache) || has_tensor(index_cache)) {
-        return {};
-      }
-      map.emplace(KVCacheTensorRole::KEY, key_cache);
-      return map;
-    default:
-      return {};
+std::vector<int64_t> host_block_layer_shape(const torch::Tensor& tensor) {
+  CHECK(tensor.defined() && tensor.dim() > 1);
+  std::vector<int64_t> shape;
+  shape.reserve(static_cast<size_t>(tensor.dim() - 2));
+  for (int64_t dim = 2; dim < tensor.dim(); ++dim) {
+    shape.emplace_back(tensor.size(dim));
   }
+  return shape;
+}
+
+std::string hash_schema_string(const std::string& schema) {
+  const XXH3Key hash = hash_string(schema);
+  return std::string(reinterpret_cast<const char*>(hash.data),
+                     sizeof(hash.data));
 }
 
 }  // namespace
+
+void HierarchyKVCacheTransfer::LoadTransaction::abort() {
+  std::vector<std::shared_ptr<LayerSynchronizer>> synchronizers_to_abort;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (aborted) {
+      return;
+    }
+    aborted = true;
+    for (const auto& [participant, synchronizer] : synchronizers) {
+      (void)participant;
+      synchronizers_to_abort.emplace_back(synchronizer);
+    }
+  }
+  for (const std::shared_ptr<LayerSynchronizer>& synchronizer :
+       synchronizers_to_abort) {
+    if (synchronizer != nullptr) {
+      synchronizer->abort();
+    }
+  }
+}
+
+HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(const Options& options,
+                                                   const torch::Device& device)
+    : options_(options), device_(device) {}
 
 HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
     const Options& options,
     const torch::Device& device,
     const Stream* compute_stream,
-    std::vector<xllm::KVCache>* kv_caches_ptr,
+    std::vector<KVCache>* kv_caches_ptr,
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& create_options)
-    : options_(options),
-      device_(device),
-      compute_stream_(compute_stream),
-      kv_caches_ptr_(kv_caches_ptr),
-      kv_cache_shape_(kv_cache_shape),
-      create_options_(create_options) {
-  CHECK(kv_caches_ptr_ != nullptr) << "kv_caches_ptr must not be null.";
-  CHECK(compute_stream_ != nullptr) << "compute stream must not be null.";
-
-  device_.set_device();
-  device_.init_device_context();
-  load_threadpool_ = std::make_unique<ThreadPool>(
-      /*num_threads=*/2,
-      /*init_func=*/[this]() mutable { device_.set_device(); },
-      /*cpu_binding=*/false,
-      /*pool_name=*/"HierarchyKVCacheTransfer.load");
-  // D2H offload runs synchronously on the caller (RemoteWorker copy thread) so
-  // its copied-block count can be returned to the scheduler; it is not posted
-  // to a local pool. Size the shared stream pool to cover the H2D load threads
-  // plus the concurrent D2H callers.
-  const size_t num_streams = load_threadpool_->size() + kOffloadStreamCount;
-  for (size_t i = 0; i < num_streams; ++i) {
-    copy_stream_.enqueue(device_.get_stream_from_pool(TIMEOUT_MS));
-  }
-
-  build_device_block_type_map();
-  layer_batch_ranges_ = build_layer_batch_ranges(
-      options_.layers(), options_.layers_wise_copy_batchs());
-
-  if (options_.host_blocks_factor() > 1.0) {
-    batch_memcpy_ = create_batch_memcpy(device_);
-    create_host_cache();
-  }
-
-  if (options_.enable_kvcache_store()) {
-    CHECK(options_.host_blocks_factor() > 1.0)
-        << "Mooncake Store requires Host cache capacity.";
-    KVCacheStoreInitConfig store_config;
-    const std::string store_local_hostname = make_store_local_hostname(
-        options_.store_local_hostname(), options_.store_worker_id());
-    store_config.localhost_name = store_local_hostname;
-    store_config.protocol = options_.store_protocol();
-    store_config.metadata_server = options_.store_metadata_server();
-    store_config.master_server_address = options_.store_master_server_address();
-    store_config.model_id = options_.store_namespace();
-    store_config.tp_rank = options_.tp_rank();
-    store_config.tp_size = options_.tp_size();
-    LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
-              << store_local_hostname << ", protocol=" << store_config.protocol
-              << ", tp_rank=" << store_config.tp_rank
-              << ", tp_size=" << store_config.tp_size;
-    kv_cache_store_ = std::make_unique<KVCacheStore>();
-    CHECK(kv_cache_store_->init(store_config, &host_kv_caches_))
-        << "Failed to initialize Mooncake Store.";
-    LOG(INFO) << "[Mooncake][StoreEngine] ready, endpoint="
-              << store_local_hostname << ", protocol=" << store_config.protocol
-              << ", tp_rank=" << store_config.tp_rank;
-  }
+    : HierarchyKVCacheTransfer(options, device) {
+  ParticipantRegistration registration;
+  registration.participant = CacheParticipant::TARGET;
+  registration.actual_compute_stream = compute_stream;
+  registration.device_caches = kv_caches_ptr;
+  registration.cache_shape = kv_cache_shape;
+  registration.create_options = create_options;
+  registration.model_identity =
+      create_options.model_id() + "|" + create_options.model_type();
+  registration.tp_rank = options.tp_rank();
+  registration.tp_size = options.tp_size();
+  register_participant(std::move(registration));
+  CHECK(finalize_registration());
 }
 
 HierarchyKVCacheTransfer::~HierarchyKVCacheTransfer() {
-  // Joining the load pool first guarantees no producer can enqueue more work
-  // while the copy streams and host cache storage are being released.
   load_threadpool_.reset();
 
   device_.set_device();
@@ -313,104 +242,319 @@ HierarchyKVCacheTransfer::~HierarchyKVCacheTransfer() {
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
-  layer_wise_load_synchronizer_.clear();
+  for (auto& [batch_id, transaction] : load_transactions_) {
+    (void)batch_id;
+    transaction->abort();
+  }
+  load_transactions_.clear();
 }
 
-void HierarchyKVCacheTransfer::build_device_block_type_map() {
-  device_kv_caches_.clear();
-  device_block_type_layer_ids_.clear();
+void HierarchyKVCacheTransfer::register_participant(
+    ParticipantRegistration registration) {
+  CHECK(registration_state_ != RegistrationState::READY)
+      << "Cannot register a participant after finalization.";
+  CHECK(registration.actual_compute_stream != nullptr)
+      << "actual compute stream must not be null.";
+  CHECK(registration.device_caches != nullptr)
+      << "device caches must not be null.";
+  CHECK(!registration.device_caches->empty())
+      << "device caches must not be empty.";
+  CHECK(!registration.model_identity.empty())
+      << "participant model identity must not be empty.";
+  CHECK_GT(registration.tp_size, 0u);
+  CHECK_LT(registration.tp_rank, registration.tp_size);
+  CHECK(participant_states_.find(registration.participant) ==
+        participant_states_.end())
+      << "Duplicate cache participant: "
+      << participant_name(registration.participant);
 
-  const std::vector<BlockType> kBlockTypes = {BlockType::KV,
-                                              BlockType::LINEAR,
-                                              BlockType::SWA,
-                                              BlockType::C4,
-                                              BlockType::C128};
+  ParticipantState state;
+  state.registration = std::move(registration);
+  participant_states_.emplace(state.registration.participant, std::move(state));
+  registration_state_ = RegistrationState::REGISTERING;
+}
 
+bool HierarchyKVCacheTransfer::finalize_registration() {
+  CHECK(registration_state_ == RegistrationState::REGISTERING)
+      << "Hierarchy KV cache registration is not active.";
+  CHECK(!participant_states_.empty());
+
+  device_.set_device();
+  device_.init_device_context();
+  for (auto& [participant, state] : participant_states_) {
+    (void)participant;
+    build_participant_state(state);
+  }
+  validate_composite_schema();
+  initialize_resources();
+  if (options_.enable_kvcache_store()) {
+    initialize_store();
+  }
+  registration_state_ = RegistrationState::READY;
+  return true;
+}
+
+void HierarchyKVCacheTransfer::initialize_resources() {
+  CHECK_GT(options_.host_blocks_factor(), 1.0)
+      << "Hierarchy KV cache transfer requires Host cache capacity.";
+  const size_t load_threads = std::max<size_t>(2, participant_states_.size());
+  load_threadpool_ = std::make_unique<ThreadPool>(
+      load_threads,
+      /*init_func=*/[this]() mutable { device_.set_device(); },
+      /*cpu_binding=*/false,
+      /*pool_name=*/"HierarchyKVCacheTransfer.load");
+  const size_t num_streams = load_threadpool_->size() + kOffloadStreamCount;
+  for (size_t i = 0; i < num_streams; ++i) {
+    copy_stream_.enqueue(device_.get_stream_from_pool(kTimeoutMs));
+  }
+  batch_memcpy_ = create_batch_memcpy(device_);
+  CHECK(batch_memcpy_ != nullptr);
+}
+
+void HierarchyKVCacheTransfer::build_participant_state(
+    ParticipantState& state) {
+  CHECK_EQ(state.registration.device_caches->size(),
+           static_cast<size_t>(state.registration.create_options.num_layers()))
+      << "Participant cache layer count does not match allocation metadata: "
+      << participant_name(state.registration.participant);
+  build_device_block_type_map(state);
+  CHECK(!state.device_grouped_caches.empty())
+      << "Participant has no Host-cache-compatible tensors: "
+      << participant_name(state.registration.participant);
+  state.layer_batch_ranges = build_layer_batch_ranges(
+      static_cast<int64_t>(state.registration.device_caches->size()),
+      options_.layers_wise_copy_batchs());
+  create_host_cache(state);
+  build_and_validate_schema(state);
+}
+
+void HierarchyKVCacheTransfer::build_device_block_type_map(
+    ParticipantState& state) {
+  state.device_grouped_caches.clear();
+  state.absolute_layer_ids.clear();
   for (int64_t layer_id = 0;
-       layer_id < static_cast<int64_t>(kv_caches_ptr_->size());
+       layer_id <
+       static_cast<int64_t>(state.registration.device_caches->size());
        ++layer_id) {
-    KVCache& kv_cache = kv_caches_ptr_->at(static_cast<size_t>(layer_id));
-    for (BlockType type : kBlockTypes) {
-      BlockTypeTensorMap tensor_map =
-          build_block_type_tensor_map(kv_cache, type);
-      if (!tensor_map.empty()) {
-        device_kv_caches_[type].push_back(&kv_cache);
-        device_block_type_layer_ids_[type].push_back(layer_id);
+    KVCache& kv_cache =
+        state.registration.device_caches->at(static_cast<size_t>(layer_id));
+    for (BlockType block_type : kBlockTypes) {
+      const BlockTypeTensorMap tensors =
+          kv_cache.get_block_type_tensors(block_type);
+      if (tensors.empty()) {
+        continue;
       }
+      state.device_grouped_caches[block_type].push_back(&kv_cache);
+      state.absolute_layer_ids[block_type].push_back(layer_id);
     }
   }
 }
 
-void HierarchyKVCacheTransfer::create_host_cache() {
-  CHECK(!device_kv_caches_.empty())
-      << "device block type caches must not be empty.";
-
-  for (const auto& [block_type, group_caches] : device_kv_caches_) {
-    if (group_caches.empty()) {
-      continue;
-    }
-
-    const int64_t layer_count = static_cast<int64_t>(group_caches.size());
-
-    KVCacheCreateOptions host_opts = create_options_;
-    host_opts.device(torch::Device(torch::kCPU))
+void HierarchyKVCacheTransfer::create_host_cache(ParticipantState& state) {
+  for (const auto& [block_type, group_caches] : state.device_grouped_caches) {
+    CHECK(!group_caches.empty());
+    KVCacheCreateOptions host_options = state.registration.create_options;
+    host_options.device(torch::Device(torch::kCPU))
         .enable_xtensor(false)
         .tensor_allocator(nullptr)
         .host_blocks_factor(options_.host_blocks_factor());
 #if defined(USE_NPU)
-    host_opts.enable_kv_cache_huge_page_allocator(false);
+    host_options.enable_kv_cache_huge_page_allocator(false);
 #endif
-
-    host_kv_caches_[block_type] = std::make_unique<KVCache>(
-        kv_cache_shape_, host_opts, block_type, layer_count);
+    state.host_grouped_caches[block_type] =
+        std::make_unique<KVCache>(state.registration.cache_shape,
+                                  host_options,
+                                  block_type,
+                                  static_cast<int64_t>(group_caches.size()));
   }
 }
 
+void HierarchyKVCacheTransfer::build_and_validate_schema(
+    ParticipantState& state) {
+  state.schema.tensor_specs.clear();
+  state.schema.component_fingerprints.clear();
+  for (const auto& [block_type, group_caches] : state.device_grouped_caches) {
+    const auto layer_ids_it = state.absolute_layer_ids.find(block_type);
+    const auto host_it = state.host_grouped_caches.find(block_type);
+    CHECK(layer_ids_it != state.absolute_layer_ids.end());
+    CHECK(host_it != state.host_grouped_caches.end() &&
+          host_it->second != nullptr);
+    const std::vector<int64_t>& layer_ids = layer_ids_it->second;
+    CHECK_EQ(layer_ids.size(), group_caches.size());
+    const BlockTypeTensorMap host_tensors =
+        host_it->second->get_block_type_tensors(block_type);
+    CHECK(!host_tensors.empty());
+
+    std::string component_schema =
+        participant_name(state.registration.participant) + "|" +
+        state.registration.model_identity +
+        "|tp=" + std::to_string(state.registration.tp_size) + ":" +
+        std::to_string(state.registration.tp_rank) +
+        "|type=" + std::to_string(static_cast<int32_t>(block_type));
+    for (size_t layer_slot = 0; layer_slot < group_caches.size();
+         ++layer_slot) {
+      const BlockTypeTensorMap device_tensors =
+          group_caches[layer_slot]->get_block_type_tensors(block_type);
+      CHECK(!device_tensors.empty());
+      for (const auto& [role, device_tensor] : device_tensors) {
+        const auto host_tensor_it = host_tensors.find(role);
+        CHECK(host_tensor_it != host_tensors.end())
+            << "Missing required Host tensor: participant="
+            << participant_name(state.registration.participant)
+            << ", type=" << static_cast<int32_t>(block_type)
+            << ", layer=" << layer_ids[layer_slot]
+            << ", role=" << static_cast<int32_t>(role);
+        const torch::Tensor& host_tensor = host_tensor_it->second;
+        CHECK_EQ(device_tensor.scalar_type(), host_tensor.scalar_type());
+        CHECK_EQ(host_tensor.size(1),
+                 static_cast<int64_t>(group_caches.size()));
+        const std::vector<int64_t> block_shape =
+            device_block_shape(device_tensor);
+        CHECK(block_shape == host_block_layer_shape(host_tensor));
+
+        HostCacheTensorSpec spec;
+        spec.participant = state.registration.participant;
+        spec.block_type = block_type;
+        spec.absolute_layer_id = layer_ids[layer_slot];
+        spec.host_layer_slot = static_cast<int64_t>(layer_slot);
+        spec.role = role;
+        spec.coverage = HostPayloadCoverage::REQUIRED;
+        spec.dtype = device_tensor.scalar_type();
+        spec.block_shape = block_shape;
+        state.schema.tensor_specs.emplace_back(std::move(spec));
+
+        component_schema.append("|layer=");
+        component_schema.append(std::to_string(layer_ids[layer_slot]));
+        component_schema.append(",slot=");
+        component_schema.append(std::to_string(layer_slot));
+        component_schema.append(",role=");
+        component_schema.append(std::to_string(static_cast<int32_t>(role)));
+        component_schema.append(",dtype=");
+        component_schema.append(
+            std::to_string(static_cast<int32_t>(device_tensor.scalar_type())));
+        component_schema.append(",shape=");
+        for (int64_t dimension : block_shape) {
+          component_schema.append(std::to_string(dimension));
+          component_schema.push_back('x');
+        }
+      }
+    }
+    state.schema.component_fingerprints[block_type] =
+        hash_schema_string(component_schema);
+  }
+}
+
+void HierarchyKVCacheTransfer::validate_composite_schema() const {
+  std::map<BlockType, int64_t> device_block_counts;
+  std::map<BlockType, int64_t> host_block_counts;
+  int64_t block_size = -1;
+  for (const auto& [participant, state] : participant_states_) {
+    (void)participant;
+    const int64_t participant_block_size =
+        state.registration.create_options.block_size();
+    if (block_size < 0) {
+      block_size = participant_block_size;
+    } else {
+      CHECK_EQ(block_size, participant_block_size)
+          << "Composite participants use different logical block sizes.";
+    }
+    for (const auto& [block_type, group_caches] : state.device_grouped_caches) {
+      CHECK(!group_caches.empty());
+      const BlockTypeTensorMap device_tensors =
+          group_caches.front()->get_block_type_tensors(block_type);
+      CHECK(!device_tensors.empty());
+      const int64_t device_blocks = device_tensors.begin()->second.size(0);
+      auto device_count_it = device_block_counts.find(block_type);
+      if (device_count_it == device_block_counts.end()) {
+        device_block_counts[block_type] = device_blocks;
+      } else {
+        CHECK_EQ(device_count_it->second, device_blocks)
+            << "Composite participants use different device block counts for "
+            << static_cast<int32_t>(block_type);
+      }
+
+      const auto host_it = state.host_grouped_caches.find(block_type);
+      CHECK(host_it != state.host_grouped_caches.end() &&
+            host_it->second != nullptr);
+      const BlockTypeTensorMap host_tensors =
+          host_it->second->get_block_type_tensors(block_type);
+      CHECK(!host_tensors.empty());
+      const int64_t host_blocks = host_tensors.begin()->second.size(0);
+      auto host_count_it = host_block_counts.find(block_type);
+      if (host_count_it == host_block_counts.end()) {
+        host_block_counts[block_type] = host_blocks;
+      } else {
+        CHECK_EQ(host_count_it->second, host_blocks)
+            << "Composite participants use different Host block counts for "
+            << static_cast<int32_t>(block_type);
+      }
+      CHECK_GE(host_blocks, device_blocks);
+    }
+  }
+}
+
+void HierarchyKVCacheTransfer::initialize_store() {
+  CHECK_GT(options_.host_blocks_factor(), 1.0)
+      << "Mooncake Store requires Host cache capacity.";
+  KVCacheStoreInitConfig store_config;
+  const std::string store_local_hostname = make_store_local_hostname(
+      options_.store_local_hostname(), options_.store_worker_id());
+  store_config.localhost_name = store_local_hostname;
+  store_config.protocol = options_.store_protocol();
+  store_config.metadata_server = options_.store_metadata_server();
+  store_config.master_server_address = options_.store_master_server_address();
+  store_config.model_id = options_.store_namespace();
+  store_config.tp_rank = options_.tp_rank();
+  store_config.tp_size = options_.tp_size();
+  LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
+            << store_local_hostname << ", protocol=" << store_config.protocol
+            << ", tp_rank=" << store_config.tp_rank
+            << ", tp_size=" << store_config.tp_size;
+  kv_cache_store_ = std::make_unique<KVCacheStore>();
+  CHECK(kv_cache_store_->init(store_config, this))
+      << "Failed to initialize Mooncake Store.";
+  LOG(INFO) << "[Mooncake][StoreEngine] ready, endpoint="
+            << store_local_hostname << ", protocol=" << store_config.protocol
+            << ", tp_rank=" << store_config.tp_rank;
+}
+
 HierarchyKVCacheTransfer::CopyPlan HierarchyKVCacheTransfer::build_copy_plan(
+    const ParticipantState& state,
     const std::vector<BlockTransferInfo>& block_transfer_info,
     const LayerBatchRange& layer_batch_range) const {
   CopyPlan plan;
   if (block_transfer_info.empty()) {
     return plan;
   }
-
   const TransferType transfer_type = block_transfer_info.front().transfer_type;
-
-  for (const auto& info : block_transfer_info) {
-    BlockType type = info.block_type;
-    auto device_it = device_kv_caches_.find(type);
-    auto layer_ids_it = device_block_type_layer_ids_.find(type);
-    auto host_it = host_kv_caches_.find(type);
-    if (device_it == device_kv_caches_.end() ||
-        layer_ids_it == device_block_type_layer_ids_.end() ||
-        host_it == host_kv_caches_.end()) {
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    const auto device_it = state.device_grouped_caches.find(info.block_type);
+    const auto layer_ids_it = state.absolute_layer_ids.find(info.block_type);
+    const auto host_it = state.host_grouped_caches.find(info.block_type);
+    if (device_it == state.device_grouped_caches.end() ||
+        layer_ids_it == state.absolute_layer_ids.end() ||
+        host_it == state.host_grouped_caches.end()) {
       continue;
     }
-
-    const auto& group_caches = device_it->second;
-    const auto& layer_ids = layer_ids_it->second;
-    const KVCache* host_cache = host_it->second.get();
-    CHECK(host_cache != nullptr) << "host cache instance must not be null.";
+    const std::vector<KVCache*>& group_caches = device_it->second;
+    const std::vector<int64_t>& layer_ids = layer_ids_it->second;
     const BlockTypeTensorMap host_tensors =
-        host_cache->get_block_type_tensors(type);
+        host_it->second->get_block_type_tensors(info.block_type);
 
     int32_t host_block_id = -1;
     int32_t device_block_id = -1;
-    switch (transfer_type) {
-      case TransferType::H2D:
-        host_block_id = info.src_block_id;
-        device_block_id = info.dst_block_id;
-        break;
-      case TransferType::D2H2G:
-        host_block_id = info.dst_block_id;
-        device_block_id = info.src_block_id;
-        break;
-      default:
-        LOG(FATAL) << "Unsupported transfer type for copy plan: "
-                   << static_cast<uint32_t>(transfer_type);
+    if (transfer_type == TransferType::H2D) {
+      host_block_id = info.src_block_id;
+      device_block_id = info.dst_block_id;
+    } else if (transfer_type == TransferType::D2H2G) {
+      host_block_id = info.dst_block_id;
+      device_block_id = info.src_block_id;
+    } else {
+      LOG(FATAL) << "Unsupported transfer type for copy plan: "
+                 << static_cast<uint32_t>(transfer_type);
     }
-
-    CHECK_GE(host_block_id, 0) << "host block id must be non-negative.";
+    CHECK_GE(host_block_id, 0);
+    CHECK_GE(device_block_id, 0);
 
     for (size_t layer_slot = 0; layer_slot < group_caches.size();
          ++layer_slot) {
@@ -419,24 +563,18 @@ HierarchyKVCacheTransfer::CopyPlan HierarchyKVCacheTransfer::build_copy_plan(
           absolute_layer_id >= layer_batch_range.end_layer) {
         continue;
       }
-
-      BlockTypeTensorMap device_tensors =
-          build_block_type_tensor_map(*group_caches[layer_slot], type);
+      const BlockTypeTensorMap device_tensors =
+          group_caches[layer_slot]->get_block_type_tensors(info.block_type);
       for (const auto& [role, device_tensor] : device_tensors) {
-        auto host_tensor_it = host_tensors.find(role);
-        if (host_tensor_it == host_tensors.end()) {
-          continue;
-        }
-
-        // device_tensor shape: [num_blocks, ...per_block_dims]
-        // host_tensor shape: [num_host_blocks, num_layers, ...per_block_dims]
+        const auto host_tensor_it = host_tensors.find(role);
+        CHECK(host_tensor_it != host_tensors.end())
+            << "Required Host tensor disappeared after schema finalization.";
         const torch::Tensor& host_tensor = host_tensor_it->second;
-        CHECK_LT(host_block_id, host_tensor.size(0))
-            << "host block id out of range.";
+        CHECK_LT(host_block_id, host_tensor.size(0));
+        CHECK_LT(device_block_id, device_tensor.size(0));
         torch::Tensor device_block = device_tensor[device_block_id];
         torch::Tensor host_block_layer =
             host_tensor[host_block_id][static_cast<int64_t>(layer_slot)];
-
         if (transfer_type == TransferType::H2D) {
           plan.src_tensors.emplace_back(host_block_layer);
           plan.dst_tensors.emplace_back(device_block);
@@ -447,64 +585,70 @@ HierarchyKVCacheTransfer::CopyPlan HierarchyKVCacheTransfer::build_copy_plan(
       }
     }
   }
-
   return plan;
 }
 
 uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(
     uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
+  CHECK(registration_state_ == RegistrationState::READY);
   CHECK(!block_transfer_info.empty());
-
-  // This runs synchronously on the caller's thread (a brpc RPC worker thread
-  // for remote workers), which has no ACL context of its own. Both branches
-  // below touch device resources on this thread — D2H offload issues the copy
-  // inline, and H2D creates the layer synchronizer's events
-  // (aclrtCreateEventWithFlag). Establish the context here so those calls do
-  // not fail with ACL_ERROR_RT_CONTEXT_NULL (107002). Idempotent; the async H2D
-  // copy posted to load_threadpool_ already has context via that pool's
-  // init_func.
   device_.set_device();
 
-  switch (block_transfer_info[0].transfer_type) {
+  switch (block_transfer_info.front().transfer_type) {
     case TransferType::D2H2G:
       return offload(block_transfer_info);
     case TransferType::H2D: {
-      const uint32_t scheduled_blocks =
-          static_cast<uint32_t>(block_transfer_info.size());
-      // Register before scheduling the load. RemoteWorker serializes this RPC
-      // ahead of the matching forward RPC, so the engine does not wait for H2D
-      // and the forward still observes this worker-local synchronizer.
-      auto synchronizer = create_layer_synchronizer(
-          static_cast<int64_t>(layer_batch_ranges_.size()));
-      CHECK(synchronizer != nullptr)
-          << "Failed to create layer synchronizer for H2D batch_id=" << batch_id
-          << "; H2D copy cannot be backed and the pool has already advanced "
-             "kv_cache_tokens_num_.";
+      auto transaction = std::make_shared<LoadTransaction>();
+      if (!snapshot_ready_entries(block_transfer_info, transaction.get())) {
+        LOG(ERROR) << "Composite Host cache entry is not READY for batch_id="
+                   << batch_id;
+        return 0;
+      }
+      for (const auto& [participant, state] : participant_states_) {
+        const bool required = std::any_of(
+            block_transfer_info.begin(),
+            block_transfer_info.end(),
+            [&state](const BlockTransferInfo& info) {
+              return state.device_grouped_caches.find(info.block_type) !=
+                     state.device_grouped_caches.end();
+            });
+        if (!required) {
+          continue;
+        }
+        std::shared_ptr<LayerSynchronizer> synchronizer =
+            create_layer_synchronizer(
+                static_cast<int64_t>(state.layer_batch_ranges.size()));
+        CHECK(synchronizer != nullptr)
+            << "Failed to create participant layer synchronizer.";
+        transaction->synchronizers[participant] = synchronizer;
+        transaction->required_participant_mask |= participant_mask(participant);
+      }
+      CHECK_NE(transaction->required_participant_mask, 0u);
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto existing = layer_wise_load_synchronizer_.find(batch_id);
-        if (existing != layer_wise_load_synchronizer_.end()) {
-          LOG(ERROR)
-              << "layer_wise_load_synchronizer collision at batch_id="
-              << batch_id
-              << ", previous entry was never consumed (batch cancelled or "
-                 "batch_id reused). Overwriting; stale entry's events will "
-                 "release when its refcount drops.";
+        auto existing = load_transactions_.find(batch_id);
+        if (existing != load_transactions_.end()) {
+          existing->second->abort();
+          LOG(ERROR) << "Composite load transaction collision at batch_id="
+                     << batch_id << "; replacing stale transaction.";
         }
-        layer_wise_load_synchronizer_[batch_id] = synchronizer;
+        load_transactions_[batch_id] = transaction;
       }
-      load_threadpool_->schedule(
-          [this,
-           synchronizer,
-           block_transfer_info = std::move(block_transfer_info)]() mutable {
-            load_from_host(synchronizer, block_transfer_info);
-          });
-      return scheduled_blocks;
+      for (const auto& [participant, synchronizer] :
+           transaction->synchronizers) {
+        (void)synchronizer;
+        load_threadpool_->schedule(
+            [this, participant, transaction, block_transfer_info]() {
+              load_from_host(participant, transaction, block_transfer_info);
+            });
+      }
+      return static_cast<uint32_t>(block_transfer_info.size());
     }
     default:
       LOG(ERROR) << "Unsupported transfer type: "
-                 << static_cast<uint32_t>(block_transfer_info[0].transfer_type);
+                 << static_cast<uint32_t>(
+                        block_transfer_info.front().transfer_type);
       return 0;
   }
 }
@@ -513,13 +657,14 @@ uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(
     uint64_t /*batch_id*/,
     Slice<BlockTransferInfo>& block_transfer_info) {
   CHECK(!block_transfer_info.empty());
-  CHECK(kv_cache_store_ != nullptr);
-  if (block_transfer_info[0].transfer_type == TransferType::G2H) {
-    return kv_cache_store_->batch_get(block_transfer_info);
+  if (block_transfer_info[0].transfer_type != TransferType::G2H) {
+    LOG(ERROR) << "Unsupported slice transfer type: "
+               << static_cast<uint32_t>(block_transfer_info[0].transfer_type);
+    return 0;
   }
-  LOG(ERROR) << "Unsupported slice transfer type: "
-             << static_cast<uint32_t>(block_transfer_info[0].transfer_type);
-  return 0;
+  const std::vector<uint8_t> statuses = prefetch_kv_blocks(block_transfer_info);
+  return static_cast<uint32_t>(
+      std::count(statuses.begin(), statuses.end(), static_cast<uint8_t>(1)));
 }
 
 std::vector<uint8_t> HierarchyKVCacheTransfer::prefetch_kv_blocks(
@@ -533,6 +678,7 @@ std::vector<uint8_t> HierarchyKVCacheTransfer::prefetch_kv_blocks(
   }
   std::vector<uint8_t> hits =
       kv_cache_store_->batch_get_with_status(block_transfer_info);
+  update_prefetched_entries(block_transfer_info, hits);
   const size_t hit_count =
       std::count(hits.begin(), hits.end(), static_cast<uint8_t>(1));
   VLOG(1) << "[Mooncake][PrefetchGet] type="
@@ -546,117 +692,376 @@ uint32_t HierarchyKVCacheTransfer::offload(
   if (block_transfer_info.empty()) {
     return 0;
   }
-
-  if (batch_memcpy_ == nullptr) {
-    return block_transfer_info.size();
-  }
-
-  Slice<BlockTransferInfo> slice(block_transfer_info);
-  if (!offload_to_host(slice)) {
-    LOG(ERROR) << "Offload to host failed.";
+  if (!begin_entry_write(block_transfer_info)) {
     return 0;
   }
+  Slice<BlockTransferInfo> slice(block_transfer_info);
+  if (!offload_to_host(slice)) {
+    abort_entry_write(block_transfer_info);
+    LOG(ERROR) << "Composite offload to Host failed.";
+    return 0;
+  }
+  commit_entry_write(block_transfer_info);
   if (options_.enable_kvcache_store()) {
     CHECK(kv_cache_store_ != nullptr);
     const uint32_t put_count = kv_cache_store_->batch_put(block_transfer_info);
     if (put_count != block_transfer_info.size()) {
-      LOG(WARNING) << "Mooncake BatchPut partially failed: " << put_count << "/"
-                   << block_transfer_info.size();
+      LOG(WARNING) << "Mooncake composite BatchPut partially failed: "
+                   << put_count << "/" << block_transfer_info.size();
     }
     VLOG(1) << "[Mooncake][OffloadPut] blocks=" << block_transfer_info.size()
             << ", success=" << put_count;
   }
-  return block_transfer_info.size();
+  return static_cast<uint32_t>(block_transfer_info.size());
 }
 
 bool HierarchyKVCacheTransfer::offload_to_host(
     Slice<BlockTransferInfo>& block_transfer_info) {
-  if (block_transfer_info.empty()) {
-    return true;
+  CHECK(batch_memcpy_ != nullptr);
+  const std::vector<BlockTransferInfo> transfer_info =
+      static_cast<std::vector<BlockTransferInfo>>(block_transfer_info);
+  CopyStreamLease stream(&copy_stream_);
+  std::set<const Stream*> waited_streams;
+  for (const auto& [participant, state] : participant_states_) {
+    (void)participant;
+    if (waited_streams.emplace(state.registration.actual_compute_stream)
+            .second) {
+      stream.get()->wait_stream(*state.registration.actual_compute_stream);
+    }
   }
 
-  CHECK(batch_memcpy_ != nullptr) << "batch memcpy must be initialized.";
-  CopyStreamLease stream(&copy_stream_);
-  // D2H is issued from an RPC worker, while the preceding forward is enqueued
-  // on WorkerImpl's compute stream. Establish a device-side dependency before
-  // reading KV; the RPC thread's current/default stream is unrelated when
-  // schedule overlap is enabled.
-  stream.get()->wait_stream(*compute_stream_);
-  bool success = true;
-  for (const auto& range : layer_batch_ranges_) {
-    CopyPlan plan = build_copy_plan(
-        static_cast<std::vector<BlockTransferInfo>>(block_transfer_info),
-        range);
-    if (plan.src_tensors.empty()) {
-      continue;
+  for (const auto& [participant, state] : participant_states_) {
+    bool participant_copied = true;
+    for (const LayerBatchRange& range : state.layer_batch_ranges) {
+      CopyPlan plan = build_copy_plan(state, transfer_info, range);
+      if (plan.src_tensors.empty()) {
+        continue;
+      }
+      if (!batch_memcpy_->copy_d2h(
+              plan.src_tensors, plan.dst_tensors, stream.get())) {
+        participant_copied = false;
+        break;
+      }
     }
-    if (!batch_memcpy_->copy_d2h(
-            plan.src_tensors, plan.dst_tensors, stream.get())) {
-      success = false;
-      break;
+    if (!participant_copied) {
+      return false;
     }
+    complete_participant_write(participant, transfer_info);
   }
-  return success;
+  return true;
 }
 
 bool HierarchyKVCacheTransfer::load_from_host(
-    std::shared_ptr<LayerSynchronizer> synchronizer,
+    CacheParticipant participant,
+    const std::shared_ptr<LoadTransaction>& transaction,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
-  if (block_transfer_info.empty()) {
-    return true;
-  }
-
-  CHECK(synchronizer != nullptr) << "layer synchronizer must not be null.";
-  CHECK(batch_memcpy_ != nullptr) << "batch memcpy must be initialized.";
+  const auto state_it = participant_states_.find(participant);
+  CHECK(state_it != participant_states_.end());
+  const ParticipantState& state = state_it->second;
+  const auto synchronizer_it = transaction->synchronizers.find(participant);
+  CHECK(synchronizer_it != transaction->synchronizers.end());
+  const std::shared_ptr<LayerSynchronizer>& synchronizer =
+      synchronizer_it->second;
 
   CopyStreamLease stream(&copy_stream_);
   bool success = true;
   bool stream_has_async_h2d = false;
-  for (size_t range_idx = 0; range_idx < layer_batch_ranges_.size();
-       ++range_idx) {
-    CopyPlan plan =
-        build_copy_plan(block_transfer_info, layer_batch_ranges_[range_idx]);
+  for (size_t range_index = 0; range_index < state.layer_batch_ranges.size();
+       ++range_index) {
+    if (!entry_snapshot_matches(block_transfer_info, *transaction)) {
+      success = false;
+      break;
+    }
+    CopyPlan plan = build_copy_plan(
+        state, block_transfer_info, state.layer_batch_ranges[range_index]);
     if (!plan.src_tensors.empty()) {
       if (!batch_memcpy_->submit_h2d(
               plan.src_tensors, plan.dst_tensors, stream.get())) {
-        stream_has_async_h2d = false;
         success = false;
         break;
       }
       stream_has_async_h2d = true;
     }
-    if (!synchronizer->record_stream(static_cast<int64_t>(range_idx),
+    if (!synchronizer->record_stream(static_cast<int64_t>(range_index),
                                      stream.get())) {
       if (stream_has_async_h2d) {
-        stream.drain_or_die("layer-ready event recording failed");
-        stream_has_async_h2d = false;
+        stream.drain_or_die("participant layer-ready event recording failed");
       }
       success = false;
       break;
     }
   }
-
-  // On failure some ranges were never recorded; abort the synchronizer so a
-  // forward thread spinning on those layers unblocks and reports failure
-  // (aborting the forward) instead of hanging or reading uncopied KV cache.
+  if (success && !entry_snapshot_matches(block_transfer_info, *transaction)) {
+    success = false;
+  }
   if (!success) {
-    synchronizer->abort();
+    transaction->abort();
   }
   return success;
 }
 
 void HierarchyKVCacheTransfer::set_layer_synchronizer(
     ModelInputParams& params) {
+  CHECK_EQ(participant_states_.size(), 1u)
+      << "Single-participant synchronizer API used by a composite transfer.";
+  set_layer_synchronizer(participant_states_.begin()->first, params);
+}
+
+void HierarchyKVCacheTransfer::set_layer_synchronizer(
+    CacheParticipant participant,
+    ModelInputParams& params) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = layer_wise_load_synchronizer_.find(params.meta.batch_id);
-  if (it != layer_wise_load_synchronizer_.end()) {
-    params.parallel.layer_wise_load_synchronizer = it->second;
-    params.parallel.layers_per_bacth_copy =
-        layer_batch_ranges_.empty()
-            ? options_.layers()
-            : static_cast<uint32_t>(layer_batch_ranges_[0].end_layer -
-                                    layer_batch_ranges_[0].begin_layer);
-    layer_wise_load_synchronizer_.erase(it);
+  const auto transaction_it = load_transactions_.find(params.meta.batch_id);
+  if (transaction_it == load_transactions_.end()) {
+    return;
+  }
+  const std::shared_ptr<LoadTransaction>& transaction = transaction_it->second;
+  const auto synchronizer_it = transaction->synchronizers.find(participant);
+  if (synchronizer_it == transaction->synchronizers.end()) {
+    return;
+  }
+  params.parallel.layer_wise_load_synchronizer = synchronizer_it->second;
+  const ParticipantState& state = participant_states_.at(participant);
+  params.parallel.layers_per_bacth_copy =
+      state.layer_batch_ranges.empty()
+          ? static_cast<uint32_t>(state.registration.device_caches->size())
+          : static_cast<uint32_t>(state.layer_batch_ranges.front().end_layer -
+                                  state.layer_batch_ranges.front().begin_layer);
+  transaction->consumed_participant_mask |= participant_mask(participant);
+  if (transaction->consumed_participant_mask ==
+      transaction->required_participant_mask) {
+    load_transactions_.erase(transaction_it);
+  }
+}
+
+std::vector<HostCacheComponentSchema>
+HierarchyKVCacheTransfer::store_components() const {
+  std::vector<HostCacheComponentSchema> components;
+  for (const auto& [participant, state] : participant_states_) {
+    for (const auto& [block_type, fingerprint] :
+         state.schema.component_fingerprints) {
+      HostCacheComponentSchema component;
+      component.participant = participant;
+      component.block_type = block_type;
+      component.model_identity = state.registration.model_identity;
+      component.schema_fingerprint = fingerprint;
+      component.tp_rank = state.registration.tp_rank;
+      component.tp_size = state.registration.tp_size;
+      components.emplace_back(std::move(component));
+    }
+  }
+  return components;
+}
+
+std::vector<torch::Tensor> HierarchyKVCacheTransfer::component_storage_tensors(
+    CacheParticipant participant,
+    BlockType block_type) const {
+  const ParticipantState& state = participant_states_.at(participant);
+  const auto cache_it = state.host_grouped_caches.find(block_type);
+  CHECK(cache_it != state.host_grouped_caches.end() &&
+        cache_it->second != nullptr);
+  const BlockTypeTensorMap tensors =
+      cache_it->second->get_block_type_tensors(block_type);
+  std::vector<torch::Tensor> storage;
+  storage.reserve(tensors.size());
+  for (const auto& [role, tensor] : tensors) {
+    (void)role;
+    storage.emplace_back(tensor);
+  }
+  return storage;
+}
+
+std::vector<torch::Tensor> HierarchyKVCacheTransfer::component_tensors(
+    CacheParticipant participant,
+    BlockType block_type,
+    int32_t host_block_id) const {
+  const std::vector<torch::Tensor> storage =
+      component_storage_tensors(participant, block_type);
+  std::vector<torch::Tensor> blocks;
+  blocks.reserve(storage.size());
+  for (const torch::Tensor& tensor : storage) {
+    CHECK_GE(host_block_id, 0);
+    CHECK_LT(host_block_id, tensor.size(0));
+    torch::Tensor block = tensor[host_block_id];
+    CHECK(block.is_contiguous());
+    blocks.emplace_back(std::move(block));
+  }
+  return blocks;
+}
+
+uint32_t HierarchyKVCacheTransfer::participant_mask(
+    CacheParticipant participant) {
+  return 1u << static_cast<uint32_t>(participant);
+}
+
+uint64_t HierarchyKVCacheTransfer::schema_fingerprint_value(
+    const std::string& fingerprint) {
+  CHECK_GE(fingerprint.size(), sizeof(uint64_t));
+  uint64_t value = 0;
+  std::memcpy(&value, fingerprint.data(), sizeof(value));
+  return value;
+}
+
+uint32_t HierarchyKVCacheTransfer::required_participant_mask(
+    BlockType block_type) const {
+  uint32_t mask = 0;
+  for (const auto& [participant, state] : participant_states_) {
+    if (participant_requires_type(state, block_type)) {
+      mask |= participant_mask(participant);
+    }
+  }
+  return mask;
+}
+
+uint64_t HierarchyKVCacheTransfer::composite_schema_fingerprint(
+    BlockType block_type) const {
+  std::string composite_schema;
+  for (const auto& [participant, state] : participant_states_) {
+    const auto fingerprint_it =
+        state.schema.component_fingerprints.find(block_type);
+    if (fingerprint_it == state.schema.component_fingerprints.end()) {
+      continue;
+    }
+    composite_schema.append(participant_name(participant));
+    composite_schema.append(fingerprint_it->second);
+  }
+  CHECK(!composite_schema.empty());
+  return schema_fingerprint_value(hash_schema_string(composite_schema));
+}
+
+bool HierarchyKVCacheTransfer::participant_requires_type(
+    const ParticipantState& state,
+    BlockType block_type) const {
+  return state.device_grouped_caches.find(block_type) !=
+         state.device_grouped_caches.end();
+}
+
+bool HierarchyKVCacheTransfer::begin_entry_write(
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    const uint32_t required_mask = required_participant_mask(info.block_type);
+    if (required_mask == 0) {
+      LOG(ERROR) << "No participant owns requested BlockType "
+                 << static_cast<int32_t>(info.block_type);
+      return false;
+    }
+    HostCacheEntryMetadata& metadata =
+        entry_metadata_[{info.block_type, info.dst_block_id}];
+    ++metadata.generation;
+    metadata.schema_fingerprint = composite_schema_fingerprint(info.block_type);
+    metadata.required_participant_mask = required_mask;
+    metadata.completed_participant_mask = 0;
+    metadata.state = HostEntryState::WRITING;
+  }
+  return true;
+}
+
+void HierarchyKVCacheTransfer::complete_participant_write(
+    CacheParticipant participant,
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const uint32_t mask = participant_mask(participant);
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    HostCacheEntryMetadata& metadata =
+        entry_metadata_.at({info.block_type, info.dst_block_id});
+    if ((metadata.required_participant_mask & mask) != 0) {
+      metadata.completed_participant_mask |= mask;
+    }
+  }
+}
+
+void HierarchyKVCacheTransfer::commit_entry_write(
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    HostCacheEntryMetadata& metadata =
+        entry_metadata_.at({info.block_type, info.dst_block_id});
+    CHECK_EQ(metadata.completed_participant_mask,
+             metadata.required_participant_mask);
+    metadata.state = HostEntryState::READY;
+  }
+}
+
+void HierarchyKVCacheTransfer::abort_entry_write(
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    HostCacheEntryMetadata& metadata =
+        entry_metadata_[{info.block_type, info.dst_block_id}];
+    metadata.state = HostEntryState::INVALID;
+  }
+}
+
+bool HierarchyKVCacheTransfer::snapshot_ready_entries(
+    const std::vector<BlockTransferInfo>& block_transfer_info,
+    LoadTransaction* transaction) const {
+  CHECK(transaction != nullptr);
+  std::lock_guard<std::mutex> lock(mutex_);
+  transaction->entry_generations.clear();
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    const std::pair<BlockType, int32_t> entry_key = {info.block_type,
+                                                     info.src_block_id};
+    const auto metadata_it = entry_metadata_.find(entry_key);
+    if (metadata_it == entry_metadata_.end()) {
+      return false;
+    }
+    const HostCacheEntryMetadata& metadata = metadata_it->second;
+    if (metadata.state != HostEntryState::READY ||
+        metadata.required_participant_mask !=
+            required_participant_mask(info.block_type) ||
+        metadata.schema_fingerprint !=
+            composite_schema_fingerprint(info.block_type)) {
+      return false;
+    }
+    transaction->entry_generations[entry_key] = metadata.generation;
+  }
+  return true;
+}
+
+bool HierarchyKVCacheTransfer::entry_snapshot_matches(
+    const std::vector<BlockTransferInfo>& block_transfer_info,
+    const LoadTransaction& transaction) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const BlockTransferInfo& info : block_transfer_info) {
+    const std::pair<BlockType, int32_t> entry_key = {info.block_type,
+                                                     info.src_block_id};
+    const auto generation_it = transaction.entry_generations.find(entry_key);
+    const auto metadata_it = entry_metadata_.find(entry_key);
+    if (generation_it == transaction.entry_generations.end() ||
+        metadata_it == entry_metadata_.end()) {
+      return false;
+    }
+    const HostCacheEntryMetadata& metadata = metadata_it->second;
+    if (metadata.state != HostEntryState::READY ||
+        metadata.generation != generation_it->second ||
+        metadata.required_participant_mask !=
+            required_participant_mask(info.block_type) ||
+        metadata.schema_fingerprint !=
+            composite_schema_fingerprint(info.block_type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void HierarchyKVCacheTransfer::update_prefetched_entries(
+    Slice<BlockTransferInfo>& block_transfer_info,
+    const std::vector<uint8_t>& statuses) {
+  CHECK_EQ(block_transfer_info.size(), statuses.size());
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (size_t index = 0; index < block_transfer_info.size(); ++index) {
+    const BlockTransferInfo& info = block_transfer_info[index];
+    HostCacheEntryMetadata& metadata =
+        entry_metadata_[{info.block_type, info.dst_block_id}];
+    ++metadata.generation;
+    metadata.schema_fingerprint = composite_schema_fingerprint(info.block_type);
+    metadata.required_participant_mask =
+        required_participant_mask(info.block_type);
+    metadata.completed_participant_mask =
+        statuses[index] == 1 ? metadata.required_participant_mask : 0;
+    metadata.state =
+        statuses[index] == 1 ? HostEntryState::READY : HostEntryState::INVALID;
   }
 }
 
