@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
 #include "core/framework/request/dit_request_state.h"
@@ -146,6 +147,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                                generation_params.num_inference_steps,
                                generation_params.guidance_scale,
                                generation_params.guidance_scale_2,
+                               generation_params.boundary_ratio,
                                generation_params.num_videos_per_prompt,
                                seed,
                                latents,
@@ -413,6 +415,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
       int64_t num_inference_steps = 28,
       float guidance_scale = 5.0f,
       float guidance_scale_2 = -1.0f,
+      float boundary_ratio = 0.9f,
       int64_t num_videos_per_prompt = 1,
       int64_t seed = 42,
       std::optional<torch::Tensor> latents = std::nullopt,
@@ -449,7 +452,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     // Call unified function for dimension adjustment
     AdjustVideoSize(images, height, width, dw, dh, false);
 
-    if (boundary_ratio_ > 0.0f && guidance_scale_2 < 0.0f) {
+    if (boundary_ratio > 0.0f && guidance_scale_2 < 0.0f) {
       guidance_scale_2 = guidance_scale;
     }
 
@@ -510,25 +513,57 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                         latents);
 
     float boundary_timestep =
-        boundary_ratio_ > 0.0f ? boundary_ratio_ * num_train_timesteps_ : -1.0f;
+        boundary_ratio > 0.0f ? boundary_ratio * num_train_timesteps_ : -1.0f;
 
     // RainFusion config is static and already bound to the transformers in the
     // constructor. Only the per-inference dynamic state lives here.
     xllm::dit::SparseAttnState sparse_attn_state;
+    const bool use_rolling_load = use_rolling_load_;
+    int64_t primary_transformer_infer_steps = 0;
+    int64_t secondary_transformer_infer_steps = 0;
+    for (int64_t i = 0; i < timesteps.numel(); ++i) {
+      const float timestep_value = timesteps[i].item<float>();
+      const int64_t cache_scope_id =
+          boundary_timestep < 0 || timestep_value >= boundary_timestep ? 0 : 1;
+      if (cache_scope_id == 0) {
+        ++primary_transformer_infer_steps;
+      } else {
+        ++secondary_transformer_infer_steps;
+      }
+    }
+
+    int64_t primary_transformer_cache_step = 0;
+    int64_t secondary_transformer_cache_step = 0;
+    DiTCache::get_instance().reset_scope(/*scope_id=*/0);
+    DiTCache::get_instance().reset_scope(/*scope_id=*/1);
 
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
 
       WanTransformer3DModel current_model = nullptr;
       float current_guidance;
+      const int64_t cache_scope_id =
+          boundary_timestep < 0 || t.item<float>() >= boundary_timestep ? 0 : 1;
+      const bool use_primary_transformer = cache_scope_id == 0;
 
-      if (boundary_timestep < 0 || t.item<float>() >= boundary_timestep) {
+      if (use_primary_transformer) {
         current_model = transformer_;
         current_guidance = guidance_scale;
       } else {
         current_model = transformer_2_;
         current_guidance = guidance_scale_2;
       }
+
+      const int64_t cache_infer_steps = use_primary_transformer
+                                            ? primary_transformer_infer_steps
+                                            : secondary_transformer_infer_steps;
+      const int64_t cache_step_id = use_primary_transformer
+                                        ? ++primary_transformer_cache_step
+                                        : ++secondary_transformer_cache_step;
+      DiTCache::get_instance().set_context(
+          {/*infer_steps=*/cache_infer_steps,
+           /*num_blocks=*/current_model->num_layers(),
+           /*scope_id=*/cache_scope_id});
 
       sparse_attn_state.current_step = i;
       torch::Tensor latent_model_input;
@@ -560,7 +595,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
       auto& rolling = (current_model.get() == transformer_.get())
                           ? rolling_transformer_
                           : rolling_transformer_2_;
-      auto rolling_forward = [&](const torch::Tensor& embeds) {
+      auto rolling_forward = [&](const torch::Tensor& embeds, bool use_cfg) {
         return current_model->forward(
             latent_model_input,
             timestep_input,
@@ -568,10 +603,13 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
             torch::Tensor(),
             sparse_attn_state,
             [&rolling](int32_t i) { rolling.wait_h2d(i); },
-            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); });
+            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); },
+            use_cfg,
+            cache_step_id);
       };
 #else
-      auto rolling_forward = [&](const torch::Tensor& /*embeds*/) {
+      auto rolling_forward = [&](const torch::Tensor& /*embeds*/,
+                                 bool /*use_cfg*/) {
         LOG(FATAL) << "Rolling load requires USE_NPU";
         return torch::Tensor{};
       };
@@ -581,12 +619,17 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
         auto [pos_noise, neg_noise] = exec_with_cfg([&](bool is_positive) {
           auto& embeds =
               is_positive ? encoded_prompt_embeds : encoded_negative_embeds;
-          return use_rolling_load_ ? rolling_forward(embeds)
-                                   : current_model->forward(latent_model_input,
-                                                            timestep_input,
-                                                            embeds,
-                                                            torch::Tensor(),
-                                                            sparse_attn_state);
+          const bool use_cfg = !is_positive;
+          return use_rolling_load ? rolling_forward(embeds, use_cfg)
+                                  : current_model->forward(latent_model_input,
+                                                           timestep_input,
+                                                           embeds,
+                                                           torch::Tensor(),
+                                                           sparse_attn_state,
+                                                           nullptr,
+                                                           nullptr,
+                                                           use_cfg,
+                                                           cache_step_id);
         });
 
         noise_pred =
@@ -594,13 +637,18 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
             static_cast<float>(current_guidance) *
                 (pos_noise.to(torch::kFloat32) - neg_noise.to(torch::kFloat32));
       } else {
-        noise_pred = use_rolling_load_
-                         ? rolling_forward(encoded_prompt_embeds)
+        noise_pred = use_rolling_load
+                         ? rolling_forward(encoded_prompt_embeds,
+                                           /*use_cfg=*/false)
                          : current_model->forward(latent_model_input,
                                                   timestep_input,
                                                   encoded_prompt_embeds,
                                                   torch::Tensor(),
-                                                  sparse_attn_state);
+                                                  sparse_attn_state,
+                                                  nullptr,
+                                                  nullptr,
+                                                  /*use_cfg=*/false,
+                                                  cache_step_id);
       }
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
@@ -736,7 +784,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
 
   int64_t vae_scale_factor_spatial_ = 8;
   int64_t vae_scale_factor_temporal_ = 4;
-  float boundary_ratio_ = 0.9f;
   bool expand_timesteps_ = false;
   int64_t zdim_ = 16;
   float num_train_timesteps_ = 1000.0f;

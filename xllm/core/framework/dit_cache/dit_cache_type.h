@@ -55,6 +55,7 @@ struct CacheBlockOut {
 struct CacheContext {
   int64_t infer_steps = 0;
   int64_t num_blocks = 0;
+  int64_t scope_id = 0;
 };
 
 }  // namespace xllm

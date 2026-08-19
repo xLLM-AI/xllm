@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
@@ -1547,13 +1548,17 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     }
   }
 
+  int64_t num_layers() const { return num_layers_; }
+
   torch::Tensor forward(const torch::Tensor& hidden_states_in,
                         const torch::Tensor& timestep,
                         const torch::Tensor& encoder_hidden_states,
                         const torch::Tensor& encoder_hidden_states_image,
                         xllm::dit::SparseAttnState& sparse_attn_state,
                         std::function<void(int32_t)> before_layer_cb = nullptr,
-                        std::function<void(int32_t)> after_layer_cb = nullptr) {
+                        std::function<void(int32_t)> after_layer_cb = nullptr,
+                        bool use_cfg = false,
+                        int64_t cache_step_id = 0) {
     int64_t batch_size = hidden_states_in.size(0);
     int64_t num_frames = hidden_states_in.size(2);
     int64_t height = hidden_states_in.size(3);
@@ -1625,20 +1630,55 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       }
     }
 
-    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
-      if (before_layer_cb) {
-        before_layer_cb(static_cast<int32_t>(i));
-      }
-      hidden_states =
-          transformer_layers_[i]->forward(hidden_states,
-                                          encoder_hidden_states_embedded,
-                                          timestep_proj,
-                                          rotary_emb,
-                                          sparse_attn_state);
-      if (after_layer_cb) {
-        after_layer_cb(static_cast<int32_t>(i));
+    if (cache_step_id <= 0) {
+      cache_step_id = sparse_attn_state.current_step + 1;
+    }
+    torch::Tensor original_hidden_states = hidden_states;
+    TensorMap step_in_map = {
+        {"hidden_states", hidden_states},
+        {"original_hidden_states", original_hidden_states}};
+    CacheStepIn step_before(cache_step_id, step_in_map);
+    const bool use_step_cache =
+        DiTCache::get_instance().on_before_step(step_before, use_cfg);
+
+    if (!use_step_cache) {
+      for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+        CacheBlockIn block_before(i);
+        const bool use_block_cache =
+            DiTCache::get_instance().on_before_block(block_before, use_cfg);
+        if (before_layer_cb) {
+          before_layer_cb(static_cast<int32_t>(i));
+        }
+        if (!use_block_cache) {
+          hidden_states =
+              transformer_layers_[i]->forward(hidden_states,
+                                              encoder_hidden_states_embedded,
+                                              timestep_proj,
+                                              rotary_emb,
+                                              sparse_attn_state);
+        }
+        if (after_layer_cb) {
+          after_layer_cb(static_cast<int32_t>(i));
+        }
+
+        TensorMap block_after_map = {
+            {"hidden_states", hidden_states},
+            {"encoder_hidden_states", encoder_hidden_states_embedded},
+            {"original_hidden_states", original_hidden_states}};
+        CacheBlockIn block_after(i, block_after_map);
+        CacheBlockOut block_out =
+            DiTCache::get_instance().on_after_block(block_after, use_cfg);
+        hidden_states = block_out.tensors.at("hidden_states");
       }
     }
+
+    TensorMap step_after_map = {
+        {"hidden_states", hidden_states},
+        {"original_hidden_states", original_hidden_states}};
+    CacheStepIn step_after(cache_step_id, step_after_map);
+    CacheStepOut step_out =
+        DiTCache::get_instance().on_after_step(step_after, use_cfg);
+    hidden_states = step_out.tensors.at("hidden_states");
 
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
       hidden_states =

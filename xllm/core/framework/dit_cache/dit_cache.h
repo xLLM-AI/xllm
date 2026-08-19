@@ -14,6 +14,11 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+
 #include "dit_cache_impl.h"
 
 namespace xllm {
@@ -44,16 +49,22 @@ class DiTCache {
 
   CacheStepOut on_after_step(const CacheStepIn& stepin, bool use_cfg = false);
 
-  void set_context(const CacheContext& context) {
-    active_cache_->set_context(context);
-    active_cond_cache_->set_context(context);
-  }
+  void set_context(const CacheContext& context);
+  void reset_scope(int64_t scope_id);
 
  private:
-  torch::Tensor get_tensor_or_empty(const TensorMap& m, const std::string& k);
+  struct CachePair {
+    std::unique_ptr<DitCacheImpl> cache;
+    std::unique_ptr<DitCacheImpl> cond_cache;
+  };
 
-  std::unique_ptr<DitCacheImpl> active_cache_;
-  std::unique_ptr<DitCacheImpl> active_cond_cache_;
+  bool create_scope(int64_t scope_id);
+  CachePair& active_scope();
+
+  DiTCacheConfig config_;
+  const ParallelArgs* parallel_args_ = nullptr;
+  int64_t active_scope_id_ = 0;
+  std::unordered_map<int64_t, CachePair> scopes_;
 };
 
 }  // namespace xllm

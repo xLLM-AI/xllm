@@ -15,54 +15,91 @@ limitations under the License.
 
 #include "dit_cache.h"
 
+#include <glog/logging.h>
+
 namespace xllm {
 
 bool DiTCache::init(const DiTCacheConfig& cfg,
                     const ParallelArgs& parallel_args) {
-  active_cache_ = create_dit_cache(cfg);
-  active_cond_cache_ = create_dit_cache(cfg);
-  if (!active_cache_ || !active_cond_cache_) {
+  config_ = cfg;
+  parallel_args_ = &parallel_args;
+  active_scope_id_ = 0;
+  scopes_.clear();
+  return create_scope(active_scope_id_);
+}
+
+void DiTCache::set_context(const CacheContext& context) {
+  active_scope_id_ = context.scope_id;
+  CHECK(create_scope(active_scope_id_))
+      << "Failed to create DiT cache scope " << active_scope_id_;
+
+  CachePair& scope = active_scope();
+  scope.cache->set_context(context);
+  scope.cond_cache->set_context(context);
+}
+
+void DiTCache::reset_scope(int64_t scope_id) {
+  scopes_.erase(scope_id);
+  CHECK(create_scope(scope_id))
+      << "Failed to reset DiT cache scope " << scope_id;
+}
+
+bool DiTCache::create_scope(int64_t scope_id) {
+  auto [it, inserted] = scopes_.try_emplace(scope_id);
+  if (!inserted) {
+    return true;
+  }
+  CHECK(parallel_args_ != nullptr) << "DiT cache must be initialized first";
+
+  CachePair& scope = it->second;
+  scope.cache = create_dit_cache(config_);
+  scope.cond_cache = create_dit_cache(config_);
+  if (!scope.cache || !scope.cond_cache) {
+    scopes_.erase(it);
     return false;
   }
-  active_cache_->init(cfg, parallel_args);
-  active_cond_cache_->init(cfg, parallel_args);
+  scope.cache->init(config_, *parallel_args_);
+  scope.cond_cache->init(config_, *parallel_args_);
   return true;
 }
 
-torch::Tensor DiTCache::get_tensor_or_empty(const TensorMap& m,
-                                            const std::string& k) {
-  auto it = m.find(k);
-  if (it != m.end()) return it->second;
-  return torch::Tensor();
+DiTCache::CachePair& DiTCache::active_scope() {
+  auto it = scopes_.find(active_scope_id_);
+  CHECK(it != scopes_.end()) << "Active DiT cache scope is not initialized";
+  return it->second;
 }
 
 bool DiTCache::on_before_block(const CacheBlockIn& blockin, bool use_cfg) {
+  CachePair& scope = active_scope();
   if (use_cfg) {
-    return active_cond_cache_->on_before_block(blockin);
+    return scope.cond_cache->on_before_block(blockin);
   }
-  return active_cache_->on_before_block(blockin);
+  return scope.cache->on_before_block(blockin);
 }
 
 CacheBlockOut DiTCache::on_after_block(const CacheBlockIn& blockin,
                                        bool use_cfg) {
+  CachePair& scope = active_scope();
   if (use_cfg) {
-    return active_cond_cache_->on_after_block(blockin);
+    return scope.cond_cache->on_after_block(blockin);
   }
-  return active_cache_->on_after_block(blockin);
+  return scope.cache->on_after_block(blockin);
 }
 
 bool DiTCache::on_before_step(const CacheStepIn& stepin, bool use_cfg) {
+  CachePair& scope = active_scope();
   if (use_cfg) {
-    return active_cond_cache_->on_before_step(stepin);
+    return scope.cond_cache->on_before_step(stepin);
   }
-  return active_cache_->on_before_step(stepin);
+  return scope.cache->on_before_step(stepin);
 }
 
 CacheStepOut DiTCache::on_after_step(const CacheStepIn& stepin, bool use_cfg) {
+  CachePair& scope = active_scope();
   if (use_cfg) {
-    return active_cond_cache_->on_after_step(stepin);
+    return scope.cond_cache->on_after_step(stepin);
   }
-  return active_cache_->on_after_step(stepin);
+  return scope.cache->on_after_step(stepin);
 }
 
 }  // namespace xllm
