@@ -21,9 +21,9 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
-#include "framework/state_dict/state_dict.h"
+#include "core/framework/state_dict/state_dict.h"
 
-namespace xllm::npu::model {
+namespace xllm {
 
 // DSpark ConfidenceHead: given a draft-step hidden state and the previous
 // token id, produces an acceptance-prob logit. When
@@ -77,11 +77,8 @@ class DSparkConfidenceHead final {
   void verify_loaded_weights(const std::string& prefix) const {
     CHECK(proj_weight_.defined())
         << "Failed to find " << prefix << "confidence_head.proj.weight";
-    CHECK(proj_bias_.defined())
-        << "Failed to find " << prefix << "confidence_head.proj.bias";
     CHECK_EQ(proj_weight_.dim(), 2)
         << "confidence_head.proj.weight must be [1, in_dim]";
-    CHECK_EQ(proj_bias_.dim(), 1) << "confidence_head.proj.bias must be [1]";
     CHECK_EQ(proj_weight_.size(0), 1)
         << "confidence_head.proj.weight must output a single logit";
     const int64_t expected_in =
@@ -89,8 +86,13 @@ class DSparkConfidenceHead final {
     CHECK_EQ(proj_weight_.size(1), expected_in)
         << "confidence_head.proj.weight in_dim mismatch, expected "
         << expected_in << " got " << proj_weight_.size(1);
-    CHECK_EQ(proj_bias_.size(0), 1)
-        << "confidence_head.proj.bias size mismatch";
+    // Bias is optional: some checkpoints (e.g. DeepSeek-V4 DSpark) ship a
+    // bias-less confidence projection. Only validate it when present.
+    if (proj_bias_.defined()) {
+      CHECK_EQ(proj_bias_.dim(), 1) << "confidence_head.proj.bias must be [1]";
+      CHECK_EQ(proj_bias_.size(0), 1)
+          << "confidence_head.proj.bias size mismatch";
+    }
   }
 
   // hidden: [num_reqs, hidden_size]
@@ -171,9 +173,9 @@ class DSparkConfidenceHead final {
     return torch::sigmoid(logit).to(torch::kFloat32);
   }
 
-  bool defined() const {
-    return proj_weight_.defined() && proj_bias_.defined();
-  }
+  // Bias is optional (some checkpoints are bias-less), so presence of the
+  // projection weight alone defines the head.
+  bool defined() const { return proj_weight_.defined(); }
 
  private:
   // Optional temperature scaling on the confidence logit before sigmoid, shared
@@ -195,4 +197,4 @@ class DSparkConfidenceHead final {
   bool with_markov_ = false;
 };
 
-}  // namespace xllm::npu::model
+}  // namespace xllm

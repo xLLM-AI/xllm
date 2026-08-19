@@ -22,10 +22,12 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model_loader.h"
 #include "core/layers/common/linear.h"
 #include "core/layers/common/rms_norm.h"
 #include "models/llm/deepseek_v4.h"
+#include "models/llm/dspark_confidence_head.h"
 #include "models/llm/dspark_markov_head.h"
 #include "models/llm/dspark_weight_source.h"
 #include "models/model_registry.h"
@@ -71,6 +73,19 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     CHECK_GT(args.markov_rank(), 0)
         << "DeepSeek-V4 DSpark requires dspark_markov_rank > 0.";
 
+    // DeepSeek-V4 DSpark checkpoints carry a confidence head (with_markov, no
+    // bias) under mtp.<last>.confidence_head. Its config has no explicit enable
+    // flag, so presence is decided by whether the weight loads. Only stand it
+    // up under adaptive speculative decode, which is its sole consumer;
+    // otherwise its weights would occupy device memory unused.
+    if (SpeculativeConfig::get_instance()
+            .enable_adaptive_speculative_decode()) {
+      confidence_head_.initialize(context.get_tensor_options(),
+                                  args.hidden_size(),
+                                  args.markov_rank(),
+                                  /*with_markov=*/true);
+    }
+
     const auto options = context.get_tensor_options();
     main_proj_ = register_module(
         "main_proj",
@@ -115,6 +130,9 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
       norm_->load_state_dict(last.get_dict_with_prefix("norm."));
       load_hc_head_state_dict(last);
       markov_head_.load_state_dict(last.get_dict_with_prefix("markov_head."));
+      // confidence_head reads confidence_head.proj.{weight,bias}; DeepSeek-V4
+      // ships a bias-less weight. Loads only if present.
+      confidence_head_.load_state_dict(last);
     }
   }
 
@@ -126,6 +144,10 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
               << embedding_source_.source_name() << ".";
     markov_head_.verify_loaded_weights(
         "mtp." + std::to_string(layers_.size() - 1) + ".markov_head.");
+    if (confidence_head_.defined()) {
+      confidence_head_.verify_loaded_weights(
+          "mtp." + std::to_string(layers_.size() - 1) + ".confidence_head.");
+    }
   }
 
   int32_t last_dspark_layer_index() const {
@@ -135,6 +157,32 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) const {
     return markov_head_.bias(previous_token_ids);
+  }
+
+  bool has_dspark_confidence_head() const { return confidence_head_.defined(); }
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) const {
+    CHECK(confidence_head_.defined())
+        << "DeepSeek-V4 DSpark ConfidenceHead is not loaded.";
+    torch::Tensor markov_embed;
+    if (previous_token_ids.defined()) {
+      markov_embed = markov_head_.markov_embed(previous_token_ids);
+    }
+    return confidence_head_.forward(hidden, markov_embed);
+  }
+
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) const {
+    CHECK(confidence_head_.defined())
+        << "DeepSeek-V4 DSpark ConfidenceHead is not loaded.";
+    torch::Tensor markov_embed_all;
+    if (prev_matrix.defined()) {
+      markov_embed_all = markov_head_.markov_embed(prev_matrix);
+    }
+    return confidence_head_.forward_batched(hidden_all, markov_embed_all);
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
@@ -168,6 +216,7 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
   layer::ReplicatedLinear main_proj_{nullptr};
   layer::RMSNorm main_norm_{nullptr};
   DSparkMarkovHead markov_head_;
+  DSparkConfidenceHead confidence_head_;
   dspark_detail::VocabularyWeightSelector embedding_source_;
 };
 TORCH_MODULE(DeepseekV4DSparkModel);
@@ -202,6 +251,22 @@ class DeepseekV4DSparkForCausalLMImpl final
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) const {
     return model_->dspark_markov_bias(previous_token_ids);
+  }
+
+  bool has_dspark_confidence_head() const {
+    return model_->has_dspark_confidence_head();
+  }
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) const {
+    return model_->dspark_confidence_probs(hidden, previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) const {
+    return model_->dspark_confidence_probs_batched(hidden_all, prev_matrix);
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,

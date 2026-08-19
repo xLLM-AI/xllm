@@ -73,6 +73,15 @@ class DSparkMarkovHead final {
     return F::linear(markov_embedding, markov_w2_);
   }
 
+  // Expose the shared markov_w1 embedding so a ConfidenceHead can reuse the
+  // same low-rank features without a redundant lookup-table copy.
+  torch::Tensor markov_embed(const torch::Tensor& previous_token_ids) const {
+    CHECK(markov_w1_.defined())
+        << "DSpark Markov head weights are not initialized.";
+    namespace F = torch::nn::functional;
+    return F::embedding(previous_token_ids, markov_w1_);
+  }
+
  private:
   torch::Tensor markov_w1_;
   torch::Tensor markov_w2_;

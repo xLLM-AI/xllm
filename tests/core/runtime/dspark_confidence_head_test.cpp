@@ -59,15 +59,12 @@ DSparkConfidenceHead make_confidence_head(bool with_markov, int64_t seed) {
 
 DSparkMarkovHead make_markov_head(int64_t seed) {
   torch::manual_seed(seed + 999);
-  DSparkMarkovHead head;
-  head.initialize(f32_cpu(), kMarkovRank);
+  DSparkMarkovHead head(f32_cpu(), kMarkovRank);
   std::unordered_map<std::string, torch::Tensor> w;
   // markov_w1: [vocab, rank]; markov_w2: [draft_vocab, rank]. Only markov_w1 is
   // exercised by confidence (markov_embed); w2 just needs to satisfy load.
-  w["markov_head.markov_w1.weight"] =
-      torch::randn({kVocab, kMarkovRank}, f32_cpu());
-  w["markov_head.markov_w2.weight"] =
-      torch::randn({kVocab, kMarkovRank}, f32_cpu());
+  w["markov_w1.weight"] = torch::randn({kVocab, kMarkovRank}, f32_cpu());
+  w["markov_w2.weight"] = torch::randn({kVocab, kMarkovRank}, f32_cpu());
   StateDict sd(std::move(w));
   head.load_state_dict(sd);
   return head;
