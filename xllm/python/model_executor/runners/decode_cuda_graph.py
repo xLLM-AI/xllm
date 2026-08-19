@@ -67,6 +67,7 @@ class _StaticAttentionMetadata:
     linear_state_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
     dp_token_counts: tuple[int, ...] = ()
+    dp_is_decode: tuple[int, ...] = ()
 
 
 class _DecodeGraphEntry:
@@ -144,6 +145,7 @@ class DecodeCudaGraphRunner(BaseRunner):
                 kv_seq_lens_host=torch.arange(batch_size + 1, dtype=torch.int32, device="cpu"),
                 kv_cu_seq_lens=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
                 dp_token_counts=(batch_size,) * self.dp_size,
+                dp_is_decode=(1,) * self.dp_size,
             )
             input_ids = torch.zeros(batch_size, dtype=torch.int32, device=device)
             positions = torch.zeros(batch_size, dtype=torch.int32, device=device)
@@ -230,6 +232,9 @@ class DecodeCudaGraphRunner(BaseRunner):
                 f"DP decode step requires valid dp_token_counts (got length {len(dp_token_counts)}, "
                 f"expected {self.dp_size}). All DP ranks must use the same graph shape."
             )
+        dp_is_decode = getattr(metadata, "dp_is_decode", None)
+        if dp_is_decode is not None and not all(dp_is_decode):
+            return None
         if any(count < 0 for count in dp_token_counts):
             raise RuntimeError(f"DP dp_token_counts contains negative value: {dp_token_counts}")
         if dp_token_counts[self.dp_rank] > input_ids.shape[0]:
@@ -291,6 +296,7 @@ class DecodeCudaGraphRunner(BaseRunner):
             ),
             linear_state_indices=torch.zeros(padded_batch_size, dtype=torch.int32, device=device),
             dp_token_counts=dp_token_counts,
+            dp_is_decode=(1,) * self.dp_size if self.dp_size > 1 else (),
             paged_kv_indptr_host=torch.zeros(padded_batch_size + 1, dtype=torch.int32, device="cpu"),
             paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
         )

@@ -80,6 +80,8 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::has_initial_state)
       .def_property_readonly("dp_token_counts",
                              &PyAttentionMetadataView::dp_token_counts)
+      .def_property_readonly("dp_is_decode",
+                             &PyAttentionMetadataView::dp_is_decode)
       .def_property_readonly("q_seq_lens", &PyAttentionMetadataView::q_seq_lens)
       .def_property_readonly("expanded_decode_metadata",
                              &PyAttentionMetadataView::expanded_decode_metadata)
@@ -162,6 +164,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   dp_token_counts_ = params.parallel.raw_dp_global_token_nums.empty()
                          ? params.parallel.dp_global_token_nums
                          : params.parallel.raw_dp_global_token_nums;
+  dp_is_decode_ = params.parallel.dp_is_decode;
 }
 
 const torch::Tensor& PyAttentionMetadataView::slot_mapping() const {
@@ -222,6 +225,10 @@ py::object PyAttentionMetadataView::has_initial_state() const {
 
 const std::vector<int32_t>& PyAttentionMetadataView::dp_token_counts() const {
   return dp_token_counts_;
+}
+
+const std::vector<int32_t>& PyAttentionMetadataView::dp_is_decode() const {
+  return dp_is_decode_;
 }
 
 py::object PyAttentionMetadataView::q_seq_lens() const {

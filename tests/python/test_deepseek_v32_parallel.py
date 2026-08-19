@@ -47,6 +47,7 @@ distributed.all_gather = MagicMock(side_effect=lambda x, **kw: x)
 distributed.tp_rank = MagicMock(return_value=0)
 
 from xllm.python.model_executor.forward_context import (  # noqa: E402
+    AclGraphExecutionState,
     ForwardContext,
     forward_context,
 )
@@ -155,7 +156,7 @@ def _make_moe(
         dp_size=dp_size,
         dp_rank=dp_rank,
         moe_tp_size=moe_tp_size,
-        world_size=max(ep_size, 1),
+        world_size=max(ep_size, 1) * dp_size,
     )
     return DeepseekV3MoE(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu"))
 
@@ -181,12 +182,11 @@ class TestDeepseekV3MoEConstruction:
 
     def test_weight_shape_ep1(self):
         moe = _make_moe(ep_size=1, n_experts=16)
-        assert moe.experts_w13.shape[0] == 16
+        assert moe.num_local_experts == 16
 
     def test_weight_shape_ep2(self):
         moe = _make_moe(ep_size=2, ep_rank=0, n_experts=16)
-        assert moe.experts_w13.shape[0] == 8
-        assert moe.experts_w2.shape[0] == 8
+        assert moe.num_local_experts == 8
 
     def test_intermediate_tp_sharding(self):
         moe = _make_moe(ep_size=2, ep_rank=0, moe_tp_size=2)
@@ -198,13 +198,21 @@ class TestDeepseekV3MoEConstruction:
 # ---------------------------------------------------------------------------
 
 
-def _mock_forward_context(dp_token_counts=(4,)):
-    metadata = SimpleNamespace(dp_token_counts=dp_token_counts)
+def _mock_forward_context(dp_token_counts=(4,), is_graph=False, dp_is_decode=None):
+    metadata = SimpleNamespace(
+        dp_token_counts=dp_token_counts,
+        is_prefill=False,
+        is_chunked_prefill=False,
+    )
+    if dp_is_decode is not None:
+        metadata.dp_is_decode = dp_is_decode
+    execution_state = AclGraphExecutionState(persistent_buffers={}) if is_graph else None
     ctx = ForwardContext(
         attention_backend=MagicMock(),
         device=torch.device("cpu"),
         metadata=metadata,
         layer_caches=[],
+        execution_state=execution_state,
     )
     return ctx
 
@@ -240,7 +248,7 @@ class TestDeepseekV3MoEForward:
         kernels.grouped_moe.return_value = torch.zeros(8, 64)
         self._patch_shared_experts(moe, 8)
 
-        ctx = _mock_forward_context(dp_token_counts=(3, 4))
+        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=True)
         with forward_context(ctx):
             moe.forward(hidden)
 
@@ -300,7 +308,10 @@ class TestDeepseekV3MoEForward:
             moe.forward(hidden)
 
         call_args = kernels.grouped_moe.call_args
-        active_range = call_args[0][11]  # 12th positional arg
+        # grouped_moe positional signature: hidden, gating, w13, w2, w13_scale,
+        # w2_scale, correction_bias, topk, topk_group, num_expert_groups,
+        # renormalize, routed_scaling, active_expert_range — index 12 is active_expert_range.
+        active_range = call_args[0][12]
         assert active_range == [8, 16]
 
     def test_dp2_output_sliced_to_local(self):
@@ -312,8 +323,45 @@ class TestDeepseekV3MoEForward:
         kernels.grouped_moe.return_value = moe_output
         self._patch_shared_experts(moe, 8)
 
-        ctx = _mock_forward_context(dp_token_counts=(3, 4))
+        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=True)
         with forward_context(ctx):
             result = moe.forward(hidden)
 
+        assert result.shape[0] == 4
+
+    def test_dp2_eager_uses_compact_gather(self):
+        moe = _make_moe(dp_size=2, dp_rank=0)
+        hidden = torch.randn(3, 64)
+        # eager mode: all_gather_variable returns compact [7, 64] (3+4 tokens)
+        compact_output = torch.randn(7, 64)
+        distributed.all_gather_variable.reset_mock()
+        distributed.all_gather_variable.return_value = compact_output
+        kernels.grouped_moe.return_value = torch.zeros(7, 64)
+        self._patch_shared_experts(moe, 7)
+
+        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=False, dp_is_decode=(1, 1))
+        with forward_context(ctx):
+            result = moe.forward(hidden)
+
+        distributed.all_gather_variable.assert_called_once()
+        distributed.all_gather.assert_not_called()
+        # dp_rank=0: offset=0, narrow(0, 0, 3) → [3, 64]
+        assert result.shape[0] == 3
+
+    def test_dp2_eager_output_sliced_rank1(self):
+        moe = _make_moe(dp_size=2, dp_rank=1)
+        hidden = torch.randn(4, 64)
+        # eager mode: all_gather_variable returns compact [7, 64] (3+4 tokens)
+        compact_output = torch.randn(7, 64)
+        distributed.all_gather_variable.reset_mock()
+        distributed.all_gather_variable.return_value = compact_output
+        moe_output = torch.randn(7, 64)
+        kernels.grouped_moe.return_value = moe_output
+        self._patch_shared_experts(moe, 7)
+
+        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=False, dp_is_decode=(1, 1))
+        with forward_context(ctx):
+            result = moe.forward(hidden)
+
+        # dp_rank=1: offset=sum([3])=3, narrow(0, 3, 4) → [4, 64]
         assert result.shape[0] == 4

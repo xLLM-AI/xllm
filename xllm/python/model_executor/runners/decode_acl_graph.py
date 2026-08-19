@@ -74,6 +74,7 @@ class _StaticAttentionMetadata:
     linear_state_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
     dp_token_counts: tuple[int, ...] = ()
+    dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None
     is_prefill: bool = False
@@ -179,6 +180,9 @@ class DecodeAclGraphRunner(BaseRunner):
                     f"DP decode step requires valid dp_token_counts (got {dp_token_counts!r}, "
                     f"expected length {self.dp_size}). All DP ranks must use the same graph shape."
                 )
+            dp_is_decode = getattr(metadata, "dp_is_decode", None)
+            if dp_is_decode is not None and not all(dp_is_decode):
+                return False
             global_batch = max(max(int(c) for c in dp_token_counts), batch_size)
             return _decode_bucket(global_batch) <= self.max_batch
         return _decode_bucket(batch_size) <= self.max_batch
@@ -229,8 +233,14 @@ class DecodeAclGraphRunner(BaseRunner):
             # drop them so the mismatched global length never reaches shape
             # validation.
             kv_seq_lens_host_values = None
-        elif kv_seq_lens_host_values is None:
-            raise RuntimeError("decode graph requires scheduler-provided host KV lengths")
+        else:
+            kv_seq_lens_host_values = (
+                expanded.kv_seq_lens_host_values
+                if expanded is not None
+                else getattr(metadata, "kv_seq_lens_host_values", None)
+            )
+            if not kv_seq_lens_host_values:
+                raise RuntimeError("decode graph requires scheduler-provided host KV lengths")
 
         paged_kv_indptr = expanded.paged_kv_indptr if expanded is not None else metadata.paged_kv_indptr
         paged_kv_indices = expanded.paged_kv_indices if expanded is not None else metadata.paged_kv_indices
@@ -660,6 +670,7 @@ class DecodeAclGraphRunner(BaseRunner):
             kv_seq_lens_host_values=[1] * padded_batch_size,
             block_table=static_block_table,
             dp_token_counts=tuple([padded_batch_size] * self.dp_size) if self.dp_size > 1 else (),
+            dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
         )
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
         entry.kv_seq_lens_delta = torch.empty(padded_batch_size, dtype=torch.int32, device=device)
