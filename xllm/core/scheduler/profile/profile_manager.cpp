@@ -19,7 +19,6 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
-#include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -72,10 +71,17 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
       options.enable_profile_kv_blocks(), true /*is_prefill*/);
   decode_time_predictor_ = std::make_unique<TimePredictor>(
       options.enable_profile_kv_blocks(), false /*is_prefill*/);
+  speculative_validate_time_predictor_ = std::make_unique<TimePredictor>(
+      options.enable_profile_kv_blocks(), false /*is_prefill*/);
   if (options.enable_profile_step_time()) {
     LOG(INFO) << "Starting profiliing step time.";
     profile_step_time(false);
-    profile_speculative_validate_time();
+    // The validate-time predictor is only consumed by the adaptive
+    // speculative controller, so skip the whole prefix/query/batch sweep
+    // unless adaptive speculative decode is actually enabled.
+    if (should_profile_speculative_validate()) {
+      profile_speculative_validate_time();
+    }
     // test accuracy
     // eval_sequence_latency_prediction();
     // eval_batch_latency_prediction("only_prefill");
@@ -404,66 +410,20 @@ void ProfileManager::train_speculative_validate_time_predictor(
     return;
   }
 
-  // Fit T = intercept + query_token_ms*(batch*query) +
-  // query_prefix_ms*(batch*query*prefix). A standalone batch term was tried
-  // and dropped: it is pruning-invariant (does not depend on prefix) and only
-  // steals variance from the marginal query terms that drive pruning.
-  //
-  // TODO: dedup this Eigen least-squares + MAE/MAPE + negative-coefficient
-  // clamp with TimePredictor::fit_for_decode (same routine, different design
-  // matrix). Deferred to a follow-up commit to keep this PR focused.
-  constexpr int32_t kNumCoefficients = 3;
-  Eigen::MatrixXd matrix(time_profiling_data.size(), kNumCoefficients);
-  Eigen::VectorXd target(time_profiling_data.size());
-  for (int32_t i = 0; i < static_cast<int32_t>(time_profiling_data.size());
-       ++i) {
-    const int32_t batch_size = std::get<0>(time_profiling_data[i]);
-    const int32_t query_len = std::get<1>(time_profiling_data[i]);
-    const int32_t prefix_len = std::get<2>(time_profiling_data[i]);
-    const double batch = static_cast<double>(batch_size);
-    const double query = static_cast<double>(query_len);
-    const double prefix = static_cast<double>(prefix_len);
-    matrix(i, 0) = 1.0;
-    matrix(i, 1) = batch * query;
-    matrix(i, 2) = batch * query * prefix;
-    target(i) = std::get<3>(time_profiling_data[i]);
-  }
-
-  Eigen::VectorXd coefficients = matrix.colPivHouseholderQr().solve(target);
-  double sum_abs_error = 0.0;
-  double sum_percentage_error = 0.0;
-  for (int32_t i = 0; i < static_cast<int32_t>(time_profiling_data.size());
-       ++i) {
-    const double actual = std::get<3>(time_profiling_data[i]);
-    const double prediction = matrix.row(i).dot(coefficients);
-    const double abs_error = std::abs(prediction - actual);
-    sum_abs_error += abs_error;
-    if (actual > 0.0) {
-      sum_percentage_error += abs_error / actual;
-    }
-  }
-  const double mae =
-      sum_abs_error / static_cast<double>(time_profiling_data.size());
-  const double mape = sum_percentage_error /
-                      static_cast<double>(time_profiling_data.size()) * 100.0;
-
-  for (int32_t i = 0; i < kNumCoefficients; ++i) {
-    // NaN/Inf can escape a rank-deficient QR solve or slip in via a NaN
-    // latency sample; `NaN < 0.0` is false so a raw negative-only clamp
-    // would silently broadcast poison to workers. Sanitize non-finite
-    // and negative values consistently here (the local registry has the
-    // same sanitizer, but the RPC path sees the raw values).
-    if (!std::isfinite(coefficients(i)) || coefficients(i) < 0.0) {
-      LOG(ERROR) << "Invalid speculative validate coefficient[" << i
-                 << "]=" << coefficients(i) << ", clamping to 0.";
-      coefficients(i) = 0.0;
-    }
-  }
+  // The least-squares fit + error metrics + coefficient sanitization live in
+  // TimePredictor (shared with the prefill/decode predictors). Here we only
+  // map the fitted coefficients into the registry struct and publish them.
+  speculative_validate_time_predictor_->fit_for_speculative_validate(
+      time_profiling_data);
+  const std::vector<double> coefficients =
+      speculative_validate_time_predictor_->get_coefficients();
+  CHECK_EQ(coefficients.size(), 3u)
+      << "speculative validate predictor must have 3 coefficients";
 
   SpeculativeProfileRegistry::ValidateTimePredictor predictor;
-  predictor.intercept_ms = coefficients(0);
-  predictor.query_token_ms = coefficients(1);
-  predictor.query_prefix_ms = coefficients(2);
+  predictor.intercept_ms = coefficients[0];
+  predictor.query_token_ms = coefficients[1];
+  predictor.query_prefix_ms = coefficients[2];
   // Broadcast to workers FIRST, then commit locally. Workers gate the
   // adaptive path on their own SpeculativeProfileRegistry, so any rank
   // that misses the predictor will diverge from ranks that received it:
@@ -481,31 +441,36 @@ void ProfileManager::train_speculative_validate_time_predictor(
   }
   SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
       predictor);
-
-  LOG(INFO) << "Fitted speculative validate equation: time = "
-            << predictor.query_token_ms << " * batch_size * query_len + "
-            << predictor.query_prefix_ms
-            << " * batch_size * query_len * prefix_len + "
-            << predictor.intercept_ms << ", MAE: " << mae << ", MAPE: " << mape
-            << "%";
 }
 
-void ProfileManager::profile_speculative_validate_time() {
+bool ProfileManager::should_profile_speculative_validate() const {
+  // The validate-time predictor is only consumed by the adaptive speculative
+  // controller: it needs adaptive explicitly enabled, more than one
+  // speculative token to prune, and a supported algorithm
+  // (MTP / DFlash / DSpark). Otherwise the prefix/query/batch sweep is wasted
+  // startup time.
   const SpeculativeConfig& speculative_config =
       ::xllm::SpeculativeConfig::get_instance();
-  // Only fit the validate-time predictor when the adaptive path can
-  // actually consume it: MTP/DFlash/DSpark with SL > 1 and adaptive
-  // explicitly enabled. Otherwise this whole prefix/query/batch sweep is
-  // wasted startup time.
   const std::string& speculative_algorithm =
       speculative_config.speculative_algorithm();
   const bool is_supported_algo =
       SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) ||
       SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
-  if (!speculative_config.enable_adaptive_speculative_decode() ||
-      speculative_config.num_speculative_tokens() <= 1 || !is_supported_algo) {
+  return speculative_config.enable_adaptive_speculative_decode() &&
+         speculative_config.num_speculative_tokens() > 1 && is_supported_algo;
+}
+
+void ProfileManager::profile_speculative_validate_time() {
+  // The adaptive gate lives at the call site (should_profile_speculative_
+  // validate); guard here too so a direct call cannot profile a config the
+  // adaptive controller would never consume.
+  if (!should_profile_speculative_validate()) {
     return;
   }
+  const SpeculativeConfig& speculative_config =
+      ::xllm::SpeculativeConfig::get_instance();
+  const std::string& speculative_algorithm =
+      speculative_config.speculative_algorithm();
   LOG(INFO) << "Starting speculative validate profile for "
             << speculative_algorithm << ", "
             << "adaptive_enabled="
