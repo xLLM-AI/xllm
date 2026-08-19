@@ -226,11 +226,17 @@ class DecodeCudaGraphRunner(BaseRunner):
 
         dp_token_counts = tuple(int(count) for count in metadata.dp_token_counts)
         if len(dp_token_counts) != self.dp_size:
-            return None
+            raise RuntimeError(
+                f"DP decode step requires valid dp_token_counts (got length {len(dp_token_counts)}, "
+                f"expected {self.dp_size}). All DP ranks must use the same graph shape."
+            )
         if any(count < 0 for count in dp_token_counts):
-            return None
+            raise RuntimeError(f"DP dp_token_counts contains negative value: {dp_token_counts}")
         if dp_token_counts[self.dp_rank] > input_ids.shape[0]:
-            return None
+            raise RuntimeError(
+                f"dp_token_counts[{self.dp_rank}]={dp_token_counts[self.dp_rank]} exceeds "
+                f"local input_ids size {input_ids.shape[0]}"
+            )
         global_batch_size = max(max(dp_token_counts, default=0), input_ids.shape[0])
         padded_batch_size = _decode_bucket(global_batch_size)
         if padded_batch_size > max_graph_batch:

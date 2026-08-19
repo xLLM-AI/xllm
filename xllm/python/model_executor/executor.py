@@ -111,6 +111,7 @@ class ModelExecutor:
         graph_backend = _resolve_graph_backend(config)
         dp_size = int(config.get("dp_size", 1))
         dp_rank = int(config.get("dp_rank", 0))
+        self.dp_size = dp_size
         if dp_size > 1 and graph_backend not in (
             "",
             "off",
@@ -224,6 +225,16 @@ class ModelExecutor:
                 input_embedding,
             )
             return graph_runner.execute(input_ids, positions, metadata, input_embedding)
+        if (
+            self.dp_size > 1
+            and graph_runner is not None
+            and not metadata.is_prefill
+            and not metadata.is_chunked_prefill
+        ):
+            raise RuntimeError(
+                f"DP mode (dp_size={self.dp_size}) requires graph execution for decode steps, "
+                f"but graph runner declined. batch_size={input_ids.shape[0]}"
+            )
         if self.inductor_runner is not None:
             return self.inductor_runner.execute(
                 input_ids,

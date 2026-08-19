@@ -146,6 +146,13 @@ class DecodeAclGraphRunner(BaseRunner):
         if (metadata.is_prefill or metadata.is_chunked_prefill) and not is_expanded_spec_verify:
             return False
 
+        batch_size = input_ids.numel()
+        if not (
+            self._has_compatible_decode_metadata(input_ids, metadata)
+            and (input_embedding is None or input_embedding.shape[0] == batch_size)
+        ):
+            return False
+
         local_batch_size, global_batch_size = self._decode_batch_sizes(
             input_ids,
             metadata,
@@ -162,13 +169,19 @@ class DecodeAclGraphRunner(BaseRunner):
                 self._batch_limit_warning_logged = True
             return False
 
-        batch_size = input_ids.numel()
-        bucket_size = _decode_bucket(batch_size)
-        return (
-            self._has_compatible_decode_metadata(input_ids, metadata)
-            and (input_embedding is None or input_embedding.shape[0] == batch_size)
-            and bucket_size <= self.max_batch
-        )
+        if self.dp_size > 1:
+            # DP ranks share one graph shape, so a missing or malformed
+            # dp_token_counts cannot silently fall back to eager: divergent
+            # execution paths across ranks would deadlock HCCL collectives.
+            dp_token_counts = getattr(metadata, "dp_token_counts", None)
+            if dp_token_counts is None or len(dp_token_counts) != self.dp_size:
+                raise RuntimeError(
+                    f"DP decode step requires valid dp_token_counts (got {dp_token_counts!r}, "
+                    f"expected length {self.dp_size}). All DP ranks must use the same graph shape."
+                )
+            global_batch = max(max(int(c) for c in dp_token_counts), batch_size)
+            return _decode_bucket(global_batch) <= self.max_batch
+        return _decode_bucket(batch_size) <= self.max_batch
 
     def _decode_batch_sizes(
         self,
@@ -199,11 +212,6 @@ class DecodeAclGraphRunner(BaseRunner):
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.attention_backend.page_size)
         block_table = expanded.block_table if expanded is not None else metadata.block_table
         kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
-        kv_seq_lens_host_values = (
-            expanded.kv_seq_lens_host_values
-            if expanded is not None
-            else getattr(metadata, "kv_seq_lens_host_values", None)
-        )
         if block_table is None or kv_seq_lens is None:
             raise RuntimeError("decode graph requires block and KV metadata")
         block_table = block_table.to(torch.int32)
@@ -214,7 +222,14 @@ class DecodeAclGraphRunner(BaseRunner):
             "requires_host_kv_lengths",
             False,
         )
-        if kv_seq_lens_host_values is None and requires_host_kv_lengths:
+        if not requires_host_kv_lengths:
+            # The C++ engine sizes kv_seq_lens_host_values by the global DP
+            # batch, while block_table holds only this rank's local rows. When
+            # the backend does not consume host KV lengths (e.g. sparse MLA),
+            # drop them so the mismatched global length never reaches shape
+            # validation.
+            kv_seq_lens_host_values = None
+        elif kv_seq_lens_host_values is None:
             raise RuntimeError("decode graph requires scheduler-provided host KV lengths")
 
         paged_kv_indptr = expanded.paged_kv_indptr if expanded is not None else metadata.paged_kv_indptr
