@@ -24,8 +24,10 @@ limitations under the License.
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/model/mtp_utils.h"
+#include "core/framework/parallel_state/process_group.h"
 #include "core/framework/speculative/spec_input_builder.h"
 #include "util/slice.h"
+#include "util/tensor_helper.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -627,22 +629,82 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   update_sampling_params(
       validate_input.sampling_params, per_seq_val_tokens, total_num_val_tokens);
 
-  // dp/ep parallel token counts: dense variant multiplies by num_val_tokens
-  // because each seq expands into that many validate rows. Here per-seq width
-  // varies, so scale by the average width = total_num_val_tokens /
-  // num_sequences so raw_dp_global_token_nums reflects the actual number of
-  // rows a rank owns.
-  const double avg_width =
-      num_sequences > 0
-          ? static_cast<double>(total_num_val_tokens) / num_sequences
-          : 1.0;
-  for (auto& it : input_params.parallel.dp_global_token_nums) {
-    it = static_cast<int32_t>(std::round(it * avg_width));
-  }
-  for (auto& it : input_params.parallel.raw_dp_global_token_nums) {
-    it = static_cast<int32_t>(std::round(it * avg_width));
-  }
+  // Note: dp_global_token_nums is NOT scaled here. Under adaptive pruning each
+  // DP rank's validate token count is data-dependent, so a rank-local estimate
+  // (e.g. average width) would diverge across ranks and desync the MoE
+  // all-to-all pads. The authoritative per-rank counts are gathered over the DP
+  // group by sync_dp_global_token_nums_after_prune(), which the worker calls on
+  // every DP rank right before the target validate forward.
   validate_input.device_tensors_ready = true;
+}
+
+void SpeculativeWorkerImpl::sync_dp_global_token_nums_after_prune(
+    ModelInputParams& input_params,
+    int32_t local_total_val_tokens) {
+  // Only the adaptive controller makes the per-rank validate token count
+  // data-dependent. When it is inactive the dense path already keeps
+  // dp_global_token_nums identical across ranks (constant width multiplier), so
+  // skip the collective entirely and leave static behavior byte-unchanged.
+  if (adaptive_spec_controller_ == nullptr ||
+      !adaptive_spec_controller_->enabled()) {
+    return;
+  }
+  ProcessGroup* dp_group = parallel_args_.dp_local_process_group_;
+  if (dp_group == nullptr || dp_group->world_size() <= 1) {
+    return;
+  }
+  const int32_t dp_size = static_cast<int32_t>(dp_group->world_size());
+  // Gather each DP peer's true post-pruning validate token count. The engine
+  // pre-populates dp_global_token_nums assuming a uniform per-seq width; after
+  // per-seq pruning that assumption is stale, so the padded and raw vectors are
+  // both rewritten with the gathered per-rank counts. Every DP rank runs this,
+  // including ranks that did not prune this step, so the collective matches.
+  torch::Tensor local = torch::tensor(
+      {local_total_val_tokens},
+      torch::TensorOptions().dtype(torch::kInt32).device(device_.unwrap()));
+  torch::Tensor gathered = dp_group->allgather_base_sync(local);
+  torch::Tensor gathered_cpu =
+      safe_to(gathered.view({dp_size}), torch::kCPU).contiguous();
+  const int32_t* gathered_data = gathered_cpu.data_ptr<int32_t>();
+
+  std::vector<int32_t>& token_nums = input_params.parallel.dp_global_token_nums;
+  std::vector<int32_t>& raw_token_nums =
+      input_params.parallel.raw_dp_global_token_nums;
+  CHECK_EQ(static_cast<int32_t>(token_nums.size()), dp_size)
+      << "dp_global_token_nums size must match DP group world size";
+  for (int32_t dp_rank = 0; dp_rank < dp_size; ++dp_rank) {
+    token_nums[static_cast<size_t>(dp_rank)] = gathered_data[dp_rank];
+  }
+  if (!raw_token_nums.empty()) {
+    CHECK_EQ(static_cast<int32_t>(raw_token_nums.size()), dp_size)
+        << "raw_dp_global_token_nums size must match DP group world size";
+    for (int32_t dp_rank = 0; dp_rank < dp_size; ++dp_rank) {
+      raw_token_nums[static_cast<size_t>(dp_rank)] = gathered_data[dp_rank];
+    }
+  }
+}
+
+void SpeculativeWorkerImpl::sync_dp_global_token_nums_for_idle_rank(
+    ModelInputParams& input_params) {
+  if (adaptive_spec_controller_ == nullptr ||
+      !adaptive_spec_controller_->enabled()) {
+    return;
+  }
+  ProcessGroup* dp_group = parallel_args_.dp_local_process_group_;
+  if (dp_group == nullptr || dp_group->world_size() <= 1) {
+    return;
+  }
+  // The idle rank's own validate width is already materialized in its
+  // dp_global_token_nums entry (scaled to the uniform N+1 width by the caller).
+  // Contribute exactly that so the gathered vector stays consistent with the
+  // busy peers, which pass their pruned Σ per_seq_val_tokens.
+  const int32_t dp_rank = static_cast<int32_t>(dp_group->rank());
+  const std::vector<int32_t>& token_nums =
+      input_params.parallel.dp_global_token_nums;
+  CHECK_LT(dp_rank, static_cast<int32_t>(token_nums.size()))
+      << "DP rank out of range for dp_global_token_nums";
+  sync_dp_global_token_nums_after_prune(
+      input_params, token_nums[static_cast<size_t>(dp_rank)]);
 }
 
 void SpeculativeWorkerImpl::restore_json_object_states(ForwardInput& input) {

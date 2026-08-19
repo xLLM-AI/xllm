@@ -798,17 +798,9 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
       MTPDraftParallelArgs(parallel_args, options),
       device,
       mtp_draft_options(draft_options));
-  const bool enable_parallel_adaptive_sl =
-      parallel_args.dp_size() <= 1 && parallel_args.ep_size() <= 1;
-  if (enable_adaptive_speculative_decode && enable_parallel_adaptive_sl) {
+  if (enable_adaptive_speculative_decode) {
     adaptive_spec_controller_ =
         std::make_unique<AdaptiveSpeculativeController>(options);
-  } else if (enable_adaptive_speculative_decode &&
-             options.enable_adaptive_speculative_decode()) {
-    LOG(WARNING)
-        << "Adaptive speculative decode is disabled for DP/EP parallelism "
-        << "in v1. dp_size=" << parallel_args.dp_size()
-        << ", ep_size=" << parallel_args.ep_size();
   }
 }
 
@@ -1240,6 +1232,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
         eplb::expand_decode_token_mask(
             new_input.input_params.expert.eplb_decode_token_mask,
             options_.num_speculative_tokens() + 1);
+    // Deadlock-safety under DP: this rank's shard is empty but all peers
+    // decode, so busy peers allgather their pruned validate counts before the
+    // target forward. Join that allgather in lockstep with this rank's uniform
+    // count.
+    sync_dp_global_token_nums_for_idle_rank(new_input.input_params);
     ForwardOutput output = run_llm_no_sync_impl(*impl_,
                                                 new_input,
                                                 *prepare_stream_,
@@ -2180,6 +2177,17 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                                          per_seq_val_tokens,
                                          json_scratch,
                                          *compute_stream_);
+  // Under DP, publish this rank's true validate token count to all DP peers so
+  // DpEpPadding computes matching MoE all-to-all pads. per_seq_val_tokens is
+  // uniform (N+1) on the static path and varlen on the adaptive path; both
+  // funnel through here, so every DP rank runs the collective in lockstep.
+  // No-op when the DP group spans a single rank.
+  int32_t local_total_val_tokens = 0;
+  for (int32_t v : per_seq_val_tokens) {
+    local_total_val_tokens += v;
+  }
+  sync_dp_global_token_nums_after_prune(validate_input.input_params,
+                                        local_total_val_tokens);
   ForwardOutput target_output = run_llm_no_sync_impl(*impl_,
                                                      validate_input,
                                                      *compute_stream_,

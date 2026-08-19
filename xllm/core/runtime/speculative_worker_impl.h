@@ -160,6 +160,25 @@ class SpeculativeWorkerImpl : public WorkerImpl {
                                ForwardInput& validate_inputs,
                                const std::vector<int32_t>& per_seq_val_tokens);
 
+  // Overwrite dp_global_token_nums / raw_dp_global_token_nums with the true
+  // post-pruning validate token count of every DP peer, gathered over the DP
+  // group. Adaptive pruning makes each rank's validate token count
+  // data-dependent, so the engine-supplied global vector (which assumes a
+  // uniform per-seq width) no longer matches; DpEpPadding needs the real
+  // per-rank counts to compute matching MoE all-to-all pads. No-op when the DP
+  // group spans a single rank. MUST be called on every DP rank each validate
+  // step (both the pruned and the unpruned branch) so the collective stays in
+  // lockstep and does not deadlock.
+  void sync_dp_global_token_nums_after_prune(ModelInputParams& input_params,
+                                             int32_t local_total_val_tokens);
+
+  // Idle-rank counterpart: a DP rank whose shard is empty still runs the target
+  // validate forward (fake input) while busy peers run the pruned forward.
+  // Both must join the same DP allgather. This variant contributes the idle
+  // rank's own current dp_global_token_nums entry (already scaled to the
+  // uniform validate width) so it stays symmetric with the busy peers.
+  void sync_dp_global_token_nums_for_idle_rank(ModelInputParams& input_params);
+
   // Target-side cache budget after reserving storage for a colocated draft.
   // DeepSeek-V4's fixed SWA pools require both geometries to participate.
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity_with_draft(

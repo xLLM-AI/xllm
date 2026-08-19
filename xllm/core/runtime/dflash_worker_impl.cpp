@@ -313,19 +313,14 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       parallel_args, device, draft_options(options));
 
-  // Adaptive per-seq validate pruning. Same DP/EP-parallel guard as MTP.
+  // Adaptive per-seq validate pruning. DP is supported: the worker gathers
+  // each rank's true validate token count over the DP group before the target
+  // forward (see sync_dp_global_token_nums_after_prune).
   const bool enable_adaptive = options.enable_adaptive_speculative_decode() &&
                                options.num_speculative_tokens() > 1;
-  const bool enable_parallel_adaptive_sl =
-      parallel_args.dp_size() <= 1 && parallel_args.ep_size() <= 1;
-  if (enable_adaptive && enable_parallel_adaptive_sl) {
+  if (enable_adaptive) {
     adaptive_spec_controller_ =
         std::make_unique<AdaptiveSpeculativeController>(options);
-  } else if (enable_adaptive) {
-    LOG(WARNING) << "DFlash/DSpark adaptive speculative decode disabled under "
-                 << "DP/EP parallelism (v1). dp_size="
-                 << parallel_args.dp_size()
-                 << ", ep_size=" << parallel_args.ep_size();
   }
 }
 
@@ -582,6 +577,12 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // anchor + drafts forward.
   scale_speculative_parallel_token_counts(
       validate_input.input_params, options_.num_speculative_tokens() + 1);
+  // Deadlock-safety under DP: when all ranks decode but this rank's shard is
+  // empty (fake input), busy peers reach run_validate and allgather their
+  // pruned validate counts before the target forward. This idle rank runs the
+  // same target forward and must join that allgather in lockstep, contributing
+  // its own uniform (unpruned) count. No-op unless adaptive + dp_size>1.
+  sync_dp_global_token_nums_for_idle_rank(validate_input.input_params);
   ForwardOutput output =
       run_llm_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
@@ -965,6 +966,20 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
     fill_validate_input_from_draft_outputs(
         draft_block, validate_input, *compute_stream_, max_val_tokens);
   }
+  // Under DP, publish this rank's true validate token count to all DP peers so
+  // DpEpPadding computes matching MoE all-to-all pads. Runs on both branches
+  // (pruned and dense) and on every DP rank so the collective stays in
+  // lockstep. No-op when the DP group spans a single rank.
+  int32_t local_total_val_tokens = 0;
+  if (did_prune) {
+    for (int32_t v : per_seq_val_tokens) {
+      local_total_val_tokens += v;
+    }
+  } else {
+    local_total_val_tokens = batch_size * max_val_tokens;
+  }
+  sync_dp_global_token_nums_after_prune(validate_input.input_params,
+                                        local_total_val_tokens);
   ForwardOutput target_output =
       run_llm_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
