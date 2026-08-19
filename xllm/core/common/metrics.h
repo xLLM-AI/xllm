@@ -141,6 +141,7 @@ DECLARE_COUNTER(request_status_total_unimplemented);
 DECLARE_COUNTER(request_handling_latency_seconds_chat);
 DECLARE_COUNTER(request_handling_latency_seconds_completion);
 DECLARE_COUNTER(tokenization_latency_seconds);
+DECLARE_COUNTER(mm_prompt_expansion_latency_seconds);
 DECLARE_COUNTER(chat_template_latency_seconds);
 
 // latency of prefix cache operations in seconds

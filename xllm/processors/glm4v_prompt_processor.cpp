@@ -15,10 +15,35 @@ limitations under the License.
 
 #include "processors/glm4v_prompt_processor.h"
 
+#include <glog/logging.h>
+
 #include <cstdint>
 #include <cstdio>
 
+#include "core/framework/tokenizer/tokenizer.h"
+
 namespace xllm {
+namespace {
+
+void append_encoded_tokens(const Tokenizer* tokenizer,
+                           std::vector<int32_t>& token_ids,
+                           const std::string& text) {
+  CHECK(tokenizer != nullptr) << "video expansion requires tokenizer";
+  std::vector<int32_t> encoded;
+  CHECK(tokenizer->encode(text, &encoded));
+  token_ids.insert(token_ids.end(), encoded.begin(), encoded.end());
+}
+
+int32_t resolve_video_placeholder_id(const Tokenizer* tokenizer,
+                                     const std::string& video_token) {
+  std::vector<int32_t> encoded;
+  CHECK(tokenizer->encode(video_token, &encoded));
+  CHECK_EQ(encoded.size(), 1U)
+      << "video placeholder must tokenize to a single id";
+  return encoded[0];
+}
+
+}  // namespace
 
 GLM4VPromptProcessor::GLM4VPromptProcessor(const ModelArgs& args) {
   merge_size_ = args.mm_image_merge_size();
@@ -29,7 +54,17 @@ GLM4VPromptProcessor::GLM4VPromptProcessor(const ModelArgs& args) {
   image_token_id_ = args.image_token_id();
 }
 
-void GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
+void GLM4VPromptProcessor::process(std::string& /*prompt*/,
+                                   const MMData& mm_data) {
+  // Token-level expansion is handled in expand_mm_tokens().
+  DLOG_IF(WARNING, !mm_data.empty())
+      << "GLM4VPromptProcessor::process is unused when token-level "
+         "expansion is enabled";
+}
+
+void GLM4VPromptProcessor::expand_mm_tokens(std::vector<int32_t>& token_ids,
+                                            MMData& mm_data,
+                                            const Tokenizer* tokenizer) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
     image_grid_thw = res.value();
@@ -52,76 +87,63 @@ void GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
   }
 
   const int32_t merge_length = merge_size_ * merge_size_;
-  int32_t total_image_token = 0;
-  if (image_grid_thw.defined()) {
-    const int64_t count = image_grid_thw.sizes()[0];
-    for (int64_t idx = 0; idx < count; ++idx) {
-      total_image_token +=
-          image_grid_thw[idx].prod().item<int32_t>() / merge_length;
-    }
-  }
-
-  int32_t total_video_token = 0;
+  int32_t video_placeholder_id = 0;
   if (video_grid_thw.defined()) {
-    const int64_t count = video_grid_thw.sizes()[0];
-    for (int64_t idx = 0; idx < count; ++idx) {
-      total_video_token += video_grid_thw[idx].prod().item<int32_t>() /
-                           merge_length /
-                           video_grid_thw[idx][0].item<int32_t>();
-    }
+    CHECK(tokenizer != nullptr);
+    video_placeholder_id =
+        resolve_video_placeholder_id(tokenizer, video_token_);
   }
 
-  size_t total_token_len = total_image_token * image_token_.size() +
-                           total_video_token * image_token_.size();
-  std::string data;
-  data.reserve(prompt.size() + total_token_len);
+  std::vector<int32_t> expanded;
+  expanded.reserve(token_ids.size());
 
   int32_t image_index = 0;
   int32_t video_index = 0;
-  size_t begin = 0;
-  auto pair = find_vision_token(prompt, begin);
 
-  while (pair.second != std::string::npos) {
-    data.append(prompt, begin, pair.second - begin);
-    if (pair.first == TokenType::IMAGE) {
-      auto token_num =
+  for (size_t index = 0; index < token_ids.size(); ++index) {
+    if (token_ids[index] == image_start_token_id_ &&
+        index + 2 < token_ids.size() &&
+        token_ids[index + 2] == image_end_token_id_ &&
+        token_ids[index + 1] == image_token_id_ && image_grid_thw.defined() &&
+        image_index < image_grid_thw.size(0)) {
+      const int32_t token_num =
           image_grid_thw[image_index].prod().item<int32_t>() / merge_length;
-      while (token_num--) {
-        data.append(image_token_);
-      }
-
+      expanded.push_back(image_start_token_id_);
+      expanded.insert(
+          expanded.end(), static_cast<size_t>(token_num), image_token_id_);
+      expanded.push_back(image_end_token_id_);
       ++image_index;
-      begin = pair.second + image_token_.size();
-    } else if (pair.first == TokenType::VIDEO) {
-      auto num_frames = video_grid_thw[video_index][0].item<int32_t>();
-      auto timestamps = video_metadata[video_index].timestamps;
+      index += 2;
+      continue;
+    }
+
+    if (video_grid_thw.defined() && video_index < video_grid_thw.size(0) &&
+        token_ids[index] == video_placeholder_id) {
+      const int32_t num_frames = video_grid_thw[video_index][0].item<int32_t>();
+      const auto& timestamps = video_metadata[video_index].timestamps;
       CHECK(!timestamps.empty());
 
-      auto selected = build_timestamps(timestamps, num_frames);
-      auto token_num = video_grid_thw[video_index].prod().item<int32_t>() /
-                       merge_length / num_frames;
+      const auto selected =
+          build_timestamps(timestamps, static_cast<size_t>(num_frames));
+      const int32_t token_num =
+          video_grid_thw[video_index].prod().item<int32_t>() / merge_length /
+          num_frames;
       for (int32_t idx = 0; idx < num_frames; ++idx) {
-        data.append(begin_of_image_token_);
-        auto num = token_num;
-        while (num--) {
-          data.append(image_token_);
-        }
-        data.append(end_of_image_token_);
-        data.append(format_timestamp_str(selected[idx]));
+        expanded.push_back(image_start_token_id_);
+        expanded.insert(
+            expanded.end(), static_cast<size_t>(token_num), image_token_id_);
+        expanded.push_back(image_end_token_id_);
+        append_encoded_tokens(
+            tokenizer, expanded, format_timestamp_str(selected[idx]));
       }
-
       ++video_index;
-      begin = pair.second + video_token_.size();
-    } else {
-      LOG(FATAL) << "Unexpected token type encountered.";
+      continue;
     }
-    pair = find_vision_token(prompt, begin);
+
+    expanded.push_back(token_ids[index]);
   }
 
-  if (begin < prompt.size()) {
-    data.append(prompt, begin, std::string::npos);
-  }
-  prompt = std::move(data);
+  token_ids = std::move(expanded);
 }
 
 void GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
@@ -139,7 +161,7 @@ void GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
     auto token = token_ids[idx];
     if (token == video_start_token_id_) {
       is_video = true;
-      video_offset = idx + 1;
+      video_offset = static_cast<int32_t>(idx) + 1;
       video_mask.clear();
       continue;
     } else if (token == video_end_token_id_) {
@@ -165,7 +187,7 @@ void GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
       continue;
     }
     if (token == image_start_token_id_) {
-      image_span_offset = idx + 1;
+      image_span_offset = static_cast<int32_t>(idx) + 1;
     }
     if (token == image_token_id_) {
       ++image_span_length;
