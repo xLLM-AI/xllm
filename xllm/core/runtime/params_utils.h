@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "framework/model/model_input_params.h"
+#include "framework/parallel_state/parallel_args.h"
 #include "framework/request/sequence.h"
 #include "runtime/forward_params.h"
 #include "worker.pb.h"
@@ -25,6 +26,13 @@ limitations under the License.
 namespace xllm {
 
 class Stream;
+
+torch::Tensor choose_lm_head_selected_token_idxes(
+    const torch::Tensor& selected_token_idxes,
+    const ModelInputParams& input_params,
+    const ParallelArgs& parallel_args,
+    int64_t hidden_num_rows,
+    const torch::Device& device);
 
 bool forward_input_to_packed_proto(
     const ForwardInput& input,

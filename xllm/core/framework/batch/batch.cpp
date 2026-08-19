@@ -70,6 +70,15 @@ Token make_empty_logprob_placeholder(const Sequence& seq) {
   return Token(placeholder_token_id);
 }
 
+void update_sequence_embedding(Sequence* seq, const torch::Tensor& embedding) {
+  if (!embedding.defined()) {
+    return;
+  }
+  torch::Tensor cur_seq_embed = safe_to(embedding, torch::kFloat32);
+  seq->update_embeddings(cur_seq_embed);
+  seq->update_mtp_bootstrap_embedding(cur_seq_embed);
+}
+
 std::unordered_set<std::string> fail_json_object_requests(
     const std::vector<Sequence*>& sequences,
     const std::vector<JsonObjectOutputError>& errors) {
@@ -304,10 +313,10 @@ void Batch::dp_balance_shuffle_seqs() {
 #if defined(USE_NPU)
   // this shuffle operation is mainly used for npu with 24 cores
   // and specific mla op implementation
-  const auto num_npu_cores = 24;  // npu cube core num
+  constexpr size_t kNumNpuCores = 24;
   if (::xllm::KernelConfig::get_instance().enable_customize_mla_kernel() &&
       ::xllm::ParallelConfig::get_instance().enable_dp_balance() &&
-      sequences_.size() > num_npu_cores) {
+      sequences_.size() > kNumNpuCores) {
     std::vector<uint32_t> kv_cache_tokens_num;
     kv_cache_tokens_num.reserve(sequences_.size());
     for (auto& seq : sequences_) {
@@ -341,10 +350,10 @@ void Batch::dp_balance_shuffle_seqs() {
 
 std::unordered_map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
     std::vector<uint32_t>& kv_cache_tokens_num) {
-  const auto num_npu_cores = 24;  // npu cube core num
-  const auto num_seqs = kv_cache_tokens_num.size();
-  const auto base_per_core = num_seqs / num_npu_cores;
-  const auto remainder = num_seqs % num_npu_cores;
+  constexpr size_t kNumNpuCores = 24;
+  const size_t num_seqs = kv_cache_tokens_num.size();
+  const size_t base_per_core = num_seqs / kNumNpuCores;
+  const size_t remainder = num_seqs % kNumNpuCores;
 
   // find the indices of the remainder biggest elements
   std::vector<uint32_t> indices(num_seqs);
@@ -373,11 +382,11 @@ std::unordered_map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
   // allocate a long and a short request to each core, to ensuring
   // load balance among all cores
   std::vector<std::vector<uint32_t>> base_assignment(
-      num_npu_cores, std::vector<uint32_t>(base_per_core));
-  for (auto i = 0; i < base_indices.size(); ++i) {
-    auto col = i / num_npu_cores;
-    auto row = (col % 2 == 0) ? (i % num_npu_cores)
-                              : (num_npu_cores - 1 - (i % num_npu_cores));
+      kNumNpuCores, std::vector<uint32_t>(base_per_core));
+  for (size_t i = 0; i < base_indices.size(); ++i) {
+    const size_t col = i / kNumNpuCores;
+    const size_t row = (col % 2 == 0) ? (i % kNumNpuCores)
+                                      : (kNumNpuCores - 1 - (i % kNumNpuCores));
     base_assignment[row][col] = base_indices[i];
   }
 
@@ -385,15 +394,16 @@ std::unordered_map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
   // second one is the target index to be exchanged to
   std::unordered_map<uint32_t, uint32_t> index_shift;
   // add base part data
-  for (auto i = 0; i < num_npu_cores; ++i) {
-    for (auto j = 0; j < base_per_core; ++j) {
-      auto idx = base_assignment[i][j];
-      index_shift[idx] = i + j * num_npu_cores;
+  for (size_t i = 0; i < kNumNpuCores; ++i) {
+    for (size_t j = 0; j < base_per_core; ++j) {
+      const uint32_t idx = base_assignment[i][j];
+      index_shift[idx] = static_cast<uint32_t>(i + j * kNumNpuCores);
     }
   }
   // add remainder part data
-  for (auto i = 0; i < remainder; ++i) {
-    index_shift[remainder_indices[i]] = i + num_npu_cores * base_per_core;
+  for (size_t i = 0; i < remainder; ++i) {
+    index_shift[remainder_indices[i]] =
+        static_cast<uint32_t>(i + kNumNpuCores * base_per_core);
   }
 
   return index_shift;
@@ -675,16 +685,48 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
 void Batch::process_sample_output(const SampleOutput& sample_output,
                                   bool replace_fake_token,
                                   bool force_requested_beam_result_size) {
-  if (sample_output.embeddings.defined()) {
+  const bool has_next_tokens = sample_output.next_tokens.defined() &&
+                               sample_output.next_tokens.numel() > 0;
+  const bool next_tokens_are_spec_width =
+      has_next_tokens && sample_output.next_tokens.dim() == 2;
+  if (sample_output.embeddings.defined() && !next_tokens_are_spec_width) {
     const int64_t num_seqs = sample_output.embeddings.size(0);
     int64_t output_idx = 0;
     const auto sequences = get_sequences();
     for (auto* seq : sequences) {
       CHECK_LT(output_idx, num_seqs);
-      auto cur_seq_embed =
-          safe_to(sample_output.embeddings[output_idx++], torch::kFloat32);
-      seq->update_embeddings(cur_seq_embed);
-      seq->update_mtp_bootstrap_embedding(cur_seq_embed);
+      update_sequence_embedding(seq, sample_output.embeddings[output_idx++]);
+    }
+  }
+  if (sample_output.embeddings.defined() && next_tokens_are_spec_width) {
+    const int64_t num_embedding_rows = sample_output.embeddings.size(0);
+    const int64_t num_token_rows = sample_output.next_tokens.size(0);
+    int64_t output_idx = 0;
+    const auto sequences = get_sequences();
+    for (auto* seq : sequences) {
+      CHECK_LT(output_idx, num_token_rows);
+      CHECK_LT(output_idx, num_embedding_rows);
+      const auto curr_next_tokens = sample_output.next_tokens[output_idx];
+
+      int64_t last_token_idx = -1;
+      const int64_t num_tokens = curr_next_tokens.size(0);
+      for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        if (curr_next_tokens[token_idx].item<int64_t>() < 0) {
+          break;
+        }
+        last_token_idx = token_idx;
+      }
+
+      if (last_token_idx >= 0) {
+        torch::Tensor token_embeddings = sample_output.embeddings[output_idx];
+        if (token_embeddings.dim() > 1) {
+          CHECK_LT(last_token_idx, token_embeddings.size(0))
+              << "speculative embedding token index out of range";
+          token_embeddings = token_embeddings[last_token_idx];
+        }
+        update_sequence_embedding(seq, token_embeddings);
+      }
+      ++output_idx;
     }
   }
 
@@ -712,6 +754,46 @@ void Batch::process_sample_output(const SampleOutput& sample_output,
 
     if (output_idx >= static_cast<size_t>(num_outputs)) {
       if (target.from_sample_slot) {
+        append_token_for_sequence(
+            seq, make_empty_logprob_placeholder(*seq), 0, replace_fake_token);
+      }
+      continue;
+    }
+
+    if (next_tokens_are_spec_width) {
+      const auto curr_next_tokens = sample_output.next_tokens[output_idx];
+      const auto curr_logprobs = sample_output.logprobs.defined()
+                                     ? sample_output.logprobs[output_idx]
+                                     : sample_output.logprobs;
+      const auto curr_top_tokens = sample_output.top_tokens.defined()
+                                       ? sample_output.top_tokens[output_idx]
+                                       : sample_output.top_tokens;
+      const auto curr_top_logprobs =
+          sample_output.top_logprobs.defined()
+              ? sample_output.top_logprobs[output_idx]
+              : sample_output.top_logprobs;
+
+      const int64_t num_tokens = curr_next_tokens.size(0);
+      bool appended_token = false;
+      for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        const auto token = build_token(token_idx,
+                                       curr_next_tokens,
+                                       curr_logprobs,
+                                       curr_top_tokens,
+                                       curr_top_logprobs);
+        if (token.id < 0) {
+          break;
+        }
+
+        append_token_for_sequence(
+            seq, token, static_cast<int>(token_idx), replace_fake_token);
+        appended_token = true;
+        if (!target.from_sample_slot && seq->finished()) {
+          break;
+        }
+      }
+
+      if (!appended_token && target.from_sample_slot) {
         append_token_for_sequence(
             seq, make_empty_logprob_placeholder(*seq), 0, replace_fake_token);
       }

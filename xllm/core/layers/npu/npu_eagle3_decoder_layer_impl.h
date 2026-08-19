@@ -101,6 +101,10 @@ class NpuEagle3DecoderLayerImpl : public BaseLayer {
   atb::Tensor internal_tensors_extra_;
   atb::Tensor placeholder_;
 
+  torch::Tensor int_tensor_placeholder_;
+  torch::Tensor slot_tensor_placeholder_;
+  torch::Tensor block_tables_placeholder_;
+
   at::Tensor decode_attn_mask_;
 
   at::Tensor at_placeholder_;

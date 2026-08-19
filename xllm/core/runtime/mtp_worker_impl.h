@@ -30,6 +30,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
 #include "core/framework/speculative/adaptive_speculative_controller.h"
+#include "runtime/llm_worker_impl.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
@@ -49,7 +50,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
  public:
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
-                const runtime::Options& options);
+                const runtime::Options& options,
+                WorkerType worker_type);
 
   ~MTPWorkerImpl() override;
 
@@ -63,6 +65,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const runtime::Options& options,
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
+                WorkerType worker_type,
                 bool enable_opt_validate_probs = false,
                 bool enable_adaptive_speculative_decode = false);
 
@@ -150,6 +153,13 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Default MTP behavior always compresses probs for cache storage.
   virtual void process_draft_sample_output(SampleOutput& sample_output);
 
+  virtual void check_draft_input_embedding(const torch::Tensor& embedding,
+                                           const std::string& phase) const {
+    (void)embedding;
+    (void)phase;
+  }
+  virtual bool share_target_lm_head_with_draft() const { return true; }
+
   SampleOutput validate(
       const SamplingParameters& sampling_params,
       const torch::Tensor& draft_token_ids,
@@ -164,6 +174,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
   virtual int64_t get_embedding_placeholder_size();
+  bool should_use_separate_draft_kv_cache_shape() const;
+  KVCacheShape get_draft_kv_cache_shape(
+      const KVCacheShape& target_kv_cache_shape) const;
 
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
@@ -183,7 +196,14 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Returns true when validation must use chunked-prefill to avoid the
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
-
+  bool uses_embedded_eagle3_draft() const;
+  bool requires_probability_based_validation() const;
+  bool uses_step_major_validate_layout() const;
+  void synchronize_embedded_eagle3_forward();
+  std::optional<ForwardOutput> run_worker_no_sync(
+      WorkerImpl& worker,
+      const ForwardInput& input,
+      ForwardInput& processed_input);
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs,

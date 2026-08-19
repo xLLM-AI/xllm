@@ -22,10 +22,14 @@ limitations under the License.
 #include "common/macros.h"
 #include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "framework/sampling/rejection_sampler.h"
-#include "runtime/llm_worker_impl.h"
 #include "runtime/options.h"
+#include "runtime/worker_impl.h"
 
 namespace xllm {
+
+class LLMWorkerImpl;
+
+int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args);
 
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.
@@ -59,7 +63,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   SpeculativeWorkerImpl(const ParallelArgs& parallel_args,
                         const torch::Device& device,
                         const runtime::Options& options,
-                        const runtime::Options& target_options);
+                        const runtime::Options& target_options,
+                        WorkerType worker_type = WorkerType::LLM);
 
  public:
   // initialize model, cache manager. blocking call
@@ -169,14 +174,13 @@ class SpeculativeWorkerImpl : public WorkerImpl {
 
  protected:
   // Target model worker
-  std::unique_ptr<LLMWorkerImpl> impl_;
+  std::unique_ptr<WorkerImpl> impl_;
 
   // Optional adaptive pruning controller. Subclasses create it in their ctor
   // when the algorithm supports adaptive per-seq validate pruning (MTP,
   // DFlash, DSpark). Left null otherwise. Held in the base so shared plumbing
   // (predictor setter, profile hook) does not need per-subclass duplication.
   std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
-
   bool enable_fused_kernel_ = false;
   int32_t embedding_size_ = 0;
 };

@@ -35,6 +35,10 @@ torch::Tensor to_cpu_int64_contiguous(const torch::Tensor& tensor) {
   return cpu_tensor;
 }
 
+torch::Tensor cache_embedding_row(const torch::Tensor& tensor) {
+  return tensor.contiguous().clone().detach();
+}
+
 }  // namespace
 
 EmbeddingCache::EmbeddingCache(int32_t total_nums) {
@@ -89,7 +93,8 @@ void EmbeddingCache::write_prefill_target_context(
     state.all_draft_accepted = false;
     state.token_id = static_cast<int32_t>(token);
     state.position_offset = 0;
-    state.embedding = target_embeddings.select(/*dim=*/0, i).detach().clone();
+    state.embedding =
+        cache_embedding_row(target_embeddings.select(/*dim=*/0, i));
 
     DecodeState& tail = mutable_tail(ids[i]);
     tail = std::move(state);
@@ -110,7 +115,7 @@ void EmbeddingCache::write_mtp_bootstrap_context(
   state.all_draft_accepted = false;
   state.token_id = token_id;
   state.position_offset = 0;
-  state.embedding = embedding.detach().clone();
+  state.embedding = cache_embedding_row(embedding);
 
   DecodeState& tail = mutable_tail(embedding_id);
   tail = std::move(state);
@@ -176,18 +181,15 @@ void EmbeddingCache::write_target_context(
     state.position_offset = last_idx;
     state.correction_token_id = correction_token;
     state.correction_position_offset = correction_offset;
-    state.embedding = accepted_embeddings.select(/*dim=*/0, i)
-                          .select(/*dim=*/0, last_idx)
-                          .detach()
-                          .clone();
+    state.embedding = cache_embedding_row(
+        accepted_embeddings.select(/*dim=*/0, i).select(/*dim=*/0, last_idx));
     if (last_idx > 0) {
       const int64_t prev_token =
           accepted_tokens_data[row_offset + last_idx - 1];
       state.prev_token_id = static_cast<int32_t>(prev_token);
-      state.prev_embedding = accepted_embeddings.select(/*dim=*/0, i)
-                                 .select(/*dim=*/0, last_idx - 1)
-                                 .detach()
-                                 .clone();
+      state.prev_embedding =
+          cache_embedding_row(accepted_embeddings.select(/*dim=*/0, i)
+                                  .select(/*dim=*/0, last_idx - 1));
     }
 
     DecodeState& tail = mutable_tail(ids[i]);

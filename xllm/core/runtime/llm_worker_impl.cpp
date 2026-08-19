@@ -43,6 +43,7 @@ limitations under the License.
 #include "layers/cuda/flashinfer_workspace.h"
 #endif
 #include "models/model_registry.h"
+#include "runtime/params_utils.h"
 #include "util/env_var.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -159,6 +160,13 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
   prepare_work_before_execute(input, input_on_device);
   std::unique_ptr<Stream> current_stream = device_.current_stream();
   return execute_no_sync_on_stream(input_on_device, *current_stream);
+}
+
+std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input,
+    Stream& compute_stream) {
+  return execute_no_sync_on_stream(
+      input, compute_stream, /*record_ready_event=*/true);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
@@ -322,9 +330,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
+  torch::Tensor lm_head_selected_token_idxes;
   torch::Tensor selected_hidden;
   if (sampling_params.selected_token_idxes.defined()) {
-    torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
+    torch::Tensor selected_token_idxes = choose_lm_head_selected_token_idxes(
+        sampling_params.selected_token_idxes,
+        input.input_params,
+        context_.get_parallel_args(),
+        model_output.hidden_states.size(0),
+        model_output.hidden_states.device());
     if (model_output.hidden_states.defined() &&
         selected_token_idxes.device() != model_output.hidden_states.device()) {
       selected_token_idxes = selected_token_idxes
@@ -332,9 +346,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    if (input.return_selected_hidden) {
+    lm_head_selected_token_idxes = selected_token_idxes;
+    const bool need_selected_hidden =
+        input.return_selected_hidden ||
+        (options_.cp_size() > 1 && options_.enable_speculative_decode());
+    if (need_selected_hidden) {
       // Emit both selected hidden and logits from a single lm_head pass so the
-      // ConfidenceHead can consume hidden without a second projection.
+      // ConfidenceHead and CP speculative paths can consume hidden without a
+      // second projection.
       logits = model_->logits(
           model_output.hidden_states, selected_token_idxes, selected_hidden);
       if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
@@ -421,8 +440,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // Target prefill: keep full embeddings (global-real under model-side CP).
       output.sample_output.embeddings = embeddings;
     } else if (sampling_params.selected_token_idxes.defined()) {
-      output.sample_output.embeddings = embeddings.index_select(
-          /*dim=*/0, sampling_params.selected_token_idxes);
+      if (options_.cp_size() > 1) {
+        CHECK(selected_hidden.defined())
+            << "selected_hidden must be defined when "
+               "selected_token_idxes is defined.";
+        output.sample_output.embeddings = selected_hidden;
+      } else {
+        output.sample_output.embeddings = embeddings.index_select(
+            /*dim=*/0, lm_head_selected_token_idxes);
+      }
     }
   }
 

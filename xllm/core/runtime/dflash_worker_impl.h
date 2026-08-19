@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/speculative/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
+#include "runtime/llm_worker_impl.h"
 #include "runtime/speculative_worker_impl.h"
 #include "util/utils.h"
 
