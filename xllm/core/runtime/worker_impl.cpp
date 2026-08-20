@@ -1929,6 +1929,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (!options_.is_draft_engine()) {
     tokenizer = model_loader->tokenizer();
     CHECK(tokenizer != nullptr);
+
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
     // use tokenizer vocab size if model vocab size is not set

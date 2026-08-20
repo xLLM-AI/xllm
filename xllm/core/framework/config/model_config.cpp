@@ -150,18 +150,13 @@ bool ModelConfig::is_python_model_impl(std::string_view model_impl) {
 std::optional<std::string> ModelConfig::validate_python_speculative_decode(
     std::string_view model_impl,
     std::string_view model_type,
-    std::string_view speculative_algorithm,
     int32_t num_speculative_tokens) {
   if (!is_python_model_impl(model_impl) || num_speculative_tokens <= 0 ||
       !is_qwen3_5_model_type(model_type)) {
     return std::nullopt;
   }
-  if (speculative_algorithm == "DSpark") {
-    return std::nullopt;
-  }
   return "Qwen3.5 Python model executor does not support speculative decoding; "
-         "use speculative_algorithm=DSpark, set num_speculative_tokens=0, or "
-         "use the native model executor";
+         "set num_speculative_tokens=0 or use the native model executor";
 }
 
 void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {

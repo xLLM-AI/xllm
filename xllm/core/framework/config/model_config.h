@@ -45,7 +45,6 @@ class ModelConfig final {
   [[nodiscard]] static std::optional<std::string>
   validate_python_speculative_decode(std::string_view model_impl,
                                      std::string_view model_type,
-                                     std::string_view speculative_algorithm,
                                      int32_t num_speculative_tokens);
 
   [[nodiscard]] static const OptionCategory& option_category() {
