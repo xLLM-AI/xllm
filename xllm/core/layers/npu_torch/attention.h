@@ -70,14 +70,13 @@ class AttentionImpl : public torch::nn::Module {
                            const std::optional<torch::Tensor>& v_cache,
                            const AttentionMetadata& attn_metadata);
 
-  void dcp_chunked_prefill_forward(
-      torch::Tensor& query,
-      torch::Tensor& key,
-      torch::Tensor& value,
-      torch::Tensor& output,
-      const torch::Tensor& k_cache,
-      const std::optional<torch::Tensor>& v_cache,
-      const AttentionMetadata& attn_metadata);
+  void dcp_chunked_prefill_forward(torch::Tensor& query,
+                                   torch::Tensor& key,
+                                   torch::Tensor& value,
+                                   torch::Tensor& output,
+                                   const torch::Tensor& k_cache,
+                                   const std::optional<torch::Tensor>& v_cache,
+                                   const AttentionMetadata& attn_metadata);
 
   int64_t num_heads_;
   int64_t head_size_;
