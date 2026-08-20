@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+
+#include <functional>
 
 #include "parallel_args.h"
 #include "process_group.h"
@@ -108,11 +110,11 @@ torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);
 
-std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input_,
+std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                                              int32_t scatter_idx,
                                              int32_t gather_idx,
-                                             bool is_sync,
-                                             ProcessGroup* pg);
+                                             bool async_ops,
+                                             ProcessGroup* process_group);
 
 // Create a process group where each process has a single device
 // devices: list of devices to create process groups on.

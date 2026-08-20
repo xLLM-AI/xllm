@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -108,12 +108,12 @@ void ensure_python_interpreter() {
       }
 #endif
       try {
-        py::module_::import("xllm.python");
+        py::module_ python_package = py::module_::import("xllm.python");
+        python_package.attr("initialize_runtime")();
       } catch (const py::error_already_set& e) {
-        LOG(FATAL) << "Failed to import the 'xllm.python' model package for "
-                      "the Python model executor. Set --python_model_path (or "
-                      "XLLM_PYTHON_MODEL_PATH) to the directory containing the "
-                      "'xllm' package. Error: "
+        LOG(FATAL) << "Failed to initialize the 'xllm.python' model runtime. "
+                      "Set --python_model_path (or XLLM_PYTHON_MODEL_PATH) to "
+                      "the directory containing the 'xllm' package. Error: "
                    << e.what();
       }
     }

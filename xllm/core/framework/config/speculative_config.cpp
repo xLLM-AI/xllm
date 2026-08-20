@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,7 +27,7 @@ DEFINE_int32(num_speculative_tokens, 0, "Number of speculative tokens.");
 DEFINE_string(speculative_algorithm,
               "MTP",
               "Speculative decoding algorithm. Supported options: MTP, Eagle3, "
-              "Suffix, DFlash. Default is MTP.");
+              "Suffix, DFlash, DSpark. Default is MTP.");
 
 DEFINE_int32(speculative_suffix_cache_max_depth,
              64,
@@ -70,6 +70,16 @@ DEFINE_bool(enable_atb_spec_kernel,
             false,
             "Whether to use ATB speculative kernel.");
 
+DEFINE_bool(enable_adaptive_speculative_decode,
+            false,
+            "Whether to enable adaptive speculative length for MTP decode.");
+
+DEFINE_double(
+    adaptive_speculative_min_gain,
+    0.0,
+    "Minimum relative throughput gain required to include a draft token in "
+    "adaptive speculative validation.");
+
 namespace xllm {
 
 void SpeculativeConfig::from_flags() {
@@ -85,6 +95,8 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_opt_validate_probs);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_adaptive_speculative_decode);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(adaptive_speculative_min_gain);
 }
 
 void SpeculativeConfig::from_json(const JsonReader& json) {
@@ -100,6 +112,8 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_opt_validate_probs);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_adaptive_speculative_decode);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(adaptive_speculative_min_gain);
 }
 
 void SpeculativeConfig::append_config_json(
@@ -129,6 +143,10 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, enable_mtp_draft_body_tp1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_atb_spec_kernel);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_adaptive_speculative_decode);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, adaptive_speculative_min_gain);
 }
 
 SpeculativeConfig& SpeculativeConfig::get_instance() {

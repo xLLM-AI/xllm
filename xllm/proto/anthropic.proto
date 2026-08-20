@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -131,6 +131,15 @@ message AnthropicToolChoice {
   optional string name = 2;
 }
 
+message AnthropicOutputConfig {
+  optional string effort = 1;
+}
+
+message AnthropicThinkingConfig {
+  string type = 1;
+  optional int32 budget_tokens = 2;
+}
+
 message AnthropicMessagesRequest {
   // ID of the model to use
   string model = 1;
@@ -183,6 +192,12 @@ message AnthropicMessagesRequest {
   // request trace headers from client.
   optional string x_request_id = 19;
   optional string x_request_time = 20;
+
+  // Reasoning output preference supplied by the Anthropic Messages API.
+  optional AnthropicOutputConfig output_config = 21;
+
+  // Thinking configuration supplied by the Anthropic Messages API.
+  optional AnthropicThinkingConfig thinking = 22;
 }
 
 message AnthropicDelta {

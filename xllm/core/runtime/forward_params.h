@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -34,10 +34,12 @@ limitations under the License.
 #include "framework/config/execution_config.h"
 #include "framework/model/model_input_params.h"
 #include "framework/sampling/beam_searcher.h"
+#include "framework/sampling/json_object_grammar.h"
 #include "framework/sampling/sampling_params.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
+#include "runtime/json_object_output_rows.h"
 
 namespace xllm {
 
@@ -58,7 +60,7 @@ inline bool supports_contiguous_forward_input_buffer(
     const torch::Device& device) {
 #if defined(USE_CUDA)
   return device.type() == torch::kCUDA;
-#elif defined(USE_MLU)
+#elif defined(USE_MLU) || defined(USE_MUSA)
   return device.type() == torch::kPrivateUse1;
 #elif defined(USE_NPU)
   (void)device;
@@ -158,7 +160,7 @@ struct ForwardInputBufferPlan {
         continue;
       }
 #endif
-#if defined(USE_MLU)
+#if defined(USE_MLU) || defined(USE_MUSA)
       if (device.type() == torch::kPrivateUse1) {
         *entry.target = get_tensor_from_blob(entry.host_tensor.sizes().vec(),
                                              entry.host_tensor.scalar_type(),
@@ -194,6 +196,8 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
                   &target.unique_token_ids_lens) &&
          plan.add(source.sample_idxes, &target.sample_idxes) &&
          plan.add(source.do_sample, &target.do_sample) &&
+         plan.add(source.filter_mask, &target.filter_mask) &&
+         plan.add(source.filter_bitmask, &target.filter_bitmask) &&
          plan.add(source.acc_logprob, &target.acc_logprob);
 }
 
@@ -532,8 +536,14 @@ struct ForwardInput {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.step_decode = step_decode;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
+    inputs.return_selected_hidden = return_selected_hidden;
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
+    inputs.retained_device_tensors = retained_device_tensors;
+    inputs.sample_sequence_ids = sample_sequence_ids;
+    inputs.sample_prior_output_rows = sample_prior_output_rows;
+    inputs.json_object_states = json_object_states;
+    inputs.json_object_state_snapshots = json_object_state_snapshots;
   }
 
   void set_host_views(ForwardInput& inputs) const {
@@ -588,11 +598,24 @@ struct ForwardInput {
   ModelInputParams input_params;
   SamplingParameters sampling_params;
   SamplingParameters decoder_sampling_params;
+  std::vector<std::string> sample_sequence_ids;
+  std::vector<int32_t> sample_prior_output_rows;
+  std::vector<JsonObjectGrammarState> json_object_states;
+  std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
+  // Flattened [sequence][draft position] flags produced during MTP
+  // validation. This is execution-local metadata and is not transported.
+  std::vector<uint8_t> json_object_invalid_draft;
+  // Errors detected while aligning prior overlap output with grammar rows.
+  std::vector<JsonObjectOutputError> json_object_errors;
 
   // step-level decode metadata
   std::optional<StepDecodeMeta> step_decode;
   // If true, skip sampler forward and only keep logits.
   bool skip_sampling_for_logits_only = false;
+  // If true, populate ForwardOutput.selected_hidden with hidden states matching
+  // the `logits` selection layout. Used by DSpark ConfidenceHead which needs
+  // pre-lm_head hidden states of the draft tokens.
+  bool return_selected_hidden = false;
 
   // kv info for disaggregated prefill/decode
   std::vector<TransferKVInfo> transfer_kv_infos;
@@ -615,6 +638,10 @@ struct ForwardInput {
   // stream. These are local runtime handles and are intentionally not included
   // in proto or shared-memory transport.
   StreamEventPtr metadata_ready_event;
+
+  // Keep cross-stream metadata sources alive through no-sync execution. These
+  // handles are local runtime state and are not serialized.
+  std::vector<torch::Tensor> retained_device_tensors;
 };
 
 // output after forward execution
@@ -626,25 +653,32 @@ struct ForwardOutput {
   // max number of top logprobs in the batch
   int64_t max_top_logprobs = 0;
   SampleOutput sample_output;
+  // The target sampler applies packed token masks in-place before returning
+  // sampled tokens. MTP validation uses this local contract to avoid applying
+  // the same mask to target logits a second time.
+  bool filter_bitmask_applied_to_logits = false;
+  std::vector<JsonObjectOutputError> json_object_errors;
   // Keep no-sync input tensor handles alive until downstream consumers finish
-  // using outputs on the same compute stream.
-  std::shared_ptr<ForwardInput> retained_input;
-  // Composite workers retain nested no-sync inputs until their final output is
-  // synchronized or its ready event is consumed.
-  std::vector<std::shared_ptr<ForwardInput>> retained_input_dependencies;
+  // using outputs on the same compute stream. Composite workers append child
+  // outputs' retained inputs here. Local runtime handles; not in proto/shm.
+  std::vector<std::shared_ptr<ForwardInput>> retained_inputs;
   // Device-side readiness dependency for no-sync outputs. This local runtime
   // handle is intentionally not included in proto or shared-memory transport.
   StreamEventPtr ready_event;
   torch::Tensor logits;
   torch::Tensor embedding;
+  // Selected hidden states matching `logits` layout: [num_selected,
+  // hidden_dim]. Populated when a speculative worker asks for the pre-lm_head
+  // hidden (e.g. DSpark's ConfidenceHead needs the draft-step hidden). Only
+  // computed when `input.return_selected_hidden` is true.
+  torch::Tensor selected_hidden;
   // Backend-neutral state for the next MTP draft step.
   MtpTopkStatePtr mtp_topk_state;
 
   // for eplb, collect the tokens load of experts on each worker.
   torch::Tensor expert_load_data;
-  // for eplb, indicates that the specified layer on the worker
-  // has completed the asynchronous loading of new weight.
-  int32_t prepared_layer_id;
+  // EPLB prepare-attempt token completed by this worker.
+  int64_t prepared_token = -1;
 
   BeamSearchOutput beam_search_output;
   torch::Tensor beam_sequence_group;
@@ -652,6 +686,29 @@ struct ForwardOutput {
   // dit output data
   DiTForwardOutput dit_forward_output;
 };
+
+inline void copy_retained_inputs(ForwardOutput& destination,
+                                 const ForwardOutput& source) {
+  destination.retained_inputs.insert(destination.retained_inputs.end(),
+                                     source.retained_inputs.begin(),
+                                     source.retained_inputs.end());
+}
+
+inline void transfer_retained_inputs(ForwardOutput& destination,
+                                     ForwardOutput& source) {
+  CHECK_NE(&destination, &source)
+      << "transfer_retained_inputs cannot alias source and destination";
+  destination.retained_inputs.insert(
+      destination.retained_inputs.end(),
+      std::make_move_iterator(source.retained_inputs.begin()),
+      std::make_move_iterator(source.retained_inputs.end()));
+  source.retained_inputs.clear();
+}
+
+inline std::vector<std::shared_ptr<ForwardInput>> take_retained_inputs(
+    ForwardOutput& source) {
+  return std::exchange(source.retained_inputs, {});
+}
 
 struct RawSampleOutput {
   std::vector<RawToken> tokens;  // num tokens
@@ -661,8 +718,9 @@ struct RawSampleOutput {
 
 struct RawForwardOutput {
   std::vector<RawSampleOutput> outputs;  // num seqs
+  std::vector<JsonObjectOutputError> json_object_errors;
   std::vector<int64_t> expert_load_data;
-  int32_t prepared_layer_id;
+  int64_t prepared_token = -1;
   // beam search kernel output
   std::vector<int32_t> src_seq_idxes;
   std::vector<int32_t> out_tokens;

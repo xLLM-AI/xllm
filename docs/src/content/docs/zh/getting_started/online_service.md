@@ -174,8 +174,8 @@ response = requests.post(url, json=request_data)
 if response.status_code != 200:
     print(response.status_code, response.text)
 else:
-    ans = json.loads(response.text)["choices"]
-    print(ans[0]['message'])
+    choices = json.loads(response.text)["choices"]
+    print(choices[0]['message'])
 ```
 
 ## VLM 客户端调用

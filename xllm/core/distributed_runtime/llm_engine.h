@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,9 @@ limitations under the License.
 #include <unistd.h>
 
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "common/macros.h"
@@ -56,7 +58,14 @@ class LLMEngine : public Engine {
 
   const runtime::Options& options() const { return options_; }
 
+  runtime::DecodeGraphExecutionShape decode_graph_execution_shape()
+      const override;
+
   bool init(MasterStatus master_status) override;
+
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
+      override;
 
   void update_last_step_result(std::vector<Batch>& batch) override;
 
@@ -64,27 +73,12 @@ class LLMEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const override;
 
   // P/D
-  bool pull_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
-
-  bool pull_hetero_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+  bool pull_kv_blocks(const int32_t src_dp_size,
+                      const int32_t src_dp_rank,
+                      const std::vector<uint64_t>& src_cluster_ids,
+                      const std::vector<std::string>& src_addrs,
+                      const int32_t dst_dp_rank,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       const uint32_t dp_rank,
@@ -95,12 +89,9 @@ class LLMEngine : public Engine {
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
-  void prefetch_from_storage(
+  std::shared_ptr<PrefetchResult> prefetch_from_storage(
       const uint32_t dp_rank,
-      const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<std::atomic<int32_t>> flag,
-      std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results)
-      override;
+      const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,
@@ -164,6 +155,7 @@ class LLMEngine : public Engine {
   // setup workers internal
   void setup_workers(const runtime::Options& options);
   bool init_model(MasterStatus master_status = MasterStatus::WAKEUP);
+  void init_eplb_manager();
   int64_t get_effective_xtensor_weight_size(
       const ModelLoader& model_loader) const;
   KVCacheCapacity estimate_kv_cache_capacity();
@@ -201,6 +193,9 @@ class LLMEngine : public Engine {
   // Effective TP width (MLU=dp_local; NPU=dp_local/cp).
   uint32_t dp_local_tp_size_;
   uint32_t dp_local_size_;
+  std::vector<std::vector<int32_t>> dp_batch_embedding_ids_;
+  std::vector<std::vector<std::string>> dp_batch_request_ids_;
+  std::vector<uint64_t> dp_batch_generations_;
 
   // For multi-node serving
   // engine brpc server, all workers connect to engine_server_,
@@ -212,8 +207,10 @@ class LLMEngine : public Engine {
 
   torch::Tensor expert_load_data_;
   std::unique_ptr<EplbManager> eplb_manager_ = nullptr;
+  std::deque<int64_t> pending_eplb_activation_tokens_;
   void process_eplb_data(
-      const std::vector<folly::Try<std::optional<RawForwardOutput>>>& results);
+      const std::vector<folly::Try<std::optional<RawForwardOutput>>>& results,
+      int64_t completed_activation_token);
 
   // threadpool for handle forward_input in parallel.
   // Since the batch is created in every step,

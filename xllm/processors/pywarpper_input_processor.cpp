@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -74,8 +74,8 @@ PyWarpperInputProcessor::PyWarpperInputProcessor(const ModelArgs&) {
   PyWrapperImpl::instance();
 }
 
-bool PyWarpperInputProcessor::process(const MMInput& inputs, MMData& datas) {
-  return PyWrapperImpl::instance().execute(inputs, datas);
+bool PyWarpperInputProcessor::process(const MMInput& inputs, MMData& data) {
+  return PyWrapperImpl::instance().execute(inputs, data);
 }
 
 }  // namespace xllm

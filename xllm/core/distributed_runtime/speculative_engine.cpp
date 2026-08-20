@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -73,6 +73,11 @@ SuffixSpeculativeEngine::SuffixSpeculativeEngine(
     const runtime::Options& options)
     : SpeculativeEngine(options, /*use_draft_engine=*/false) {}
 
+runtime::DecodeGraphExecutionShape
+SpeculativeEngine::decode_graph_execution_shape() const {
+  return engine_->decode_graph_execution_shape();
+}
+
 bool SpeculativeEngine::init(MasterStatus master_status) {
   if (!init_model()) {
     return false;
@@ -117,6 +122,7 @@ bool SpeculativeEngine::init_model() {
     }
   }
 
+  engine_->init_eplb_manager();
   dtype_ = util::parse_dtype(model_args_.dtype(), options_.devices()[0]);
   return true;
 }
@@ -161,6 +167,11 @@ bool SpeculativeEngine::allocate_kv_cache() {
   draft_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
   return engine_->allocate_kv_cache(target_kv_cache_cap) &&
          draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
+}
+
+bool SpeculativeEngine::set_speculative_validate_time_predictor(
+    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
+  return engine_->set_speculative_validate_time_predictor(predictor);
 }
 
 // TODO: support dp batches later
@@ -255,42 +266,15 @@ bool SpeculativeEngine::pull_kv_blocks(
     const int32_t src_dp_rank,
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
     const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   return engine_->pull_kv_blocks(src_dp_size,
                                  src_dp_rank,
                                  src_cluster_ids,
                                  src_addrs,
-                                 src_blocks,
                                  dst_dp_rank,
-                                 dst_blocks,
-                                 src_linear_state_ids,
-                                 dst_linear_state_ids);
+                                 mappings);
 };
-
-bool SpeculativeEngine::pull_hetero_kv_blocks(
-    const int32_t src_dp_size,
-    const int32_t src_dp_rank,
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  return engine_->pull_hetero_kv_blocks(src_dp_size,
-                                        src_dp_rank,
-                                        src_cluster_ids,
-                                        src_addrs,
-                                        src_blocks,
-                                        dst_dp_rank,
-                                        dst_blocks,
-                                        src_linear_state_ids,
-                                        dst_linear_state_ids);
-}
 
 void SpeculativeEngine::get_cache_info(std::vector<uint64_t>& cluster_ids,
                                        std::vector<std::string>& addrs,

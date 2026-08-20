@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,18 +48,14 @@ runtime::Options eagle3_draft_options(const runtime::Options& options) {
 Eagle3WorkerImpl::Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : MTPWorkerImpl(parallel_args,
-                    device,
-                    options,
-                    eagle3_main_options(options),
-                    eagle3_draft_options(options),
-                    ::xllm::SpeculativeConfig::get_instance()
-                        .enable_opt_validate_probs()) {
-  // EAGLE-3 drives the draft from the target's captured intermediate-layer
-  // aux hidden states. Context parallelism only exposes the lm_head-gathered
-  // final hidden (see llm_worker_impl.cpp), not the aux hidden, so the draft
-  // would silently receive the wrong tensor. Reject cp_size > 1 until
-  // aux-hidden plumbing under CP is implemented.
+    : MTPWorkerImpl(
+          parallel_args,
+          device,
+          options,
+          eagle3_main_options(options),
+          eagle3_draft_options(options),
+          ::xllm::SpeculativeConfig::get_instance().enable_opt_validate_probs(),
+          /*enable_adaptive_speculative_decode=*/false) {
   CHECK_LE(parallel_args.cp_size(), 1)
       << "EAGLE-3 speculative decoding does not support context parallelism "
          "(cp_size > 1).";

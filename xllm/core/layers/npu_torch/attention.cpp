@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -129,23 +129,24 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     return std::make_tuple(output, output_lse);
   }
 
-  bool only_prefill =
+  const bool only_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
 
   torch::Tensor k_cache = kv_cache.get_k_cache();
-  torch::Tensor v = value.view({-1, num_kv_heads_, head_size_});
   std::optional<torch::Tensor> v_cache = kv_cache.get_v_cache();
 
-  // Reshape and cache key/value
-  xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
-  reshape_paged_cache_params.key = key.view({-1, num_kv_heads_, head_size_});
-  reshape_paged_cache_params.value = v;
-  reshape_paged_cache_params.k_cache = k_cache;
-  reshape_paged_cache_params.v_cache = v_cache;
-  reshape_paged_cache_params.slot_mapping = attn_metadata.slot_mapping;
-  xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
+  if (!attn_metadata.prefill_without_cache) {
+    xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
+    reshape_paged_cache_params.key = key.view({-1, num_kv_heads_, head_size_});
+    reshape_paged_cache_params.value =
+        value.view({-1, num_kv_heads_, head_size_});
+    reshape_paged_cache_params.k_cache = k_cache;
+    reshape_paged_cache_params.v_cache = v_cache;
+    reshape_paged_cache_params.slot_mapping = attn_metadata.slot_mapping;
+    xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
+  }
 
-  if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {
+  if (attn_metadata.expanded_decode.enabled) {
     decoder_forward(query, output, k_cache, v_cache, attn_metadata);
   } else if (dcp_size_ > 1 && attn_metadata.is_chunked_prefill) {
     // Mixed batches also set is_chunked_prefill, but the DCP cache-slot gate in
@@ -235,7 +236,7 @@ void AttentionImpl::dcp_decoder_forward(
   CHECK(!attn_metadata.is_chunked_prefill);
   CHECK(!attn_metadata.is_spec_verify)
       << "DCP-2 does not support speculative decode attention.";
-  CHECK(!attn_metadata.use_expanded_decode_for_spec_verify_attention)
+  CHECK(!attn_metadata.expanded_decode.enabled)
       << "DCP-2 does not support speculative decode attention.";
   CHECK(v_cache.has_value() && v_cache.value().defined())
       << "DCP decode requires a defined V cache.";
@@ -319,6 +320,7 @@ void AttentionImpl::dcp_decoder_forward(
             /*sparse_mode=*/0,
             "TND",
             /*softmax_lse_flag=*/true,
+            /*is_causal=*/true,
             fia_out,
             fia_lse);
     torch::Tensor fia_workspace;
@@ -348,6 +350,7 @@ void AttentionImpl::dcp_decoder_forward(
                                                      /*sparse_mode=*/0,
                                                      "TND",
                                                      /*softmax_lse_flag=*/true,
+                                                     /*is_causal=*/true,
                                                      fia_out,
                                                      fia_lse,
                                                      fia_workspace_opt);
@@ -600,13 +603,13 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
   torch::Tensor kv_seq_lens;
   torch::Tensor block_table = attn_metadata.block_table;
   torch::Tensor tiling_data = attn_metadata.paged_attention_tiling_data;
-  if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {
-    block_table = attn_metadata.expanded_block_table;
-    tiling_data = attn_metadata.expanded_paged_attention_tiling_data;
-    if (attn_metadata.expanded_kv_seq_lens_host.defined()) {
-      kv_seq_lens = attn_metadata.expanded_kv_seq_lens_host;
+  if (attn_metadata.expanded_decode.enabled) {
+    block_table = attn_metadata.expanded_decode.block_table;
+    tiling_data = attn_metadata.expanded_decode.paged_attention_tiling_data;
+    if (attn_metadata.expanded_decode.kv_seq_lens_host.defined()) {
+      kv_seq_lens = attn_metadata.expanded_decode.kv_seq_lens_host;
     } else {
-      kv_seq_lens = attn_metadata.expanded_kv_seq_lens;
+      kv_seq_lens = attn_metadata.expanded_decode.kv_seq_lens;
     }
   } else if (attn_metadata.kv_seq_lens_host.defined()) {
     kv_seq_lens = attn_metadata.kv_seq_lens_host;

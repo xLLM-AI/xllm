@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,9 @@ limitations under the License.
 #include <algorithm>
 
 #include "common/metrics.h"
-#include "framework/sampling/rejection_sampler.h"
+#include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/speculative/spec_verify.h"
+#include "framework/sampling/sampling_params.h"
 #include "util/slice.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -86,6 +88,10 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     for (auto& it : new_input.input_params.parallel.dp_global_token_nums) {
       it *= options_.num_speculative_tokens() + 1;
     }
+    new_input.input_params.expert.eplb_decode_token_mask =
+        eplb::expand_decode_token_mask(
+            new_input.input_params.expert.eplb_decode_token_mask,
+            options_.num_speculative_tokens() + 1);
 
     auto future = impl_->step_async(new_input);
     ForwardOutput output = std::move(future).get().value();
@@ -404,26 +410,15 @@ SampleOutput SuffixWorkerImpl::validate(
   // Suffix decoding always uses greedy sampling for validation,
   // regardless of the user's sampling parameters.
   auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
-  auto rejection_sampler =
-      std::make_unique<RejectionSampler>(greedy_do_sample,
-                                         /*all_random_sample=*/false,
-                                         /*all_greedy_sample=*/true,
-                                         target_output.logprobs,
-                                         target_output.max_top_logprobs,
-                                         enable_fused_kernel_);
-
-  SampleOutput sample_output =
-      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
-                                 draft_probs.to(target_logits.device()),
-                                 target_logits,
-                                 bonus_token_ids,
-                                 /*mask_out_rejected_tokens=*/true);
-
-  auto embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings =
-      embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
-
-  return sample_output;
+  return spec_verify::run_rejection_sampling({.do_sample = greedy_do_sample,
+                                              .all_random_sample = false,
+                                              .all_greedy_sample = true},
+                                             draft_token_ids,
+                                             draft_probs,
+                                             target_logits,
+                                             target_output,
+                                             bonus_token_ids,
+                                             enable_fused_kernel_);
 }
 
 }  // namespace xllm

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -65,6 +66,23 @@ struct ModelArgs {
 
   PROPERTY(int64_t, vocab_size) = -1;
   PROPERTY(int64_t, draft_vocab_size) = 0;
+
+  // DSpark: low-rank dim of the Markov head. 0 = disabled (plain DFlash /
+  // non-DSpark models).
+  PROPERTY(int64_t, markov_rank) = 0;
+  PROPERTY(int32_t, dspark_num_layers) = 0;
+  PROPERTY(int32_t, dspark_block_size) = 0;
+  // True only when SparseAttnSharedkv accepts explicit DSpark SWA indices.
+  // False selects the CANN 9.0-compatible q_len=1 row fallback.
+  PROPERTY(bool, dspark_use_native_sas) = false;
+
+  // DSpark ConfidenceHead switches. When enabled, DSpark's ForCausalLM
+  // registers a `confidence_head.proj` layer used for adaptive-speculative
+  // pruning acceptance-probability estimation. `with_markov` toggles whether
+  // the head is applied on `concat(hidden, markov_embedding[prev])` (True in
+  // released dspark_qwen3_*b_block* checkpoints) or on `hidden` alone.
+  PROPERTY(bool, enable_confidence_head) = false;
+  PROPERTY(bool, confidence_head_with_markov) = false;
 
   PROPERTY(bool, use_qk_norm) = false;
   PROPERTY(float, rms_norm_eps) = 0.0f;
@@ -159,6 +177,8 @@ struct ModelArgs {
   PROPERTY(std::string, index_topk_pattern);
   PROPERTY(int32_t, index_skip_topk_offset) = 0;
   PROPERTY(bool, index_share_for_mtp_iteration) = false;
+  PROPERTY(std::vector<std::string>, indexer_types) = {};
+  PROPERTY(std::vector<std::string>, mlp_layer_types) = {};
 
   // deepseek v4
   PROPERTY(int32_t, rope_head_dim) = 0;
@@ -429,7 +449,7 @@ struct ModelArgs {
   // number of speculative decoding tokens
   PROPERTY(int64_t, num_speculative_tokens) = 0;
 
-  // Eagle3: layer indices (0-based) to capture aux hidden states, from config
+  // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
 
   // VAE related args
@@ -573,6 +593,12 @@ struct ModelArgs {
   PROPERTY(bool, zero_cond_t) = false;
   PROPERTY(bool, use_additional_t_cond) = false;
   PROPERTY(bool, use_layer3d_rope) = false;
+
+  // JoyImage-Edit-Plus dit related args
+  PROPERTY(double, mlp_width_ratio) = 4.0;
+  PROPERTY(int64_t, text_dim) = 4096;
+  PROPERTY(std::vector<int64_t>, rope_dim_list) = { 16, 56, 56 };
+  PROPERTY(int64_t, rope_theta_dit) = 10000;
 };
 
 // Qwen hybrid models may describe full-attention layers explicitly via
@@ -603,6 +629,14 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
                        });
   }
   return args.full_attention_interval() > 1;
+}
+
+// Closed set by design: a new target variant must be enumerated here rather
+// than matched by a "qwen3_5_" prefix, so draft bodies ("qwen3_5_mtp") are not
+// silently promoted onto the target spec-verify path.
+inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
+  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
+         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

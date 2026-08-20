@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include <optional>
+
+#include "framework/kv_cache_transfer/cache_layout.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/kv_cache_transfer/mooncake_transfer_engine.h"
 
@@ -32,19 +35,30 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
 
   void initialize(int32_t device_id) override;
 
+  void configure_cache_layout(const ParallelArgs& parallel_args,
+                              const ModelArgs& model_args,
+                              int32_t block_token_capacity,
+                              bool is_spec_draft) override;
+
   void get_cache_info(uint64_t& cluster_id, std::string& addr) override;
 
-  bool link_cluster(const uint64_t cluster_id,
-                    const std::string& remote_addr,
-                    const uint16_t port) override;
+  bool link_clusters(const std::vector<uint64_t>& cluster_ids,
+                     const std::vector<std::string>& remote_addrs,
+                     const std::vector<uint16_t>& ports) override;
 
   bool unlink_cluster(const uint64_t& cluster_id,
                       const std::string& remote_addr,
                       const uint16_t port,
                       bool force_flag = false) override;
 
+  void merge_kv_blocks(
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      const std::vector<TransferKVInfo>& transfer_kv_infos,
+      const ParallelArgs& parallel_args) override;
+
  protected:
   std::string addr_;
+  std::string incarnation_id_;
   uint64_t cluster_id_;
   uint16_t listen_port_;
   int32_t device_id_;
@@ -53,6 +67,13 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
   int64_t size_per_block_ = 0;
 
   std::unique_ptr<MooncakeTransferEngine> mooncake_te_;
+  std::optional<CacheRegistrationContext> pending_registration_context_;
+  WorkerCacheLayoutManifest local_cache_layout_;
+  uint64_t layout_generation_ = 0;
+
+  void publish_cache_layout(
+      const std::vector<CacheTensorManifest>& tensor_manifests,
+      const CacheRegistrationContext& registration_context);
 };
 
 class MooncakeKVCacheTransferDefault final
@@ -69,16 +90,6 @@ class MooncakeKVCacheTransferDefault final
       const std::string& model_type,
       std::unique_ptr<MooncakeTransferEngine> engine);
 
-  void allocate_kv_cache(std::vector<xllm::KVCache>& kv_caches,
-                         const int64_t num_layers,
-                         const KVCacheShape& kv_cache_shape,
-                         torch::ScalarType dtype) override;
-
-  void allocate_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
-                              const int64_t num_layers,
-                              const KVCacheShape& kv_cache_shape,
-                              torch::ScalarType dtype) override;
-
   void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,
                          const torch::ScalarType dtype) override;
@@ -87,18 +98,9 @@ class MooncakeKVCacheTransferDefault final
                               const KVCacheShape& kv_cache_shape,
                               torch::ScalarType dtype) override;
 
-  bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids,
-      const std::vector<uint64_t>& dst_linear_state_ids) override;
-
-  void merge_kv_blocks(
-      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-      const std::vector<TransferKVInfo>& transfer_kv_infos,
-      const ParallelArgs& parallel_args) override;
+  bool pull_kv_blocks(const uint64_t src_cluster_id,
+                      const std::string& src_addr,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
@@ -108,6 +110,13 @@ class MooncakeKVCacheTransferDefault final
       int32_t kv_split_size) override;
 
  private:
+  struct RegisteredBufferDesc {
+    int64_t buf_id = 0;
+    KVCacheTensorRole role;
+    int32_t group_id = 0;
+    uint64_t block_bytes = 0;
+  };
+
   // Mooncake assigns buffer ids in registration order. Main KV cache registers
   // first, then the speculative draft KV cache is appended after it.
   struct BufLayout {
@@ -115,39 +124,34 @@ class MooncakeKVCacheTransferDefault final
     int64_t num_layers = 0;
     // Starting buffer id of this layout in the Mooncake registration table.
     int64_t offset = 0;
-    // Registration-order offsets for each layer plus one terminal offset.
-    // Shared DSA layers omit indexer buffers, so counts may vary by layer.
-    std::vector<int64_t> layer_offsets;
-    // Legacy uniform buffers-per-layer view. It is zero when buffer counts
-    // vary. Keep this for callers that construct a uniform layout directly.
-    int64_t buf_cnt = 0;
+    // Registration-order descriptors for each layer. Shared DSA layers may
+    // omit indexer buffers, so counts can vary by layer.
+    std::vector<std::vector<RegisteredBufferDesc>> layers;
     // Total buffers registered by this layout.
     int64_t total_buf_cnt = 0;
     // True after the corresponding KV cache memory has been registered.
     bool registered = false;
   };
 
-  void allocate_kv_cache_impl(std::vector<xllm::KVCache>& kv_caches,
-                              int64_t num_layers,
-                              const KVCacheShape& kv_cache_shape,
-                              torch::ScalarType dtype);
-
   void add_buf(const torch::Tensor& tensor,
                std::vector<void*>& addrs,
                std::vector<size_t>& lens,
-               std::vector<uint64_t>& buf_bytes) const;
-  std::vector<int64_t> get_buf_ids(const std::vector<int64_t>& layer_ids,
-                                   bool is_spec_draft) const;
-  std::vector<int64_t> get_buf_ids(const std::vector<int64_t>& layer_ids,
-                                   const BufLayout& layout) const;
+               std::vector<uint64_t>& buf_bytes,
+               int64_t physical_rows_per_resource = 1) const;
+  bool append_buffer_mappings(
+      const BufLayout& layout,
+      const std::vector<int64_t>& layer_ids,
+      const std::vector<KVTransferMapping>& mappings,
+      std::vector<MooncakeTransferEngine::BufferTransferMapping>*
+          buffer_mappings) const;
 
   // Register per-layer K/V tensor memory.
-  void register_kv_cache_impl(const std::vector<xllm::KVCache>& kv_caches);
+  void register_kv_cache_impl(const std::vector<xllm::KVCache>& kv_caches,
+                              int64_t ssm_checkpoint_stride);
 
   bool has_v_cache_ = true;
   BufLayout main_layout_;
   BufLayout spec_layout_;
-  std::string model_type_;
 };
 
 class MooncakeKVCacheTransferXTensor final
@@ -159,22 +163,13 @@ class MooncakeKVCacheTransferXTensor final
 
   void set_model_id(const std::string& model_id) { model_id_ = model_id; }
 
-  void allocate_kv_cache(std::vector<xllm::KVCache>& kv_caches,
-                         const int64_t num_layers,
-                         const KVCacheShape& kv_cache_shape,
-                         torch::ScalarType dtype) override;
-
   void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,
                          const torch::ScalarType dtype) override;
 
-  bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids,
-      const std::vector<uint64_t>& dst_linear_state_ids) override;
+  bool pull_kv_blocks(const uint64_t src_cluster_id,
+                      const std::string& src_addr,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
@@ -184,11 +179,6 @@ class MooncakeKVCacheTransferXTensor final
       int32_t kv_split_size) override;
 
  private:
-  void allocate_kv_cache_impl(std::vector<xllm::KVCache>& kv_caches,
-                              int64_t num_layers,
-                              const KVCacheShape& kv_cache_shape,
-                              torch::ScalarType dtype);
-
   // Register GlobalXTensor memory region.
   void register_kv_cache_impl();
 

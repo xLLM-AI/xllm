@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,6 +49,15 @@ class DeepseekV4HCPreImpl final : public torch::nn::Module {
   DeepseekV4HCPreOutput forward(
       const torch::Tensor& x,
       const std::optional<torch::Tensor>& rsqrt = std::nullopt);
+
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+  fused_post_pre_norm(const torch::Tensor& x,
+                      const torch::Tensor& residual,
+                      const torch::Tensor& post,
+                      const torch::Tensor& comb,
+                      const torch::Tensor& gamma);
+
+  bool supports_fused_mhc() const { return hc_mult_ == 4 && dim_ == 4096; }
 
   void load_state_dict(const StateDict& state_dict);
 

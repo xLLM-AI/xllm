@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -39,6 +40,7 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "max_tokens_per_batch": 8192,
   "max_seqs_per_batch": 64,
   "model_impl": "py",
+  "disable_graph_warmup": true,
   "python_graph_backend": "cudagraphs"
 })json";
 
@@ -50,6 +52,16 @@ inline constexpr std::string_view kUpdatedConfig = R"json({
 inline constexpr std::string_view kMalformedConfig = R"json({
   "block_size":
 })json";
+
+#if !defined(USE_NPU)
+TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
+  JsonReader json_config =
+      config::parse_json_string(R"json({"enable_dspark_native_sas":true})json");
+  KernelConfig kernel_config;
+  EXPECT_DEATH(kernel_config.from_json(json_config),
+               "enable_dspark_native_sas is only supported on NPU");
+}
+#endif
 
 class ConfigJsonFileFlagGuard final {
  public:
@@ -107,6 +119,7 @@ class ConfigFlagGuard final {
         old_max_seqs_per_batch_(FLAGS_max_seqs_per_batch),
         old_model_impl_(FLAGS_model_impl),
         old_python_model_path_(FLAGS_python_model_path),
+        old_disable_graph_warmup_(FLAGS_disable_graph_warmup),
         old_python_graph_backend_(FLAGS_python_graph_backend) {}
 
   ~ConfigFlagGuard() {
@@ -117,6 +130,7 @@ class ConfigFlagGuard final {
     FLAGS_max_seqs_per_batch = old_max_seqs_per_batch_;
     FLAGS_model_impl = old_model_impl_;
     FLAGS_python_model_path = old_python_model_path_;
+    FLAGS_disable_graph_warmup = old_disable_graph_warmup_;
     FLAGS_python_graph_backend = old_python_graph_backend_;
   }
 
@@ -128,6 +142,7 @@ class ConfigFlagGuard final {
   int32_t old_max_seqs_per_batch_;
   std::string old_model_impl_;
   std::string old_python_model_path_;
+  bool old_disable_graph_warmup_;
   std::string old_python_graph_backend_;
 };
 
@@ -201,6 +216,31 @@ std::filesystem::path config_test_file_path() {
   return std::filesystem::path("tests/core/framework/config/config_test.json");
 }
 
+TEST(ModelConfigValidationTest, RejectsQwen35PythonSpeculativeDecode) {
+  const std::optional<std::string> error =
+      ModelConfig::validate_python_speculative_decode(
+          "python", "qwen3_5_moe_text", 4);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("does not support speculative decoding"),
+            std::string::npos);
+  EXPECT_TRUE(
+      ModelConfig::validate_python_speculative_decode("py", "qwen3_5_text", 1)
+          .has_value());
+}
+
+TEST(ModelConfigValidationTest, AcceptsSupportedPythonExecutionModes) {
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "python", "qwen3_5_text", 0)
+                   .has_value());
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "native", "qwen3_5_text", 4)
+                   .has_value());
+  EXPECT_FALSE(
+      ModelConfig::validate_python_speculative_decode("python", "qwen3", 4)
+          .has_value());
+}
+
 TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   const JsonReader json = config::parse_json_string(kInlineConfig);
   ConfigFlagGuard flag_guard;
@@ -233,15 +273,23 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   // model and python_model_path are command-line-only: from_json neither reads
   // them nor touches their gflags, so both keep their pre-call values.
   EXPECT_EQ(model_config.python_model_path(), "");
+  EXPECT_TRUE(execution_config.disable_graph_warmup());
   EXPECT_EQ(execution_config.python_graph_backend(), "cudagraphs");
 
   EXPECT_EQ(FLAGS_model_impl, "py");
   EXPECT_EQ(FLAGS_python_model_path, old_python_model_path);
+  EXPECT_TRUE(FLAGS_disable_graph_warmup);
   EXPECT_EQ(FLAGS_python_graph_backend, "cudagraphs");
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
+}
+
+TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {
+  const ExecutionConfig execution_config;
+
+  EXPECT_FALSE(execution_config.disable_graph_warmup());
 }
 
 TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {

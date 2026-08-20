@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,13 +19,15 @@ limitations under the License.
 
 #include "common/flash_comm1_context.h"
 #include "kernels/ops_api.h"
+#include "npu_torch/deepseek_v4_cp_context.h"
 
 namespace xllm {
 namespace layer {
 
 DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
-    int32_t layer_id) {
+    int32_t layer_id)
+    : layer_id_(layer_id) {
   const auto& args = context.get_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
@@ -52,6 +54,7 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
   moe_args.skip_gate_load = true;
   moe_mlp_ = register_module(
       "ffn", FusedMoE(args, moe_args, quant_args, parallel_args, options));
+  moe_mlp_->set_eplb_layer_id(layer_id_ - args.first_k_dense_replace());
   // Register as "gate" to match Python's mlp.gate module path.
   gate_ = register_module("gate", DeepseekV4Gate(context, layer_id));
 
@@ -129,6 +132,19 @@ void DeepseekV4DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
 
 void DeepseekV4DecoderLayerImpl::verify_loaded_weights() const {}
 
+void DeepseekV4DecoderLayerImpl::prepare_expert_weight(
+    const std::vector<int32_t>& expert_ids) {
+  moe_mlp_->prepare_expert_weight(expert_ids);
+}
+
+void DeepseekV4DecoderLayerImpl::start_expert_weight_transfer() {
+  moe_mlp_->start_expert_weight_transfer();
+}
+
+void DeepseekV4DecoderLayerImpl::update_expert_weight() {
+  moe_mlp_->update_expert_weight();
+}
+
 torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     torch::Tensor& x,
     std::optional<torch::Tensor>& residual,
@@ -184,6 +200,19 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     ffn_input = gather_sequence(ffn_input, *fc1_ctx);
   }
 
+  // Prefill CP shards the query axis, so ffn_input holds only this rank's rows.
+  // MoE cannot run on that shard: its expert reduce spans moe_ep_group, which
+  // crosses cp_rank, and partial expert sums are only addable when every group
+  // member holds the same tokens. Gather back to the full DP-local token set
+  // for the gate and the experts, then re-shard so the residual path stays
+  // CP-local. This mirrors what the ATB CP path does through
+  // CpEpMeta::ffn_padding_indices.
+  const v4_cp::DeepseekV4CpContext* cp_ctx = dsa.v4_cp_context;
+  const bool cp_bridge_ffn = cp_ctx != nullptr && cp_ctx->enabled();
+  if (cp_bridge_ffn) {
+    ffn_input = cp_ctx->gather_restore(ffn_input);
+  }
+
   auto ffn_input_2d = ffn_input.reshape({-1, ffn_input.size(-1)});
   std::optional<torch::Tensor> gate_input_ids = std::nullopt;
   if (input_ids.has_value() && input_ids.value().defined()) {
@@ -208,12 +237,25 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   ffn_input = moe_mlp_->forward_with_selected_experts(
       ffn_input, topk_weights, topk_ids, input_params);
 
+  if (cp_bridge_ffn) {
+    ffn_input = cp_ctx->shard_rows(ffn_input);
+  }
+
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     ffn_input = shard_sequence(ffn_input, *fc1_ctx);
   }
   x = hc_post(ffn_input, residual_ffn, post_ffn, comb_ffn);
 
   return x;
+}
+
+void DeepseekV4DecoderLayerImpl::write_context_kv(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    const torch::Tensor& slot_mapping,
+    KVCache& kv_cache) {
+  attention_->write_context_kv(hidden_states, cos, sin, slot_mapping, kv_cache);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>

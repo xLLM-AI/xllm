@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -440,7 +440,7 @@ class TimestepEmbeddingImpl final : public torch::nn::Module {
 };
 TORCH_MODULE(TimestepEmbedding);
 
-// A internel class that only register necessary modules for attention
+// A internal class that only register necessary modules for attention
 // implementation The attention forward shouldn't be implemented here, but in
 // processor classes
 // TODO: This class should be extracted from dit class and integrated into a
@@ -838,7 +838,7 @@ TORCH_MODULE(FeedForward);
 // common class.
 class AdaLayerNormImpl final : public torch::nn::Module {
  public:
-  AdaLayerNormImpl(const ModelContext& contex,
+  AdaLayerNormImpl(const ModelContext& context,
                    int64_t hidden_size,
                    double eps = 1e-6)
       : hidden_size_(hidden_size), eps_(eps) {

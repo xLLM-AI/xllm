@@ -14,11 +14,38 @@ cc_test(
 
 cc_test(
   NAME
+    attention_metadata_builder_test
+  SRCS
+    attention_metadata_builder_test.cpp
+  DEPS
+    :common_layers
+    GTest::gtest_main
+)
+
+target_link_libraries(attention_metadata_builder_test PUBLIC Python::Python)
+
+cc_test(
+  NAME
     rotary_embedding_util_test
   SRCS
     rotary_embedding_util_test.cpp
   DEPS
     :common_layers
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+
+# DeepSeek-V4 prefill CP split arithmetic. Kept outside the platform
+# subdirectories: the split math has no accelerator or ProcessGroup dependency,
+# so every platform build can verify it.
+cc_test(
+  NAME
+    deepseek_v4_cp_split_test
+  SRCS
+    deepseek_v4_cp_split_test.cpp
+  DEPS
+    :parallel_state
     glog::glog
     torch
     GTest::gtest_main

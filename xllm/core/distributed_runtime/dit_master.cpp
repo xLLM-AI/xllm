@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -85,6 +85,11 @@ void DiTMaster::handle_request(DiTRequestParams params,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry. Dismissed
+    // right before DiTRequest takes ownership; any early return releases it.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     Timer timer;
     // verify the prompt
     if (!params.verify_params(callback)) {
@@ -96,10 +101,14 @@ void DiTMaster::handle_request(DiTRequestParams params,
                                                 nullptr,
                                                 params.request_kind,
                                                 call);
+    rate_limit_guard.dismiss();
     auto request = std::make_shared<DiTRequest>(params.request_id,
                                                 params.x_request_id,
                                                 params.x_request_time,
-                                                std::move(dit_state));
+                                                std::move(dit_state),
+                                                /*service_request_id=*/"",
+                                                /*source_xservice_addr=*/"",
+                                                get_rate_limiter());
 
     if (!scheduler_->add_request(request)) {
       CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,

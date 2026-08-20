@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,9 +20,11 @@ limitations under the License.
 #include "dit/pipelines/pipeline_flux2.h"                // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_control.h"         // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_fill.h"            // IWYU pragma: keep
+#include "dit/pipelines/pipeline_joyimage_edit_plus.h"   // IWYU pragma: keep
 #include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
 #include "dit/pipelines/pipeline_wan_i2v.h"              // IWYU pragma: keep
 #include "llm/deepseek_v4.h"                             // IWYU pragma: keep
+#include "llm/deepseek_v4_dspark.h"                      // IWYU pragma: keep
 #include "llm/deepseek_v4_mtp.h"                         // IWYU pragma: keep
 #include "llm/npu/deepseek_mtp.h"                        // IWYU pragma: keep
 #include "llm/npu/deepseek_v2.h"                         // IWYU pragma: keep
@@ -45,6 +47,7 @@ limitations under the License.
 #include "llm/npu/qwen2.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3_dflash.h"                        // IWYU pragma: keep
+#include "llm/npu/qwen3_dspark.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_eagle3.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_moe.h"                           // IWYU pragma: keep
 #include "llm/qwen3.h"                                   // IWYU pragma: keep
@@ -64,6 +67,7 @@ limitations under the License.
 #include "vlm/npu/qwen3_vl.h"                            // IWYU pragma: keep
 #include "vlm/npu/qwen3_vl_moe.h"                        // IWYU pragma: keep
 #include "vlm/qwen3_5.h"                                 // IWYU pragma: keep
+#include "vlm/qwen3_vl.h"                                // IWYU pragma: keep
 
 #elif defined(USE_MLU)
 #include "dit/pipelines/pipeline_flux.h"          // IWYU pragma: keep
@@ -109,6 +113,7 @@ limitations under the License.
 #include "llm/mimo_mtp.h"                               // IWYU pragma: keep
 #include "llm/qwen2.h"                                  // IWYU pragma: keep
 #include "llm/qwen3.h"                                  // IWYU pragma: keep
+#include "llm/qwen3_5.h"                                // IWYU pragma: keep
 #include "llm/qwen3_moe.h"                              // IWYU pragma: keep
 #include "llm/rwkv7.h"                                  // IWYU pragma: keep
 #include "vlm/qwen2_5_vl.h"                             // IWYU pragma: keep

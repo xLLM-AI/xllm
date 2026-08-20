@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -224,18 +224,18 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
                                            index_dtype,
                                            create_options);
 #elif defined(USE_NPU)
+  const torch::ScalarType index_dtype =
+      create_options.enable_indexer_cache_quant() ? torch::kChar
+                                                  : create_options.dtype();
   const aclFormat npu_format_type =
       get_npu_kv_cache_format(create_options.model_type());
   if (create_options.enable_kv_cache_huge_page_allocator()) {
-    tensors.index_cache =
-        alloc_npu_huge_page_tensor(kv_cache_shape.index_cache_shape(),
-                                   create_options.dtype(),
-                                   npu_format_type);
+    tensors.index_cache = alloc_npu_huge_page_tensor(
+        kv_cache_shape.index_cache_shape(), index_dtype, npu_format_type);
   } else {
     tensors.index_cache = at_npu::native::npu_format_cast(
         torch::empty(kv_cache_shape.index_cache_shape(),
-                     torch::dtype(create_options.dtype())
-                         .device(create_options.device())),
+                     torch::dtype(index_dtype).device(create_options.device())),
         npu_format_type);
   }
 #else
@@ -244,8 +244,8 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
       torch::dtype(create_options.dtype()).device(create_options.device()));
 #endif
   if (create_options.enable_indexer_cache_quant()) {
-#if !defined(USE_MLU)
-    CHECK(false) << "Indexer cache INT8 is only supported on MLU backend.";
+#if !defined(USE_MLU) && !defined(USE_NPU)
+    CHECK(false) << "Indexer cache INT8 is unsupported on this backend.";
 #endif
     if (kv_cache_shape.has_index_cache_scale_shape()) {
 #if defined(USE_MLU)
@@ -254,6 +254,10 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
                              kv_cache_shape.index_cache_scale_shape(),
                              torch::kFloat32,
                              create_options);
+#elif defined(USE_NPU)
+      tensors.index_cache_scale = torch::zeros(
+          kv_cache_shape.index_cache_scale_shape(),
+          torch::dtype(torch::kFloat16).device(create_options.device()));
 #else
       tensors.index_cache_scale = torch::zeros(
           kv_cache_shape.index_cache_scale_shape(),
@@ -531,6 +535,16 @@ std::optional<std::string> validate_host_cache_options(
     violations.emplace_back(
         "prefix caching is disabled; set --enable_prefix_cache=true");
   }
+  if (options.enable_disagg_pd) {
+    if (options.enable_pd_ooc) {
+      violations.emplace_back(
+          "disaggregated host offload does not support PD-OOC");
+    }
+  } else if (options.instance_role != InstanceRole::DEFAULT) {
+    violations.emplace_back(
+        "host offload outside disaggregated serving requires the DEFAULT "
+        "instance role");
+  }
 
   // Quantized KV caches add scale tensors whose host offload and restore
   // lifecycle is not supported consistently by the common path yet.
@@ -542,7 +556,8 @@ std::optional<std::string> validate_host_cache_options(
   if (!options.has_key_cache_shape) {
     violations.emplace_back("KV cache has no key-cache tensor to offload");
   }
-  if (options.has_grouped_cache_layout) {
+  if (options.has_grouped_cache_layout &&
+      !options.supports_grouped_cache_offload) {
     std::ostringstream violation;
     violation << "model \"" << options.model_type
               << "\" uses a grouped cache layout (for example DeepSeek-V4 "

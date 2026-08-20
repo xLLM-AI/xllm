@@ -31,6 +31,7 @@ cc_library(
     absl::flat_hash_set
     absl::strings
     glog::glog
+    nlohmann_json::nlohmann_json
     rust_tokenizers
     re2::re2
 )

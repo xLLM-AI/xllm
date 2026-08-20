@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,9 +15,12 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "framework/sampling/rejection_sampler.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/options.h"
@@ -27,6 +30,19 @@ namespace xllm {
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.
 bool should_run_speculative_decode(const ModelInputParams& params);
+
+// Keep padded and raw DP token-count views in the same speculative layout.
+void scale_speculative_parallel_token_counts(ModelInputParams& params,
+                                             int32_t multiplier);
+
+struct SpeculativeOutputStats {
+  std::vector<int64_t> accepted_per_position;
+  int64_t committed_tokens = 0;
+};
+
+SpeculativeOutputStats calculate_speculative_output_stats(
+    const torch::Tensor& tokens,
+    int64_t num_speculative_tokens);
 
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and
@@ -94,6 +110,7 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   // prepare work before model execution
   void prepare_work_before_execute(const ForwardInput& input,
                                    ForwardInput& new_input) override;
+  void restore_json_object_states(ForwardInput& input) override;
 
   // Common step dispatch: prefill / decode / empty
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
@@ -103,31 +120,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override {
-    return impl_->pull_kv_blocks_async(src_cluster_id,
-                                       src_addr,
-                                       src_blocks,
-                                       dst_blocks,
-                                       src_linear_state_ids,
-                                       dst_linear_state_ids);
-  };
-
-  folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override {
-    return impl_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                              src_addrs,
-                                              src_blocks,
-                                              dst_blocks,
-                                              src_linear_state_ids,
-                                              dst_linear_state_ids);
+      const std::vector<KVTransferMapping>& mappings) override {
+    return impl_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
   };
 
  protected:
@@ -143,14 +137,56 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void update_sampling_params(SamplingParameters& sampling_params,
                               const int32_t num_val_tokens,
                               const int32_t total_num_val_tokens);
+  void update_sampling_params(SamplingParameters& sampling_params,
+                              const std::vector<int32_t>& per_seq_val_tokens,
+                              const int32_t total_num_val_tokens);
 
   // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs);
+  // Per-seq variant used by adaptive-speculative pruning: each sequence's
+  // validate row width equals per_seq_val_tokens[i] (must be in [1, N+1]).
+  // The dense meta/token/position/kv-slot buffers are rebuilt as varlen with
+  // total_tokens = Σ per_seq_val_tokens.
+  void prepare_validate_inputs(const ForwardInput& inputs,
+                               ForwardInput& validate_inputs,
+                               const std::vector<int32_t>& per_seq_val_tokens);
+
+  // Overwrite dp_global_token_nums / raw_dp_global_token_nums with the true
+  // post-pruning validate token count of every DP peer, gathered over the DP
+  // group. Adaptive pruning makes each rank's validate token count
+  // data-dependent, so the engine-supplied global vector (which assumes a
+  // uniform per-seq width) no longer matches; DpEpPadding needs the real
+  // per-rank counts to compute matching MoE all-to-all pads. No-op when the DP
+  // group spans a single rank. MUST be called on every DP rank each validate
+  // step (both the pruned and the unpruned branch) so the collective stays in
+  // lockstep and does not deadlock.
+  void sync_dp_global_token_nums_after_prune(ModelInputParams& input_params,
+                                             int32_t local_total_val_tokens);
+
+  // Idle-rank counterpart: a DP rank whose shard is empty still runs the target
+  // validate forward (fake input) while busy peers run the pruned forward.
+  // Both must join the same DP allgather. This variant contributes the idle
+  // rank's own current dp_global_token_nums entry (already scaled to the
+  // uniform validate width) so it stays symmetric with the busy peers.
+  void sync_dp_global_token_nums_for_idle_rank(ModelInputParams& input_params);
+
+  // Target-side cache budget after reserving storage for a colocated draft.
+  // DeepSeek-V4's fixed SWA pools require both geometries to participate.
+  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity_with_draft(
+      LLMWorkerImpl& draft_impl,
+      const runtime::Options& target_options,
+      const runtime::Options& draft_options);
 
  protected:
   // Target model worker
   std::unique_ptr<LLMWorkerImpl> impl_;
+
+  // Optional adaptive pruning controller. Subclasses create it in their ctor
+  // when the algorithm supports adaptive per-seq validate pruning (MTP,
+  // DFlash, DSpark). Left null otherwise. Held in the base so shared plumbing
+  // (predictor setter, profile hook) does not need per-subclass duplication.
+  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
 
   bool enable_fused_kernel_ = false;
   int32_t embedding_size_ = 0;

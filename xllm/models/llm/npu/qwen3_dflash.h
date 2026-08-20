@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,7 +33,7 @@ limitations under the License.
 
 namespace xllm::npu::model {
 
-class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
+class DFlashQwen3ModelImpl : public QWen3ModelImpl {
  public:
   explicit DFlashQwen3ModelImpl(const ModelContext& context)
       : QWen3ModelImpl(context) {
@@ -53,8 +53,6 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
     head_dim_ = model_args.head_dim();
     rms_norm_eps_ = model_args.rms_norm_eps();
     CHECK_GT(head_dim_, 0) << "DFlash head_dim must be positive.";
-    CHECK_GT(model_args.layers_to_capture().size(), 0u)
-        << "DFlash requires dflash_config.target_layer_ids.";
 
     fc_ = register_module("fc", layer::NpuColumnParallelLinear(context));
     hidden_norm_ = register_module("hidden_norm", layer::NpuRMSNorm(context));

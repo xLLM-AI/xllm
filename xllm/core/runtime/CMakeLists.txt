@@ -6,6 +6,7 @@ cc_library(
     runtime
   HDRS
     options.h
+    decode_graph_bucket.h
     forward_params.h
     dit_forward_params.h
     params_utils.h
@@ -15,11 +16,14 @@ cc_library(
     vlm_executor_impl.h
     base_executor_impl.h
     dit_executor.h
+    $<$<BOOL:${USE_NPU}>:acl_graph_bucket_policy.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
+    $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.h>
     py_executor_impl.h
+    py_attention_metadata.h
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.h>
     worker.h
     worker_impl.h
@@ -33,16 +37,15 @@ cc_library(
     worker_client.h
     xservice_client.h
     speculative_worker_impl.h
-    mtp_async_input_builder.h
     mtp_worker_impl.h
-    mtp_async_state.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
     dflash_worker_impl.h
-    spec_input_builder.h
+    dspark_worker_impl.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
   SRCS
+    decode_graph_bucket.cpp
     executor.cpp
     executor_impl_factory.cpp
     base_executor_impl.cpp
@@ -52,7 +55,9 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
+    $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.cpp>
     py_executor_impl.cpp
+    py_attention_metadata.cpp
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
     worker.cpp
     worker_impl.cpp
@@ -68,13 +73,11 @@ cc_library(
     xservice_client.cpp
     params_utils.cpp
     speculative_worker_impl.cpp
-    mtp_async_input_builder.cpp
     mtp_worker_impl.cpp
-    mtp_async_state.cpp
     suffix_worker_impl.cpp
     eagle3_worker_impl.cpp
     dflash_worker_impl.cpp
-    spec_input_builder.cpp
+    dspark_worker_impl.cpp
     forward_shared_memory_manager.cpp
   DEPS
     torch
@@ -83,6 +86,7 @@ cc_library(
     :platform
     :model_context
     :request
+    :speculative
     :encoder_cache
     :state_dict
     :dit_cache
@@ -111,11 +115,6 @@ cc_library(
     absl::flat_hash_map
     proto::xllm_proto
     $<$<BOOL:${USE_MLU}>:torch_mlu>
+    $<$<BOOL:${USE_MUSA}>:torch_musa>
     $<$<BOOL:${USE_DCU}>:hip::host>
 )
-
-if(USE_MUSA)
-  set_property(
-    SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/cuda_graph_executor_impl.cpp
-    APPEND PROPERTY COMPILE_OPTIONS ${_XLLM_MUSIFY_COPTS})
-endif()

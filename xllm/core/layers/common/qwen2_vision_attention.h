@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,9 @@ limitations under the License.
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "linear.h"
+#if defined(USE_NPU)
+#include "layers/npu/npu_rope_layer_impl.h"
+#endif
 
 namespace xllm {
 namespace layer {
@@ -55,6 +58,9 @@ class Qwen2VisionAttentionImpl : public torch::nn::Module {
 
   QKVParallelLinear qkv_proj_{nullptr};
   RowParallelLinear proj_{nullptr};
+#if defined(USE_NPU)
+  NpuRopeLayer rope_layer_{nullptr};
+#endif
 };
 TORCH_MODULE(Qwen2VisionAttention);
 

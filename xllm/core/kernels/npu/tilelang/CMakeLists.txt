@@ -123,6 +123,11 @@ set(TILELANG_KERNEL_SRCS)
 set(TILELANG_KERNEL_PRIVATE_DEFINITIONS)
 
 tilelang_register_runtime_kernel(
+  NAME apply_token_bitmask
+  WRAPPER_SRCS apply_token_bitmask_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
   NAME rope
   WRAPPER_SRCS rope_wrapper.cpp
 )

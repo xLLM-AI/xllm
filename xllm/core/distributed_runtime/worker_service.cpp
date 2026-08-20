@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <string>
 #include <vector>
 
 #include "common/device_monitor.h"
@@ -29,12 +30,14 @@ limitations under the License.
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
+#include "runtime/speculative_worker_impl.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -59,62 +62,6 @@ int32_t get_num_decode_seqs_for_schedule_overlap(const ForwardInput& input) {
       unpacked_input.sampling_params.sample_idxes.size(0));
 }
 
-template <typename T>
-int64_t count_negative_tokens(const torch::Tensor& tokens) {
-  const T* data = tokens.const_data_ptr<T>();
-  const int64_t numel = tokens.numel();
-  int64_t count = 0;
-  for (int64_t i = 0; i < numel; ++i) {
-    if (data[i] < static_cast<T>(0)) {
-      ++count;
-    }
-  }
-  return count;
-}
-
-void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
-                                            const runtime::Options& options) {
-  if (!options.enable_speculative_decode() || !next_tokens.defined() ||
-      next_tokens.dim() != 2 || next_tokens.numel() == 0) {
-    return;
-  }
-
-  const int64_t batch_size = next_tokens.size(0);
-  const int64_t token_width = next_tokens.size(1);
-  const int64_t num_speculative_tokens = options.num_speculative_tokens();
-  if (num_speculative_tokens <= 0 ||
-      token_width != num_speculative_tokens + 1) {
-    return;
-  }
-
-  torch::Tensor tokens = next_tokens.contiguous();
-  int64_t rejected_count = 0;
-  switch (tokens.scalar_type()) {
-    case torch::kInt64:
-      rejected_count = count_negative_tokens<int64_t>(tokens);
-      break;
-    case torch::kInt32:
-      rejected_count = count_negative_tokens<int32_t>(tokens);
-      break;
-    case torch::kInt16:
-      rejected_count = count_negative_tokens<int16_t>(tokens);
-      break;
-    case torch::kInt8:
-      rejected_count = count_negative_tokens<int8_t>(tokens);
-      break;
-    default:
-      LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "
-                   << tokens.scalar_type();
-      return;
-  }
-
-  const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
-  rejected_count = std::min(rejected_count, num_draft_tokens);
-  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total,
-              num_draft_tokens - rejected_count);
-}
-
 torch::Tensor clone_cpu_tensor_view(const torch::Tensor& tensor) {
   if (!tensor.defined()) {
     return tensor;
@@ -130,11 +77,30 @@ void stabilize_schedule_overlap_host_views(ForwardInput& input) {
       clone_cpu_tensor_view(input.input_params.attention.host.block_tables);
 }
 
+// Preformatted position tags for MULTI_COUNTER_ADD so the metrics loop does
+// not allocate a fresh std::string per step per position.
+std::vector<std::string> build_speculative_position_labels(
+    const runtime::Options& options) {
+  const int32_t num_speculative_tokens = options.num_speculative_tokens();
+  if (num_speculative_tokens <= 0) {
+    return {};
+  }
+  std::vector<std::string> labels;
+  labels.reserve(static_cast<size_t>(num_speculative_tokens));
+  for (int32_t position = 0; position < num_speculative_tokens; ++position) {
+    labels.emplace_back(std::to_string(position));
+  }
+  return labels;
+}
+
 }  // namespace
 
 WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device)
-    : options_(options), device_(device), initialized_(false) {
+    : options_(options),
+      speculative_position_labels_(build_speculative_position_labels(options)),
+      initialized_(false),
+      device_(device) {
   device_.set_device();
   device_.init_device_context();
   stream_ = device_.get_stream_from_pool();
@@ -149,9 +115,10 @@ WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device,
                              std::unique_ptr<Worker> worker)
     : options_(options),
+      speculative_position_labels_(build_speculative_position_labels(options)),
+      initialized_(true),
       device_(device),
-      worker_(std::move(worker)),
-      initialized_(true) {
+      worker_(std::move(worker)) {
   device_.set_device();
   device_.init_device_context();
   stream_ = device_.get_stream_from_pool();
@@ -164,25 +131,83 @@ WorkerService::WorkerService(runtime::Options options,
 
 WorkerService::~WorkerService() = default;
 
+void WorkerService::record_speculative_metrics_from_output(
+    const torch::Tensor& next_tokens) {
+  if (!options_.enable_speculative_decode() || !next_tokens.defined() ||
+      next_tokens.dim() != 2 || next_tokens.numel() == 0) {
+    return;
+  }
+  // DFlash / DSpark record metrics inline in their own worker
+  // (DFlashWorkerImpl::record_validate_metrics) with precise per-seq widths,
+  // so this generic per-tensor count would double-count them.
+  if (SpeculativeConfig::is_block_diffusion_algorithm(
+          options_.speculative_algorithm())) {
+    return;
+  }
+
+  const int64_t batch_size = next_tokens.size(0);
+  const int64_t token_width = next_tokens.size(1);
+  const int64_t num_speculative_tokens = options_.num_speculative_tokens();
+  if (num_speculative_tokens <= 0 || token_width < 2) {
+    return;
+  }
+  // Adaptive pruning may hand back a narrower validate block, so accept any
+  // width in [2, N+1] and derive the actual draft count from token_width - 1.
+  if (token_width > num_speculative_tokens + 1) {
+    return;
+  }
+  const int64_t effective_speculative_tokens = token_width - 1;
+
+  SpeculativeOutputStats stats =
+      calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
+
+  const int64_t num_draft_tokens = batch_size * effective_speculative_tokens;
+  int64_t num_accepted_tokens = 0;
+  for (int64_t position = 0; position < effective_speculative_tokens;
+       ++position) {
+    const int64_t accepted =
+        stats.accepted_per_position[static_cast<size_t>(position)];
+    num_accepted_tokens += accepted;
+    MULTI_COUNTER_ADD(
+        speculative_num_accepted_tokens_per_pos,
+        speculative_position_labels_[static_cast<size_t>(position)],
+        accepted);
+  }
+  COUNTER_ADD(speculative_num_drafts_total, batch_size);
+  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
+  COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
+  COUNTER_ADD(speculative_num_committed_tokens_total, stats.committed_tokens);
+  // Derive from the global counters, not per-instance totals, so multi-DP
+  // writers converge on one aggregate instead of overwriting the gauge.
+  const double total_drafts = COUNTER_VALUE(speculative_num_drafts_total);
+  if (total_drafts > 0) {
+    GAUGE_SET(
+        speculative_mean_tokens_per_decode_step,
+        COUNTER_VALUE(speculative_num_committed_tokens_total) / total_drafts);
+  }
+}
+
 void WorkerService::set_worker(std::unique_ptr<Worker> worker) {
   worker_ = std::move(worker);
   initialized_ = true;
 }
 
-void WorkerService::step(ForwardInput& fwd_input,
-                         torch::Tensor& next_tokens,
-                         torch::Tensor& logprobs,
-                         torch::Tensor& top_tokens,
-                         torch::Tensor& top_logprobs,
-                         torch::Tensor& embeddings,
-                         std::vector<std::vector<torch::Tensor>>& mm_embeddings,
-                         std::vector<torch::Tensor>& dit_images,
-                         std::vector<std::string>& dit_text_output,
-                         torch::Tensor& expert_load_data,
-                         int32_t& prepared_layer_id,
-                         torch::Tensor& src_seq_idxes,
-                         torch::Tensor& out_tokens,
-                         torch::Tensor& out_logprobs) {
+void WorkerService::step(
+    ForwardInput& fwd_input,
+    torch::Tensor& next_tokens,
+    torch::Tensor& logprobs,
+    torch::Tensor& top_tokens,
+    torch::Tensor& top_logprobs,
+    torch::Tensor& embeddings,
+    std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    std::vector<torch::Tensor>& dit_images,
+    std::vector<std::string>& dit_text_output,
+    torch::Tensor& expert_load_data,
+    int64_t& prepared_token,
+    torch::Tensor& src_seq_idxes,
+    torch::Tensor& out_tokens,
+    torch::Tensor& out_logprobs,
+    std::vector<JsonObjectOutputError>& json_object_errors) {
   const bool use_default_stream =
       !options_.enable_schedule_overlap() && options_.backend() == "llm";
   if (options_.enable_schedule_overlap()) {
@@ -203,7 +228,8 @@ void WorkerService::step(ForwardInput& fwd_input,
       expert_load_data = safe_to(forward_outputs.value().expert_load_data,
                                  torch::kCPU,
                                  /*non_blocking=*/true);
-      prepared_layer_id = forward_outputs.value().prepared_layer_id;
+      prepared_token = forward_outputs.value().prepared_token;
+      json_object_errors = forward_outputs.value().json_object_errors;
 
       {
         auto copy_output_to_host = [&]() {
@@ -287,7 +313,7 @@ void WorkerService::step(ForwardInput& fwd_input,
         } else {
           stream_->synchronize();
         }
-        record_speculative_metrics_from_output(next_tokens, options_);
+        record_speculative_metrics_from_output(next_tokens);
       }
     }
   } else {
@@ -335,12 +361,13 @@ void WorkerService::create_polling_shm_thread(
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           torch::Tensor expert_load_data;
-          int32_t prepared_layer_id = -1;
+          int64_t prepared_token = -1;
 
           // beam search kernel output
           torch::Tensor src_seq_idxes;
           torch::Tensor out_tokens;
           torch::Tensor out_logprobs;
+          std::vector<JsonObjectOutputError> json_object_errors;
 
           step(fwd_input,
                next_tokens,
@@ -352,10 +379,11 @@ void WorkerService::create_polling_shm_thread(
                dit_images,
                dit_text_output,
                expert_load_data,
-               prepared_layer_id,
+               prepared_token,
                src_seq_idxes,
                out_tokens,
-               out_logprobs);
+               out_logprobs,
+               json_object_errors);
 
           const bool shm_write_ok =
               output_shm_manager->raw_output_write(next_tokens,
@@ -367,10 +395,11 @@ void WorkerService::create_polling_shm_thread(
                                                    dit_images,
                                                    dit_text_output,
                                                    expert_load_data,
-                                                   prepared_layer_id,
+                                                   prepared_token,
                                                    src_seq_idxes,
                                                    out_tokens,
-                                                   out_logprobs);
+                                                   out_logprobs,
+                                                   json_object_errors);
           CHECK(shm_write_ok) << "Worker output shared memory write failed.";
           COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
         }
@@ -460,6 +489,23 @@ void WorkerService::AllocateKVCache(
   return;
 }
 
+void WorkerService::SetSpeculativeValidateTimePredictor(
+    ::google::protobuf::RpcController* controller,
+    const proto::SpeculativeValidateTimePredictor* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, request, response, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    SpeculativeProfileRegistry::ValidateTimePredictor predictor;
+    predictor.intercept_ms = request->intercept_ms();
+    predictor.query_token_ms = request->query_token_ms();
+    predictor.query_prefix_ms = request->query_prefix_ms();
+    response->set_ok(
+        worker_->set_speculative_validate_time_predictor(predictor));
+  });
+  return;
+}
+
 void WorkerService::AllocateKVCacheWithTransfer(
     ::google::protobuf::RpcController* controller,
     const proto::AllocateKVCacheRequest* req,
@@ -500,34 +546,19 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
                                 ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    std::vector<uint64_t> src_blocks(req->src_blocks().begin(),
-                                     req->src_blocks().end());
-    std::vector<uint64_t> dst_blocks(req->dst_blocks().begin(),
-                                     req->dst_blocks().end());
-    std::vector<uint64_t> src_linear_state_ids(
-        req->src_linear_state_ids().begin(), req->src_linear_state_ids().end());
-    std::vector<uint64_t> dst_linear_state_ids(
-        req->dst_linear_state_ids().begin(), req->dst_linear_state_ids().end());
-    auto future = [&]() {
-      if (req->hetero_merge()) {
-        std::vector<uint64_t> src_cluster_ids(req->src_cluster_ids().begin(),
-                                              req->src_cluster_ids().end());
-        std::vector<std::string> src_addrs(req->src_addrs().begin(),
-                                           req->src_addrs().end());
-        return worker_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                                    src_addrs,
-                                                    src_blocks,
-                                                    dst_blocks,
-                                                    src_linear_state_ids,
-                                                    dst_linear_state_ids);
-      }
-      return worker_->pull_kv_blocks_async(req->cluster_id(),
-                                           req->addr(),
-                                           src_blocks,
-                                           dst_blocks,
-                                           src_linear_state_ids,
-                                           dst_linear_state_ids);
-    }();
+    std::vector<KVTransferMapping> mappings;
+    mappings.reserve(req->mappings_size());
+    for (const proto::KVTransferMapping& proto_mapping : req->mappings()) {
+      KVTransferMapping mapping;
+      mapping.group_id = proto_mapping.group_id();
+      mapping.local_ids.assign(proto_mapping.local_ids().begin(),
+                               proto_mapping.local_ids().end());
+      mapping.remote_ids.assign(proto_mapping.remote_ids().begin(),
+                                proto_mapping.remote_ids().end());
+      mappings.emplace_back(std::move(mapping));
+    }
+    auto future =
+        worker_->pull_kv_blocks_async(req->cluster_id(), req->addr(), mappings);
     bool status = std::move(future).get();
     resp->set_ok(status);
   });
@@ -558,7 +589,7 @@ void WorkerService::PrefetchFromStorage(
 
   brpc::StreamId stream_id;
   brpc::StreamOptions stream_options;
-  stream_options.idle_timeout_ms = 5 * options_.prefetch_batch_size();
+  stream_options.idle_timeout_ms = -1;
   if (brpc::StreamAccept(&stream_id, *cntl, &stream_options) != 0) {
     resp->set_ok(false);
     LOG(ERROR) << "Failed to accept stream!";
@@ -568,47 +599,33 @@ void WorkerService::PrefetchFromStorage(
   std::vector<BlockTransferInfo> block_transfer_info;
   proto_to_block_transfer_info(*req, block_transfer_info);
 
-  copy_threadpool_.schedule([this,
-                             block_transfer_info =
-                                 std::move(block_transfer_info),
-                             stream_id = std::move(stream_id)]() mutable {
-    Slice<BlockTransferInfo> transfer_slice{block_transfer_info};
-    bool is_completed = false;
-
-    for (size_t i = 0; i < transfer_slice.size();
-         i += options_.prefetch_batch_size()) {
-      auto current_slice = transfer_slice.slice(
-          i,
-          std::min(i + options_.prefetch_batch_size(), transfer_slice.size()));
-
-      auto success_cnt =
-          worker_->transfer_kv_blocks(UNINITIALIZED_BATCH_ID, current_slice);
-
-      if (success_cnt != current_slice.size() ||
-          (i + options_.prefetch_batch_size()) >= transfer_slice.size()) {
-        is_completed = true;
-      }
-
-      butil::IOBuf buf;
-      buf.append(std::to_string(success_cnt));
-      if (brpc::StreamWrite(stream_id, buf) != 0) {
-        brpc::StreamClose(stream_id);
-        return;
-      }
-
-      if (is_completed) {
-        if (success_cnt != 0) {
-          butil::IOBuf buf_end;
-          buf_end.append("0");
-          if (brpc::StreamWrite(stream_id, buf_end) != 0) {
-            brpc::StreamClose(stream_id);
-            return;
-          }
+  copy_threadpool_.schedule(
+      [this,
+       block_transfer_info = std::move(block_transfer_info),
+       stream_id = std::move(stream_id)]() mutable {
+        Slice<BlockTransferInfo> transfer_slice{block_transfer_info};
+        std::vector<uint8_t> hits = worker_->prefetch_kv_blocks(transfer_slice);
+        const bool worker_ok = hits.size() == transfer_slice.size();
+        if (!worker_ok) {
+          LOG(ERROR) << "Mooncake prefetch returned an invalid bitmap size: "
+                     << hits.size() << " != " << transfer_slice.size();
+          hits.assign(transfer_slice.size(), /*value=*/0);
         }
-        break;
-      }
-    }
-  });
+
+        proto::PrefetchResultChunk result_chunk;
+        result_chunk.set_offset(0);
+        result_chunk.set_hit_bitmap(reinterpret_cast<const char*>(hits.data()),
+                                    hits.size());
+        result_chunk.set_completed(true);
+        result_chunk.set_worker_ok(worker_ok);
+
+        std::string payload;
+        CHECK(result_chunk.SerializeToString(&payload));
+        butil::IOBuf buffer;
+        buffer.append(payload);
+        brpc::StreamWrite(stream_id, buffer);
+        brpc::StreamClose(stream_id);
+      });
 
   resp->set_ok(true);
   return;
@@ -776,11 +793,12 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
         std::vector<torch::Tensor> dit_images;
         std::vector<std::string> dit_text_output;
         torch::Tensor expert_load_data;
-        int32_t prepared_layer_id = -1;
+        int64_t prepared_token = -1;
         // beam search kernel output
         torch::Tensor src_seq_idxes;
         torch::Tensor out_tokens;
         torch::Tensor out_logprobs;
+        std::vector<JsonObjectOutputError> json_object_errors;
 
         step(forward_input,
              next_tokens,
@@ -792,10 +810,11 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
              dit_images,
              dit_text_output,
              expert_load_data,
-             prepared_layer_id,
+             prepared_token,
              src_seq_idxes,
              out_tokens,
-             out_logprobs);
+             out_logprobs,
+             json_object_errors);
         // convert to proto output
         forward_output_to_proto(next_tokens,
                                 logprobs,
@@ -804,12 +823,13 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 embeddings,
                                 mm_embeddings,
                                 expert_load_data,
-                                prepared_layer_id,
+                                prepared_token,
                                 src_seq_idxes,
                                 out_tokens,
                                 out_logprobs,
                                 dit_images,
                                 dit_text_output,
+                                json_object_errors,
                                 pb_forward_output);
         COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
       });
@@ -831,7 +851,7 @@ void WorkerService::GetLastStepResult(
         if (forward_outputs) {
           const ForwardOutput& forward_output = forward_outputs.value();
           const auto& sample_output = forward_output.sample_output;
-          int32_t prepared_layer_id = forward_output.prepared_layer_id;
+          int64_t prepared_token = forward_output.prepared_token;
           const auto& beam_search_output = forward_output.beam_search_output;
           torch::Tensor expert_load_data;
           torch::Tensor embeddings;
@@ -922,11 +942,12 @@ void WorkerService::GetLastStepResult(
                 device_.index());
 #endif
           }
-          record_speculative_metrics_from_output(next_tokens, options_);
+          record_speculative_metrics_from_output(next_tokens);
 
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||
-              ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+              ::xllm::EPLBConfig::get_instance().enable_eplb() ||
+              !forward_output.json_object_errors.empty()) {
             const std::vector<std::vector<torch::Tensor>> mm_embeddings;
             forward_output_to_proto(next_tokens,
                                     logprobs,
@@ -935,12 +956,13 @@ void WorkerService::GetLastStepResult(
                                     embeddings,
                                     mm_embeddings,
                                     expert_load_data,
-                                    prepared_layer_id,
+                                    prepared_token,
                                     src_seq_idxes,
                                     out_tokens,
                                     out_logprobs,
                                     dit_images,
                                     dit_text_output,
+                                    forward_output.json_object_errors,
                                     pb_forward_output);
           }
         }

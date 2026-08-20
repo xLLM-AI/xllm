@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,6 +48,8 @@ class KernelConfig final {
          "enable_split_rmsnorm_rope",
          "enable_aclnn_matmul",
          "enable_aclnn_swiglu",
+         "enable_mega_moe",
+         "enable_dspark_native_sas",
          "enable_flashcomm1",
          "flashcomm1_min_prefill_tokens",
          "enable_mmrs_fusion",
@@ -71,6 +73,10 @@ class KernelConfig final {
   PROPERTY(bool, enable_aclnn_matmul) = false;
 
   PROPERTY(bool, enable_aclnn_swiglu) = false;
+
+  PROPERTY(bool, enable_mega_moe) = false;
+
+  PROPERTY(bool, enable_dspark_native_sas) = false;
 
   PROPERTY(bool, enable_flashcomm1) = false;
 

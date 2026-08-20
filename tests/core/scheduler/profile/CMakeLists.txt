@@ -9,6 +9,7 @@ cc_test(
     :xllm_server
     :block
     :profile
+    :platform
     :request
     GTest::gtest_main
 )

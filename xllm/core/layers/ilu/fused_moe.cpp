@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -473,7 +473,7 @@ torch::Tensor FusedMoEImpl::forward_experts(const torch::Tensor& hidden_states,
                      selected_expert_info,
                      enable_all2all_communication);
 
-  // Communciation Step 1: Dipatch
+  // Communication Step 1: Dipatch
   // intermediate outputs that are used both in dispatch and combine
   torch::Tensor gather_by_rank_index;
   torch::Tensor token_sum;
@@ -608,7 +608,7 @@ torch::Tensor FusedMoEImpl::forward_experts(const torch::Tensor& hidden_states,
     gemm2_out = xllm::kernel::group_gemm(group_gemm_params);
   }
 
-  // Communciation Step 2: Combine
+  // Communication Step 2: Combine
   if (enable_all2all_communication) {
     int64_t num_token_expand = hidden_states_2d.size(0) * topk_;
     // Delegate pack, layout generation and combine to DeepEP
@@ -622,7 +622,7 @@ torch::Tensor FusedMoEImpl::forward_experts(const torch::Tensor& hidden_states,
     // create a wait event for the current stream to finish computation
     auto current_stream = device_.current_stream();
     routed_stream_->wait_stream(*current_stream);
-    // pure communciation kernel: dispatch
+    // pure communication kernel: dispatch
     {
       torch::StreamGuard stream_guard = routed_stream_->set_stream_guard();
       gemm2_out = deep_ep_->combine_step_comm(combine_send_layout,
@@ -683,7 +683,7 @@ torch::Tensor FusedMoEImpl::forward_experts(const torch::Tensor& hidden_states,
     return final_hidden_states;
   }
 
-  // Communciation Step 3: AllReduce for non-all2all communication
+  // Communication Step 3: AllReduce for non-all2all communication
   // shared experts can be parallelized with the final communication step
   // during moe computation.
   auto current_stream = device_.current_stream();

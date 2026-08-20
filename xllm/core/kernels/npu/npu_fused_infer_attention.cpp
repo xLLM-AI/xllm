@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -162,7 +162,8 @@ namespace xllm::kernel::npu {
                           block_table,                                 \
                           actual_seq_lengths,                          \
                           actual_seq_lengths_kv,                       \
-                          input_layout)                                \
+                          input_layout,                                \
+                          is_causal)                                   \
   std::vector<torch::Tensor> key_tensors_vec{key};                     \
   std::vector<torch::Tensor> value_tensors_vec{value};                 \
   torch::TensorList key_tensors(key_tensors_vec);                      \
@@ -182,7 +183,7 @@ namespace xllm::kernel::npu {
   std::string layout_str = input_layout;                               \
   char* input_layout_ptr = const_cast<char*>(layout_str.c_str());      \
   int64_t pre_tokens = kSwaIntMax;                                     \
-  int64_t next_tokens = 0;                                             \
+  int64_t next_tokens = is_causal ? 0 : kSwaIntMax;                    \
   int64_t inner_precise = 0;                                           \
   int64_t antiquant_mode = 0;                                          \
   int64_t key_antiquant_mode = 0;                                      \
@@ -234,6 +235,7 @@ void npu_fused_infer_attention_out(
     int64_t sparse_mode,
     const std::string& input_layout,
     bool softmax_lse_flag,
+    bool is_causal,
     torch::Tensor& output,
     torch::Tensor& softmax_lse,
     const std::optional<torch::Tensor>& workspace) {
@@ -266,7 +268,8 @@ void npu_fused_infer_attention_out(
                     block_table,
                     actual_seq_lengths,
                     actual_seq_lengths_kv,
-                    input_layout);
+                    input_layout,
+                    is_causal);
 
   if (workspace.has_value() && workspace.value().defined()) {
     EXEC_NPU_CMD_WITH_WORKSPACE(
@@ -292,6 +295,7 @@ uint64_t npu_fused_infer_attention_workspace_size(
     int64_t sparse_mode,
     const std::string& input_layout,
     bool softmax_lse_flag,
+    bool is_causal,
     torch::Tensor& output,
     torch::Tensor& softmax_lse) {
   CHECK(output.defined()) << "output must be preallocated for the size query";
@@ -305,7 +309,8 @@ uint64_t npu_fused_infer_attention_workspace_size(
                     block_table,
                     actual_seq_lengths,
                     actual_seq_lengths_kv,
-                    input_layout);
+                    input_layout,
+                    is_causal);
 
   uint64_t workspace_size = 0;
   EXEC_NPU_CMD_GET_WORKSPACE_SIZE(
@@ -327,7 +332,8 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     int64_t block_size,
     int64_t sparse_mode,
     const std::string& input_layout,
-    bool softmax_lse_flag) {
+    bool softmax_lse_flag,
+    bool is_causal) {
   torch::Tensor output = infer_attention_output(
       query, value, block_table, num_heads, input_layout);
   torch::Tensor softmax_lse =
@@ -347,6 +353,7 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
                                 sparse_mode,
                                 input_layout,
                                 softmax_lse_flag,
+                                is_causal,
                                 output,
                                 softmax_lse);
 

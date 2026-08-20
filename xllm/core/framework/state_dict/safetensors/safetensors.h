@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -104,7 +104,7 @@ extern "C" {
 /// # Arguments
 ///
 /// * `handle`: In-Out pointer to store the resulting safetensors reference is
-/// sucessfully deserialized
+/// successfully deserialized
 /// * `buffer`: Buffer to attempt to read data from
 /// * `buffer_len`: Number of bytes we can safely read from the deserialize the
 /// safetensors
@@ -119,7 +119,7 @@ Status safetensors_deserialize(Handle** handle,
 ///
 /// # Arguments
 ///
-/// * `handle`: Pointer ot the safetensors we want to release the resources of
+/// * `handle`: Pointer to the safetensors we want to release the resources of
 ///
 /// returns: `Status::Ok == 0` if success, any other status code if an error
 /// what caught up

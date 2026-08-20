@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -97,6 +97,9 @@ class ModelRegistry {
 
   static void register_dit_model_factory(const std::string& name,
                                          DiTModelFactory factory);
+
+  static void register_model_backend(const std::string& name,
+                                     const std::string& backend);
 
   static void register_model_args_loader(const std::string& name,
                                          ModelArgsLoader loader);
@@ -231,6 +234,15 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 
 #define REGISTER_DIT_MODEL(ModelType, ModelClass) \
   REGISTER_DIT_MODEL_WITH_VARNAME(ModelType, ModelType, ModelClass)
+
+#define REGISTER_MODEL_BACKEND_WITH_VARNAME(VarName, ModelType, Backend) \
+  const bool VarName##_backend_registered = []() {                       \
+    ModelRegistry::register_model_backend(#ModelType, Backend);          \
+    return true;                                                         \
+  }()
+
+#define REGISTER_MODEL_BACKEND(ModelType, Backend) \
+  REGISTER_MODEL_BACKEND_WITH_VARNAME(ModelType, ModelType, Backend)
 
 #define REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(              \
     VarName, ModelType, ProcessorClass)                          \

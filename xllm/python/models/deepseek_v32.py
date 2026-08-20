@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,15 +17,22 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch_npu  # noqa: F401
 
-from xllm.python import ops
-from xllm.python.attention.backend import MlaIndexContext
+from xllm.python import distributed, kernels
+
+if TYPE_CHECKING:
+    from xllm_weight_loader import StateDict
+from xllm.python.attention.backend import (
+    AttentionBackend,
+    MlaIndexContext,
+    MlaPreprocessContext,
+)
 from xllm.python.layers import (
     Attention,
     ColumnParallelLinear,
@@ -34,8 +41,34 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import (
+    get_execution_buffer,
+    get_forward_context,
+)
 from xllm.python.models.base import PyModelBase
+
+_SHARED_EXPERT_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
+
+
+def _shared_expert_stream(device: torch.device) -> torch.npu.Stream:
+    key = (device.type, device.index)
+    stream = _SHARED_EXPERT_STREAMS.get(key)
+    if stream is None:
+        stream = torch.npu.Stream(device=device)
+        _SHARED_EXPERT_STREAMS[key] = stream
+    return stream
+
+
+_GATE_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
+
+
+def _gate_stream(device: torch.device) -> torch.npu.Stream:
+    key = (device.type, device.index)
+    stream = _GATE_STREAMS.get(key)
+    if stream is None:
+        stream = torch.npu.Stream(device=device)
+        _GATE_STREAMS[key] = stream
+    return stream
 
 
 def _tp_rank_from_device(device: object) -> int:
@@ -47,6 +80,25 @@ def _tp_rank_from_device(device: object) -> int:
         except ValueError:
             return 0
     return 0
+
+
+def _create_hadamard_matrix(
+    dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if dim <= 0 or dim & (dim - 1):
+        raise ValueError("Hadamard dimension must be a positive power of two")
+    matrix = torch.ones((1, 1), dtype=dtype, device=device)
+    while matrix.size(0) < dim:
+        matrix = torch.cat(
+            [
+                torch.cat([matrix, matrix], dim=1),
+                torch.cat([matrix, -matrix], dim=1),
+            ],
+            dim=0,
+        )
+    return matrix.contiguous()
 
 
 def _yarn_get_mscale(scale: float, mscale: float) -> float:
@@ -62,9 +114,7 @@ def _yarn_find_correction_dim(
     base: float,
     max_position_embeddings: int,
 ) -> float:
-    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (
-        2 * math.log(base)
-    )
+    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
 
 
 def _yarn_find_correction_range(
@@ -73,7 +123,7 @@ def _yarn_find_correction_range(
     dim: int,
     base: float,
     max_position_embeddings: int,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     low = _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
     high = _yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
     low = math.floor(low)
@@ -81,13 +131,54 @@ def _yarn_find_correction_range(
     return max(low, 0), min(high, dim - 1)
 
 
-def _yarn_linear_ramp_mask(
-    low: float, high: float, dim: int, dtype: torch.dtype, device: torch.device
-) -> torch.Tensor:
+def _yarn_linear_ramp_mask(low: float, high: float, dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     if low == high:
         high += 0.001  # Prevent singularity.
     linear = (torch.arange(dim, dtype=dtype, device=device) - low) / (high - low)
     return torch.clamp(linear, 0, 1)
+
+
+def _gather_half_rope_cos_sin(
+    cos_sin_cache: torch.Tensor, positions: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos_sin = cos_sin_cache[positions]
+    half = cos_sin.size(-1) // 2
+    return cos_sin[..., :half], cos_sin[..., half:]
+
+
+def _expand_interleave_rope_cos_sin(
+    half_cos: torch.Tensor, half_sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos = torch.cat([half_cos, half_cos], dim=-1).unsqueeze(1).unsqueeze(1)
+    sin = torch.cat([half_sin, half_sin], dim=-1).unsqueeze(1).unsqueeze(1)
+    return cos, sin
+
+
+def _gather_interleave_cos_sin(
+    cos_sin_cache: torch.Tensor, positions: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather per-token cos/sin and double for ``npu_interleave_rope``."""
+    return _expand_interleave_rope_cos_sin(*_gather_half_rope_cos_sin(cos_sin_cache, positions))
+
+
+def _interleave_rope_with(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply interleaved RoPE to ``[T, H, D]`` with precomputed cos/sin."""
+    return kernels.interleaved_rotary_embedding(x, cos, sin)
+
+
+def _apply_half_rope(cos_sin_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    """Half-rotate RoPE (NeoX style) for ``[T, H, D]`` tensors."""
+    half_cos, half_sin = _gather_half_rope_cos_sin(cos_sin_cache, positions)
+    return _apply_half_rope_with_angles(x, half_cos, half_sin)
+
+
+def _apply_half_rope_with_angles(x: torch.Tensor, half_cos: torch.Tensor, half_sin: torch.Tensor) -> torch.Tensor:
+    c = half_cos.unsqueeze(1)
+    s = half_sin.unsqueeze(1)
+    half = half_cos.size(-1)
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
 
 
 class DeepseekYarnRotaryEmbedding(RotaryEmbedding):
@@ -123,17 +214,18 @@ class DeepseekYarnRotaryEmbedding(RotaryEmbedding):
             device=device,
         )
         freqs = torch.outer(t, inv_freq)
-        rope_mscale = _yarn_get_mscale(scaling_factor, mscale) / _yarn_get_mscale(
-            scaling_factor, mscale_all_dim
-        )
+        rope_mscale = _yarn_get_mscale(scaling_factor, mscale) / _yarn_get_mscale(scaling_factor, mscale_all_dim)
         cos = freqs.cos() * rope_mscale
         sin = freqs.sin() * rope_mscale
         cache = torch.cat([cos, sin], dim=-1)
         if dtype is not None:
             cache = cache.to(dtype)
-        self.register_buffer(
-            "cos_sin_cache", cache.contiguous(), persistent=False
-        )
+        self.register_buffer("cos_sin_cache", cache.contiguous(), persistent=False)
+
+    def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        half_cos, half_sin = _gather_half_rope_cos_sin(self.cos_sin_cache, positions)
+        cos, sin = _expand_interleave_rope_cos_sin(half_cos, half_sin)
+        return half_cos, half_sin, cos, sin
 
     @staticmethod
     def _yarn_inv_freq(
@@ -145,10 +237,7 @@ class DeepseekYarnRotaryEmbedding(RotaryEmbedding):
         max_position_embeddings: int,
         device: torch.device,
     ) -> torch.Tensor:
-        pos_freqs = base ** (
-            torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
-            / rotary_dim
-        )
+        pos_freqs = base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
         low, high = _yarn_find_correction_range(
@@ -158,12 +247,7 @@ class DeepseekYarnRotaryEmbedding(RotaryEmbedding):
             base,
             max_position_embeddings,
         )
-        inv_freq_mask = (
-            1
-            - _yarn_linear_ramp_mask(
-                low, high, rotary_dim // 2, torch.float32, device
-            )
-        )
+        inv_freq_mask = 1 - _yarn_linear_ramp_mask(low, high, rotary_dim // 2, torch.float32, device)
         return inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
 
 
@@ -206,11 +290,18 @@ class DeepseekV3Config:
     topk_method: str = "noaux_tc"
     norm_topk_prob: bool = True
     moe_intermediate_size: int = 2048
-    tp_size: int = 1
+    tp_size: int = 1  # TP for dense layers (attn, embed, shared expert, lm_head)
     tp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    dp_size: int = 1
+    dp_rank: int = 0
+    moe_tp_size: int = 1  # TP for routed MoE experts (equals tp_size when ep_size == 1)
+    moe_tp_rank: int = 0
+    world_size: int = 1
 
     @classmethod
-    def from_dict(cls, d: dict) -> "DeepseekV3Config":
+    def from_dict(cls, d: dict) -> DeepseekV3Config:
         def pick(*keys, default=None):
             for k in keys:
                 if k in d and d[k] is not None:
@@ -242,12 +333,8 @@ class DeepseekV3Config:
             vocab_size=int(pick("vocab_size", default=129280)),
             rms_norm_eps=float(pick("rms_norm_eps", default=1e-6)),
             rope_theta=float(pick("rope_theta", default=1.0e6)),
-            max_position_embeddings=int(
-                pick("max_position_embeddings", default=4096)
-            ),
-            original_max_position_embeddings=int(
-                rpick("original_max_position_embeddings", default=4096)
-            ),
+            max_position_embeddings=int(pick("max_position_embeddings", default=4096)),
+            original_max_position_embeddings=int(rpick("original_max_position_embeddings", default=4096)),
             rope_scaling_factor=float(rpick("factor", "rope_scaling_factor", default=40.0)),
             rope_beta_fast=int(rpick("beta_fast", default=32)),
             rope_beta_slow=int(rpick("beta_slow", default=1)),
@@ -272,24 +359,40 @@ class DeepseekV3Config:
             routed_scaling_factor=float(pick("routed_scaling_factor", default=2.5)),
             topk_method=str(pick("topk_method", default="noaux_tc")),
             norm_topk_prob=bool(pick("norm_topk_prob", default=True)),
-            moe_intermediate_size=int(
-                pick("moe_intermediate_size", default=2048)
-            ),
+            moe_intermediate_size=int(pick("moe_intermediate_size", default=2048)),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
+            ep_size=int(pick("ep_size", default=1)),
+            ep_rank=int(pick("ep_rank", default=0)),
+            dp_size=int(pick("dp_size", default=1)),
+            dp_rank=int(pick("dp_rank", default=0)),
+            moe_tp_size=int(pick("moe_tp_size", default=1)),
+            moe_tp_rank=int(pick("moe_tp_rank", default=0)),
+            world_size=int(pick("world_size", default=1)),
         )
 
-    def head_split(self) -> Tuple[int, int]:
+    def head_split(self) -> tuple[int, int]:
         """Per-rank (num_heads_local, num_kv_heads_local=1)."""
         num_heads_local = self.n_heads // self.tp_size
         return num_heads_local, 1
+
+    def validate(self) -> None:
+        if self.ep_size not in (1, self.world_size):
+            raise ValueError(f"ep_size must be 1 or world_size ({self.world_size}), got {self.ep_size}")
+        if self.ep_size > 1 and self.n_routed_experts % self.ep_size:
+            raise ValueError(
+                f"n_routed_experts ({self.n_routed_experts}) must be divisible by ep_size ({self.ep_size})"
+            )
+        if self.ep_size > 1 and self.moe_tp_size * self.ep_size != self.world_size:
+            raise ValueError(
+                f"world_size ({self.world_size}) must equal moe_tp_size ({self.moe_tp_size}) * ep_size ({self.ep_size})"
+            )
 
 
 class W8A8StaticLinear(nn.Module):
     """Static-activation W8A8 linear (attention projections)."""
 
-    def __init__(self, in_features: int, out_features: int, device: torch.device,
-                 row_parallel: bool = False) -> None:
+    def __init__(self, in_features: int, out_features: int, device: torch.device, row_parallel: bool = False) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -298,34 +401,38 @@ class W8A8StaticLinear(nn.Module):
             torch.empty(out_features, in_features, dtype=torch.int8, device=device),
             requires_grad=False,
         )
+        self.register_buffer("deq_scale", torch.empty(out_features, dtype=torch.float32, device=device))
+        self.register_buffer("quant_bias", torch.empty(out_features, dtype=torch.int32, device=device))
         self.register_buffer(
-            "deq_scale", torch.empty(out_features, dtype=torch.float32, device=device)
+            "input_scale",
+            torch.empty(1, dtype=torch.bfloat16, device=device),
         )
-        self.register_buffer(
-            "quant_bias", torch.empty(out_features, dtype=torch.int32, device=device)
-        )
-        self.register_buffer(
-            "input_scale", torch.empty(1, dtype=torch.bfloat16, device=device)
-        )
-        self.register_buffer(
-            "input_offset", torch.empty(1, dtype=torch.bfloat16, device=device)
-        )
+        self.register_buffer("input_offset", torch.empty(1, dtype=torch.bfloat16, device=device))
 
     def process_weights_after_loading(self) -> None:
-        self.weight.data = self.weight.data.transpose(0, 1).contiguous()
-        self.input_scale_recip = (1.0 / self.input_scale).to(torch.float32)
+        self.weight.data = kernels.prepare_quant_weight(self.weight.data)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mult = self.input_scale_recip
-        x_int8 = torch.clamp(
-            torch.round(
-                x.to(torch.float32) * mult + self.input_offset.to(torch.float32)
-            ),
-            -128, 127,
-        ).to(torch.int8)
-        return ops.quant_matmul(
-            x_int8, self.weight, False, self.deq_scale, None, None,
-            self.quant_bias if not (self.row_parallel and ops.tp_rank(x.device) != 0) else None,
+        # xLLM's aclnnQuantize uses input / scale + zero_point.
+        x_int8 = kernels.quantize_per_tensor(
+            x,
+            self.input_scale,
+            self.input_offset,
+            torch.qint8,
+            -1,
+        )
+        return self.forward_quantized(x_int8)
+
+    def forward_quantized(self, x_int8: torch.Tensor) -> torch.Tensor:
+        bias = self.quant_bias if not (self.row_parallel and distributed.tp_rank(x_int8.device) != 0) else None
+        return kernels.quant_matmul(
+            x_int8,
+            self.weight,
+            False,
+            self.deq_scale,
+            None,
+            None,
+            bias,
             torch.bfloat16,
         )
 
@@ -341,31 +448,155 @@ class W8A8DynamicLinear(nn.Module):
             torch.empty(out_features, in_features, dtype=torch.int8, device=device),
             requires_grad=False,
         )
-        self.register_buffer(
-            "weight_scale", torch.empty(out_features, 1, dtype=torch.float32, device=device)
-        )
-        self.register_buffer(
-            "weight_offset", torch.empty(out_features, 1, dtype=torch.float32, device=device)
-        )
+        self.register_buffer("weight_scale", torch.empty(out_features, 1, dtype=torch.float32, device=device))
+        self.register_buffer("weight_offset", torch.empty(out_features, 1, dtype=torch.float32, device=device))
 
     def process_weights_after_loading(self) -> None:
-        self.weight.data = self.weight.data.transpose(0, 1).contiguous()
+        if not bool(torch.all(self.weight_offset == 0)):
+            raise ValueError("W8A8DynamicLinear requires symmetric INT8 weights with zero weight_offset")
+        self.weight.data = kernels.prepare_quant_weight(self.weight.data)
         self.weight_scale.data = self.weight_scale.data.flatten().contiguous()
         self.weight_offset.data = self.weight_offset.data.flatten().contiguous()
-        if not bool(torch.all(self.weight_offset == 0)):
-            import logging
-            logging.getLogger(__name__).warning(
-                "W8A8DynamicLinear loaded with non-zero weight_offset; the "
-                "int8 matmul path drops the antiquant offset -- output may be "
-                "wrong. Expected symmetric int8 (offset == 0)."
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        x_int8, pertoken = kernels.dynamic_quant(x)
+        return self.forward_quantized(x_int8, pertoken)
+
+    def forward_quantized(
+        self,
+        x_int8: torch.Tensor,
+        pertoken: torch.Tensor,
+    ) -> torch.Tensor:
+        return kernels.quant_matmul(
+            x_int8,
+            self.weight,
+            False,
+            self.weight_scale,
+            None,
+            pertoken,
+            None,
+            torch.bfloat16,
+        )
+
+    def forward_accumulated(self, x_int8: torch.Tensor) -> torch.Tensor:
+        return kernels.quant_matmul(
+            x_int8,
+            self.weight,
+            False,
+            self.weight_scale,
+            None,
+            None,
+            None,
+            torch.int32,
+        )
+
+
+class W8A8WeightLoader:
+    """Shared W8A8 weight-loading helpers for a model's ``load_weights``.
+
+    Owns the byte-identical checkpoint tensor lookup / TP sharding / W8A8
+    projection- and MLP-weight packing used by every W8A8 DSA model. The
+    model-specific per-layer loop (which projections/experts to load and in
+    what order) stays in each model; only the mechanics live here.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        state_dicts: list[StateDict],
+        tp_size: int,
+        tp_rank: int,
+    ) -> None:
+        self._params_by_name = dict(model.named_parameters())
+        self._buffers_by_name = dict(model.named_buffers())
+        self._state_dicts = state_dicts
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
+
+    def find(self, name: str) -> Optional[StateDict]:
+        for sd in self._state_dicts:
+            if sd.has(name):
+                return sd
+        return None
+
+    def load_tensor(self, name: str) -> torch.Tensor:
+        sd = self.find(name)
+        assert sd is not None, f"checkpoint tensor not found: {name}"
+        return sd.get_tensor(name)
+
+    def shard(
+        self,
+        t: torch.Tensor,
+        dim: int,
+        world: Optional[int] = None,
+        rank: Optional[int] = None,
+    ) -> torch.Tensor:
+        world = self.tp_size if world is None else world
+        rank = self.tp_rank if rank is None else rank
+        if world <= 1:
+            return t
+        cs = t.size(dim) // world
+        return t.narrow(dim, rank * cs, cs).contiguous()
+
+    def copy_in(self, param_name: str, tensor: torch.Tensor) -> None:
+        p = self._params_by_name.get(param_name)
+        if p is None:
+            p = self._buffers_by_name.get(param_name)
+        assert p is not None, f"no parameter/buffer named {param_name}"
+        p.data.copy_(tensor.to(dtype=p.dtype, device=p.device))
+
+    def load_w8a8_a(self, prefix: str, proj: str, shard_dims: Optional[dict] = None) -> None:
+        for suffix in ("weight", "deq_scale", "quant_bias", "input_scale", "input_offset"):
+            t = self.load_tensor(prefix + proj + "." + suffix)
+            dim = (shard_dims or {}).get(suffix)
+            if dim is not None:
+                t = self.shard(t, dim=dim)
+            self.copy_in(prefix + proj + "." + suffix, t)
+
+    def load_fused_w8a8_a(
+        self,
+        prefix: str,
+        target_proj: str,
+        source_projs: tuple[str, ...],
+    ) -> None:
+        for suffix in ("weight", "deq_scale", "quant_bias"):
+            tensors = [self.load_tensor(prefix + proj + "." + suffix) for proj in source_projs]
+            self.copy_in(
+                prefix + target_proj + "." + suffix,
+                torch.cat(tensors, dim=0).contiguous(),
             )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_int8, pertoken = torch.ops.npu.npu_dynamic_quant(x)
-        return ops.quant_matmul(
-            x_int8, self.weight, False, self.weight_scale, None,
-            pertoken, None, torch.bfloat16,
+        for suffix in ("input_scale", "input_offset"):
+            tensors = [self.load_tensor(prefix + proj + "." + suffix) for proj in source_projs]
+            reference = tensors[0]
+            if any(not torch.equal(reference, tensor) for tensor in tensors[1:]):
+                names = ", ".join(source_projs)
+                raise ValueError(f"{prefix}{names} must share {suffix} for fused W8A8")
+            self.copy_in(prefix + target_proj + "." + suffix, reference)
+
+    def load_w8a8_b(self, mlp_pfx: str) -> None:
+        gw = self.load_tensor(mlp_pfx + "gate_proj.weight")
+        gs = self.load_tensor(mlp_pfx + "gate_proj.weight_scale")
+        go = self.load_tensor(mlp_pfx + "gate_proj.weight_offset")
+        uw = self.load_tensor(mlp_pfx + "up_proj.weight")
+        us = self.load_tensor(mlp_pfx + "up_proj.weight_scale")
+        uo = self.load_tensor(mlp_pfx + "up_proj.weight_offset")
+        self.copy_in(
+            mlp_pfx + "gate_up_proj.weight", torch.cat([self.shard(gw, 0), self.shard(uw, 0)], dim=0).contiguous()
         )
+        self.copy_in(
+            mlp_pfx + "gate_up_proj.weight_scale", torch.cat([self.shard(gs, 0), self.shard(us, 0)], dim=0).contiguous()
+        )
+        self.copy_in(
+            mlp_pfx + "gate_up_proj.weight_offset",
+            torch.cat([self.shard(go, 0), self.shard(uo, 0)], dim=0).contiguous(),
+        )
+        self.copy_in(mlp_pfx + "down_proj.weight", self.shard(self.load_tensor(mlp_pfx + "down_proj.weight"), dim=1))
+        self.copy_in(mlp_pfx + "down_proj.weight_scale", self.load_tensor(mlp_pfx + "down_proj.weight_scale"))
+        self.copy_in(mlp_pfx + "down_proj.weight_offset", self.load_tensor(mlp_pfx + "down_proj.weight_offset"))
 
 
 class DeepseekV3MLP(nn.Module):
@@ -378,28 +609,84 @@ class DeepseekV3MLP(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         skip_tp_reduce: bool = False,
+        tp_override: Optional[int] = None,
     ) -> None:
         super().__init__()
-        tp = cfg.tp_size
-        assert intermediate_size % tp == 0, (
-            f"intermediate_size {intermediate_size} not divisible by tp {tp}"
-        )
+        tp = tp_override if tp_override is not None else cfg.tp_size
+        assert intermediate_size % tp == 0, f"intermediate_size {intermediate_size} not divisible by tp {tp}"
         inter_local = intermediate_size // tp
         self.tp = tp
         self.skip_tp_reduce = skip_tp_reduce
         self.gate_up_proj = W8A8DynamicLinear(cfg.hidden_size, 2 * inter_local, device)
-        self.down_proj = W8A8DynamicLinear(inter_local, cfg.hidden_size, device)
+        self.down_proj = W8A8DynamicLinear(
+            inter_local,
+            cfg.hidden_size,
+            device,
+        )
 
     def process_weights_after_loading(self) -> None:
         self.gate_up_proj.process_weights_after_loading()
         self.down_proj.process_weights_after_loading()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        tp_reduce_add: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
-        act = ops.silu_and_mul(gate_up)
+        return self._forward_gate_up(gate_up, tp_reduce_add)
+
+    def forward_quantized(
+        self,
+        x_int8: torch.Tensor,
+        pertoken: torch.Tensor,
+        tp_reduce_add: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        gate_up = self.gate_up_proj.forward_quantized(x_int8, pertoken)
+        return self._forward_gate_up(gate_up, tp_reduce_add)
+
+    def forward_dequant_swiglu_quant(
+        self,
+        x: torch.Tensor,
+        tp_reduce_add: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x_int8, pertoken = kernels.dynamic_quant(x)
+        gate_up = self.gate_up_proj.forward_accumulated(x_int8)
+        act_int8, act_scale = kernels.dequant_swiglu_quant(
+            gate_up,
+            self.gate_up_proj.weight_scale,
+            pertoken,
+        )
+        reduce_result = self.tp > 1 and (not self.skip_tp_reduce or tp_reduce_add is not None)
+        out = self.down_proj.forward_quantized(act_int8, act_scale)
+        if tp_reduce_add is not None:
+            out = out + tp_reduce_add
+        if reduce_result:
+            distributed.all_reduce_(out)
+        return out
+
+    def quantize_and_project_gate_up(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x_int8, pertoken = kernels.dynamic_quant(x)
+        return self.gate_up_proj.forward_accumulated(x_int8), pertoken
+
+    def activate_and_quantize(self, gate_up: torch.Tensor, pertoken: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return kernels.dequant_swiglu_quant(gate_up, self.gate_up_proj.weight_scale, pertoken)
+
+    def project_down(self, act_int8: torch.Tensor, act_scale: torch.Tensor) -> torch.Tensor:
+        return self.down_proj.forward_quantized(act_int8, act_scale)
+
+    def _forward_gate_up(
+        self,
+        gate_up: torch.Tensor,
+        tp_reduce_add: torch.Tensor | None,
+    ) -> torch.Tensor:
+        act = kernels.silu_and_mul(gate_up)
+        reduce_result = self.tp > 1 and (not self.skip_tp_reduce or tp_reduce_add is not None)
         out = self.down_proj(act)
-        if self.tp > 1 and not self.skip_tp_reduce:
-            ops.all_reduce_(out)
+        if tp_reduce_add is not None:
+            out = out + tp_reduce_add
+        if reduce_result:
+            distributed.all_reduce_(out)
         return out
 
 
@@ -421,9 +708,7 @@ class DeepseekV3MLAAttention(Attention):
         qk_rope = cfg.qk_rope_head_dim
         v_head = cfg.v_head_dim
         scale = (qk_nope + qk_rope) ** -0.5
-        attn_mscale = _yarn_get_mscale(
-            cfg.rope_scaling_factor, cfg.rope_mscale_all_dim
-        )
+        attn_mscale = _yarn_get_mscale(cfg.rope_scaling_factor, cfg.rope_mscale_all_dim)
         scale = scale * attn_mscale * attn_mscale
         super().__init__(
             num_heads=num_heads,
@@ -439,36 +724,35 @@ class DeepseekV3MLAAttention(Attention):
         self.v_head_dim = v_head
         self.kv_lora_rank = kv_lora
         self.num_heads_local = num_heads
+        self.q_lora_rank = cfg.q_lora_rank
+        self._use_fused_mla_decode = device.type in (
+            "npu",
+            "privateuseone",
+        )
+        self._use_mlapo_v2 = (
+            self._use_fused_mla_decode
+            and os.environ.get("XLLM_ENABLE_MLAPO_V2") == "1"
+            and kernels.has_mla_preprocess_v2()
+        )
 
-        self.q_a_proj = W8A8StaticLinear(cfg.hidden_size, cfg.q_lora_rank, device)
-        self.kv_a_proj_with_mqa = W8A8StaticLinear(cfg.hidden_size, kv_lora + qk_rope, device)
-        self.q_a_layernorm = RMSNorm(
-            cfg.q_lora_rank, cfg.rms_norm_eps, dtype=dtype, device=device
+        self.qkv_a_proj = W8A8StaticLinear(
+            cfg.hidden_size,
+            cfg.q_lora_rank + kv_lora + qk_rope,
+            device,
         )
-        self.kv_a_layernorm = RMSNorm(
-            kv_lora, cfg.rms_norm_eps, dtype=dtype, device=device
+        self.q_b_proj = W8A8StaticLinear(cfg.q_lora_rank, num_heads * (qk_nope + qk_rope), device)
+        self.o_proj = W8A8StaticLinear(
+            num_heads * v_head,
+            cfg.hidden_size,
+            device,
+            row_parallel=True,
         )
-        self.q_b_proj = W8A8StaticLinear(
-            cfg.q_lora_rank, num_heads * (qk_nope + qk_rope), device
-        )
+        self.q_a_layernorm = RMSNorm(cfg.q_lora_rank, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.kv_a_layernorm = RMSNorm(kv_lora, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.kv_b_proj = ColumnParallelLinear(
             kv_lora,
             num_heads * (qk_nope + v_head),
             tp,
-            dtype=dtype,
-            device=device,
-        )
-        self.o_proj = W8A8StaticLinear(num_heads * v_head, cfg.hidden_size, device,
-                                       row_parallel=True)
-        self.rotary = DeepseekYarnRotaryEmbedding(
-            qk_rope,
-            cfg.original_max_position_embeddings,
-            cfg.rope_scaling_factor,
-            cfg.rope_theta,
-            cfg.rope_beta_fast,
-            cfg.rope_beta_slow,
-            cfg.rope_mscale,
-            cfg.rope_mscale_all_dim,
             dtype=dtype,
             device=device,
         )
@@ -482,15 +766,61 @@ class DeepseekV3MLAAttention(Attention):
             torch.empty(num_heads, kv_lora, v_head, dtype=dtype, device=device),
             persistent=False,
         )
-        self.indexer: DeepseekV3Indexer | None = (
-            DeepseekV3Indexer(cfg, dtype, device) if cfg.index_topk > 0 else None
-        )
-        if self.indexer is not None:
-            self.indexer.rotary = self.rotary
+        for name in (
+            "_mlapo_input_norm_weight",
+            "_mlapo_input_norm_bias",
+            "_mlapo_q_norm_bias",
+            "_mlapo_qkv_input_offset",
+            "_mlapo_qkv_weight",
+            "_mlapo_qkv_deq_scale",
+            "_mlapo_qkv_quant_bias",
+            "_mlapo_q_b_input_offset",
+            "_mlapo_q_b_weight",
+            "_mlapo_q_b_deq_scale",
+            "_mlapo_q_b_quant_bias",
+        ):
+            self.register_buffer(
+                name,
+                torch.empty(0, dtype=dtype, device=device),
+                persistent=False,
+            )
+        self.indexer: DeepseekV3Indexer | None = DeepseekV3Indexer(cfg, dtype, device) if cfg.index_topk > 0 else None
 
     def process_weights_after_loading(self) -> None:
-        self.q_a_proj.process_weights_after_loading()
-        self.kv_a_proj_with_mqa.process_weights_after_loading()
+        if self._use_mlapo_v2:
+            (
+                self._mlapo_qkv_weight,
+                self._mlapo_qkv_deq_scale,
+                self._mlapo_qkv_quant_bias,
+            ) = kernels.prepare_mla_preprocess_v2_qkv(
+                self.qkv_a_proj.weight.data,
+                self.qkv_a_proj.deq_scale,
+                self.qkv_a_proj.quant_bias,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+            )
+            (
+                self._mlapo_q_b_weight,
+                self._mlapo_q_b_deq_scale,
+                self._mlapo_q_b_quant_bias,
+            ) = kernels.prepare_mla_preprocess_v2_q_b(
+                self.q_b_proj.weight.data,
+                self.q_b_proj.deq_scale,
+                self.q_b_proj.quant_bias,
+                self.num_heads_local,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+            )
+            self._mlapo_input_norm_weight = torch.ones(
+                self.cfg.hidden_size,
+                dtype=self.q_a_layernorm.weight.dtype,
+                device=self.q_a_layernorm.weight.device,
+            )
+            self._mlapo_input_norm_bias = torch.zeros_like(self._mlapo_input_norm_weight)
+            self._mlapo_q_norm_bias = torch.zeros_like(self.q_a_layernorm.weight)
+            self._mlapo_qkv_input_offset = self.qkv_a_proj.input_offset.to(torch.int8)
+            self._mlapo_q_b_input_offset = self.q_b_proj.input_offset.to(torch.int8)
+        self.qkv_a_proj.process_weights_after_loading()
         self.q_b_proj.process_weights_after_loading()
         self.o_proj.process_weights_after_loading()
         w = self.kv_b_proj.weight.data
@@ -499,144 +829,301 @@ class DeepseekV3MLAAttention(Attention):
             self.qk_nope_head_dim + self.v_head_dim,
             self.kv_lora_rank,
         )
-        w_uk, w_uv = w.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=1
-        )
+        w_uk, w_uv = w.split([self.qk_nope_head_dim, self.v_head_dim], dim=1)
         self.W_UK.copy_(w_uk.contiguous())
         self.W_UV.copy_(w_uv.transpose(1, 2).contiguous())
 
-    def _interleaved_rope(
-        self, x: torch.Tensor, positions: torch.Tensor
+    def _project_qkv_a(self, input_norm_quant: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        qkv_a = self.qkv_a_proj.forward_quantized(input_norm_quant)
+        kv, q_a = qkv_a.split(
+            [
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                self.q_lora_rank,
+            ],
+            dim=-1,
+        )
+        return q_a, kv
+
+    def _forward_fused_mla_decode(
+        self,
+        hidden: torch.Tensor,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        backend: AttentionBackend,
+        context: MlaPreprocessContext,
     ) -> torch.Tensor:
-        cos_sin = self.rotary.cos_sin_cache[positions]
-        half = cos_sin.size(-1) // 2
-        cos32 = cos_sin[..., :half]
-        sin32 = cos_sin[..., half:]
-        cos = torch.cat([cos32, cos32], dim=-1).unsqueeze(1).unsqueeze(1)
-        sin = torch.cat([sin32, sin32], dim=-1).unsqueeze(1).unsqueeze(1)
-        T, H, D = x.shape
-        return torch_npu.npu_interleave_rope(
-            x.view(T, H, 1, D), cos, sin
-        ).view(T, H, D)
+        if self._use_mlapo_v2:
+            q_c, q_latent, q_pe = kernels.deepseek_mla_preprocess_decode_v2(
+                hidden,
+                self._mlapo_input_norm_weight,
+                self._mlapo_input_norm_bias,
+                self.qkv_a_proj.input_scale,
+                self._mlapo_qkv_input_offset,
+                self._mlapo_qkv_weight,
+                self._mlapo_qkv_deq_scale,
+                self._mlapo_qkv_quant_bias,
+                self.q_a_layernorm.weight,
+                self._mlapo_q_norm_bias,
+                self.q_b_proj.input_scale,
+                self._mlapo_q_b_input_offset,
+                self._mlapo_q_b_weight,
+                self._mlapo_q_b_deq_scale,
+                self._mlapo_q_b_quant_bias,
+                self.kv_a_layernorm.weight,
+                rope_cos,
+                rope_sin,
+                self.W_UK,
+                context.kv_cache,
+                context.rope_cache,
+                context.slot_mapping[: hidden.shape[0]],
+                self.kv_lora_rank,
+                self.q_lora_rank,
+                self.qk_rope_head_dim,
+                self.q_a_layernorm.eps,
+            )
+        else:
+            q_c, q_latent, q_pe = kernels.deepseek_mla_preprocess_decode(
+                hidden,
+                self.qkv_a_proj.input_scale,
+                self.qkv_a_proj.input_offset,
+                self.qkv_a_proj.weight,
+                self.qkv_a_proj.deq_scale,
+                self.qkv_a_proj.quant_bias,
+                self.q_a_layernorm.weight,
+                self.q_b_proj.input_scale,
+                self.q_b_proj.input_offset,
+                self.q_b_proj.weight,
+                self.q_b_proj.deq_scale,
+                self.q_b_proj.quant_bias,
+                self.W_UK,
+                self.kv_a_layernorm.weight,
+                rope_cos,
+                rope_sin,
+                context.slot_mapping[: hidden.shape[0]],
+                context.kv_cache,
+                context.rope_cache,
+                self.kv_lora_rank,
+                self.q_lora_rank,
+                self.num_heads_local,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.q_a_layernorm.eps,
+                self.kv_a_layernorm.eps,
+            )
+        topk = None
+        if self.indexer is not None:
+            index_context = backend.mla_index_context(self)
+            topk = self.indexer.select_qli(
+                hidden,
+                q_c,
+                index_context,
+                half_rope_cos,
+                half_rope_sin,
+            )
+        attn_out = backend.execute_mla(
+            q_latent,
+            q_pe,
+            None,
+            None,
+            self,
+            topk=topk,
+            cache_is_preprocessed=True,
+        )
+        v_full = kernels.batch_matmul_transpose(
+            attn_out.transpose(0, 1),
+            self.W_UV,
+        )
+        v_full = v_full.reshape(hidden.shape[0], self.num_heads_local * self.v_head_dim)
+        output = self.o_proj(v_full)
+        if self.cfg.tp_size > 1:
+            distributed.all_reduce_(output)
+        return output
 
     def forward(
-        self, hidden: torch.Tensor, positions: torch.Tensor
+        self,
+        hidden: torch.Tensor,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
     ) -> torch.Tensor:
         num_tokens = hidden.shape[0]
-        q_a = self.q_a_proj(hidden)
-        q_c = self.q_a_layernorm(q_a)
         backend = get_forward_context().attention_backend
+        if self._use_fused_mla_decode:
+            preprocess_context = backend.mla_preprocess_context(self)
+            if preprocess_context is not None:
+                return self._forward_fused_mla_decode(
+                    hidden,
+                    half_rope_cos,
+                    half_rope_sin,
+                    rope_cos,
+                    rope_sin,
+                    backend,
+                    preprocess_context,
+                )
+        input_norm_quant = kernels.quantize_per_tensor(
+            hidden,
+            self.qkv_a_proj.input_scale,
+            self.qkv_a_proj.input_offset,
+            torch.qint8,
+            -1,
+        )
+        q_a, kv = self._project_qkv_a(input_norm_quant)
+        q_c = self.q_a_layernorm(q_a)
+        q_a_norm_quant = kernels.quantize_per_tensor(
+            q_c,
+            self.q_b_proj.input_scale,
+            self.q_b_proj.input_offset,
+            torch.qint8,
+            -1,
+        )
         topk = None
         if self.indexer is not None:
             ctx = backend.mla_index_context(self)
-            topk = self.indexer.select_qli(hidden, q_c, positions, ctx)
-        q = self.q_b_proj(q_c)
+            topk = self.indexer.select_qli(
+                hidden,
+                q_c,
+                ctx,
+                half_rope_cos,
+                half_rope_sin,
+            )
+        q = self.q_b_proj.forward_quantized(q_a_norm_quant)
         q = q.view(
             num_tokens,
             self.num_heads_local,
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
-        q_nope, q_rope = q.split(
-            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        q_latent = torch.bmm(
-            q_nope.transpose(0, 1), self.W_UK
-        ).transpose(0, 1)
-        q_pe = self._interleaved_rope(q_rope, positions)
-        kv = self.kv_a_proj_with_mqa(hidden)
-        k_latent_raw, k_rope_raw = kv.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+        q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_latent = torch.bmm(q_nope.transpose(0, 1), self.W_UK).transpose(0, 1)
+        q_pe = _interleave_rope_with(q_rope, rope_cos, rope_sin)
+        k_latent_raw, k_rope_raw = kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_latent = self.kv_a_layernorm(k_latent_raw)
-        k_pe = self._interleaved_rope(
-            k_rope_raw.unsqueeze(1), positions
-        )
+        k_pe = _interleave_rope_with(k_rope_raw.unsqueeze(1), rope_cos, rope_sin)
         k_latent_3d = k_latent.view(num_tokens, 1, self.kv_lora_rank)
         k_pe_3d = k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
 
-        attn_out = backend.execute_mla(
-            q_latent, q_pe, k_latent_3d, k_pe_3d, self, topk=topk
+        attn_out = backend.execute_mla(q_latent, q_pe, k_latent_3d, k_pe_3d, self, topk=topk)
+        v_full = kernels.batch_matmul_transpose(
+            attn_out.transpose(0, 1),
+            self.W_UV,
         )
-        v_full = torch.bmm(
-            attn_out.transpose(0, 1), self.W_UV
-        ).transpose(0, 1)
-        v_full = v_full.reshape(
-            num_tokens, self.num_heads_local * self.v_head_dim
-        )
+        v_full = v_full.reshape(num_tokens, self.num_heads_local * self.v_head_dim)
         o = self.o_proj(v_full)
         if self.cfg.tp_size > 1:
-            ops.all_reduce_(o)
+            distributed.all_reduce_(o)
         return o
 
 
 class DeepseekV3Indexer(nn.Module):
-    """DeepSeek-V3.2 lightning indexer (bf16 weights, non-quant aclnnLightningIndexer)."""
+    """DeepSeek-V3.2 LightningIndexer with optional INT8 Q/K cache."""
 
-    def __init__(self, cfg: "DeepseekV3Config", dtype: torch.dtype,
-                 device: torch.device) -> None:
+    def __init__(self, cfg: DeepseekV3Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.n_head = cfg.index_n_heads
         self.head_dim = cfg.index_head_dim
         self.rope_dim = cfg.qk_rope_head_dim
         self.topk = cfg.index_topk
-        self.wq_b = nn.Linear(cfg.q_lora_rank, self.n_head * self.head_dim,
-                             bias=False, dtype=dtype, device=device)
-        self.wk = nn.Linear(cfg.hidden_size, self.head_dim,
-                            bias=False, dtype=dtype, device=device)
-        self.weights_proj = nn.Linear(cfg.hidden_size, self.n_head,
-                                      bias=False, dtype=dtype, device=device)
-        self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-6,
-                                   dtype=dtype, device=device)
-        self.rotary = None
+        self.wq_b = nn.Linear(cfg.q_lora_rank, self.n_head * self.head_dim, bias=False, dtype=dtype, device=device)
+        self.wk_weights_proj = nn.Linear(
+            cfg.hidden_size,
+            self.head_dim + self.n_head,
+            bias=False,
+            dtype=dtype,
+            device=device,
+        )
+        self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-6, dtype=dtype, device=device)
+        self.register_buffer(
+            "hadamard",
+            _create_hadamard_matrix(self.head_dim, dtype, device),
+            persistent=False,
+        )
 
     def select_qli(
         self,
         hidden: torch.Tensor,
         qr: torch.Tensor,
-        positions: torch.Tensor,
         ctx: MlaIndexContext,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
     ) -> torch.Tensor:
         q = self.wq_b(qr).view(-1, self.n_head, self.head_dim)
-        q_pe, q_nope = torch.split(
-            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
-        k = self.wk(hidden)
-        weights = self.weights_proj(hidden)
+        k, weights = self.wk_weights_proj(hidden).split([self.head_dim, self.n_head], dim=-1)
         k = self.k_norm(k)
-        k_pe, k_nope = torch.split(
-            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
-        cos_sin = self.rotary.cos_sin_cache[positions]
-        half = cos_sin.size(-1) // 2
-        c = cos_sin[:, :half]
-        s = cos_sin[:, half:]
-        q1 = q_pe[..., :half]; q2 = q_pe[..., half:]
-        o1 = q1 * c.unsqueeze(1) - q2 * s.unsqueeze(1)
-        o2 = q2 * c.unsqueeze(1) + q1 * s.unsqueeze(1)
-        q_pe = torch.cat([o1, o2], dim=-1)
-        k1 = k_pe[..., :half]; k2 = k_pe[..., half:]
-        ko1 = k1 * c - k2 * s
-        ko2 = k2 * c + k1 * s
-        k_pe = torch.cat([ko1, ko2], dim=-1)
+        q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+        k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+        q_pe = _apply_half_rope_with_angles(q_pe, half_rope_cos, half_rope_sin)
+        k_pe = _apply_half_rope_with_angles(k_pe.unsqueeze(1), half_rope_cos, half_rope_sin).squeeze(1)
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
-        if ctx.index_cache is not None and ctx.slot_mapping is not None:
-            k_view = ctx.index_cache.view(-1, ctx.index_cache.size(-1))
-            ops.scatter_nd_update(
-                k_view, ctx.slot_mapping.reshape(-1, 1).clamp_min(0), k
+
+        use_quant_indexer = ctx.index_cache.dtype == torch.int8 and ctx.index_cache_scale is not None
+        if use_quant_indexer:
+            rotation_scale = self.head_dim**-0.5
+            q = torch.matmul(q, self.hadamard) * rotation_scale
+            k = torch.matmul(k, self.hadamard) * rotation_scale
+            q, q_scale = kernels.dynamic_quant(q)
+            k, k_scale = kernels.dynamic_quant(k)
+            assert q_scale is not None
+            assert k_scale is not None
+            q_scale = q_scale.to(torch.float16)
+            k_scale = k_scale.unsqueeze(-1).to(torch.float16)
+            ctx.update_index_cache(k, k_scale)
+            weight_scale = self.head_dim**-0.5 * self.n_head**-0.5
+            # xLLM stores one index key per source token.
+            cmp_ratio = 1
+            qli_metadata = ctx.get_quant_indexer_metadata(self.n_head, self.head_dim, self.topk, cmp_ratio)
+            return kernels.quant_lightning_indexer(
+                q,
+                ctx.index_cache,
+                (weights * weight_scale).to(torch.float16),
+                q_scale,
+                ctx.index_cache_scale,
+                qli_metadata,
+                ctx.actual_seq_q,
+                ctx.actual_seq_kv,
+                ctx.block_table,
+                self.topk,
+                cmp_ratio,
             )
-        topk = ops.lightning_indexer(
-            q, ctx.index_cache, weights,
-            ctx.actual_seq_q, ctx.actual_seq_kv, ctx.block_table,
-            "TND", "PA_BSND", self.topk, 3,
-            9223372036854775807, 9223372036854775807,
+
+        if ctx.index_cache is not None and ctx.slot_mapping is not None:
+            ctx.update_index_cache(k, None)
+
+        key_head_num = ctx.index_cache.size(2) if ctx.index_cache.dim() >= 3 else 1
+        output_shape = (q.size(0), key_head_num, self.topk)
+        buffer_key = tuple(output_shape)
+        topk_buffer = get_execution_buffer(
+            ("LIGHTNING_INDEXER_INDICES",) + buffer_key,
+            lambda: torch.empty(output_shape, dtype=torch.int32, device=q.device),
+        )
+        values_buffer = get_execution_buffer(
+            ("LIGHTNING_INDEXER_VALUES",) + buffer_key,
+            lambda: torch.empty(output_shape, dtype=q.dtype, device=q.device),
+        )
+        topk = kernels.lightning_indexer_out(
+            q,
+            ctx.index_cache,
+            weights,
+            ctx.actual_seq_q,
+            ctx.actual_seq_kv,
+            ctx.block_table,
+            "TND",
+            "PA_BSND",
+            self.topk,
+            3,
+            9223372036854775807,
+            9223372036854775807,
             False,
+            topk_buffer,
+            values_buffer,
         )
         return topk
 
 
 class DeepseekV3MoE(nn.Module):
-    """Pure-TP MoE: 256 routed experts replicated, expert intermediate TP-sharded."""
+    """EP-aware MoE: experts split across EP ranks, intermediate TP-sharded."""
 
     def __init__(
         self,
@@ -648,7 +1135,6 @@ class DeepseekV3MoE(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.layer_id = layer_id
-        tp = cfg.tp_size
         self.num_experts = cfg.n_routed_experts
         self.topk = cfg.num_experts_per_tok
         self.n_group = cfg.n_group
@@ -656,154 +1142,367 @@ class DeepseekV3MoE(nn.Module):
         self.routed_scaling = cfg.routed_scaling_factor
         self.moe_inter = cfg.moe_intermediate_size
         self.hidden = cfg.hidden_size
+        self.ep_size = cfg.ep_size
+        self.ep_rank = cfg.ep_rank
+        self.dp_size = cfg.dp_size
+        self.dp_rank = cfg.dp_rank
+        self.moe_tp_size = cfg.moe_tp_size
+
+        tp = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
         assert self.moe_inter % tp == 0
         self.inter_local = self.moe_inter // tp
 
+        num_local_experts = self.num_experts // max(self.ep_size, 1)
+        self.num_local_experts = num_local_experts
+        self.local_expert_start = self.ep_rank * num_local_experts
+        self.local_expert_end = self.local_expert_start + num_local_experts
+
+        # Match the ATB router's FP32 precision.
         self.gate = nn.Linear(
-            cfg.hidden_size, self.num_experts, bias=False, dtype=dtype, device=device
+            cfg.hidden_size,
+            self.num_experts,
+            bias=False,
+            dtype=torch.float32,
+            device=device,
         )
         self.register_buffer(
             "e_score_correction_bias",
             torch.zeros(self.num_experts, dtype=torch.float32, device=device),
             persistent=False,
         )
+        # Materialize and format expert weights one at a time to limit loading peak memory.
         self.experts_w13 = nn.Parameter(
-            torch.empty(
-                self.num_experts, 2 * self.inter_local, self.hidden,
-                dtype=torch.int8, device=device,
-            ),
+            torch.empty(0, dtype=torch.int8, device=device),
             requires_grad=False,
         )
         self.register_buffer(
             "experts_w13_scale",
             torch.empty(
-                self.num_experts, 2 * self.inter_local, 1,
-                dtype=torch.float32, device=device,
+                num_local_experts,
+                2 * self.inter_local,
+                1,
+                dtype=torch.float32,
+                device=device,
             ),
         )
         self.register_buffer(
             "experts_w13_offset",
             torch.empty(
-                self.num_experts, 2 * self.inter_local, 1,
-                dtype=torch.float32, device=device,
+                num_local_experts,
+                2 * self.inter_local,
+                1,
+                dtype=torch.float32,
+                device=device,
             ),
         )
         self.experts_w2 = nn.Parameter(
-            torch.empty(
-                self.num_experts, self.hidden, self.inter_local,
-                dtype=torch.int8, device=device,
-            ),
+            torch.empty(0, dtype=torch.int8, device=device),
             requires_grad=False,
         )
         self.register_buffer(
             "experts_w2_scale",
             torch.empty(
-                self.num_experts, self.hidden, 1,
-                dtype=torch.float32, device=device,
+                num_local_experts,
+                self.hidden,
+                1,
+                dtype=torch.float32,
+                device=device,
             ),
+        )
+        self.register_buffer(
+            "experts_w2_scale_compute",
+            torch.empty(
+                num_local_experts,
+                self.hidden,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            persistent=False,
         )
         self.register_buffer(
             "experts_w2_offset",
             torch.empty(
-                self.num_experts, self.hidden, 1,
-                dtype=torch.float32, device=device,
+                num_local_experts,
+                self.hidden,
+                1,
+                dtype=torch.float32,
+                device=device,
             ),
         )
         shared_inter = cfg.moe_intermediate_size * cfg.n_shared_experts
-        self.shared_experts = DeepseekV3MLP(cfg, shared_inter, dtype, device,
-                                            skip_tp_reduce=True)
+        shared_tp = cfg.moe_tp_size if cfg.ep_size > 1 else None
+        self.shared_experts = DeepseekV3MLP(
+            cfg,
+            shared_inter,
+            dtype,
+            device,
+            skip_tp_reduce=True,
+            tp_override=shared_tp,
+        )
+        self._expert_parallel_enabled = hasattr(torch, "npu") and device.type in ("npu", "privateuseone")
+        self._gate_overlap_enabled = self._expert_parallel_enabled and os.environ.get("XLLM_MOE_GATE_OVERLAP") == "1"
+        self._fine_overlap_enabled = self._gate_overlap_enabled and os.environ.get("XLLM_MOE_FINE_OVERLAP") == "1"
+        self._fuse_shared_expert = self._expert_parallel_enabled
+        self._shared_expert_start_event: torch.npu.Event | None = None
+        self._gate_done_event: torch.npu.Event | None = None
+        self._shared_expert_done_event: torch.npu.Event | None = None
+        self._before_dispatch_event: torch.npu.Event | None = None
+        self._before_gmm2_event: torch.npu.Event | None = None
 
-    def process_weights_after_loading(self) -> None:
+    def allocate_experts_w13_for_loading(self) -> None:
+        assert self.experts_w13.numel() == 0, "experts_w13 is already loaded"
+        self.experts_w13.data = torch.empty(
+            self.num_local_experts,
+            2 * self.inter_local,
+            self.hidden,
+            dtype=torch.int8,
+            device=self.experts_w13.device,
+        )
+
+    def allocate_experts_w2_for_loading(self) -> None:
+        assert self.experts_w2.numel() == 0, "experts_w2 is already loaded"
+        self.experts_w2.data = torch.empty(
+            self.num_local_experts,
+            self.hidden,
+            self.inter_local,
+            dtype=torch.int8,
+            device=self.experts_w2.device,
+        )
+
+    @staticmethod
+    def _format_and_release_expert_weight(parameter: nn.Parameter) -> None:
+        assert parameter.numel() > 0, "expert weight was not loaded"
+        transposed = parameter.data.transpose(1, 2).contiguous()
+        parameter.data = torch.empty(0, dtype=parameter.dtype, device=parameter.device)
+        parameter.data = kernels.format_cast_nz(transposed)
+        del transposed
+
+    def process_experts_w13_after_loading(self) -> None:
         assert torch.all(self.experts_w13_offset == 0), (
-            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts "
-            "(experts_w13_offset == 0)")
+            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w13_offset == 0)"
+        )
+        self._format_and_release_expert_weight(self.experts_w13)
+
+    def process_experts_w2_after_loading(self) -> None:
         assert torch.all(self.experts_w2_offset == 0), (
-            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts "
-            "(experts_w2_offset == 0)")
-        self.experts_w13.data = self.experts_w13.data.transpose(1, 2).contiguous()
-        self.experts_w2.data = self.experts_w2.data.transpose(1, 2).contiguous()
-        self.experts_w13.data = torch_npu.npu_format_cast(
-            self.experts_w13.data, 29)  # ACL_FORMAT_FRACTAL_NZ
-        self.experts_w2.data = torch_npu.npu_format_cast(
-            self.experts_w2.data, 29)  # ACL_FORMAT_FRACTAL_NZ
-        self.experts_w13_scale.data = self.experts_w13_scale.data.view(
-            self.num_experts, -1
-        ).contiguous()
-        self.experts_w13_offset.data = self.experts_w13_offset.data.view(
-            self.num_experts, -1
-        ).contiguous()
-        self.experts_w2_scale.data = self.experts_w2_scale.data.view(
-            self.num_experts, -1
-        ).contiguous()
-        self.experts_w2_offset.data = self.experts_w2_offset.data.view(
-            self.num_experts, -1
-        ).contiguous()
+            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w2_offset == 0)"
+        )
+        self._format_and_release_expert_weight(self.experts_w2)
+
+    def process_weights_after_loading(self, *, skip_expert_format: bool = False) -> None:
+        assert torch.all(self.experts_w13_offset == 0), (
+            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w13_offset == 0)"
+        )
+        assert torch.all(self.experts_w2_offset == 0), (
+            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w2_offset == 0)"
+        )
+        if not skip_expert_format:
+            self.process_experts_w13_after_loading()
+            self.process_experts_w2_after_loading()
+        self.experts_w13_scale.data = self.experts_w13_scale.data.view(self.num_local_experts, -1).contiguous()
+        # GMM1 uses FP32 scales; GMM2 uses BF16 scales.
+        self.experts_w13_offset.data = self.experts_w13_offset.data.view(self.num_local_experts, -1).contiguous()
+        self.experts_w2_scale.data = self.experts_w2_scale.data.view(self.num_local_experts, -1).contiguous()
+        self.experts_w2_scale_compute.copy_(self.experts_w2_scale)
+        self.experts_w2_offset.data = self.experts_w2_offset.data.view(self.num_local_experts, -1).contiguous()
         self.shared_experts.process_weights_after_loading()
 
-    def _grouped_topk(
-        self, gating_output: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """noaux_tc groupwise top-k via ``npu_moe_gating_top_k``."""
-        bias = self.e_score_correction_bias
-        if bias is not None and bias.dtype != gating_output.dtype:
-            bias = bias.to(gating_output.dtype)
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-            gating_output,
-            k=self.topk,
-            bias=bias,
-            k_group=self.topk_group,
-            group_count=self.n_group,
-            group_select_mode=1,
-            renorm=1 if self.cfg.norm_topk_prob else 0,
-            norm_type=1,
-            routed_scaling_factor=1.0,
-            eps=1e-20,
+    def _run_routed_experts(self, hidden: torch.Tensor) -> torch.Tensor:
+        logits = self.gate(hidden.to(torch.float32))
+        return kernels.grouped_moe(
+            hidden,
+            logits,
+            self.experts_w13,
+            self.experts_w2,
+            self.experts_w13_scale,
+            self.experts_w2_scale_compute,
+            self.e_score_correction_bias,
+            self.topk,
+            self.topk_group,
+            self.n_group,
+            self.cfg.norm_topk_prob,
+            self.routed_scaling,
+            [self.local_expert_start, self.local_expert_end],
         )
-        return topk_weights, topk_ids
+
+    def _run_shared_experts(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self._fuse_shared_expert:
+            return self.shared_experts.forward_dequant_swiglu_quant(hidden)
+        return self.shared_experts(hidden)
+
+    def _combine_expert_outputs(
+        self,
+        routed: torch.Tensor,
+        shared: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.ep_size > 1:
+            distributed.all_reduce_(routed, "moe_ep")
+
+        final = routed + shared
+        if self.moe_tp_size > 1:
+            distributed.all_reduce_(final, "moe_tp")
+        elif self.cfg.tp_size > 1 and self.ep_size == 1:
+            distributed.all_reduce_(final)
+        return final
+
+    def _ensure_expert_parallel_resources(self) -> None:
+        if self._shared_expert_start_event is not None:
+            return
+        self._shared_expert_start_event = torch.npu.Event()
+        self._shared_expert_done_event = torch.npu.Event()
+        if self._gate_overlap_enabled:
+            self._gate_done_event = torch.npu.Event()
+        if self._fine_overlap_enabled:
+            self._before_dispatch_event = torch.npu.Event()
+            self._before_gmm2_event = torch.npu.Event()
+
+    def _forward_parallel(self, hidden: torch.Tensor) -> torch.Tensor:
+        self._ensure_expert_parallel_resources()
+        shared_stream = _shared_expert_stream(hidden.device)
+        start_event = self._shared_expert_start_event
+        shared_done_event = self._shared_expert_done_event
+        assert start_event is not None
+        assert shared_done_event is not None
+
+        current_stream = torch.npu.current_stream()
+        start_event.record(current_stream)
+
+        if self._gate_overlap_enabled:
+            gate_stream = _gate_stream(hidden.device)
+            gate_done_event = self._gate_done_event
+            assert gate_done_event is not None
+
+            gate_stream.wait_event(start_event)
+            with torch.npu.stream(gate_stream):
+                logits = self.gate(hidden.to(torch.float32))
+                topk_weights, topk_ids = kernels.moe_gate_routing(
+                    logits,
+                    self.e_score_correction_bias,
+                    self.topk,
+                    self.topk_group,
+                    self.n_group,
+                    self.cfg.norm_topk_prob,
+                    self.routed_scaling,
+                )
+                gate_done_event.record(gate_stream)
+
+            shared_stream.wait_event(start_event)
+            with torch.npu.stream(shared_stream):
+                shared = self._run_shared_experts(hidden)
+                shared_done_event.record(shared_stream)
+
+            current_stream.wait_event(gate_done_event)
+            routed = kernels.moe_expert_compute(
+                hidden,
+                topk_weights,
+                topk_ids,
+                self.experts_w13,
+                self.experts_w2,
+                self.experts_w13_scale,
+                self.experts_w2_scale_compute,
+                self.topk,
+            )
+            current_stream.wait_event(shared_done_event)
+        else:
+            shared_stream.wait_event(start_event)
+            with torch.npu.stream(shared_stream):
+                shared = self._run_shared_experts(hidden)
+                shared_done_event.record(shared_stream)
+            routed = self._run_routed_experts(hidden)
+            current_stream.wait_event(shared_done_event)
+
+        return self._combine_expert_outputs(routed, shared)
+
+    def _forward_fine_grained_parallel(self, hidden: torch.Tensor) -> torch.Tensor:
+        self._ensure_expert_parallel_resources()
+        shared_stream = _shared_expert_stream(hidden.device)
+        gate_stream = _gate_stream(hidden.device)
+        current_stream = torch.npu.current_stream()
+
+        before_dispatch_event = self._before_dispatch_event
+        before_gmm2_event = self._before_gmm2_event
+        assert before_dispatch_event is not None
+        assert before_gmm2_event is not None
+
+        # Auxiliary streams must fork from and rejoin the ACL Graph capture stream.
+        gate_stream.wait_stream(current_stream)
+        shared_stream.wait_stream(current_stream)
+
+        with torch.npu.stream(gate_stream):
+            logits = self.gate(hidden.to(torch.float32))
+            topk_weights, topk_ids = kernels.moe_gate_routing(
+                logits,
+                self.e_score_correction_bias,
+                self.topk,
+                self.topk_group,
+                self.n_group,
+                self.cfg.norm_topk_prob,
+                self.routed_scaling,
+            )
+
+        with torch.npu.stream(shared_stream):
+            gate_up, pertoken = self.shared_experts.quantize_and_project_gate_up(hidden)
+
+        current_stream.wait_stream(gate_stream)
+        before_dispatch_event.record(current_stream)
+        sorted_hidden_i8, expanded_row_idx, group_list, pt_scale = kernels.moe_token_dispatch(
+            hidden, topk_ids, self.topk, self.num_experts
+        )
+        act_i8, act_pt = kernels.moe_gmm1(
+            sorted_hidden_i8,
+            self.experts_w13,
+            self.experts_w13_scale,
+            pt_scale,
+            group_list,
+        )
+        before_gmm2_event.record(current_stream)
+        routed = kernels.moe_gmm2_combine(
+            act_i8,
+            act_pt,
+            self.experts_w2,
+            self.experts_w2_scale_compute,
+            group_list,
+            expanded_row_idx,
+            topk_weights,
+        )
+
+        # Record events before the auxiliary stream waits on them.
+        with torch.npu.stream(shared_stream):
+            shared_stream.wait_event(before_dispatch_event)
+            act_int8, act_scale = self.shared_experts.activate_and_quantize(gate_up, pertoken)
+            shared_stream.wait_event(before_gmm2_event)
+            shared = self.shared_experts.project_down(act_int8, act_scale)
+
+        current_stream.wait_stream(shared_stream)
+        return self._combine_expert_outputs(routed, shared)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        num_tokens = hidden.shape[0]
-        logits = self.gate(hidden)
-        topk_w, topk_idx = self._grouped_topk(logits)
+        local_hidden = hidden
+        token_counts: list[int] | None = None
+        if self.dp_size > 1:
+            token_counts = list(get_forward_context().metadata.dp_token_counts)
+            hidden = distributed.all_gather_variable(
+                hidden,
+                token_counts,
+                self.dp_rank,
+                "dp",
+            )
 
-        sorted_hidden_i8, expanded_row_idx, expert_tokens, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
-            hidden,
-            topk_idx.to(torch.int32),
-            scale=None,
-            active_num=num_tokens * self.topk,
-            expert_num=self.num_experts,
-            expert_tokens_num_type=1,
-            expert_tokens_num_flag=True,
-            active_expert_range=[0, self.num_experts],
-            quant_mode=1,
-        )
-        group_list = torch.cumsum(expert_tokens.to(torch.int64), 0)
+        if self._fine_overlap_enabled:
+            final = self._forward_fine_grained_parallel(hidden)
+        elif self._expert_parallel_enabled:
+            final = self._forward_parallel(hidden)
+        else:
+            routed = self._run_routed_experts(hidden)
+            shared = self._run_shared_experts(hidden)
+            final = self._combine_expert_outputs(routed, shared)
 
-        act_i8, act_pt, _ = torch.ops.npu.npu_grouped_matmul_swiglu_quant(
-            x=sorted_hidden_i8,
-            weight=self.experts_w13,
-            group_list=group_list,
-            weight_scale=self.experts_w13_scale,
-            x_scale=pertoken_scale,
-        )
-
-        out = torch.ops.npu.npu_grouped_matmul(
-            x=[act_i8], weight=[self.experts_w2],
-            scale=[self.experts_w2_scale.to(torch.bfloat16)],
-            per_token_scale=[act_pt],
-            split_item=2, group_list_type=0, group_type=0,
-            group_list=group_list, output_dtype=torch.bfloat16)[0]
-
-        routed = torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=out,
-            sorted_indices=expanded_row_idx.abs(),
-            probs=topk_w.to(out.dtype),
-        )
-        routed = routed * self.routed_scaling
-        shared_out = self.shared_experts(hidden)
-        final = routed + shared_out
-        if self.cfg.tp_size > 1:
-            ops.all_reduce_(final)
+        if token_counts is not None:
+            local_tokens = token_counts[self.dp_rank]
+            if local_tokens == 0:
+                return torch.zeros_like(local_hidden)
+            start = sum(token_counts[: self.dp_rank])
+            final = final.narrow(0, start, local_tokens)
         return final
 
 
@@ -817,40 +1516,61 @@ class DeepseekV3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
-        self.input_layernorm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.self_attn = DeepseekV3MLAAttention(cfg, layer_id, dtype, device)
-        self.post_attention_layernorm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
-        )
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         if layer_id < cfg.first_k_dense_replace:
-            self.mlp = DeepseekV3MLP(
-                cfg, cfg.intermediate_size, dtype, device
-            )
+            self.mlp = DeepseekV3MLP(cfg, cfg.intermediate_size, dtype, device)
         else:
             self.mlp = DeepseekV3MoE(cfg, layer_id, dtype, device)
+        self._fuse_dense_norm_quant = isinstance(self.mlp, DeepseekV3MLP) and device.type in ("npu", "privateuseone")
 
     def forward(
         self,
         hidden: torch.Tensor,
         residual: Optional[torch.Tensor],
-        positions: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden
             hidden = self.input_layernorm(hidden)
         else:
             hidden, residual = self.input_layernorm(hidden, residual)
-        hidden = self.self_attn(hidden, positions)
-        hidden, residual = self.post_attention_layernorm(hidden, residual)
-        hidden = self.mlp(hidden)
+        hidden = self.self_attn(
+            hidden,
+            half_rope_cos,
+            half_rope_sin,
+            rope_cos,
+            rope_sin,
+        )
+        fused_dense_input: tuple[torch.Tensor, torch.Tensor] | None = None
+        if self._fuse_dense_norm_quant:
+            hidden_quant, hidden_scale, residual = kernels.fused_add_rms_norm_dynamic_quant(
+                hidden,
+                residual,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.eps,
+            )
+            fused_dense_input = (hidden_quant, hidden_scale)
+        else:
+            hidden, residual = self.post_attention_layernorm(hidden, residual)
+        if fused_dense_input is not None:
+            assert isinstance(self.mlp, DeepseekV3MLP)
+            hidden = self.mlp.forward_quantized(*fused_dense_input)
+        else:
+            hidden = self.mlp(hidden)
         return hidden, residual
 
 
 class DeepseekV3Model(nn.Module):
     def __init__(
-        self, cfg: DeepseekV3Config, dtype: torch.dtype, device: torch.device
+        self,
+        cfg: DeepseekV3Config,
+        dtype: torch.dtype,
+        device: torch.device,
     ) -> None:
         super().__init__()
         tp = cfg.tp_size
@@ -863,24 +1583,36 @@ class DeepseekV3Model(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.layers = nn.ModuleList(
-            [
-                DeepseekV3DecoderLayer(cfg, i, dtype, device)
-                for i in range(cfg.n_layers)
-            ]
-        )
-        self.norm = RMSNorm(
-            cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
+        self.layers = nn.ModuleList([DeepseekV3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
+        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.rotary = DeepseekYarnRotaryEmbedding(
+            cfg.qk_rope_head_dim,
+            cfg.original_max_position_embeddings,
+            cfg.rope_scaling_factor,
+            cfg.rope_theta,
+            cfg.rope_beta_fast,
+            cfg.rope_beta_slow,
+            cfg.rope_mscale,
+            cfg.rope_mscale_all_dim,
+            dtype=dtype,
+            device=device,
         )
 
-    def forward(
-        self, input_ids: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
         positions = positions.to(torch.int64).contiguous()
+        half_rope_cos, half_rope_sin, rope_cos, rope_sin = self.rotary(positions)
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
-            hidden, residual = layer(hidden, residual, positions)
+            hidden, residual = layer(
+                hidden,
+                residual,
+                half_rope_cos,
+                half_rope_sin,
+                rope_cos,
+                rope_sin,
+            )
+            assert residual is not None
         hidden, last_hidden = self.norm(hidden, residual)
         return hidden
 
@@ -888,28 +1620,45 @@ class DeepseekV3Model(nn.Module):
 class DeepseekV3ForCausalLM(PyModelBase):
     """DeepSeek-V3.2 causal LM. Registered under ``model_type='deepseek_v32'``."""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, build_model: bool = True) -> None:
         super().__init__()
         self.cfg = DeepseekV3Config.from_dict(config)
         self.cfg.tp_size = int(config.get("tp_size", 1))
-        self.cfg.tp_rank = int(config.get(
-            "tp_rank", _tp_rank_from_device(config.get("device", "npu:0"))))
-        dtype = self.resolve_dtype(
-            config.get("dtype") or config.get("torch_dtype")
-        )
+        self.cfg.tp_rank = int(config.get("tp_rank", _tp_rank_from_device(config.get("device", "npu:0"))))
+        self.cfg.ep_size = int(config.get("ep_size", 1))
+        self.cfg.ep_rank = int(config.get("ep_rank", 0))
+        self.cfg.dp_size = int(config.get("dp_size", 1))
+        self.cfg.dp_rank = int(config.get("dp_rank", 0))
+        self.cfg.moe_tp_size = int(config.get("moe_tp_size", 1))
+        self.cfg.moe_tp_rank = int(config.get("moe_tp_rank", 0))
+        self.cfg.world_size = int(config.get("world_size", self.cfg.tp_size))
+        if hasattr(self.cfg, "validate"):
+            self.cfg.validate()
+        dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "cuda"))
         self.dtype = dtype
         self.device = device
         tp = self.cfg.tp_size
         assert self.cfg.vocab_size % tp == 0
-        self.model = DeepseekV3Model(self.cfg, dtype, device)
+        self.model: Optional[nn.Module] = None
+        self.lm_head: Optional[nn.Module] = None
+        if build_model:
+            self._build_model()
+
+    def _build_model(self) -> None:
+        tp = self.cfg.tp_size
+        self.model = DeepseekV3Model(
+            self.cfg,
+            self.dtype,
+            self.device,
+        )
         self.lm_head = ColumnParallelLinear(
             self.cfg.hidden_size,
             self.cfg.vocab_size // tp,
             tp,
             gather_output=True,
-            dtype=dtype,
-            device=device,
+            dtype=self.dtype,
+            device=self.device,
         )
 
     def load_weights(
@@ -917,133 +1666,133 @@ class DeepseekV3ForCausalLM(PyModelBase):
         state_dicts: list,
         tp_rank: int,
         tp_size: int,
+        load_lm_head: bool = True,
+        load_embedding: bool = True,
     ) -> None:
         cfg = self.cfg
-        tp_size = cfg.tp_size
-        tp_rank = cfg.tp_rank
+        loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
 
-        params_by_name = dict(self.named_parameters())
-        buffers_by_name = dict(self.named_buffers())
-
-        def find(name: str):
-            for sd in state_dicts:
-                if sd.has(name):
-                    return sd
-            return None
-
-        def load_tensor(name: str) -> torch.Tensor:
-            sd = find(name)
-            assert sd is not None, f"checkpoint tensor not found: {name}"
-            return sd.get_tensor(name)
-
-        def shard(t: torch.Tensor, dim: int, world: int = tp_size, rank: int = tp_rank) -> torch.Tensor:
-            if world <= 1:
-                return t
-            cs = t.size(dim) // world
-            return t.narrow(dim, rank * cs, cs).contiguous()
-
-        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
-            p = params_by_name.get(param_name)
-            if p is None:
-                p = buffers_by_name.get(param_name)
-            assert p is not None, f"no parameter/buffer named {param_name}"
-            p.data.copy_(tensor.to(dtype=p.dtype, device=p.device))
-
-        def load_w8a8_a(prefix: str, proj: str, shard_dims=None) -> None:
-            for suffix in ("weight", "deq_scale", "quant_bias",
-                           "input_scale", "input_offset"):
-                t = load_tensor(prefix + proj + "." + suffix)
-                dim = (shard_dims or {}).get(suffix)
-                if dim is not None:
-                    t = shard(t, dim=dim)
-                copy_in(prefix + proj + "." + suffix, t)
-
-        def load_w8a8_b(mlp_pfx: str) -> None:
-            gw = load_tensor(mlp_pfx + "gate_proj.weight")
-            gs = load_tensor(mlp_pfx + "gate_proj.weight_scale")
-            go = load_tensor(mlp_pfx + "gate_proj.weight_offset")
-            uw = load_tensor(mlp_pfx + "up_proj.weight")
-            us = load_tensor(mlp_pfx + "up_proj.weight_scale")
-            uo = load_tensor(mlp_pfx + "up_proj.weight_offset")
-            copy_in(mlp_pfx + "gate_up_proj.weight",
-                    torch.cat([shard(gw, 0), shard(uw, 0)], dim=0).contiguous())
-            copy_in(mlp_pfx + "gate_up_proj.weight_scale",
-                    torch.cat([shard(gs, 0), shard(us, 0)], dim=0).contiguous())
-            copy_in(mlp_pfx + "gate_up_proj.weight_offset",
-                    torch.cat([shard(go, 0), shard(uo, 0)], dim=0).contiguous())
-            copy_in(mlp_pfx + "down_proj.weight",
-                    shard(load_tensor(mlp_pfx + "down_proj.weight"), dim=1))
-            copy_in(mlp_pfx + "down_proj.weight_scale",
-                    load_tensor(mlp_pfx + "down_proj.weight_scale"))
-            copy_in(mlp_pfx + "down_proj.weight_offset",
-                    load_tensor(mlp_pfx + "down_proj.weight_offset"))
-
-        copy_in("model.embed_tokens.weight",
-                shard(load_tensor("model.embed_tokens.weight"), dim=1))
+        if load_embedding:
+            loader.copy_in(
+                "model.embed_tokens.weight",
+                loader.shard(loader.load_tensor("model.embed_tokens.weight"), dim=1),
+            )
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
-            copy_in(p + "input_layernorm.weight",
-                    load_tensor(p + "input_layernorm.weight"))
-            copy_in(p + "post_attention_layernorm.weight",
-                    load_tensor(p + "post_attention_layernorm.weight"))
+            loader.copy_in(p + "input_layernorm.weight", loader.load_tensor(p + "input_layernorm.weight"))
+            loader.copy_in(
+                p + "post_attention_layernorm.weight", loader.load_tensor(p + "post_attention_layernorm.weight")
+            )
             attn = p + "self_attn."
-            load_w8a8_a(attn, "q_a_proj")
-            copy_in(attn + "q_a_layernorm.weight",
-                    load_tensor(attn + "q_a_layernorm.weight"))
-            load_w8a8_a(attn, "q_b_proj",
-                        {"weight": 0, "deq_scale": 0, "quant_bias": 0})
-            load_w8a8_a(attn, "kv_a_proj_with_mqa")
-            copy_in(attn + "kv_a_layernorm.weight",
-                    load_tensor(attn + "kv_a_layernorm.weight"))
-            copy_in(attn + "kv_b_proj.weight",
-                    shard(load_tensor(attn + "kv_b_proj.weight"), dim=0))
-            load_w8a8_a(attn, "o_proj", {"weight": 1})
+            loader.load_fused_w8a8_a(
+                attn,
+                "qkv_a_proj",
+                ("kv_a_proj_with_mqa", "q_a_proj"),
+            )
+            loader.copy_in(attn + "q_a_layernorm.weight", loader.load_tensor(attn + "q_a_layernorm.weight"))
+            loader.load_w8a8_a(attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0})
+            loader.copy_in(attn + "kv_a_layernorm.weight", loader.load_tensor(attn + "kv_a_layernorm.weight"))
+            loader.copy_in(
+                attn + "kv_b_proj.weight", loader.shard(loader.load_tensor(attn + "kv_b_proj.weight"), dim=0)
+            )
+            loader.load_w8a8_a(attn, "o_proj", {"weight": 1})
             if cfg.index_topk > 0:
                 idx = attn + "indexer."
-                copy_in(idx + "wq_b.weight", load_tensor(idx + "wq_b.weight"))
-                copy_in(idx + "wk.weight", load_tensor(idx + "wk.weight"))
-                copy_in(idx + "weights_proj.weight",
-                        load_tensor(idx + "weights_proj.weight"))
-                copy_in(idx + "k_norm.weight", load_tensor(idx + "k_norm.weight"))
-                copy_in(idx + "k_norm.bias", load_tensor(idx + "k_norm.bias"))
+                loader.copy_in(idx + "wq_b.weight", loader.load_tensor(idx + "wq_b.weight"))
+                loader.copy_in(
+                    idx + "wk_weights_proj.weight",
+                    torch.cat(
+                        [
+                            loader.load_tensor(idx + "wk.weight"),
+                            loader.load_tensor(idx + "weights_proj.weight"),
+                        ],
+                        dim=0,
+                    ).contiguous(),
+                )
+                loader.copy_in(idx + "k_norm.weight", loader.load_tensor(idx + "k_norm.weight"))
+                loader.copy_in(idx + "k_norm.bias", loader.load_tensor(idx + "k_norm.bias"))
             self.model.layers[i].self_attn.process_weights_after_loading()
 
             if i < cfg.first_k_dense_replace:
-                load_w8a8_b(p + "mlp.")
+                loader.load_w8a8_b(p + "mlp.")
                 self.model.layers[i].mlp.process_weights_after_loading()
             else:
                 se = p + "mlp.experts."
+                moe = self.model.layers[i].mlp
+                moe.allocate_experts_w13_for_loading()
                 w13_param = self.get_parameter(p + "mlp.experts_w13")
-                w2_param = self.get_parameter(p + "mlp.experts_w2")
                 w13_scale = self.get_buffer(p + "mlp.experts_w13_scale")
                 w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
+                expert_start = moe.local_expert_start
+                expert_end = moe.local_expert_end
+                shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
+                shard_rank = cfg.moe_tp_rank if cfg.ep_size > 1 else cfg.tp_rank
+                for j in range(expert_start, expert_end):
+                    local_idx = j - expert_start
+                    gw = loader.load_tensor(se + f"{j}.gate_proj.weight")
+                    gs = loader.load_tensor(se + f"{j}.gate_proj.weight_scale")
+                    go = loader.load_tensor(se + f"{j}.gate_proj.weight_offset")
+                    uw = loader.load_tensor(se + f"{j}.up_proj.weight")
+                    us = loader.load_tensor(se + f"{j}.up_proj.weight_scale")
+                    uo = loader.load_tensor(se + f"{j}.up_proj.weight_offset")
+                    w13_param.data[local_idx].copy_(
+                        torch.cat(
+                            [
+                                loader.shard(gw, 0, shard_world, shard_rank),
+                                loader.shard(uw, 0, shard_world, shard_rank),
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+                    w13_scale.data[local_idx].copy_(
+                        torch.cat(
+                            [
+                                loader.shard(gs, 0, shard_world, shard_rank),
+                                loader.shard(us, 0, shard_world, shard_rank),
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+                    w13_offset.data[local_idx].copy_(
+                        torch.cat(
+                            [
+                                loader.shard(go, 0, shard_world, shard_rank),
+                                loader.shard(uo, 0, shard_world, shard_rank),
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+
+                moe.process_experts_w13_after_loading()
+                moe.allocate_experts_w2_for_loading()
+                w2_param = self.get_parameter(p + "mlp.experts_w2")
                 w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
                 w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                for j in range(cfg.n_routed_experts):
-                    gw = load_tensor(se + f"{j}.gate_proj.weight")
-                    gs = load_tensor(se + f"{j}.gate_proj.weight_scale")
-                    go = load_tensor(se + f"{j}.gate_proj.weight_offset")
-                    uw = load_tensor(se + f"{j}.up_proj.weight")
-                    us = load_tensor(se + f"{j}.up_proj.weight_scale")
-                    uo = load_tensor(se + f"{j}.up_proj.weight_offset")
-                    dw = load_tensor(se + f"{j}.down_proj.weight")
-                    ds = load_tensor(se + f"{j}.down_proj.weight_scale")
-                    do = load_tensor(se + f"{j}.down_proj.weight_offset")
-                    w13_param.data[j].copy_(
-                        torch.cat([shard(gw, 0), shard(uw, 0)], dim=0).contiguous())
-                    w13_scale.data[j].copy_(
-                        torch.cat([shard(gs, 0), shard(us, 0)], dim=0).contiguous())
-                    w13_offset.data[j].copy_(
-                        torch.cat([shard(go, 0), shard(uo, 0)], dim=0).contiguous())
-                    w2_param.data[j].copy_(shard(dw, 1).contiguous())
-                    w2_scale.data[j].copy_(ds.contiguous())
-                    w2_offset.data[j].copy_(do.contiguous())
-                copy_in(p + "mlp.gate.weight", load_tensor(p + "mlp.gate.weight"))
-                copy_in(p + "mlp.e_score_correction_bias",
-                        load_tensor(p + "mlp.gate.e_score_correction_bias"))
-                load_w8a8_b(p + "mlp.shared_experts.")
-                self.model.layers[i].mlp.process_weights_after_loading()
+                for j in range(expert_start, expert_end):
+                    local_idx = j - expert_start
+                    dw = loader.load_tensor(se + f"{j}.down_proj.weight")
+                    ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
+                    do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
+                    w2_param.data[local_idx].copy_(loader.shard(dw, 1, shard_world, shard_rank).contiguous())
+                    w2_scale.data[local_idx].copy_(ds.contiguous())
+                    w2_offset.data[local_idx].copy_(do.contiguous())
 
-        copy_in("model.norm.weight", load_tensor("model.norm.weight"))
-        copy_in("lm_head.weight", shard(load_tensor("lm_head.weight"), dim=0))
+                moe.process_experts_w2_after_loading()
+                loader.copy_in(p + "mlp.gate.weight", loader.load_tensor(p + "mlp.gate.weight"))
+                loader.copy_in(
+                    p + "mlp.e_score_correction_bias", loader.load_tensor(p + "mlp.gate.e_score_correction_bias")
+                )
+                saved_tp = (loader.tp_size, loader.tp_rank)
+                loader.tp_size = shard_world
+                loader.tp_rank = shard_rank
+                loader.load_w8a8_b(p + "mlp.shared_experts.")
+                loader.tp_size, loader.tp_rank = saved_tp
+                moe.process_weights_after_loading(skip_expert_format=True)
+
+        loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))
+        if load_lm_head:
+            loader.copy_in(
+                "lm_head.weight",
+                loader.shard(loader.load_tensor("lm_head.weight"), dim=0),
+            )

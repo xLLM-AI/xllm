@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,56 +43,14 @@ GraphWarmupPlan graph_warmup_plan(InstanceRole role) {
   return GraphWarmupPlan::UNIFIED;
 }
 
-std::vector<int32_t> graph_warmup_buckets(int32_t max_seqs_per_batch) {
-  CHECK_GT(max_seqs_per_batch, 0);
-
-  std::vector<int32_t> buckets;
-  const std::vector<int32_t> small_buckets = {1, 2, 4, 8, 16};
-  for (int32_t bucket : small_buckets) {
-    if (bucket <= max_seqs_per_batch) {
-      buckets.emplace_back(bucket);
-    }
-  }
-
-  for (int32_t bucket = 32; bucket <= max_seqs_per_batch; bucket += 16) {
-    buckets.emplace_back(bucket);
-  }
-
-  if (buckets.back() != max_seqs_per_batch) {
-    buckets.emplace_back(max_seqs_per_batch);
-  }
-
-  return buckets;
-}
-
-bool skip_graph_bucket(int32_t bucket, int32_t dp_size) {
-  CHECK_GT(bucket, 0);
-  CHECK_GT(dp_size, 0);
-  return bucket < dp_size;
-}
-
-std::vector<int32_t> graph_decode_buckets(int32_t max_seqs_per_batch,
-                                          int32_t dp_size) {
-  std::vector<int32_t> buckets = graph_warmup_buckets(max_seqs_per_batch);
-  std::vector<int32_t> decode_buckets;
-  decode_buckets.reserve(buckets.size());
-  for (int32_t bucket : buckets) {
-    if (!skip_graph_bucket(bucket, dp_size)) {
-      decode_buckets.emplace_back(bucket);
-    }
-  }
-
-  return decode_buckets;
-}
-
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
-                                  int32_t bucket,
+                                  int32_t token_bucket,
                                   double latency_ms) {
   CHECK_GT(total, 0);
   CHECK_GE(completed, 0);
   CHECK_LE(completed, total);
-  CHECK_GT(bucket, 0);
+  CHECK_GT(token_bucket, 0);
   CHECK_GE(latency_ms, 0.0);
 
   const int32_t filled = static_cast<int32_t>(
@@ -110,8 +68,8 @@ std::string graph_warmup_progress(int32_t completed,
   std::ostringstream oss;
   oss << "Graph warmup progress: [" << bar << "] " << completed << "/" << total
       << " " << std::fixed << std::setprecision(1) << percent
-      << "%, bucket=" << bucket << ", latency=" << std::setprecision(2)
-      << latency_ms << " ms";
+      << "%, token_bucket=" << token_bucket
+      << ", latency=" << std::setprecision(2) << latency_ms << " ms";
   return oss.str();
 }
 

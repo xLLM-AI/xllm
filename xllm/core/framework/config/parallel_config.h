@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,6 +50,7 @@ class ParallelConfig final {
          "sp_size",
          "cfg_size",
          "vae_size",
+         "text_encoder_tp_size",
          "communication_backend",
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
@@ -84,6 +85,8 @@ class ParallelConfig final {
   PROPERTY(int64_t, cfg_size) = 1;
 
   PROPERTY(int64_t, vae_size) = 1;
+
+  PROPERTY(int64_t, text_encoder_tp_size) = 1;
 
   PROPERTY(std::string, communication_backend) = "hccl";
 

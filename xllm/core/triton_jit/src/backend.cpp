@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -334,15 +334,15 @@ std::string TritonBackend::compile(const std::string& path,
   py::module_ mod = py::module_::import(kTritonCompileModule);
   py::list args_spec = specs_to_py(specs);
   py::dict options = options_to_py(compile_options_json());
-  py::object ans = mod.attr("compile")(path,
-                                       name,
-                                       args_spec,
-                                       this->name(),
-                                       options,
-                                       cfg.num_warps,
-                                       cfg.num_stages,
-                                       dev);
-  return ans.cast<std::string>();
+  py::object result = mod.attr("compile")(path,
+                                          name,
+                                          args_spec,
+                                          this->name(),
+                                          options,
+                                          cfg.num_warps,
+                                          cfg.num_stages,
+                                          dev);
+  return result.cast<std::string>();
 }
 
 // Conservative default search space. It targets the currently implemented MLU

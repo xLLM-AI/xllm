@@ -15,14 +15,17 @@ cc_library(
     rms_norm.h
     rotary_embedding.h
     rotary_embedding_util.h
-    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
+    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
     dense_mlp.h
     linear.h
+    $<$<BOOL:${USE_MUSA}>:${CMAKE_CURRENT_SOURCE_DIR}/../musa/linear_block_fp8.h>
     word_embedding_impl.h
     deep_ep.h
     activation.h
     attention_metadata.h
     attention_metadata_builder.h
+    kv_shard_batch_metadata.h
+    expanded_decode_metadata_builder.h
     dsa_metadata.h
     dsa_metadata_builder.h
     dsa_topk_share_plan.h
@@ -41,13 +44,16 @@ cc_library(
     rms_norm.cpp
     rotary_embedding.cpp
     rotary_embedding_util.cpp
-    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
+    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
     dense_mlp.cpp
     linear.cpp
+    $<$<BOOL:${USE_MUSA}>:${CMAKE_CURRENT_SOURCE_DIR}/../musa/linear_block_fp8.cpp>
     word_embedding_impl.cpp
     deep_ep.cpp
     activation.cpp
     attention_metadata_builder.cpp
+    kv_shard_batch_metadata.cpp
+    expanded_decode_metadata_builder.cpp
     dsa_metadata_builder.cpp
     dp_utils.cpp
     add_matmul.cpp
@@ -66,6 +72,7 @@ cc_library(
     gflags::gflags
     torch
     :platform
+    $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_MLU}>:mlu_layers>
     $<$<AND:$<BOOL:${USE_CUDA}>,$<NOT:$<BOOL:${USE_MUSA}>>>:cuda_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
@@ -73,3 +80,8 @@ cc_library(
     $<$<BOOL:${USE_MUSA}>:musa_layers>
     $<$<BOOL:${USE_DCU}>:dcu_layers>
 )
+
+if(USE_NPU)
+  # Repeat the static-library cycle so NPU RoPE symbols are resolved.
+  set_property(TARGET common_layers PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
+endif()

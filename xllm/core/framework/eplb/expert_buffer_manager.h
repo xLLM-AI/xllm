@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,7 +25,8 @@ namespace xllm {
 
 class ExpertBufferManager {
  public:
-  ExpertBufferManager(int32_t num_experts,
+  ExpertBufferManager(const std::string& service_namespace,
+                      int32_t num_experts,
                       int32_t num_layers,
                       int64_t shm_size_per_expert);
 
@@ -39,6 +40,7 @@ class ExpertBufferManager {
                            const std::string& tensor_name);
 
  private:
+  const std::string service_namespace_;
   std::vector<std::unique_ptr<ExpertBufferShm>> expert_buffers_;
   const int32_t num_experts_;
   const int32_t num_layers_;

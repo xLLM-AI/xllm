@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,8 @@ limitations under the License.
 
 DEFINE_uint32(prefetch_timeout,
               0,
-              "Prefetch timeout for prefetch from kv cache store.");
+              "Stop issuing new KV cache Store prefetch batches after this "
+              "timeout; wait for in-flight batches before admission.");
 
 DEFINE_uint32(prefetch_batch_size,
               2,
@@ -41,7 +42,8 @@ DEFINE_string(store_protocol,
 
 DEFINE_string(store_master_server_address,
               "",
-              "The address information of the store master service.");
+              "The Store master address: IP:Port for standalone mode or "
+              "etcd://IP:Port;IP:Port;... for high availability mode.");
 
 DEFINE_string(store_metadata_server,
               "",

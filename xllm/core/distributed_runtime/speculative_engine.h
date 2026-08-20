@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -47,6 +47,13 @@ class SpeculativeEngine : public Engine {
 
   const ModelArgs& model_args() const override { return model_args_; }
 
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
+      override;
+
+  runtime::DecodeGraphExecutionShape decode_graph_execution_shape()
+      const override;
+
   const TokenizerArgs& tokenizer_args() const override {
     return engine_->tokenizer_args();
   }
@@ -57,27 +64,12 @@ class SpeculativeEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const override;
 
   // P/D
-  bool pull_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
-
-  bool pull_hetero_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+  bool pull_kv_blocks(const int32_t src_dp_size,
+                      const int32_t src_dp_rank,
+                      const std::vector<uint64_t>& src_cluster_ids,
+                      const std::vector<std::string>& src_addrs,
+                      const int32_t dst_dp_rank,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,

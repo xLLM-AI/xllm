@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,8 +17,8 @@
 At ``tp_size==1`` these hold full-size weights and skip all collectives, so they
 are numerically identical to plain ``nn.Linear`` and preserve the single-card
 byte parity. At ``tp_size>1`` each rank holds a per-partition shard and inserts
-the same all-reduce / all-gather the native C++ parallel layers use (via the op
-dispatch layer :mod:`python.ops`).
+the same all-reduce / all-gather the native C++ parallel layers use (via
+:mod:`python.distributed`).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import distributed, kernels
 
 
 class ColumnParallelLinear(nn.Module):
@@ -62,16 +62,14 @@ class ColumnParallelLinear(nn.Module):
             )
         )
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features_per_partition, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features_per_partition, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.linear(x, self.weight, self.bias)
         if self.gather_output and self.tp_size > 1:
-            out = ops.all_gather(out, dim=-1, world_size=self.tp_size)
+            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
         return out
 
 
@@ -92,10 +90,16 @@ class RowParallelLinear(nn.Module):
         bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self._weight_is_transposed = False
+        self.reduce_results = reduce_results
+        if bias and not reduce_results:
+            # The bias is replicated and must be added exactly once, which is
+            # only possible here when this layer owns the reduction.
+            raise ValueError("a deferred reduction cannot be combined with a replicated bias")
         self.weight = nn.Parameter(
             torch.empty(
                 out_features,
@@ -105,31 +109,25 @@ class RowParallelLinear(nn.Module):
             )
         )
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
 
-    def format_npu_weight_(self) -> None:
-        """Store the weight as ``[K, N]`` FRACTAL_NZ for non-transposed matmul."""
-        if self.weight.device.type not in ("npu", "privateuseone"):
-            return
+    def process_weights_after_loading(self) -> None:
+        """Prepare the weight layout selected by the active device backend."""
         if self._weight_is_transposed:
             return
-        import torch_npu
-
-        transposed = self.weight.data.transpose(0, 1).contiguous()
-        self.weight.data = torch_npu.npu_format_cast(transposed, 29)
-        self._weight_is_transposed = True
+        prepared, is_transposed = kernels.prepare_row_parallel_weight(self.weight.data)
+        self.weight.data = prepared
+        self._weight_is_transposed = is_transposed
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._weight_is_transposed:
             out = torch.matmul(x, self.weight)
         else:
             out = torch.nn.functional.linear(x, self.weight)
-        if self.tp_size > 1:
-            ops.all_reduce_(out)
+        if self.tp_size > 1 and self.reduce_results:
+            distributed.all_reduce_(out)
         if self.bias is not None:
             out = out + self.bias
         return out

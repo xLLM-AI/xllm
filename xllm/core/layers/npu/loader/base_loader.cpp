@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@ limitations under the License.
 #include "base_loader.h"
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/platform/sleepable_allocator.h"
 #include "framework/xtensor/xtensor_allocator.h"
@@ -72,6 +73,14 @@ BaseLoader::BaseLoader(uint64_t weight_count,
 BaseLoader::~BaseLoader() {
   release_host_storage();
   release_device_storage();
+}
+
+std::string BaseLoader::expert_shm_namespace() const {
+  const std::string& master_node_addr =
+      ::xllm::DistributedConfig::get_instance().master_node_addr();
+  CHECK(!master_node_addr.empty())
+      << "EPLB expert SHM requires master_node_addr for service isolation.";
+  return master_node_addr + "|" + model_id_;
 }
 
 // ----------------------------- set_weight ---------------------------------

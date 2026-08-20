@@ -6,8 +6,8 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 
 def repo_root() -> Path:
@@ -38,8 +38,7 @@ def resolve_tilelang_root() -> Path:
         return installed_root
 
     raise RuntimeError(
-        "TileLang is not installed. Run `python xllm/compiler/tilelang_launcher.py "
-        "prepare-ascend` first."
+        "TileLang is not installed. Run `python xllm/compiler/tilelang_launcher.py prepare-ascend` first."
     )
 
 
@@ -59,9 +58,7 @@ def prepend_pythonpath(env: dict[str, str], path: str) -> None:
 
 
 def prepare_tilelang_import(tilelang_root: str | Path | None = None) -> Path:
-    tl_root = (
-        Path(tilelang_root).resolve() if tilelang_root is not None else resolve_tilelang_root()
-    )
+    tl_root = Path(tilelang_root).resolve() if tilelang_root is not None else resolve_tilelang_root()
     import_path = tl_root.parent
     os.environ["TL_ROOT"] = str(tl_root)
     prepend_pythonpath(os.environ, str(import_path))

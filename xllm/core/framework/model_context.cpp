@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -97,6 +97,20 @@ ModelContext ModelContext::with_parallel_args(
   derived.model_id_ = model_id_;
   derived.optimization_config_ = optimization_config_;
   derived.flash_comm1_options_ = flash_comm1_options_;
+  return derived;
+}
+
+ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
+#if defined(USE_NPU)
+  ModelContext derived(
+      parallel_args_, model_args_, quant_args, tensor_options_, context_);
+  derived.atb_workspace_ = atb_workspace_;
+#else
+  ModelContext derived(
+      parallel_args_, model_args_, quant_args, tensor_options_);
+#endif
+  derived.model_id_ = model_id_;
+  derived.derive_optimization_config();
   return derived;
 }
 

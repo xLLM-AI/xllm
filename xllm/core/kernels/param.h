@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -1450,6 +1450,7 @@ struct DispatchFFNCombineParams {
   torch::TensorList scale2;
   // Router probabilities. Shape: [num_tokens, topk], dtype fp32.
   torch::Tensor probs;
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
   // HCCL communication group name.
   std::string group;
   int64_t max_output_size = 0;
@@ -1933,6 +1934,60 @@ struct NpuInplacePartialRotaryMulParams {
   torch::Tensor r2;
   std::string rotary_mode = "interleave";
   std::vector<int64_t> partial_slice;
+};
+
+// Parameters for the fused expert-parallel mega MoE kernel.
+// Wraps the NPU apply_npu_mega_moe op: dispatch + grouped GEMM (gate/up) +
+// activation + combine grouped GEMM (down) + combine, in one fused call.
+struct MegaMoeParams {
+  // HCCL context tensor that carries the communicator handle.
+  torch::Tensor context;
+  // Input hidden states. Shape: [num_tokens, hidden_size].
+  torch::Tensor x;
+  // Routed expert ids. Shape: [num_tokens, topk], dtype int32.
+  torch::Tensor topk_ids;
+  // Router top-k weights. Shape: [num_tokens, topk], dtype fp32.
+  torch::Tensor topk_weights;
+  // First expert weights as TensorList (gate/up projection).
+  torch::TensorList weight1;
+  // Second expert weights as TensorList (down projection).
+  torch::TensorList weight2;
+  // Total number of experts across all ranks.
+  int64_t moe_expert_num = 0;
+  // Expert-parallel world size.
+  int64_t ep_world_size = 1;
+  // HCCL communication buffer size in bytes.
+  int64_t ccl_buffer_size = 0;
+  // Optional W8A8/int8 weight scales for weight1.
+  std::optional<torch::TensorList> weight_scales1 = std::nullopt;
+  // Optional W8A8/int8 weight scales for weight2.
+  std::optional<torch::TensorList> weight_scales2 = std::nullopt;
+  // Optional bias list added to the first matmul output.
+  std::optional<torch::TensorList> bias1 = std::nullopt;
+  // Optional bias list added to the second matmul output.
+  std::optional<torch::TensorList> bias2 = std::nullopt;
+  // Optional active token mask. Shape: [num_tokens], dtype int8/bool.
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  // Maximum number of tokens that can be received from remote ranks.
+  int64_t max_recv_token_num = 0;
+  // Dispatch communication quantization mode.
+  int64_t dispatch_quant_mode = 0;
+  // Combine communication quantization mode.
+  int64_t combine_quant_mode = 0;
+  // HCCL communication algorithm name.
+  std::string comm_alg = "";
+  // Maximum number of tokens per rank for the all-to-all buffer.
+  int64_t num_max_tokens_per_rank = 0;
+  // Activation function name for the gated MLP.
+  std::string activation = "swiglu";
+  // Clamp limit applied to the activation output.
+  float activation_clamp = std::numeric_limits<float>::max();
+  // Output dtype used by dispatch quantization.
+  int64_t dispatch_quant_out_dtype = 0;
+  // Topology type for the expert-parallel communication.
+  int64_t topo_type = 0;
+  // Number of ranks per server node.
+  int64_t rank_num_per_server = 2;
 };
 
 }  // namespace xllm::kernel

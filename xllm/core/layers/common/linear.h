@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -39,6 +39,11 @@ struct LinearExtraArgs {
       : act_mode(act_mode_), is_gated(is_gated_) {}
 };
 
+struct W8A8DynamicInput {
+  torch::Tensor activation;
+  torch::Tensor per_token_scale;
+};
+
 // Linear layer with column parallelism.
 // The linear layer is defined as Y = XA + b. A is parallelized along
 // its second dimension as A = [A_1, ..., A_p].
@@ -58,6 +63,8 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   ColumnParallelLinearImpl(const ModelContext& context);
 
   torch::Tensor forward(torch::Tensor input);
+
+  torch::Tensor forward_quantized(const W8A8DynamicInput& input);
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);
@@ -119,6 +126,9 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+#if defined(USE_MUSA)
+  DEFINE_FUSED_WEIGHT(weight_scale_inv);
+#endif
 
   // NPU static W8A8 parameters.
   DEFINE_FUSED_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
@@ -147,6 +157,10 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  bool block_fp8_resolved_unquantized_ = false;
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
 };
 TORCH_MODULE(ColumnParallelLinear);
 
@@ -177,8 +191,26 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   }
 
   // return the weight (for testing)
-  torch::Tensor weight() const { return weight_; }
-  bool is_weight_loaded() const { return weight_is_loaded_; }
+  torch::Tensor weight() const {
+    if (qweight_is_loaded_) {
+      return qweight_;
+    }
+    return weight_;
+  }
+  torch::Tensor per_channel_scale() const { return per_channel_scale_; }
+  std::optional<torch::Tensor> smooth() const {
+    if (smooth_is_loaded_) {
+      return smooth_;
+    }
+    return std::nullopt;
+  }
+  bool is_weight_loaded() const {
+    if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+      return qweight_is_loaded_ && per_channel_scale_is_loaded_ &&
+             smooth_is_loaded_;
+    }
+    return weight_is_loaded_;
+  }
 
   // Accessors for W8A8 dynamic quantization parameters.
   // Used by attention layers to reorder weight_scale/weight_offset
@@ -197,12 +229,18 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   // we allocate the transpose since linear performs XA^T.
   // A^T: [out_features_per_partition, in_features]
   DEFINE_FUSED_WEIGHT(weight);
+  DEFINE_FUSED_WEIGHT(qweight);
+  DEFINE_FUSED_WEIGHT(per_channel_scale);
+  DEFINE_WEIGHT(smooth);
   DEFINE_FUSED_WEIGHT(bias);
 
   // FP8 quantization parameters
   DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+#if defined(USE_MUSA)
+  DEFINE_FUSED_WEIGHT(weight_scale_inv);
+#endif
 
   // NPU static W8A8 parameters.
   DEFINE_FUSED_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
@@ -232,6 +270,10 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   QuantArgs quant_args_;
   at::ScalarType output_dtype_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  bool block_fp8_resolved_unquantized_ = false;
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
 };
 TORCH_MODULE(QKVParallelLinear);
 
@@ -312,6 +354,9 @@ class RowParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+#if defined(USE_MUSA)
+  DEFINE_WEIGHT(weight_scale_inv);
+#endif
 
   // NPU static W8A8 parameters.
   DEFINE_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
@@ -341,6 +386,10 @@ class RowParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  bool block_fp8_resolved_unquantized_ = false;
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
   mutable torch::Tensor mmrs_weight_t_;
 };
 TORCH_MODULE(RowParallelLinear);
@@ -388,6 +437,9 @@ class ReplicatedLinearImpl : public torch::nn::Module {
   torch::TensorOptions options_;
   at::ScalarType output_dtype_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
 };
 TORCH_MODULE(ReplicatedLinear);
 

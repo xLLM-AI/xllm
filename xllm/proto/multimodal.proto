@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -81,7 +81,7 @@ message MMChatRequest {
   // string function_call = 4;
 
   // temperature of the sampling, between [0, 2]. default = 0.0
-  // higher value will make the ouput more random, while a lower value will make it more deterministic.
+  // higher value will make the output more random, while a lower value will make it more deterministic.
   // it is recommended altering this or top_p but not both.
   optional float temperature = 5;
 
@@ -120,7 +120,7 @@ message MMChatRequest {
   // the list of token ids where the API will stop generating further tokens.
   repeated int32 stop_token_ids = 16;
 
-  // repetition penalty to penalize new tokens based on their occurence in the
+  // repetition penalty to penalize new tokens based on their occurrence in the
   // text. values > 1.0 encourage the model to use new tokens, while values
   // < 1.0 encourage the model to repeat tokens. default = 1.0
   optional float repetition_penalty = 17;

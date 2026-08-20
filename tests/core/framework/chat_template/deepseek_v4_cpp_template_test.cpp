@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -65,13 +65,38 @@ TEST(DeepseekV4CppTemplate, BasicChatModeUserMessage) {
   messages.emplace_back("system", "You are a helpful assistant.");
   messages.emplace_back("user", "Hello");
 
+  // Chat mode has to be asked for explicitly: an absent thinking flag now
+  // means thinking. See BareRequestDefaultsToThinkingWithHighEffort.
   nlohmann::ordered_json kwargs = nlohmann::json::object();
+  kwargs["thinking"] = false;
   auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
   ASSERT_TRUE(prompt.has_value());
 
   EXPECT_EQ(*prompt,
             "<｜begin▁of▁sentence｜>You are a helpful assistant."
             "<｜User｜>Hello<｜Assistant｜></think>");
+}
+
+// A request carrying no thinking flag at all defaults to thinking with the
+// "high" effort tier, matching vLLM's DeepSeek-V4 tokenizer wrapper
+// (thinking_enabled = True when neither "thinking" nor "enable_thinking" is
+// present, then reasoning_effort = "high").
+TEST(DeepseekV4CppTemplate, BareRequestDefaultsToThinkingWithHighEffort) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "Hello");
+
+  nlohmann::ordered_json kwargs = nlohmann::json::object();
+  auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_NE(prompt->find("Reasoning Effort: Absolute maximum"),
+            std::string::npos);
+  EXPECT_EQ(prompt->find("Reasoning Effort: Beyond maximum"),
+            std::string::npos);
+  EXPECT_NE(prompt->find("<｜User｜>Hello<｜Assistant｜><think>"),
+            std::string::npos);
 }
 
 TEST(DeepseekV4CppTemplate, ThinkingModeAddsThinkAfterLastUser) {
@@ -85,9 +110,41 @@ TEST(DeepseekV4CppTemplate, ThinkingModeAddsThinkAfterLastUser) {
   auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
   ASSERT_TRUE(prompt.has_value());
 
+  // An absent reasoning_effort resolves to the "high" tier, so the prefix is
+  // present. See ReasoningEffortHighPrefixesThinkingPrompt.
   EXPECT_EQ(*prompt,
-            "<｜begin▁of▁sentence｜><｜User｜>Hello"
-            "<｜Assistant｜><think>");
+            std::string("<｜begin▁of▁sentence｜>") +
+                "Reasoning Effort: Absolute maximum with no shortcuts "
+                "permitted.\n"
+                "You MUST be very thorough in your thinking and "
+                "comprehensively decompose the problem to resolve the root "
+                "cause, rigorously stress-testing your logic against all "
+                "potential paths, edge cases, and adversarial scenarios.\n"
+                "Explicitly write out your entire deliberation process, "
+                "documenting every intermediate step, considered alternative, "
+                "and rejected hypothesis to ensure absolutely no assumption is "
+                "left unchecked.\n\n"
+                "<｜User｜>Hello<｜Assistant｜><think>");
+}
+
+TEST(DeepseekV4CppTemplate, ReportsRenderedGenerationMode) {
+  auto encoder = make_encoder();
+  ChatMessages messages;
+  messages.emplace_back("user", "Hello");
+
+  auto chat = encoder.apply_with_generation_mode(
+      messages,
+      /*json_tools=*/{},
+      nlohmann::ordered_json{{"thinking", false}});
+  ASSERT_TRUE(chat.has_value());
+  EXPECT_EQ(chat->generation_mode, ChatTemplateGenerationMode::CHAT);
+
+  auto reasoning = encoder.apply_with_generation_mode(
+      messages,
+      /*json_tools=*/{},
+      nlohmann::ordered_json{{"thinking", true}});
+  ASSERT_TRUE(reasoning.has_value());
+  EXPECT_EQ(reasoning->generation_mode, ChatTemplateGenerationMode::REASONING);
 }
 
 TEST(DeepseekV4CppTemplate, UsesToolCallsBlockName) {
@@ -124,6 +181,7 @@ TEST(DeepseekV4CppTemplate, ToolResultIsMergedAsUserToolResult) {
   messages.push_back(tool_msg);
 
   nlohmann::ordered_json kwargs = nlohmann::json::object();
+  kwargs["thinking"] = false;
   auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
   ASSERT_TRUE(prompt.has_value());
 
@@ -195,6 +253,7 @@ TEST(DeepseekV4CppTemplate, LatestReminderUsesDedicatedToken) {
   messages.emplace_back("user", "你好");
 
   nlohmann::ordered_json kwargs = nlohmann::json::object();
+  kwargs["thinking"] = false;
   auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
   ASSERT_TRUE(prompt.has_value());
 
@@ -212,6 +271,7 @@ TEST(DeepseekV4CppTemplate, AdjacentUserMessagesAreMergedAsContentBlocks) {
   messages.emplace_back("user", "second");
 
   nlohmann::ordered_json kwargs = nlohmann::json::object();
+  kwargs["thinking"] = false;
   auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
   ASSERT_TRUE(prompt.has_value());
 
@@ -246,7 +306,7 @@ TEST(DeepseekV4CppTemplate, ToolResultsAreSortedByToolCallId) {
   EXPECT_LT(first_pos, second_pos);
 }
 
-TEST(DeepseekV4CppTemplate, ReasoningEffortMaxPrefixesThinkingPrompt) {
+std::optional<std::string> render_with_effort(const std::string& effort) {
   auto encoder = make_encoder();
 
   ChatMessages messages;
@@ -254,14 +314,102 @@ TEST(DeepseekV4CppTemplate, ReasoningEffortMaxPrefixesThinkingPrompt) {
 
   nlohmann::ordered_json kwargs = nlohmann::json::object();
   kwargs["thinking"] = true;
+  if (!effort.empty()) {
+    kwargs["reasoning_effort"] = effort;
+  }
+  return encoder.apply(messages, /*json_tools=*/{}, kwargs);
+}
+
+// DeepSeek-V4-Flash-0731 introduced a third tier above "high". Only "max"
+// reaches it.
+TEST(DeepseekV4CppTemplate, ReasoningEffortMaxPrefixesThinkingPrompt) {
+  auto prompt = render_with_effort("max");
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_NE(prompt->find("Reasoning Effort: Beyond maximum"),
+            std::string::npos);
+  EXPECT_EQ(prompt->find("Reasoning Effort: Absolute maximum"),
+            std::string::npos);
+  EXPECT_LT(prompt->find("Reasoning Effort: Beyond maximum"),
+            prompt->find("<｜User｜>hard problem"));
+}
+
+// "high" and its alias "xhigh" carry the "Absolute maximum" prefix, as does an
+// absent or unrecognized value.
+TEST(DeepseekV4CppTemplate, ReasoningEffortHighPrefixesThinkingPrompt) {
+  for (const std::string effort : {"high", "xhigh", "unexpected", ""}) {
+    auto prompt = render_with_effort(effort);
+    ASSERT_TRUE(prompt.has_value()) << "effort=" << effort;
+    EXPECT_NE(prompt->find("Reasoning Effort: Absolute maximum"),
+              std::string::npos)
+        << "effort=" << effort;
+    EXPECT_EQ(prompt->find("Reasoning Effort: Beyond maximum"),
+              std::string::npos)
+        << "effort=" << effort;
+    EXPECT_LT(prompt->find("Reasoning Effort: Absolute maximum"),
+              prompt->find("<｜User｜>hard problem"))
+        << "effort=" << effort;
+  }
+}
+
+// "minimal", "low" and "medium" collapse to the "low" tier, which renders no
+// prefix at all.
+TEST(DeepseekV4CppTemplate, ReasoningEffortLowAddsNoPrefix) {
+  for (const std::string effort : {"minimal", "low", "medium"}) {
+    auto prompt = render_with_effort(effort);
+    ASSERT_TRUE(prompt.has_value()) << "effort=" << effort;
+    EXPECT_EQ(prompt->find("Reasoning Effort:"), std::string::npos)
+        << "effort=" << effort;
+    EXPECT_NE(prompt->find("<｜User｜>hard problem"), std::string::npos)
+        << "effort=" << effort;
+  }
+}
+
+// "none" disables thinking outright even though thinking=true was passed, so
+// the prompt is rendered in chat mode (closing </think> instead of <think>).
+TEST(DeepseekV4CppTemplate, ReasoningEffortNoneDisablesThinking) {
+  auto prompt = render_with_effort("none");
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_EQ(*prompt,
+            "<｜begin▁of▁sentence｜><｜User｜>hard problem"
+            "<｜Assistant｜></think>");
+}
+
+// A reasoning_effort on its own enables thinking, without any thinking flag.
+TEST(DeepseekV4CppTemplate, ReasoningEffortAloneEnablesThinking) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "hard problem");
+
+  nlohmann::ordered_json kwargs = nlohmann::json::object();
   kwargs["reasoning_effort"] = "max";
   auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
   ASSERT_TRUE(prompt.has_value());
 
-  EXPECT_NE(prompt->find("Reasoning Effort: Absolute maximum"),
+  EXPECT_NE(prompt->find("Reasoning Effort: Beyond maximum"),
             std::string::npos);
-  EXPECT_LT(prompt->find("Reasoning Effort: Absolute maximum"),
-            prompt->find("<｜User｜>hard problem"));
+  EXPECT_NE(prompt->find("<｜Assistant｜><think>"), std::string::npos);
+}
+
+// An explicit thinking flag still wins over the effort, and chat mode never
+// carries a prefix.
+TEST(DeepseekV4CppTemplate, ExplicitThinkingFalseOverridesReasoningEffort) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "hard problem");
+
+  nlohmann::ordered_json kwargs = nlohmann::json::object();
+  kwargs["thinking"] = false;
+  kwargs["reasoning_effort"] = "max";
+  auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_EQ(*prompt,
+            "<｜begin▁of▁sentence｜><｜User｜>hard problem"
+            "<｜Assistant｜></think>");
 }
 
 }  // namespace

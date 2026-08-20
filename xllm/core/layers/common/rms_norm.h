@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,6 +46,8 @@ class RMSNormImpl : public torch::nn::Module {
   void set_layernorm_mode();
 
   void load_state_dict(const StateDict& state_dict);
+
+  void verify_loaded_weights(const std::string& prefix) const;
 
   torch::Tensor weight() const { return weight_; }
   torch::Tensor bias() const { return bias_; }

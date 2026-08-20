@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -75,6 +75,7 @@ class Stream {
   const PlatformStream* get_stream() const { return &stream_; }
   void wait_stream(const Stream& other_stream);
   StreamEventPtr record_event() const;
+  StreamEventPtr record_event_or_sync() const;
   bool wait_event(const StreamEventPtr& event) const;
 
   // Support for LOG(INFO) output

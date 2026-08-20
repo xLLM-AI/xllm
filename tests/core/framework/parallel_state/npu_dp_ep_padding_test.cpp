@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -126,6 +126,57 @@ TEST(DpEpPaddingTest, BuildAttnUnpaddingWithTrailingEmptyDpGroup) {
 
   EXPECT_TRUE(torch::equal(dp_ep_padding_data.attn_unpadding_idx(),
                            torch::tensor({0, 1}, torch::kInt32)));
+}
+
+TEST(DpEpPaddingCacheTest, ReusesBAndTwoBLayouts) {
+  DpEpPaddingCache cache(/*capacity=*/2);
+  DpEpPaddingData b_data;
+  b_data.attn_padding_idx(torch::tensor({1}, torch::kInt32));
+  DpEpPaddingData two_b_data;
+  two_b_data.attn_padding_idx(torch::tensor({2}, torch::kInt32));
+
+  cache.insert({4}, {}, b_data);
+  cache.insert({8}, {8}, two_b_data);
+
+  const DpEpPaddingData* cached_b = cache.find({4}, {4});
+  const DpEpPaddingData* cached_two_b = cache.find({8}, {});
+  ASSERT_NE(cached_b, nullptr);
+  ASSERT_NE(cached_two_b, nullptr);
+  EXPECT_EQ(cached_b->attn_padding_idx().item<int32_t>(), 1);
+  EXPECT_EQ(cached_two_b->attn_padding_idx().item<int32_t>(), 2);
+}
+
+TEST(DpEpPaddingCacheTest, DistinguishesDataParallelTokenDistributions) {
+  DpEpPaddingCache cache(/*capacity=*/2);
+  DpEpPaddingData b_data;
+  b_data.attn_padding_idx(torch::tensor({1}, torch::kInt32));
+  DpEpPaddingData two_b_data;
+  two_b_data.attn_padding_idx(torch::tensor({2}, torch::kInt32));
+
+  cache.insert({1, 2}, {1, 2}, b_data);
+  cache.insert({2, 4}, {2, 4}, two_b_data);
+
+  const DpEpPaddingData* cached_b = cache.find({1, 2}, {1, 2});
+  const DpEpPaddingData* cached_two_b = cache.find({2, 4}, {2, 4});
+  ASSERT_NE(cached_b, nullptr);
+  ASSERT_NE(cached_two_b, nullptr);
+  EXPECT_EQ(cached_b->attn_padding_idx().item<int32_t>(), 1);
+  EXPECT_EQ(cached_two_b->attn_padding_idx().item<int32_t>(), 2);
+  EXPECT_EQ(cache.find({2, 1}, {2, 1}), nullptr);
+  EXPECT_EQ(cache.find({1, 2}, {2, 1}), nullptr);
+}
+
+TEST(DpEpPaddingCacheTest, EvictsOldLayoutAtCapacity) {
+  DpEpPaddingCache cache(/*capacity=*/2);
+  DpEpPaddingData data;
+
+  cache.insert({4}, {}, data);
+  cache.insert({8}, {}, data);
+  cache.insert({6}, {}, data);
+
+  EXPECT_EQ(cache.find({4}, {}), nullptr);
+  EXPECT_NE(cache.find({8}, {}), nullptr);
+  EXPECT_NE(cache.find({6}, {}), nullptr);
 }
 
 }  // namespace xllm

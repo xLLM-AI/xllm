@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -59,7 +59,12 @@ class DeepseekV4AttentionImpl final : public torch::nn::Module {
   // q_down / kv_down are the precomputed fused-projection slices for the q_a
   // and kv projections (segments 0 and 1 of hidden_proj); the attention layer
   // merges the hidden->* GEMMs into a single fused_wqa_wkv_ call and splits.
-  torch::Tensor project_q(torch::Tensor& q_down, torch::Tensor& qr);
+  torch::Tensor project_q(torch::Tensor& q_down,
+                          torch::Tensor& qr,
+                          bool use_fused_decode,
+                          const torch::Tensor& sin_table,
+                          const torch::Tensor& cos_table,
+                          const torch::Tensor& input_positions);
 
   torch::Tensor project_kv(torch::Tensor& kv_down);
 

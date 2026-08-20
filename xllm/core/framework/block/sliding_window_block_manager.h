@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,6 +35,7 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
   // invalid placeholders in their slots. Called by the composite after a
   // successful allocate commit.
   void release_out_of_window(Sequence* seq) override;
+  void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   // Gap-tolerant SWA probe. Delegates to LinearStatePrefixCache::match; see
   // that class for the shape returned. Composite owns the tail-continuity
@@ -46,6 +47,11 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
       const Slice<XXH3Key>& block_hashes = {}) override;
 
   uint32_t swa_blocks_per_seq() const { return options_.swa_blocks_per_seq(); }
+
+ private:
+  void release_out_of_window(Sequence* seq,
+                             KVCacheState& kv_state,
+                             size_t cached_tokens);
 };
 
 }  // namespace xllm

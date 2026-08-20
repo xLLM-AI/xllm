@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,11 +21,12 @@ limitations under the License.
 
 namespace xllm::spawn_worker_protocol {
 
-inline constexpr int32_t kArgumentCount = 37;
+inline constexpr int32_t kArgumentCount = 38;
 inline constexpr int32_t kMinimumArgumentCount = 34;
 inline constexpr int32_t kIndexerCacheDtypeArgumentIndex = 34;
 inline constexpr int32_t kEnableMtpDraftBodyTp1ArgumentIndex = 35;
-inline constexpr int32_t kDecodeContextParallelSizeArgumentIndex = 36;
+inline constexpr int32_t kTextEncoderTpSizeArgumentIndex = 36;
+inline constexpr int32_t kDecodeContextParallelSizeArgumentIndex = 37;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
 
 inline std::optional<std::string> parse_indexer_cache_dtype(

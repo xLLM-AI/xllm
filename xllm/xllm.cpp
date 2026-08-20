@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -114,6 +114,14 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const DiTConfig& dit_config = DiTConfig::get_instance();
   const RecConfig& rec_config = RecConfig::get_instance();
 
+  if (kv_cache_store_config.enable_kvcache_store()) {
+    CHECK(kv_cache_config.enable_prefix_cache())
+        << "KV cache Store requires --enable_prefix_cache=true.";
+    CHECK_GT(kv_cache_store_config.host_blocks_factor(), 1.0)
+        << "KV cache Store requires --host_blocks_factor > 1 so Host cache "
+           "blocks can serve as transfer destinations.";
+  }
+
 #if !defined(USE_NPU)
   CHECK(!speculative_config.enable_mtp_draft_body_tp1())
       << "enable_mtp_draft_body_tp1 is only supported on the NPU backend";
@@ -161,13 +169,18 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .speculative_suffix_use_tree_spec(
           speculative_config.speculative_suffix_use_tree_spec())
       .enable_mtp_draft_body_tp1(speculative_config.enable_mtp_draft_body_tp1())
+      .enable_adaptive_speculative_decode(
+          speculative_config.enable_adaptive_speculative_decode())
+      .adaptive_speculative_min_gain(
+          speculative_config.adaptive_speculative_min_gain())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())
       .communication_backend(parallel_config.communication_backend())
       .enable_eplb(eplb_config.enable_eplb())
       .redundant_experts_num(eplb_config.redundant_experts_num())
       .eplb_update_interval(eplb_config.eplb_update_interval())
-      .eplb_update_threshold(eplb_config.eplb_update_threshold())
+      .eplb_min_peak_load_improvement(
+          eplb_config.eplb_min_peak_load_improvement())
       .rank_tablefile(eplb_config.rank_tablefile())
       .expert_parallel_degree(eplb_config.expert_parallel_degree())
       .enable_chunked_prefill(scheduler_config.enable_chunked_prefill())
@@ -188,6 +201,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .sp_size(static_cast<int32_t>(parallel_config.sp_size()))
       .cfg_size(static_cast<int32_t>(parallel_config.cfg_size()))
       .vae_size(static_cast<int32_t>(parallel_config.vae_size()))
+      .text_encoder_tp_size(
+          static_cast<int32_t>(parallel_config.text_encoder_tp_size()))
       .instance_name(instance_name)
       .enable_disagg_pd(disagg_pd_config.enable_disagg_pd())
       .enable_pd_ooc(disagg_pd_config.enable_pd_ooc())
@@ -203,9 +218,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_online_preempt_offline(
           scheduler_config.enable_online_preempt_offline())
       .host_blocks_factor(kv_cache_store_config.host_blocks_factor())
-      .enable_kvcache_store(kv_cache_store_config.enable_kvcache_store() &&
-                            kv_cache_config.enable_prefix_cache() &&
-                            (kv_cache_store_config.host_blocks_factor() > 1.0))
+      .enable_kvcache_store(kv_cache_store_config.enable_kvcache_store())
       .prefetch_timeout(kv_cache_store_config.prefetch_timeout())
       .prefetch_batch_size(kv_cache_store_config.prefetch_batch_size())
       .layers_wise_copy_batchs(kv_cache_store_config.layers_wise_copy_batchs())
@@ -436,6 +449,8 @@ int run() {
   std::filesystem::path model_path =
       std::filesystem::path(model_config.model()).lexically_normal();
   const std::string default_model_name = xllm::util::get_model_name(model_path);
+  const std::string model_repository_name =
+      xllm::util::get_model_repository_name(model_path);
 
   if (model_config.model_id().empty()) {
     // use last part of the path as model id
@@ -468,7 +483,7 @@ int run() {
   }
 
 // disable block copy kernel on unsupported backends
-#if !defined(USE_NPU) && !defined(USE_CUDA)
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
   beam_search_config.enable_block_copy_kernel(false);
 #endif
   std::string model_type = "";
@@ -550,12 +565,13 @@ int run() {
 
   // supported models
   std::vector<std::string> model_names = {model_config.model_id()};
+  std::vector<std::string> model_repository_names = {model_repository_name};
   std::string model_version = default_model_name;
   std::vector<std::string> model_versions = {model_version};
 
   if (distributed_config.node_rank() == 0 || kv_cache_config.enable_xtensor()) {
-    auto api_service =
-        std::make_unique<APIService>(master.get(), model_names, model_versions);
+    auto api_service = std::make_unique<APIService>(
+        master.get(), model_names, model_repository_names, model_versions);
     auto xllm_server =
         ServerRegistry::get_instance().register_server("HttpServer");
 

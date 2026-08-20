@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -210,6 +210,7 @@ c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
   c10d::TCPStoreOptions tcp_options;
   tcp_options.isServer = (rank == 0);
   tcp_options.port = port;
+  tcp_options.multiTenant = true;
   return c10::make_intrusive<c10d::TCPStore>(host, tcp_options);
 }
 
@@ -548,6 +549,16 @@ c10::intrusive_ptr<c10d::Work> ProcessGroup::batch_isend_irecv(
              int64_t peer_rank,
              int32_t tag) { return recv_p2p(wave_tensors, peer_rank, tag); },
       [this]() { return synchronize_p2p_staging(); });
+}
+
+HcclComm ProcessGroup::hccl_comm() {
+  CHECK(false) << "hccl_comm is only supported on NPU HCCL process group.";
+  return nullptr;
+}
+
+std::shared_ptr<MegaMoeCommResource>
+ProcessGroup::acquire_mega_moe_comm_resource(const MegaMoeCommSpec& spec) {
+  return mega_moe_comm_slot_.acquire(spec);
 }
 #endif
 

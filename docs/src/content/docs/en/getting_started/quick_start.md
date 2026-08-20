@@ -194,6 +194,9 @@ python setup.py build
 
 # Compile python wheel
 python setup.py bdist_wheel
+
+# Compile python wheel and install
+python setup.py install
 ```
 
 ## Launch xllm

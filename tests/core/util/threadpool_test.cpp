@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,7 +46,7 @@ TEST(ThreadPoolTest, ScheduleMultipleTasks) {
   std::vector<std::string> completed_tasks;
   absl::Notification notification;
 
-  // run frist task
+  // run first task
   threadpool.schedule([&completed_tasks, &notification]() {
     completed_tasks.emplace_back("first");
     if (completed_tasks.size() == 2) {

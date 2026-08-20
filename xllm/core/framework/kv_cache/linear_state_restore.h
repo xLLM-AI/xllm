@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <torch/torch.h>
-
 #include <cstdint>
 #include <vector>
 
@@ -25,10 +23,17 @@ limitations under the License.
 
 namespace xllm {
 
+// Convert logical sequence KV cursors to the warm/cold state mask consumed by
+// active linear-attention rows. Data-parallel expansion keeps each logical
+// row contiguous in the execution batch.
+LinearStateValidityMask build_linear_state_mask(
+    const std::vector<int32_t>& cached_tokens,
+    int64_t active_rows);
+
 // Apply each op's restore plan in-place: copy `restore_src_slot_id` into
 // `linear_state_id` across every linear-attention layer present in
-// `kv_caches`, then record each op's outcome into `has_initial_state`. The
-// caller sizes `has_initial_state` to the active batch and pre-fills it with
+// `kv_caches`, then record each op's outcome into `validity_mask`. The
+// caller sizes `validity_mask` to the active batch and pre-fills it with
 // the kv-cache default; this helper only overrides the entries it must:
 //   - RESTORED:  a checkpoint was copied into the live slot -> set 1 (warm).
 //   - COLD_START: a restore was requested but the checkpoint was unavailable
@@ -48,6 +53,6 @@ namespace xllm {
 void restore_linear_state_slots(
     std::vector<KVCache>& kv_caches,
     const std::vector<LinearStateCacheOp>& cache_ops,
-    std::vector<int64_t>& has_initial_state);
+    LinearStateValidityMask& validity_mask);
 
 }  // namespace xllm

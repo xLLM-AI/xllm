@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -61,6 +61,10 @@ class Platform final {
     return is_mlu() || is_npu();
   }
 
+  static constexpr bool supports_dsa_indexer_cache_sharding() {
+    return is_mlu();
+  }
+
   // MLU can reuse DSA top-k results across layers without keeping an indexer
   // cache for every layer. Other backends retain the legacy all-layer cache
   // allocation until they implement the same cache-elision contract.
@@ -68,10 +72,14 @@ class Platform final {
     return is_mlu();
   }
 
-  // Host KV offload requires both a batch memcpy provider and a layer-wise
-  // synchronization implementation.
+  // Host KV offload requires a batch memcpy provider with stream
+  // synchronization support.
   static constexpr bool supports_host_kv_offload() {
     return is_npu() || is_mlu();
+  }
+
+  static constexpr bool supports_mtp_decode_graph_warmup() {
+    return is_mlu() || is_npu();
   }
 
   static constexpr bool is_ilu() {

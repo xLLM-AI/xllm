@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -160,6 +160,32 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
     norm_->weight.set_data(norm_->weight.to(options));
     norm_->bias.set_data(norm_->bias.to(options));
 
+    is_smoothquant_ = quant_args.quant_method() == kQuantMethodSmoothquant;
+    if (is_smoothquant_) {
+      quant_fc1_ =
+          register_module("linear_fc1",
+                          layer::ColumnParallelLinear(hidden_size_,
+                                                      hidden_size_,
+                                                      /*bias=*/true,
+                                                      /*gather_output=*/false,
+                                                      quant_args,
+                                                      parallel_args.tp_group_,
+                                                      options));
+      quant_fc2_ = register_module(
+          "linear_fc2",
+          layer::RowParallelLinear(
+              hidden_size_,
+              d_model,
+              /*bias=*/true,
+              /*input_is_parallelized=*/true,
+              /*enable_result_reduction=*/true,
+              quant_args,
+              parallel_args.tp_group_,
+              options,
+              layer::LinearExtraArgs("gelu", /*is_gated=*/false)));
+      return;
+    }
+
     auto fc1 = torch::nn::Linear(
         torch::nn::LinearOptions(hidden_size_, hidden_size_).bias(true));
     fc1->weight.set_data(fc1->weight.to(options));
@@ -178,6 +204,9 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
       x = norm_(x.view({-1, hidden_size_}));
     else
       x = norm_(x).view({-1, hidden_size_});
+    if (is_smoothquant_) {
+      return quant_fc2_->forward(quant_fc1_->forward(x));
+    }
     return mlp_->forward(x);
   }
 
@@ -197,6 +226,14 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
           << "bias size mismatch for " << name();
       norm_->bias.data().copy_(norm_bias);
       is_norm_bias_loaded = true;
+    }
+
+    if (is_smoothquant_) {
+      quant_fc1_->load_state_dict(
+          state_dict.get_dict_with_prefix("linear_fc1."));
+      quant_fc2_->load_state_dict(
+          state_dict.get_dict_with_prefix("linear_fc2."));
+      return;
     }
 
     const auto& fc1_dict = state_dict.get_dict_with_prefix("linear_fc1.");
@@ -233,6 +270,17 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
+    if (is_smoothquant_) {
+      CHECK(quant_fc1_->is_weight_loaded())
+          << "quantized weights are not loaded for " << prefix + "linear_fc1";
+      CHECK(quant_fc2_->is_weight_loaded())
+          << "quantized weights are not loaded for " << prefix + "linear_fc2";
+      CHECK(is_norm_weight_loaded)
+          << "weight is not loaded for " << prefix + "norm" + ".weight";
+      CHECK(is_norm_bias_loaded)
+          << "bias is not loaded for " << prefix + "norm" + ".bias";
+      return;
+    }
     CHECK(is_fc1_weight_loaded)
         << "weight is not loaded for " << prefix + "linear_fc1" + ".weight";
     CHECK(is_fc1_bias_loaded)
@@ -252,6 +300,8 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
   bool use_postshuffle_norm_;
   torch::nn::LayerNorm norm_{nullptr};
   torch::nn::Sequential mlp_{nullptr};
+  layer::ColumnParallelLinear quant_fc1_{nullptr};
+  layer::RowParallelLinear quant_fc2_{nullptr};
   std::tuple<torch::nn::Linear, torch::nn::GELU, torch::nn::Linear> layers_ = {
       nullptr,
       nullptr,
@@ -262,6 +312,7 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
   bool is_fc2_bias_loaded = false;
   bool is_norm_weight_loaded = false;
   bool is_norm_bias_loaded = false;
+  bool is_smoothquant_ = false;
 };
 TORCH_MODULE(Qwen3_VisionPatchMerger);
 
@@ -461,12 +512,12 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     m_sin = m_sin.repeat({1, 2});
 
     torch::Tensor cu_seqlens_cpu = cu_seqlens.cpu();
-    std::vector<int> cu_seqlens_vec(
+    std::vector<int32_t> cu_seqlens_vec(
         cu_seqlens_cpu.data_ptr<int>(),  // full seqlen vec
         cu_seqlens_cpu.data_ptr<int>() + cu_seqlens_cpu.numel());
     std::vector<torch::Tensor> deepstack_feature_lists;
     deepstack_feature_lists.reserve(deepstack_visual_indexes_.size());
-    for (int idx = 0; idx < layers_.size(); ++idx) {
+    for (int32_t idx = 0; idx < layers_.size(); ++idx) {
       hidden_states = layers_[idx](
           hidden_states, m_cos, m_sin, cu_seqlens, cu_seqlens_vec, idx);
       auto it = std::find(deepstack_visual_indexes_.begin(),
@@ -557,11 +608,13 @@ TORCH_MODULE(Qwen3_VLForConditionalGeneration);
 using Qwen3VLMultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
                                                        Qwen2VLImageProcessor,
                                                        Qwen3VLVideoProcessor>;
+
 REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
 REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
 
-REGISTER_MODEL_ARGS(qwen3_vl, [&] {
+const ModelArgsLoader kQwen3VLModelArgsLoader = [](const JsonReader& json,
+                                                   ModelArgs* args) {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(model_type, "model_type", "qwen3_vl");
@@ -617,7 +670,11 @@ REGISTER_MODEL_ARGS(qwen3_vl, [&] {
 
   LOAD_ARG_OR(
       rope_scaling_rope_type, "vision_config.rope_scaling.type", "mrope");
-
   LOAD_ARG_OR(vocab_size, "text_config.vocab_size", 151936);
-});
+  return true;
+};
+
+REGISTER_MODEL_ARGS_LOADER(qwen3_vl, kQwen3VLModelArgsLoader);
+REGISTER_MODEL_ARGS_LOADER(Qwen3VLForConditionalGeneration,
+                           kQwen3VLModelArgsLoader);
 }  // namespace xllm

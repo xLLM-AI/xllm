@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 #include "common/types.h"
 
@@ -33,16 +32,9 @@ enum class GraphWarmupPlan : int8_t {
 
 GraphWarmupPlan graph_warmup_plan(InstanceRole role);
 
-std::vector<int32_t> graph_warmup_buckets(int32_t max_seqs_per_batch);
-
-bool skip_graph_bucket(int32_t bucket, int32_t dp_size);
-
-std::vector<int32_t> graph_decode_buckets(int32_t max_seqs_per_batch,
-                                          int32_t dp_size);
-
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
-                                  int32_t bucket,
+                                  int32_t token_bucket,
                                   double latency_ms);
 
 // Returns a process-unique request id for synthetic profiling/warmup requests.

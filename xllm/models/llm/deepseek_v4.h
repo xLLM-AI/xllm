@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,6 +35,8 @@ limitations under the License.
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -44,6 +46,7 @@ limitations under the License.
 #include "core/layers/deepseek_v4_decoder_layer.h"
 #include "core/util/tensor_helper.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
+#include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "llm_model_base.h"
 
 namespace xllm {
@@ -89,6 +92,17 @@ inline bool deepseek_v4_uses_acl_graph(
   (void)input_params;
   return false;
 #endif
+}
+
+inline void deepseek_v4_clamp_multi_block_tables(
+    ModelInputParams& input_params,
+    size_t registered_group_count) {
+  // multi_block_tables follows SWA/C4/C128 export order. The DSpark draft
+  // registers only the SWA prefix, while its input is copied from the
+  // three-group target, so discard groups this model cannot consume.
+  if (input_params.multi_block_tables.size() > registered_group_count) {
+    input_params.multi_block_tables.resize(registered_group_count);
+  }
 }
 
 inline size_t deepseek_v4_align_up(size_t value, size_t alignment) {
@@ -407,7 +421,11 @@ class DeepseekV4ModelImpl
             "deepseek_v4",
             context.get_model_args()),
         parallel_args_(context.get_parallel_args()),
-        flash_comm1_options_(context.get_flash_comm1_options()) {
+        flash_comm1_options_(context.get_flash_comm1_options()),
+        aux_capture_(
+            context.get_model_args(),
+            context.get_tensor_options(),
+            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -424,15 +442,23 @@ class DeepseekV4ModelImpl
 
     num_heads_ = model_args.n_heads();
     head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
-    dp_local_tp_size_ =
-        std::max<int64_t>(parallel_args.world_size() /
-                              std::max<int64_t>(parallel_args.dp_size(), 1),
-                          1);
+    // Attention TP width under the orthogonal dp * cp * attn_tp == world
+    // layout. This must match the width DSAttention actually shards heads by
+    // (it reads tp_group_->world_size(), narrowed in
+    // CollectiveCommunicator::create_process_groups). Dividing by dp alone
+    // would make the precomputed sparse metadata below advertise a head count
+    // the kernels never see.
+    cp_size_ = std::max<int64_t>(parallel_args.cp_size(), 1);
+    cp_group_ = parallel_args.cp_group_;
+    dp_local_tp_size_ = std::max<int64_t>(
+        parallel_args.world_size() /
+            std::max<int64_t>(parallel_args.dp_size(), 1) / cp_size_,
+        1);
     CHECK_EQ(num_heads_ % dp_local_tp_size_, 0)
-        << "[DSV4][Init] n_heads must be divisible by local tp size. n_heads="
-        << num_heads_ << ", local_tp_size=" << dp_local_tp_size_
+        << "[DSV4][Init] n_heads must be divisible by attn tp size. n_heads="
+        << num_heads_ << ", attn_tp_size=" << dp_local_tp_size_
         << ", world_size=" << parallel_args.world_size()
-        << ", dp_size=" << parallel_args.dp_size();
+        << ", dp_size=" << parallel_args.dp_size() << ", cp_size=" << cp_size_;
     tp_num_heads_ = num_heads_ / dp_local_tp_size_;
     window_size_ = model_args.window_size();
     index_n_heads_ = model_args.index_n_heads();
@@ -576,17 +602,80 @@ class DeepseekV4ModelImpl
             {gid, ce.type, ce.ratio, ce.block_size});
       }
     }
+
+    // Locate the first SWA cache so build_dspark_swa_metadata doesn't rescan
+    // caches_info_ on every model forward.
+    for (size_t layer_id = 0; layer_id < caches_info_.size(); ++layer_id) {
+      const auto& layer_caches = caches_info_[layer_id];
+      const auto it = std::find_if(
+          layer_caches.begin(), layer_caches.end(), [](const auto& c) {
+            return c.type == DSACacheType::SLIDING_WINDOW;
+          });
+      if (it != layer_caches.end()) {
+        dspark_swa_layer_ = static_cast<int32_t>(layer_id);
+        dspark_swa_cache_ =
+            static_cast<int32_t>(std::distance(layer_caches.begin(), it));
+        dspark_swa_block_size_ = it->block_size;
+        break;
+      }
+    }
   }
 
   void load_state_dict(const StateDict& state_dict) override {
     LlmModelImplBase<layer::DeepseekV4DecoderLayer>::load_state_dict(
         state_dict);
     embed_tokens_->load_state_dict(state_dict.get_dict_with_prefix("embed."));
+    load_hc_head_state_dict(state_dict);
+  }
+
+  void prepare_expert_weight(int32_t layer_id,
+                             const std::vector<int32_t>& expert_ids) {
+    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
+    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
+        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layers_[layer_id]->prepare_expert_weight(expert_ids);
+  }
+
+  void update_expert_weight(int32_t layer_id) {
+    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
+    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
+        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layers_[layer_id]->update_expert_weight();
+  }
+
+  void start_expert_weight_transfer(int32_t layer_id) {
+    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
+    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
+        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layers_[layer_id]->start_expert_weight_transfer();
+  }
+
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const {
+    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
+    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
+        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    return layers_[layer_id]->last_prepare_expert_weight_ok();
+  }
+
+ protected:
+  void load_hc_head_state_dict(const StateDict& state_dict) {
     LOAD_WEIGHT(hc_head_fn);
     LOAD_WEIGHT(hc_head_base);
     LOAD_WEIGHT(hc_head_scale);
   }
 
+  layer::DeepseekV4RotaryEmbedding::CosSinPair build_default_rope(
+      const torch::Tensor& positions) const {
+    CHECK(dsa_rotary_embedding_ != nullptr)
+        << "DeepSeek-V4 rotary embedding is not initialized.";
+    auto groups = dsa_rotary_embedding_->build(positions);
+    auto it = groups.find("default");
+    CHECK(it != groups.end())
+        << "DeepSeek-V4 default rotary group is unavailable.";
+    return it->second;
+  }
+
+ public:
   bool requires_graph_forward_metadata() { return true; }
 
   std::unique_ptr<ModelGraphMetadataState>
@@ -604,6 +693,8 @@ class DeepseekV4ModelImpl
     CHECK(deepseek_v4_state != nullptr)
         << "DeepSeek V4 received incompatible graph metadata state";
     auto modified_input_params = input_params;
+    deepseek_v4_clamp_multi_block_tables(modified_input_params,
+                                         group_infos_.size());
     if (modified_input_params.meta.actual_num_sequences == 0) {
       // Graph metadata must keep the bucket-shaped sequence count used during
       // capture/replay. The normal empty-DP fallback intentionally shrinks the
@@ -745,15 +836,76 @@ class DeepseekV4ModelImpl
       }
     }
 
-    const int32_t fc1_num_tokens = static_cast<int32_t>(h.size(0));
+    // Row count of the DP-local batch, before any token-axis sharding. FC1
+    // thresholds against this so its on/off decision is identical on every rank
+    // of the CP group even though the CP segments below are uneven.
+    const int32_t fc1_global_num_tokens = static_cast<int32_t>(h.size(0));
+
+    // Prefill context parallel. Built here, after the global DSA metadata is
+    // complete, because the KV / compressor / index-cache write path keeps the
+    // global kv_seq_lens and slot_mapping: only the query axis is localized.
+    //
+    // CP is the OUTER token-axis shard and FlashComm1 below is the inner one:
+    // CP splits the batch across cp_group, then FC1 splits this rank's CP
+    // segment across tp_group. The groups are orthogonal in the rank layout
+    // dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank, and every
+    // rank of a TP group shares one cp_rank, so all TP peers see the same CP
+    // segment length and FC1's collectives stay symmetric. Both the tail of
+    // this function and the decoder layer unwind in the reverse order (FC1
+    // gather, then CP gather_restore).
+    layer::v4_cp::DeepseekV4CpContext cp_ctx;
+    const bool cp_enabled = cp_size_ > 1 && cp_group_ != nullptr &&
+                            !is_empty_dp_rank &&
+                            input_params.meta.batch_forward_type.no_decode() &&
+                            attn_metadata.dsa_metadata != nullptr;
+    if (cp_enabled) {
+      auto& dsa = *(attn_metadata.dsa_metadata);
+      cp_ctx = layer::v4_cp::build_deepseek_v4_cp_context(
+          static_cast<int32_t>(cp_size_),
+          cp_group_->rank(),
+          cp_group_,
+          modified_input_params.attention.host.q_seq_lens,
+          modified_input_params.attention.host.kv_seq_lens,
+          dsa.input_positions);
+      if (cp_ctx.enabled()) {
+        // Save the global-position RoPE per ratio before the query side is
+        // rebuilt against local rows. The layer loop below picks the KV table
+        // for the layer's own ratio out of this map.
+        cp_ctx.global_rope_by_ratio = input_rope_by_ratio;
+        rebuild_cp_local_query_metadata(
+            dsa, modified_input_params, cp_ctx, input_rope_by_ratio);
+        h = cp_ctx.shard_rows(h);
+        positions = cp_ctx.shard_rows(positions);
+        // tokens stays global on purpose. The decoder layer gathers the FFN
+        // input back to the full DP-local token set before the MoE gate, so the
+        // gate's input_ids must stay global to match those rows. Likewise
+        // dp_global_token_nums keeps the unsharded counts the engine published,
+        // because the MoE DP gather runs on the already CP-gathered rows.
+        dsa.v4_cp_context = &cp_ctx;
+      }
+    }
+
+    // FlashComm1 sequence parallel, inner to the CP shard above. h now holds
+    // only this rank's CP rows, so the padding geometry is derived from them
+    // while the min_prefill_tokens threshold stays on the pre-CP count. The
+    // smallest CP segment gates composition: V4 splits each sequence into
+    // contiguous per-rank chunks, so short batches leave high cp_ranks with few
+    // or zero rows and FC1 must then stay off across the whole group.
+    FlashComm1TokenGeometry fc1_geometry =
+        FlashComm1TokenGeometry::without_cp(fc1_global_num_tokens);
+    if (cp_ctx.enabled() && !cp_ctx.tokens_per_rank.empty()) {
+      fc1_geometry.local_num_tokens = static_cast<int32_t>(h.size(0));
+      fc1_geometry.min_local_num_tokens = *std::min_element(
+          cp_ctx.tokens_per_rank.begin(), cp_ctx.tokens_per_rank.end());
+    }
     FlashComm1Context fc1_ctx;
-    if (!acl_graph_forward && !is_empty_dp_rank) {
+    // FC1 shards the sequence across ranks; per-layer aux capture needs the
+    // full local token set, so skip FC1 while capturing.
+    if (!acl_graph_forward && !is_empty_dp_rank && !aux_capture_.enabled()) {
       const bool is_prefill_side =
           input_params.meta.batch_forward_type.no_decode();
-      fc1_ctx = build_flash_comm1_context(fc1_num_tokens,
-                                          is_prefill_side,
-                                          parallel_args_,
-                                          flash_comm1_options_);
+      fc1_ctx = build_flash_comm1_context(
+          fc1_geometry, is_prefill_side, parallel_args_, flash_comm1_options_);
     }
     FlashComm1ContextScope fc1_scope(&fc1_ctx);
     if (is_sequence_sharded(fc1_ctx)) {
@@ -791,6 +943,14 @@ class DeepseekV4ModelImpl
           // the attention kernel reads them from dsa.
           dsa.cos = rope_it->second.first;
           dsa.sin = rope_it->second.second;
+        }
+        if (cp_ctx.enabled()) {
+          // Under CP the tables above are localized to this rank's query rows.
+          // The KV / compressor / index-cache writes span all tokens, so pair
+          // them with the global table of the same ratio.
+          auto [kv_cos, kv_sin] = cp_ctx.global_rope(layer_compress_ratio);
+          dsa.kv_cos = kv_cos;
+          dsa.kv_sin = kv_sin;
         }
 
         if (layer_id < static_cast<int32_t>(dsa.block_tables.size()) &&
@@ -830,6 +990,11 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
+      const int32_t capture_layer = static_cast<int32_t>(i + 1);
+      if (aux_capture_.should_capture(capture_layer)) {
+        torch::Tensor captured = h.dim() == 3 ? h.mean(/*dim=*/1) : h;
+        aux_capture_.capture_layer(capture_layer, captured, std::nullopt);
+      }
 #if defined(USE_NPU)
       if (modified_input_params.parallel.layer_synchronizer != nullptr &&
           !modified_input_params.parallel.layer_synchronizer->record_event(
@@ -841,12 +1006,24 @@ class DeepseekV4ModelImpl
     if (is_sequence_sharded(fc1_ctx)) {
       h = gather_sequence(h, fc1_ctx);
     }
+    if (cp_ctx.enabled()) {
+      // Restore full global-order tokens before hc_head / norm / lm_head, which
+      // are not CP-aware. Done before capturing pre_hc_head_hidden_states so
+      // MTP receives full-length aux hidden states.
+      h = cp_ctx.gather_restore(h);
+      if (attn_metadata.dsa_metadata) {
+        attn_metadata.dsa_metadata->v4_cp_context = nullptr;
+      }
+    }
     torch::Tensor pre_hc_head_hidden_states;
-    if (model_args_.num_speculative_tokens() > 0) {
+    if (!aux_capture_.enabled() && model_args_.num_speculative_tokens() > 0) {
       pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (aux_capture_.enabled()) {
+      return aux_capture_.finalize(hidden_states, residual_out);
+    }
     if (pre_hc_head_hidden_states.defined()) {
       ModelOutput out(hidden_states, residual_out);
       out.aux_hidden_states = pre_hc_head_hidden_states.flatten(1);
@@ -1048,6 +1225,8 @@ class DeepseekV4ModelImpl
   build_attention_metadata_for_forward(const torch::Tensor& positions,
                                        const ModelInputParams& input_params) {
     auto modified_input_params = input_params;
+    deepseek_v4_clamp_multi_block_tables(modified_input_params,
+                                         group_infos_.size());
     auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
 
@@ -1301,6 +1480,107 @@ class DeepseekV4ModelImpl
     }
   }
 
+  // Rewrites the query axis to this rank's local rows, shortens the kv extent
+  // the attention / indexer kernels read to where those rows end, and rebuilds
+  // the sparse metadata derived from both. slot_mapping and block_tables stay
+  // global on purpose: every CP rank holds a full KV replica and writes it from
+  // all tokens, which is what lets local queries attend to the whole prefix
+  // without any cross-rank KV exchange.
+  //
+  // The kv lengths must shrink even though the replica is full, because
+  // sparse_attn_sharedkv aligns the query block to the END of the kv window.
+  // See DeepseekV4CpContext::local_kv_seq_lens for why a global kv length
+  // silently relocates every non-last rank's queries.
+  //
+  // Getting this wrong degrades accuracy rather than crashing, so keep the two
+  // views strictly separated: the attention read path takes both axes from
+  // cp_ctx; the write path takes its global view from cp_ctx too
+  // (global_q_cu_seq_lens) and from start_pos, which stays global below.
+  void rebuild_cp_local_query_metadata(
+      layer::DSAMetadata& dsa,
+      ModelInputParams& params,
+      const layer::v4_cp::DeepseekV4CpContext& cp_ctx,
+      std::unordered_map<int32_t, layer::DeepseekV4RotaryEmbedding::CosSinPair>&
+          input_rope_by_ratio) const {
+    const auto& local_q = cp_ctx.local_q_seq_lens;
+    const torch::Device device =
+        dsa.seq_lens_q.defined() ? dsa.seq_lens_q.device() : device_;
+    const auto int_options =
+        torch::TensorOptions().dtype(torch::kInt32).device(device);
+
+    params.attention.host.q_seq_lens = local_q;
+    torch::Tensor q_lens = torch::tensor(local_q, int_options);
+    params.attention.device.q_seq_lens = q_lens;
+    dsa.seq_lens_q = q_lens;
+    torch::Tensor q_cumsum =
+        torch::cumsum(q_lens, /*dim=*/0, /*dtype=*/torch::kInt32);
+    dsa.actual_seq_lengths_query =
+        torch::cat({torch::zeros({1}, int_options), q_cumsum});
+    params.attention.device.q_cu_seq_lens = dsa.actual_seq_lengths_query;
+    std::vector<int32_t> q_cu_host;
+    q_cu_host.reserve(local_q.size());
+    int32_t running = 0;
+    for (const int32_t len : local_q) {
+      running += len;
+      q_cu_host.push_back(running);
+    }
+    params.attention.host.q_cu_seq_lens = q_cu_host;
+
+    const int64_t local_q_max = vector_max_or_zero(local_q);
+    params.meta.q_max_seq_len = static_cast<int32_t>(local_q_max);
+    dsa.max_seqlen_q = q_lens.numel() > 0
+                           ? torch::max(q_lens).to(torch::kInt32).reshape({1})
+                           : torch::zeros({1}, int_options);
+    dsa.max_query_len = local_q_max;
+
+    // Attention-side kv view: prefix + this rank's last local row. Everything
+    // written above and below stays on the global view.
+    const auto& local_kv = cp_ctx.local_kv_seq_lens;
+    torch::Tensor kv_lens = torch::tensor(local_kv, int_options);
+    params.attention.host.kv_seq_lens = local_kv;
+    params.attention.device.kv_seq_lens = kv_lens;
+    dsa.actual_seq_lengths_kv = kv_lens;
+    dsa.seq_lens = kv_lens;
+    dsa.kv_cu_seq_lens = cp_ctx.local_kv_cu_seq_lens;
+    const int64_t local_kv_max = vector_max_or_zero(local_kv);
+    params.meta.kv_max_seq_len = static_cast<int32_t>(local_kv_max);
+    dsa.max_seqlen_kv = kv_lens.numel() > 0
+                            ? torch::max(kv_lens).to(torch::kInt32).reshape({1})
+                            : torch::zeros({1}, int_options);
+    dsa.max_seq_len = local_kv_max;
+
+    // Query RoPE follows the local rows. local_positions keeps true global
+    // positions, so RoPE values are unchanged -- only the row set shrinks.
+    if (cp_ctx.local_positions.defined()) {
+      dsa.input_positions = cp_ctx.local_positions;
+    }
+    // The layer loop reassigns dsa.cos/dsa.sin from input_rope_by_ratio, so the
+    // map itself must be rebuilt or the first layer would restore the global
+    // table and silently undo the localization.
+    input_rope_by_ratio.clear();
+    build_dsa_rope_metadata(dsa, &input_rope_by_ratio);
+
+    // start_pos deliberately keeps the global value computed before this
+    // rebuild. Its only consumers are the compressor and the indexer's
+    // compress_kv, and under CP both run on the CP-gathered global token set:
+    // start_pos is the absolute position of the first token they process, which
+    // is global_kv - global_q. Localizing it to global_kv - local_q tells them
+    // to skip a prefix that is not there, which drives the compressed block
+    // count to zero and the kernel launches with blockDim == 0.
+    // build_precomputed_metadata does not read start_pos, so nothing between
+    // here and the layer loop needs the localized form.
+    //
+    // (start_pos must not be recomputed after this point: the
+    // two fields it is derived from (actual_seq_lengths_kv - seq_lens_q) are
+    // both localized above, so re-deriving it would yield the local value the
+    // paragraph above rules out. Both call sites that build it
+    // (prepare_dsa_metadata_for_forward and the eager branch in forward()) run
+    // before the CP block, and neither prepare_forward_dsa_runtime_metadata nor
+    // build_precomputed_metadata touches it.)
+
+    build_precomputed_metadata(dsa, params, cp_ctx.local_kv_cu_seq_lens);
+  }
+
   void prepare_forward_dsa_runtime_metadata(
       layer::DSAMetadata& dsa,
       const ModelInputParams& params,
@@ -1348,12 +1628,45 @@ class DeepseekV4ModelImpl
     return *std::max_element(values.begin(), values.end());
   }
 
-  void build_precomputed_metadata(layer::DSAMetadata& dsa,
-                                  const ModelInputParams& params) const {
+  void build_dspark_swa_metadata(layer::DSAMetadata& dsa) const {
+    if (!model_args_.dspark_use_native_sas() ||
+        model_args_.dspark_block_size() <= 0) {
+      return;
+    }
+    CHECK_GE(dspark_swa_layer_, 0)
+        << "Native DeepSeek-V4 DSpark requires an SWA block table.";
+    const size_t layer_id = static_cast<size_t>(dspark_swa_layer_);
+    const size_t cache_id = static_cast<size_t>(dspark_swa_cache_);
+    if (layer_id >= dsa.block_tables.size() ||
+        cache_id >= dsa.block_tables[layer_id].size() ||
+        !dsa.block_tables[layer_id][cache_id].defined()) {
+      return;
+    }
+    dsa.explicit_swa_indices =
+        layer::build_dspark_swa_indices(dsa.block_tables[layer_id][cache_id],
+                                        dsa.actual_seq_lengths_query,
+                                        dsa.actual_seq_lengths_kv,
+                                        window_size_,
+                                        model_args_.dspark_block_size(),
+                                        dspark_swa_block_size_);
+  }
+
+  // cu_seqlens_ori_kv_override, when defined, replaces the query cumsum the
+  // prefill sparse metadata normally uses to describe ori_kv. Only prefill CP
+  // passes it: there the kv window is longer than this rank's query block, so
+  // the two stop coinciding and the kernel's baked tiling must follow the
+  // window. It has to agree with the cu_seqlens_ori_kv the attention layer
+  // passes at call time.
+  void build_precomputed_metadata(
+      layer::DSAMetadata& dsa,
+      const ModelInputParams& params,
+      const torch::Tensor& cu_seqlens_ori_kv_override = torch::Tensor()) const {
     dsa.c1_metadata = torch::Tensor();
     dsa.c4_metadata = torch::Tensor();
     dsa.c128_metadata = torch::Tensor();
     dsa.qli_metadata = torch::Tensor();
+    dsa.sparse_metadata_ori_win_left = -1;
+    dsa.explicit_swa_indices = torch::Tensor();
 
     torch::Device metadata_device(torch::kCPU);
     if (dsa.input_positions.defined()) {
@@ -1379,6 +1692,11 @@ class DeepseekV4ModelImpl
       return;
     }
 
+    // Native DSpark's explicit SWA indices are request-level metadata. All
+    // draft layers share the same SWA manager, so build them once per model
+    // forward instead of once per decoder layer.
+    build_dspark_swa_metadata(dsa);
+
     const int64_t batch_size =
         std::max<int64_t>(dsa.actual_seq_lengths_kv.size(0), 1);
     const int64_t max_seqlen_q =
@@ -1387,15 +1705,28 @@ class DeepseekV4ModelImpl
     const int64_t max_seqlen_kv = std::max<int64_t>(
         params.meta.kv_max_seq_len,
         vector_max_or_zero(params.attention.host.kv_seq_lens));
-    const int64_t ori_win_left = std::max<int64_t>(window_size_ - 1, 0);
+    // Keep the opaque tiling metadata identical to the arguments passed by
+    // DSAttentionImpl::forward. Native DSpark SAS expands the window and uses
+    // explicit indices; the compatibility fallback keeps the DSV4 window and
+    // expresses block non-causality through q_len=1 rows.
+    const int64_t ori_win_left =
+        layer::deepseek_v4_ori_window_left(window_size_,
+                                           model_args_.dspark_block_size(),
+                                           model_args_.dspark_use_native_sas());
+    dsa.sparse_metadata_ori_win_left = ori_win_left;
     const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
-    const bool is_prefill = params.meta.q_max_seq_len > 1;
+    // The compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics,
+    // whereas native DSpark uses a gamma-wide DECODE query. The batch type,
+    // not q_max_seq_len, is therefore the authoritative metadata selector.
+    const bool is_prefill = params.meta.batch_forward_type.no_decode();
 
     const char* layout_kv = "PA_ND";
     auto empty_int32_opt = as_empty_int32_tensor(dsa.actual_seq_lengths_query);
+    const torch::Tensor& ori_kv_cu = cu_seqlens_ori_kv_override.defined()
+                                         ? cu_seqlens_ori_kv_override
+                                         : dsa.actual_seq_lengths_query;
     auto cu_seqlens_ori_kv_opt =
-        is_prefill ? as_optional_tensor(dsa.actual_seq_lengths_query)
-                   : empty_int32_opt;
+        is_prefill ? as_optional_tensor(ori_kv_cu) : empty_int32_opt;
 
     xllm::kernel::SparseAttnSharedkvMetadataParams c1_params;
     c1_params.num_heads_q = tp_num_heads_;
@@ -1560,6 +1891,9 @@ class DeepseekV4ModelImpl
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
+  // Prefill CP geometry. cp_size_ == 1 means CP is off everywhere below.
+  int64_t cp_size_ = 1;
+  ProcessGroup* cp_group_ = nullptr;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
   int64_t index_n_heads_ = 0;
@@ -1570,12 +1904,18 @@ class DeepseekV4ModelImpl
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
 
+  AuxHiddenCapture aux_capture_;
+
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that
   // layer
   std::vector<std::vector<DSACacheInfo>> caches_info_;
   // group_infos_[group_id] = DSAGroupInfo
   std::vector<DSAGroupInfo> group_infos_;
+
+  int32_t dspark_swa_layer_ = -1;
+  int32_t dspark_swa_cache_ = -1;
+  int32_t dspark_swa_block_size_ = 0;
 
   DEFINE_WEIGHT(hc_head_fn);
   DEFINE_WEIGHT(hc_head_base);
@@ -1587,7 +1927,9 @@ class DeepseekV4ForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekV4Model> {
  public:
   explicit DeepseekV4ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV4Model>(context) {}
+      : LlmForCausalLMImplBase<DeepseekV4Model>(context),
+        first_k_dense_replace_(
+            context.get_model_args().first_k_dense_replace()) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
@@ -1610,6 +1952,29 @@ class DeepseekV4ForCausalLMImpl
     this->model_->prepare_graph_forward_metadata(
         state, positions, input_params);
   }
+
+  void prepare_expert_weight(int32_t layer_id,
+                             const std::vector<int32_t>& expert_ids) override {
+    this->model_->prepare_expert_weight(layer_id + first_k_dense_replace_,
+                                        expert_ids);
+  }
+
+  void update_expert_weight(int32_t layer_id) override {
+    this->model_->update_expert_weight(layer_id + first_k_dense_replace_);
+  }
+
+  void start_expert_weight_transfer(int32_t layer_id) override {
+    this->model_->start_expert_weight_transfer(layer_id +
+                                               first_k_dense_replace_);
+  }
+
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const override {
+    return this->model_->last_prepare_expert_weight_ok(layer_id +
+                                                       first_k_dense_replace_);
+  }
+
+ private:
+  int32_t first_k_dense_replace_;
 };
 TORCH_MODULE(DeepseekV4ForCausalLM);
 
@@ -1717,6 +2082,16 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   LOAD_ARG_OR_FUNC(
       vocab_size, "vocab_size", [&] { return args->vocab_size(); });
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 163840);
+
+  // DSpark draft metadata. The 0731 checkpoint stores three draft layers
+  // under mtp.0/1/2 and uses DeepSeek-specific top-level key names.
+  LOAD_ARG_OR(markov_rank, "dspark_markov_rank", 0);
+  args->dspark_num_layers() = static_cast<int32_t>(
+      json.value_or<std::vector<int32_t>>("dspark_target_layer_ids",
+                                          std::vector<int32_t>{})
+          .size());
+  // Don't arm dspark_block_size on the shared target (enables non-causal DSpark
+  // attention there); the draft worker sets it from the checkpoint.
 
   // Token ids
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);

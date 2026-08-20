@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,7 +49,7 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
 
   std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
-  std::optional<ForwardOutput> execute_no_sync_on_stream(
+  virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
       Stream& compute_stream,
       bool record_ready_event = true);
@@ -99,6 +99,28 @@ class LLMWorkerImpl : public WorkerImpl {
   void set_word_embedding(layer::WordEmbedding& embedding) {
     model_->set_word_embedding(embedding);
   };
+
+  torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
+    return model_->dspark_markov_bias(previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) {
+    return model_->dspark_confidence_probs(hidden, previous_token_ids);
+  }
+  torch::Tensor dspark_confidence_probs_batched(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) {
+    return model_->dspark_confidence_probs_batched(hidden_all, prev_matrix);
+  }
+  bool has_dspark_confidence_head() const {
+    return model_->has_dspark_confidence_head();
+  }
+
+  bool share_weights_from(LLMWorkerImpl& source) {
+    return model_->share_weights_from(*source.model_);
+  }
 
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no

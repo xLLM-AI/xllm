@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,7 +46,7 @@ bool DeadlineComparator::operator()(const std::shared_ptr<Request>& a,
   return remain_time_a > remain_time_b;
 }
 
-// density-first strategy. denisty = weight / latency
+// density-first strategy. density = weight / latency
 bool DensityComparator::operator()(const std::shared_ptr<Request>& a,
                                    const std::shared_ptr<Request>& b) const {
   auto& sequence_a = a->sequences()[0];

@@ -7,9 +7,7 @@ from scripts.logger import logger
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Compile xLLM TileLang kernels and emit manifests."
-    )
+    parser = argparse.ArgumentParser(description="Compile xLLM TileLang kernels and emit manifests.")
     parser.add_argument(
         "--target",
         required=True,

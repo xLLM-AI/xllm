@@ -30,6 +30,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    reshard_planner_test
+  SRCS
+    reshard_planner_test.cpp
+  DEPS
+    :reshard_planner
+    GTest::gtest_main
+)
+
 if(USE_NPU OR USE_MLU)
 cc_test(
   NAME

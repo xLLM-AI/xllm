@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -66,6 +66,24 @@ TEST(DeepseekV32CppTemplate, ThinkingModeEnabledByKwargs) {
   ASSERT_TRUE(prompt.has_value());
 
   EXPECT_NE(prompt->find("<think>"), std::string::npos);
+}
+
+TEST(DeepseekV32CppTemplate, ReportsRenderedGenerationMode) {
+  TokenizerArgs args;
+  args.bos_token("<｜begin▁of▁sentence｜>");
+  DeepseekV32CppTemplate encoder(args);
+  ChatMessages messages;
+  messages.emplace_back("user", "hello");
+
+  auto chat = encoder.apply_with_generation_mode(
+      messages, /*json_tools=*/{}, nlohmann::ordered_json::object());
+  ASSERT_TRUE(chat.has_value());
+  EXPECT_EQ(chat->generation_mode, ChatTemplateGenerationMode::CHAT);
+
+  auto reasoning = encoder.apply_with_generation_mode(
+      messages, /*json_tools=*/{}, nlohmann::ordered_json{{"thinking", true}});
+  ASSERT_TRUE(reasoning.has_value());
+  EXPECT_EQ(reasoning->generation_mode, ChatTemplateGenerationMode::REASONING);
 }
 
 TEST(DeepseekV32CppTemplate, ToolsInjectionFormat) {

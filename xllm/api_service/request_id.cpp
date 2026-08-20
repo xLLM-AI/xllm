@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -61,6 +61,9 @@ std::string get_header_x_request_id(const brpc::Controller* controller) {
   if (x_request_id.empty()) {
     x_request_id =
         get_valid_header(controller->http_request(), "x-ms-client-request-id");
+  }
+  if (x_request_id.empty()) {
+    x_request_id = get_valid_header(controller->http_request(), "trace_id");
   }
   return x_request_id;
 }

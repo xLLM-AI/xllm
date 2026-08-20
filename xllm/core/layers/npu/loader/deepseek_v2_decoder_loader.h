@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -102,6 +102,12 @@ class DeekseekV2DecoderLoader : public BaseLoader {
 
   void merge_experts_weights();
 
+  void preprocess_w4a8_dynamic_experts_weights();
+
+  bool use_quant_weight_mapping() const;
+
+  int get_w4a8_expert_shard_dim(const std::string& suffix) const;
+
   torch::Tensor merge_experts_weights(std::vector<torch::Tensor>& experts,
                                       bool transpose = false);
 
@@ -140,6 +146,7 @@ class DeekseekV2DecoderLoader : public BaseLoader {
   int32_t end_expert_id_;
   int32_t ep_rank_;
   int32_t redundant_experts_num_;
+  int32_t quant_group_size_ = 0;
 
   int32_t layer_id_;
   int32_t qk_nope_head_dim_;

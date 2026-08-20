@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,7 +28,8 @@ class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
                             int32_t dit_tp_size,
                             int32_t dit_sp_size,
                             int32_t dit_cfg_size,
-                            int32_t dit_vae_size);
+                            int32_t dit_vae_size,
+                            int32_t dit_text_encoder_tp_size);
 
   ~DiTCollectiveCommunicator() = default;
 
@@ -54,6 +55,7 @@ class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> dit_dp_group_;
   std::unique_ptr<ProcessGroup> dit_cfg_group_;
   std::unique_ptr<ProcessGroup> dit_vae_group_;
+  std::unique_ptr<ProcessGroup> dit_text_encoder_tp_group_;
 };
 
 }  // namespace xllm

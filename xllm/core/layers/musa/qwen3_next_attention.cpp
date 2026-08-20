@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <cmath>
 #include <tuple>
-#include <vector>
 
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/util/env_var.h"
@@ -139,26 +139,8 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
 
 torch::Tensor Qwen3NextAttentionImpl::build_mrope_cos_sin(
     const torch::Tensor& positions) const {
-  // The fused split_qkv_rmsnorm_mrope kernel is currently NPU-only via
-  // TileLang -- `has_split_qkv_rmsnorm_mrope_specialization()` returns false
-  // in the MUSA build (see ops_api.cpp), so `use_fused_qkv_` is always false
-  // on this platform and the precomputed mrope_cos_sin tensor
-  // produced here is never consulted by forward() -- it falls through to the
-  // standalone `rotary_emb_->forward(positions, q, k)` path instead.
-  //
-  // Returning an undefined tensor short-circuits the per-step host gather
-  // (`cos_sin_cache.permute().contiguous().index_select(...)`) which would
-  // otherwise issue at::musa::IndexSelect -> EmptyMUSA inside a captured
-  // MUSA stream and abort with
-  //   "operation not permitted when stream is capturing".
-  //
-  // The caller loop in Qwen3HybridModelImplBase::forward keeps an undefined
-  // mrope_cos_sin and propagates it through every layer's forward, where
-  // each Qwen3NextAttentionImpl::forward only reads `mrope_cos_sin` from
-  // inside `if (use_fused_qkv_) { ... }`; the value is therefore never
-  // dereferenced. When the MUSA tilelang specialization lands we should
-  // revisit this and route through persistent buffers + a custom gather
-  // kernel that does not call EmptyMUSA.
+  // The MUSA build does not provide the fused mRoPE specialization. Returning
+  // an undefined tensor keeps the caller on the standalone rotary path.
   if (!use_fused_qkv_) {
     return {};
   }
@@ -180,10 +162,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const torch::Tensor& mrope_cos_sin) {
-  torch::Tensor qkv;
-  {
-    qkv = qkv_proj_->forward(hidden_states);
-  }
+  torch::Tensor qkv = qkv_proj_->forward(hidden_states);
   if (use_fused_qkv_) {
     torch::Tensor q_flat;
     torch::Tensor k_flat;
@@ -250,7 +229,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
         (head_dim_ == 64 || head_dim_ == 128 || head_dim_ == 256)) {
       auto cos_sin_cache = rotary_emb_->get_cos_sin_cache();
       int64_t k_head_offset = attn_output_gate_ ? num_heads_ * 2 : num_heads_;
-      xllm::kernel::cuda::fused_qk_norm_rope(qkv,
+      xllm::kernel::musa::fused_qk_norm_rope(qkv,
                                              num_heads_,
                                              num_kv_heads_,
                                              num_kv_heads_,
@@ -277,19 +256,14 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
       rotary_emb_->forward(positions, q, k);
     }
   }
-
-  torch::Tensor out;
-  {
-    out = std::get<0>(attn_->forward(attn_metadata, q, k, v, kv_cache));
+  torch::Tensor out =
+      std::get<0>(attn_->forward(attn_metadata, q, k, v, kv_cache));
+  if (attn_output_gate_) {
+    // Capture-safe fused gating: compute sigmoid(gate) and multiply `out`
+    // in one launch without a temporary allocation or mutating `gate`.
+    xllm::kernel::musa::mul_sigmoid_gate_inplace(out, gate);
   }
-  {
-    if (attn_output_gate_) {
-      // Capture-safe fused gating: compute sigmoid(gate) and multiply `out`
-      // in one launch without a temporary allocation or mutating `gate`.
-      xllm::kernel::cuda::mul_sigmoid_gate_inplace(out, gate);
-    }
-    return o_proj_->forward(out);
-  }
+  return o_proj_->forward(out);
 }
 
 void Qwen3NextAttentionImpl::load_state_dict(const StateDict& state_dict) {

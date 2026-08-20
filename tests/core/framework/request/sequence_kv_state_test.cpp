@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -51,6 +51,23 @@ TEST(KVCacheStateTest, ResetClearsBeamSourceState) {
   EXPECT_TRUE(state.src_blocks().empty());
   EXPECT_FALSE(state.need_swap());
   EXPECT_EQ(block.ref_count(), external_ref_count);
+}
+
+TEST(KVCacheStateTest, PrefixMatchStateIsIndependentAndMovable) {
+  KVCacheState state;
+  EXPECT_FALSE(state.prefix_cache_matched());
+  state.set_prefix_cache_matched();
+  EXPECT_TRUE(state.prefix_cache_matched());
+
+  Block block(/*id=*/7, /*allocator=*/nullptr);
+  state.add_blocks(BlockType::KV, {block});
+  std::vector<Block> moved = state.take_blocks(BlockType::KV);
+  ASSERT_EQ(moved.size(), 1u);
+  EXPECT_FALSE(state.has_any_blocks());
+  EXPECT_TRUE(state.prefix_cache_matched());
+
+  state.reset();
+  EXPECT_FALSE(state.prefix_cache_matched());
 }
 
 // Finding 2 regression: has_any_blocks() must report true for ANY

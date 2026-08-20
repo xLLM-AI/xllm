@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,9 +22,13 @@ limitations under the License.
 namespace xllm::kernel::npu {
 
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode) {
-  if (act_mode != "silu" && act_mode != "swiglu") {
-    LOG(FATAL) << "Only swiglu activation is supported in NPU active";
+  if (act_mode == "gelu" || act_mode == "gelu_pytorch_tanh") {
+    const auto approximate = act_mode == "gelu_pytorch_tanh" ? "tanh" : "none";
+    return at_npu::native::custom_ops::npu_gelu(input, approximate);
   }
-  return at_npu::native::custom_ops::npu_swiglu(input);
+  if (act_mode == "silu" || act_mode == "swiglu") {
+    return at_npu::native::custom_ops::npu_swiglu(input);
+  }
+  LOG(FATAL) << "Unsupported NPU activation: " << act_mode;
 }
 }  // namespace xllm::kernel::npu

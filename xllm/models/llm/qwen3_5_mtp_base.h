@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -112,12 +112,20 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
       positions = torch::tensor({0}).to(torch::kInt32).to(device_);
     }
 
+    layer::AttentionMetadataBuildOptions metadata_build_options;
+#if defined(USE_NPU)
+    // Native NPU GDN consumes the canonical host mask directly. Avoid
+    // materializing the unused device bool tensor inside ACL graph capture.
+    metadata_build_options.materialize_linear_state_validity =
+        !input_params.enable_graph;
+#endif
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(
             input_params,
             model_args_.enable_mla(),
             build_attention_mask(input_params),
-            /*device=*/device_);
+            /*device=*/device_,
+            metadata_build_options);
     prepare_mrope(positions, attn_metadata);
 
     torch::Tensor embedding = embed_tokens_(tokens);
@@ -141,6 +149,9 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
 
     std::optional<torch::Tensor> residual = std::nullopt;
     for (size_t i = 0; i < layers_.size(); ++i) {
+      if (!input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return ModelOutput();
+      }
       mtp_hidden = layers_[i]->forward(mtp_hidden,
                                        residual,
                                        positions,

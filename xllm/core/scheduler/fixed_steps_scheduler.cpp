@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -53,19 +53,6 @@ FixedStepsScheduler::FixedStepsScheduler(Engine* engine, const Options& options)
       /*pool_name=*/"FixedStepsScheduler.step");
 }
 
-bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
-  CHECK(request != nullptr);
-  CHECK(!request->sequences().empty());
-
-  if (request_queue_.write(request)) {  //.get()
-    // take over the ownership of the request
-    // request.release();
-    return true;
-  }
-  // queue is full
-  return false;
-}
-
 void FixedStepsScheduler::handle_prefill_requests(
     size_t& remaining_token_budget,
     size_t& remaining_seq_budget,
@@ -79,7 +66,7 @@ void FixedStepsScheduler::handle_prefill_requests(
   // longer be scheduled to avoid frequent preemption.
   //
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
-  // they may contian many sequences, so we should check here.
+  // they may contain many sequences, so we should check here.
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
   const bool requires_kv_cache =
@@ -192,7 +179,8 @@ void FixedStepsScheduler::handle_prefill_requests(
 
 std::vector<Batch> FixedStepsScheduler::prepare_batch() {
   Timer timer;
-  // propogate new requests to prefill_queue_
+  drain_prefetched_requests();
+  // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   auto propagate_request = [this](std::shared_ptr<Request>& request) {
     CHECK(request);

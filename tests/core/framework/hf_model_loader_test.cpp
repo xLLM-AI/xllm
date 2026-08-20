@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -108,6 +108,7 @@ TEST(HFModelLoaderTest, Qwen35DenseBackendAwareModelTypeSelection) {
   EXPECT_EQ(util::get_model_type(reader, fake_model_path, "llm"),
             "qwen3_5_text");
   EXPECT_EQ(util::get_model_type(reader, fake_model_path, "vlm"), "qwen3_5");
+  EXPECT_EQ(ModelRegistry::get_model_backend("qwen3_5_text"), "llm");
 }
 
 TEST(HFModelLoaderTest, Qwen35MoeBackendAwareModelTypeSelection) {
@@ -135,7 +136,15 @@ TEST(HFModelLoaderTest, Qwen35MoeBackendAwareModelTypeSelection) {
             "qwen3_5_moe_text");
   EXPECT_EQ(util::get_model_type(reader, fake_model_path, "vlm"),
             "qwen3_5_moe");
+  EXPECT_EQ(ModelRegistry::get_model_backend("qwen3_5_moe_text"), "llm");
 }
+
+#if defined(USE_MLU)
+TEST(HFModelLoaderTest, Qwen35MoeRootTypeHasCausalModelFactory) {
+  CausalLMFactory factory = ModelRegistry::get_causallm_factory("qwen3_5_moe");
+  EXPECT_TRUE(static_cast<bool>(factory));
+}
+#endif
 
 TEST(HFModelLoaderTest, LoadCompressedTensorsFp8StaticConfig) {
   JsonReader reader;
@@ -235,6 +244,39 @@ TEST(HFModelLoaderTest, RecFactoryCreatesRecCausalLmInstance) {
 }
 
 #if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU)
+TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
+  auto loader = ModelRegistry::get_model_args_loader("deepseek_v4");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "deepseek_v4",
+      "hidden_size": 4096,
+      "num_hidden_layers": 43,
+      "num_attention_heads": 32,
+      "num_key_value_heads": 1,
+      "compress_ratios": [1],
+      "dspark_block_size": 5,
+      "dspark_markov_rank": 256,
+      "dspark_noise_token_id": 128799,
+      "dspark_target_layer_ids": [40, 41, 42]
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_EQ(args.model_type(), "deepseek_v4");
+  EXPECT_EQ(args.dspark_num_layers(), 3);
+  // Base loader leaves this 0; applied later in
+  // configure_deepseek_v4_dspark_args.
+  EXPECT_EQ(args.dspark_block_size(), 0);
+  EXPECT_EQ(args.markov_rank(), 256);
+  ASSERT_EQ(args.compress_ratios().size(), 43);
+}
+#endif
+
 TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromDenseConfig) {
   auto loader = ModelRegistry::get_model_args_loader("qwen3_5_mtp");
   ASSERT_NE(loader, nullptr);

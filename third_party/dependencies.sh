@@ -10,6 +10,8 @@ NC="\033[0m" # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INSTALL_PREFIX="${YALANTINGLIBS_PREFIX:-/usr/local/yalantinglibs}"
+GOVER=1.25.10
+GO_INSTALL_DIR="/usr/local/go"
 
 print_section() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
@@ -52,6 +54,101 @@ remove_dir_if_exists() {
         print_warning "${dir_name} directory already exists. Removing for fresh install..."
         run_or_die "Failed to remove existing ${dir_name} directory" rm -rf "${dir_path}"
     fi
+}
+
+installed_go_version() {
+    local go_binary="$1"
+    "${go_binary}" version 2>/dev/null | sed -n 's/.* go\([0-9][0-9.]*\).*/\1/p'
+}
+
+configure_go() {
+    local go_binary="$1"
+    if [ -z "${GOPROXY:-}" ]; then
+        run_or_die "Failed to configure GOPROXY" \
+            "${go_binary}" env -w \
+            GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+    fi
+}
+
+install_go() {
+    local arch
+    local go_tarball
+    local work_dir
+    local download_success=false
+    local url
+    local download_urls
+
+    arch="$(uname -m)"
+    case "${arch}" in
+        aarch64)
+            arch="arm64"
+            ;;
+        x86_64)
+            arch="amd64"
+            ;;
+        *)
+            print_error "Unsupported architecture: ${arch}"
+            ;;
+    esac
+
+    go_tarball="go${GOVER}.linux-${arch}.tar.gz"
+    work_dir="$(mktemp -d -t xllm-go-XXXXXX)"
+    download_urls=(
+        "https://go.dev/dl/${go_tarball}"
+        "https://golang.google.cn/dl/${go_tarball}"
+        "https://mirrors.aliyun.com/golang/${go_tarball}"
+    )
+
+    for url in "${download_urls[@]}"; do
+        echo "Downloading Go ${GOVER} from ${url}..."
+        if wget -q --show-progress --timeout=30 --tries=2 \
+            -O "${work_dir}/${go_tarball}" "${url}"; then
+            download_success=true
+            break
+        fi
+        print_warning "Failed to download from ${url}, trying next mirror..."
+    done
+
+    if [ "${download_success}" = false ]; then
+        rm -rf "${work_dir}"
+        print_error "Failed to download Go ${GOVER} from all mirrors"
+    fi
+
+    run_or_die "Failed to remove old Go installation" rm -rf "${GO_INSTALL_DIR}"
+    run_or_die "Failed to install Go ${GOVER}" \
+        tar -C /usr/local -xzf "${work_dir}/${go_tarball}"
+    rm -rf "${work_dir}"
+    print_success "Go ${GOVER} installed successfully to ${GO_INSTALL_DIR}"
+}
+
+ensure_go() {
+    local go_binary
+    local go_version
+
+    go_binary="$(command -v go || true)"
+    if [ -n "${go_binary}" ]; then
+        go_version="$(installed_go_version "${go_binary}")"
+        if [ "${go_version}" = "${GOVER}" ]; then
+            configure_go "${go_binary}"
+            print_success "Go ${GOVER} is already installed"
+            return
+        fi
+    fi
+
+    if [ -x "${GO_INSTALL_DIR}/bin/go" ] && \
+        [ "$(installed_go_version "${GO_INSTALL_DIR}/bin/go")" = "${GOVER}" ]; then
+        run_or_die "Failed to expose Go in /usr/local/bin" \
+            ln -sf "${GO_INSTALL_DIR}/bin/go" /usr/local/bin/go
+        configure_go "${GO_INSTALL_DIR}/bin/go"
+        print_success "Go ${GOVER} is already installed"
+        return
+    fi
+
+    print_section "Installing Go ${GOVER} for Mooncake HA"
+    install_go
+    run_or_die "Failed to expose Go in /usr/local/bin" \
+        ln -sf "${GO_INSTALL_DIR}/bin/go" /usr/local/bin/go
+    configure_go "${GO_INSTALL_DIR}/bin/go"
 }
 
 patch_yalantinglibs_config() {
@@ -208,7 +305,7 @@ install_msgpack_cxx_headers() {
     print_success "msgpack-cxx headers installed to /usr/local/include"
 }
 
-main() {
+install_build_dependencies() {
     ensure_dir "${INSTALL_PREFIX}" "Failed to create install directory: ${INSTALL_PREFIX}"
     echo -e "${YELLOW}Installing to: ${INSTALL_PREFIX}${NC}"
 
@@ -230,6 +327,20 @@ main() {
         print_error \
             "Mooncake dependencies are incomplete after installation. Check zstd, xxHash, and msgpack-cxx development files."
     fi
+}
+
+main() {
+    case "${1:-}" in
+        --ensure-go)
+            ensure_go
+            ;;
+        "")
+            install_build_dependencies
+            ;;
+        *)
+            print_error "Unknown argument: $1"
+            ;;
+    esac
 }
 
 main "$@"

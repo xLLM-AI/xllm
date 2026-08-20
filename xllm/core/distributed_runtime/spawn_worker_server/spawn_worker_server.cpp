@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -88,6 +88,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t tp_size,
                                      int32_t sp_size,
                                      int32_t cfg_size,
+                                     int32_t text_encoder_tp_size,
                                      int32_t cp_size,
                                      int32_t ep_size,
                                      const InstanceRole& instance_role,
@@ -101,6 +102,8 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
   const bool is_dit_backend = backend == "dit";
   const int32_t effective_sp_size = is_dit_backend ? sp_size : 1;
   const int32_t effective_cfg_size = is_dit_backend ? cfg_size : 1;
+  const int32_t effective_text_encoder_tp_size =
+      is_dit_backend ? text_encoder_tp_size : 1;
   runner_options.block_size(block_size)
       .backend(backend)
       .world_size(world_size)
@@ -121,6 +124,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
+      .text_encoder_tp_size(effective_text_encoder_tp_size)
       .enable_shm(enable_shm)
       .input_shm_size(input_shm_size)
       .output_shm_size(output_shm_size)
@@ -145,6 +149,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
+      .text_encoder_tp_size(effective_text_encoder_tp_size)
       .communication_backend(communication_backend);
   DistributedConfig::get_instance().master_node_addr(master_node_addr);
   KVCacheConfig::get_instance()

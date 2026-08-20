@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -45,7 +45,7 @@ void batch_chunked_prefill(const std::string& uri,
   torch::Tensor qo_indptr_to_use;
   if (qo_indptr.has_value()) {
     // Use provided qo_indptr from attn_metadata
-    // TODO: consturct qo_indptr in CUDA graph execution
+    // TODO: construct qo_indptr in CUDA graph execution
     qo_indptr_to_use = qo_indptr.value();
     VLOG(kGraphExecutorLogVerboseLevel)
         << "use provided qo_indptr in CUDA graph execution";

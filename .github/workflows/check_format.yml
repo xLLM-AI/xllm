@@ -1,5 +1,5 @@
 name: CheckFormat
-on: 
+on:
   workflow_dispatch:
   push:
     branches: [main]
@@ -9,7 +9,6 @@ on:
       - 'cmake/**'
       - 'docs/**'
       - 'third_party/**'
-      - 'tools/**'
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [main]
@@ -19,7 +18,6 @@ on:
       - 'cmake/**'
       - 'docs/**'
       - 'third_party/**'
-      - 'tools/**'
 
 jobs:
   format-check:
@@ -73,10 +71,10 @@ jobs:
             "^tools/.*"
           )
 
-          # igonore files
+          # ignore files
           FILES=$(git diff --name-only "$BASE_COMMIT" -- '*.c' '*.h' '*.cc' '*.cp' '*.cpp' '*.c++' '*.cxx' '*.hh' '*.hpp' '*.hxx' '*.inc' '*.cu' '*.cuh' | \
             grep -v -E "$(IFS=\|; echo "${IGNORED_PATHS[*]}")")
-          
+
           if [ -z "$FILES" ]; then
             echo "✅ No files to check (all excluded)"
             exit 0
@@ -101,3 +99,20 @@ jobs:
           printf "\n\033[1mSuggested changes:\n\n"
           echo "$diff"
           exit 1
+
+  python-lint:
+    runs-on: [xllm-cpu-only-cicd]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify Ruff
+        run: |
+          command -v ruff
+          test "$(ruff --version)" = "ruff 0.14.0"
+
+      - name: Check Python formatting
+        run: ruff format --check --diff .
+
+      - name: Check Python lint
+        run: ruff check --output-format github .

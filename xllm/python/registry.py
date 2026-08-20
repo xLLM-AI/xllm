@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,41 +20,98 @@ class by the model's architecture (or model_type) string.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Type
+from collections.abc import Callable
+from importlib import import_module
 
 import torch.nn as nn
 
-_REGISTRY: Dict[str, Callable[[], Type[nn.Module]]] = {}
+from xllm.python.model_platform_support import MODEL_PLATFORM_SUPPORT
+from xllm.python.platform import current_platform
+
+_ModelPath = tuple[str, str]
+_REGISTRY: dict[str, _ModelPath] = {}
 
 
 def register_model(
     *names: str,
-) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
-    def deco(cls: Type[nn.Module]) -> Type[nn.Module]:
+) -> Callable[[type[nn.Module]], type[nn.Module]]:
+    """Register a model class for callers that already imported its module."""
+
+    def deco(cls: type[nn.Module]) -> type[nn.Module]:
+        path = (cls.__module__, cls.__name__)
         for name in names:
-            _REGISTRY[name] = cls
+            _REGISTRY[name] = path
         return cls
 
     return deco
 
 
-def get_model_class(name: str) -> Type[nn.Module]:
+def _register_model_path(module_name: str, class_name: str, *names: str) -> None:
+    path = (module_name, class_name)
+    for name in names:
+        _REGISTRY[name] = path
+
+
+def get_model_class(name: str) -> type[nn.Module]:
     if name not in _REGISTRY:
-        raise KeyError(
-            f"model '{name}' not registered; available: {sorted(_REGISTRY)}"
+        raise KeyError(f"model '{name}' not registered; available: {sorted(_REGISTRY)}")
+
+    module_name, class_name = _REGISTRY[name]
+    implementation = module_name.rsplit(".", 1)[-1]
+    platform = current_platform.device_type()
+    support = MODEL_PLATFORM_SUPPORT.get(implementation, {})
+    if not support.get(platform, False):
+        supported_platforms = sorted(name for name, enabled in support.items() if enabled)
+        raise NotImplementedError(
+            f"Python model '{name}' (implementation '{implementation}') is not "
+            f"supported on platform '{platform}'; supported platforms: "
+            f"{supported_platforms}"
         )
-    return _REGISTRY[name]
+
+    model_cls = getattr(import_module(module_name), class_name)
+    return model_cls
 
 
 def _register_builtin_models() -> None:
-    # Imported lazily to avoid import cycles at module load.
-    from xllm.python.models.qwen3 import Qwen3ForCausalLM
+    _register_model_path(
+        "xllm.python.models.qwen3",
+        "Qwen3ForCausalLM",
+        "Qwen3ForCausalLM",
+        "qwen3",
+    )
+    _register_model_path(
+        "xllm.python.models.qwen3_5",
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5ForCausalLM",
+        "qwen3_5",
+        "qwen3_5_text",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeForCausalLM",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    )
+    _register_model_path(
+        "xllm.python.models.qwen3_vl",
+        "Qwen3VLForConditionalGeneration",
+        "qwen3_vl",
+    )
+    _register_model_path(
+        "xllm.python.models.deepseek_v32",
+        "DeepseekV3ForCausalLM",
+        "deepseek_v32",
+    )
+    _register_model_path(
+        "xllm.python.models.glm5_2",
+        "Glm52ForCausalLM",
+        "glm_moe_dsa",
+    )
 
-    register_model("Qwen3ForCausalLM", "qwen3")(Qwen3ForCausalLM)
-
-    from xllm.python.models.deepseek_v32 import DeepseekV3ForCausalLM
-
-    register_model("deepseek_v32")(DeepseekV3ForCausalLM)
+    _register_model_path(
+        "xllm.python.models.deepseek_v32_mtp",
+        "DeepseekV32MtpForCausalLM",
+        "deepseek_v32_mtp",
+    )
 
 
 _register_builtin_models()

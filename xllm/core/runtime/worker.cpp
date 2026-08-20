@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,6 +32,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
+#include "runtime/dspark_worker_impl.h"
 #include "runtime/eagle3_worker_impl.h"
 #include "runtime/embed_vlm_worker_impl.h"
 #include "runtime/embed_worker_impl.h"
@@ -55,6 +56,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (algorithm == "DSpark") {
+      impl_ = new DSparkWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "Suffix") {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
@@ -91,6 +94,13 @@ bool Worker::init_model(const std::string& model_weights_path,
 
 bool Worker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return impl_->allocate_kv_cache(kv_cache_shape);
+}
+
+bool Worker::set_speculative_validate_time_predictor(
+    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
+  SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
+      predictor);
+  return true;
 }
 
 void Worker::get_cache_info(uint64_t& cluster_id,
@@ -169,31 +179,8 @@ folly::SemiFuture<bool> Worker::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> Worker::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  return impl_->pull_kv_blocks_async(src_cluster_id,
-                                     src_addr,
-                                     src_blocks,
-                                     dst_blocks,
-                                     src_linear_state_ids,
-                                     dst_linear_state_ids);
-}
-
-folly::SemiFuture<bool> Worker::pull_hetero_kv_blocks_async(
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  return impl_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                            src_addrs,
-                                            src_blocks,
-                                            dst_blocks,
-                                            src_linear_state_ids,
-                                            dst_linear_state_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  return impl_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
 }
 
 uint32_t Worker::transfer_kv_blocks(
@@ -206,6 +193,11 @@ uint32_t Worker::transfer_kv_blocks(
     const uint64_t batch_id,
     Slice<BlockTransferInfo>& block_transfer_info) {
   return impl_->transfer_kv_blocks(batch_id, block_transfer_info);
+}
+
+std::vector<uint8_t> Worker::prefetch_kv_blocks(
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  return impl_->prefetch_kv_blocks(block_transfer_info);
 }
 
 const torch::Device& Worker::device() const { return impl_->device(); }

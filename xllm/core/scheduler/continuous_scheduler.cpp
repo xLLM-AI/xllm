@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,7 @@ limitations under the License.
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -99,6 +100,8 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
       engine_(engine),
       request_queue_(::xllm::RecConfig::get_instance().request_queue_size()) {
   CHECK(engine_ != nullptr);
+  prefetch_admission_limit_ = static_cast<size_t>(
+      ::xllm::RecConfig::get_instance().request_queue_size());
 
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
@@ -177,13 +180,94 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
-  kv_cache_manager_->prefetch_from_storage(request);
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    if (request_queue_.size() + prefetch_admission_slots_ >=
+        prefetch_admission_limit_) {
+      return false;
+    }
+    ++prefetch_admission_slots_;
+  }
 
-  if (request_queue_.write(request)) {
+  kv_cache_manager_->prefetch_from_storage(request);
+  if (kv_cache_manager_->update_prefetch_result(request,
+                                                options_.prefetch_timeout())) {
+    if (request->finished() || request->cancelled()) {
+      release_prefetch_admission_slot();
+      VLOG(1) << "[Mooncake][AdmissionCancelled] request="
+              << request->request_id();
+      return true;
+    }
+    if (!enqueue_ready_request(request)) {
+      std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+      prefetch_admission_queue_.emplace_back(request);
+      return true;
+    }
+    release_prefetch_admission_slot();
     return true;
   }
 
-  return false;
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    prefetch_admission_queue_.emplace_back(request);
+  }
+  VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
+  return true;
+}
+
+bool ContinuousScheduler::enqueue_ready_request(
+    std::shared_ptr<Request> request) {
+  return request_queue_.write(std::move(request));
+}
+
+size_t ContinuousScheduler::num_prefetch_pending_requests() const {
+  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  return prefetch_admission_slots_;
+}
+
+void ContinuousScheduler::release_prefetch_admission_slot() {
+  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  CHECK_GT(prefetch_admission_slots_, 0u);
+  --prefetch_admission_slots_;
+}
+
+void ContinuousScheduler::drain_prefetched_requests() {
+  std::deque<std::shared_ptr<Request>> pending;
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    pending.swap(prefetch_admission_queue_);
+  }
+
+  std::deque<std::shared_ptr<Request>> still_pending;
+  for (std::shared_ptr<Request>& request : pending) {
+    if (!kv_cache_manager_->update_prefetch_result(
+            request, options_.prefetch_timeout())) {
+      still_pending.emplace_back(std::move(request));
+      continue;
+    }
+
+    if (request->finished() || request->cancelled()) {
+      release_prefetch_admission_slot();
+      VLOG(1) << "[Mooncake][AdmissionCancelled] request="
+              << request->request_id();
+      continue;
+    }
+
+    if (!enqueue_ready_request(request)) {
+      still_pending.emplace_back(std::move(request));
+      continue;
+    }
+    release_prefetch_admission_slot();
+    VLOG(1) << "[Mooncake][AdmissionReady] request=" << request->request_id();
+  }
+
+  if (!still_pending.empty()) {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    prefetch_admission_queue_.insert(
+        prefetch_admission_queue_.end(),
+        std::make_move_iterator(still_pending.begin()),
+        std::make_move_iterator(still_pending.end()));
+  }
 }
 
 void ContinuousScheduler::create_queues(const Options& options) {
@@ -215,6 +299,7 @@ void ContinuousScheduler::clear_mtp_bootstrap(Request* request) {
 
 std::vector<Batch> ContinuousScheduler::prepare_batch() {
   Timer timer;
+  drain_prefetched_requests();
   auto state = make_state();
 
   // Common phases (strategy-independent)
@@ -431,10 +516,15 @@ void ContinuousScheduler::generate() {
   response_processor_->wait_completion();
 }
 
-int64_t ContinuousScheduler::amortized_token_latency_ms(int64_t tbt_ms,
-                                                        size_t num_tokens) {
+int64_t ContinuousScheduler::microseconds_to_milliseconds(
+    int64_t microseconds) {
+  return (microseconds + 500) / 1000;
+}
+
+int64_t ContinuousScheduler::amortized_token_latency(int64_t latency,
+                                                     size_t num_tokens) {
   const int64_t n = static_cast<int64_t>(num_tokens);
-  return (tbt_ms + n / 2) / n;
+  return (latency + n / 2) / n;
 }
 
 void ContinuousScheduler::update_token_latency_metrics(
@@ -442,8 +532,6 @@ void ContinuousScheduler::update_token_latency_metrics(
   const auto now = absl::Now();
   const bool speculative_metrics_enabled =
       options_.num_speculative_tokens() > 0;
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
@@ -452,26 +540,25 @@ void ContinuousScheduler::update_token_latency_metrics(
     }
     // Read the committed-token count before tbt(), which resets it.
     const size_t committed_tokens = sequence->generated_tokens_since_latency();
-    int64_t tbt_milliseconds = sequence->tbt(now);
+    const int64_t tbt_microseconds = sequence->tbt_microseconds(now);
+    const int64_t tbt_milliseconds =
+        microseconds_to_milliseconds(tbt_microseconds);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                         tbt_milliseconds);
       sequence->set_time_to_first_token_latency_seconds(
           static_cast<double>(tbt_milliseconds) / 1000);
     } else {
-      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
+      int64_t inter_token_latency_us = tbt_microseconds;
       if (speculative_metrics_enabled && committed_tokens > 0) {
-        HISTOGRAM_OBSERVE(
-            speculative_per_token_latency_milliseconds,
-            amortized_token_latency_ms(tbt_milliseconds, committed_tokens));
-        step_committed_tokens += static_cast<int64_t>(committed_tokens);
-        ++step_decode_seqs;
+        inter_token_latency_us =
+            amortized_token_latency(tbt_microseconds, committed_tokens);
       }
+      HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
+                        inter_token_latency_us);
+      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
+                        microseconds_to_milliseconds(inter_token_latency_us));
     }
-  }
-  if (step_decode_seqs > 0) {
-    GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              static_cast<double>(step_committed_tokens) / step_decode_seqs);
   }
 }
 
@@ -499,6 +586,9 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
         if (request->cancelled()) {
           continue;
         }
+        if (request->error_status().has_value()) {
+          continue;
+        }
         if (!request->finished()) {
           stream_requests.emplace_back(request);
           continue;
@@ -511,7 +601,8 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
       } else if (request->finished() && !request->last_token_handled()) {
         request->handle_last_token();
       }
-    } else if (request->state().stream) {
+    } else if (request->state().stream &&
+               !request->error_status().has_value()) {
       stream_requests.emplace_back(request);
     }
   }

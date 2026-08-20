@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,6 +23,48 @@ limitations under the License.
 #include "util/tensor_helper.h"
 
 namespace xllm {
+
+DpEpPaddingCache::DpEpPaddingCache(size_t capacity) : capacity_(capacity) {
+  CHECK_GT(capacity_, 0);
+  entries_.reserve(capacity_);
+}
+
+const DpEpPaddingData* DpEpPaddingCache::find(
+    const std::vector<int32_t>& token_size_per_dp_group,
+    const std::vector<int32_t>& raw_token_size_per_dp_group) const {
+  const std::vector<int32_t>& normalized_raw_token_sizes =
+      raw_token_size_per_dp_group.empty() ? token_size_per_dp_group
+                                          : raw_token_size_per_dp_group;
+  for (const Entry& entry : entries_) {
+    if (entry.token_size_per_dp_group == token_size_per_dp_group &&
+        entry.raw_token_size_per_dp_group == normalized_raw_token_sizes) {
+      return &entry.data;
+    }
+  }
+  return nullptr;
+}
+
+void DpEpPaddingCache::insert(
+    const std::vector<int32_t>& token_size_per_dp_group,
+    const std::vector<int32_t>& raw_token_size_per_dp_group,
+    const DpEpPaddingData& data) {
+  const std::vector<int32_t>& normalized_raw_token_sizes =
+      raw_token_size_per_dp_group.empty() ? token_size_per_dp_group
+                                          : raw_token_size_per_dp_group;
+  for (Entry& entry : entries_) {
+    if (entry.token_size_per_dp_group == token_size_per_dp_group &&
+        entry.raw_token_size_per_dp_group == normalized_raw_token_sizes) {
+      entry.data = data;
+      return;
+    }
+  }
+
+  if (entries_.size() == capacity_) {
+    entries_.erase(entries_.begin());
+  }
+  entries_.emplace_back(
+      Entry{token_size_per_dp_group, normalized_raw_token_sizes, data});
+}
 
 void DpEpPaddingData::set_placeholder(const torch::Tensor& placeholder) {
   attn_padding_idx_ = placeholder;

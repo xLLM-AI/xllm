@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,16 +16,21 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/model/mtp_utils.h"
+#include "core/framework/request/incremental_decoder.h"
+#include "core/framework/request/sequence.h"
+#include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "framework/block/block_manager_pool.h"
-#include "framework/request/incremental_decoder.h"
-#include "framework/request/sequence.h"
-#include "framework/request/stopping_checker.h"
+#include "platform/platform.h"
+#include "runtime/decode_graph_bucket.h"
+#include "scheduler/profile/decode_graph_warmup_plan.h"
 #include "scheduler/profile/graph_warmup.h"
+#include "scheduler/profile/profile_manager.h"
 
 namespace xllm {
 namespace {
@@ -63,30 +68,213 @@ Sequence make_sequence(size_t index, const std::vector<int32_t>& tokens) {
                   params);
 }
 
-TEST(GraphWarmupTest, BuildsCanonicalBuckets) {
-  const std::vector<int32_t> buckets = graph_warmup_buckets(64);
+runtime::DecodeGraphExecutionShape make_decode_graph_execution_shape(
+    int64_t num_decoding_tokens,
+    int32_t num_speculative_tokens,
+    bool enable_no_padding,
+    int32_t max_graph_batch_size = 0) {
+  runtime::DecodeGraphExecutionShape execution_shape;
+  execution_shape.num_decoding_tokens = num_decoding_tokens;
+  execution_shape.num_speculative_tokens = num_speculative_tokens;
+  execution_shape.enable_graph_mode_decode_no_padding = enable_no_padding;
+  execution_shape.max_graph_batch_size = max_graph_batch_size;
+  return execution_shape;
+}
 
-  EXPECT_EQ(buckets, (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
+class RecordingProfileEngine final : public Engine {
+ public:
+  RecordingProfileEngine() {
+    BlockManagerPool::Options options;
+    options.num_blocks(/*num_blocks=*/64)
+        .block_size(/*block_size=*/4)
+        .enable_prefix_cache(/*enable_prefix_cache=*/false)
+        .max_seqs_per_batch(/*max_seqs_per_batch=*/8);
+    block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
+    model_args_.vocab_size(128)
+        .eos_token_id(2)
+        .max_position_embeddings(16)
+        .hidden_size(8);
+  }
+
+  ForwardOutput step(std::vector<Batch>& batches) override {
+    for (Batch& batch : batches) {
+      for (Sequence* sequence : batch.get_sequences()) {
+        all_requests_marked_ =
+            all_requests_marked_ && sequence->is_graph_warmup();
+      }
+    }
+    return ForwardOutput();
+  }
+
+  void update_last_step_result(std::vector<Batch>& batches) override {
+    (void)batches;
+  }
+
+  BlockManagerPool* block_manager_pool() const override {
+    return block_manager_.get();
+  }
+
+  const ModelArgs& model_args() const override { return model_args_; }
+
+  std::vector<int64_t> get_active_activation_memory() const override {
+    return {};
+  }
+
+  void reset_profile_markers() { all_requests_marked_ = true; }
+
+  bool all_requests_marked() const { return all_requests_marked_; }
+
+ private:
+  std::unique_ptr<BlockManagerPool> block_manager_;
+  ModelArgs model_args_;
+  bool all_requests_marked_ = true;
+};
+
+TEST(GraphWarmupTest, BuildsCanonicalBuckets) {
+  const DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
+      /*max_global_batch_size=*/64, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.batch_sizes,
+            (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
 }
 
 TEST(GraphWarmupTest, IncludesNonCanonicalMaxBucket) {
-  const std::vector<int32_t> buckets = graph_warmup_buckets(40);
+  const DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
+      /*max_global_batch_size=*/40, /*dp_size=*/1);
 
-  EXPECT_EQ(buckets, (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 40}));
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 40}));
 }
 
 TEST(GraphWarmupTest, SkipsBucketsBelowDpSize) {
-  const std::vector<int32_t> buckets =
-      graph_decode_buckets(/*max_seqs_per_batch=*/16, /*dp_size=*/4);
+  const DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
+      /*max_global_batch_size=*/16, /*dp_size=*/4);
 
-  EXPECT_EQ(buckets, (std::vector<int32_t>{4, 8, 16}));
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 16}));
 }
 
 TEST(GraphWarmupTest, AllowsAllBucketsSkipped) {
-  const std::vector<int32_t> buckets =
-      graph_decode_buckets(/*max_seqs_per_batch=*/2, /*dp_size=*/4);
+  const DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
+      /*max_global_batch_size=*/2, /*dp_size=*/4);
 
-  EXPECT_TRUE(buckets.empty());
+  EXPECT_TRUE(plan.batch_sizes.empty());
+}
+
+TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {
+  if (!Platform::supports_mtp_decode_graph_warmup()) {
+    GTEST_SKIP() << "MTP decode graph warmup is not supported.";
+  }
+
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/4,
+          /*num_speculative_tokens=*/3,
+          /*enable_no_padding=*/false);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/64, /*dp_size=*/1);
+
+  EXPECT_EQ(
+      plan.batch_sizes,
+      (std::vector<int32_t>{
+          1, 2, 3, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61}));
+}
+
+TEST(DecodeGraphWarmupPlanTest, UsesLocalDpBatchesAndKeepsPartialBatch) {
+  if (!Platform::supports_mtp_decode_graph_warmup()) {
+    GTEST_SKIP() << "MTP decode graph warmup is not supported.";
+  }
+
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/4,
+          /*num_speculative_tokens=*/0,
+          /*enable_no_padding=*/false);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/66, /*dp_size=*/4);
+
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 12, 20, 36, 52, 66}));
+}
+
+TEST(DecodeGraphWarmupPlanTest,
+     GraphLimitKeepsCppBatchSemanticsAndCoversMtpBuckets) {
+  if (!Platform::supports_mtp_decode_graph_warmup()) {
+    GTEST_SKIP() << "MTP decode graph warmup is not supported.";
+  }
+
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/4,
+          /*num_speculative_tokens=*/3,
+          /*enable_no_padding=*/false,
+          /*max_graph_batch_size=*/16);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/64, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.batch_sizes,
+            (std::vector<int32_t>{1, 2, 4, 8, 12, 16, 32, 48, 64}));
+}
+
+TEST(DecodeGraphWarmupPlanTest,
+     Mtp1GraphLimitPreservesCompatibilityBatchSizes) {
+  if (!Platform::supports_mtp_decode_graph_warmup()) {
+    GTEST_SKIP() << "MTP decode graph warmup is not supported.";
+  }
+
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/2,
+          /*num_speculative_tokens=*/1,
+          /*enable_no_padding=*/false,
+          /*max_graph_batch_size=*/16);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/64, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.batch_sizes,
+            (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
+}
+
+TEST(DecodeGraphWarmupPlanTest, NoPaddingKeepsCompatibilityBatches) {
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/4,
+          /*num_speculative_tokens=*/3,
+          /*enable_no_padding=*/true);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/64, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.batch_sizes,
+            (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
+}
+
+TEST(DecodeGraphWarmupPlanTest, PreservesSuppliedExecutionShape) {
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/4,
+          /*num_speculative_tokens=*/3,
+          /*enable_no_padding=*/false);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/16, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.execution_shape.num_decoding_tokens, 4);
+  EXPECT_EQ(plan.execution_shape.num_speculative_tokens, 3);
+  EXPECT_FALSE(plan.execution_shape.enable_graph_mode_decode_no_padding);
+  EXPECT_EQ(plan.execution_shape.max_graph_batch_size, 0);
+  if (Platform::supports_mtp_decode_graph_warmup()) {
+    EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 3, 5, 9, 13}));
+  } else {
+    EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 16}));
+  }
+}
+
+TEST(DecodeGraphWarmupPlanTest, RespectsReducedWarmupCapacity) {
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/1,
+          /*num_speculative_tokens=*/0,
+          /*enable_no_padding=*/false);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/15, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 15}));
 }
 
 TEST(GraphWarmupTest, PrefillRoleUsesPrefillOnlyPlan) {
@@ -107,20 +295,23 @@ TEST(GraphWarmupTest, DecodeRoleUsesDecodeOnlyPlan) {
 
 TEST(GraphWarmupTest, FormatsWarmupProgress) {
   const std::string progress = graph_warmup_progress(
-      /*completed=*/3, /*total=*/8, /*bucket=*/8, /*latency_ms=*/12.5);
+      /*completed=*/3, /*total=*/8, /*token_bucket=*/8, /*latency_ms=*/12.5);
 
   EXPECT_EQ(progress,
             "Graph warmup progress: [########------------] 3/8 37.5%, "
-            "bucket=8, latency=12.50 ms");
+            "token_bucket=8, latency=12.50 ms");
 }
 
 TEST(GraphWarmupTest, FormatsCompletedWarmupProgress) {
   const std::string progress = graph_warmup_progress(
-      /*completed=*/8, /*total=*/8, /*bucket=*/64, /*latency_ms=*/100.0);
+      /*completed=*/8,
+      /*total=*/8,
+      /*token_bucket=*/64,
+      /*latency_ms=*/100.0);
 
   EXPECT_EQ(progress,
             "Graph warmup progress: [####################] 8/8 100.0%, "
-            "bucket=64, latency=100.00 ms");
+            "token_bucket=64, latency=100.00 ms");
 }
 
 TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
@@ -190,6 +381,18 @@ TEST(GraphWarmupTest, PresetDpRankControlsBlockAllocation) {
   EXPECT_EQ(sequence.dp_rank(), 1);
   EXPECT_EQ(pool.num_used_blocks()[0], used_before[0]);
   EXPECT_GT(pool.num_used_blocks()[1], used_before[1]);
+}
+
+TEST(GraphWarmupTest, MarksOrdinaryProfileRequestsAsSyntheticLoad) {
+  RecordingProfileEngine engine;
+  ProfileManager::Options options;
+  options.max_tokens_per_batch(4).max_seqs_per_batch(1).dp_size(1);
+  ProfileManager profile_manager(&engine, options);
+  engine.reset_profile_markers();
+
+  profile_manager.run_request(/*token_length=*/4, /*prefix_length=*/0);
+
+  EXPECT_TRUE(engine.all_requests_marked());
 }
 
 }  // namespace

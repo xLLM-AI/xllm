@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -101,6 +101,7 @@ struct ParallelArgs {
                int32_t sp_size,
                int32_t cfg_size,
                int32_t vae_size,
+               int32_t text_encoder_tp_size,
                ProcessGroup* process_group)
       : rank_(rank),
         world_size_(world_size),
@@ -109,6 +110,7 @@ struct ParallelArgs {
         sp_size_(sp_size),
         cfg_size_(cfg_size),
         vae_size_(vae_size),
+        text_encoder_tp_size_(text_encoder_tp_size),
         process_group_(process_group) {}
 
   int32_t get_group_size_by_type(const std::string& group_type) const {
@@ -124,6 +126,8 @@ struct ParallelArgs {
       return ep_size();
     } else if (group_type == "vae") {
       return vae_size();
+    } else if (group_type == "text_encoder_tp") {
+      return text_encoder_tp_size();
     } else if (group_type == "cp") {
       return cp_size();
     } else {
@@ -168,10 +172,16 @@ struct ParallelArgs {
   }
 
   [[nodiscard]] int32_t dcp_size_effective() const noexcept {
+    if (dcp_group_ != nullptr) {
+      return dcp_group_->world_size();
+    }
     return dcp_size_ > 0 ? dcp_size_ : 1;
   }
 
   [[nodiscard]] int32_t dcp_rank() const noexcept {
+    if (dcp_group_ != nullptr) {
+      return dcp_group_->rank();
+    }
     if (dcp_size_effective() <= 1) {
       return 0;
     }
@@ -186,6 +196,9 @@ struct ParallelArgs {
   }
 
   [[nodiscard]] int32_t kv_split_rank() const noexcept {
+    if (dcp_group_ != nullptr) {
+      return dcp_group_->rank();
+    }
     const int32_t kv = kv_split_size_effective();
     if (kv <= 1) {
       return 0;
@@ -204,6 +217,9 @@ struct ParallelArgs {
 
   // cfg size
   PROPERTY(int32_t, vae_size) = 1;
+
+  // text encoder tensor parallel size
+  PROPERTY(int32_t, text_encoder_tp_size) = 1;
 
   // atb hccl mapping json data
   PROPERTY(nlohmann::json, mapping_data);
@@ -231,6 +247,7 @@ struct ParallelArgs {
   ProcessGroup* single_rank_group_ = nullptr;
   // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
+  // DCP ProcessGroup is authoritative for KV ownership and decode merge.
   ProcessGroup* dcp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   // Dedicated group for EPLB weight migration. It has the same rank set as
@@ -241,10 +258,10 @@ struct ParallelArgs {
   ProcessGroup* mc2_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 
-  // PyTorch creates its own TP process group. These fields only reserve the
-  // TCPStore endpoint after the native process-group port range.
-  std::string python_tp_rendezvous_host_;
-  int32_t python_tp_rendezvous_port_ = 0;
+  // Python process groups reuse the native world TCPStore. PrefixStore keeps
+  // the bootstrap keys for each logical group independent.
+  std::string python_rendezvous_host_;
+  int32_t python_rendezvous_port_ = 0;
 
   // ProcessGroups for DiT models
   ProcessGroup* dit_tp_group_ = nullptr;
@@ -252,6 +269,7 @@ struct ParallelArgs {
   ProcessGroup* dit_cfg_group_ = nullptr;
   ProcessGroup* dit_dp_group_ = nullptr;
   ProcessGroup* dit_vae_group_ = nullptr;
+  ProcessGroup* dit_text_encoder_tp_group_ = nullptr;
 };
 
 }  // namespace xllm

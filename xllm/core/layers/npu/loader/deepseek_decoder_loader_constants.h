@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -170,32 +170,39 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"mlp.gate_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.gate_proj.weight_offset", IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.gate_proj.weight_scale", IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.gate_proj.scale_bias", IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.up_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.up_proj.weight_offset", IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.up_proj.weight_scale", IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.up_proj.scale_bias", IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.down_proj.weight", IN_MLP_DOWN_WEIGHT_SHARED_EXPERT},
     {"mlp.down_proj.weight_offset", IN_MLP_DOWN_OFFSET_SHARED_EXPERT},
     {"mlp.down_proj.weight_scale", IN_MLP_DOWN_SCALE_SHARED_EXPERT},
+    {"mlp.down_proj.scale_bias", IN_MLP_DOWN_BIAS_SHARED_EXPERT},
 
     {"mlp.shared_experts.gate_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.shared_experts.gate_proj.weight_offset",
      IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.shared_experts.gate_proj.weight_scale",
      IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.shared_experts.gate_proj.scale_bias",
+     IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.shared_experts.up_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.shared_experts.up_proj.weight_offset",
      IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.shared_experts.up_proj.weight_scale",
      IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.shared_experts.up_proj.scale_bias", IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.shared_experts.down_proj.weight", IN_MLP_DOWN_WEIGHT_SHARED_EXPERT},
     {"mlp.shared_experts.down_proj.weight_offset",
      IN_MLP_DOWN_OFFSET_SHARED_EXPERT},
     {"mlp.shared_experts.down_proj.weight_scale",
      IN_MLP_DOWN_SCALE_SHARED_EXPERT},
+    {"mlp.shared_experts.down_proj.scale_bias", IN_MLP_DOWN_BIAS_SHARED_EXPERT},
 
     {"mlp.gate.weight", IN_BLOCK_SPARSE_MOE_GATE_WEIGHT},
     {"mlp.gate.e_score_correction_bias", IN_BLOCK_SPARSE_MOE_GATE_BIAS},
@@ -203,13 +210,16 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"gate_proj.weight", IN_MLP_GATEUP_WEIGHT_EXPERT},
     {"gate_proj.weight_offset", IN_MLP_GATEUP_OFFSET_EXPERT},
     {"gate_proj.weight_scale", IN_MLP_GATEUP_SCALE_EXPERT},
+    {"gate_proj.scale_bias", IN_MLP_GATEUP_BIAS_EXPERT},
     {"up_proj.weight", IN_MLP_GATEUP_WEIGHT_EXPERT},
     {"up_proj.weight_offset", IN_MLP_GATEUP_OFFSET_EXPERT},
     {"up_proj.weight_scale", IN_MLP_GATEUP_SCALE_EXPERT},
+    {"up_proj.scale_bias", IN_MLP_GATEUP_BIAS_EXPERT},
 
     {"down_proj.weight", IN_MLP_DOWN_WEIGHT_EXPERT},
     {"down_proj.weight_offset", IN_MLP_DOWN_OFFSET_EXPERT},
     {"down_proj.weight_scale", IN_MLP_DOWN_SCALE_EXPERT},
+    {"down_proj.scale_bias", IN_MLP_DOWN_BIAS_EXPERT},
 };
 
 inline const std::map<int, int> WEIGHT_SHARD = {};

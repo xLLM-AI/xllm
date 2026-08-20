@@ -7,7 +7,8 @@ This document explains how to add or modify an Ascend TileLang kernel in xLLM. T
 
 Relevant directories:
 
-- Python kernel definitions: `xllm/xllm/compiler/tilelang/targets/ascend/kernels`
+- TileLang DSL/JIT implementations: `xllm/xllm/python/kernels_npu/tilelang`
+- AOT descriptors: `xllm/xllm/compiler/tilelang/targets/ascend/aot`
 - NPU runtime wrappers: `xllm/xllm/core/kernels/npu/tilelang`
 
 Builds and tests should be run inside the NPU container.
@@ -31,9 +32,9 @@ For `rope`:
 
 The recommended order is:
 
-1. Implement the TileLang kernel in a Python file such as `rope.py`
-2. Implement `generate_source(...)` to lower the kernel into Ascend-C source
-3. Declare `DISPATCH_SCHEMA` and `SPECIALIZATIONS`
+1. Implement the TileLang DSL/JIT kernel in `python/kernels_npu/tilelang/rope.py`
+2. Implement `generate_source(...)` in `compiler/tilelang/targets/ascend/aot/rope.py`
+3. Declare `DISPATCH_SCHEMA` and `SPECIALIZATIONS` in the AOT descriptor
 4. Generate `registry.inc` once and inspect it
 5. Then write or update the runtime specialization construction logic in the wrapper
 6. Wire it into CMake and run tests
@@ -46,11 +47,14 @@ The key idea behind this order is:
 
 ## 3. Write the Python Kernel
 
-Using `rope.py` as the example, the Python side can be understood in three layers:
+Using `rope` as the example, the Python side is split across two files:
 
-- `build_rope_kernel(...)`: kernel implementation
-- `generate_source(...)`: AOT export
-- `RopeKernel`: kernel registration plus dispatch schema and compiled instance declaration
+- `python/kernels_npu/tilelang/rope.py`
+  - `build_rope_kernel(...)`: DSL kernel implementation
+  - `rope_in_place_kernel_jit(...)`: Python JIT entry point
+- `compiler/tilelang/targets/ascend/aot/rope.py`
+  - `generate_source(...)`: AOT export
+  - `RopeKernel`: kernel registration plus dispatch schema and compiled instance declaration
 
 ### 3.1 Implement `build_rope_kernel(...)`
 
@@ -61,7 +65,7 @@ Using `rope.py` as the example, the Python side can be understood in three layer
 - parallel task organization under `with T.Kernel(...)`
 - UB allocation and the actual compute logic
 
-The simplified structure in `rope.py` looks like this:
+The simplified DSL implementation looks like this:
 
 ```python
 def build_rope_kernel(
@@ -112,9 +116,11 @@ max_rows_num_in_ub = _derive_max_rows_num_in_ub(...)
 compile_num_tokens = task_num * max_rows_num_in_ub
 ```
 
-### 3.2 Implement `generate_source(...)`
+### 3.2 Implement AOT `generate_source(...)`
 
-`generate_source(...)` lowers the TileLang kernel above into the final source code. The export layer takes one specialization and turns it into compilable Ascend-C source.
+`generate_source(...)` lives in `compiler/tilelang/targets/ascend/aot/rope.py` and lowers the
+independent DSL implementation into final source code. The AOT file owns specialization, ABI, and
+lowering metadata; it must not copy the `T.prim_func` body.
 
 For `rope`, the core logic is:
 
@@ -143,10 +149,11 @@ The rules here are:
 
 After the kernel implementation and export layer are done, use an `@register_kernel` class to attach the kernel to the framework.
 
-The current minimal template in `rope.py` is:
+The current minimal template in the AOT `rope.py` is:
 
 ```python
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm.python.kernels_npu.tilelang.rope import build_rope_kernel
 
 @register_kernel
 class RopeKernel(TilelangKernel):
@@ -396,4 +403,3 @@ python setup.py test --test-name rope_wrapper_test --device a3
 ```
 
 The first command generates `manifest.json`, `registry.inc`, and the object files. The second command validates the full integration path.
-

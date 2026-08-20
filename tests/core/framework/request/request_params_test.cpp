@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,10 +21,26 @@ limitations under the License.
 #include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
+#include "core/framework/config/service_config.h"
 #include "multimodal.pb.h"
 
 namespace xllm {
 namespace {
+
+class ScopedJsonObjectOutput final {
+ public:
+  explicit ScopedJsonObjectOutput(bool enabled)
+      : previous_(ServiceConfig::get_instance().enable_json_object_output()) {
+    ServiceConfig::get_instance().enable_json_object_output(enabled);
+  }
+
+  ~ScopedJsonObjectOutput() {
+    ServiceConfig::get_instance().enable_json_object_output(previous_);
+  }
+
+ private:
+  bool previous_;
+};
 
 TEST(RequestParamsTest, IncludeStopStringInOutputDefaultsToFalse) {
   RequestParams completion_params(proto::CompletionRequest(), "", "");
@@ -62,6 +78,49 @@ TEST(RequestParamsTest, IncludeStopStringInOutputUsesVllmJsonName) {
   RequestParams params(request, "", "");
 
   EXPECT_TRUE(params.include_stop_str_in_output);
+}
+
+TEST(RequestParamsTest, ParsesJsonObjectResponseFormat) {
+  const ServiceConfig default_config;
+  EXPECT_TRUE(default_config.enable_json_object_output());
+  ScopedJsonObjectOutput enabled(/*enabled=*/true);
+  proto::ChatRequest request;
+  request.mutable_response_format()->set_type("json_object");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_EQ(params.response_format, ResponseFormatType::JSON_OBJECT);
+  EXPECT_TRUE(params.response_format_error.empty());
+}
+
+TEST(RequestParamsTest, IgnoresJsonObjectResponseFormatWhenDisabled) {
+  ScopedJsonObjectOutput disabled(/*enabled=*/false);
+  proto::ChatRequest request;
+  request.mutable_response_format()->set_type("json_object");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_EQ(params.response_format, ResponseFormatType::NONE);
+  EXPECT_TRUE(params.response_format_error.empty());
+}
+
+TEST(RequestParamsTest, RejectsUnsupportedResponseFormat) {
+  ScopedJsonObjectOutput disabled(/*enabled=*/false);
+  proto::ChatRequest request;
+  request.mutable_response_format()->set_type("text");
+
+  RequestParams params(request, "", "");
+  std::optional<Status> received_status;
+  const bool valid =
+      params.verify_params([&received_status](RequestOutput output) {
+        received_status = output.status;
+        return false;
+      });
+
+  EXPECT_FALSE(valid);
+  ASSERT_TRUE(received_status.has_value());
+  EXPECT_EQ(received_status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(received_status->message().find("json_object"), std::string::npos);
 }
 
 TEST(RequestParamsTest,

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <mutex>
 
 #include "common/types.h"
 #include "executor.h"
@@ -37,12 +38,14 @@ limitations under the License.
 #include "framework/sampling/beam_searcher.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
+#include "framework/tokenizer/tokenizer.h"
 #include "framework/xtensor/xtensor.h"
 #include "options.h"
 #include "platform/device.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/mooncake_weight_transfer.h"
+#include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "layers/npu/loader/rolling_load_manager.h"
 #endif
 
@@ -111,22 +114,33 @@ class WorkerImpl {
   // prepare work before model execution
   virtual void prepare_work_before_execute(const ForwardInput& inputs,
                                            ForwardInput& processed_inputs);
+  virtual void restore_json_object_states(ForwardInput& input);
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream,
-                                             bool record_ready_event = true);
+                                             bool record_ready_event = true,
+                                             bool restore_linear_state = true);
 #if defined(USE_NPU)
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
   const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
   torch::Tensor recompute_dcp_cache_slots(const ForwardInput& input) const;
+  // Builds or reuses draft decode padding on the current stream. MTP calls this
+  // while preparing B/2B metadata so the compute stream only observes hits.
+  bool uses_npu_dp_ep_padding() const;
+  void prepare_dp_ep_padding(ModelInputParams& input_params);
+  void prepare_dp_ep_padding_on_stream(ModelInputParams& input_params,
+                                       Stream& prepare_stream);
 #endif
 
-  // False on MTP composite: only leaf workers run NpuCpPlan::prepare.
-  virtual bool owns_npu_cp_plan_build() const { return true; }
+  // False on composites where only leaf workers consume parallel metadata.
+  virtual bool owns_npu_parallel_input_prepare() const { return true; }
 
   // Cached: whether the loaded model advertises NPU model-side CP.
   bool model_supports_model_cp() const;
+  // Lazily create (or return) the worker-local JSON grammar. Thread-safe.
+  std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
+      bool reasoning_enabled);
 
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);
@@ -136,6 +150,8 @@ class WorkerImpl {
   virtual void process_group_test();
 
   virtual ForwardInput update_input_by_last_step_output(ForwardInput& inputs);
+  void update_json_object_states_by_last_step_output(ForwardInput& inputs);
+  void sanitize_json_object_error_inputs(ForwardInput& inputs);
 
   // initialize model, cache manager. async call
   virtual folly::SemiFuture<bool> init_model_async(
@@ -170,18 +186,7 @@ class WorkerImpl {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
-
-  virtual folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
@@ -191,8 +196,13 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
+  void set_hierarchy_layer_synchronizer(ModelInputParams& input_params);
+
+  virtual std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info);
+
   // Run the model on the given input. async call
-  // the future returns a successfull status with no meaningful value
+  // the future returns a successful status with no meaningful value
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs);
 
@@ -226,7 +236,12 @@ class WorkerImpl {
   }
 
  protected:
-  void update_last_step_output(const std::optional<ForwardOutput>& output);
+  void update_last_step_output(
+      const std::optional<ForwardOutput>& output,
+      const std::vector<std::string>& request_ids,
+      const std::vector<std::string>& sample_sequence_ids);
+  bool can_use_last_step_output_for_schedule_overlap(
+      const ForwardInput& input) const;
   virtual std::optional<ForwardOutput> step_for_schedule_overlap(
       const ForwardInput& input);
   virtual ForwardInput update_input_by_last_step_output_for_schedule_overlap(
@@ -270,7 +285,7 @@ class WorkerImpl {
   // Original xtensor (PageAllocator) sleep path.
   bool xtensor_sleep(MasterStatus master_status);
 
-#if defined(USE_CUDA) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   void refresh_cuda_block_copy_runtime_state();
   bool can_use_cuda_block_copy_kernel(
       const ModelInputParams& input_params) const;
@@ -290,11 +305,16 @@ class WorkerImpl {
 #endif
 
 #if defined(USE_NPU)
+  static constexpr size_t kDraftDpEpPaddingCacheCapacity = 2;
+  DpEpPaddingCache draft_dp_ep_padding_cache_{kDraftDpEpPaddingCacheCapacity};
+
   bool wakeup_from_remote_weights(const WakeupOptions& options);
   // Complete rolling initialization by delegating to model-owned rolling
   // runtime (manager + buffer): decoder preload, non-decoder reload, and
   // decoder ATB binding refresh.
   bool init_rolling_runtime_state();
+
+  torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
 
 #endif
 
@@ -344,6 +364,11 @@ class WorkerImpl {
   // causal LM model
   std::unique_ptr<CausalLM> model_;
 
+  std::unique_ptr<Tokenizer> tokenizer_;
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
+  std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
+  mutable std::mutex json_object_grammar_mutex_;
+
   std::unique_ptr<Executor> model_executor_;
 
   std::unique_ptr<Sampler> sampler_;
@@ -353,6 +378,8 @@ class WorkerImpl {
   // params for enable_schedule_overlap case
   // an output to store the result of last step
   ForwardOutput last_step_output_;
+  std::vector<std::string> last_step_request_ids_;
+  std::vector<std::string> last_step_sample_sequence_ids_;
   bool last_step_output_valid_ = false;
   std::mutex mtx_;
   std::condition_variable cv_;
@@ -364,7 +391,7 @@ class WorkerImpl {
   std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
-#if defined(USE_CUDA) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   CudaBlockCopyRuntimeState cuda_block_copy_runtime_state_;
 #endif
 

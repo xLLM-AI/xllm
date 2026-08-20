@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,15 +21,18 @@ limitations under the License.
 
 #include "core/layers/common/rotary_embedding_util.h"
 #include "deepseek_v32.h"
+#include "models/llm/npu/glm_shared_expert_stream.h"
 #include "mtp_model_base.h"
 
 namespace xllm::npu::model {
 
 class GlmMoeDsaMtpModelImpl
-    : public xllm::npu::model::MtpModelImplBase<DeepseekV32DecoderLayer> {
+    : private GlmSharedExpertStreamOwner,
+      public xllm::npu::model::MtpModelImplBase<DeepseekV32DecoderLayer> {
  public:
   GlmMoeDsaMtpModelImpl(const ModelContext& context)
-      : xllm::npu::model::MtpModelImplBase<DeepseekV32DecoderLayer>(
+      : GlmSharedExpertStreamOwner(context),
+        xllm::npu::model::MtpModelImplBase<DeepseekV32DecoderLayer>(
             "glm_moe_dsa_mtp",
             context) {
     auto model_args = context.get_model_args();

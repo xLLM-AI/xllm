@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -113,6 +113,30 @@ TEST(SamplingParamsTest, AbnormalConcat) {
   // check results
   EXPECT_FALSE(sampling_parameters_1.selected_token_idxes.defined());
   EXPECT_FALSE(sampling_parameters_1.sample_idxes.defined());
+}
+
+TEST(SamplingParamsTest, ConcatPadsUnconstrainedRows) {
+  RequestSamplingParam constrained_request;
+  SamplingParameters constrained;
+  constrained.init({&constrained_request},
+                   {0},
+                   {0},
+                   {},
+                   {},
+                   {},
+                   {torch::tensor({0.0F, -1.0e9F})});
+
+  RequestSamplingParam unconstrained_request;
+  SamplingParameters unconstrained;
+  unconstrained.init({&unconstrained_request}, {1}, {0}, {}, {}, {});
+
+  constrained.concat(unconstrained);
+
+  ASSERT_TRUE(constrained.filter_mask.defined());
+  ASSERT_EQ(constrained.filter_mask.sizes(), torch::IntArrayRef({2, 2}));
+  EXPECT_EQ(constrained.filter_mask.index({0, 1}).item<float>(), -1.0e9F);
+  EXPECT_EQ(constrained.filter_mask.index({1, 0}).item<float>(), 0.0F);
+  EXPECT_EQ(constrained.filter_mask.index({1, 1}).item<float>(), 0.0F);
 }
 
 }  // namespace xllm

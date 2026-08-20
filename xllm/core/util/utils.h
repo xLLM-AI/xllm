@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <numeric>
 #include <optional>
@@ -163,10 +164,26 @@ inline bool is_target_mtp_model_type(std::string_view model_type,
          has_mtp_model_type_marker(model_type);
 }
 
+inline constexpr std::string_view kDeepseekV4DSparkModelType =
+    "deepseek_v4_dspark";
+
+inline bool is_deepseek_v4_dspark_model_type(std::string_view model_type) {
+  return model_type == kDeepseekV4DSparkModelType;
+}
+
 inline bool is_deepseek_v4_model_type(std::string_view model_type) {
   constexpr std::string_view kTargetModelType = "deepseek_v4";
   return model_type == kTargetModelType ||
+         is_deepseek_v4_dspark_model_type(model_type) ||
          is_target_mtp_model_type(model_type, kTargetModelType);
+}
+
+// Returns whether a model's KV cache can be transferred between different TP
+// sizes without concatenating TP-local head shards. This is a PD cache-layout
+// capability, not an attention-runtime classification: DeepSeek-V4 DSA has
+// TP-invariant cache blocks even though it does not use the generic MLA path.
+inline bool is_tp_invariant_kv_cache_model_type(std::string_view model_type) {
+  return is_mla_model_type(model_type) || is_deepseek_v4_model_type(model_type);
 }
 
 inline bool is_target_model_type(std::string_view model_type,
@@ -196,6 +213,32 @@ inline std::string get_model_name(
   }
 
   return model_name;
+}
+
+inline std::string get_model_repository_name(
+    const std::filesystem::path& normalized_model_path) {
+  std::filesystem::path version_path = normalized_model_path;
+  if (!version_path.has_filename()) {
+    version_path = version_path.parent_path();
+  }
+
+  const std::string model_version = version_path.filename().string();
+  const bool is_numeric_version =
+      !model_version.empty() &&
+      std::all_of(
+          model_version.begin(), model_version.end(), [](char character) {
+            return std::isdigit(static_cast<unsigned char>(character)) != 0;
+          });
+  if (!is_numeric_version) {
+    return get_model_name(normalized_model_path);
+  }
+
+  const std::string repository_name =
+      version_path.parent_path().filename().string();
+  if (repository_name.empty()) {
+    return get_model_name(normalized_model_path);
+  }
+  return repository_name;
 }
 
 inline std::string get_model_backend(const std::filesystem::path& model_path) {

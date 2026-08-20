@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -157,7 +157,7 @@ torch::Tensor StateDict::get_sharded_tensor(const std::string& tensor_name,
   }
 
   CHECK(dim_size % world_size == 0)
-      << "can't devide tensor evenly on " << dim << " with dim: " << dim_size
+      << "can't divide tensor evenly on " << dim << " with dim: " << dim_size
       << " world_size: " << world_size;
   const auto chunks = tensor.chunk(world_size, dim);
   return chunks[rank];

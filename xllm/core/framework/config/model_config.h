@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -41,6 +42,10 @@ class ModelConfig final {
   void normalize_cpp_chat_template(const std::string& model_type);
 
   [[nodiscard]] static bool is_python_model_impl(std::string_view model_impl);
+  [[nodiscard]] static std::optional<std::string>
+  validate_python_speculative_decode(std::string_view model_impl,
+                                     std::string_view model_type,
+                                     int32_t num_speculative_tokens);
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {

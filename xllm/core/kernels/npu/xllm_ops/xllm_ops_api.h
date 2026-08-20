@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -210,6 +210,23 @@ torch::Tensor lightning_indexer(
     int64_t pre_tokens,
     int64_t next_tokens,
     bool return_value);
+
+torch::Tensor lightning_indexer_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& weights,
+    const c10::optional<torch::Tensor>& query_seq_lengths,
+    const c10::optional<torch::Tensor>& key_seq_lengths,
+    const c10::optional<torch::Tensor>& block_table,
+    c10::string_view layout_query,
+    c10::string_view layout_key,
+    int64_t selected_count,
+    int64_t sparse_mode,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    bool return_value,
+    torch::Tensor& sparse_indices_out,
+    torch::Tensor& sparse_values_out);
 at::Tensor hc_pre_inv_rms(const at::Tensor& x, double epsilon);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gamma_add_rms_norm(
@@ -295,6 +312,23 @@ at::Tensor sparse_flash_attention(
     c10::string_view layout_kv,
     int64_t sparse_mode);
 
+at::Tensor sparse_flash_attention_out(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& sparse_indices,
+    const c10::optional<at::Tensor>& block_table,
+    const c10::optional<at::Tensor>& actual_seq_lengths_query,
+    const c10::optional<at::Tensor>& actual_seq_lengths_kv,
+    const c10::optional<at::Tensor>& query_rope,
+    const c10::optional<at::Tensor>& key_rope,
+    double scale_value,
+    int64_t sparse_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode,
+    at::Tensor& output);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_preprocess(
     const at::Tensor& input,
     const at::Tensor& gamma0,
@@ -333,6 +367,50 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_preprocess(
     int64_t quant_mode,
     bool do_rms_norm,
     int64_t wdkv_split_count);
+
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor>
+mla_preprocess_v2(const torch::Tensor& input,
+                  const torch::Tensor& gamma0,
+                  const torch::Tensor& beta0,
+                  const torch::Tensor& quant_scale0,
+                  const torch::Tensor& quant_offset0,
+                  const torch::Tensor& wdqkv,
+                  const torch::Tensor& descale0,
+                  const torch::Tensor& bias0,
+                  const torch::Tensor& gamma1,
+                  const torch::Tensor& beta1,
+                  const torch::Tensor& quant_scale1,
+                  const torch::Tensor& quant_offset1,
+                  const torch::Tensor& wuq,
+                  const torch::Tensor& descale1,
+                  const torch::Tensor& bias1,
+                  const torch::Tensor& gamma2,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& sin,
+                  const torch::Tensor& wuk,
+                  torch::Tensor& kv_cache,
+                  torch::Tensor& kv_cache_rope,
+                  const torch::Tensor& slot_mapping,
+                  const torch::Tensor& ctkv_scale,
+                  const torch::Tensor& q_nope_scale,
+                  int64_t wdq_dim,
+                  int64_t q_rope_dim,
+                  int64_t k_rope_dim,
+                  double epsilon,
+                  int64_t q_rotary_coeff,
+                  int64_t k_rotary_coeff,
+                  bool transpose_wdq,
+                  bool transpose_wuq,
+                  bool transpose_wuk,
+                  int64_t cache_mode,
+                  int64_t quant_mode,
+                  bool do_rms_norm,
+                  int64_t wdkv_split_count,
+                  bool q_down_out_flag);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 compressor(const at::Tensor& x,

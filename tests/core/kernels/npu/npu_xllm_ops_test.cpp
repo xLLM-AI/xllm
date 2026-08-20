@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,7 @@ limitations under the License.
 #include <limits>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/xllm_torch_ops.h"
@@ -137,7 +138,7 @@ class NpuXllmOpsTest : public ::testing::Test {
     py::gil_scoped_acquire gil;
     prepend_python_model_path();
     py::module_::import("xllm.python._npu_bootstrap");
-    py::module_::import("xllm.python");
+    py::module_::import("xllm.python").attr("initialize_runtime")();
   }
 };
 
@@ -184,6 +185,40 @@ TEST_F(NpuXllmOpsTest, DispatcherSiluAndMulMatchesReference) {
              .abs()
              .max()
              .item<float>();
+}
+
+TEST_F(NpuXllmOpsTest, DispatcherQuantizeMatchesStaticW8A8Reference) {
+  py::gil_scoped_acquire gil;
+  const auto input_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto scale_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto zero_point_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto input_cpu = torch::tensor(
+      std::vector<float>{-40.0F, -1.0F, -0.25F, 0.0F, 0.25F, 1.0F, 40.0F},
+      input_opts);
+  const auto scale_cpu = torch::full({1}, 0.25, scale_opts);
+  const auto zero_point_cpu = torch::full({1}, 2, zero_point_opts);
+  const auto input = input_cpu.to(torch::kPrivateUse1);
+  const auto scale = scale_cpu.to(torch::kPrivateUse1);
+  const auto zero_point = zero_point_cpu.to(torch::kPrivateUse1);
+
+  auto op = c10::Dispatcher::singleton().findSchemaOrThrow(
+      "xllm_ops::quantize_per_tensor", "");
+  auto actual = op.typed<torch::Tensor(const torch::Tensor&,
+                                       const torch::Tensor&,
+                                       const torch::Tensor&,
+                                       at::ScalarType,
+                                       int64_t)>()
+                    .call(input, scale, zero_point, at::ScalarType::QInt8, -1);
+
+  const auto expected =
+      torch::clamp(torch::round(input_cpu.to(torch::kFloat32) /
+                                    scale_cpu.to(torch::kFloat32) +
+                                zero_point_cpu.to(torch::kFloat32)),
+                   -128,
+                   127)
+          .to(torch::kInt8);
+  EXPECT_EQ(actual.scalar_type(), torch::kInt8);
+  EXPECT_TRUE(torch::equal(actual.cpu(), expected));
 }
 
 TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
@@ -413,6 +448,173 @@ with patch.object(
     assert model_executor._num_attention_layers == 1
     assert model_executor.decode_graph_runner is None
     assert model_executor.inductor_runner is None
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, LightningIndexerOutKeepsBuffersAcrossGraphReplay) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+
+query = torch.randn(
+    (1, 64, 128), dtype=torch.bfloat16, device="privateuseone:0"
+)
+key = torch.randn(
+    (1, 16, 1, 128), dtype=torch.bfloat16, device="privateuseone:0"
+)
+weights = torch.randn(
+    (1, 64), dtype=torch.bfloat16, device="privateuseone:0"
+)
+query_seq_lengths = torch.tensor(
+    [1], dtype=torch.int32, device="privateuseone:0"
+)
+key_seq_lengths = torch.tensor(
+    [16], dtype=torch.int32, device="privateuseone:0"
+)
+block_table = torch.tensor(
+    [[0]], dtype=torch.int32, device="privateuseone:0"
+)
+sparse_indices = torch.empty(
+    (1, 1, 4), dtype=torch.int32, device="privateuseone:0"
+)
+sparse_values = torch.empty(
+    (1, 1, 4), dtype=torch.bfloat16, device="privateuseone:0"
+)
+indices_address = sparse_indices.data_ptr()
+values_address = sparse_values.data_ptr()
+
+
+def run_indexer():
+    return torch.ops.xllm_ops.lightning_indexer_out(
+        query,
+        key,
+        weights,
+        query_seq_lengths,
+        key_seq_lengths,
+        block_table,
+        "TND",
+        "PA_BSND",
+        4,
+        3,
+        2**63 - 1,
+        2**63 - 1,
+        False,
+        sparse_indices,
+        sparse_values,
+    )
+
+
+eager_result = run_indexer()
+assert eager_result.shape == (1, 1, 4)
+assert eager_result.dtype == torch.int32
+assert eager_result.data_ptr() == indices_address
+assert sparse_values.shape == (1, 1, 4)
+assert sparse_values.dtype == torch.bfloat16
+assert sparse_values.data_ptr() == values_address
+
+stream = torch.npu.Stream()
+graph = torch.npu.NPUGraph()
+with torch.npu.stream(stream):
+    run_indexer()
+torch.npu.synchronize()
+with torch.npu.stream(stream):
+    with torch.npu.graph(graph, stream=stream):
+        graph_result = run_indexer()
+torch.npu.synchronize()
+
+with torch.npu.stream(stream):
+    query.add_(0.25)
+    graph.replay()
+    query.sub_(0.5)
+    graph.replay()
+torch.npu.synchronize()
+
+assert graph_result.data_ptr() == indices_address
+assert sparse_indices.data_ptr() == indices_address
+assert sparse_values.data_ptr() == values_address
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, SparseFlashAttentionOutKeepsBufferAcrossGraphReplay) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+
+query = torch.randn(
+    (1, 8, 512), dtype=torch.bfloat16, device="privateuseone:0"
+)
+key = torch.randn(
+    (1, 16, 1, 512), dtype=torch.bfloat16, device="privateuseone:0"
+)
+value = torch.randn_like(key)
+sparse_indices = torch.tensor(
+    [[[0, 1, 2, 3]]], dtype=torch.int32, device="privateuseone:0"
+)
+block_table = torch.tensor(
+    [[0]], dtype=torch.int32, device="privateuseone:0"
+)
+actual_seq_lengths_query = torch.tensor(
+    [1], dtype=torch.int32, device="privateuseone:0"
+)
+actual_seq_lengths_kv = torch.tensor(
+    [16], dtype=torch.int32, device="privateuseone:0"
+)
+query_rope = torch.randn(
+    (1, 8, 64), dtype=torch.bfloat16, device="privateuseone:0"
+)
+key_rope = torch.randn(
+    (1, 16, 1, 64), dtype=torch.bfloat16, device="privateuseone:0"
+)
+output = torch.empty_like(query)
+output_address = output.data_ptr()
+
+
+def run_attention():
+    return torch.ops.xllm_ops.sparse_flash_attention_out(
+        query,
+        key,
+        value,
+        sparse_indices,
+        block_table,
+        actual_seq_lengths_query,
+        actual_seq_lengths_kv,
+        query_rope,
+        key_rope,
+        1.0 / 16.0,
+        1,
+        "TND",
+        "PA_BSND",
+        3,
+        output,
+    )
+
+
+eager_result = run_attention()
+assert eager_result.shape == query.shape
+assert eager_result.dtype == query.dtype
+assert eager_result.data_ptr() == output_address
+
+stream = torch.npu.Stream()
+graph = torch.npu.NPUGraph()
+with torch.npu.stream(stream):
+    run_attention()
+torch.npu.synchronize()
+with torch.npu.stream(stream):
+    with torch.npu.graph(graph, stream=stream):
+        graph_result = run_attention()
+torch.npu.synchronize()
+
+with torch.npu.stream(stream):
+    query.add_(0.25)
+    graph.replay()
+    query.sub_(0.5)
+    graph.replay()
+torch.npu.synchronize()
+
+assert graph_result.data_ptr() == output_address
+assert output.data_ptr() == output_address
 )PY");
 }
 

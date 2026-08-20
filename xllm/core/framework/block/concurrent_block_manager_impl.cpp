@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -99,9 +99,29 @@ ConcurrentBlockManagerImpl::allocate_for_sequence(Sequence* seq,
   return blocks;
 }
 
+std::optional<std::vector<Block>>
+ConcurrentBlockManagerImpl::allocate_for_sequence(Sequence* seq,
+                                                  KVCacheState& kv_state,
+                                                  size_t num_tokens) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto blocks = inner_->allocate_for_sequence(seq, kv_state, num_tokens);
+  if (blocks.has_value()) {
+    for (Block& block : *blocks) {
+      block.set_manager(this);
+    }
+  }
+  return blocks;
+}
+
 void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   inner_->release_out_of_window(seq);
+}
+
+void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq,
+                                                       KVCacheState& kv_state) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->release_out_of_window(seq, kv_state);
 }
 
 void ConcurrentBlockManagerImpl::reset_prefix_cache() {

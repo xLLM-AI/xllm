@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +36,8 @@ class DiTMapping final {
     PROPERTY(int32_t, dit_dp_size) = -1;
     // vae size
     PROPERTY(int32_t, dit_vae_size) = -1;
+    // text encoder tensor parallel size
+    PROPERTY(int32_t, dit_text_encoder_tp_size) = -1;
   };
 
   DiTMapping(const int32_t world_size,
@@ -72,5 +74,6 @@ class DiTMapping final {
   ParallelInfo cfg_ = ParallelInfo();
   ParallelInfo dp_ = ParallelInfo();
   ParallelInfo vae_ = ParallelInfo();
+  ParallelInfo text_encoder_tp_ = ParallelInfo();
 };
 }  // namespace xllm

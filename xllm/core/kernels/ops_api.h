@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -149,6 +149,13 @@ std::tuple<torch::Tensor, torch::Tensor> dispatch_gmm_combine_decode(
     DispatchGmmCombineDecodeParams& params);
 
 bool has_dispatch_gmm_combine_decode();
+
+// Fused expert-parallel mega MoE kernel: dispatch + grouped GEMM (gate/up) +
+// activation + combine grouped GEMM (down) + combine, in one fused call.
+// Returns tuple of (output hidden states, expert token nums).
+std::tuple<torch::Tensor, torch::Tensor> mega_moe(MegaMoeParams& params);
+
+bool has_mega_moe();
 
 // FP8 scaled quantize: quantizes input tensor to FP8 e4m3 format
 // Returns: (quantized_output, scale)

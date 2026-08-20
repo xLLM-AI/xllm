@@ -2,6 +2,20 @@ include(cc_test)
 
 cc_test(
   NAME
+    apply_token_bitmask_wrapper_test
+  SRCS
+    apply_token_bitmask_wrapper_test.cpp
+  DEPS
+    :json_object_grammar
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+    unified_dlog
+)
+
+cc_test(
+  NAME
     rope_wrapper_test
   SRCS
     rope_wrapper_test.cpp

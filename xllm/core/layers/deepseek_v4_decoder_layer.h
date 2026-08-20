@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <tuple>
+#include <vector>
 
 #include "common/attention_metadata.h"
 #include "common/rms_norm.h"
@@ -42,6 +43,12 @@ class DeepseekV4DecoderLayerImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;
+  void prepare_expert_weight(const std::vector<int32_t>& expert_ids);
+  void start_expert_weight_transfer();
+  void update_expert_weight();
+  bool last_prepare_expert_weight_ok() const {
+    return moe_mlp_->last_prepare_expert_weight_ok();
+  }
 
   torch::Tensor forward(
       torch::Tensor& x,
@@ -51,6 +58,12 @@ class DeepseekV4DecoderLayerImpl : public torch::nn::Module {
       KVCache& kv_cache,
       const ModelInputParams& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt);
+
+  void write_context_kv(const torch::Tensor& hidden_states,
+                        const torch::Tensor& cos,
+                        const torch::Tensor& sin,
+                        const torch::Tensor& slot_mapping,
+                        KVCache& kv_cache);
 
  private:
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> hc_pre(
@@ -74,6 +87,7 @@ class DeepseekV4DecoderLayerImpl : public torch::nn::Module {
   int64_t hc_sinkhorn_iters_ = 0;
   double hc_eps_ = 0.0;
   double norm_eps_ = 1e-6;
+  int32_t layer_id_ = -1;
 
   DEFINE_WEIGHT(hc_attn_fn);
   DEFINE_WEIGHT(hc_ffn_fn);

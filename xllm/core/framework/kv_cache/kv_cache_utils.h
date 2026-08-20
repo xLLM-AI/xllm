@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/common/constants.h"
+#include "core/common/types.h"
 #include "util/tensor_helper.h"
 
 #if defined(USE_NPU)
@@ -43,6 +44,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
+#include "framework/kv_cache/logical_cache_layout.h"
 
 namespace xllm {
 
@@ -55,7 +57,7 @@ class MLUHostMemoryRegion;
 
 struct KVCacheCreateOptions {
   PROPERTY(torch::Device, device) = torch::Device(torch::kCPU);
-  // kvcache dtype for key/value cacahe, index cache
+  // kvcache dtype for key/value cache, index cache
   PROPERTY(torch::ScalarType, dtype) = torch::kBFloat16;
   // ssm dtype for linear attention layers
   PROPERTY(torch::ScalarType, ssm_dtype) = torch::kBFloat16;
@@ -119,8 +121,13 @@ struct HostCacheValidationOptions {
   int64_t device_block_count = 0;
   bool supports_host_kv_offload = false;
   bool enable_prefix_cache = true;
+  bool enable_disagg_pd = false;
+  bool enable_pd_ooc = false;
+  bool enable_kvcache_store = false;
+  InstanceRole instance_role = InstanceRole::DEFAULT;
   bool has_key_cache_shape = true;
   bool has_grouped_cache_layout = false;
+  bool supports_grouped_cache_offload = false;
   bool has_conv_cache_shape = false;
   bool has_ssm_cache_shape = false;
   std::string kv_cache_dtype = "auto";
@@ -133,6 +140,7 @@ struct KVCacheTensor {
   torch::Tensor tensor;
   int32_t group_id = cache_group_id(BlockType::KV);
   bool sequence_scoped = false;
+  std::optional<LogicalShardDescriptor> shard_descriptor;
 };
 
 using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -87,6 +87,8 @@ class BaseLoader {
   virtual void refresh_rolling_weights();
 
   torch::Dtype string2dtype(const std::string& dtype_str);
+
+  std::string expert_shm_namespace() const;
 
   void correct_tensor_dtype(torch::Tensor& tensor,
                             const std::string& tensorName);

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,6 +49,7 @@ class KVCacheShape final {
   bool has_index_cache_scale_shape() const;
   bool has_conv_cache_shape() const;
   bool has_ssm_cache_shape() const;
+  int64_t linear_ssm_checkpoint_stride() const;
   bool has_grouped_cache_layout() const {
     return shape_kind_ == ShapeKind::GROUPED_POOL;
   }

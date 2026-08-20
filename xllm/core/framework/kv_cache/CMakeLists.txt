@@ -31,24 +31,27 @@ cc_library(
   NAME
     kv_cache
   HDRS
+    cache_layout_builder.h
+    logical_cache_layout.h
     deepseek_v4_kv_cache_impl.h
-    embedding_cache.h
     indexed_kv_cache_impl.h
     kv_cache.h
     kv_cache_impl.h
     kv_cache_shape.h
+    kv_shard_layout.h
     kv_cache_tensor_allocator.h
     kv_cache_tensor_role.h
     kv_cache_utils.h
     linear_attention_kv_cache_impl.h
     quantized_kv_cache_impl.h
   SRCS
+    cache_layout_builder.cpp
     deepseek_v4_kv_cache_impl.cpp
-    embedding_cache.cpp
     indexed_kv_cache_impl.cpp
     kv_cache.cpp
     kv_cache_impl.cpp
     kv_cache_shape.cpp
+    kv_shard_layout.cpp
     kv_cache_tensor_allocator.cpp
     kv_cache_utils.cpp
     linear_attention_kv_cache_impl.cpp

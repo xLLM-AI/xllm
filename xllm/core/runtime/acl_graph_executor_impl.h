@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -42,6 +42,7 @@ limitations under the License.
 #pragma GCC diagnostic ignored "-Wattributes"
 #endif
 
+#include "acl_graph_bucket_policy.h"
 #include "torch_npu/csrc/core/npu/NPUGraph.h"
 
 #if defined(__GNUC__)
@@ -90,11 +91,11 @@ inline StaticGraphTaskSignature make_static_graph_task_signature(
 // NPUGraph provides mempool to manage temporary tensors during forward pass
 class AclGraph {
  public:
-  explicit AclGraph(GraphPersistentParam& persistent_param,
-                    c10::DeviceIndex device_index)
+  AclGraph(GraphPersistentParam& persistent_param,
+           c10::DeviceIndex device_index,
+           const c10_npu::NPUStream& capture_stream)
       : persistent_param_(persistent_param), device_index_(device_index) {
-    // Initialize capture stream in constructor
-    initialize_capture_stream(device_index);
+    initialize_streams(device_index, capture_stream);
   }
 
   ~AclGraph();
@@ -106,7 +107,8 @@ class AclGraph {
                const torch::Tensor& positions,
                const ModelInputParams& params,
                std::vector<KVCache>& kv_cache,
-               uint32_t bucket_num_tokens);
+               uint32_t bucket_num_tokens,
+               c10_npu::MempoolId_t graph_pool);
 
   // Replay captured graph with new input data
   ModelOutput replay(CausalLM* model,
@@ -123,17 +125,20 @@ class AclGraph {
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const c10_npu::NPUStream& signal_stream);
 
-  // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens = 0) const {
     return persistent_param_.hidden_states(actual_num_tokens);
   }
+
+  c10_npu::MempoolId_t memory_pool() { return graph_.pool(); }
+  int64_t capture_stream_id() const { return capture_stream_->id(); }
 
  private:
   // Print graph held tensors for debugging
   void print_graph_tensors() const;
 
   // Initialize capture stream if not already initialized
-  void initialize_capture_stream(c10::DeviceIndex device_index);
+  void initialize_streams(c10::DeviceIndex device_index,
+                          const c10_npu::NPUStream& capture_stream);
   void make_graph_wait_for_current_stream(aclrtStream current_stream);
   void make_current_stream_wait_for_graph(aclrtStream current_stream);
   void prepare_model_graph_metadata(CausalLM* model,
@@ -205,6 +210,9 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   [[nodiscard]] int32_t graph_slot_count_for_test() const {
     return graph_slot_count_;
   }
+  size_t get_graph_count() const;
+  size_t get_graph_memory_pool_count();
+  size_t get_graph_capture_stream_count() const;
 
   [[nodiscard]] uint64_t graph_key_for_test(
       uint32_t bucket_num_tokens,
@@ -222,6 +230,8 @@ class AclGraphExecutorImpl : public ExecutorImpl {
 
   struct GraphSlot {
     std::unique_ptr<GraphPersistentParam> persistent_param;
+    c10_npu::MempoolId_t graph_pool{0, 0};
+    std::optional<c10_npu::NPUStream> graph_capture_stream;
     absl::flat_hash_map<uint64_t, std::shared_ptr<AclGraph>> graphs;
     std::deque<uint64_t> static_mtp_graph_keys;
     bool is_prepared = false;
@@ -236,8 +246,8 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   int32_t last_started_replay_slot_ = -1;
 
   // Get bucket num_tokens for given num_tokens
-  // For num_tokens < 8: use 1, 2, 4, 8
-  // For num_tokens >= 8: use multiples of 8
+  // For num_tokens <= 8: use 1, 2, 4, 8
+  // For num_tokens > 8: use multiples of 16
   uint32_t get_bucket_num_tokens(uint32_t num_tokens) const;
 
   uint64_t get_graph_key(uint32_t bucket_num_tokens,

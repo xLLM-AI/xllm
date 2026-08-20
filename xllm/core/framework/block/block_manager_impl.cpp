@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -238,13 +238,20 @@ void BlockManagerImpl::free(int32_t block_id) {
 std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
     Sequence* seq,
     size_t num_tokens) {
+  return allocate_for_sequence(seq, seq->kv_state(), num_tokens);
+}
+
+std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
+    Sequence* seq,
+    KVCacheState& kv_state,
+    size_t num_tokens) {
   if (seq == nullptr) {
     return std::nullopt;
   }
   if (block_size_ == 0) {
     return std::vector<Block>{};
   }
-  const size_t held = seq->kv_state().num_blocks(block_type());
+  const size_t held = kv_state.num_blocks(block_type());
   const size_t num_blocks_needed = (num_tokens + block_size_ - 1) / block_size_;
   if (num_blocks_needed <= held) {
     return std::vector<Block>{};

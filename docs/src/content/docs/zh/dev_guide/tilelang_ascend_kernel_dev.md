@@ -7,7 +7,8 @@ sidebar:
 
 相关目录：
 
-- Python kernel 定义：`xllm/xllm/compiler/tilelang/targets/ascend/kernels`
+- TileLang DSL/JIT 实现：`xllm/xllm/python/kernels_npu/tilelang`
+- AOT 描述：`xllm/xllm/compiler/tilelang/targets/ascend/aot`
 - NPU runtime wrapper：`xllm/xllm/core/kernels/npu/tilelang`
 
 构建和测试应在 NPU 容器中执行。
@@ -31,9 +32,9 @@ sidebar:
 
 推荐按下面顺序开发：
 
-1. 在 `rope.py` 这类 Python 文件里先写 TileLang kernel 实现
-2. 实现 `generate_source(...)`，把 kernel lower 成 Ascend-C 源码
-3. 声明 `DISPATCH_SCHEMA` 和 `SPECIALIZATIONS`
+1. 在 `python/kernels_npu/tilelang/rope.py` 中实现 TileLang DSL/JIT kernel
+2. 在 `compiler/tilelang/targets/ascend/aot/rope.py` 中实现 `generate_source(...)`
+3. 在 AOT descriptor 中声明 `DISPATCH_SCHEMA` 和 `SPECIALIZATIONS`
 4. 先生成一次 `registry.inc` 并查看内容
 5. 再写或修改 wrapper 里的 runtime specialization 构造逻辑
 6. 接入 CMake 并运行测试
@@ -46,11 +47,14 @@ sidebar:
 
 ## 3. 编写 Python Kernel
 
-以 `rope.py` 为例，Python 侧可以按三层理解：
+以 `rope` 为例，Python 侧分成两个文件：
 
-- `build_rope_kernel(...)`：kernel 实现
-- `generate_source(...)`：AOT 导出
-- `RopeKernel`：注册 kernel，并声明 dispatch schema 与编译实例
+- `python/kernels_npu/tilelang/rope.py`
+  - `build_rope_kernel(...)`：DSL kernel 实现
+  - `rope_in_place_kernel_jit(...)`：Python JIT 入口
+- `compiler/tilelang/targets/ascend/aot/rope.py`
+  - `generate_source(...)`：AOT 导出
+  - `RopeKernel`：注册 kernel，并声明 dispatch schema 与编译实例
 
 ### 3.1 实现 `build_rope_kernel(...)`
 
@@ -61,7 +65,7 @@ sidebar:
 - `with T.Kernel(...)` 下的并行任务组织
 - UB 分配和实际计算逻辑
 
-`rope.py` 的精简骨架如下：
+DSL 文件的精简骨架如下：
 
 ```python
 def build_rope_kernel(
@@ -112,9 +116,11 @@ max_rows_num_in_ub = _derive_max_rows_num_in_ub(...)
 compile_num_tokens = task_num * max_rows_num_in_ub
 ```
 
-### 3.2 实现 `generate_source(...)`
+### 3.2 实现 AOT `generate_source(...)`
 
-`generate_source(...)` 负责把上面的 TileLang kernel lower 成最终源码。导出层的职责，是把一组 specialization 参数转换成可编译的 Ascend-C 源码。
+`generate_source(...)` 位于 `compiler/tilelang/targets/ascend/aot/rope.py`，负责把独立 DSL
+子库中的 TileLang kernel lower 成最终源码。AOT 文件只描述 specialization、ABI 和 lowering，
+不得复制 `T.prim_func` body。
 
 对 `rope` 来说，核心逻辑如下：
 
@@ -143,10 +149,11 @@ def generate_source(head_dim: int, rope_dim: int, dtype: str) -> str:
 
 当 kernel 实现和导出层写完后，再通过 `@register_kernel` 类把它接入框架。
 
-`rope.py` 当前的最小模板如下：
+AOT `rope.py` 当前的最小模板如下：
 
 ```python
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm.python.kernels_npu.tilelang.rope import build_rope_kernel
 
 @register_kernel
 class RopeKernel(TilelangKernel):
@@ -396,4 +403,3 @@ python setup.py test --test-name rope_wrapper_test --device a3
 ```
 
 第一条命令用于生成 `manifest.json`、`registry.inc` 和 object；第二条命令用于验证完整接入路径。
-

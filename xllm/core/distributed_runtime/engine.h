@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,14 @@ limitations under the License.
 
 #include <unordered_map>
 
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/batch/batch.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/kv_cache_transfer/prefetch_result.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
+#include "runtime/decode_graph_bucket.h"
 #include "runtime/options.h"
 
 namespace xllm {
@@ -55,6 +58,16 @@ class Engine {
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
 
+  virtual bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor&) {
+    return false;
+  }
+
+  virtual runtime::DecodeGraphExecutionShape decode_graph_execution_shape()
+      const {
+    return {};
+  }
+
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {
     return tokenizer_args_;
@@ -64,30 +77,12 @@ class Engine {
   virtual std::vector<int64_t> get_active_activation_memory() const = 0;
 
   // P/D
-  virtual bool pull_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) {
-    NOT_IMPLEMENTED();
-    return false;
-  };
-
-  virtual bool pull_hetero_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) {
+  virtual bool pull_kv_blocks(const int32_t src_dp_size,
+                              const int32_t src_dp_rank,
+                              const std::vector<uint64_t>& src_cluster_ids,
+                              const std::vector<std::string>& src_addrs,
+                              const int32_t dst_dp_rank,
+                              const std::vector<KVTransferMapping>& mappings) {
     NOT_IMPLEMENTED();
     return false;
   };
@@ -106,12 +101,11 @@ class Engine {
     NOT_IMPLEMENTED();
   };
 
-  virtual void prefetch_from_storage(
+  virtual std::shared_ptr<PrefetchResult> prefetch_from_storage(
       const uint32_t dp_rank,
-      const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<std::atomic<int32_t>> flag,
-      std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results) {
+      const std::vector<BlockTransferInfo>& block_transfer_info) {
     NOT_IMPLEMENTED();
+    return nullptr;
   };
 
   virtual void get_cache_info(std::vector<uint64_t>& cluster_ids,

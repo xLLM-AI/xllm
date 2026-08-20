@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -589,11 +589,14 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_mlp_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args) {
+  const bool is_glm_moe_dsa =
+      args.model_type().find("glm_moe_dsa") != std::string::npos;
   param.hasSharedExpert = (args.n_shared_experts() > 0);
   param.hasSharedExpertGate = false;
   param.processLogits = "normScaling";
   param.routedScalingFactor = args.routed_scaling_factor();
   param.numOfSelectedExperts = {args.num_experts_per_tok()};
+  param.enableDispatchCombineV2 = is_glm_moe_dsa && !param.isPrefill;
 
   if (ep_size_ > 1) {
     param.expertParallelDegree = std::max(
@@ -668,7 +671,10 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_parallel_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
     const ParallelArgs& parallel_args) {
   param.lmHeadLocalTp = dp_local_tp_size_;
-  param.enableSharedExpertOverlap = false;  // TODO
+  param.enableSharedExpertOverlap =
+      param.enableDispatchCombineV2 && !param.isPrefill &&
+      param.expertParallelDegree == 2 && param.isDynamicEp &&
+      param.hasSharedExpert && !param.isDenseLayer;
 
   param.enableAllToAllMC2 = (param.expertParallelDegree == 2);
   param.enableGatherPreNorm = true;
@@ -1071,7 +1077,7 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_topk(
                             output_topk_);
     st = execute_node(decode_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "execute prefill layer fail, error code: " << st;
+                           << "execute decode layer fail, error code: " << st;
   } else {
     build_node_variant_pack(prefill_node_,
                             x,
@@ -1167,6 +1173,11 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
   const CpAttentionMeta& cp_attention_meta =
       input_params.parallel.cp_plan.attention_meta();
   const bool use_cp_ep_padding = (cp_size_ > 1 && is_prefill);
+  const bool uses_dsa_attention =
+      (is_prefill ? prefill_param_ : decode_param_).index_n_heads > 0;
+  // DSA passes sequence lengths to LightningIndexer/SparseFlashAttention as
+  // device aclTensors. Only dense MLA converts these inputs from hostData into
+  // aclIntArray metadata.
 
   if (dp_size_ <= 1 && ep_size_ <= 1 || cp_size_ > 1) {
     dp_ep_padding.set_placeholder(tensor_placeholder_);
@@ -1202,14 +1213,18 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
            nullptr)) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
-        const_cast<int32_t*>(placeholder_vec_.data());
+    if (!uses_dsa_attention) {
+      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+          const_cast<int32_t*>(placeholder_vec_.data());
+    }
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(
             input_params.attention.device.kv_seq_lens);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
-        const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+    if (!uses_dsa_attention) {
+      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+          const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+    }
   }
 
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12) =
@@ -1242,14 +1257,18 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
              nullptr)) {
       node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17) =
           atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
-          const_cast<int32_t*>(placeholder_vec_.data());
+      if (!uses_dsa_attention) {
+        node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
+            const_cast<int32_t*>(placeholder_vec_.data());
+      }
     } else {
       node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17) =
           atb_speed::Utils::AtTensor2Tensor(
               input_params.attention.device.q_seq_lens);
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
-          const_cast<int32_t*>(input_params.attention.host.q_seq_lens.data());
+      if (!uses_dsa_attention) {
+        node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
+            const_cast<int32_t*>(input_params.attention.host.q_seq_lens.data());
+      }
     }
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17) =

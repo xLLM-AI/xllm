@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,27 +49,32 @@ class AttentionImpl : public torch::nn::Module {
       torch::Tensor& query,
       torch::Tensor& key,
       torch::Tensor& value,
-      KVCache& kv_cache);
+      KVCache& kv_cache,
+      bool return_lse = false);
 
   void prefill_forward(
       torch::Tensor& query,
       torch::Tensor& key,
       torch::Tensor& value,
       torch::Tensor& output,
+      std::optional<torch::Tensor>& output_lse,
       const torch::Tensor& k_cache,
       const std::optional<torch::Tensor>& v_cache,
       const AttentionMetadata& attn_metadata,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt,
-      const std::optional<torch::Tensor>& v_cache_scale = std::nullopt);
+      const std::optional<torch::Tensor>& v_cache_scale = std::nullopt,
+      bool return_lse = false);
 
   void decoder_forward(
       torch::Tensor& query,
       torch::Tensor& output,
+      std::optional<torch::Tensor>& output_lse,
       const torch::Tensor& k_cache,
       const std::optional<torch::Tensor>& v_cache,
       const AttentionMetadata& attn_metadata,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt,
-      const std::optional<torch::Tensor>& v_cache_scale = std::nullopt);
+      const std::optional<torch::Tensor>& v_cache_scale = std::nullopt,
+      bool return_lse = false);
 
  private:
   int64_t num_heads_;

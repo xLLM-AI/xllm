@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -477,7 +477,10 @@ void DeekseekV32DecoderLoader::initialize_weight_tensors(
     const int64_t size =
         50LL * 1024LL * 1024LL * int64_t(n_layers_ - first_k_dense_replace_);
     shared_buffer_ = std::make_unique<ExpertBufferManager>(
-        num_experts_, n_layers_ - first_k_dense_replace_, size);
+        expert_shm_namespace(),
+        num_experts_,
+        n_layers_ - first_k_dense_replace_,
+        size);
   }
 }
 

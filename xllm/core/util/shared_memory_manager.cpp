@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -210,7 +210,7 @@ SharedMemoryManager::~SharedMemoryManager() {
 void SharedMemoryManager::cleanup_handler(int sig) {
   // Avoid non-async-signal-safe operations (mutex, logging, shm_unlink, exit).
   // Just restore default handler and re-raise to terminate normally.
-  // TODO: support cleaning up shared memory properly when singal is received.
+  // TODO: support cleaning up shared memory properly when signal is received.
   signal(sig, SIG_DFL);
   kill(getpid(), sig);
 }

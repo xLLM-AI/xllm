@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,12 +50,7 @@ bool WorkerRendezvous::link_cluster(const std::vector<uint64_t>& cluster_ids,
     return false;
   }
 
-  const size_t cluster_count = cluster_ids.size();
-  for (size_t i = 0; i < cluster_count; ++i) {
-    if (!kv_cache_transfer_->link_cluster(cluster_ids[i], addrs[i], ports[i])) {
-      return false;
-    }
-  }
+  return kv_cache_transfer_->link_clusters(cluster_ids, addrs, ports);
 #endif
   return true;
 }

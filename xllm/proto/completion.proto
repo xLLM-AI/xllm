@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,7 +41,7 @@ message CompletionRequest {
   optional uint32 max_tokens = 4;
 
   // temperature of the sampling, between [0, 2]. default = 0.0
-  // higher value will make the ouput more random.
+  // higher value will make the output more random.
   optional float temperature = 5;
 
   // top_p sampling cutoff, between [0, 1.0]. default = 1.0
@@ -87,7 +87,7 @@ message CompletionRequest {
   // top_k sampling cutoff, default = -1 (no cutoff)
   optional int64 top_k = 19;
 
-  // repetition penalty to penalize new tokens based on their occurence in the
+  // repetition penalty to penalize new tokens based on their occurrence in the
   // text. values > 1.0 encourage the model to use new tokens, while values
   // < 1.0 encourage the model to repeat tokens. default = 1.0
   optional float repetition_penalty = 20;
@@ -163,7 +163,7 @@ message Choice {
   // the log probability of of output tokens.
   optional LogProbs logprobs = 3;
 
-  // the reason of the model stoped generating tokens.
+  // the reason of the model stopped generating tokens.
   // "stop" - the model hit a natural stop point or a provided stop sequence.
   // "length" - the maximum number of tokens specified in the request was reached.
   // "function_call" - the model called a function.

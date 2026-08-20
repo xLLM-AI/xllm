@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -148,12 +148,17 @@ void VLMMaster::handle_request(std::string prompt,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     Timer timer;
     // verify the prompt
     if (!sp.verify_params(callback)) {
       return;
     }
 
+    rate_limit_guard.dismiss();
     auto request = generate_request(std::move(prompt),
                                     std::move(mm_data),
                                     std::move(sp),
@@ -190,11 +195,16 @@ void VLMMaster::handle_request(std::vector<Message> messages,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     // verify the prompt
     if (!sp.verify_params(callback)) {
       return;
     }
 
+    rate_limit_guard.dismiss();
     auto request = generate_request(std::move(messages),
                                     std::move(sp),
                                     std::move(payload),
@@ -308,6 +318,11 @@ std::shared_ptr<Request> VLMMaster::generate_request(std::string prompt,
                                                      MMData mm_data,
                                                      RequestParams sp,
                                                      OutputCallback callback) {
+  // Guard the rate-limit slot acquired at the service entry. build_request
+  // installs its own guard, so we dismiss ours before forwarding.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   if (prompt.empty() && mm_data.empty()) {
     LOG(ERROR) << "Prompt and multimodal data cannot be both empty.";
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
@@ -322,6 +337,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(std::string prompt,
     return nullptr;
   }
 
+  rate_limit_guard.dismiss();
   return build_request(std::move(prompt),
                        std::move(prompt_tokens),
                        std::move(mm_data),
@@ -335,6 +351,12 @@ std::shared_ptr<Request> VLMMaster::build_request(
     MMData mm_data,
     RequestParams sp,
     OutputCallback callback) {
+  // Guard the rate-limit slot acquired at the service entry. Any early
+  // return below releases it; success path dismisses right before Request
+  // takes ownership.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   const int32_t max_context_len = model_args_.max_position_embeddings();
   int32_t prompt_token_limit = max_context_len;
   if (!options_.enable_chunked_prefill()) {
@@ -378,7 +400,7 @@ std::shared_ptr<Request> VLMMaster::build_request(
   if (sp.stop_token_ids.has_value()) {
     const auto& stop_token_ids = sp.stop_token_ids.value();
     stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
-  } else {
+  } else if (!sp.ignore_eos) {
     stop_tokens = model_args_.stop_token_ids();
   }
   std::vector<std::vector<int32_t>> stop_sequences;
@@ -424,12 +446,14 @@ std::shared_ptr<Request> VLMMaster::build_request(
                          callback,
                          nullptr);
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
+  rate_limit_guard.dismiss();
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.source_xservice_addr);
+                                           sp.source_xservice_addr,
+                                           get_rate_limiter());
 
   // add one sequence, rest will be added by scheduler
   return request;
@@ -440,6 +464,12 @@ std::shared_ptr<Request> VLMMaster::generate_request(
     RequestParams sp,
     std::string payload,
     OutputCallback callback) {
+  // Guard the rate-limit slot acquired at the service entry. The next hop
+  // (generate_request(prompt, ...)) installs its own guard, so we dismiss
+  // ours before forwarding.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   static MMInputTransfer mm_input_transfer;
 
   MMInput mm_inputs(std::move(payload));
@@ -470,6 +500,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(
   }
   COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
 
+  rate_limit_guard.dismiss();
   return generate_request(std::move(prompt.value()),
                           std::move(mm_data),
                           std::move(sp),

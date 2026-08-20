@@ -9,7 +9,8 @@ description: Use when the user wants to add, modify, debug, or review an xLLM Ti
 
 Use this skill when the task involves any of the following in the xLLM repo:
 
-- `xllm/compiler/tilelang/targets/ascend/kernels/*.py`
+- `xllm/python/kernels_npu/tilelang/*.py`
+- `xllm/compiler/tilelang/targets/ascend/aot/*.py`
 - `xllm/core/kernels/npu/tilelang/*_wrapper.cpp`
 - `xllm/core/kernels/npu/tilelang/CMakeLists.txt`
 - generated TileLang artifacts such as `manifest.json`, `registry.inc`, or specialization `.cpp`
@@ -28,12 +29,14 @@ Run TileLang commands from the xLLM repo root, not from an installed-package env
 
 ```bash
 cd xllm
-python -m compiler.tilelang.targets.ascend.kernels.rope \
-  --output ../.tmp/rope.cpp
+export PYTHONPATH="$PWD:$PWD/xllm${PYTHONPATH:+:$PYTHONPATH}"
+python -m compiler.tilelang.targets.ascend.aot.rope \
+  --output .tmp/rope.cpp
 # Expected: [INFO] RoPE output matches torch reference
 ```
 
-- The same module-style rule applies to other kernel files under `xllm/compiler/tilelang/targets/ascend/kernels/`.
+- The same module-style rule applies to other AOT descriptors under
+  `xllm/compiler/tilelang/targets/ascend/aot/`.
 
 ## Primary Reference And Mode Preference
 
@@ -75,9 +78,9 @@ Rules for semantic-preserving lowering:
 
 Follow this order:
 
-1. Implement `build_<kernel>_kernel(...)`
-2. Implement `generate_source(...)`
-3. Declare `DISPATCH_SCHEMA` and `SPECIALIZATIONS`
+1. Implement `build_<kernel>_kernel(...)` under `xllm/python/kernels_npu/tilelang/`
+2. Implement `generate_source(...)` in the matching `targets/ascend/aot/` descriptor
+3. Declare `DISPATCH_SCHEMA` and `SPECIALIZATIONS` in the AOT descriptor
 4. Run TileLang compilation once and inspect `registry.inc`
 5. Add or update `<kernel>_wrapper.cpp`
 6. Register the kernel in `xllm/core/kernels/npu/tilelang/CMakeLists.txt` with:
@@ -126,8 +129,9 @@ Use this path before changing wrapper code when you need to understand generated
 
 Prefer the narrowest command first:
 
-- `python -m py_compile xllm/compiler/tilelang/targets/ascend/kernels/<kernel>.py`
-- `cd xllm && python -m compiler.tilelang.targets.ascend.kernels.<kernel> --output ../.tmp/<kernel>.cpp`
+- `python -m py_compile xllm/python/kernels_npu/tilelang/<kernel>.py`
+- `python -m py_compile xllm/compiler/tilelang/targets/ascend/aot/<kernel>.py`
+- `cd xllm && PYTHONPATH="$PWD:$PWD/xllm" python -m compiler.tilelang.targets.ascend.aot.<kernel> --output .tmp/<kernel>.cpp`
 - `python xllm/compiler/tilelang_launcher.py prepare-ascend`
 - `python setup.py test --test-name <wrapper_test_target> --device npu`
 
@@ -135,6 +139,7 @@ Prefer the narrowest command first:
 
 Read [tilelang_ascend_kernel_dev](https://docs.xllm-ai.com/en/dev_guide/tilelang_ascend_kernel_dev/) for mechanism details.
 Use `rope` as the concrete template:
-- `xllm/compiler/tilelang/targets/ascend/kernels/rope.py`
+- `xllm/python/kernels_npu/tilelang/rope.py`
+- `xllm/compiler/tilelang/targets/ascend/aot/rope.py`
 - `xllm/core/kernels/npu/tilelang/rope_wrapper.cpp`
 - `xllm/core/kernels/npu/tilelang/CMakeLists.txt`

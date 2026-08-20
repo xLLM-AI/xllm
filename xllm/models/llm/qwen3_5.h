@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,12 +22,17 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/layers/qwen3_5_decoder_layer.h"
 #include "models/model_registry.h"
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA) || \
+    defined(USE_DCU)
+#include "core/layers/qwen3_5_decoder_layer.h"
 #include "qwen3_next.h"
+#endif
 
 namespace xllm {
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA) || \
+    defined(USE_DCU)
 class Qwen3_5ModelImpl : public Qwen3NextModelImpl {
  public:
   explicit Qwen3_5ModelImpl(const ModelContext& context)
@@ -64,6 +69,7 @@ class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
   }
 };
 TORCH_MODULE(Qwen3_5ForCausalLM);
+#endif
 
 #define LOAD_ARG_TEXT_OR_ROOT(arg_name, json_key, default_value) \
   LOAD_ARG_OR(arg_name, "text_config." json_key, default_value); \
@@ -190,7 +196,11 @@ TORCH_MODULE(Qwen3_5ForCausalLM);
   LOAD_ARG_OR(dtype, "text_config.torch_dtype", args->dtype()); \
   LOAD_ARG_OR(dtype, "torch_dtype", args->dtype())
 
+REGISTER_MODEL_BACKEND(qwen3_5_text, "llm");
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA) || \
+    defined(USE_DCU)
 REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
+#endif
 REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
   LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE("qwen3_5_text");
   LOAD_QWEN3_5_NEXT_COMPAT_ARGS(/*moe_intermediate_size=*/0,
@@ -199,7 +209,11 @@ REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
                                 /*shared_expert_intermediate_size=*/0);
 });
 
+REGISTER_MODEL_BACKEND(qwen3_5_moe_text, "llm");
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA) || \
+    defined(USE_DCU)
 REGISTER_CAUSAL_MODEL(qwen3_5_moe_text, Qwen3_5ForCausalLM);
+#endif
 REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
   LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE("qwen3_5_moe_text");
   LOAD_QWEN3_5_NEXT_COMPAT_ARGS(/*moe_intermediate_size=*/512,

@@ -194,6 +194,9 @@ python setup.py build
 
 # 编译python wheel
 python setup.py bdist_wheel
+
+# 编译python wheel并安装
+python setup.py install
 ```
 
 ## 启动xllm

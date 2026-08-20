@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -207,13 +207,6 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       CHECK(num_sequences == 1 || num_sequences == request->best_of())
           << "Waiting request should have either 1 or best_of("
           << request->best_of() << ") sequences, got " << num_sequences;
-    }
-
-    if (!state.kv_cache_manager->update_prefetch_result(
-            request, options_.prefetch_timeout())) {
-      queue->pop_top();
-      queue->push(request);
-      continue;
     }
 
     // Full-footprint admission (fresh requests only): check that the system
@@ -419,11 +412,12 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
     state.kv_cache_manager->allocate_shared(seq);
     return;
   }
-  // DSV4 (SWA_COMPRESSED) holds SWA/C4/C128 but never a KV leaf, so a
-  // num_blocks(KV)==0 guard alone would treat an already-mounted DSV4 sequence
-  // as fresh and re-run allocate_shared -> mount_composite_shared CHECK. Skip
-  // re-match for the KV-less composite; only flat-KV shapes re-match below.
+  // DSV4 (SWA_COMPRESSED) never has a KV leaf. A failed HBM growth can retain
+  // its device prefix while releasing the Host match, so the hierarchy manager
+  // must get a chance to re-probe Host before the scheduler computes the next
+  // chunk boundary. Non-hierarchical DSV4 managers make this call idempotent.
   if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
+    state.kv_cache_manager->allocate_shared(seq);
     return;
   }
   if (seq->is_chunked_prefill_stage()) {

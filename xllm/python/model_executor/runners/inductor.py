@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,13 +35,19 @@ class InductorRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
         with forward_context(
             ForwardContext(
-                self.attention_backend, self.device,
+                self.attention_backend,
+                self.device,
+                metadata,
+                self.layer_caches,
                 layer_synchronizer=layer_synchronizer,
             )
         ):
-            return self.compiled_model(input_ids, positions)
+            if input_embedding is None:
+                return self.compiled_model(input_ids, positions)
+            return self.compiled_model(input_ids, positions, input_embedding)

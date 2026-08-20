@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -72,36 +72,38 @@ bool ResidualCache::cache_validation() {
   return step_valid & block_valid;
 }
 
-bool ResidualCache::on_before_block(const CacheBlockIn& blockin) {
+bool ResidualCache::on_before_block(const CacheBlockIn& block_input) {
   // when infer_steps is less than skipped_skips, won't use cache
   if (!cache_validation() || !use_cache_ ||
-      blockin.block_id < dit_cache_start_blocks_ ||
-      blockin.block_id >= num_blocks_ - dit_cache_end_blocks_ - 1) {
+      block_input.block_id < dit_cache_start_blocks_ ||
+      block_input.block_id >= num_blocks_ - dit_cache_end_blocks_ - 1) {
     return false;
   }
 
   return true;
 }
 
-CacheBlockOut ResidualCache::on_after_block(const CacheBlockIn& blockin) {
+CacheBlockOut ResidualCache::on_after_block(const CacheBlockIn& block_input) {
   TensorMap out_map;
-  auto hidden_states = get_tensor_or_empty(blockin.tensors, "hidden_states");
+  auto hidden_states =
+      get_tensor_or_empty(block_input.tensors, "hidden_states");
   auto encoder_hidden_states =
-      get_tensor_or_empty(blockin.tensors, "encoder_hidden_states");
+      get_tensor_or_empty(block_input.tensors, "encoder_hidden_states");
   if (cache_validation()) {
     if (use_cache_) {
-      if (blockin.block_id == num_blocks_ - dit_cache_end_blocks_ - 1) {
+      if (block_input.block_id == num_blocks_ - dit_cache_end_blocks_ - 1) {
         out_map["hidden_states"] = add_residual(hidden_states, "hidden_states");
         out_map["encoder_hidden_states"] =
             add_residual(encoder_hidden_states, "encoder_hidden_states");
         return CacheBlockOut(out_map);
       }
     } else if (update_cache_) {
-      if (blockin.block_id == dit_cache_start_blocks_ - 1) {
+      if (block_input.block_id == dit_cache_start_blocks_ - 1) {
         // cache
         update(hidden_states.clone(), "hidden_states");
         update(encoder_hidden_states.clone(), "encoder_hidden_states");
-      } else if (blockin.block_id == num_blocks_ - dit_cache_end_blocks_ - 1) {
+      } else if (block_input.block_id ==
+                 num_blocks_ - dit_cache_end_blocks_ - 1) {
         // calculate residual and update cache
         update(get_residual(hidden_states, "hidden_states"), "hidden_states");
         update(get_residual(encoder_hidden_states, "encoder_hidden_states"),

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -65,13 +65,12 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
   const bool use_qwen35_moe =
       is_moe_layer && model_args.model_type() == "qwen3_5_moe_text";
   if (use_qwen35_moe) {
-    moe_mlp_ =
-        register_module("mlp",
-                        Qwen3_5MusaFusedMoE(model_args,
-                                            FusedMoEArgs{.is_gated = true},
-                                            quant_args,
-                                            parallel_args,
-                                            options));
+    moe_mlp_ = register_module("mlp",
+                               Qwen3_5FusedMoE(model_args,
+                                               FusedMoEArgs{.is_gated = true},
+                                               quant_args,
+                                               parallel_args,
+                                               options));
   } else {
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),

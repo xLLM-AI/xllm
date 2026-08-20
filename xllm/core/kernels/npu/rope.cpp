@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,6 +19,41 @@ limitations under the License.
 #include "ops_npu/npu_ops.h"
 
 namespace xllm::kernel::npu {
+
+void apply_rotary(torch::Tensor& query,
+                  torch::Tensor& key,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& sin,
+                  const std::string& input_layout) {
+  CHECK(cos.defined() && sin.defined());
+  CHECK(cos.sizes() == sin.sizes());
+  CHECK_GT(cos.dim(), 0);
+  const int64_t rotary_dim = cos.size(-1);
+  CHECK_GT(rotary_dim, 0);
+  const int64_t num_tokens = cos.numel() / rotary_dim;
+  CHECK_GT(num_tokens, 0);
+  CHECK_EQ(query.numel() % (num_tokens * rotary_dim), 0);
+  CHECK_EQ(key.numel() % (num_tokens * rotary_dim), 0);
+
+  const std::vector<int64_t> query_shape = query.sizes().vec();
+  const std::vector<int64_t> key_shape = key.sizes().vec();
+  const int64_t num_query_heads = query.numel() / (num_tokens * rotary_dim);
+  const int64_t num_key_heads = key.numel() / (num_tokens * rotary_dim);
+
+  torch::Tensor query_view =
+      query.contiguous().view({1, num_tokens, num_query_heads, rotary_dim});
+  torch::Tensor key_view =
+      key.contiguous().view({1, num_tokens, num_key_heads, rotary_dim});
+  torch::Tensor cos_view =
+      cos.contiguous().view({1, num_tokens, 1, rotary_dim});
+  torch::Tensor sin_view =
+      sin.contiguous().view({1, num_tokens, 1, rotary_dim});
+
+  auto rotary_result = at_npu::native::custom_ops::npu_apply_rotary_pos_emb(
+      query_view, key_view, cos_view, sin_view, input_layout);
+  query = std::get<0>(rotary_result).view(query_shape);
+  key = std::get<1>(rotary_result).view(key_shape);
+}
 
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,

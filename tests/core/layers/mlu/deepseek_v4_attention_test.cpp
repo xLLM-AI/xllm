@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -223,7 +223,7 @@ class DeepseekV4AttentionTest : public ::testing::Test {
   test::Dsv4AttentionRefConfig make_config(int64_t compress_ratio) const {
     test::Dsv4AttentionRefConfig config;
     config.hidden_dim = 32;
-    config.q_lora_rank = 16;
+    config.q_lora_rank = 1024;
     config.n_heads = 4;
     config.head_dim = 512;
     config.rope_head_dim = 64;

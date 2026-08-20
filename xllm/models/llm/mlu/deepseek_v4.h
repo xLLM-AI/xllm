@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -205,15 +205,18 @@ class DeepseekV4ModelImpl final
     }
 
     std::optional<torch::Tensor> residual;
+    std::optional<layer::DeepseekV4PendingMHC> pending_mhc;
     for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
       prepare_layer_metadata(attn_metadata, static_cast<int32_t>(layer_idx));
-      h = layers_[layer_idx](h,
-                             residual,
-                             positions,
-                             attn_metadata,
-                             kv_caches[layer_idx],
-                             modified_input_params,
-                             tokens);
+      h = layers_[layer_idx]->forward(h,
+                                      residual,
+                                      positions,
+                                      attn_metadata,
+                                      kv_caches[layer_idx],
+                                      modified_input_params,
+                                      tokens,
+                                      &pending_mhc,
+                                      layer_idx + 1 == layers_.size());
       if (!modified_input_params.record_layer(static_cast<uint32_t>(layer_idx),
                                               h.device())) {
         return ModelOutput();

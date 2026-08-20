@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -233,7 +233,9 @@ class NpuDeepseekV2DecoderLayerImpl : public BaseLayer {
   int32_t dp_local_tp_rank_;
 
   float sm_scale_;
+  int32_t quant_group_size_ = 0;
   int32_t num_speculative_tokens_ = 0;
+  bool uses_deepseek_v2_mla_graph_ = false;
 
   atb_speed::deepseekV2::DecoderLayerParam prefill_param_;
   atb_speed::deepseekV2::DecoderLayerParam prefill_param_prefixcache_;
