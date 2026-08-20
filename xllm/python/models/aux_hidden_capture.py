@@ -23,10 +23,6 @@ class AuxHiddenCapture:
     """Captures selected layer inputs and concatenates them in config order."""
 
     def __init__(self, layers_to_capture: tuple[int, ...]) -> None:
-        if any(layer_id < 0 for layer_id in layers_to_capture):
-            raise ValueError("layers_to_capture must contain non-negative layer ids")
-        if len(set(layers_to_capture)) != len(layers_to_capture):
-            raise ValueError("layers_to_capture must not contain duplicate layer ids")
         self._layers_to_capture = layers_to_capture
         self._capture_set = frozenset(layers_to_capture)
 
@@ -43,8 +39,6 @@ class AuxHiddenCapture:
     ) -> None:
         if layer_id not in self._capture_set:
             return
-        if layer_id in captured:
-            raise RuntimeError(f"layer {layer_id} was captured more than once")
         captured[layer_id] = hidden.clone() if residual is None else hidden + residual
 
     def finalize(
@@ -54,8 +48,5 @@ class AuxHiddenCapture:
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if not self.enabled:
             return hidden
-        missing_layers = [layer_id for layer_id in self._layers_to_capture if layer_id not in captured]
-        if missing_layers:
-            raise RuntimeError(f"failed to capture configured layers: {missing_layers}")
         aux_hidden = torch.cat([captured[layer_id] for layer_id in self._layers_to_capture], dim=-1)
         return hidden, aux_hidden

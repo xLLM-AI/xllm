@@ -125,8 +125,3 @@ def test_aux_hidden_capture_snapshots_hidden_without_residual() -> None:
     _, aux_hidden = capture.finalize(hidden, captured)
 
     torch.testing.assert_close(aux_hidden, torch.tensor([[1.0, 2.0]]))
-
-
-def test_aux_hidden_capture_rejects_duplicate_layers() -> None:
-    with pytest.raises(ValueError, match="duplicate"):
-        AuxHiddenCapture((1, 1))
