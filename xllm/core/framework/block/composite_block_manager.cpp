@@ -305,6 +305,34 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
     return;
   }
   KVCacheState& kv = seq->kv_state();
+
+  size_t cacheable_tokens =
+      std::min(seq->kv_cache_tokens_num(), seq->tokens().size());
+  size_t cache_unit_size = 0;
+  if (combination_ == LeafCombination::SWA_COMPRESSED) {
+    BlockManager* c128_leaf = leaf_of(BlockType::C128);
+    CHECK(c128_leaf != nullptr);
+    cache_unit_size = c128_leaf->block_size();
+    CHECK_GT(cache_unit_size, 0u);
+
+    // A DSV4 prefix is restorable only at a complete C128 boundary. Cap the
+    // boundary by every participating leaf's allocated logical capacity so no
+    // partially allocated composite unit can become visible.
+    for (const auto& [type, entry] : leaves_) {
+      if (!entry.supports_prefix_cache || type == BlockType::EMBEDDING ||
+          type == BlockType::LINEAR) {
+        continue;
+      }
+      const size_t block_size = entry.leaf->block_size();
+      CHECK_GT(block_size, 0u);
+      CHECK_EQ(cache_unit_size % block_size, 0u)
+          << "DSV4 cache leaf block size must divide the C128 cache unit";
+      cacheable_tokens =
+          std::min(cacheable_tokens, kv.num_blocks(type) * block_size);
+    }
+    cacheable_tokens = (cacheable_tokens / cache_unit_size) * cache_unit_size;
+  }
+
   for (auto& [type, entry] : leaves_) {
     // EMBEDDING / LINEAR hold no token cache. KV also participates here so a
     // Host-restored prefix is published immediately after its HBM destination
@@ -324,12 +352,48 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
     if (blocks == nullptr || blocks->empty()) {
       continue;
     }
-    const size_t num_full = seq->kv_cache_tokens_num() / block_size;
-    const size_t cached = kv.num_cached_blocks(type);
+    const size_t num_full = combination_ == LeafCombination::SWA_COMPRESSED
+                                ? cacheable_tokens / block_size
+                                : seq->kv_cache_tokens_num() / block_size;
+    size_t cached = kv.num_cached_blocks(type);
     const size_t end = std::min(num_full, blocks->size());
     if (end <= cached) {
       continue;
     }
+
+    if (combination_ == LeafCombination::SWA_COMPRESSED &&
+        type == BlockType::SWA) {
+      const size_t blocks_per_unit = cache_unit_size / block_size;
+      const size_t blocks_per_window =
+          static_cast<size_t>(leaf.options().swa_blocks_per_seq());
+      CHECK_GT(blocks_per_unit, 0u);
+      CHECK_GT(blocks_per_window, 0u);
+
+      // SWA only needs the window immediately preceding each restorable C128
+      // checkpoint. Advance the cursor over earlier positions without
+      // inserting them; LinearStatePrefixCache keeps those positions sparse.
+      const size_t completed_units = cacheable_tokens / cache_unit_size;
+      for (size_t unit = cached / blocks_per_unit + 1; unit <= completed_units;
+           ++unit) {
+        const size_t unit_end = unit * blocks_per_unit;
+        const size_t window_begin =
+            unit_end > blocks_per_window ? unit_end - blocks_per_window : 0;
+        const size_t publish_begin = std::max(cached, window_begin);
+        if (unit_end > publish_begin) {
+          seq->update_block_hashes(static_cast<uint32_t>(block_size),
+                                   leaf.options().hasher_type());
+          leaf.cache(seq->tokens().slice(0, unit_end * block_size),
+                     *blocks,
+                     publish_begin,
+                     seq->mm_data(),
+                     seq->block_hashes());
+        }
+        cached = unit_end;
+      }
+      kv.set_num_cached_blocks(type, cached);
+      continue;
+    }
+
     // Clamp tokens to `end * block_size`. The leaf's cache() re-derives its own
     // n_blocks bound from `tokens.size() / block_size_`; without this clamp,
     // chunked prefill (where seq->tokens() spans the whole prompt but only

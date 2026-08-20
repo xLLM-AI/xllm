@@ -311,13 +311,14 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
   KVCacheEstimateOptions options;
   options.dtype = torch::kFloat32;
   options.kv_cache_dtype = "auto";
-  options.cache_size_in_bytes = 2818048;
+  options.cache_size_in_bytes =
+      2818048 + /*two_additional_swa_blocks=*/2 * 90112;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
 
   KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 19);
+  EXPECT_EQ(capacity.swa_count(), 21);
 #if defined(USE_MLU)
   EXPECT_EQ(capacity.c4_count(), 64);
   EXPECT_EQ(capacity.c128_count(), 2);
@@ -327,6 +328,35 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
   EXPECT_EQ(capacity.c128_count(), 3);
   EXPECT_EQ(capacity.n_blocks(), 384);
 #endif
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4RejectsBudgetWithoutCompressedCacheUnit) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(128)
+      .compress_ratios({1, 4, 128});
+
+  constexpr int64_t kSwaCount = 4;
+  constexpr int64_t kSwaBytesPerBlock =
+      /*c1=*/128 * 16 * 4 +
+      /*c4=*/128 * (16 * 4 + 2 * 16 * 4 * 2 + 2 * 8 * 4 * 2) +
+      /*c128=*/128 * (16 * 4 + 16 * 4 * 2);
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes =
+      kSwaCount * kSwaBytesPerBlock + /*remaining_bytes=*/1;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 1;
+  options.max_tokens_per_chunk_for_prefill = 128;
+
+  EXPECT_DEATH(
+      estimate_kv_cache_capacity(model_args, options),
+      "minimum DSV4 SWA cache leaves insufficient memory for one compressed "
+      "cache unit");
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesChunkCapacity) {
@@ -352,6 +382,31 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesChunkCapacity) {
       estimate_kv_cache_capacity(model_args, options);
 
   // W=3, ceil(385/128)=4: 4 * (3 + 4 + 1) usable rows + padding row.
+  EXPECT_EQ(capacity.swa_count(), 33);
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV4MixUsesChunkCapacity) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 16 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 16384;
+  options.max_tokens_per_chunk_for_prefill = 385;
+  options.instance_role = InstanceRole::MIX;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
   EXPECT_EQ(capacity.swa_count(), 33);
 }
 
@@ -399,7 +454,6 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesTwoWindows) {
   options.cache_size_in_bytes = 16 * 1024 * 1024;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
-  options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::DECODE;
 
   const KVCacheCapacity capacity =
@@ -471,7 +525,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4PrefixCacheKeepsOperationalSwaPool) {
 }
 
 TEST(KVCacheEstimationTest,
-     DeepSeekV4RealisticPrefixBudgetRetainsCompressedPools) {
+     DeepSeekV4RealisticMixBudgetRetainsCompressedPools) {
   std::vector<int32_t> compress_ratios{0, 0};
   compress_ratios.reserve(43);
   for (int32_t layer_id = 2; layer_id < 43; ++layer_id) {
@@ -492,14 +546,16 @@ TEST(KVCacheEstimationTest,
   options.kv_cache_dtype = "auto";
   options.cache_size_in_bytes = int64_t{16} * 1024 * 1024 * 1024;
   options.block_size = 128;
-  options.max_seqs_per_batch = 80;
-  options.max_tokens_per_batch = 25000;
+  options.max_seqs_per_batch = 10;
+  options.max_tokens_per_batch = 10240;
+  options.max_tokens_per_chunk_for_prefill = 2048;
   options.enable_prefix_cache = true;
+  options.instance_role = InstanceRole::MIX;
 
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 358);
+  EXPECT_EQ(capacity.swa_count(), 181);
   EXPECT_GT(capacity.c4_count(), 0);
   EXPECT_GT(capacity.c128_count(), 0);
   EXPECT_EQ(capacity.c4_count(), 32 * capacity.c128_count());
@@ -531,7 +587,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
   EXPECT_GT(capacity.c128_count(), 0);
 }
 
-TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixUsesRemainingMemory) {
+TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixKeepsOperationalSwaPool) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4_dspark")
       .n_layers(3)
@@ -555,7 +611,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixUsesRemainingMemory) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 43);
+  EXPECT_EQ(capacity.swa_count(), 33);
   EXPECT_EQ(capacity.c4_count(), 0);
   EXPECT_EQ(capacity.c128_count(), 0);
 }
@@ -579,7 +635,7 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 19);
+  EXPECT_EQ(capacity.swa_count(), 21);
   EXPECT_EQ(capacity.c4_count(), 0);
   EXPECT_EQ(capacity.c128_count(), 0);
   EXPECT_EQ(capacity.n_blocks(), 1);
@@ -605,7 +661,8 @@ TEST(KVCacheEstimationTest,
   KVCacheEstimateOptions target_options;
   target_options.dtype = torch::kFloat32;
   target_options.kv_cache_dtype = "auto";
-  target_options.cache_size_in_bytes = 2818048;
+  target_options.cache_size_in_bytes =
+      2818048 + /*target_and_draft_swa_growth=*/229376;
   target_options.block_size = 128;
   target_options.max_seqs_per_batch = 4;
   KVCacheEstimateOptions draft_options = target_options;
@@ -621,7 +678,7 @@ TEST(KVCacheEstimationTest,
       estimate_kv_cache_capacity(target_args, target_options);
 
   constexpr int64_t kDraftSwaBytes =
-      /*layers=*/3 * /*swa_count=*/19 * /*block_size=*/128 *
+      /*layers=*/3 * /*swa_count=*/21 * /*block_size=*/128 *
       /*head_dim=*/16 * /*float32_bytes=*/4;
   EXPECT_LE(capacity.cache_size_in_bytes() + kDraftSwaBytes,
             target_options.cache_size_in_bytes);

@@ -59,10 +59,9 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     }
 
     // A block completed by the previous forward may now be outside the active
-    // window but still pinned by this sequence and the SWA prefix cache. The
-    // first allocation cannot evict that shared cache entry. Release slid-out
-    // sequence references, then retry so the allocator can evict and reuse the
-    // prefix-cache-only physical blocks. Only mutate the sequence when those
+    // window. Release slid-out sequence references, then retry: uncached blocks
+    // return directly to the free list, while cached checkpoint-window blocks
+    // can be evicted and reused. Only mutate the sequence when those
     // reclaimable blocks make the retry large enough to succeed; otherwise a
     // failed composite round must preserve the existing SWA state.
     const size_t block_size = options_.block_size();

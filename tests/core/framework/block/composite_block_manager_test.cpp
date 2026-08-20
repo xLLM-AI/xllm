@@ -711,7 +711,7 @@ TEST(CompositeBlockManagerTest, SlidingWindowSlidOutBlocksEnterPrefixCache) {
 }
 
 TEST(CompositeBlockManagerTest,
-     SlidingWindowReclaimsCachedBlockBeforeFullPoolGrowth) {
+     SlidingWindowReclaimsUncachedBlockBeforeFullCacheUnit) {
   const uint32_t window_size = 2 * kBaseBlockSize;
   BlockManager::Options opts = MakeCompositeOptions(
       /*base_num_blocks=*/4096,
@@ -734,16 +734,16 @@ TEST(CompositeBlockManagerTest,
 
   seq.kv_state().incr_kv_cache_tokens_num(first_chunk_tokens);
 
-  // The first block is outside the two-block window. The next growth must
-  // publish and release it before allocation so the SWA prefix cache can evict
-  // that block and reuse its physical id.
+  // The first block is outside the two-block window. No C128 cache unit is
+  // complete yet, so the next growth releases it directly and reuses its
+  // physical id without publishing a partial DSV4 prefix.
   ASSERT_TRUE(manager.allocate_sequence(&seq, second_chunk_tokens));
   const std::vector<Block> swa_blocks = SwaBlocks(seq);
   ASSERT_EQ(swa_blocks.size(), 4u);
   EXPECT_FALSE(swa_blocks.front().is_valid());
   EXPECT_TRUE(swa_blocks.back().is_valid());
   EXPECT_EQ(swa_leaf->num_free_blocks(), 0u);
-  EXPECT_EQ(swa_leaf->num_blocks_in_prefix_cache(), 2u);
+  EXPECT_EQ(swa_leaf->num_blocks_in_prefix_cache(), 0u);
 
   manager.deallocate_for_sequence(&seq);
 }
@@ -782,6 +782,55 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCachePostGrowCursorAdvances) {
             chunk / kBlockSizeRatio4);
   EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128),
             chunk / kBlockSizeRatio128);
+  EXPECT_EQ(manager.leaf_entries()
+                .at(BlockType::SWA)
+                .leaf->num_blocks_in_prefix_cache(),
+            4u);
+  EXPECT_EQ(manager.leaf_entries()
+                .at(BlockType::C4)
+                .leaf->num_blocks_in_prefix_cache(),
+            32u);
+  EXPECT_EQ(manager.leaf_entries()
+                .at(BlockType::C128)
+                .leaf->num_blocks_in_prefix_cache(),
+            1u);
+
+  manager.deallocate_for_sequence(&seq);
+}
+
+TEST(CompositeBlockManagerTest, Dsv4PrefixCacheSkipsPartialCacheUnitTail) {
+  const uint32_t base_num_blocks = 4096;
+  const uint32_t window_size = kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  set_swa_capacity_for_token_budget(&opts, 2 * kBlockSizeRatio128);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const size_t completed_tokens = kBlockSizeRatio128 + kBlockSizeRatio4;
+  Sequence seq =
+      MakeTestSequence(0, std::vector<int32_t>(completed_tokens, 17));
+  ASSERT_TRUE(manager.allocate_sequence(&seq, completed_tokens));
+  seq.kv_state().incr_kv_cache_tokens_num(completed_tokens);
+  manager.cache_for_sequence(&seq);
+
+  EXPECT_EQ(manager.leaf_entries()
+                .at(BlockType::SWA)
+                .leaf->num_blocks_in_prefix_cache(),
+            1u);
+  EXPECT_EQ(manager.leaf_entries()
+                .at(BlockType::C4)
+                .leaf->num_blocks_in_prefix_cache(),
+            32u);
+  EXPECT_EQ(manager.leaf_entries()
+                .at(BlockType::C128)
+                .leaf->num_blocks_in_prefix_cache(),
+            1u);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::SWA),
+            kBlockSizeRatio128 / kBaseBlockSize);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C4),
+            kBlockSizeRatio128 / kBlockSizeRatio4);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128), 1u);
 
   manager.deallocate_for_sequence(&seq);
 }
