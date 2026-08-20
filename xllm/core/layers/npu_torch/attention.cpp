@@ -106,10 +106,19 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         num_kv_heads_,
         scale_,
         /*block_size=*/0,
-        /*sparse_mode=*/attn_metadata.is_causal ? 3 : 0,
+        // FIA requires sparse mode 3 when an explicit attention mask is used.
+        // DFlash2 supplies a non-causal block mask, so the mask and causality
+        // controls must remain independent.
+        /*sparse_mode=*/attn_metadata.fia_sparse_mode >= 0
+            ? attn_metadata.fia_sparse_mode
+            : (attn_metadata.fia_attn_mask.defined()
+                   ? 3
+                   : (attn_metadata.is_causal ? 3 : 0)),
         "TND",
         /*softmax_lse_flag=*/false,
-        /*is_causal=*/attn_metadata.is_causal);
+        /*is_causal=*/attn_metadata.is_causal,
+        /*pre_tokens=*/attn_metadata.fia_pre_tokens,
+        /*next_tokens=*/attn_metadata.fia_next_tokens);
     output.copy_(std::get<0>(fia_result).view_as(output));
   } else if (attn_metadata.is_chunked_prefill) {
     torch::Tensor k = k_cache.view({k_cache.size(0), k_cache.size(1), -1});
@@ -131,10 +140,16 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         num_kv_heads_,
         scale_,
         /*block_size=*/k_cache.size(1),
-        /*sparse_mode=*/attn_metadata.is_causal ? 3 : 0,
+        /*sparse_mode=*/attn_metadata.fia_sparse_mode >= 0
+            ? attn_metadata.fia_sparse_mode
+            : (attn_metadata.fia_attn_mask.defined()
+                   ? 3
+                   : (attn_metadata.is_causal ? 3 : 0)),
         "TND",
         /*softmax_lse_flag=*/false,
-        /*is_causal=*/attn_metadata.is_causal);
+        /*is_causal=*/attn_metadata.is_causal,
+        /*pre_tokens=*/attn_metadata.fia_pre_tokens,
+        /*next_tokens=*/attn_metadata.fia_next_tokens);
     output.copy_(std::get<0>(fia_result).view_as(output));
   }
 }

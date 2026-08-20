@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -138,6 +138,9 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     head_dim_ = args.head_dim();
     rms_norm_eps_ = args.rms_norm_eps();
     sliding_window_ = args.sliding_window();
+    block_size_ = args.dflash2_block_size();
+    CHECK_GT(sliding_window_, 0);
+    CHECK_GT(block_size_, 0);
 
     const int32_t dp_size = parallel_args.dp_size();
     const int32_t cp_size = parallel_args.cp_size();
@@ -264,15 +267,14 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
       const torch::Tensor& h) override {
     layer::AttentionMetadata metadata =
         QWen3ModelImpl::get_attention_metadata(params, h);
-    // DFlash2 jointly denoises the whole query block.  Every query token must
-    // see the complete context plus all tokens in the draft block, matching
-    // the checkpoint's `is_causal=false` contract.
+    // DFlash2 jointly denoises the whole query block. Keep the 2048x2048 FIA
+    // optimized mask built by the base metadata path and use band mode to
+    // expose the full proposal block within the checkpoint's sliding window.
     metadata.is_causal = false;
 #if defined(USE_NPU)
-    if (metadata.attn_mask.defined()) {
-      metadata.fia_attn_mask =
-          metadata.attn_mask.ne(0).to(torch::kInt8).contiguous();
-    }
+    metadata.fia_sparse_mode = 4;
+    metadata.fia_pre_tokens = sliding_window_ - 1;
+    metadata.fia_next_tokens = block_size_ - 1;
 #endif
     return metadata;
   }
@@ -386,6 +388,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
   int64_t local_kv_heads_ = 0;
   double rms_norm_eps_ = 1e-6;
   int32_t sliding_window_ = -1;
+  int32_t block_size_ = 0;
   int32_t tp_rank_ = 0;
   int32_t tp_size_ = 1;
 };

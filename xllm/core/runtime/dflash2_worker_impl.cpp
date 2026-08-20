@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -138,6 +138,17 @@ DFlash2WorkerImpl::BlockSampleOutput DFlash2WorkerImpl::sample_path(
   step_params.logprobs = false;
   step_params.max_top_logprobs = 0;
   step_params.use_beam_search = false;
+  // DFlash2 samples selector edges from softmax(edge_logits / temperature).
+  // Target-side truncation, penalties, and grammar constraints are applied by
+  // verification and must not be applied a second time to the selector's
+  // top-k candidate distribution.
+  step_params.top_p = torch::Tensor();
+  step_params.top_k = torch::Tensor();
+  step_params.frequency_penalties = torch::Tensor();
+  step_params.presence_penalties = torch::Tensor();
+  step_params.repetition_penalties = torch::Tensor();
+  step_params.filter_mask = torch::Tensor();
+  step_params.filter_bitmask = torch::Tensor();
 
   torch::Tensor token_ids =
       torch::empty({batch_size, num_steps}, candidates.candidate_ids.options());
