@@ -44,7 +44,10 @@ if(USE_NPU)
     SRCS
       cp_group_ranks_test.cpp
     DEPS
+      block
+      dcp_attention_utils
       parallel_state
+      torch
       GTest::gtest_main
   )
 

@@ -44,6 +44,8 @@ class ParallelConfig final {
         {"dp_size",
          "ep_size",
          "cp_size",
+         "decode_context_parallel_size",
+         "enable_experimental_dcp_chunked_prefill",
          "tp_size",
          "sp_size",
          "cfg_size",
@@ -62,6 +64,16 @@ class ParallelConfig final {
   PROPERTY(int32_t, ep_size) = 1;
 
   PROPERTY(int32_t, cp_size) = 1;
+
+  PROPERTY(int32_t, decode_context_parallel_size) = 1;
+
+  // Opt-in flag for the experimental DCP chunked prefill path. When
+  // decode_context_parallel_size > 1 and chunked prefill is enabled, the DCP
+  // attention splits into per-shard partial FIA calls whose partial outputs are
+  // BF16/FP16-quantized before the FP32 online-softmax merge, so results are
+  // not bitwise-equivalent to dcp=1. Keep false unless explicitly running the
+  // experimental path.
+  PROPERTY(bool, enable_experimental_dcp_chunked_prefill) = false;
 
   // 0 means follow cp_size (legacy KV-split width).
   PROPERTY(int32_t, kv_split_size) = 1;

@@ -11,6 +11,7 @@
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
+#include "scheduler/chunked_prefill_policy.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
 
@@ -490,6 +491,112 @@ TEST(ContinuousSchedulerFactoryTest,
   ContinuousScheduler::Options opt = create_scheduler_options(8, 8, 0, 4, 1);
   opt.enable_chunked_prefill() = true;
   opt.cp_size() = 2;  // CP > 1 forces exclusive batch (no mix)
+
+  auto engine = std::make_unique<FakeEngine>(32, 32);
+  auto scheduler = create_continuous_scheduler(engine.get(), opt);
+  ASSERT_NE(scheduler.get(), nullptr);
+
+  auto requests = generate_request({2, 10},
+                                   {8, 8},
+                                   std::nullopt,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   30000);
+  for (auto& req : requests) {
+    scheduler->add_request(req);
+  }
+
+  auto batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1);
+  ASSERT_EQ(batches[0].size(), 2);
+  const auto& allowed_max_tokens = batches[0].get_allowed_max_tokens();
+  ASSERT_EQ(allowed_max_tokens.size(), 2);
+
+  make_request_decode_ready(requests[0]);
+  set_chunk_kv(requests[1], allowed_max_tokens[1]);
+
+  batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1);
+  ASSERT_EQ(batches[0].size(), 1);
+
+  const auto forward_input =
+      batches[0].prepare_forward_input(1, 0, ModelArgs());
+  EXPECT_TRUE(
+      forward_input.input_params.meta.batch_forward_type.is_chunked_prefill());
+  EXPECT_FALSE(forward_input.input_params.meta.batch_forward_type.is_mixed());
+  EXPECT_EQ(forward_input.input_params.meta.num_sequences, 1);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0],
+            opt.max_tokens_per_chunk_for_prefill());
+}
+
+TEST(ContinuousSchedulerBatchModeTest, Dcp1KeepsMixBatch) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.enable_chunked_prefill() = true;
+  ::xllm::SchedulerConfig::get_instance().enable_mix_batch() = true;
+  opt.decode_context_parallel_size() = 1;
+
+  BatchMode mode = resolve_batch_mode(opt);
+
+  EXPECT_TRUE(mode.enable_mix_batch);
+}
+
+TEST(ContinuousSchedulerBatchModeTest, Dcp2ClosesMixBatch) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.enable_chunked_prefill() = true;
+  ::xllm::SchedulerConfig::get_instance().enable_mix_batch() = true;
+  opt.decode_context_parallel_size() = 2;
+
+  BatchMode mode = resolve_batch_mode(opt);
+
+  EXPECT_FALSE(mode.enable_mix_batch);
+}
+
+TEST(ContinuousSchedulerBatchModeTest, Dcp2ClosesMixBatchUnderMultiSlo) {
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      10000, 256, 0, 1024, 1, /*priority_strategy=*/"multi_slo_and_prio");
+  ::xllm::SchedulerConfig::get_instance().enable_mix_batch() = true;
+  opt.decode_context_parallel_size() = 2;
+
+  BatchMode mode = resolve_batch_mode(opt);
+
+  EXPECT_FALSE(mode.enable_mix_batch);
+}
+
+TEST(ContinuousSchedulerBatchModeTest, MultiSloForcesEffectiveChunkedPrefill) {
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      10000, 256, 0, 1024, 1, /*priority_strategy=*/"multi_slo_and_prio");
+  ::xllm::SchedulerConfig::get_instance().enable_mix_batch() = true;
+  opt.enable_chunked_prefill() = false;
+  opt.decode_context_parallel_size() = 2;
+
+  BatchMode mode = resolve_batch_mode(opt);
+
+  // multi_slo_and_prio drives chunked prefill even when the raw flag is false;
+  // DCP then closes mix batching.
+  EXPECT_TRUE(mode.enable_chunked_prefill);
+  EXPECT_FALSE(mode.enable_mix_batch);
+}
+
+TEST(ChunkedPrefillPolicyTest, EffectiveChunkedTruthTable) {
+  // Raw flag wins when set, regardless of strategy.
+  EXPECT_TRUE(resolve_effective_chunked_prefill(true, "fcfs"));
+  EXPECT_TRUE(resolve_effective_chunked_prefill(true, "multi_slo_and_prio"));
+  // multi_slo_and_prio implicitly enables chunked prefill.
+  EXPECT_TRUE(resolve_effective_chunked_prefill(false, "multi_slo_and_prio"));
+  // Otherwise the raw false value is preserved.
+  EXPECT_FALSE(resolve_effective_chunked_prefill(false, "fcfs"));
+  EXPECT_FALSE(resolve_effective_chunked_prefill(false, "priority"));
+  EXPECT_FALSE(resolve_effective_chunked_prefill(false, "deadline"));
+}
+
+TEST(ContinuousSchedulerFactoryTest,
+     ChunkedPrefillWithDcpDoesNotBuildMixedBatch) {
+  ContinuousScheduler::Options opt = create_scheduler_options(8, 8, 0, 4, 1);
+  opt.enable_chunked_prefill() = true;
+  opt.decode_context_parallel_size() = 2;  // DCP > 1 forces exclusive batch
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);

@@ -61,6 +61,7 @@ limitations under the License.
 // @indexer_cache_dtype
 // @enable_mtp_draft_body_tp1
 // @text_encoder_tp_size
+// @decode_context_parallel_size
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -124,13 +125,24 @@ int main(int argc, char* argv[]) {
                 atoi(argv[xllm::spawn_worker_protocol::
                               kTextEncoderTpSizeArgumentIndex]))
           : 1;
+  const int32_t decode_context_parallel_size =
+      argc > xllm::spawn_worker_protocol::
+                  kDecodeContextParallelSizeArgumentIndex
+          ? static_cast<int32_t>(
+                atoi(argv[xllm::spawn_worker_protocol::
+                              kDecodeContextParallelSizeArgumentIndex]))
+          : 1;
   if (world_size < 1 || global_rank < 0 || global_rank >= world_size ||
       cp_size < 1 || ep_size < 1 || text_encoder_tp_size < 1 ||
+      decode_context_parallel_size < 1 ||
       (instance_role_str != "DEFAULT" && instance_role_str != "PREFILL" &&
        instance_role_str != "DECODE")) {
     LOG(ERROR) << "Invalid spawn worker topology: global_rank=" << global_rank
                << ", world_size=" << world_size << ", cp_size=" << cp_size
                << ", ep_size=" << ep_size
+               << ", text_encoder_tp_size=" << text_encoder_tp_size
+               << ", decode_context_parallel_size="
+               << decode_context_parallel_size
                << ", instance_role=" << instance_role_str;
     return 1;
   }
@@ -168,7 +180,9 @@ int main(int argc, char* argv[]) {
       << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size
       << ", text_encoder_tp_size = " << text_encoder_tp_size
       << ", indexer_cache_dtype = " << indexer_cache_dtype
-      << ", enable_mtp_draft_body_tp1 = " << enable_mtp_draft_body_tp1 << "\n";
+      << ", enable_mtp_draft_body_tp1 = " << enable_mtp_draft_body_tp1
+      << ", decode_context_parallel_size = " << decode_context_parallel_size
+      << "\n";
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
@@ -205,7 +219,8 @@ int main(int argc, char* argv[]) {
                                  cp_size,
                                  ep_size,
                                  instance_role,
-                                 enable_mtp_draft_body_tp1);
+                                 enable_mtp_draft_body_tp1,
+                                 decode_context_parallel_size);
 
   worker.run();
 

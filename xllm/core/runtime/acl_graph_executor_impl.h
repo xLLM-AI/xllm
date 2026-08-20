@@ -214,6 +214,12 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   size_t get_graph_memory_pool_count();
   size_t get_graph_capture_stream_count() const;
 
+  [[nodiscard]] uint64_t graph_key_for_test(
+      uint32_t bucket_num_tokens,
+      const ModelInputParams& params) const {
+    return get_graph_key(bucket_num_tokens, params);
+  }
+
  private:
   // not own
   CausalLM* model_;

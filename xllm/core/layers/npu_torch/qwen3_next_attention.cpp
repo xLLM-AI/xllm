@@ -106,7 +106,10 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                                     head_dim_,
                                     scaling_,
                                     num_kv_heads_,
-                                    args.sliding_window()));
+                                    args.sliding_window(),
+                                    parallel_args.dcp_size_effective(),
+                                    parallel_args.dcp_rank(),
+                                    parallel_args.dcp_group_));
 
   // 7. Fused split_qkv_rmsnorm_mrope kernel setup
   rotary_dim_ = static_cast<int64_t>(head_dim_ * args.partial_rotary_factor());

@@ -124,6 +124,7 @@ class WorkerImpl {
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
   const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
+  torch::Tensor recompute_dcp_cache_slots(const ForwardInput& input) const;
   // Builds or reuses draft decode padding on the current stream. MTP calls this
   // while preparing B/2B metadata so the compute stream only observes hits.
   bool uses_npu_dp_ep_padding() const;

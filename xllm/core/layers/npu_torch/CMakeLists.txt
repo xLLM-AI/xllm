@@ -2,6 +2,18 @@ include(cc_library)
 
 cc_library(
   NAME
+    dcp_attention_utils
+  HDRS
+    dcp_attention_utils.h
+  SRCS
+    dcp_attention_utils.cpp
+  DEPS
+    glog::glog
+    torch
+)
+
+cc_library(
+  NAME
     npu_torch_layers
   HDRS
     fused_moe.h
@@ -40,6 +52,7 @@ cc_library(
     deepseek_v4_indexer.cpp
     deepseek_v4_gate.cpp
   DEPS
+    :dcp_attention_utils
     :common_layers
     :npu_layers
     :xllm_ops
