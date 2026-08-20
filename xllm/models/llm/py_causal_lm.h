@@ -102,6 +102,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
  private:
   pybind11::dict build_config_dict(const ParallelArgs& parallel_args) const;
+  const pybind11::object& get_or_build_python_kv_caches(
+      std::vector<KVCache>& kv_caches);
 
   ModelArgs model_args_;
   torch::TensorOptions options_;
@@ -122,6 +124,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   pybind11::object py_model_;
   pybind11::object config_dict_;
+  pybind11::object python_kv_caches_;
+  int64_t python_kv_cache_layer_count_ = 0;
 };
 
 }  // namespace xllm

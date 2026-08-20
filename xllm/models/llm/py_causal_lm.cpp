@@ -203,8 +203,22 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 }
 
 PyCausalLM::~PyCausalLM() {
+  clear_python_object(python_kv_caches_);
   clear_python_object(py_model_);
   clear_python_object(config_dict_);
+}
+
+const py::object& PyCausalLM::get_or_build_python_kv_caches(
+    std::vector<KVCache>& kv_caches) {
+  const int64_t num_layers = static_cast<int64_t>(kv_caches.size());
+  if (!python_kv_caches_) {
+    python_kv_caches_ = build_python_kv_caches(kv_caches);
+    python_kv_cache_layer_count_ = num_layers;
+  } else {
+    CHECK_EQ(num_layers, python_kv_cache_layer_count_)
+        << "KV cache layer count changed after initial Python conversion";
+  }
+  return python_kv_caches_;
 }
 
 py::dict PyCausalLM::build_config_dict(
@@ -289,12 +303,12 @@ ModelOutput PyCausalLM::write_context_kv(
     layer_synchronizer = py::cast(input_params.parallel.layer_synchronizer);
   }
 #endif
-  py::object output =
-      py_model_.attr("write_context_kv")(target_hidden,
-                                         positions,
-                                         device_cache_slots,
-                                         build_python_kv_caches(kv_caches),
-                                         layer_synchronizer);
+  const py::object& python_kv_caches = get_or_build_python_kv_caches(kv_caches);
+  py::object output = py_model_.attr("write_context_kv")(target_hidden,
+                                                         positions,
+                                                         device_cache_slots,
+                                                         python_kv_caches,
+                                                         layer_synchronizer);
   if (output.is_none()) {
     return ModelOutput();
   }
