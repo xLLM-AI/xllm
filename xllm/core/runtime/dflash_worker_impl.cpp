@@ -1775,8 +1775,7 @@ void DFlashWorkerImpl::record_validate_metrics(
       }
       ++emitted_len;
     }
-    const int32_t accepted =
-        std::min(prefix_len, std::max(emitted_len - 1, 0));
+    const int32_t accepted = std::min(prefix_len, std::max(emitted_len - 1, 0));
     accepted_count += accepted;
     for (int32_t position = 0; position < accepted; ++position) {
       ++accepted_per_position[static_cast<size_t>(position)];
