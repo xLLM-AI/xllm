@@ -410,7 +410,6 @@ Master::Master(const Options& options, EngineType type)
       ModelConfig::validate_python_speculative_decode(
           ModelConfig::get_instance().model_impl(),
           model_type,
-          options_.speculative_algorithm(),
           options_.num_speculative_tokens());
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   const std::optional<std::string> cp_error =
