@@ -42,6 +42,7 @@ cc_library(
     kv_cache_tensor_allocator.h
     kv_cache_tensor_role.h
     kv_cache_utils.h
+    layerwise_split_layout.h
     linear_attention_kv_cache_impl.h
     quantized_kv_cache_impl.h
   SRCS

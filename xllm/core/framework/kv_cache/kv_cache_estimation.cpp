@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "core/layers/common/dsa_topk_share_plan.h"
@@ -120,6 +121,68 @@ int64_t standard_full_cache_block_size_in_bytes(
        indexer_layers * kv_cache_cap.index_slot_size());
   CHECK_GT(logical_block_bytes, 0) << "logical block bytes must be positive";
   return logical_block_bytes;
+}
+
+int64_t layerwise_split_block_count(const ModelArgs& model_args,
+                                    int32_t layerwise_split_size,
+                                    const KVCacheCapacity& kv_cache_cap,
+                                    int64_t available_bytes,
+                                    int64_t additional_block_bytes) {
+  const int64_t num_layers = kv_cache_cap.n_layers();
+  const std::vector<bool> indexer_layer_mask =
+      resolve_indexer_cache_enabled_layers(model_args, num_layers);
+
+  std::vector<int64_t> layer_bytes(static_cast<size_t>(num_layers), 0);
+  bool any_indexer_layer = false;
+  for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    if (!is_full_attention_layer(model_args, layer_id)) {
+      continue;
+    }
+    const bool has_indexer =
+        kv_cache_cap.index_slot_size() > 0 &&
+        (indexer_layer_mask.empty() ||
+         indexer_layer_mask[static_cast<size_t>(layer_id)]);
+    any_indexer_layer = any_indexer_layer || has_indexer;
+    const int64_t bytes =
+        kv_cache_cap.block_size() *
+        (kv_cache_cap.slot_size() + kv_cache_cap.scale_slot_size() +
+         (has_indexer ? kv_cache_cap.index_slot_size() : 0));
+    layer_bytes[static_cast<size_t>(layer_id)] = bytes;
+  }
+
+  // Scratch matches an owned layer, including indexer when any layer has one.
+  const int64_t scratch_bytes_per_block =
+      kv_cache_cap.block_size() *
+      (kv_cache_cap.slot_size() + kv_cache_cap.scale_slot_size() +
+       (any_indexer_layer ? kv_cache_cap.index_slot_size() : 0));
+  CHECK_GT(scratch_bytes_per_block, 0);
+
+  int64_t common_block_count = std::numeric_limits<int64_t>::max();
+  for (int32_t split_rank = 0; split_rank < layerwise_split_size;
+       ++split_rank) {
+    const LayerwiseSplitLayout layout(
+        /*enabled=*/true, layerwise_split_size, split_rank);
+    const std::vector<bool> layer_cache_owned =
+        build_layer_cache_owned(model_args, layout, num_layers);
+    int64_t owned_bytes = 0;
+    for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+      if (layer_cache_owned[static_cast<size_t>(layer_id)]) {
+        owned_bytes += layer_bytes[static_cast<size_t>(layer_id)];
+      }
+    }
+    if (owned_bytes == 0) {
+      continue;
+    }
+    const int64_t per_block_bytes =
+        owned_bytes + scratch_bytes_per_block + additional_block_bytes;
+    common_block_count =
+        std::min(common_block_count, available_bytes / per_block_bytes);
+  }
+
+  CHECK_NE(common_block_count, std::numeric_limits<int64_t>::max())
+      << "No layerwise split rank owns a model layer.";
+  CHECK_GT(common_block_count, 0) << "No memory for one layerwise split block.";
+  return common_block_count;
 }
 
 bool enable_qwen3_5_spec_verify(const ModelArgs& model_args,
@@ -472,8 +535,17 @@ void init_standard_counts(const ModelArgs& model_args,
   CHECK_GT(available_full_cache_size_in_bytes, 0)
       << "no memory left for full-attention kv cache after reserving linear "
          "state cache";
-  kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
-                         full_cache_block_size_in_bytes);
+  if (options.layerwise_split_size > 1) {
+    kv_cache_cap->n_blocks(
+        layerwise_split_block_count(model_args,
+                                    options.layerwise_split_size,
+                                    *kv_cache_cap,
+                                    available_full_cache_size_in_bytes,
+                                    /*additional_block_bytes=*/0));
+  } else {
+    kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
+                           full_cache_block_size_in_bytes);
+  }
   CHECK_GT(kv_cache_cap->n_blocks(), 0) << "no n_blocks for kv cache";
 }
 
@@ -486,6 +558,32 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
     return {};
   }
   return layer::get_dsa_indexer_layer_mask(model_args, num_cache_layers);
+}
+
+std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers) {
+  std::vector<bool> layer_cache_owned;
+  layer_cache_owned.reserve(static_cast<size_t>(num_layers));
+  for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    layer_cache_owned.emplace_back(
+        !is_full_attention_layer(model_args, layer_id) ||
+        layout.owns(layer_id));
+  }
+  return layer_cache_owned;
+}
+
+int64_t estimate_layerwise_split_block_count(
+    const ModelArgs& model_args,
+    int32_t layerwise_split_size,
+    const KVCacheCapacity& kv_cache_cap,
+    int64_t available_bytes,
+    int64_t additional_block_bytes) {
+  return layerwise_split_block_count(model_args,
+                                     layerwise_split_size,
+                                     kv_cache_cap,
+                                     available_bytes,
+                                     additional_block_bytes);
 }
 
 KVCacheCapacity estimate_kv_cache_capacity(

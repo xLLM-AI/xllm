@@ -74,6 +74,7 @@ class _StaticAttentionMetadata:
     linear_state_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
     dp_token_counts: tuple[int, ...] = ()
+    dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None
     is_prefill: bool = False
@@ -146,6 +147,13 @@ class DecodeAclGraphRunner(BaseRunner):
         if (metadata.is_prefill or metadata.is_chunked_prefill) and not is_expanded_spec_verify:
             return False
 
+        batch_size = input_ids.numel()
+        if not (
+            self._has_compatible_decode_metadata(input_ids, metadata)
+            and (input_embedding is None or input_embedding.shape[0] == batch_size)
+        ):
+            return False
+
         local_batch_size, global_batch_size = self._decode_batch_sizes(
             input_ids,
             metadata,
@@ -162,13 +170,22 @@ class DecodeAclGraphRunner(BaseRunner):
                 self._batch_limit_warning_logged = True
             return False
 
-        batch_size = input_ids.numel()
-        bucket_size = _decode_bucket(batch_size)
-        return (
-            self._has_compatible_decode_metadata(input_ids, metadata)
-            and (input_embedding is None or input_embedding.shape[0] == batch_size)
-            and bucket_size <= self.max_batch
-        )
+        if self.dp_size > 1:
+            # DP ranks share one graph shape, so a missing or malformed
+            # dp_token_counts cannot silently fall back to eager: divergent
+            # execution paths across ranks would deadlock HCCL collectives.
+            dp_token_counts = getattr(metadata, "dp_token_counts", None)
+            if dp_token_counts is None or len(dp_token_counts) != self.dp_size:
+                raise RuntimeError(
+                    f"DP decode step requires valid dp_token_counts (got {dp_token_counts!r}, "
+                    f"expected length {self.dp_size}). All DP ranks must use the same graph shape."
+                )
+            dp_is_decode = getattr(metadata, "dp_is_decode", None)
+            if dp_is_decode is not None and not all(dp_is_decode):
+                return False
+            global_batch = max(max(int(c) for c in dp_token_counts), batch_size)
+            return _decode_bucket(global_batch) <= self.max_batch
+        return _decode_bucket(batch_size) <= self.max_batch
 
     def _decode_batch_sizes(
         self,
@@ -199,11 +216,6 @@ class DecodeAclGraphRunner(BaseRunner):
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.attention_backend.page_size)
         block_table = expanded.block_table if expanded is not None else metadata.block_table
         kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
-        kv_seq_lens_host_values = (
-            expanded.kv_seq_lens_host_values
-            if expanded is not None
-            else getattr(metadata, "kv_seq_lens_host_values", None)
-        )
         if block_table is None or kv_seq_lens is None:
             raise RuntimeError("decode graph requires block and KV metadata")
         block_table = block_table.to(torch.int32)
@@ -214,8 +226,21 @@ class DecodeAclGraphRunner(BaseRunner):
             "requires_host_kv_lengths",
             False,
         )
-        if kv_seq_lens_host_values is None and requires_host_kv_lengths:
-            raise RuntimeError("decode graph requires scheduler-provided host KV lengths")
+        if not requires_host_kv_lengths:
+            # The C++ engine sizes kv_seq_lens_host_values by the global DP
+            # batch, while block_table holds only this rank's local rows. When
+            # the backend does not consume host KV lengths (e.g. sparse MLA),
+            # drop them so the mismatched global length never reaches shape
+            # validation.
+            kv_seq_lens_host_values = None
+        else:
+            kv_seq_lens_host_values = (
+                expanded.kv_seq_lens_host_values
+                if expanded is not None
+                else getattr(metadata, "kv_seq_lens_host_values", None)
+            )
+            if not kv_seq_lens_host_values:
+                raise RuntimeError("decode graph requires scheduler-provided host KV lengths")
 
         paged_kv_indptr = expanded.paged_kv_indptr if expanded is not None else metadata.paged_kv_indptr
         paged_kv_indices = expanded.paged_kv_indices if expanded is not None else metadata.paged_kv_indices
@@ -496,7 +521,15 @@ class DecodeAclGraphRunner(BaseRunner):
         input_embedding: torch.Tensor | None,
     ) -> _DecodeGraphEntry:
         batch_size = input_ids.shape[0]
-        padded_batch_size = _decode_bucket(batch_size)
+        # DP ranks all_gather MoE tokens into one fixed shape, so every rank
+        # must capture the same graph. Bucket by the group-wide max token count
+        # (dp_token_counts) rather than the local batch, keeping shapes uniform.
+        if self.dp_size > 1:
+            dp_token_counts = tuple(int(c) for c in metadata.dp_token_counts)
+            global_batch = max(max(dp_token_counts, default=0), batch_size)
+            padded_batch_size = _decode_bucket(global_batch)
+        else:
+            padded_batch_size = _decode_bucket(batch_size)
         if padded_batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
 
@@ -636,6 +669,8 @@ class DecodeAclGraphRunner(BaseRunner):
             paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
             kv_seq_lens_host_values=[1] * padded_batch_size,
             block_table=static_block_table,
+            dp_token_counts=tuple([padded_batch_size] * self.dp_size) if self.dp_size > 1 else (),
+            dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
         )
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
         entry.kv_seq_lens_delta = torch.empty(padded_batch_size, dtype=torch.int32, device=device)
@@ -784,7 +819,7 @@ class DecodeAclGraphRunner(BaseRunner):
             self.layer_caches,
             execution_state=entry.execution_state,
         )
-        with forward_context(context):
+        with forward_context(context), torch.npu.stream(self._stream):
             for _ in range(_CAPTURE_WARMUP_STEPS):
                 self._forward_static(entry)
         torch.npu.synchronize()

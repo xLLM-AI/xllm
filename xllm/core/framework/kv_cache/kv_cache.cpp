@@ -200,6 +200,21 @@ void allocate_sleepable_kv_caches(std::vector<KVCache>& kv_caches,
             << ", total_bytes=" << total_bytes << ", base=" << base;
 }
 
+// One scratch layer for non-owners. Empty indexer mask exposes the superset
+// ABI.
+KVCache create_layerwise_scratch_cache(
+    const KVCacheShape& kv_cache_shape,
+    const KVCacheCreateOptions& create_options) {
+  KVCacheCreateOptions scratch_options = create_options;
+  scratch_options.indexer_cache_enabled_layers(std::vector<bool>{});
+  scratch_options.layer_cache_owned(std::vector<bool>{});
+  scratch_options.enable_linear_attention(false);
+  return KVCache(kv_cache_shape,
+                 scratch_options,
+                 /*layer_id=*/0,
+                 /*owns_layer_cache=*/false);
+}
+
 }  // namespace
 
 KVCache::KVCache() : impl_(std::make_unique<KVCacheImpl>()) {}
@@ -221,8 +236,10 @@ KVCache::KVCache(const DeepSeekV4KVCacheTensors& tensors)
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
-                 int64_t layer_id)
-    : impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)) {}
+                 int64_t layer_id,
+                 bool owns_layer_cache)
+    : owns_layer_cache_(owns_layer_cache),
+      impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)) {}
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
@@ -299,8 +316,18 @@ std::vector<std::vector<int64_t>> KVCache::get_shapes() {
 
 bool KVCache::empty() const { return impl_->empty(); }
 
+KVCache KVCache::create_shared_view() const {
+  KVCache view;
+  view.owns_layer_cache_ = false;
+  view.impl_ = impl_;
+  return view;
+}
+
 void KVCache::swap_blocks(torch::Tensor& src_tensor,
                           torch::Tensor& dst_tensor) {
+  if (!owns_layer_cache_) {
+    return;
+  }
   impl_->swap_blocks(src_tensor, dst_tensor);
 }
 
@@ -311,6 +338,12 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
 
   const int64_t num_layers = create_options.num_layers();
   kv_caches.reserve(num_layers);
+  const std::vector<bool>& layer_cache_owned =
+      create_options.layer_cache_owned();
+  if (!layer_cache_owned.empty()) {
+    CHECK_EQ(layer_cache_owned.size(), static_cast<size_t>(num_layers))
+        << "Layer cache ownership mask must match num_layers.";
+  }
 
   if (util::is_deepseek_v4_model_type(create_options.model_type())) {
     std::vector<int32_t> layer_compress_ratios;
@@ -346,11 +379,15 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
   }
 
   if (create_options.enable_sleep_mode()) {
+    CHECK(layer_cache_owned.empty())
+        << "Sleep mode does not support layerwise split.";
     allocate_sleepable_kv_caches(kv_caches, kv_cache_shape, create_options);
     return;
   }
 
   if (create_options.enable_xtensor()) {
+    CHECK(layer_cache_owned.empty())
+        << "XTensor does not support layerwise split.";
     CHECK(kv_cache_shape.has_key_cache_shape())
         << "key_cache_shape must be initialized for XTensor mode.";
     CHECK(kv_cache_shape.has_value_cache_shape())
@@ -390,8 +427,29 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
     return;
   }
 
+  if (layer_cache_owned.empty()) {
+    for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+      kv_caches.emplace_back(kv_cache_shape,
+                             create_options,
+                             layer_idx,
+                             /*owns_layer_cache=*/true);
+    }
+    return;
+  }
+
+  // Views share the scratch impl, so the tensors stay alive after this local
+  // scratch object goes out of scope.
+  const KVCache scratch_cache =
+      create_layerwise_scratch_cache(kv_cache_shape, create_options);
   for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-    kv_caches.emplace_back(kv_cache_shape, create_options, layer_idx);
+    if (!layer_cache_owned[static_cast<size_t>(layer_idx)]) {
+      kv_caches.emplace_back(scratch_cache.create_shared_view());
+      continue;
+    }
+    kv_caches.emplace_back(kv_cache_shape,
+                           create_options,
+                           layer_idx,
+                           /*owns_layer_cache=*/true);
   }
 }
 

@@ -111,6 +111,7 @@ class ModelExecutor:
         graph_backend = _resolve_graph_backend(config)
         dp_size = int(config.get("dp_size", 1))
         dp_rank = int(config.get("dp_rank", 0))
+        self.dp_size = dp_size
         if dp_size > 1 and graph_backend not in (
             "",
             "off",
