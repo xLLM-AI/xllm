@@ -704,6 +704,13 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_decode(
 
   update_decode_step_input(input, last_states);
   DraftBlock draft_block = run_decode_draft(input, validate_input);
+  // Lag confidence: decide pruning from the previous step's confidence while
+  // this step's draft is still in flight (run_decode_draft launched it async
+  // and did not sync). Pure host, so it overlaps the draft forward. No-op
+  // vector when the flag is off — run_validate then takes the this-step path.
+  if (options_.enable_lag_confidence()) {
+    draft_block.lagged_prefix_lengths = decide_lagged_prefix_lengths(input);
+  }
   return run_validate(input, draft_block, validate_input);
 }
 
@@ -902,8 +909,13 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   const int32_t batch_size = input.input_params.meta.num_sequences;
 
   DraftBlock draft_block = draft_block_in;
+  // Under lag confidence the decision was already computed in step_decode from
+  // the previous step's confidence (overlapping this step's draft forward);
+  // consume it here. Otherwise fall back to the this-step decision.
   std::vector<int32_t> prefix_lengths =
-      compute_adaptive_prefix_lengths(draft_block, input);
+      options_.enable_lag_confidence()
+          ? draft_block.lagged_prefix_lengths
+          : compute_adaptive_prefix_lengths(draft_block, input);
   std::vector<int32_t> per_seq_val_tokens;
   bool did_prune = false;
   int32_t max_val_tokens = default_val_tokens;
@@ -1034,7 +1046,26 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   // as rejections. Zero extra device sync — we're already on CPU.
   record_validate_metrics(
       val_output, did_prune ? per_seq_val_tokens : std::vector<int32_t>{});
-  write_target_context_to_cache(input, val_output);
+  // Under lag confidence, stash THIS step's confidence into the cache so the
+  // next step's decision can consume it (lag-1). The store D2H runs here, past
+  // the validate sync above, off the critical path. Source mirrors the
+  // controller's: ConfidenceHead output when present, else proposal probs. Only
+  // a [batch, num_speculative_tokens] tensor is stored — DFlash's N+1-wide
+  // proposal probs have no confidence head and the wrong width, so they are
+  // dropped (undefined) and that step's slots simply carry no lagged
+  // confidence (read falls back to full width), never tripping the write's
+  // width CHECK.
+  torch::Tensor confidence_to_store;
+  if (options_.enable_lag_confidence()) {
+    const torch::Tensor& confidence_src = draft_block.confidence_probs.defined()
+                                              ? draft_block.confidence_probs
+                                              : draft_block.probs;
+    if (confidence_src.defined() && confidence_src.dim() == 2 &&
+        confidence_src.size(1) == options_.num_speculative_tokens()) {
+      confidence_to_store = confidence_src;
+    }
+  }
+  write_target_context_to_cache(input, val_output, confidence_to_store);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
@@ -1382,7 +1413,8 @@ void DFlashWorkerImpl::write_context_kv(
 
 void DFlashWorkerImpl::write_target_context_to_cache(
     const ForwardInput& input,
-    const SampleOutput& validate_output) {
+    const SampleOutput& validate_output,
+    const torch::Tensor& confidence) {
   const torch::Tensor& accepted_embeddings = validate_output.embeddings;
   CHECK(accepted_embeddings.defined())
       << "DFlash validate target embeddings are undefined.";
@@ -1453,7 +1485,8 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       input.input_params.embedding.request_ids,
       validate_output.next_tokens,
       validate_output.embeddings,
-      options_.num_speculative_tokens());
+      options_.num_speculative_tokens(),
+      confidence);
 }
 
 // -----------------------------------------------------------------------------
@@ -1500,6 +1533,12 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
     return {};
   }
 
+  return compute_prefix_lengths_from_probs(probs_for_controller, input);
+}
+
+std::vector<int32_t> DFlashWorkerImpl::compute_prefix_lengths_from_probs(
+    const torch::Tensor& probs_for_controller,
+    const ForwardInput& input) {
   const int32_t batch_size = input.input_params.meta.num_sequences;
   std::vector<double> per_seq_kv_lens(static_cast<size_t>(batch_size), 0.0);
   const Slice<int32_t> kv_seq_lens =
@@ -1514,6 +1553,47 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
           probs_for_controller,
           /*full_draft_time_ms=*/0.0,
           per_seq_kv_lens);
+  return prefix_lengths;
+}
+
+std::vector<int32_t> DFlashWorkerImpl::decide_lagged_prefix_lengths(
+    const ForwardInput& input) {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  if (adaptive_spec_controller_ == nullptr ||
+      !adaptive_spec_controller_->enabled() || embedding_cache_ == nullptr) {
+    return {};
+  }
+  const auto& embedding = input.input_params.embedding;
+  if (embedding.embedding_ids.empty()) {
+    return {};
+  }
+  const int32_t batch_size = input.input_params.meta.num_sequences;
+  if (static_cast<int32_t>(embedding.embedding_ids.size()) != batch_size) {
+    return {};
+  }
+
+  // Prune from the PREVIOUS step's confidence (lag-1): its D2H already
+  // completed at last step's write, so this decision is pure host and no longer
+  // waits on this step's draft forward — it overlaps the in-flight draft.
+  EmbeddingCache::LaggedConfidence lagged =
+      embedding_cache_->read_lagged_confidence(embedding.embedding_ids,
+                                               embedding.request_ids,
+                                               num_speculative_tokens);
+  std::vector<int32_t> prefix_lengths =
+      compute_prefix_lengths_from_probs(lagged.confidence, input);
+  if (prefix_lengths.empty()) {
+    return {};
+  }
+  // Freshness fallback: a request with no usable lagged confidence (first
+  // decode step, or slot recycled by a new request) must NOT be pruned on a
+  // zero-filled row — force full width, the cost-model-independent analog of
+  // SGLang's survival=1.
+  CHECK_EQ(static_cast<int32_t>(prefix_lengths.size()), batch_size);
+  for (int32_t i = 0; i < batch_size; ++i) {
+    if (!lagged.valid[static_cast<size_t>(i)]) {
+      prefix_lengths[static_cast<size_t>(i)] = num_speculative_tokens;
+    }
+  }
   return prefix_lengths;
 }
 

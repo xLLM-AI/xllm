@@ -104,6 +104,11 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
     // consumed by the adaptive-speculative pruning controller. When undefined,
     // the controller falls back to `probs` (sampler-gathered softmax scores).
     torch::Tensor confidence_probs;
+    // Adaptive lag-confidence pruning decision, computed in step_decode from
+    // the PREVIOUS step's confidence (overlapping this step's draft forward)
+    // and consumed by run_validate. Per-seq validate prefix length; empty when
+    // lag confidence is off. Not produced by run_decode_draft.
+    std::vector<int32_t> lagged_prefix_lengths;
     // No-sync draft inputs must outlive validation's stream sync.
     std::vector<std::shared_ptr<ForwardInput>> retained_inputs;
   };
@@ -183,6 +188,20 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
       const DraftBlock& draft_block,
       const ForwardInput& input);
 
+  // Core of the adaptive decision, shared by the this-step and lag-confidence
+  // paths: build per-seq kv lengths and run the controller on the given
+  // [batch, num_speculative_tokens] probs. The cost model is reused verbatim.
+  std::vector<int32_t> compute_prefix_lengths_from_probs(
+      const torch::Tensor& probs_for_controller,
+      const ForwardInput& input);
+
+  // Lag-confidence decision (enable_lag_confidence): prune from the PREVIOUS
+  // step's confidence read from the embedding cache, so the decision does not
+  // data-depend on this step's draft forward. Requests with no fresh lagged
+  // confidence (first step / recycled slot) fall back to full width. Empty when
+  // adaptive is off.
+  std::vector<int32_t> decide_lagged_prefix_lengths(const ForwardInput& input);
+
   // Zero out draft probs beyond each sequence's prefix_len so the rejection
   // Per-seq varlen prune: rebuild validate_input as a true varlen
   // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
@@ -217,8 +236,10 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                         const torch::Tensor& positions_device,
                         const torch::Tensor& new_cache_slots_device);
 
-  void write_target_context_to_cache(const ForwardInput& input,
-                                     const SampleOutput& validate_output);
+  void write_target_context_to_cache(
+      const ForwardInput& input,
+      const SampleOutput& validate_output,
+      const torch::Tensor& confidence = torch::Tensor());
 
  protected:
   std::unique_ptr<LLMWorkerImpl> draft_impl_;

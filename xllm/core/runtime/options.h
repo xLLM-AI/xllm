@@ -90,6 +90,8 @@ struct Options {
 
   PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
 
+  PROPERTY(bool, enable_lag_confidence) = false;
+
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 

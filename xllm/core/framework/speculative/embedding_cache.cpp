@@ -121,7 +121,8 @@ void EmbeddingCache::write_target_context(
     const std::vector<std::string>& request_ids,
     const torch::Tensor& accepted_tokens,
     const torch::Tensor& accepted_embeddings,
-    int32_t num_speculative_tokens) {
+    int32_t num_speculative_tokens,
+    const torch::Tensor& confidence) {
   CHECK(accepted_tokens.defined()) << "accepted target tokens are undefined";
   CHECK(accepted_embeddings.defined())
       << "accepted target embeddings are undefined";
@@ -138,6 +139,21 @@ void EmbeddingCache::write_target_context(
   CHECK_EQ(accepted_tokens.size(1), accepted_embeddings.size(1))
       << "accepted token/embedding width mismatch";
   CHECK_GE(num_speculative_tokens, 0) << "invalid speculative token count";
+
+  // Lag confidence: one blocking D2H of [batch, num_speculative_tokens] here,
+  // off the critical path (the caller invokes this past the validate sync), so
+  // the next-step read is a pure-host slot copy. Undefined when lag is off.
+  torch::Tensor confidence_cpu;
+  if (confidence.defined()) {
+    CHECK_EQ(confidence.dim(), 2)
+        << "lag confidence should be [batch, num_speculative_tokens]";
+    CHECK_EQ(confidence.size(0), static_cast<int64_t>(ids.size()))
+        << "lag confidence batch mismatch";
+    CHECK_EQ(confidence.size(1), num_speculative_tokens)
+        << "lag confidence width mismatch";
+    confidence_cpu = safe_to(confidence, torch::kCPU).to(torch::kFloat32);
+    confidence_cpu = confidence_cpu.contiguous();
+  }
 
   torch::Tensor accepted_tokens_cpu = to_cpu_int64_contiguous(accepted_tokens);
   const int64_t* accepted_tokens_data =
@@ -176,6 +192,9 @@ void EmbeddingCache::write_target_context(
     state.position_offset = last_idx;
     state.correction_token_id = correction_token;
     state.correction_position_offset = correction_offset;
+    if (confidence_cpu.defined()) {
+      state.confidence = confidence_cpu.select(/*dim=*/0, i).detach().clone();
+    }
     state.embedding = accepted_embeddings.select(/*dim=*/0, i)
                           .select(/*dim=*/0, last_idx)
                           .detach()
@@ -263,6 +282,41 @@ std::vector<int32_t> EmbeddingCache::read_accepted_prefix_lengths(
     accepted_prefix_lengths.emplace_back(accepted_length);
   }
   return accepted_prefix_lengths;
+}
+
+EmbeddingCache::LaggedConfidence EmbeddingCache::read_lagged_confidence(
+    const std::vector<int32_t>& ids,
+    const std::vector<std::string>& request_ids,
+    int32_t num_speculative_tokens) const {
+  CHECK(!ids.empty()) << "decode ids should not be empty";
+  CHECK(request_ids.empty() || request_ids.size() == ids.size())
+      << "embedding_id / request_id count mismatch";
+  CHECK_GT(num_speculative_tokens, 0)
+      << "lag confidence requires positive speculative tokens";
+  const int32_t num_ids = static_cast<int32_t>(ids.size());
+  LaggedConfidence result;
+  result.valid.assign(static_cast<size_t>(num_ids), false);
+  result.confidence = torch::zeros({num_ids, num_speculative_tokens},
+                                   torch::dtype(torch::kFloat32));
+  for (int32_t i = 0; i < num_ids; ++i) {
+    const DecodeState& state = get_tail(ids[i]);
+    // Freshness gate mirrors read_accepted_prefix_lengths: a slot never
+    // written, or recycled by a later request (request_id mismatch), carries no
+    // usable lagged confidence. Width mismatch is likewise rejected. Invalid
+    // rows stay zero-filled and valid[i]=false so the caller falls back to full
+    // width.
+    if (!state.valid ||
+        (!request_ids.empty() && state.request_id != request_ids[i])) {
+      continue;
+    }
+    if (!state.confidence.defined() ||
+        state.confidence.numel() != num_speculative_tokens) {
+      continue;
+    }
+    result.confidence.select(/*dim=*/0, i).copy_(state.confidence);
+    result.valid[static_cast<size_t>(i)] = true;
+  }
+  return result;
 }
 
 void EmbeddingCache::clear(const std::vector<int32_t>& ids) {
