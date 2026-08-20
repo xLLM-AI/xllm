@@ -111,6 +111,15 @@ class Glm52Config:
     moe_intermediate_size: int = 2048
     tp_size: int = 1
     tp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    dp_size: int = 1
+    dp_rank: int = 0
+    cp_size: int = 1
+    cp_rank: int = 0
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    world_size: int = 1
     indexer_types: list | None = None
     mlp_layer_types: list | None = None
     index_skip_topk_offset: int = 2
@@ -155,6 +164,10 @@ class Glm52Config:
         hidden = int(pick("hidden_size", default=6144))
         n_heads = int(pick("n_heads", "num_attention_heads", default=64))
         max_pe = int(pick("max_position_embeddings", default=202752))
+        tp_size = int(pick("tp_size", default=1))
+        dp_size = int(pick("dp_size", default=1))
+        cp_size = int(pick("cp_size", default=1))
+        world_size = int(pick("world_size", default=tp_size * dp_size * cp_size))
         rope_scaling_factor = float(rpick_nz("factor", "rope_scaling_factor", default=1.0))
         original_max = int(rpick_nz("original_max_position_embeddings", default=max_pe))
 
@@ -196,8 +209,17 @@ class Glm52Config:
             topk_method=str(pick("topk_method", default="noaux_tc")),
             norm_topk_prob=bool(pick("norm_topk_prob", default=True)),
             moe_intermediate_size=int(pick("moe_intermediate_size", default=2048)),
-            tp_size=int(pick("tp_size", default=1)),
+            tp_size=tp_size,
             tp_rank=int(pick("tp_rank", default=0)),
+            ep_size=int(pick("ep_size", default=1)),
+            ep_rank=int(pick("ep_rank", default=0)),
+            dp_size=dp_size,
+            dp_rank=int(pick("dp_rank", default=0)),
+            cp_size=cp_size,
+            cp_rank=int(pick("cp_rank", default=0)),
+            moe_tp_size=int(pick("moe_tp_size", default=1)),
+            moe_tp_rank=int(pick("moe_tp_rank", default=0)),
+            world_size=world_size,
             indexer_types=pick("indexer_types", default=None) or None,
             mlp_layer_types=pick("mlp_layer_types", default=None) or None,
             index_skip_topk_offset=int(pick("index_skip_topk_offset", default=2)),
@@ -210,6 +232,33 @@ class Glm52Config:
         cfg._resolve_indexer_types()
         cfg._resolve_mlp_layer_types()
         return cfg
+
+    def validate(self) -> None:
+        """Validate the orthogonal attention/DP and MoE EP topology."""
+        if min(self.tp_size, self.ep_size, self.dp_size, self.cp_size, self.moe_tp_size) <= 0:
+            raise ValueError("parallel sizes must be positive")
+        if self.tp_size * self.dp_size * self.cp_size != self.world_size:
+            raise ValueError("world_size must equal tp_size * dp_size * cp_size")
+        if self.ep_size not in (1, self.world_size):
+            raise ValueError(f"ep_size must be 1 or world_size ({self.world_size})")
+        if self.ep_size > 1:
+            if self.n_routed_experts % self.ep_size:
+                raise ValueError("n_routed_experts must be divisible by ep_size")
+            if self.moe_tp_size * self.ep_size != self.world_size:
+                raise ValueError("world_size must equal moe_tp_size * ep_size")
+        effective_moe_tp_size = self.moe_tp_size if self.ep_size > 1 else self.tp_size
+        if self.moe_intermediate_size % effective_moe_tp_size:
+            raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
+        if not 0 <= self.tp_rank < self.tp_size:
+            raise ValueError("tp_rank must be in [0, tp_size)")
+        if not 0 <= self.dp_rank < self.dp_size:
+            raise ValueError("dp_rank must be in [0, dp_size)")
+        if not 0 <= self.cp_rank < self.cp_size:
+            raise ValueError("cp_rank must be in [0, cp_size)")
+        if not 0 <= self.ep_rank < self.ep_size:
+            raise ValueError("ep_rank must be in [0, ep_size)")
+        if not 0 <= self.moe_tp_rank < self.moe_tp_size:
+            raise ValueError("moe_tp_rank must be in [0, moe_tp_size)")
 
     def _resolve_indexer_types(self) -> None:
         """Derive per-layer indexer mode (full/shared)."""
@@ -529,6 +578,16 @@ class Glm52ForCausalLM(PyModelBase):
         self.cfg = Glm52Config.from_dict(config)
         self.cfg.tp_size = int(config.get("tp_size", 1))
         self.cfg.tp_rank = int(config.get("tp_rank", _tp_rank_from_device(config.get("device", "npu:0"))))
+        self.cfg.ep_size = int(config.get("ep_size", 1))
+        self.cfg.ep_rank = int(config.get("ep_rank", 0))
+        self.cfg.dp_size = int(config.get("dp_size", 1))
+        self.cfg.dp_rank = int(config.get("dp_rank", 0))
+        self.cfg.cp_size = int(config.get("cp_size", 1))
+        self.cfg.cp_rank = int(config.get("cp_rank", 0))
+        self.cfg.moe_tp_size = int(config.get("moe_tp_size", 1))
+        self.cfg.moe_tp_rank = int(config.get("moe_tp_rank", 0))
+        self.cfg.world_size = int(config.get("world_size", self.cfg.tp_size * self.cfg.dp_size * self.cfg.cp_size))
+        self.cfg.validate()
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "cuda"))
         self.dtype = dtype
@@ -594,7 +653,13 @@ class Glm52ForCausalLM(PyModelBase):
                 w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
                 w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
                 w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                for j in range(cfg.n_routed_experts):
+                moe_layer = self.model.layers[i].mlp
+                expert_start = moe_layer.local_expert_start
+                expert_end = moe_layer.local_expert_end
+                shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
+                shard_rank = cfg.moe_tp_rank if cfg.ep_size > 1 else cfg.tp_rank
+                for j in range(expert_start, expert_end):
+                    local_idx = j - expert_start
                     gw = loader.load_tensor(se + f"{j}.gate_proj.weight")
                     gs = loader.load_tensor(se + f"{j}.gate_proj.weight_scale")
                     go = loader.load_tensor(se + f"{j}.gate_proj.weight_offset")
@@ -604,17 +669,45 @@ class Glm52ForCausalLM(PyModelBase):
                     dw = loader.load_tensor(se + f"{j}.down_proj.weight")
                     ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
                     do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
-                    w13_param.data[j].copy_(torch.cat([loader.shard(gw, 0), loader.shard(uw, 0)], dim=0).contiguous())
-                    w13_scale.data[j].copy_(torch.cat([loader.shard(gs, 0), loader.shard(us, 0)], dim=0).contiguous())
-                    w13_offset.data[j].copy_(torch.cat([loader.shard(go, 0), loader.shard(uo, 0)], dim=0).contiguous())
-                    w2_param.data[j].copy_(loader.shard(dw, 1).contiguous())
-                    w2_scale.data[j].copy_(ds.contiguous())
-                    w2_offset.data[j].copy_(do.contiguous())
+                    w13_param.data[local_idx].copy_(
+                        torch.cat(
+                            [
+                                loader.shard(gw, 0, shard_world, shard_rank),
+                                loader.shard(uw, 0, shard_world, shard_rank),
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+                    w13_scale.data[local_idx].copy_(
+                        torch.cat(
+                            [
+                                loader.shard(gs, 0, shard_world, shard_rank),
+                                loader.shard(us, 0, shard_world, shard_rank),
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+                    w13_offset.data[local_idx].copy_(
+                        torch.cat(
+                            [
+                                loader.shard(go, 0, shard_world, shard_rank),
+                                loader.shard(uo, 0, shard_world, shard_rank),
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+                    w2_param.data[local_idx].copy_(loader.shard(dw, 1, shard_world, shard_rank).contiguous())
+                    w2_scale.data[local_idx].copy_(ds.contiguous())
+                    w2_offset.data[local_idx].copy_(do.contiguous())
                 loader.copy_in(p + "mlp.gate.weight", loader.load_tensor(p + "mlp.gate.weight"))
                 loader.copy_in(
                     p + "mlp.e_score_correction_bias", loader.load_tensor(p + "mlp.gate.e_score_correction_bias")
                 )
+                saved_tp = (loader.tp_size, loader.tp_rank)
+                loader.tp_size = shard_world
+                loader.tp_rank = shard_rank
                 loader.load_w8a8_b(p + "mlp.shared_experts.")
+                loader.tp_size, loader.tp_rank = saved_tp
                 self.model.layers[i].mlp.process_weights_after_loading()
 
         loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))

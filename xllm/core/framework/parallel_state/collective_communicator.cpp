@@ -151,7 +151,8 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
                                                         int32_t world_size,
                                                         int32_t dp_size,
                                                         int32_t ep_size,
-                                                        int32_t cp_size) {
+                                                        int32_t cp_size,
+                                                        bool initialize_hccl) {
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
   const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
 
@@ -171,6 +172,9 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
   DispatchAndCombineComm result;
   result.mapping_data = mapping_npu.to_json();
   result.mapping.ParseParam(result.mapping_data);
+  if (!initialize_hccl) {
+    return result;
+  }
   result.mapping.InitGlobalCommDomain(
       ParallelConfig::get_instance().communication_backend());
 
@@ -499,12 +503,19 @@ void CollectiveCommunicator::create_process_groups(
     // while tp_size == world/dp; after narrowing it collides.
     const int32_t dp_group_count = world_size / dp_size;
     port_offset = global_rank % dp_group_count + 1;
+    std::string dp_host = host;
+#if defined(USE_NPU)
+    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
+      const int32_t dp_group_start = global_rank % dp_group_count;
+      dp_host = get_rank_table_server_host(dp_group_start, host);
+    }
+#endif
     dp_local_process_group_ = create_process_group(global_rank,
                                                    world_size,
                                                    dp_size,
                                                    port + port_offset,
                                                    true,
-                                                   host,
+                                                   dp_host,
                                                    "dp_group",
                                                    device);
     parallel_args_->dp_local_process_group_ = dp_local_process_group_.get();
@@ -592,13 +603,21 @@ void CollectiveCommunicator::create_process_groups(
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
       ep_size == world_size) {
+    // Torch already owns the HCCL process group. Creating an ATB rank-table
+    // communicator here initializes HCCL a second time for full-world EP.
     auto dispatch_and_combine_comm = create_dispatch_and_combine_comm(
-        global_rank, world_size, dp_size, ep_size, cp_size);
+        global_rank, world_size, dp_size, ep_size, cp_size, false);
     parallel_args_->mapping_data(dispatch_and_combine_comm.mapping_data);
     parallel_args_->mapping(dispatch_and_combine_comm.mapping);
+    CHECK(parallel_args_->moe_ep_group_ != nullptr)
+        << "EP2 dispatch/combine requires a Torch MoE EP process group.";
+    const std::string dispatch_and_combine_comm_name =
+        parallel_args_->moe_ep_group_->hccl_comm_name(/*init_comm=*/true);
+    CHECK(!dispatch_and_combine_comm_name.empty())
+        << "EP2 dispatch/combine requires an initialized Torch MoE EP "
+           "communicator.";
     parallel_args_->dispatchAndCombinecommDomain(
-        dispatch_and_combine_comm.domain);
-    parallel_args_->dispatchAndCombineHcclComm(dispatch_and_combine_comm.comm);
+        dispatch_and_combine_comm_name);
   }
 #endif
 }
