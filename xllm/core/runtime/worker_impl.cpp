@@ -384,8 +384,8 @@ void disable_layerwise_split_for_draft(ParallelArgs* parallel_args) {
     nlohmann::json& split = mapping_data["attnLayerwiseSplit"];
     split["group_size"] = 1;
     split["rank"] = 0;
-    split["rankIds"] = std::vector<uint32_t>{
-        static_cast<uint32_t>(parallel_args->rank())};
+    split["rankIds"] =
+        std::vector<uint32_t>{static_cast<uint32_t>(parallel_args->rank())};
   }
 #if defined(USE_NPU)
   if (!parallel_args->mapping().Has(atb_speed::base::ATTN_LAYERWISE_SPLIT)) {

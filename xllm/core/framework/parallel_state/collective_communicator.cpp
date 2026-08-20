@@ -163,7 +163,8 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
       .pp_size(1)
       .sp_size(1)
       .cp_size(normalized_cp_size)
-      .layerwise_split_size(ParallelConfig::get_instance().layerwise_split_size());
+      .layerwise_split_size(
+          ParallelConfig::get_instance().layerwise_split_size());
 
   MappingNPU mapping_npu(EPLBConfig::get_instance().rank_tablefile(),
                          world_size,

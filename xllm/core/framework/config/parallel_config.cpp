@@ -31,7 +31,8 @@ DEFINE_int32(
     1,
     "Layer-owner KV cache group size inside each attention TP group. "
     "1 disables layerwise split; values > 1 shard persistent KV by layer owner "
-    "and enable layerwise-split communication. The value must divide attention TP "
+    "and enable layerwise-split communication. The value must divide attention "
+    "TP "
     "size.");
 
 DEFINE_int32(kv_split_size,

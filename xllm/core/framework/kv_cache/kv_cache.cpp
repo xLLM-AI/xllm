@@ -200,7 +200,8 @@ void allocate_sleepable_kv_caches(std::vector<KVCache>& kv_caches,
             << ", total_bytes=" << total_bytes << ", base=" << base;
 }
 
-// One scratch layer for non-owners. Empty indexer mask exposes the superset ABI.
+// One scratch layer for non-owners. Empty indexer mask exposes the superset
+// ABI.
 KVCache create_layerwise_scratch_cache(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& create_options) {

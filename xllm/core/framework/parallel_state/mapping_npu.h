@@ -137,7 +137,8 @@ class MappingNPU final {
   // "full-replica / skip prefix AllGather" mode.
   void get_kv_split_group(ParallelInfo& parallel_info);
 
-  // Split every attention TP group into ordered contiguous layerwise-split subgroups.
+  // Split every attention TP group into ordered contiguous layerwise-split
+  // subgroups.
   void get_layerwise_split_group(ParallelInfo& parallel_info);
 
   void get_domain(ParallelInfo& src,

@@ -158,7 +158,8 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
   CHECK_GT(scratch_bytes_per_block, 0);
 
   int64_t common_block_count = std::numeric_limits<int64_t>::max();
-  for (int32_t split_rank = 0; split_rank < layerwise_split_size; ++split_rank) {
+  for (int32_t split_rank = 0; split_rank < layerwise_split_size;
+       ++split_rank) {
     const LayerwiseSplitLayout layout(
         /*enabled=*/true, layerwise_split_size, split_rank);
     const std::vector<bool> layer_cache_owned =
@@ -180,8 +181,7 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
 
   CHECK_NE(common_block_count, std::numeric_limits<int64_t>::max())
       << "No layerwise split rank owns a model layer.";
-  CHECK_GT(common_block_count, 0)
-      << "No memory for one layerwise split block.";
+  CHECK_GT(common_block_count, 0) << "No memory for one layerwise split block.";
   return common_block_count;
 }
 
@@ -560,10 +560,9 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
   return layer::get_dsa_indexer_layer_mask(model_args, num_cache_layers);
 }
 
-std::vector<bool> build_layer_cache_owned(
-    const ModelArgs& model_args,
-    const LayerwiseSplitLayout& layout,
-    int64_t num_layers) {
+std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers) {
   std::vector<bool> layer_cache_owned;
   layer_cache_owned.reserve(static_cast<size_t>(num_layers));
   for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {

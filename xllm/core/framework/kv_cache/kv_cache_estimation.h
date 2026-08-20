@@ -64,10 +64,9 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
 
 // Linear-attention layers stay owned on every rank. Full-attention layers
 // follow LayerwiseSplitLayout.
-std::vector<bool> build_layer_cache_owned(
-    const ModelArgs& model_args,
-    const LayerwiseSplitLayout& layout,
-    int64_t num_layers);
+std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers);
 
 // Common block count across a layerwise split group. Each rank pays for the
 // layers it owns plus one shared scratch layer of the same per-block cost, so
