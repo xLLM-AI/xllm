@@ -64,6 +64,7 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
   void set_layer_id(int32_t layer_id) override {
     prefill_param_.layerId = layer_id;
     decode_graph_param_.layerId = layer_id;
+    decode_optimized_graph_param_.layerId = layer_id;
     decode_eager_param_.layerId = layer_id;
   }
 
@@ -97,11 +98,14 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
 
   atb_speed::Model::Node prefill_node_;
   atb_speed::Model::Node decode_graph_node_;
+  atb_speed::Model::Node decode_optimized_graph_node_;
   atb_speed::Model::Node decode_eager_node_;
   std::string model_name_;
   atb_speed::qwen::QwenLayerParam prefill_param_;
   atb_speed::qwen::QwenLayerParam decode_graph_param_;
+  atb_speed::qwen::QwenLayerParam decode_optimized_graph_param_;
   atb_speed::qwen::QwenLayerParam decode_eager_param_;
+  bool enable_optimized_decode_graph_ = false;
   atb::Tensor internal_tensors_;
   atb::Tensor residual_tensors_;
   atb::Tensor placeholder_;
