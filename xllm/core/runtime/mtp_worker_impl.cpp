@@ -1352,6 +1352,13 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
+  // The hybrid target owns recurrent GDN state, while the Qwen MTP draft
+  // is a pure full-attention model. Do not forward target-only slot metadata
+  // into the draft prefill; it has no matching validity mask or state cache.
+  input_params.embedding.linear_state_ids.clear();
+  input_params.embedding.linear_state_indices = torch::Tensor();
+  input_params.linear_state_cache_ops.clear();
+  input_params.linear_state_validity_mask.clear();
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;

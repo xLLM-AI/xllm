@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "runtime/dflash_worker_impl.h"
 
+#include <c10/util/SmallVector.h>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -385,6 +386,12 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
          "parallelism (cp_size > 1).";
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       parallel_args, device, draft_options(options));
+  speculative_position_labels_.reserve(
+      static_cast<size_t>(options.num_speculative_tokens()));
+  for (int32_t position = 0; position < options.num_speculative_tokens();
+       ++position) {
+    speculative_position_labels_.emplace_back(std::to_string(position));
+  }
 
   // Adaptive per-seq validate pruning. DP is supported: the worker gathers
   // each rank's true validate token count over the DP group before the target
@@ -1735,6 +1742,8 @@ void DFlashWorkerImpl::record_validate_metrics(
   const int64_t* token_data = next_tokens_cpu.const_data_ptr<int64_t>();
   int64_t num_draft_tokens = 0;
   int64_t accepted_count = 0;
+  c10::SmallVector<int64_t, 8> accepted_per_position(
+      static_cast<size_t>(num_speculative_tokens), 0);
   for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
     // seq_width = target-side validate width for this seq (anchor + drafts).
     // Under adaptive per-seq varlen prune it is per_seq_val_tokens[i], else
@@ -1753,19 +1762,31 @@ void DFlashWorkerImpl::record_validate_metrics(
     const int32_t prefix_len = seq_width - 1;
     num_draft_tokens += prefix_len;
 
-    // Count accepted drafts by walking columns [0, prefix_len) — the first
-    // -1 marks the boundary where the sampler rejected. Padding tail past
-    // prefix_len is ignored so it never counts as rejection.
+    // next_tokens column 0 is the token committed by the target; accepted
+    // draft position i is represented by column i + 1. Walk the complete
+    // per-seq output (draft prefix plus target bonus/replacement), then remove
+    // that guaranteed first token. Padding past seq_width is ignored.
     const int64_t row_offset =
         static_cast<int64_t>(seq_id) * static_cast<int64_t>(width);
-    int32_t emitted = 0;
-    for (int32_t token_idx = 0; token_idx < prefix_len; ++token_idx) {
+    int32_t emitted_len = 0;
+    for (int32_t token_idx = 0; token_idx < seq_width; ++token_idx) {
       if (token_data[row_offset + token_idx] < 0) {
         break;
       }
-      ++emitted;
+      ++emitted_len;
     }
-    accepted_count += emitted;
+    const int32_t accepted =
+        std::min(prefix_len, std::max(emitted_len - 1, 0));
+    accepted_count += accepted;
+    for (int32_t position = 0; position < accepted; ++position) {
+      ++accepted_per_position[static_cast<size_t>(position)];
+    }
+  }
+  for (int32_t position = 0; position < num_speculative_tokens; ++position) {
+    MULTI_COUNTER_ADD(
+        speculative_num_accepted_tokens_per_pos,
+        speculative_position_labels_[static_cast<size_t>(position)],
+        accepted_per_position[static_cast<size_t>(position)]);
   }
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total, accepted_count);
