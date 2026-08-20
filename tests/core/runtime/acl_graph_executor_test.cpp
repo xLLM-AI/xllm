@@ -175,18 +175,24 @@ TEST(Qwen35FiaRoutingTest, UsesExactModelTypeWhitelist) {
   }
 }
 
-TEST(Qwen35FiaRoutingTest, DisableFlagOverridesWhitelist) {
+TEST(Qwen35FiaRoutingTest, RequiresExplicitEnableFlag) {
   ExecutionConfig& execution_config = ExecutionConfig::get_instance();
-  const bool original_disable_fia_decode =
-      execution_config.disable_fia_decode();
+  const bool original_enable_fia_decode = execution_config.enable_fia_decode();
 
-  execution_config.disable_fia_decode(false);
-  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5"));
+  execution_config.enable_fia_decode(false);
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_text"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_text"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_mtp"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_mtp"));
 
-  execution_config.disable_fia_decode(true);
-  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5"));
+  execution_config.enable_fia_decode(true);
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_text"));
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_text"));
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_mtp"));
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_mtp"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_next"));
 
-  execution_config.disable_fia_decode(original_disable_fia_decode);
+  execution_config.enable_fia_decode(original_enable_fia_decode);
 }
 
 namespace {

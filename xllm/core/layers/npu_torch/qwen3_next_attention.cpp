@@ -34,8 +34,8 @@ bool is_qwen3_5_model_type(const std::string& model_type) {
 }
 
 bool should_enable_qwen3_5_fia_decode(const std::string& model_type) {
-  return is_qwen3_5_model_type(model_type) &&
-         !ExecutionConfig::get_instance().disable_fia_decode();
+  return ExecutionConfig::get_instance().enable_fia_decode() &&
+         is_qwen3_5_model_type(model_type);
 }
 
 Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
