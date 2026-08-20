@@ -529,6 +529,10 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
     estimate_options.n_local_linear_k_heads = args_.linear_num_key_heads();
     estimate_options.n_local_linear_v_heads = args_.linear_num_value_heads();
   }
+  estimate_options.layerwise_split_size =
+      options_.is_draft_engine()
+          ? 1
+          : ParallelConfig::get_instance().layerwise_split_size();
 
   KVCacheCapacity kv_cache_cap =
       ::xllm::estimate_kv_cache_capacity(args_, estimate_options);

@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "framework/kv_cache/kv_cache_capacity.h"
+#include "framework/kv_cache/layerwise_split_layout.h"
 
 namespace xllm {
 
@@ -43,6 +44,7 @@ struct KVCacheEstimateOptions {
   int64_t max_linear_state_cache_slots = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
+  int32_t layerwise_split_size = 1;
   const ModelArgs* draft_model_args = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };
@@ -59,6 +61,22 @@ struct Dsv4KVCacheEstimateCost {
 std::vector<bool> resolve_indexer_cache_enabled_layers(
     const ModelArgs& model_args,
     int64_t num_cache_layers);
+
+// Linear-attention layers stay owned on every rank. Full-attention layers
+// follow LayerwiseSplitLayout.
+std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers);
+
+// Common block count across a layerwise split group. Each rank pays for the
+// layers it owns plus one shared scratch layer of the same per-block cost, so
+// the group settles on the smallest count any rank can afford.
+int64_t estimate_layerwise_split_block_count(
+    const ModelArgs& model_args,
+    int32_t layerwise_split_size,
+    const KVCacheCapacity& kv_cache_cap,
+    int64_t available_bytes,
+    int64_t additional_block_bytes);
 
 KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,

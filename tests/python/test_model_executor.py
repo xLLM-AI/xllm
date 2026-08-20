@@ -391,7 +391,8 @@ class TestDecodeCudaGraphDataParallelKeys:
         runner = self._runner(dp_rank=1)
         input_ids = torch.zeros(1, dtype=torch.int32)
 
-        assert runner._graph_key(input_ids, self._metadata(token_counts)) is None
+        with pytest.raises(RuntimeError):
+            runner._graph_key(input_ids, self._metadata(token_counts))
 
 
 # ---------------------------------------------------------------------------

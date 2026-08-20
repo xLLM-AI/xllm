@@ -79,6 +79,7 @@ MappingNPU::MappingNPU(const std::string rank_table_file,
   get_tp_group(word_embed_tp_);
   get_dp_group(word_embed_dp_);
   get_tp_group(attn_tp_);
+  get_layerwise_split_group(attn_layerwise_split_);
   get_tp_group(attn_o_proj_tp_);
   get_dp_group(attn_dp_);
   get_dp_group(attn_o_proj_dp_);
@@ -142,6 +143,7 @@ MappingNPU::MappingNPU(const std::string rank_table_file,
   lm_head_tp_.buffer_size(unified_buffer);
   lm_head_dp_.buffer_size(unified_buffer);
   attn_cp_.buffer_size(unified_buffer);
+  attn_layerwise_split_.buffer_size(unified_buffer);
   attn_inner_sp_.domain(attn_tp_.domain());
 }
 
@@ -209,6 +211,9 @@ void MappingNPU::parse_parallel_info() {
     attn_cp_.group_size(options_.cp_size());
   }
 
+  attn_layerwise_split_.group_size(options_.layerwise_split_size());
+  attn_layerwise_split_.backend("hccl");
+
   const int32_t cp_group_size =
       attn_cp_.group_size() > 0 ? attn_cp_.group_size() : 1;
   const int32_t kv_split_group_size =
@@ -264,6 +269,15 @@ void MappingNPU::validate() {
   CHECK(cp_sz % kv_split == 0)
       << "cp_size (" << cp_sz << ") must be divisible by kv_split_size ("
       << kv_split << ").";
+
+  const int32_t layerwise_split_size = attn_layerwise_split_.group_size();
+  const int32_t attn_tp_size = attn_tp_.group_size();
+  CHECK(layerwise_split_size >= 1)
+      << "layerwise_split_size must be >= 1, got " << layerwise_split_size;
+  CHECK(attn_tp_size % layerwise_split_size == 0)
+      << "attention tp size (" << attn_tp_size
+      << ") must be divisible by layerwise_split_size (" << layerwise_split_size
+      << ").";
 
   CHECK(attn_tp_.group_size() * attn_dp_.group_size() * attn_cp_.group_size() ==
         world_size_)
@@ -398,6 +412,32 @@ void MappingNPU::get_kv_split_group(ParallelInfo& parallel_info) {
   get_dp_group(parallel_info);
 }
 
+void MappingNPU::get_layerwise_split_group(ParallelInfo& parallel_info) {
+  const int32_t split_size = parallel_info.group_size();
+  std::vector<std::vector<int32_t>> rank_per_group;
+  for (const std::vector<int32_t>& tp_group : attn_tp_.rank_per_group()) {
+    if (tp_group.empty() || tp_group.front() >= world_size_) {
+      continue;
+    }
+    CHECK_EQ(tp_group.size(), static_cast<size_t>(attn_tp_.group_size()));
+    for (size_t begin = 0; begin < tp_group.size();
+         begin += static_cast<size_t>(split_size)) {
+      const size_t end = begin + static_cast<size_t>(split_size);
+      rank_per_group.emplace_back(tp_group.begin() + begin,
+                                  tp_group.begin() + end);
+    }
+  }
+
+  parallel_info.num_group(static_cast<int32_t>(rank_per_group.size()));
+  parallel_info.rank_per_group(rank_per_group);
+  auto [current_group_id, local_rank] =
+      get_current_group_id(rank_per_group, rank_);
+  CHECK(current_group_id >= 0 && local_rank >= 0)
+      << "Failed to get layerwise split group for rank " << rank_;
+  parallel_info.current_group_id(current_group_id);
+  parallel_info.rank(local_rank);
+}
+
 void MappingNPU::get_domain(ParallelInfo& src,
                             ParallelInfo& dst,
                             const int32_t start_idx) {
@@ -459,6 +499,7 @@ nlohmann::json MappingNPU::to_json() {
   data["lmHeadDp"] = lmhead_dp;
   data["lcocAttnTp"] = attn_tp_.to_json(buffer_offset_);
   data["attnCp"] = attn_cp_.to_json(buffer_offset_);
+  data["attnLayerwiseSplit"] = attn_layerwise_split_.to_json(buffer_offset_);
   // KV split metadata. ATB layers that consume `kvSplit` use it to size the
   // prefix AllGather (or to skip it entirely when group_size == 1).
   // Older ATB versions ignore the unknown key, preserving backward

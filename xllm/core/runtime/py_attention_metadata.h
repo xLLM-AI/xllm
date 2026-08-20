@@ -76,6 +76,7 @@ class PyAttentionMetadataView final {
   pybind11::object linear_state_indices() const;
   pybind11::object has_initial_state() const;
   const std::vector<int32_t>& dp_token_counts() const;
+  const std::vector<int32_t>& dp_is_decode() const;
   pybind11::object q_seq_lens() const;
   PyExpandedDecodeMetadataView expanded_decode_metadata() const;
   bool is_prefill() const;
@@ -92,6 +93,7 @@ class PyAttentionMetadataView final {
   torch::Tensor q_seq_lens_host_;
   torch::Tensor linear_state_indices_;
   std::vector<int32_t> dp_token_counts_;
+  std::vector<int32_t> dp_is_decode_;
 };
 
 }  // namespace xllm
