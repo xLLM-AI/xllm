@@ -106,8 +106,10 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         num_kv_heads_,
         scale_,
         /*block_size=*/0,
-        /*sparse_mode=*/3,
-        "TND");
+        /*sparse_mode=*/attn_metadata.is_causal ? 3 : 0,
+        "TND",
+        /*softmax_lse_flag=*/false,
+        /*is_causal=*/attn_metadata.is_causal);
     output.copy_(std::get<0>(fia_result).view_as(output));
   } else if (attn_metadata.is_chunked_prefill) {
     torch::Tensor k = k_cache.view({k_cache.size(0), k_cache.size(1), -1});
@@ -129,8 +131,10 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         num_kv_heads_,
         scale_,
         /*block_size=*/k_cache.size(1),
-        /*sparse_mode=*/3,
-        "TND");
+        /*sparse_mode=*/attn_metadata.is_causal ? 3 : 0,
+        "TND",
+        /*softmax_lse_flag=*/false,
+        /*is_causal=*/attn_metadata.is_causal);
     output.copy_(std::get<0>(fia_result).view_as(output));
   }
 }

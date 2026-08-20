@@ -118,6 +118,14 @@ class LLMWorkerImpl : public WorkerImpl {
     return model_->has_dspark_confidence_head();
   }
 
+  DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) {
+    return model_->dflash2_candidates(
+        hidden_states, unary_logits, anchor_token_ids);
+  }
+
   bool share_weights_from(LLMWorkerImpl& source) {
     return model_->share_weights_from(*source.model_);
   }

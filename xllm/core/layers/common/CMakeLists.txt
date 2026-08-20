@@ -31,6 +31,7 @@ cc_library(
     dsa_topk_share_plan.h
     dp_utils.h
     add_matmul.h
+    dflash2_grouped_conv.h
     moe_fused_topk.h
   SRCS
     oxygen_vision_attention.cpp
@@ -57,6 +58,7 @@ cc_library(
     dsa_metadata_builder.cpp
     dp_utils.cpp
     add_matmul.cpp
+    dflash2_grouped_conv.cpp
     moe_fused_topk.cpp
   DEPS
     "-Wl,--whole-archive"

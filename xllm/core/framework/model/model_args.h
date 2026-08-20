@@ -84,6 +84,13 @@ struct ModelArgs {
   PROPERTY(bool, enable_confidence_head) = false;
   PROPERTY(bool, confidence_head_with_markov) = false;
 
+  // DFlash2 local-convolution and candidate-selector geometry.
+  PROPERTY(int32_t, dflash2_block_size) = 0;
+  PROPERTY(int32_t, dflash2_conv_group_size) = 0;
+  PROPERTY(int32_t, dflash2_conv_kernel_size) = 0;
+  PROPERTY(int32_t, dflash2_selector_rank) = 0;
+  PROPERTY(int32_t, dflash2_selector_top_k) = 0;
+
   PROPERTY(bool, use_qk_norm) = false;
   PROPERTY(float, rms_norm_eps) = 0.0f;
 

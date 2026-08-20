@@ -173,3 +173,15 @@ cc_test(
     glog::glog
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    dflash2_grouped_conv_test
+  SRCS
+    dflash2_grouped_conv_tests.cpp
+  DEPS
+    :common_layers
+    torch
+    glog::glog
+    GTest::gtest_main
+)

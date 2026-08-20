@@ -30,6 +30,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
+#include "runtime/dflash2_worker_impl.h"
 #include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
 #include "runtime/dspark_worker_impl.h"
@@ -56,6 +57,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (algorithm == "DFlash2") {
+      impl_ = new DFlash2WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DSpark") {
       impl_ = new DSparkWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "Suffix") {
