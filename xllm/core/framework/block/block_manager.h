@@ -51,6 +51,8 @@ class BlockManager {
     PROPERTY(uint32_t, sliding_window_size) = 0;
     // Base SWA/cache-state block rows retained per sequence.
     PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
+    // Total physical SWA rows computed by the KV cache estimator.
+    PROPERTY(uint32_t, swa_num_blocks) = 0;
     // Scheduler token budget used to size the shared SWA burst pool.
     PROPERTY(uint32_t, max_tokens_per_batch) = 0;
     // For CompositeBlockManager (passed from upstream).
@@ -192,9 +194,9 @@ class BlockManager {
       size_t num_tokens) = 0;
 
   // Sliding-window hook: release leading blocks that have slid out of the
-  // window. The composite calls this on every leaf AFTER a successful
-  // allocate_sequence commit; non-SWA leaves keep the empty default (no-op).
-  // Running post-commit means a failed round never releases existing blocks.
+  // window. The composite calls this on every leaf after a successful commit;
+  // the SWA leaf may also call it after an allocation shortage before retrying.
+  // Non-SWA leaves keep the empty default (no-op).
   virtual void release_out_of_window(Sequence* /*seq*/) {}
   virtual void release_out_of_window(Sequence* /*seq*/,
                                      KVCacheState& /*kv_state*/) {}

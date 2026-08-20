@@ -55,6 +55,9 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(uint32_t, sliding_window_size) = 0;
     // Base SWA/cache-state block rows retained per sequence.
     PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
+    // Total physical SWA rows. This is computed by the KV cache estimator and
+    // shared with the device tensor shape to keep both id spaces identical.
+    PROPERTY(uint32_t, swa_num_blocks) = 0;
     // Scheduler token budget used to size the shared SWA burst pool.
     PROPERTY(uint32_t, max_tokens_per_batch) = 0;
     // For CompositeBlockManager.
