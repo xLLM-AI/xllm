@@ -418,6 +418,13 @@ class Qwen3_5Model(nn.Module):
         self.norm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        # TODO: The current tilelang-ascend version has a cache bug that prevents kernels with
+        # dynamic symbols from being cached, causing the service to crash. This is a temporary
+        # workaround; we will resubmit once tilelang-ascend fixes the issue.
+        import tilelang
+
+        tilelang.disable_cache()
+        tilelang.cache.clear_cache()
         hidden = self.embed_tokens(input_ids)
         residual: torch.Tensor | None = None
         for layer in self.layers:

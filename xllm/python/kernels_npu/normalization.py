@@ -52,10 +52,7 @@ def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     Returns:
         A tensor with the shape and dtype of ``value``.
     """
-    del value, eps
-    raise NotImplementedError(
-        "l2_norm has no NPU kernel; see kernels_cuda/triton/l2_norm.py for the reference implementation"
-    )
+    return torch.ops.xllm_ops.l2_norm(value, eps)
 
 
 def rms_norm_gated(
@@ -64,21 +61,18 @@ def rms_norm_gated(
     weight: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Apply RMSNorm to ``value`` and gate the result with ``gate``.
+    """Apply RMSNorm to ``value`` and gate the result with ``silu(gate)``.
 
     Args:
         value: Tensor to normalize.
-        gate: Gate applied after normalization, same shape as ``value``.
+        gate: Gate applied after normalization (SiLU is applied internally).
         weight: RMSNorm weight over the last dimension.
         eps: RMSNorm epsilon.
 
     Returns:
         A tensor with the shape and dtype of ``value``.
     """
-    del value, gate, weight, eps
-    raise NotImplementedError(
-        "rms_norm_gated has no NPU kernel; see kernels_cuda/triton/rms_norm.py for the reference implementation"
-    )
+    return torch.ops.xllm_ops.rms_norm_gated(value, gate, weight, eps)
 
 
 __all__ = [

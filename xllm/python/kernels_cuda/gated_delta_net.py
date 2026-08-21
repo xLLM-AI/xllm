@@ -199,9 +199,58 @@ def _chunk_gated_delta_rule_fake(
     return torch.empty_like(v), torch.empty_like(initial_state)
 
 
+def gdn_prefill_prepare(
+    mixed_qkv: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    num_key_heads: int,
+    num_value_heads: int,
+    key_head_dim: int,
+    value_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused conv + split + l2norm + gating for prefill.
+
+    Encapsulates the CUDA-optimal fusion strategy: causal_conv1d_prefill
+    produces packed convolved output, then fused_gdn_prefill_post_conv
+    splits into Q/K/V with l2norm and computes gating in one kernel.
+
+    Returns:
+        (q, k, v, g, beta) with shapes [T, H, D] / [T, H].
+    """
+    from .causal_conv1d import causal_conv1d_prefill
+
+    convolved = causal_conv1d_prefill(
+        mixed_qkv,
+        weight,
+        conv_state,
+        state_indices,
+        has_initial_state,
+        cu_seqlens,
+    )
+    q, k, v, g, beta = fused_gdn_prefill_post_conv(
+        convolved,
+        a,
+        b,
+        a_log,
+        dt_bias,
+        num_key_heads,
+        key_head_dim,
+        value_head_dim,
+    )
+    return q, k, v, g, beta
+
+
 __all__ = [
     "GdnPrefillBackend",
     "resolve_gdn_prefill_backend",
+    "gdn_prefill_prepare",
     "fused_gdn_prefill_post_conv",
     "fused_recurrent_gated_delta_rule_packed_decode",
     "chunk_gated_delta_rule",
