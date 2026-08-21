@@ -703,13 +703,50 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_decode(
       << "DFlash decode target state count mismatch";
 
   update_decode_step_input(input, last_states);
-  DraftBlock draft_block = run_decode_draft(input, validate_input);
+  // Lag confidence: decide the prune from the PREVIOUS step's confidence BEFORE
+  // launching this step's draft. The decision is pure host (the lagged
+  // confidence D2H completed last step) and has no data dependency on this
+  // step's draft, so computing it here lets run_decode_draft build the pruned
+  // varlen validate batch inside the draft-overlap window instead of rebuilding
+  // it on the critical path in run_validate. Empty vector when the flag is off.
+  std::vector<int32_t> lagged_prefix_lengths;
+  if (options_.enable_lag_confidence()) {
+    lagged_prefix_lengths = decide_lagged_prefix_lengths(input);
+  }
+  DraftBlock draft_block =
+      run_decode_draft(input, validate_input, lagged_prefix_lengths);
   return run_validate(input, draft_block, validate_input);
+}
+
+void DFlashWorkerImpl::prepare_overlap_validate_input(
+    const ForwardInput& input,
+    ForwardInput& validate_input,
+    const std::vector<int32_t>& lagged_prefix_lengths,
+    DraftBlock& draft_block) {
+  const int32_t batch_size = input.input_params.meta.num_sequences;
+  std::vector<int32_t> per_seq_val_tokens;
+  int32_t max_val_tokens = 0;
+  const bool did_prune = prefix_lengths_to_val_tokens(
+      lagged_prefix_lengths, batch_size, &per_seq_val_tokens, &max_val_tokens);
+  if (did_prune) {
+    // Build the pruned varlen batch here, overlapping the in-flight draft.
+    // run_validate consumes this directly and skips its own rebuild.
+    prepare_validate_inputs(input, validate_input, per_seq_val_tokens);
+    draft_block.varlen_prebuilt = true;
+    draft_block.per_seq_val_tokens = std::move(per_seq_val_tokens);
+    draft_block.max_val_tokens = max_val_tokens;
+  } else {
+    // No prune (flag off, first step, or every seq full width): dense batch,
+    // exactly as before. run_validate takes the legacy path.
+    prepare_validate_inputs(input, validate_input);
+    draft_block.varlen_prebuilt = false;
+  }
 }
 
 DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
     const ForwardInput& input,
-    ForwardInput& validate_input) {
+    ForwardInput& validate_input,
+    const std::vector<int32_t>& lagged_prefix_lengths) {
   Timer timer;
 
   ForwardInput query_input;
@@ -723,8 +760,12 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
   // launch above returns immediately, so building validate_input here (it only
   // reads the original input; draft tokens are injected later in
   // fill_validate_input_from_draft_outputs) runs on the host while the draft
-  // computes on device, instead of delaying the draft launch.
-  prepare_validate_inputs(input, validate_input);
+  // computes on device, instead of delaying the draft launch. Under lag
+  // confidence the lagged decision lets us build the pruned varlen batch here,
+  // moving the whole rebuild off run_validate's critical path.
+  DraftBlock draft_block;
+  prepare_overlap_validate_input(
+      input, validate_input, lagged_prefix_lengths, draft_block);
   // Unify the draft next_tokens across the tensor-parallel group before
   // process_draft_sample_output() compresses the probs into the cache, so every
   // rank caches the same selected draft prob under schedule-overlap. No-op for
@@ -745,7 +786,6 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
   CHECK_EQ(draft_output.sample_output.probs.numel(), num_draft_tokens)
       << "DFlash draft output requires selected draft probs.";
 
-  DraftBlock draft_block;
   draft_block.token_ids = draft_output.sample_output.next_tokens.view(
       {batch_size, num_speculative_tokens});
   draft_block.probs = draft_output.sample_output.probs.view(
@@ -879,6 +919,48 @@ void DFlashWorkerImpl::fill_validate_input_from_draft_outputs_varlen(
   record_metadata_ready_event(compute_stream, validate_input);
 }
 
+bool DFlashWorkerImpl::prefix_lengths_to_val_tokens(
+    const std::vector<int32_t>& prefix_lengths,
+    int32_t batch_size,
+    std::vector<int32_t>* per_seq_val_tokens,
+    int32_t* max_val_tokens) const {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  const int32_t default_val_tokens = num_speculative_tokens + 1;
+  per_seq_val_tokens->clear();
+  if (prefix_lengths.empty()) {
+    *max_val_tokens = default_val_tokens;
+    return false;
+  }
+  // Note: we intentionally do NOT mask draft probs beyond each seq's
+  // prefix_len. The varlen validate path only sends prefix_lengths[i] draft
+  // tokens per seq to target; and apply_pruned_prefix_lengths downstream
+  // overwrites all pruned rejection-sampler outputs (via cut_mask + drop mask).
+  // So the sampler's decision on pruned draft slots is irrelevant to the
+  // emitted tokens.
+  per_seq_val_tokens->resize(batch_size);
+  bool did_prune = false;
+  int32_t max_width = 0;
+  for (int32_t i = 0; i < batch_size; ++i) {
+    const int32_t p = std::clamp(prefix_lengths[static_cast<size_t>(i)],
+                                 /*min=*/0,
+                                 /*max=*/num_speculative_tokens);
+    // Per-seq validate width = accepted-draft-count + 1 bonus. When the
+    // controller decides prefix=0 (don't speculate this step), the seq still
+    // must verify its bonus token, so the minimum is 1 slot — not 2. A previous
+    // floor to 2 forced a phantom "draft slot" at position 0 that leaked
+    // whatever the sampler emitted there past the intended prefix, showing up
+    // as duplicate/garbage tokens in adaptive output.
+    const int32_t width = p + 1;
+    (*per_seq_val_tokens)[static_cast<size_t>(i)] = width;
+    max_width = std::max(max_width, width);
+    if (width < default_val_tokens) {
+      did_prune = true;
+    }
+  }
+  *max_val_tokens = max_width;
+  return did_prune;
+}
+
 std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
     const ForwardInput& input,
     const DraftBlock& draft_block_in,
@@ -902,41 +984,33 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   const int32_t batch_size = input.input_params.meta.num_sequences;
 
   DraftBlock draft_block = draft_block_in;
-  std::vector<int32_t> prefix_lengths =
-      compute_adaptive_prefix_lengths(draft_block, input);
   std::vector<int32_t> per_seq_val_tokens;
   bool did_prune = false;
   int32_t max_val_tokens = default_val_tokens;
-  if (!prefix_lengths.empty()) {
-    // Note: we intentionally do NOT mask draft_block.probs beyond each seq's
-    // prefix_len. The varlen validate path only sends prefix_lengths[i] draft
-    // tokens per seq to target; and apply_pruned_prefix_lengths downstream
-    // overwrites all pruned rejection-sampler outputs (via cut_mask + drop
-    // mask). So the sampler's decision on pruned draft slots is irrelevant
-    // to the emitted tokens — no need to touch draft_probs on the hot path.
-    per_seq_val_tokens.resize(batch_size);
-    max_val_tokens = 0;
-    for (int32_t i = 0; i < batch_size; ++i) {
-      int32_t p = std::clamp(prefix_lengths[static_cast<size_t>(i)],
-                             /*min=*/0,
-                             /*max=*/num_speculative_tokens);
-      // Per-seq validate width = accepted-draft-count + 1 bonus. When the
-      // controller decides prefix=0 (don't speculate this step), the seq
-      // still must verify its bonus token, so the minimum is 1 slot — not
-      // 2. A previous floor to 2 forced a phantom "draft slot" at position
-      // 0 that leaked whatever the sampler emitted there past the intended
-      // prefix, showing up as duplicate/garbage tokens in adaptive output.
-      const int32_t width = p + 1;
-      per_seq_val_tokens[static_cast<size_t>(i)] = width;
-      max_val_tokens = std::max(max_val_tokens, width);
-      if (width < default_val_tokens) {
-        did_prune = true;
-      }
+  if (draft_block.varlen_prebuilt) {
+    // Lag confidence: run_decode_draft already decided the prune and built the
+    // pruned varlen validate_input in the draft-overlap window. Consume the
+    // decision directly; only the draft-token fill (which needs this step's
+    // draft output) remains on the critical path below.
+    per_seq_val_tokens = draft_block.per_seq_val_tokens;
+    did_prune = !per_seq_val_tokens.empty();
+    max_val_tokens =
+        did_prune ? draft_block.max_val_tokens : default_val_tokens;
+  } else {
+    // Legacy this-step path: decide now (blocking on this step's draft output)
+    // and rebuild the varlen batch here, on the critical path.
+    std::vector<int32_t> prefix_lengths =
+        options_.enable_lag_confidence()
+            ? draft_block.lagged_prefix_lengths
+            : compute_adaptive_prefix_lengths(draft_block, input);
+    did_prune = prefix_lengths_to_val_tokens(
+        prefix_lengths, batch_size, &per_seq_val_tokens, &max_val_tokens);
+    if (did_prune) {
+      prepare_validate_inputs(input, validate_input, per_seq_val_tokens);
     }
   }
 
   if (did_prune) {
-    apply_per_seq_varlen_prune(input, validate_input, per_seq_val_tokens);
     fill_validate_input_from_draft_outputs_varlen(
         draft_block, validate_input, *compute_stream_, per_seq_val_tokens);
   } else {
@@ -990,16 +1064,16 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   // dense rejection sampling.
   if (did_prune) {
     // effective_prefix[i] mirrors the controller's decision (0-based, clamped
-    // to [0, num_speculative_tokens]). Since per_seq_val_tokens[i] is exactly
-    // prefix_lengths[i] + 1 now (bonus slot only when prefix=0), we could
-    // equivalently write per_seq_val_tokens[i] - 1; keeping the raw
-    // prefix_lengths read here documents the semantic and stays robust if the
-    // width calculation grows another guard later.
+    // to [0, num_speculative_tokens]). per_seq_val_tokens[i] is exactly that
+    // clamped prefix + 1 (bonus slot only when prefix=0), so recover it as
+    // per_seq_val_tokens[i] - 1. Deriving from per_seq_val_tokens (rather than
+    // the raw prefix_lengths) keeps this correct on both the lag-prebuilt path
+    // — where the decision was made in run_decode_draft and only
+    // per_seq_val_tokens survives — and the legacy this-step path.
     std::vector<int32_t> effective_prefix(batch_size);
     for (int32_t i = 0; i < batch_size; ++i) {
-      int32_t p = prefix_lengths[static_cast<size_t>(i)];
       effective_prefix[static_cast<size_t>(i)] =
-          std::clamp(p, 0, options_.num_speculative_tokens());
+          per_seq_val_tokens[static_cast<size_t>(i)] - 1;
     }
     adaptive_pruning::PrunedPrefixMasks masks =
         adaptive_pruning::build_pruned_prefix_masks(
@@ -1034,7 +1108,26 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   // as rejections. Zero extra device sync — we're already on CPU.
   record_validate_metrics(
       val_output, did_prune ? per_seq_val_tokens : std::vector<int32_t>{});
-  write_target_context_to_cache(input, val_output);
+  // Under lag confidence, stash THIS step's confidence into the cache so the
+  // next step's decision can consume it (lag-1). The store D2H runs here, past
+  // the validate sync above, off the critical path. Source mirrors the
+  // controller's: ConfidenceHead output when present, else proposal probs. Only
+  // a [batch, num_speculative_tokens] tensor is stored — DFlash's N+1-wide
+  // proposal probs have no confidence head and the wrong width, so they are
+  // dropped (undefined) and that step's slots simply carry no lagged
+  // confidence (read falls back to full width), never tripping the write's
+  // width CHECK.
+  torch::Tensor confidence_to_store;
+  if (options_.enable_lag_confidence()) {
+    const torch::Tensor& confidence_src = draft_block.confidence_probs.defined()
+                                              ? draft_block.confidence_probs
+                                              : draft_block.probs;
+    if (confidence_src.defined() && confidence_src.dim() == 2 &&
+        confidence_src.size(1) == options_.num_speculative_tokens()) {
+      confidence_to_store = confidence_src;
+    }
+  }
+  write_target_context_to_cache(input, val_output, confidence_to_store);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
@@ -1226,13 +1319,22 @@ void DFlashWorkerImpl::update_decode_step_input(
   input.device_tensors_ready = false;
 }
 
-void DFlashWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
-                                               ForwardInput& validate_input) {
+void DFlashWorkerImpl::prepare_validate_inputs(
+    const ForwardInput& input,
+    ForwardInput& validate_input,
+    const std::vector<int32_t>& per_seq_val_tokens) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   ForwardInput prepared_input = input;
   prepared_input.metadata_ready_event.reset();
-  SpeculativeWorkerImpl::prepare_validate_inputs(prepared_input,
-                                                 validate_input);
+  if (per_seq_val_tokens.empty()) {
+    SpeculativeWorkerImpl::prepare_validate_inputs(prepared_input,
+                                                   validate_input);
+  } else {
+    // Pruned varlen batch: Σ per_seq_val_tokens[i] tokens instead of the dense
+    // [batch, N+1] layout, via the base SpeculativeWorkerImpl per-seq builder.
+    SpeculativeWorkerImpl::prepare_validate_inputs(
+        prepared_input, validate_input, per_seq_val_tokens);
+  }
   validate_input.input_params.embedding.input_embedding = torch::Tensor();
   record_metadata_ready_event(*prepare_stream_, validate_input);
 }
@@ -1382,7 +1484,8 @@ void DFlashWorkerImpl::write_context_kv(
 
 void DFlashWorkerImpl::write_target_context_to_cache(
     const ForwardInput& input,
-    const SampleOutput& validate_output) {
+    const SampleOutput& validate_output,
+    const torch::Tensor& confidence) {
   const torch::Tensor& accepted_embeddings = validate_output.embeddings;
   CHECK(accepted_embeddings.defined())
       << "DFlash validate target embeddings are undefined.";
@@ -1453,7 +1556,8 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       input.input_params.embedding.request_ids,
       validate_output.next_tokens,
       validate_output.embeddings,
-      options_.num_speculative_tokens());
+      options_.num_speculative_tokens(),
+      confidence);
 }
 
 // -----------------------------------------------------------------------------
@@ -1500,6 +1604,12 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
     return {};
   }
 
+  return compute_prefix_lengths_from_probs(probs_for_controller, input);
+}
+
+std::vector<int32_t> DFlashWorkerImpl::compute_prefix_lengths_from_probs(
+    const torch::Tensor& probs_for_controller,
+    const ForwardInput& input) {
   const int32_t batch_size = input.input_params.meta.num_sequences;
   std::vector<double> per_seq_kv_lens(static_cast<size_t>(batch_size), 0.0);
   const Slice<int32_t> kv_seq_lens =
@@ -1517,21 +1627,45 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
   return prefix_lengths;
 }
 
-void DFlashWorkerImpl::apply_per_seq_varlen_prune(
-    const ForwardInput& input,
-    ForwardInput& validate_input,
-    const std::vector<int32_t>& per_seq_val_tokens) {
-  const int32_t num_sequences = input.input_params.meta.num_sequences;
-  CHECK_EQ(static_cast<int32_t>(per_seq_val_tokens.size()), num_sequences);
-  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  ForwardInput prepared_input = input;
-  prepared_input.metadata_ready_event.reset();
-  ForwardInput new_validate;
-  SpeculativeWorkerImpl::prepare_validate_inputs(
-      prepared_input, new_validate, per_seq_val_tokens);
-  new_validate.input_params.embedding.input_embedding = torch::Tensor();
-  record_metadata_ready_event(*prepare_stream_, new_validate);
-  validate_input = std::move(new_validate);
+std::vector<int32_t> DFlashWorkerImpl::decide_lagged_prefix_lengths(
+    const ForwardInput& input) {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  if (adaptive_spec_controller_ == nullptr ||
+      !adaptive_spec_controller_->enabled() || embedding_cache_ == nullptr) {
+    return {};
+  }
+  const auto& embedding = input.input_params.embedding;
+  if (embedding.embedding_ids.empty()) {
+    return {};
+  }
+  const int32_t batch_size = input.input_params.meta.num_sequences;
+  if (static_cast<int32_t>(embedding.embedding_ids.size()) != batch_size) {
+    return {};
+  }
+
+  // Prune from the PREVIOUS step's confidence (lag-1): its D2H already
+  // completed at last step's write, so this decision is pure host and no longer
+  // waits on this step's draft forward — it overlaps the in-flight draft.
+  EmbeddingCache::LaggedConfidence lagged =
+      embedding_cache_->read_lagged_confidence(embedding.embedding_ids,
+                                               embedding.request_ids,
+                                               num_speculative_tokens);
+  std::vector<int32_t> prefix_lengths =
+      compute_prefix_lengths_from_probs(lagged.confidence, input);
+  if (prefix_lengths.empty()) {
+    return {};
+  }
+  // Freshness fallback: a request with no usable lagged confidence (first
+  // decode step, or slot recycled by a new request) must NOT be pruned on a
+  // zero-filled row — force full width, the cost-model-independent analog of
+  // SGLang's survival=1.
+  CHECK_EQ(static_cast<int32_t>(prefix_lengths.size()), batch_size);
+  for (int32_t i = 0; i < batch_size; ++i) {
+    if (!lagged.valid[static_cast<size_t>(i)]) {
+      prefix_lengths[static_cast<size_t>(i)] = num_speculative_tokens;
+    }
+  }
+  return prefix_lengths;
 }
 
 void DFlashWorkerImpl::record_validate_metrics(

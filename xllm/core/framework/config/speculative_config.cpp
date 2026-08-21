@@ -80,6 +80,12 @@ DEFINE_double(
     "Minimum relative throughput gain required to include a draft token in "
     "adaptive speculative validation.");
 
+DEFINE_bool(enable_lag_confidence,
+            false,
+            "Whether the adaptive controller prunes using the previous decode "
+            "step's confidence (lag-1) so the decision overlaps this step's "
+            "draft forward. Requires enable_adaptive_speculative_decode.");
+
 namespace xllm {
 
 void SpeculativeConfig::from_flags() {
@@ -97,6 +103,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_adaptive_speculative_decode);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(adaptive_speculative_min_gain);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_lag_confidence);
 }
 
 void SpeculativeConfig::from_json(const JsonReader& json) {
@@ -147,6 +154,8 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, enable_adaptive_speculative_decode);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, adaptive_speculative_min_gain);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_lag_confidence);
 }
 
 SpeculativeConfig& SpeculativeConfig::get_instance() {

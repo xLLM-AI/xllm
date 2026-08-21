@@ -84,7 +84,8 @@ class SpeculativeConfig final {
          "enable_mtp_draft_body_tp1",
          "enable_atb_spec_kernel",
          "enable_adaptive_speculative_decode",
-         "adaptive_speculative_min_gain"}};
+         "adaptive_speculative_min_gain",
+         "enable_lag_confidence"}};
     return kOptionCategory;
   }
 
@@ -115,6 +116,13 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_adaptive_speculative_decode) = false;
 
   PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
+
+  // When true, the adaptive controller prunes using the PREVIOUS decode step's
+  // confidence (lag-1) instead of this step's, so the decision no longer
+  // data-depends on this step's draft forward and can overlap it. Requires
+  // enable_adaptive_speculative_decode. Off by default keeps the this-step
+  // path.
+  PROPERTY(bool, enable_lag_confidence) = false;
 
  private:
   // ASCII case-insensitive equality. Mirrors the manual case handling in

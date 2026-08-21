@@ -99,6 +99,8 @@ class Options {
 
   PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
 
+  PROPERTY(bool, enable_lag_confidence) = false;
+
   // thread num to handle requests
   PROPERTY(size_t, num_request_handling_threads) = 4;
 

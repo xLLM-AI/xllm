@@ -52,6 +52,7 @@ std::string Options::to_string() const {
      << ", enable_adaptive_speculative_decode: "
      << enable_adaptive_speculative_decode()
      << ", adaptive_speculative_min_gain: " << adaptive_speculative_min_gain()
+     << ", enable_lag_confidence: " << enable_lag_confidence()
      << ", num_request_handling_threads: " << num_request_handling_threads()
      << ", communication_backend: " << communication_backend().value_or("null")
      << ", rank_tablefile: " << rank_tablefile().value_or("null")

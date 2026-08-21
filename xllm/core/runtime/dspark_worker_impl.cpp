@@ -38,7 +38,8 @@ DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
 
 DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
     const ForwardInput& input,
-    ForwardInput& validate_input) {
+    ForwardInput& validate_input,
+    const std::vector<int32_t>& lagged_prefix_lengths) {
   Timer timer;
 
   // Same input build as DFlash, but sample_from_anchor()==true makes the query
@@ -84,8 +85,12 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
       << "DSpark draft forward must return logits.";
   // Match DFlash's host/device overlap: validation input construction only
   // reads the original input, so prepare it after the asynchronous draft
-  // launch instead of delaying that launch.
-  prepare_validate_inputs(input, validate_input);
+  // launch instead of delaying that launch. Under lag confidence the lagged
+  // decision lets us build the pruned varlen batch here, overlapping the
+  // in-flight draft and keeping the rebuild off run_validate's critical path.
+  DraftBlock draft_block;
+  prepare_overlap_validate_input(
+      input, validate_input, lagged_prefix_lengths, draft_block);
 
   const int64_t num_rows = draft_output->logits.size(/*dim=*/0);
   CHECK_EQ(num_rows % num_speculative_tokens, 0)
@@ -122,7 +127,6 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
         base_logits, last_hidden, anchor_token_ids, sampling_params_on_device);
   }
 
-  DraftBlock draft_block;
   draft_block.token_ids = std::move(sample_output.token_ids);
   draft_block.probs = std::move(sample_output.probs);
   draft_block.confidence_probs = std::move(sample_output.confidence_probs);
