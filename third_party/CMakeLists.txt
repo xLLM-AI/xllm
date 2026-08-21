@@ -2,7 +2,54 @@ include(cc_library)
 
 add_subdirectory(sentencepiece)
 add_subdirectory(minja)
+
+set(_XLLM_BRPC_GIT_DIR_WAS_SET FALSE)
+set(_XLLM_BRPC_GIT_WORK_TREE_WAS_SET FALSE)
+if(DEFINED ENV{GIT_DIR})
+  set(_XLLM_BRPC_GIT_DIR_WAS_SET TRUE)
+  set(_XLLM_BRPC_SAVED_GIT_DIR "$ENV{GIT_DIR}")
+endif()
+if(DEFINED ENV{GIT_WORK_TREE})
+  set(_XLLM_BRPC_GIT_WORK_TREE_WAS_SET TRUE)
+  set(_XLLM_BRPC_SAVED_GIT_WORK_TREE "$ENV{GIT_WORK_TREE}")
+endif()
+
+set(_XLLM_BRPC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/brpc")
+set(_XLLM_BRPC_GIT_DIR "")
+set(_XLLM_BRPC_GIT_RESULT 1)
+unset(ENV{GIT_DIR})
+unset(ENV{GIT_WORK_TREE})
+if(EXISTS "${_XLLM_BRPC_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND git -C "${_XLLM_BRPC_SOURCE_DIR}" rev-parse --absolute-git-dir
+    OUTPUT_VARIABLE _XLLM_BRPC_GIT_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _XLLM_BRPC_GIT_RESULT
+    ERROR_QUIET
+  )
+endif()
+
+if(_XLLM_BRPC_GIT_RESULT EQUAL 0 AND _XLLM_BRPC_GIT_DIR)
+  set(ENV{GIT_DIR} "${_XLLM_BRPC_GIT_DIR}")
+  set(ENV{GIT_WORK_TREE} "${_XLLM_BRPC_SOURCE_DIR}")
+else()
+  set(ENV{GIT_DIR} "${CMAKE_CURRENT_BINARY_DIR}/brpc-no-git")
+  unset(ENV{GIT_WORK_TREE})
+endif()
+
 add_subdirectory(brpc)
+
+if(_XLLM_BRPC_GIT_DIR_WAS_SET)
+  set(ENV{GIT_DIR} "${_XLLM_BRPC_SAVED_GIT_DIR}")
+else()
+  unset(ENV{GIT_DIR})
+endif()
+if(_XLLM_BRPC_GIT_WORK_TREE_WAS_SET)
+  set(ENV{GIT_WORK_TREE} "${_XLLM_BRPC_SAVED_GIT_WORK_TREE}")
+else()
+  unset(ENV{GIT_WORK_TREE})
+endif()
+
 add_subdirectory(smhasher/src)
 add_subdirectory(cpprestsdk)
 if(USE_MUSA AND TARGET cpprest)
