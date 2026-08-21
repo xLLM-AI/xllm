@@ -38,7 +38,7 @@ limitations under the License.
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/linear.h"
 #include "core/layers/common/rms_norm.h"
-#include "models/dit/utils/dit_parallel_linear.h"
+#include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/dit/utils/sparse_attention.h"
 #include "models/dit/utils/util.h"
 
@@ -113,22 +113,6 @@ inline int64_t sp_pad_sequence(
   return pad_seq_len;
 }
 
-inline torch::Tensor sp_all_to_all(const torch::Tensor& input,
-                                   int64_t heads,
-                                   int64_t dim_head,
-                                   int64_t tp_size,
-                                   ProcessGroup* sp_group) {
-  auto fn = parallel_state::all_to_all_4D(
-      input.view({input.size(0), -1, heads / tp_size, dim_head}),
-      /*scatter_dim=*/2,
-      /*gather_dim=*/1,
-      /*async=*/false,
-      sp_group);
-  return fn().view({input.size(0),
-                    -1,
-                    heads * dim_head / (tp_size * sp_group->world_size())});
-}
-
 inline torch::Tensor sp_slice_heads(const torch::Tensor& input,
                                     int64_t heads,
                                     int64_t dim_head,
@@ -139,23 +123,6 @@ inline torch::Tensor sp_slice_heads(const torch::Tensor& input,
       .view({input.size(0), -1, n_heads * sp_group->world_size(), dim_head})
       .slice(2, sp_group->rank() * n_heads, (sp_group->rank() + 1) * n_heads)
       .flatten(2, 3);
-}
-
-inline torch::Tensor sp_all_to_all_reverse(const torch::Tensor& input,
-                                           int64_t heads,
-                                           int64_t dim_head,
-                                           int64_t tp_size,
-                                           ProcessGroup* sp_group) {
-  auto fn = parallel_state::all_to_all_4D(
-      input.view({input.size(0),
-                  -1,
-                  heads / (tp_size * sp_group->world_size()),
-                  dim_head}),
-      /*scatter_dim=*/1,
-      /*gather_dim=*/2,
-      /*async=*/false,
-      sp_group);
-  return fn().view({input.size(0), -1, heads * dim_head / tp_size});
 }
 
 class FP32LayerNormImpl : public torch::nn::Module {
@@ -546,14 +513,17 @@ class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
 };
 TORCH_MODULE(WanPixArtAlphaTextProjection);
 
-class WanAttentionImpl : public torch::nn::Module {
+class WanAttentionImpl : public torch::nn::Module,
+                         public xllm::dit::SequenceParallelMixin {
  public:
   explicit WanAttentionImpl(
       const ModelContext& context,
       const ParallelArgs& parallel_args,
       int64_t cross_attention_dim_head = -1,
       const xllm::dit::SparseAttnConfig& sparse_attn_config = {})
-      : options_(context.get_tensor_options()),
+      : xllm::dit::SequenceParallelMixin(
+            /*process_group=*/parallel_args.dit_sp_group_),
+        options_(context.get_tensor_options()),
         parallel_args_(parallel_args),
         sparse_attn_config_(sparse_attn_config) {
     auto model_args = context.get_model_args();
@@ -595,7 +565,6 @@ class WanAttentionImpl : public torch::nn::Module {
                                     parallel_args_.dit_tp_group_,
                                     options_));
 
-    // V: TP column only (SP all2all handled in forward())
     to_v_ = register_module(
         "to_v",
         layer::ColumnParallelLinear(dim_,
@@ -764,6 +733,11 @@ class WanAttentionImpl : public torch::nn::Module {
     bool is_self_attention =
         !encoder_hidden_states.defined() ||
         (encoder_hidden_states.size(1) == hidden_states.size(1));
+    int64_t batch_size = hidden_states.size(0);
+    int64_t tp_size = ::xllm::ParallelConfig::get_instance().tp_size();
+    int64_t sp_size = ::xllm::ParallelConfig::get_instance().sp_size();
+    int64_t local_heads = heads_ / tp_size;
+    int64_t n_heads = local_heads / sp_size;
 
     torch::Tensor encoder_hidden_states_text =
         encoder_hidden_states.defined() ? encoder_hidden_states : hidden_states;
@@ -779,62 +753,84 @@ class WanAttentionImpl : public torch::nn::Module {
           encoder_hidden_states_text.slice(1, image_context_length);
     }
 
-    // ── Step 1: Linear projections ──
     torch::Tensor query = to_q_->forward(hidden_states);
-    torch::Tensor key = to_k_->forward(encoder_hidden_states_text);
-    torch::Tensor value = to_v_->forward(encoder_hidden_states_text);
-
-    // ── Step 2: Norm on TP-sharded Q/K ──
-    if (::xllm::ParallelConfig::get_instance().tp_size() > 1) {
+    if (tp_size > 1) {
       query = dit::tp_rms_norm(query, norm_q_, parallel_args_.dit_tp_group_);
-      key = dit::tp_rms_norm(key, norm_k_, parallel_args_.dit_tp_group_);
     } else {
       query = std::get<0>(norm_q_->forward(query));
+    }
+    std::function<torch::Tensor()> q_handler;
+    if (is_self_attention || sp_size > 1) {
+      q_handler = parallel_state::all_to_all_4D(
+          query.view({batch_size, -1, local_heads, dim_head_}),
+          /*scatter_idx=*/2,
+          /*gather_idx=*/1,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+    }
+
+    torch::Tensor key = to_k_->forward(encoder_hidden_states_text);
+    if (tp_size > 1) {
+      key = dit::tp_rms_norm(key, norm_k_, parallel_args_.dit_tp_group_);
+    } else {
       key = std::get<0>(norm_k_->forward(key));
     }
-
-    // ── Step 3: SP all2all for Q/K/V (self-attn) or slice K/V (cross-attn) ──
-    int64_t batch_size = query.size(0);
-    int64_t n_heads = heads_;
-    if (::xllm::ParallelConfig::get_instance().tp_size() > 1) {
-      n_heads = heads_ / ::xllm::ParallelConfig::get_instance().tp_size();
+    std::function<torch::Tensor()> k_handler;
+    if (is_self_attention) {
+      k_handler = parallel_state::all_to_all_4D(
+          key.view({batch_size, -1, local_heads, dim_head_}),
+          /*scatter_idx=*/2,
+          /*gather_idx=*/1,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+    } else if (sp_size > 1) {
+      key = sp_slice_heads(
+          key, heads_, dim_head_, tp_size, parallel_args_.dit_sp_group_);
     }
-    if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-      query = sp_all_to_all(query,
-                            heads_,
-                            dim_head_,
-                            ::xllm::ParallelConfig::get_instance().tp_size(),
-                            parallel_args_.dit_sp_group_);
-      if (is_self_attention) {
-        key = sp_all_to_all(key,
-                            heads_,
-                            dim_head_,
-                            ::xllm::ParallelConfig::get_instance().tp_size(),
-                            parallel_args_.dit_sp_group_);
-        value = sp_all_to_all(value,
-                              heads_,
-                              dim_head_,
-                              ::xllm::ParallelConfig::get_instance().tp_size(),
-                              parallel_args_.dit_sp_group_);
+
+    std::function<torch::Tensor()> v_handler;
+    torch::Tensor value = to_v_->forward(encoder_hidden_states_text);
+    if (is_self_attention) {
+      v_handler = parallel_state::all_to_all_4D(
+          value.view({batch_size, -1, local_heads, dim_head_}),
+          /*scatter_idx=*/2,
+          /*gather_idx=*/1,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+    } else if (sp_size > 1) {
+      value = sp_slice_heads(
+          value, heads_, dim_head_, tp_size, parallel_args_.dit_sp_group_);
+    }
+
+    torch::Tensor key_img, value_img;
+    if (encoder_hidden_states_img.defined()) {
+      key_img = add_k_proj_->forward(encoder_hidden_states_img);
+      if (tp_size > 1) {
+        key_img = dit::tp_rms_norm(
+            key_img, norm_added_k_, parallel_args_.dit_tp_group_);
       } else {
-        key = sp_slice_heads(key,
-                             heads_,
-                             dim_head_,
-                             ::xllm::ParallelConfig::get_instance().tp_size(),
-                             parallel_args_.dit_sp_group_);
-        value = sp_slice_heads(value,
-                               heads_,
-                               dim_head_,
-                               ::xllm::ParallelConfig::get_instance().tp_size(),
-                               parallel_args_.dit_sp_group_);
+        key_img = std::get<0>(norm_added_k_->forward(key_img));
       }
-      n_heads = n_heads / ::xllm::ParallelConfig::get_instance().sp_size();
+      value_img = add_v_proj_->forward(encoder_hidden_states_img);
+      if (sp_size > 1) {
+        key_img = sp_slice_heads(
+            key_img, heads_, dim_head_, tp_size, parallel_args_.dit_sp_group_);
+        value_img = sp_slice_heads(value_img,
+                                   heads_,
+                                   dim_head_,
+                                   tp_size,
+                                   parallel_args_.dit_sp_group_);
+      }
     }
 
-    // ── Step 4: Reshape → RoPE → Attention → to_out ──
+    if (q_handler) {
+      query = q_handler();
+    }
+    if (k_handler) {
+      key = k_handler();
+    }
     query = query.view({batch_size, -1, n_heads, dim_head_});
     key = key.view({batch_size, -1, n_heads, dim_head_});
-    value = value.view({batch_size, -1, n_heads, dim_head_});
 
     if (rotary_emb.has_value()) {
       torch::Tensor freqs_cos = rotary_emb->first;
@@ -843,32 +839,13 @@ class WanAttentionImpl : public torch::nn::Module {
       key = wan_apply_rotary_emb(key, freqs_cos, freqs_sin);
     }
 
+    if (v_handler) {
+      value = v_handler();
+    }
+    value = value.view({batch_size, -1, n_heads, dim_head_});
+
     torch::Tensor hidden_states_img;
     if (encoder_hidden_states_img.defined()) {
-      torch::Tensor key_img = add_k_proj_->forward(encoder_hidden_states_img);
-      torch::Tensor value_img = add_v_proj_->forward(encoder_hidden_states_img);
-
-      if (::xllm::ParallelConfig::get_instance().tp_size() > 1) {
-        key_img = dit::tp_rms_norm(
-            key_img, norm_added_k_, parallel_args_.dit_tp_group_);
-      } else {
-        key_img = std::get<0>(norm_added_k_->forward(key_img));
-      }
-      if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-        key_img =
-            sp_slice_heads(key_img,
-                           heads_,
-                           dim_head_,
-                           ::xllm::ParallelConfig::get_instance().tp_size(),
-                           parallel_args_.dit_sp_group_);
-        value_img =
-            sp_slice_heads(value_img,
-                           heads_,
-                           dim_head_,
-                           ::xllm::ParallelConfig::get_instance().tp_size(),
-                           parallel_args_.dit_sp_group_);
-      }
-
       key_img = key_img.view({batch_size, -1, n_heads, dim_head_});
       value_img = value_img.view({batch_size, -1, n_heads, dim_head_});
       hidden_states_img =
@@ -878,17 +855,21 @@ class WanAttentionImpl : public torch::nn::Module {
     if (hidden_states_img.defined()) {
       hidden_states = hidden_states + hidden_states_img;
     }
-    if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-      hidden_states = sp_all_to_all_reverse(
-          hidden_states,
-          heads_,
-          dim_head_,
-          ::xllm::ParallelConfig::get_instance().tp_size(),
-          parallel_args_.dit_sp_group_);
-    }
-    hidden_states = to_out_->forward(hidden_states);
 
-    return hidden_states;
+    if (sp_size > 1) {
+      auto out_handler = parallel_state::all_to_all_4D(
+          hidden_states.view({batch_size, -1, n_heads, dim_head_}),
+          /*scatter_idx=*/1,
+          /*gather_idx=*/2,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+      hidden_states = out_handler();
+      hidden_states =
+          hidden_states.view({batch_size, -1, local_heads * dim_head_});
+    } else {
+      hidden_states = hidden_states.view({batch_size, -1, n_heads * dim_head_});
+    }
+    return to_out_->forward(hidden_states);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -1457,9 +1438,9 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
   WanAttention attn1_{nullptr};
   WanAttention attn2_{nullptr};
-  WanFeedForward ff_{nullptr};
   layer::AdaLayerNorm ada_norm1_{nullptr};  // self-attn pre-norm (fused)
   FP32LayerNorm norm2_{nullptr};  // cross-attn pre-norm (bf16 LayerNorm)
+  WanFeedForward ff_{nullptr};
   layer::AdaLayerNorm ada_norm3_{nullptr};  // FFN pre-norm (fused)
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
@@ -1473,12 +1454,15 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 };
 TORCH_MODULE(WanTransformerBlock);
 
-class WanTransformer3DModelImpl : public torch::nn::Module {
+class WanTransformer3DModelImpl : public torch::nn::Module,
+                                  public xllm::dit::SequenceParallelMixin {
  public:
   explicit WanTransformer3DModelImpl(
       const ModelContext& context,
       const xllm::dit::SparseAttnConfig& sparse_attn_config = {})
-      : options_(context.get_tensor_options()) {
+      : xllm::dit::SequenceParallelMixin(
+            /*process_group=*/context.get_parallel_args().dit_sp_group_),
+        options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
     sp_group_ = parallel_args.dit_sp_group_;
@@ -1616,34 +1600,42 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                      1);
     }
 
-    if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-      hidden_states =
-          dit::sp_split_sequence(hidden_states, /*dim=*/1, sp_group_);
-      if (timestep_proj.dim() == 4) {
-        timestep_proj =
-            dit::sp_split_sequence(timestep_proj, /*dim=*/1, sp_group_);
-      }
+    // Sequence parallelism: scatter inputs, run blocks on the local shard,
+    // gather back.
+    xllm::dit::SequenceParallelTensorMap sp_inputs{
+        {"hidden_states", {hidden_states, /*sequence_dim=*/1}}};
+    // timestep_proj only carries a sequence dim in the 4-D (per-token) layout;
+    // the 3-D broadcast layout must stay unsharded.
+    if (timestep_proj.dim() == 4) {
+      sp_inputs["timestep_proj"] = {timestep_proj, /*sequence_dim=*/1};
     }
 
-    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
-      if (before_layer_cb) {
-        before_layer_cb(static_cast<int32_t>(i));
-      }
-      hidden_states =
-          transformer_layers_[i]->forward(hidden_states,
-                                          encoder_hidden_states_embedded,
-                                          timestep_proj,
-                                          rotary_emb,
-                                          sparse_attn_state);
-      if (after_layer_cb) {
-        after_layer_cb(static_cast<int32_t>(i));
-      }
-    }
+    xllm::dit::SequenceParallelTensorMap sp_outputs = sequence_parallel_forward(
+        sp_inputs,
+        [this,
+         &encoder_hidden_states_embedded,
+         &timestep_proj,
+         &rotary_emb,
+         &sparse_attn_state,
+         &before_layer_cb,
+         &after_layer_cb](
+            const xllm::dit::SequenceParallelTensorMap& sp_locals) {
+          const torch::Tensor& local_timestep_proj =
+              timestep_proj.dim() == 4 ? sp_locals.at("timestep_proj").first
+                                       : timestep_proj;
+          torch::Tensor local_hidden_states =
+              forward_impl(sp_locals.at("hidden_states").first,
+                           encoder_hidden_states_embedded,
+                           local_timestep_proj,
+                           rotary_emb,
+                           sparse_attn_state,
+                           before_layer_cb,
+                           after_layer_cb);
+          return xllm::dit::SequenceParallelTensorMap{
+              {"hidden_states", {local_hidden_states, /*sequence_dim=*/1}}};
+        });
 
-    if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-      hidden_states =
-          dit::sp_gather_sequence(hidden_states, /*dim=*/1, sp_group_);
-    }
+    hidden_states = sp_outputs.at("hidden_states").first;
 
     torch::Tensor shift, scale;
     if (temb.dim() == 3) {
@@ -1664,14 +1656,14 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
     auto hidden_states_dtype = hidden_states.dtype();
 
-    // Drop the redundant sequence dim so the fused kernel uses the fast 2D
-    // [B,H] path instead of the token-wise fold.
     auto scale_2d = scale.dim() == 3 ? scale.select(1, 0) : scale;
     auto shift_2d = shift.dim() == 3 ? shift.select(1, 0) : shift;
     hidden_states = ada_norm_out_->forward(hidden_states,
                                            scale_2d.to(hidden_states_dtype),
                                            shift_2d.to(hidden_states_dtype));
 
+    // De-pad here, after ada_norm_out, matching the pre-refactor order.
+    // gather_sequence() trimmed nothing because the padding it recorded was 0.
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1 &&
         seq_len != pad_seq_len) {
       hidden_states = hidden_states.slice(1, 0, seq_len);
@@ -1687,6 +1679,33 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                         -1});
     hidden_states = hidden_states.permute({0, 7, 1, 4, 2, 5, 3, 6});
     hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3);
+    return hidden_states;
+  }
+
+  // Runs the transformer blocks on this rank's sequence shard.
+  torch::Tensor forward_impl(
+      const torch::Tensor& local_hidden_states,
+      const torch::Tensor& encoder_hidden_states_embedded,
+      const torch::Tensor& local_timestep_proj,
+      std::pair<torch::Tensor, torch::Tensor>& rotary_emb,
+      xllm::dit::SparseAttnState& sparse_attn_state,
+      const std::function<void(int32_t)>& before_layer_cb,
+      const std::function<void(int32_t)>& after_layer_cb) {
+    torch::Tensor hidden_states = local_hidden_states;
+    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      if (before_layer_cb) {
+        before_layer_cb(static_cast<int32_t>(i));
+      }
+      hidden_states =
+          transformer_layers_[i]->forward(hidden_states,
+                                          encoder_hidden_states_embedded,
+                                          local_timestep_proj,
+                                          rotary_emb,
+                                          sparse_attn_state);
+      if (after_layer_cb) {
+        after_layer_cb(static_cast<int32_t>(i));
+      }
+    }
     return hidden_states;
   }
 
