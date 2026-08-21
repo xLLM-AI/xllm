@@ -158,12 +158,12 @@ inline torch::Tensor sp_all_to_all_reverse(const torch::Tensor& input,
   return fn().view({input.size(0), -1, heads * dim_head / tp_size});
 }
 
-class FP32LayerNormImpl : public torch::nn::Module {
+class WanLayerNormImpl : public torch::nn::Module {
  public:
-  FP32LayerNormImpl(const ModelContext& context,
-                    int64_t normalized_shape,
-                    double eps = 1e-6,
-                    bool elementwise_affine = true)
+  WanLayerNormImpl(const ModelContext& context,
+                   int64_t normalized_shape,
+                   double eps = 1e-6,
+                   bool elementwise_affine = true)
       : options_(context.get_tensor_options()),
         normalized_shape_(normalized_shape),
         eps_(eps),
@@ -174,24 +174,13 @@ class FP32LayerNormImpl : public torch::nn::Module {
     }
   }
 
-  torch::Tensor forward(const torch::Tensor& x, bool keep_fp32 = false) {
-    auto origin_dtype = x.dtype();
-    auto x_fp32 = x.to(torch::kFloat32);
-    torch::Tensor result;
+  torch::Tensor forward(const torch::Tensor& x) {
     if (elementwise_affine_) {
-      result = torch::layer_norm(x_fp32,
-                                 {normalized_shape_},
-                                 weight_.to(torch::kFloat32),
-                                 bias_.to(torch::kFloat32),
-                                 eps_);
+      return torch::layer_norm(x, {normalized_shape_}, weight_, bias_, eps_);
     } else {
-      result = torch::layer_norm(
-          x_fp32, {normalized_shape_}, torch::nullopt, torch::nullopt, eps_);
+      return torch::layer_norm(
+          x, {normalized_shape_}, torch::nullopt, torch::nullopt, eps_);
     }
-    if (keep_fp32 == true) {
-      return result;
-    }
-    return result.to(origin_dtype);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -219,7 +208,7 @@ class FP32LayerNormImpl : public torch::nn::Module {
   double eps_;
   bool elementwise_affine_;
 };
-TORCH_MODULE(FP32LayerNorm);
+TORCH_MODULE(WanLayerNorm);
 
 class WanTimestepEmbeddingImpl : public torch::nn::Module {
  public:
@@ -966,7 +955,7 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
 
     norm1_ =
-        register_module("norm1", FP32LayerNorm(context, in_features_, 1e-6));
+        register_module("norm1", WanLayerNorm(context, in_features_, 1e-6));
     ff_ = register_module("ff",
                           WanFeedForward(context,
                                          parallel_args,
@@ -979,7 +968,7 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
                                          -1,
                                          true));
     norm2_ =
-        register_module("norm2", FP32LayerNorm(context, out_features_, 1e-6));
+        register_module("norm2", WanLayerNorm(context, out_features_, 1e-6));
 
     if (pos_embed_seq_len_ > 0) {
       pos_embed_ = register_parameter(
@@ -1027,9 +1016,9 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
   int64_t out_features_;
   int64_t pos_embed_seq_len_;
 
-  FP32LayerNorm norm1_{nullptr};
+  WanLayerNorm norm1_{nullptr};
   WanFeedForward ff_{nullptr};
-  FP32LayerNorm norm2_{nullptr};
+  WanLayerNorm norm2_{nullptr};
   torch::Tensor pos_embed_;
   bool pos_embed_loaded_{false};
   torch::TensorOptions options_;
@@ -1320,7 +1309,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
             context, parallel_args, dim_ / num_heads_, sparse_attn_config));
     if (cross_attn_norm_) {
       norm2_ =
-          register_module("norm2", FP32LayerNorm(context, dim_, eps_, true));
+          register_module("norm2", WanLayerNorm(context, dim_, eps_, true));
     }
     ff_ = register_module("ff",
                           WanFeedForward(context,
@@ -1459,7 +1448,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   WanAttention attn2_{nullptr};
   WanFeedForward ff_{nullptr};
   layer::AdaLayerNorm ada_norm1_{nullptr};  // self-attn pre-norm (fused)
-  FP32LayerNorm norm2_{nullptr};  // cross-attn pre-norm (bf16 LayerNorm)
+  WanLayerNorm norm2_{nullptr};             // cross-attn pre-norm
   layer::AdaLayerNorm ada_norm3_{nullptr};  // FFN pre-norm (fused)
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};

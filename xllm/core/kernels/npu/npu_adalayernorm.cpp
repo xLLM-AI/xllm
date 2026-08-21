@@ -90,14 +90,18 @@ torch::Tensor fused_adalayer_norm(const torch::Tensor& input,
 
   auto output = torch::empty(x_arg.sizes().vec(), x_arg.options());
 
-  EXEC_NPU_CMD(aclnnAdaLayerNorm,
+  auto mean_out = torch::Tensor();
+  auto rstd_out = torch::Tensor();
+  EXEC_NPU_CMD(aclnnAdaLayerNormV2,
                x_arg,
                scale_arg,
                shift_arg,
                weight,
                bias,
                eps,
-               output);
+               output,
+               mean_out,
+               rstd_out);
 
   if (tokenwise) {
     output = output.reshape({batch_size, seq_len, hidden_size});
