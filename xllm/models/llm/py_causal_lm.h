@@ -78,12 +78,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
       const torch::Tensor& previous_token_ids) override;
 
   torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden,
-      const torch::Tensor& previous_token_ids) override;
-
-  torch::Tensor dspark_confidence_probs_batched(
       const torch::Tensor& hidden_all,
-      const torch::Tensor& previous_token_ids) override;
+      const torch::Tensor& prev_matrix) override;
 
   bool has_dspark_confidence_head() const override;
 

@@ -93,13 +93,13 @@ def test_base_preserves_dspark_checkpoint_names() -> None:
 def test_base_forwards_confidence_for_batched_hidden() -> None:
     model = _model()
     hidden = torch.ones(1, 2, 3)
-    previous_token_ids = torch.tensor([[0, 1]])
+    prev_matrix = torch.tensor([[0, 1]])
 
-    output = model.dspark_confidence_probs_batched(hidden, previous_token_ids)
+    output = model.dspark_confidence_probs(hidden, prev_matrix)
 
     confidence_head = model.confidence_head
     assert confidence_head is not None
-    expected = confidence_head(hidden, model.markov_head.embed(previous_token_ids))
+    expected = confidence_head(hidden, model.markov_head.embed(prev_matrix))
     torch.testing.assert_close(output, expected)
     assert model.has_dspark_confidence_head()
 
@@ -108,5 +108,5 @@ def test_base_rejects_confidence_without_head() -> None:
     model = _model(enable_confidence_head=False)
 
     with pytest.raises(RuntimeError, match="not enabled"):
-        model.dspark_confidence_probs(torch.ones(1, 3), torch.tensor([0]))
+        model.dspark_confidence_probs(torch.ones(1, 1, 3), torch.tensor([[0]]))
     assert not model.has_dspark_confidence_head()

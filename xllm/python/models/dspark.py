@@ -102,22 +102,15 @@ class DSparkForCausalLMBase(PyModelBase):
 
     def dspark_confidence_probs(
         self,
-        hidden: torch.Tensor,
-        previous_token_ids: torch.Tensor | None,
+        hidden_all: torch.Tensor,
+        prev_matrix: torch.Tensor | None,
     ) -> torch.Tensor:
         if self.confidence_head is None:
             raise RuntimeError("DSpark confidence head is not enabled")
         markov_embedding = None
-        if previous_token_ids is not None:
-            markov_embedding = self.markov_head.embed(previous_token_ids)
-        return self.confidence_head(hidden, markov_embedding)
-
-    def dspark_confidence_probs_batched(
-        self,
-        hidden_all: torch.Tensor,
-        previous_token_ids: torch.Tensor | None,
-    ) -> torch.Tensor:
-        return self.dspark_confidence_probs(hidden_all, previous_token_ids)
+        if prev_matrix is not None:
+            markov_embedding = self.markov_head.embed(prev_matrix)
+        return self.confidence_head(hidden_all, markov_embedding)
 
     def has_dspark_confidence_head(self) -> bool:
         return self.confidence_head is not None

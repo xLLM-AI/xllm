@@ -324,26 +324,14 @@ torch::Tensor PyCausalLM::dspark_markov_bias(
 }
 
 torch::Tensor PyCausalLM::dspark_confidence_probs(
-    const torch::Tensor& hidden,
-    const torch::Tensor& previous_token_ids) {
-  torch::NoGradGuard no_grad;
-  py::gil_scoped_acquire gil;
-  py::object previous = previous_token_ids.defined()
-                            ? py::object(py::cast(previous_token_ids))
-                            : py::object(py::none());
-  return py_model_.attr("dspark_confidence_probs")(hidden, previous)
-      .cast<torch::Tensor>();
-}
-
-torch::Tensor PyCausalLM::dspark_confidence_probs_batched(
     const torch::Tensor& hidden_all,
-    const torch::Tensor& previous_token_ids) {
+    const torch::Tensor& prev_matrix) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
-  py::object previous = previous_token_ids.defined()
-                            ? py::object(py::cast(previous_token_ids))
+  py::object previous = prev_matrix.defined()
+                            ? py::object(py::cast(prev_matrix))
                             : py::object(py::none());
-  return py_model_.attr("dspark_confidence_probs_batched")(hidden_all, previous)
+  return py_model_.attr("dspark_confidence_probs")(hidden_all, previous)
       .cast<torch::Tensor>();
 }
 
