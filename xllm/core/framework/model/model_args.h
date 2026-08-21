@@ -239,6 +239,38 @@ struct ModelArgs {
   PROPERTY(float, partial_rotary_factor) = 0.0f;
   PROPERTY(std::vector<std::string>, layer_types) = {};
 
+  // Qwen3 Omni multimodal processor args.
+  PROPERTY(int32_t, mm_position_id_per_seconds) = 0;
+  PROPERTY(double, mm_fps) = 0;
+  PROPERTY(bool, mm_use_audio_in_video) = false;
+
+  // Audio processor args.
+  PROPERTY(bool, has_feature_extractor) = false;
+  PROPERTY(int64_t, mm_audio_feature_size) = 0;
+  PROPERTY(int64_t, mm_audio_sampling_rate) = 0;
+  PROPERTY(int64_t, mm_audio_hop_length) = 0;
+  PROPERTY(int64_t, mm_audio_chunk_length) = 0;
+  PROPERTY(int64_t, mm_audio_n_fft) = 0;
+  PROPERTY(double, mm_audio_dither) = 0.0;
+  PROPERTY(bool, mm_audio_truncation) = false;
+  PROPERTY(bool, mm_audio_do_normalize) = false;
+
+  // Qwen3 audio encoder args.
+  PROPERTY(int32_t, audio_token_id) = 0;
+  PROPERTY(int32_t, audio_start_token_id) = 0;
+  PROPERTY(int32_t, audio_end_token_id) = 0;
+  PROPERTY(int64_t, mm_audio_num_attention_heads) = 0;
+  PROPERTY(int64_t, mm_audio_hidden_size) = 0;
+  PROPERTY(double, mm_audio_layer_norm_eps) = 1e-5;
+  PROPERTY(int64_t, mm_audio_downsample_hidden_size) = 0;
+  PROPERTY(int64_t, mm_audio_num_mel_bins) = 0;
+  PROPERTY(int64_t, mm_audio_max_source_positions) = 0;
+  PROPERTY(int64_t, mm_audio_n_window) = 0;
+  PROPERTY(int64_t, mm_audio_n_window_infer) = 0;
+  PROPERTY(int64_t, mm_audio_conv_chunksize) = 0;
+  PROPERTY(int64_t, mm_audio_encoder_layers) = 0;
+  PROPERTY(int64_t, mm_audio_output_dim) = 0;
+
   // Vision model's dropout
   PROPERTY(float, mm_dropout) = 0.0f;
 
@@ -855,6 +887,33 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", base_image_seq_len: " << args.base_image_seq_len();
   os << ", max_image_seq_len: " << args.max_image_seq_len();
   os << "]";
+  os << ", mm_position_id_per_seconds: " << args.mm_position_id_per_seconds();
+  os << ", mm_use_audio_in_video: " << args.mm_use_audio_in_video();
+  os << ", has_feature_extractor: " << args.has_feature_extractor();
+  os << ", mm_audio_feature_size: " << args.mm_audio_feature_size();
+  os << ", mm_audio_sampling_rate: " << args.mm_audio_sampling_rate();
+  os << ", mm_audio_hop_length: " << args.mm_audio_hop_length();
+  os << ", mm_audio_chunk_length: " << args.mm_audio_chunk_length();
+  os << ", mm_audio_n_fft: " << args.mm_audio_n_fft();
+  os << ", mm_audio_dither: " << args.mm_audio_dither();
+  os << ", mm_audio_truncation: " << args.mm_audio_truncation();
+  os << ", mm_audio_do_normalize: " << args.mm_audio_do_normalize();
+
+  os << ", audio_token_id: " << args.audio_token_id();
+  os << ", mm_audio_num_attention_heads: "
+     << args.mm_audio_num_attention_heads();
+  os << ", mm_audio_hidden_size: " << args.mm_audio_hidden_size();
+  os << ", mm_audio_layer_norm_eps: " << args.mm_audio_layer_norm_eps();
+  os << ", mm_audio_downsample_hidden_size: "
+     << args.mm_audio_downsample_hidden_size();
+  os << ", mm_audio_num_mel_bins: " << args.mm_audio_num_mel_bins();
+  os << ", mm_audio_max_source_positions: "
+     << args.mm_audio_max_source_positions();
+  os << ", mm_audio_n_window: " << args.mm_audio_n_window();
+  os << ", mm_audio_n_window_infer: " << args.mm_audio_n_window_infer();
+  os << ", mm_audio_conv_chunksize: " << args.mm_audio_conv_chunksize();
+  os << ", mm_audio_encoder_layers: " << args.mm_audio_encoder_layers();
+  os << ", mm_audio_output_dim: " << args.mm_audio_output_dim();
   return os;
 }
 

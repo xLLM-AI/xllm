@@ -4,6 +4,7 @@ cc_library(
   NAME
     util
   HDRS
+    audio_utils.h
     concurrent_queue.h
     blocking_counter.h
     blockingconcurrentqueue.h
