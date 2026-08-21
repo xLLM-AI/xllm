@@ -29,11 +29,15 @@ limitations under the License.
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/framework/parallel_state/parallel_args.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
 #include "framework/model_context.h"
+#include "models/dit/utils/dit_parallel_linear.h"
+#include "models/dit/utils/sequence_parallel_pad_manager.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
@@ -213,7 +217,11 @@ TORCH_MODULE(DiTRMSNorm);
 class FluxSingleAttentionImpl : public torch::nn::Module {
  public:
   explicit FluxSingleAttentionImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+      : FluxSingleAttentionImpl(context, ParallelArgs(0, 1, nullptr)) {}
+
+  explicit FluxSingleAttentionImpl(const ModelContext& context,
+                                   const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     heads_ = model_args.n_heads();
     auto head_dim = model_args.head_dim();
@@ -231,9 +239,13 @@ class FluxSingleAttentionImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
-                        const torch::Tensor& image_rotary_emb) {
+                        const torch::Tensor& image_rotary_emb,
+                        int64_t text_sequence_length = -1) {
     int64_t batch_size, channel, height, width;
     batch_size = hidden_states.size(0);
+    int64_t sp_size = parallel_args_.dit_sp_group_
+                          ? parallel_args_.dit_sp_group_->world_size()
+                          : 1;
 
     auto qkv = fused_qkv_->forward(hidden_states);
     auto chunks = qkv.chunk(3, -1);
@@ -245,11 +257,50 @@ class FluxSingleAttentionImpl : public torch::nn::Module {
     // Reshape for multi-head attention
     int64_t inner_dim = key.size(-1);
     int64_t attn_heads = heads_;
+    CHECK_EQ(attn_heads % sp_size, 0)
+        << "Flux attention heads must be divisible by SP size";
     int64_t head_dim = inner_dim / attn_heads;
 #if defined(USE_NPU)
     query = query.view({batch_size, -1, attn_heads, head_dim}).contiguous();
     key = key.view({batch_size, -1, attn_heads, head_dim}).contiguous();
     value = value.view({batch_size, -1, attn_heads, head_dim}).contiguous();
+
+    auto query_handler =
+        parallel_state::all_to_all_4D(query,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto key_handler =
+        parallel_state::all_to_all_4D(key,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto value_handler =
+        parallel_state::all_to_all_4D(value,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    query = query_handler();
+    key = key_handler();
+    value = value_handler();
+    if (sp_size > 1 && text_sequence_length >= 0) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      int64_t padded_text_sequence_length =
+          text_sequence_length + pad_manager.get("flux_encoder_hidden_states");
+      auto unpad_joint = [&](const torch::Tensor& input) {
+        auto text = input.slice(1, 0, padded_text_sequence_length);
+        auto image = input.slice(1, padded_text_sequence_length);
+        pad_manager.unpad_tensor(text, "flux_encoder_hidden_states", 1);
+        pad_manager.unpad_tensor(image, "flux_hidden_states", 1);
+        return torch::cat({text, image}, 1);
+      };
+      query = unpad_joint(query);
+      key = unpad_joint(key);
+      value = unpad_joint(value);
+    }
 
     // Apply Q/K normalization if enabled
     if (norm_q_) query = std::get<0>(norm_q_->forward(query));
@@ -277,23 +328,98 @@ class FluxSingleAttentionImpl : public torch::nn::Module {
                                                          65535);
     auto attn_output = std::get<0>(results);
     attn_output = attn_output.to(query.dtype());
-    return attn_output.flatten(2);
+    if (sp_size > 1 && text_sequence_length >= 0) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      auto text_output = attn_output.slice(1, 0, text_sequence_length);
+      auto image_output = attn_output.slice(1, text_sequence_length);
+      text_output =
+          pad_manager.pad_tensor(text_output, "flux_encoder_hidden_states", 1);
+      image_output =
+          pad_manager.pad_tensor(image_output, "flux_hidden_states", 1);
+      attn_output = torch::cat({text_output, image_output}, 1);
+    }
+    auto output_handler =
+        parallel_state::all_to_all_4D(attn_output,
+                                      /*scatter_idx=*/1,
+                                      /*gather_idx=*/2,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    return output_handler().flatten(2);
 #elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
-    query = query.view({batch_size, -1, attn_heads, head_dim}).transpose(1, 2);
-    key = key.view({batch_size, -1, attn_heads, head_dim}).transpose(1, 2);
-    value = value.view({batch_size, -1, attn_heads, head_dim}).transpose(1, 2);
+    query = query.view({batch_size, -1, attn_heads, head_dim});
+    key = key.view({batch_size, -1, attn_heads, head_dim});
+    value = value.view({batch_size, -1, attn_heads, head_dim});
 
     // Apply Q/K normalization if enabled
     if (norm_q_) query = std::get<0>(norm_q_->forward(query));
     if (norm_k_) key = std::get<0>(norm_k_->forward(key));
+    auto query_handler =
+        parallel_state::all_to_all_4D(query,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto key_handler =
+        parallel_state::all_to_all_4D(key,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto value_handler =
+        parallel_state::all_to_all_4D(value,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    query = query_handler();
+    key = key_handler();
+    value = value_handler();
+    if (sp_size > 1 && text_sequence_length >= 0) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      int64_t padded_text_sequence_length =
+          text_sequence_length + pad_manager.get("flux_encoder_hidden_states");
+      auto unpad_joint = [&](const torch::Tensor& input) {
+        auto text = input.slice(1, 0, padded_text_sequence_length);
+        auto image = input.slice(1, padded_text_sequence_length);
+        pad_manager.unpad_tensor(text, "flux_encoder_hidden_states", 1);
+        pad_manager.unpad_tensor(image, "flux_hidden_states", 1);
+        return torch::cat({text, image}, 1);
+      };
+      query = unpad_joint(query);
+      key = unpad_joint(key);
+      value = unpad_joint(value);
+    }
     // Apply rotary positional embedding
-    query = apply_rotary_emb(query, image_rotary_emb);
-    key = apply_rotary_emb(key, image_rotary_emb);
+    query = apply_rotary_emb(query, image_rotary_emb, false);
+    key = apply_rotary_emb(key, image_rotary_emb, false);
+    query = query.transpose(1, 2);
+    key = key.transpose(1, 2);
+    value = value.transpose(1, 2);
     // Compute scaled dot-product attention (no mask, no dropout)
     torch::Tensor attn_output = torch::scaled_dot_product_attention(
         query, key, value, torch::nullopt, 0.0, false);
     attn_output = attn_output.to(query.dtype());
-    return attn_output.transpose(1, 2).flatten(2);
+    if (sp_size > 1 && text_sequence_length >= 0) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      auto text_output =
+          attn_output.transpose(1, 2).slice(1, 0, text_sequence_length);
+      auto image_output =
+          attn_output.transpose(1, 2).slice(1, text_sequence_length);
+      text_output =
+          pad_manager.pad_tensor(text_output, "flux_encoder_hidden_states", 1);
+      image_output =
+          pad_manager.pad_tensor(image_output, "flux_hidden_states", 1);
+      attn_output = torch::cat({text_output, image_output}, 1)
+                        .transpose(1, 2)
+                        .contiguous();
+    }
+    auto output_handler =
+        parallel_state::all_to_all_4D(attn_output.transpose(1, 2),
+                                      /*scatter_idx=*/1,
+                                      /*gather_idx=*/2,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    return output_handler().flatten(2);
 #else
     NOT_IMPLEMENTED();
 #endif
@@ -318,13 +444,15 @@ class FluxSingleAttentionImpl : public torch::nn::Module {
   layer::RMSNorm norm_q_{nullptr};
   layer::RMSNorm norm_k_{nullptr};
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(FluxSingleAttention);
 
 class FluxAttentionImpl : public torch::nn::Module {
  public:
-  explicit FluxAttentionImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+  explicit FluxAttentionImpl(const ModelContext& context,
+                             const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     heads_ = model_args.n_heads();
     auto head_dim = model_args.head_dim();
@@ -390,6 +518,9 @@ class FluxAttentionImpl : public torch::nn::Module {
               .transpose(1, 2);
     }
     int64_t batch_size = encoder_hidden_states_reshaped.size(0);
+    int64_t sp_size = parallel_args_.dit_sp_group_
+                          ? parallel_args_.dit_sp_group_->world_size()
+                          : 1;
 
     auto qkv = fused_qkv_->forward(hidden_states_reshaped);
 
@@ -400,6 +531,9 @@ class FluxAttentionImpl : public torch::nn::Module {
 
     int64_t inner_dim = key.size(-1);
     int64_t attn_heads = heads_;
+    CHECK_EQ(attn_heads % sp_size, 0)
+        << "Flux attention heads must be divisible by SP size";
+    int64_t local_attn_heads = attn_heads / sp_size;
 
     int64_t head_dim = inner_dim / attn_heads;
     query = query.view({batch_size, -1, attn_heads, head_dim});
@@ -407,6 +541,34 @@ class FluxAttentionImpl : public torch::nn::Module {
     value = value.view({batch_size, -1, attn_heads, head_dim});
     if (norm_q_) query = std::get<0>(norm_q_->forward(query));
     if (norm_k_) key = std::get<0>(norm_k_->forward(key));
+
+    auto query_handler =
+        parallel_state::all_to_all_4D(query,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto key_handler =
+        parallel_state::all_to_all_4D(key,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto value_handler =
+        parallel_state::all_to_all_4D(value,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    query = query_handler();
+    key = key_handler();
+    value = value_handler();
+    if (sp_size > 1) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      pad_manager.unpad_tensor(query, "flux_hidden_states", 1);
+      pad_manager.unpad_tensor(key, "flux_hidden_states", 1);
+      pad_manager.unpad_tensor(value, "flux_hidden_states", 1);
+    }
 
     auto encoder_qkv = fused_add_qkv_->forward(encoder_hidden_states_reshaped);
 
@@ -428,6 +590,36 @@ class FluxAttentionImpl : public torch::nn::Module {
     if (norm_added_k_)
       encoder_hidden_states_key_proj =
           std::get<0>(norm_added_k_->forward(encoder_hidden_states_key_proj));
+    auto encoder_query_handler =
+        parallel_state::all_to_all_4D(encoder_hidden_states_query_proj,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto encoder_key_handler =
+        parallel_state::all_to_all_4D(encoder_hidden_states_key_proj,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    auto encoder_value_handler =
+        parallel_state::all_to_all_4D(encoder_hidden_states_value_proj,
+                                      /*scatter_idx=*/2,
+                                      /*gather_idx=*/1,
+                                      /*async_ops=*/true,
+                                      parallel_args_.dit_sp_group_);
+    encoder_hidden_states_query_proj = encoder_query_handler();
+    encoder_hidden_states_key_proj = encoder_key_handler();
+    encoder_hidden_states_value_proj = encoder_value_handler();
+    if (sp_size > 1) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      pad_manager.unpad_tensor(
+          encoder_hidden_states_query_proj, "flux_encoder_hidden_states", 1);
+      pad_manager.unpad_tensor(
+          encoder_hidden_states_key_proj, "flux_encoder_hidden_states", 1);
+      pad_manager.unpad_tensor(
+          encoder_hidden_states_value_proj, "flux_encoder_hidden_states", 1);
+    }
     // TODO some are right some are wrong query1& key1.
     // encoder_hidden_states_query_proj
     auto query1 = torch::cat({encoder_hidden_states_query_proj, query}, 1);
@@ -457,7 +649,8 @@ class FluxAttentionImpl : public torch::nn::Module {
                                                          65535);
     auto attn_output = std::get<0>(results);
 
-    attn_output = attn_output.reshape({batch_size, -1, attn_heads * head_dim});
+    attn_output =
+        attn_output.reshape({batch_size, -1, local_attn_heads * head_dim});
 #elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_MUSA) || \
     defined(USE_DCU)
     // SDPA expects (B, H, S, D); our query1/key1/value1 are (B, S, H, D).
@@ -468,17 +661,42 @@ class FluxAttentionImpl : public torch::nn::Module {
     torch::Tensor attn_output = torch::scaled_dot_product_attention(
         query1, key1, value1, torch::nullopt, 0.0, false);
     attn_output = attn_output.transpose(1, 2).reshape(
-        {batch_size, -1, attn_heads * head_dim});
+        {batch_size, -1, local_attn_heads * head_dim});
 #else
     NOT_IMPLEMENTED();
 #endif
     attn_output = attn_output.to(query.dtype());
 
-    int64_t encoder_length = encoder_hidden_states_reshaped.size(1);
+    int64_t encoder_length = encoder_hidden_states_reshaped.size(1) * sp_size;
+    if (sp_size > 1) {
+      encoder_length -= dit::SequenceParallelPadManager::get_instance().get(
+          "flux_encoder_hidden_states");
+    }
     torch::Tensor encoder_output = attn_output.slice(1, 0, encoder_length);
     torch::Tensor hidden_output = attn_output.slice(1, encoder_length);
     encoder_output = encoder_output.flatten(2);
     hidden_output = hidden_output.flatten(2);
+    if (sp_size > 1) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      encoder_output = pad_manager.pad_tensor(
+          encoder_output, "flux_encoder_hidden_states", 1);
+      hidden_output =
+          pad_manager.pad_tensor(hidden_output, "flux_hidden_states", 1);
+    }
+    auto hidden_output_handler = parallel_state::all_to_all_4D(
+        hidden_output.view({batch_size, -1, attn_heads / sp_size, head_dim}),
+        /*scatter_idx=*/1,
+        /*gather_idx=*/2,
+        /*async_ops=*/true,
+        parallel_args_.dit_sp_group_);
+    auto encoder_output_handler = parallel_state::all_to_all_4D(
+        encoder_output.view({batch_size, -1, attn_heads / sp_size, head_dim}),
+        /*scatter_idx=*/1,
+        /*gather_idx=*/2,
+        /*async_ops=*/true,
+        parallel_args_.dit_sp_group_);
+    hidden_output = hidden_output_handler().flatten(2);
+    encoder_output = encoder_output_handler().flatten(2);
     hidden_output = to_out_->forward(hidden_output);
     encoder_output = to_add_out_->forward(encoder_output);
     return std::make_tuple(hidden_output, encoder_output);
@@ -528,6 +746,7 @@ class FluxAttentionImpl : public torch::nn::Module {
   layer::RMSNorm norm_added_k_{nullptr};
   int64_t heads_;
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(FluxAttention);
 
@@ -1020,7 +1239,11 @@ TORCH_MODULE(FeedForward);
 class FluxSingleTransformerBlockImpl : public torch::nn::Module {
  public:
   explicit FluxSingleTransformerBlockImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+      : FluxSingleTransformerBlockImpl(context, ParallelArgs(0, 1, nullptr)) {}
+
+  explicit FluxSingleTransformerBlockImpl(const ModelContext& context,
+                                          const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
@@ -1048,17 +1271,19 @@ class FluxSingleTransformerBlockImpl : public torch::nn::Module {
                                   return torch::gelu(x, "tanh");
                                 })));
 
-    attn_ = register_module("attn", FluxSingleAttention(context));
+    attn_ =
+        register_module("attn", FluxSingleAttention(context, parallel_args));
   }
 
-  torch::Tensor forward(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& temb,
-      const torch::Tensor& image_rotary_emb = torch::Tensor()) {
+  torch::Tensor forward(const torch::Tensor& hidden_states,
+                        const torch::Tensor& temb,
+                        const torch::Tensor& image_rotary_emb = torch::Tensor(),
+                        int64_t text_sequence_length = -1) {
     auto residual = hidden_states;
     auto [norm_hidden_states, gate] = norm_(hidden_states, temb);
     auto mlp_hidden_states = act_mlp_(proj_mlp_(norm_hidden_states));
-    auto attn_output = attn_->forward(norm_hidden_states, image_rotary_emb);
+    auto attn_output = attn_->forward(
+        norm_hidden_states, image_rotary_emb, text_sequence_length);
     auto hidden_states_cat = torch::cat({attn_output, mlp_hidden_states}, 2);
     auto out = proj_out_(hidden_states_cat);
     out = gate.unsqueeze(1) * out;
@@ -1092,13 +1317,18 @@ class FluxSingleTransformerBlockImpl : public torch::nn::Module {
   FluxSingleAttention attn_{nullptr};
   int64_t mlp_hidden_dim_;
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(FluxSingleTransformerBlock);
 
 class FluxTransformerBlockImpl : public torch::nn::Module {
  public:
   explicit FluxTransformerBlockImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+      : FluxTransformerBlockImpl(context, ParallelArgs(0, 1, nullptr)) {}
+
+  explicit FluxTransformerBlockImpl(const ModelContext& context,
+                                    const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
@@ -1111,7 +1341,7 @@ class FluxTransformerBlockImpl : public torch::nn::Module {
     norm1_context_ =
         register_module("norm1_context", AdaLayerNormZero(context));
 
-    attn_ = register_module("attn", FluxAttention(context));
+    attn_ = register_module("attn", FluxAttention(context, parallel_args));
     norm2_ = register_module(
         "norm2",
         torch::nn::LayerNorm(
@@ -1200,13 +1430,15 @@ class FluxTransformerBlockImpl : public torch::nn::Module {
   FeedForward ff_context_{nullptr};
   torch::nn::LayerNorm norm2_context_{nullptr};
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(FluxTransformerBlock);
 
 class FluxTransformer2DModelImpl : public torch::nn::Module {
  public:
-  explicit FluxTransformer2DModelImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+  explicit FluxTransformer2DModelImpl(const ModelContext& context,
+                                      const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
@@ -1245,14 +1477,14 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
     // mm-dit block
     transformer_block_layers_.reserve(num_layers);
     for (int64_t i = 0; i < num_layers; ++i) {
-      auto block = FluxTransformerBlock(context);
+      auto block = FluxTransformerBlock(context, parallel_args);
       transformer_blocks_->push_back(block);
       transformer_block_layers_.push_back(block);
     }
     // single mm-dit block
     single_transformer_block_layers_.reserve(num_single_layers);
     for (int64_t i = 0; i < num_single_layers; ++i) {
-      auto block = FluxSingleTransformerBlock(context);
+      auto block = FluxSingleTransformerBlock(context, parallel_args);
       single_transformer_blocks_->push_back(block);
       single_transformer_block_layers_.push_back(block);
     }
@@ -1271,7 +1503,8 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
                         const torch::Tensor& timestep,
                         const torch::Tensor& image_rotary_emb,
                         const torch::Tensor& guidance,
-                        int64_t step_idx = 0) {
+                        int64_t step_idx = 0,
+                        bool use_cfg = false) {
     torch::Tensor hidden_states = x_embedder_->forward(hidden_states_input);
     auto timestep_scaled = timestep.to(hidden_states.dtype()) * 1000.0f;
     torch::Tensor temb;
@@ -1284,6 +1517,20 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
     }
     torch::Tensor encoder_hidden_states =
         context_embedder_->forward(encoder_hidden_states_input);
+    int64_t sp_size = parallel_args_.dit_sp_group_
+                          ? parallel_args_.dit_sp_group_->world_size()
+                          : 1;
+    if (sp_size > 1) {
+      auto& pad_manager = dit::SequenceParallelPadManager::get_instance();
+      hidden_states =
+          pad_manager.pad_tensor(hidden_states, "flux_hidden_states", 1);
+      encoder_hidden_states = pad_manager.pad_tensor(
+          encoder_hidden_states, "flux_encoder_hidden_states", 1);
+      hidden_states = dit::sp_split_sequence(
+          hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+      encoder_hidden_states = dit::sp_split_sequence(
+          encoder_hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+    }
 
     bool use_step_cache = false;
     bool use_block_cache = false;
@@ -1295,14 +1542,15 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
         {"hidden_states", hidden_states},
         {"original_hidden_states", original_hidden_states}};
     CacheStepIn stepin_before(step_idx, step_in_map);
-    use_step_cache = DiTCache::get_instance().on_before_step(stepin_before);
+    use_step_cache =
+        DiTCache::get_instance().on_before_step(stepin_before, use_cfg);
 
     if (!use_step_cache) {
       for (int64_t i = 0; i < transformer_block_layers_.size(); ++i) {
         // Block start: prepare input (block_id)
         CacheBlockIn blockin_before(i);
         use_block_cache =
-            DiTCache::get_instance().on_before_block(blockin_before);
+            DiTCache::get_instance().on_before_block(blockin_before, use_cfg);
 
         if (!use_block_cache) {
           auto block = transformer_block_layers_[i];
@@ -1322,24 +1570,45 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
             {"original_encoder_hidden_states", original_encoder_hidden_states}};
         CacheBlockIn blockin_after(i, block_in_map);
         CacheBlockOut blockout_after =
-            DiTCache::get_instance().on_after_block(blockin_after);
+            DiTCache::get_instance().on_after_block(blockin_after, use_cfg);
 
         hidden_states = blockout_after.tensors.at("hidden_states");
         encoder_hidden_states =
             blockout_after.tensors.at("encoder_hidden_states");
       }
 
-      hidden_states = torch::cat({encoder_hidden_states, hidden_states}, 1);
+      if (parallel_args_.dit_sp_group_ &&
+          parallel_args_.dit_sp_group_->world_size() > 1) {
+        auto gathered_encoder_hidden_states = dit::sp_gather_sequence(
+            encoder_hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+        auto gathered_hidden_states = dit::sp_gather_sequence(
+            hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+        hidden_states = torch::cat(
+            {gathered_encoder_hidden_states, gathered_hidden_states}, 1);
+        hidden_states = dit::sp_split_sequence(
+            hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+      } else {
+        hidden_states = torch::cat({encoder_hidden_states, hidden_states}, 1);
+      }
+      int64_t text_sequence_length = encoder_hidden_states.size(1) * sp_size;
+      if (sp_size > 1) {
+        text_sequence_length -=
+            dit::SequenceParallelPadManager::get_instance().get(
+                "flux_encoder_hidden_states");
+      }
 
       for (int64_t i = 0; i < single_transformer_block_layers_.size(); ++i) {
         // Block start: prepare input (block_id)
-        CacheBlockIn blockin_before(i);
+        int64_t block_id =
+            static_cast<int64_t>(transformer_block_layers_.size()) + i;
+        CacheBlockIn blockin_before(block_id);
         use_block_cache =
-            DiTCache::get_instance().on_before_block(blockin_before);
+            DiTCache::get_instance().on_before_block(blockin_before, use_cfg);
 
         if (!use_block_cache) {
           auto block = single_transformer_block_layers_[i];
-          hidden_states = block->forward(hidden_states, temb, image_rotary_emb);
+          hidden_states = block->forward(
+              hidden_states, temb, image_rotary_emb, text_sequence_length);
         }
 
         // Block end: update outputs (block_id, hidden_states,
@@ -1347,18 +1616,30 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
         TensorMap single_block_map = {
             {"hidden_states", hidden_states},
             {"original_hidden_states", original_hidden_states}};
-        CacheBlockIn blockin_after(i, single_block_map);
+        CacheBlockIn blockin_after(block_id, single_block_map);
         CacheBlockOut blockout_after =
-            DiTCache::get_instance().on_after_block(blockin_after);
+            DiTCache::get_instance().on_after_block(blockin_after, use_cfg);
 
         hidden_states = blockout_after.tensors.at("hidden_states");
       }
 
-      int64_t start = encoder_hidden_states.size(1);
-      int64_t length = hidden_states.size(1) - start;
-      auto output_hidden =
-          hidden_states.narrow(1, start, std::max(length, int64_t(0)));
-      hidden_states = output_hidden;
+      if (sp_size > 1) {
+        hidden_states = dit::sp_gather_sequence(
+            hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+        int64_t padded_text_sequence_length =
+            encoder_hidden_states.size(1) * sp_size;
+        int64_t image_sequence_length =
+            hidden_states.size(1) - padded_text_sequence_length;
+        hidden_states = hidden_states.narrow(
+            1, padded_text_sequence_length, image_sequence_length);
+        hidden_states = dit::sp_split_sequence(
+            hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+      } else {
+        int64_t start = encoder_hidden_states.size(1);
+        int64_t length = hidden_states.size(1) - start;
+        hidden_states =
+            hidden_states.narrow(1, start, std::max(length, int64_t(0)));
+      }
     }
 
     // Step end: update outputs (hidden_states, original_hidden_states)
@@ -1367,11 +1648,19 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
         {"original_hidden_states", original_hidden_states}};
     CacheStepIn stepin_after(step_idx, step_after_map);
     CacheStepOut stepout_after =
-        DiTCache::get_instance().on_after_step(stepin_after);
+        DiTCache::get_instance().on_after_step(stepin_after, use_cfg);
     hidden_states = stepout_after.tensors.at("hidden_states");
 
     auto output_hidden = norm_out_(hidden_states, temb);
-    return proj_out_(output_hidden);
+    hidden_states = proj_out_(output_hidden);
+    if (parallel_args_.dit_sp_group_ &&
+        parallel_args_.dit_sp_group_->world_size() > 1) {
+      hidden_states = dit::sp_gather_sequence(
+          hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
+      dit::SequenceParallelPadManager::get_instance().unpad_tensor(
+          hidden_states, "flux_hidden_states", 1);
+    }
+    return hidden_states;
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
@@ -1442,6 +1731,10 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
 
   int64_t in_channels() { return in_channels_; }
   bool guidance_embeds() { return guidance_embeds_; }
+  int64_t num_blocks() const {
+    return static_cast<int64_t>(transformer_block_layers_.size() +
+                                single_transformer_block_layers_.size());
+  }
 
  private:
   CombinedTimestepTextProjEmbeddings time_text_embed_{nullptr};
@@ -1458,15 +1751,18 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
   int64_t in_channels_;
   int64_t out_channels_;
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(FluxTransformer2DModel);
 
 class FluxDiTModelImpl : public torch::nn::Module {
  public:
-  explicit FluxDiTModelImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
-    flux_transformer_2d_model_ = register_module(
-        "flux_transformer_2d_model", FluxTransformer2DModel(context));
+  explicit FluxDiTModelImpl(const ModelContext& context,
+                            const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
+    flux_transformer_2d_model_ =
+        register_module("flux_transformer_2d_model",
+                        FluxTransformer2DModel(context, parallel_args));
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states_input,
@@ -1475,7 +1771,8 @@ class FluxDiTModelImpl : public torch::nn::Module {
                         const torch::Tensor& timestep,
                         const torch::Tensor& image_rotary_emb,
                         const torch::Tensor& guidance,
-                        int64_t step_idx = 0) {
+                        int64_t step_idx = 0,
+                        bool use_cfg = false) {
     torch::Tensor output =
         flux_transformer_2d_model_->forward(hidden_states_input,
                                             encoder_hidden_states_input,
@@ -1483,12 +1780,16 @@ class FluxDiTModelImpl : public torch::nn::Module {
                                             timestep,
                                             image_rotary_emb,
                                             guidance,
-                                            step_idx);
+                                            step_idx,
+                                            use_cfg);
     return output;
   }
   int64_t in_channels() { return flux_transformer_2d_model_->in_channels(); }
   bool guidance_embeds() {
     return flux_transformer_2d_model_->guidance_embeds();
+  }
+  int64_t num_blocks() const {
+    return flux_transformer_2d_model_->num_blocks();
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
@@ -1499,6 +1800,7 @@ class FluxDiTModelImpl : public torch::nn::Module {
  private:
   FluxTransformer2DModel flux_transformer_2d_model_{nullptr};
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(FluxDiTModel);
 
