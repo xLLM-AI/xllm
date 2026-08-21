@@ -1106,6 +1106,7 @@ if __name__ == "__main__":
             "xllm/pybind/llm",
             "xllm/pybind/vlm",
             "xllm/pybind/embedding",
+            "xllm/pybind/multimodal",
             "xllm/pybind/utils",
             "xllm/pybind/args",
             "xllm/pybind/params",
