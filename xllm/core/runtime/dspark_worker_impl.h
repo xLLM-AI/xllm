@@ -45,8 +45,10 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
   bool sample_from_anchor() const override { return true; }
 
   // Build the DSpark query and produce the complete proposal block.
-  DraftBlock run_decode_draft(const ForwardInput& input,
-                              ForwardInput& validate_input) override;
+  DraftBlock run_decode_draft(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& lagged_prefix_lengths = {}) override;
 
  private:
   struct BlockSampleOutput {

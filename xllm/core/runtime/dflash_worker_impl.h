@@ -109,14 +109,31 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
     // and consumed by run_validate. Per-seq validate prefix length; empty when
     // lag confidence is off. Not produced by run_decode_draft.
     std::vector<int32_t> lagged_prefix_lengths;
+    // Set when run_decode_draft already built the pruned varlen validate batch
+    // in the draft-overlap window (lag confidence on + a pruning decision).
+    // run_validate then skips its own metadata rebuild and consumes these
+    // directly. varlen_prebuilt=false means the dense batch is in
+    // validate_input and run_validate takes the legacy this-step decision +
+    // rebuild path.
+    bool varlen_prebuilt = false;
+    std::vector<int32_t> per_seq_val_tokens;
+    int32_t max_val_tokens = 0;
     // No-sync draft inputs must outlive validation's stream sync.
     std::vector<std::shared_ptr<ForwardInput>> retained_inputs;
   };
 
   // virtual: DSpark overrides the draft sampling (parallel block sample ->
   // one forward + sequential Markov-head sampling loop).
-  virtual DraftBlock run_decode_draft(const ForwardInput& input,
-                                      ForwardInput& validate_input);
+  //
+  // lagged_prefix_lengths (lag confidence only): the pre-draft prune decision.
+  // When it prunes, run_decode_draft builds the pruned varlen validate batch in
+  // the draft-overlap window (setting DraftBlock.varlen_prebuilt) so the whole
+  // rebuild overlaps the in-flight draft instead of sitting on run_validate's
+  // critical path. Empty => build the dense batch as before.
+  virtual DraftBlock run_decode_draft(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& lagged_prefix_lengths = {});
 
   // Block layout hook: false (DFlash) -> query_width N+1, slot 0 is the
   // un-selected anchor; true (DSpark) -> query_width N, every position predicts
@@ -125,13 +142,31 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // stays here and a subclass flips one bit.
   virtual bool sample_from_anchor() const { return false; }
 
+  // Build the validate batch in the draft-overlap window and record the prune
+  // decision into `draft_block`. Both DFlash and DSpark run_decode_draft call
+  // this in place of the bare prepare_validate_inputs, so the lag overlap-build
+  // covers both algorithms. When lagged_prefix_lengths prunes, builds the
+  // pruned varlen batch (sets draft_block.varlen_prebuilt / per_seq_val_tokens
+  // / max_val_tokens); otherwise builds the dense batch (varlen_prebuilt=false)
+  // exactly as before.
+  void prepare_overlap_validate_input(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& lagged_prefix_lengths,
+      DraftBlock& draft_block);
+
   // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
   // the target validate input. A DSpark override of run_decode_draft calls both
   // before its draft forward.
+  //
+  // per_seq_val_tokens: when non-empty, build a *pruned varlen* validate batch
+  // (Σ per_seq_val_tokens[i] tokens) instead of the dense [batch, N+1] batch.
   void prepare_query_inputs(const ForwardInput& input,
                             ForwardInput& query_input);
-  void prepare_validate_inputs(const ForwardInput& input,
-                               ForwardInput& validate_input);
+  void prepare_validate_inputs(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& per_seq_val_tokens = {});
 
  private:
   bool draft_use_block_parallel_rows() const {
@@ -202,15 +237,15 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // adaptive is off.
   std::vector<int32_t> decide_lagged_prefix_lengths(const ForwardInput& input);
 
-  // Zero out draft probs beyond each sequence's prefix_len so the rejection
-  // Per-seq varlen prune: rebuild validate_input as a true varlen
-  // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
-  // compute on tokens each seq's prefix_len actually needs. Reuses the base
-  // SpeculativeWorkerImpl per-seq builder.
-  void apply_per_seq_varlen_prune(
-      const ForwardInput& input,
-      ForwardInput& validate_input,
-      const std::vector<int32_t>& per_seq_val_tokens);
+  // Convert a per-seq prefix_len vector into per-seq validate widths
+  // (prefix_len + 1 bonus). Writes per_seq_val_tokens (empty when
+  // prefix_lengths is empty) and max_val_tokens; returns did_prune (true iff
+  // any seq's width is below the full N+1). Shared by the lag overlap-build
+  // path (run_decode_draft) and the legacy this-step path (run_validate).
+  bool prefix_lengths_to_val_tokens(const std::vector<int32_t>& prefix_lengths,
+                                    int32_t batch_size,
+                                    std::vector<int32_t>* per_seq_val_tokens,
+                                    int32_t* max_val_tokens) const;
 
   // Record precise (draft, accepted) counters. Padded -1 slots at positions
   // past per_seq_val_tokens[i]-1 are excluded — the count only walks each
