@@ -71,29 +71,13 @@ class DSparkQwen3ForCausalLMImpl final
   }
 
   // Compute per-request acceptance probability using the trained ConfidenceHead
-  // over the draft-step hidden state and the previous token embedding.
-  // hidden: [num_reqs, hidden_size], prev_token_ids: [num_reqs].
-  // Returns [num_reqs] fp32 in [0, 1]. Defined only when
-  // enable_confidence_head.
-  torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden,
-      const torch::Tensor& previous_token_ids) const {
-    CHECK(confidence_head_.defined())
-        << "DSpark ConfidenceHead is not initialized (enable_confidence_head?)";
-    torch::Tensor markov_embed;
-    if (previous_token_ids.defined()) {
-      markov_embed = markov_head_.markov_embed(previous_token_ids);
-    }
-    return confidence_head_.forward(hidden, markov_embed);
-  }
-
-  // Batched variant of dspark_confidence_probs over the whole draft block.
+  // over the whole draft block.
   //   hidden_all:  [num_reqs, num_spec, hidden_size]
   //   prev_matrix: [num_reqs, num_spec] int64 — column k is step k's "prev"
   //                token (col 0 = anchor, col k = draft token sampled at k-1).
   // Returns [num_reqs, num_spec] fp32 in [0, 1]. Defined only when
   // enable_confidence_head.
-  torch::Tensor dspark_confidence_probs_batched(
+  torch::Tensor dspark_confidence_probs(
       const torch::Tensor& hidden_all,
       const torch::Tensor& prev_matrix) const {
     CHECK(confidence_head_.defined())

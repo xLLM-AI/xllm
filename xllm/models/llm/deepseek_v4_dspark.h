@@ -162,18 +162,6 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
   bool has_dspark_confidence_head() const { return confidence_head_.defined(); }
 
   torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden,
-      const torch::Tensor& previous_token_ids) const {
-    CHECK(confidence_head_.defined())
-        << "DeepSeek-V4 DSpark ConfidenceHead is not loaded.";
-    torch::Tensor markov_embed;
-    if (previous_token_ids.defined()) {
-      markov_embed = markov_head_.markov_embed(previous_token_ids);
-    }
-    return confidence_head_.forward(hidden, markov_embed);
-  }
-
-  torch::Tensor dspark_confidence_probs_batched(
       const torch::Tensor& hidden_all,
       const torch::Tensor& prev_matrix) const {
     CHECK(confidence_head_.defined())
@@ -258,15 +246,9 @@ class DeepseekV4DSparkForCausalLMImpl final
   }
 
   torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden,
-      const torch::Tensor& previous_token_ids) const {
-    return model_->dspark_confidence_probs(hidden, previous_token_ids);
-  }
-
-  torch::Tensor dspark_confidence_probs_batched(
       const torch::Tensor& hidden_all,
       const torch::Tensor& prev_matrix) const {
-    return model_->dspark_confidence_probs_batched(hidden_all, prev_matrix);
+    return model_->dspark_confidence_probs(hidden_all, prev_matrix);
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
