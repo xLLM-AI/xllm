@@ -89,6 +89,29 @@ size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
   return util::max(free_blocks);
 }
 
+void validate_residual_sjf_options(
+    const BatchMode& mode,
+    const ContinuousScheduler::Options& options) {
+  if (!options.enable_disagg_pd()) {
+    LOG(FATAL) << "residual_sjf requires enable_disagg_pd=true.";
+  }
+  if (mode.enable_mix_batch) {
+    LOG(FATAL) << "residual_sjf requires enable_mix_batch=false "
+                  "(exclusive prefill-first batching).";
+  }
+  if (!options.enable_chunked_prefill()) {
+    LOG(FATAL) << "residual_sjf requires enable_chunked_prefill=true.";
+  }
+  if (options.instance_role() == InstanceRole::DECODE) {
+    LOG(FATAL) << "residual_sjf is only supported on PD prefill or mix "
+               << "instances, not decode instances.";
+  }
+  if (SchedulerConfig::get_instance().residual_sjf_max_wait_ms() < 0) {
+    LOG(FATAL) << "residual_sjf_max_wait_ms must be >= 0, got "
+               << SchedulerConfig::get_instance().residual_sjf_max_wait_ms();
+  }
+}
+
 }  // namespace
 
 // =============================================================================
@@ -856,13 +879,19 @@ void SchedulerPolicy::clear_mtp_bootstrap(Request* request,
 std::unique_ptr<SchedulerPolicy> create_scheduler_policy(
     const BatchMode& mode,
     const ContinuousScheduler::Options& options) {
+  if (mode.priority_strategy == "residual_sjf") {
+    validate_residual_sjf_options(mode, options);
+    LOG(INFO) << "Enable PD-prefill residual-aware SJF scheduling: "
+              << "residual_sjf_max_wait_ms="
+              << SchedulerConfig::get_instance().residual_sjf_max_wait_ms();
+    return std::make_unique<ResidualSJFPolicy>(mode, options);
+  }
   if (mode.enable_mix_batch && mode.priority_strategy == "multi_slo_and_prio") {
     return std::make_unique<UnifiedPolicy>(mode, options);
   } else if (mode.enable_mix_batch) {
     return std::make_unique<DecodeFirstPolicy>(mode, options);
-  } else {
-    return std::make_unique<PrefillFirstPolicy>(mode, options);
   }
+  return std::make_unique<PrefillFirstPolicy>(mode, options);
 }
 
 }  // namespace xllm

@@ -113,7 +113,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `chunked_match_frequency` | `int32` | `2` | sequence prefix cache 匹配频率。 |
 | `use_zero_evict` | `bool` | `false` | 是否使用 ZeroEvictionScheduler；详见 [Zero Evict Scheduler](/zh/features/zero_evict_scheduler/)。 |
 | `max_decode_token_per_sequence` | `int32` | `256` | ZeroEvictionScheduler 中每个 sequence 的最大 decode token 数。 |
-| `priority_strategy` | `string` | `"fcfs"` | 请求优先级策略，例如 `fcfs`、`priority`、`deadline`。 |
+| `priority_strategy` | `string` | `"fcfs"` | 请求优先级策略，例如 `fcfs`、`priority`、`deadline`；PD prefill 下支持 `residual_sjf`（按剩余本地 prefill 成本排序）。 |
+| `residual_sjf_max_wait_ms` | `int32` | `10000` | `residual_sjf` 下的 aging 阈值（毫秒）：等待超过该值的请求按 FCFS 提前；`0` 退化为 FCFS。 |
 | `use_mix_scheduler` | `bool` | `false` | 是否使用 MixScheduler 统一处理 prefill 和 decode。 |
 | `enable_online_preempt_offline` | `bool` | `true` | 是否允许在线请求抢占离线请求。 |
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |

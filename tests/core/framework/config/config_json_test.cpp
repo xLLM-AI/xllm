@@ -39,6 +39,7 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "enable_prefix_cache": false,
   "max_tokens_per_batch": 8192,
   "max_seqs_per_batch": 64,
+  "residual_sjf_max_wait_ms": 12345,
   "model_impl": "py",
   "disable_graph_warmup": true,
   "python_graph_backend": "cudagraphs"
@@ -278,6 +279,7 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
+  EXPECT_EQ(scheduler_config.residual_sjf_max_wait_ms(), 12345);
 }
 
 TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {

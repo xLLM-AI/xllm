@@ -68,6 +68,12 @@ std::vector<Block> ConcurrentBlockManagerImpl::allocate_shared(
   return blocks;
 }
 
+size_t ConcurrentBlockManagerImpl::get_num_local_computed_blocks(
+    const Slice<XXH3Key>& block_hashes) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return inner_->get_num_local_computed_blocks(block_hashes);
+}
+
 void ConcurrentBlockManagerImpl::cache(const Slice<int32_t>& token_ids,
                                        std::vector<Block>& blocks,
                                        size_t existed_shared_blocks_num,

@@ -51,6 +51,7 @@ class SchedulerConfig final {
          "use_zero_evict",
          "max_decode_token_per_sequence",
          "priority_strategy",
+         "residual_sjf_max_wait_ms",
          "enable_mix_batch",
          "enable_online_preempt_offline",
          "aggressive_coeff",
@@ -78,6 +79,8 @@ class SchedulerConfig final {
   PROPERTY(int32_t, max_decode_token_per_sequence) = 256;
 
   PROPERTY(std::string, priority_strategy) = "fcfs";
+
+  PROPERTY(int32_t, residual_sjf_max_wait_ms) = 10000;
 
   PROPERTY(bool, enable_mix_batch) = true;
 
