@@ -375,7 +375,7 @@ void SuffixTree::append(int32_t seq_id, int32_t token) {
           // This should be the first child being added.
           assert(!node->head_child && !node->tail_child);
           node->head_child = node->tail_child = new_child;
-          new_child->group.reset(new Group(new_child));
+          new_child->group = std::make_shared<Group>(new_child);
         } else {
           assert(node->tail_child);
           insert_into_siblings_after(new_child, node->tail_child);
@@ -500,7 +500,7 @@ void SuffixTree::append(int32_t seq_id, int32_t token) {
 
         // Create a new group for the child node.
         new_node->head_child = new_node->tail_child = child;
-        child->group.reset(new Group(child));
+        child->group = std::make_shared<Group>(child);
 
         // Increment the new node count and update siblings lists.
         increment_count(new_node);
