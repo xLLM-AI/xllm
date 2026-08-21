@@ -4,6 +4,10 @@ add_subdirectory(sentencepiece)
 add_subdirectory(minja)
 add_subdirectory(brpc)
 add_subdirectory(smhasher/src)
+if(USE_MUSA AND TARGET SMHasherSupport)
+  # SMHasher uses the deprecated register storage class in SpeedTest.cpp.
+  target_compile_options(SMHasherSupport PRIVATE -Wno-register)
+endif()
 add_subdirectory(cpprestsdk)
 if(USE_MUSA AND TARGET cpprest)
   # mcc_wrapper diagnoses signed conversions in cpprestsdk headers more
