@@ -190,6 +190,23 @@ torch::Tensor causal_conv1d(torch::Tensor& conv_state,
                             const torch::Tensor& initial_state_mode,
                             bool has_silu);
 
+// High-level causal conv1d update for decode/spec-verify on NPU.
+// Handles parameter assembly (cu_seqlens, indices) and dispatches to
+// causal_conv1d_decode specialization or fallback per-batch loop.
+torch::Tensor causal_conv1d_update(
+    torch::Tensor x,
+    torch::Tensor conv_state,
+    torch::Tensor weight,
+    const std::optional<torch::Tensor>& bias,
+    const std::optional<torch::Tensor>& conv_state_indices,
+    const std::optional<torch::Tensor>& query_start_loc,
+    int32_t max_query_len,
+    bool activation,
+    const std::optional<torch::Tensor>& initial_state_idx = std::nullopt,
+    const std::optional<torch::Tensor>& block_idx_last_scheduled_token =
+        std::nullopt,
+    const std::optional<torch::Tensor>& initial_state_mode_opt = std::nullopt);
+
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
 // Returns (out, final_state).
 //   out: [T_padded, nv, dv] (padded token dim; caller strips padding)

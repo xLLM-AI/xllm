@@ -180,6 +180,7 @@ cc_library(
     tilelang_ops_api.h
   SRCS
     ${TILELANG_KERNEL_SRCS}
+    causal_conv1d_update_wrapper.cpp
   DEPS
     torch
     torch_npu
@@ -200,6 +201,7 @@ target_link_libraries(tilelang_kernels
     "$ENV{NPU_HOME_PATH}/lib64/libascend_dump.so"
     "$ENV{NPU_HOME_PATH}/lib64/libprofapi.so"
     "$ENV{NPU_HOME_PATH}/lib64/libmmpa.so"
+    "$ENV{NPU_HOME_PATH}/lib64/libunified_dlog.so"
     m
     dl
 )
