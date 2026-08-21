@@ -25,7 +25,10 @@ namespace py = pybind11;
 #endif
 
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <random>
 
@@ -314,6 +317,18 @@ void init_npu_python_runtime() {
   if (we_initialized_python) {
     PyEval_SaveThread();
   }
+}
+
+[[noreturn]] void exit_npu_process(int exit_code) {
+  VerboseTraceLogger::get_instance().shutdown();
+  LOG(INFO) << "NPU process shutdown complete; bypassing process-static "
+               "destructors, exit_code="
+            << exit_code;
+  google::FlushLogFiles(google::INFO);
+  std::cout.flush();
+  std::cerr.flush();
+  std::fflush(nullptr);
+  std::_Exit(exit_code);
 }
 }  // namespace
 #endif
@@ -621,5 +636,10 @@ int main(int argc, char** argv) {
   init_npu_python_runtime();
 #endif
 
-  return run();
+  const int exit_code = run();
+#if defined(USE_NPU)
+  exit_npu_process(exit_code);
+#else
+  return exit_code;
+#endif
 }
