@@ -145,9 +145,11 @@ class AclGraph {
                                     const torch::Tensor& positions,
                                     ModelInputParams& params);
   void update_spec_verify_attention_tiling(const ModelInputParams& params);
+  bool has_fused_infer_attention_graph_tasks() const;
 
   bool update_graph_tasks(const ModelInputParams& params);
-  void signal_static_graph_tasks(const c10_npu::NPUStream& signal_stream);
+  void prepare_static_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
+                                  const c10_npu::NPUStream& signal_stream);
   bool static_graph_task_signature_matches(
       const ModelInputParams& params) const;
   void capture_static_graph_task_signature(const ModelInputParams& params);

@@ -78,15 +78,19 @@ class GraphPersistentParam final {
   // host parameters can be bucketed for graph tiling/workspace. During replay,
   // return_capture_params may still be true for metadata refresh, but
   // for_capture must stay false so dynamic host metadata uses actual lengths.
-  std::optional<ModelInputParams> update(const torch::Tensor& tokens,
-                                         const torch::Tensor& k_cache,
-                                         const torch::Tensor& v_cache,
-                                         const torch::Tensor& positions,
-                                         const ModelInputParams& params,
-                                         uint32_t padded_num_tokens,
-                                         bool return_capture_params = false,
-                                         bool skip_token_update = false,
-                                         bool for_capture = false);
+  // update_paged_attention_plan can be disabled when FIA graph tasks replace
+  // the paged-attention task for the current graph.
+  std::optional<ModelInputParams> update(
+      const torch::Tensor& tokens,
+      const torch::Tensor& k_cache,
+      const torch::Tensor& v_cache,
+      const torch::Tensor& positions,
+      const ModelInputParams& params,
+      uint32_t padded_num_tokens,
+      bool return_capture_params = false,
+      bool skip_token_update = false,
+      bool for_capture = false,
+      bool update_paged_attention_plan = true);
 
   void update_tokens(const torch::Tensor& tokens,
                      const ModelInputParams& params,

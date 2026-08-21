@@ -31,6 +31,12 @@ namespace ffi = tvm::ffi;
 #include "dsa_metadata.h"
 #include "layers/common/kv_shard_batch_metadata.h"
 
+#if defined(USE_NPU)
+namespace xllm::npu {
+class AclGraphTaskUpdateContext;
+}
+#endif
+
 namespace xllm::layer {
 
 struct ExpandedDecodeMetadata {
@@ -207,6 +213,7 @@ struct AttentionMetadata {
 
 #if defined(USE_NPU)
   // for npu
+  std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
   torch::Tensor q_seq_lens_host;
   torch::Tensor kv_seq_lens_host;
   // For ACL graph execution - fixed-address device tiling data for

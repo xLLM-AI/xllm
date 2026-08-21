@@ -46,6 +46,11 @@ enum class CausalConv1dGraphBranch {
   kSpecVerify,
 };
 
+enum class FusedInferAttentionGraphBranch {
+  kDecode,
+  kSpecVerify,
+};
+
 struct CausalConv1dGraphTask {
   torch::Tensor output;
   torch::Tensor x;
@@ -56,6 +61,48 @@ struct CausalConv1dGraphTask {
   int64_t pad_slot_id = kCausalConv1dGraphPadSlotId;
   int64_t run_mode = kCausalConv1dRunModeUpdate;
   CausalConv1dGraphBranch branch = CausalConv1dGraphBranch::kDecode;
+  uint64_t capture_order = 0;
+  c10_npu::NPUTaskGroupHandle handle{};
+  std::shared_ptr<c10_npu::NPUEvent> event;
+};
+
+class FusedInferAttentionWorkspaceSignature {
+ public:
+  torch::ScalarType query_dtype;
+  torch::ScalarType key_dtype;
+  torch::ScalarType value_dtype;
+  torch::ScalarType block_table_dtype;
+  c10::DeviceIndex device_index;
+  std::vector<int64_t> query_shape;
+  std::vector<int64_t> key_shape;
+  std::vector<int64_t> value_shape;
+  std::vector<int64_t> block_table_shape;
+  std::vector<int64_t> actual_seq_lengths;
+  std::vector<int64_t> actual_seq_lengths_kv;
+  int64_t num_heads;
+  int64_t num_key_value_heads;
+  int64_t block_size;
+  double scale;
+
+  bool operator==(const FusedInferAttentionWorkspaceSignature&) const = default;
+};
+
+struct FusedInferAttentionGraphTask {
+  torch::Tensor output;
+  torch::Tensor softmax_lse;
+  torch::Tensor query;
+  torch::Tensor key;
+  torch::Tensor value;
+  torch::Tensor block_table;
+  torch::Tensor workspace;
+  std::vector<int64_t> actual_seq_lengths;
+  int64_t num_heads = 0;
+  int64_t num_key_value_heads = 0;
+  double scale = 0.0;
+  int64_t block_size = 0;
+  FusedInferAttentionGraphBranch branch =
+      FusedInferAttentionGraphBranch::kDecode;
+  uint64_t capture_order = 0;
   c10_npu::NPUTaskGroupHandle handle{};
   std::shared_ptr<c10_npu::NPUEvent> event;
 };
@@ -64,13 +111,22 @@ class AclGraphTaskUpdateContext final {
  public:
   void begin_capture() {
     capturing = true;
+    next_capture_order = 0;
     causal_conv1d_tasks.clear();
+    fused_infer_attention_tasks.clear();
+    fused_infer_attention_workspace_signature.reset();
+    fused_infer_attention_workspace = torch::Tensor();
   }
 
   void end_capture() { capturing = false; }
 
   bool capturing = false;
+  uint64_t next_capture_order = 0;
   std::vector<CausalConv1dGraphTask> causal_conv1d_tasks;
+  std::vector<FusedInferAttentionGraphTask> fused_infer_attention_tasks;
+  std::optional<FusedInferAttentionWorkspaceSignature>
+      fused_infer_attention_workspace_signature;
+  torch::Tensor fused_infer_attention_workspace;
 };
 
 }  // namespace xllm::npu

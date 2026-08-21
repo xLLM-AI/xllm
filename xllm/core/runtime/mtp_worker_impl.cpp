@@ -3340,19 +3340,24 @@ bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
   const int64_t verify_block_table_width =
       spec_verify_block_table_width(block_tables);
   const auto& kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
-  if (kv_seq_lens.empty()) {
+  if (kv_seq_lens.size() != 1) {
     return false;
   }
-  const int64_t spec_verify_max_kv_seq_len =
-      static_cast<int64_t>(
-          *std::max_element(kv_seq_lens.begin(), kv_seq_lens.end())) +
-      options_.num_speculative_tokens();
+  const int64_t spec_width = options_.num_speculative_tokens() + 1;
+  const int64_t base_kv_seq_len = kv_seq_lens.front();
+  std::vector<int64_t> expanded_kv_seq_lens;
+  expanded_kv_seq_lens.reserve(static_cast<size_t>(spec_width));
+  for (int64_t token_idx = 0; token_idx < spec_width; ++token_idx) {
+    expanded_kv_seq_lens.emplace_back(base_kv_seq_len + token_idx);
+  }
+  const int64_t spec_verify_max_kv_seq_len = expanded_kv_seq_lens.back();
   const SpecVerifyGraphTaskSignal signal{
       .linear_state_id = input.input_params.embedding.linear_state_ids.front(),
       .num_accepted_tokens = accepted_prefix_lengths.front(),
-      .spec_width = options_.num_speculative_tokens() + 1,
+      .spec_width = spec_width,
       .block_table_width = verify_block_table_width,
       .max_kv_seq_len = spec_verify_max_kv_seq_len,
+      .expanded_kv_seq_lens = std::move(expanded_kv_seq_lens),
   };
   return impl_->prepare_static_mtp_graph_tasks(signal, *compute_stream_);
 #else
