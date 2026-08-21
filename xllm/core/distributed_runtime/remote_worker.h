@@ -134,7 +134,7 @@ class RemoteWorker : public WorkerClient {
   folly::SemiFuture<int64_t> get_active_activation_memory_async() override;
 
   // Check if the connection to worker is healthy
-  bool check_health();
+  bool check_health(int32_t timeout_ms = 600000);
 
   // Get worker global rank
   int32_t global_rank() const { return global_rank_; }

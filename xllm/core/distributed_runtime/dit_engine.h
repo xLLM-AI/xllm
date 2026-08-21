@@ -18,10 +18,13 @@ limitations under the License.
 
 #include <gflags/gflags.h>
 
+#include <atomic>
 #include <memory>
+#include <vector>
 
 #include "common/macros.h"
 #include "dist_manager.h"
+#include "distributed_runtime/remote_worker.h"
 #include "engine.h"
 #include "framework/batch/dit_batch.h"
 #include "framework/parallel_state/process_group.h"
@@ -76,6 +79,10 @@ class DiTEngine : public Engine {
  private:
   // setup workers internal
   void setup_workers(const runtime::Options& options);
+  void setup_vae_workers();
+  size_t select_vae_worker(const std::vector<bool>& attempted_workers);
+  DiTForwardOutput decode_with_vae(const DiTForwardInput& input,
+                                   const DiTForwardOutput& latent_output);
   // init models
   bool init_model();
   // options
@@ -84,6 +91,13 @@ class DiTEngine : public Engine {
   int64_t worker_clients_num_;
   // a list of process groups, with each process group handling a single device
   std::vector<std::unique_ptr<ProcessGroup>> process_groups_;
+  struct VaeWorkerState {
+    std::shared_ptr<RemoteWorker> worker;
+    std::atomic<bool> healthy{true};
+    std::atomic<int64_t> next_health_check_ms{0};
+  };
+  std::vector<std::unique_ptr<VaeWorkerState>> vae_workers_;
+  std::atomic<size_t> next_vae_worker_{0};
 };
 
 }  // namespace xllm

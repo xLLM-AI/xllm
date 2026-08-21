@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include "core/framework/config/dit_config.h"
 #include "models/dit/pipelines/pipeline_flux_base.h"
 #include "models/dit/transformers/transformer_flux.h"
 // pipeline_flux compatible with huggingface weights
@@ -60,6 +61,24 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
   }
 
   DiTForwardOutput forward(const DiTForwardInput& input) {
+    const std::string& instance_role =
+        DiTConfig::get_instance().dit_instance_role();
+    CHECK(instance_role == "all" || instance_role == "dit" ||
+          instance_role == "vae")
+        << "Unsupported dit_instance_role: " << instance_role;
+
+    if (instance_role == "vae") {
+      CHECK(input.latents.defined())
+          << "VAE instance requires latent input from a DiT instance.";
+      torch::Tensor latents = input.latents.to(options_.device());
+      torch::Tensor image = decode_latents(latents,
+                                           input.generation_params.height,
+                                           input.generation_params.width);
+      DiTForwardOutput out;
+      out.tensors = torch::chunk(image, input.batch_size);
+      return out;
+    }
+
     const DiTGenerationParams& generation_params = input.generation_params;
     int64_t seed = generation_params.seed > 0 ? generation_params.seed : 42;
     std::optional<std::vector<std::string>> prompts =
@@ -131,16 +150,24 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
     auto tokenizer_2_loader = loader->take_component_loader("tokenizer_2");
     LOG(INFO)
         << "Flux model components loaded, start to load weights to sub models";
-    transformer_->load_model(std::move(transformer_loader));
-    transformer_->to(options_.device());
-    vae_->load_model(std::move(vae_loader));
-    vae_->to(options_.device());
-    t5_->load_model(std::move(t5_loader));
-    t5_->to(options_.device());
-    clip_text_model_->load_model(std::move(clip_loader));
-    clip_text_model_->to(options_.device());
-    tokenizer_ = tokenizer_loader->tokenizer();
-    tokenizer_2_ = tokenizer_2_loader->tokenizer();
+    const std::string& instance_role =
+        DiTConfig::get_instance().dit_instance_role();
+    if (instance_role != "vae") {
+      transformer_->load_model(std::move(transformer_loader));
+      transformer_->to(options_.device());
+      t5_->load_model(std::move(t5_loader));
+      t5_->to(options_.device());
+      clip_text_model_->load_model(std::move(clip_loader));
+      clip_text_model_->to(options_.device());
+    }
+    if (instance_role != "dit") {
+      vae_->load_model(std::move(vae_loader));
+      vae_->to(options_.device());
+    }
+    if (instance_role != "vae") {
+      tokenizer_ = tokenizer_loader->tokenizer();
+      tokenizer_2_ = tokenizer_2_loader->tokenizer();
+    }
   }
 
  private:
@@ -312,16 +339,23 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
         prepared_latents = prepared_latents.to(latents.value().dtype());
       }
     }
-    torch::Tensor image;
-    // Unpack latents
+    const std::string& instance_role =
+        DiTConfig::get_instance().dit_instance_role();
+    if (instance_role == "dit") {
+      return prepared_latents;
+    }
+    return decode_latents(prepared_latents, height, width);
+  }
+
+  torch::Tensor decode_latents(const torch::Tensor& latents,
+                               int64_t height,
+                               int64_t width) {
     torch::Tensor unpacked_latents =
-        unpack_latents(prepared_latents, height, width, vae_scale_factor_);
+        unpack_latents(latents, height, width, vae_scale_factor_);
     unpacked_latents =
         (unpacked_latents / vae_scaling_factor_) + vae_shift_factor_;
     unpacked_latents = unpacked_latents.to(options_.dtype());
-    image = vae_->decode(unpacked_latents);
-    image = vae_image_processor_->postprocess(image);
-    return image;
+    return vae_image_processor_->postprocess(vae_->decode(unpacked_latents));
   }
 
  private:

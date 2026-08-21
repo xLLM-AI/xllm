@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,8 @@ class DiTRequest : public RequestBase {
 
   void handle_forward_output(torch::Tensor output);
 
+  void handle_error(Status status);
+
   void handle_forward_text_output(const std::string& text);
 
   const DiTRequestOutput generate_output();
@@ -56,6 +59,7 @@ class DiTRequest : public RequestBase {
  private:
   DiTRequestState state_;
   DiTForwardOutput output_;
+  std::optional<Status> status_;
 };
 
 }  // namespace xllm

@@ -36,6 +36,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/distributed_runtime/spawn_worker_server/spawn_worker_protocol.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
@@ -141,20 +142,34 @@ void WorkerServer::create_server(const runtime::Options& options,
   }
   auto worker_server =
       ServerRegistry::get_instance().register_server(server_name_);
-  if (!worker_server->start(worker_service, addr + ":0")) {
+  int32_t worker_port = 0;
+  if (options.backend() == "dit") {
+    worker_port = DiTConfig::get_instance().dit_worker_port();
+    if (worker_port > 0) {
+      const int64_t rank_port = static_cast<int64_t>(worker_port) +
+                                static_cast<int64_t>(worker_global_rank);
+      CHECK_LE(rank_port, 65535)
+          << "dit_worker_port plus global rank exceeds the valid port range: "
+          << rank_port;
+      worker_port = static_cast<int32_t>(rank_port);
+    }
+  }
+  const std::string worker_server_addr =
+      addr + ":" + std::to_string(worker_port);
+  if (!worker_server->start(worker_service, worker_server_addr)) {
     LOG(ERROR) << "failed to start distribute worker server on address: "
                << addr;
     return;
   }
 
-  auto worker_server_addr =
+  const std::string actual_worker_server_addr =
       addr + ":" + std::to_string(worker_server->listen_port());
   LOG(INFO) << "Worker " << worker_global_rank
-            << ": server address: " << worker_server_addr;
+            << ": server address: " << actual_worker_server_addr;
 
   // Sync with master node
   proto::AddressInfo addr_info;
-  addr_info.set_address(worker_server_addr);
+  addr_info.set_address(actual_worker_server_addr);
   addr_info.set_global_rank(worker_global_rank);
   proto::CommUniqueIdList uids;
   if (!sync_master_node(master_node_addr, addr_info, uids)) {
