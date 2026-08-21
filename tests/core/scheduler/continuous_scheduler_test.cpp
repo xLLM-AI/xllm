@@ -345,6 +345,37 @@ void set_chunk_kv(const std::shared_ptr<Request>& request, size_t kv_tokens) {
   }
 }
 
+std::shared_ptr<Request> make_request_with_id(const std::string& request_id,
+                                              size_t prompt_tokens) {
+  std::vector<int32_t> prompt_token_ids(prompt_tokens, 1);
+  RequestSamplingParam sampling_param;
+  SchedulerParam scheduler_param;
+
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  stopping_checker.set_max_context_len(4096);
+  stopping_checker.set_ignore_eos(true);
+
+  RequestState req_state("x",
+                         prompt_token_ids,
+                         sampling_param,
+                         scheduler_param,
+                         stopping_checker,
+                         prompt_token_ids.size() + 30000,
+                         1,
+                         1,
+                         false,
+                         false,
+                         false,
+                         false,
+                         false,
+                         nullptr,
+                         nullptr);
+
+  return std::make_shared<Request>(
+      request_id, "x-request-id", "x-request-time", std::move(req_state));
+}
+
 }  // namespace
 
 TEST(ContinuousSchedulerFactoryTest,
@@ -1238,6 +1269,42 @@ TEST(ContinuousSchedulerTest,
   // engine to skip the block manager's "all blocks freed" teardown check.
   scheduler.reset();
   (void)engine.release();
+}
+
+TEST(ContinuousSchedulerTest, ShortRequestFirstSchedulesShortBeforeLong) {
+  SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  ScopedConfigValue<int32_t> threshold(
+      scheduler_config.short_request_first_threshold(), 256);
+  ScopedConfigValue<double> long_wait(
+      scheduler_config.short_request_first_long_max_wait_ms(), 0.0);
+
+  FakeEngine engine(/*num_blocks=*/2048, /*block_size=*/8);
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/10000,
+      /*max_seqs_per_batch=*/256,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/1024,
+      /*dp_size=*/1);
+  opt.priority_strategy_ = "short_request_first";
+  opt.enable_disagg_pd_ = true;
+  opt.enable_chunked_prefill_ = true;
+  opt.instance_role_ = InstanceRole::PREFILL;
+  TestContinuousScheduler scheduler(&engine, opt);
+
+  std::shared_ptr<Request> long_request =
+      make_request_with_id("long", /*prompt_tokens=*/512);
+  std::shared_ptr<Request> short_request =
+      make_request_with_id("short", /*prompt_tokens=*/64);
+  scheduler.add_request(long_request);
+  scheduler.add_request(short_request);
+
+  scheduler.prepare_batch_test();
+
+  const std::vector<std::shared_ptr<Request>> running =
+      scheduler.get_running_requests();
+  ASSERT_EQ(running.size(), 2u);
+  EXPECT_EQ(running[0]->request_id(), "short");
+  EXPECT_EQ(running[1]->request_id(), "long");
 }
 
 }  // namespace xllm

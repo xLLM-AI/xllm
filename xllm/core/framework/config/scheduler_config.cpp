@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "core/framework/config/scheduler_config.h"
 
+#include <glog/logging.h>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -56,7 +58,17 @@ DEFINE_int32(
 
 DEFINE_string(priority_strategy,
               "fcfs",
-              "Priority strategy for requests(e.g. fcfs, priority, deadline).");
+              "Priority strategy for requests(e.g. fcfs, priority, deadline, "
+              "short_request_first).");
+
+DEFINE_int32(short_request_first_threshold,
+             256,
+             "Prompt-length threshold for PD-prefill ShortRequestFirst.");
+
+DEFINE_double(short_request_first_long_max_wait_ms,
+              0.0,
+              "Maximum wait time in milliseconds before a long PD-prefill "
+              "request can bypass waiting short requests.");
 
 DEFINE_bool(enable_online_preempt_offline,
             true,
@@ -88,10 +100,13 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(priority_strategy);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_batch);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(short_request_first_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(short_request_first_long_max_wait_ms);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_online_preempt_offline);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_starve_prevent);
+  validate_short_request_first();
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
@@ -106,10 +121,13 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_JSON(priority_strategy);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_batch);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(short_request_first_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(short_request_first_long_max_wait_ms);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_online_preempt_offline);
   XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_JSON(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_starve_prevent);
+  validate_short_request_first();
 }
 
 void SchedulerConfig::append_config_json(
@@ -138,6 +156,10 @@ void SchedulerConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mix_batch);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, short_request_first_threshold);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, short_request_first_long_max_wait_ms);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_online_preempt_offline);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, aggressive_coeff);
@@ -156,6 +178,17 @@ void SchedulerConfig::initialize() {
   from_flags();
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
+  }
+}
+
+void SchedulerConfig::validate_short_request_first() const {
+  if (short_request_first_threshold_ < 0) {
+    LOG(FATAL) << "short_request_first_threshold must be >= 0, got "
+               << short_request_first_threshold_;
+  }
+  if (short_request_first_long_max_wait_ms_ < 0.0) {
+    LOG(FATAL) << "short_request_first_long_max_wait_ms must be >= 0, got "
+               << short_request_first_long_max_wait_ms_;
   }
 }
 

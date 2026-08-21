@@ -63,6 +63,20 @@ TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
 }
 #endif
 
+inline constexpr std::string_view kShortRequestFirstConfig = R"json({
+  "priority_strategy": "short_request_first",
+  "short_request_first_threshold": 384,
+  "short_request_first_long_max_wait_ms": 250.5
+})json";
+
+inline constexpr std::string_view kInvalidShortRequestFirstThreshold = R"json({
+  "short_request_first_threshold": -1
+})json";
+
+inline constexpr std::string_view kInvalidShortRequestFirstLongWait = R"json({
+  "short_request_first_long_max_wait_ms": -1.0
+})json";
+
 class ConfigJsonFileFlagGuard final {
  public:
   explicit ConfigJsonFileFlagGuard(const std::string& config_json_file)
@@ -154,8 +168,11 @@ class StartupConfigGuard final {
         old_enable_prefix_cache_(kv_cache_config_.enable_prefix_cache()),
         old_max_tokens_per_batch_(scheduler_config_.max_tokens_per_batch()),
         old_max_seqs_per_batch_(scheduler_config_.max_seqs_per_batch()),
-        old_enable_chunked_prefill_(
-            scheduler_config_.enable_chunked_prefill()) {}
+        old_enable_chunked_prefill_(scheduler_config_.enable_chunked_prefill()),
+        old_short_request_first_threshold_(
+            scheduler_config_.short_request_first_threshold()),
+        old_short_request_first_long_max_wait_ms_(
+            scheduler_config_.short_request_first_long_max_wait_ms()) {}
 
   ~StartupConfigGuard() {
     model_config_.model_impl(old_model_impl_)
@@ -165,7 +182,10 @@ class StartupConfigGuard final {
         .enable_prefix_cache(old_enable_prefix_cache_);
     scheduler_config_.max_tokens_per_batch(old_max_tokens_per_batch_)
         .max_seqs_per_batch(old_max_seqs_per_batch_)
-        .enable_chunked_prefill(old_enable_chunked_prefill_);
+        .enable_chunked_prefill(old_enable_chunked_prefill_)
+        .short_request_first_threshold(old_short_request_first_threshold_)
+        .short_request_first_long_max_wait_ms(
+            old_short_request_first_long_max_wait_ms_);
   }
 
  private:
@@ -181,6 +201,8 @@ class StartupConfigGuard final {
   int32_t old_max_tokens_per_batch_;
   int32_t old_max_seqs_per_batch_;
   bool old_enable_chunked_prefill_;
+  int32_t old_short_request_first_threshold_;
+  double old_short_request_first_long_max_wait_ms_;
 };
 
 void write_config_file(const std::filesystem::path& config_path,
@@ -407,6 +429,45 @@ TEST(ConfigJsonTest, InitializeLoadsConfigJsonFileFromFlag) {
   std::filesystem::remove(config_path);
 }
 
+TEST(ConfigJsonTest, FromJsonReadsShortRequestFirstFields) {
+  const JsonReader json = config::parse_json_string(kShortRequestFirstConfig);
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.from_flags();
+  scheduler_config.from_json(json);
+
+  EXPECT_EQ(scheduler_config.priority_strategy(), "short_request_first");
+  EXPECT_EQ(scheduler_config.short_request_first_threshold(), 384);
+  EXPECT_DOUBLE_EQ(scheduler_config.short_request_first_long_max_wait_ms(),
+                   250.5);
+}
+
+TEST(ConfigJsonTest, FromJsonRejectsNegativeShortRequestFirstThreshold) {
+  const JsonReader json =
+      config::parse_json_string(kInvalidShortRequestFirstThreshold);
+
+  EXPECT_DEATH(
+      {
+        SchedulerConfig scheduler_config;
+        scheduler_config.from_flags();
+        scheduler_config.from_json(json);
+      },
+      "short_request_first_threshold");
+}
+
+TEST(ConfigJsonTest, FromJsonRejectsNegativeShortRequestFirstLongWait) {
+  const JsonReader json =
+      config::parse_json_string(kInvalidShortRequestFirstLongWait);
+
+  EXPECT_DEATH(
+      {
+        SchedulerConfig scheduler_config;
+        scheduler_config.from_flags();
+        scheduler_config.from_json(json);
+      },
+      "short_request_first_long_max_wait_ms");
+}
+
 TEST(ConfigJsonTest, InitializeReusesCachedConfigJsonForSameFile) {
   ConfigFlagGuard config_flag_guard;
   const std::filesystem::path config_path =
@@ -619,7 +680,10 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(2048)
       .max_seqs_per_batch(128)
-      .enable_chunked_prefill(false);
+      .enable_chunked_prefill(false)
+      .priority_strategy("short_request_first")
+      .short_request_first_threshold(320)
+      .short_request_first_long_max_wait_ms(123.0);
   FLAGS_enable_dump_config_json = true;
 
   config::dump_startup_config();
@@ -634,6 +698,13 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   EXPECT_EQ(config_json.at("max_tokens_per_batch").get<int32_t>(), 2048);
   EXPECT_EQ(config_json.at("max_seqs_per_batch").get<int32_t>(), 128);
   EXPECT_FALSE(config_json.at("enable_chunked_prefill").get<bool>());
+  EXPECT_EQ(config_json.at("priority_strategy").get<std::string>(),
+            "short_request_first");
+  EXPECT_EQ(config_json.at("short_request_first_threshold").get<int32_t>(),
+            320);
+  EXPECT_DOUBLE_EQ(
+      config_json.at("short_request_first_long_max_wait_ms").get<double>(),
+      123.0);
 
   // model and python_model_path are command-line-only: never dumped, even when
   // set to a non-default value.
@@ -642,7 +713,6 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   EXPECT_FALSE(config_json.contains("max_cache_size"));
   EXPECT_FALSE(config_json.contains("kv_cache_dtype"));
   EXPECT_FALSE(config_json.contains("indexer_cache_dtype"));
-  EXPECT_FALSE(config_json.contains("priority_strategy"));
 
   std::filesystem::remove(dump_path);
 }

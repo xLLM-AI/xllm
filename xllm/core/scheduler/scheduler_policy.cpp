@@ -89,6 +89,20 @@ size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
   return util::max(free_blocks);
 }
 
+void validate_short_request_first_options(
+    const ContinuousScheduler::Options& options) {
+  if (!options.enable_disagg_pd()) {
+    LOG(FATAL) << "ShortRequestFirst requires enable_disagg_pd=true.";
+  }
+  if (!options.enable_chunked_prefill()) {
+    LOG(FATAL) << "ShortRequestFirst requires enable_chunked_prefill=true.";
+  }
+  if (options.instance_role() == InstanceRole::DECODE) {
+    LOG(FATAL) << "ShortRequestFirst is only supported on PD prefill "
+               << "instances, not decode instances.";
+  }
+}
+
 }  // namespace
 
 // =============================================================================
@@ -856,13 +870,27 @@ void SchedulerPolicy::clear_mtp_bootstrap(Request* request,
 std::unique_ptr<SchedulerPolicy> create_scheduler_policy(
     const BatchMode& mode,
     const ContinuousScheduler::Options& options) {
+  if (mode.enable_mix_batch &&
+      mode.priority_strategy == "short_request_first") {
+    LOG(FATAL) << "ShortRequestFirst requires exclusive batch "
+                  "(enable_mix_batch=false); mix-batch with "
+                  "priority_strategy=short_request_first is not supported.";
+  }
   if (mode.enable_mix_batch && mode.priority_strategy == "multi_slo_and_prio") {
     return std::make_unique<UnifiedPolicy>(mode, options);
   } else if (mode.enable_mix_batch) {
     return std::make_unique<DecodeFirstPolicy>(mode, options);
-  } else {
-    return std::make_unique<PrefillFirstPolicy>(mode, options);
   }
+  if (mode.priority_strategy == "short_request_first") {
+    validate_short_request_first_options(options);
+    const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+    LOG(INFO) << "Enable PD-prefill ShortRequestFirst scheduling: threshold="
+              << scheduler_config.short_request_first_threshold()
+              << ", long_max_wait_ms="
+              << scheduler_config.short_request_first_long_max_wait_ms();
+    return std::make_unique<ShortRequestFirstPolicy>(mode, options);
+  }
+  return std::make_unique<PrefillFirstPolicy>(mode, options);
 }
 
 }  // namespace xllm
