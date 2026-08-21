@@ -17,8 +17,6 @@ pass_configs_config = {
     tilelang.PassConfigKey.TL_ASCEND_MEMORY_PLANNING: True,
 }
 
-_decode_kernel_cache = {}
-
 
 def build_causal_conv1d_decode_kernel(
     width: int,
@@ -168,31 +166,6 @@ def _build_decode_kernel_jit(
     )
 
 
-def get_decode_kernel(
-    width: int,
-    dim: int,
-    dtype_str: str = "bfloat16",
-    has_silu: bool = True,
-) -> torch.nn.Module:
-    dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
-    cache_key = (
-        width,
-        dim_chunks,
-        DIM_PER_CORE,
-        dtype_str,
-        has_silu,
-    )
-    if cache_key not in _decode_kernel_cache:
-        _decode_kernel_cache[cache_key] = _build_decode_kernel_jit(
-            width,
-            dim_chunks,
-            DIM_PER_CORE,
-            dtype_str,
-            has_silu,
-        )
-    return _decode_kernel_cache[cache_key]
-
-
 def causal_conv1d_decode(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -268,7 +241,8 @@ def causal_conv1d_decode(
 
     initial_state_mode = torch.ones(batch, dtype=torch.int32, device=conv_state.device)
 
-    kernel = get_decode_kernel(width, dim, "bfloat16", has_silu)
+    dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
+    kernel = _build_decode_kernel_jit(width, dim_chunks, DIM_PER_CORE, "bfloat16", has_silu)
     output = kernel(
         x_kernel,
         weight_t,
@@ -288,3 +262,31 @@ def causal_conv1d_decode(
         output = output.to(torch.float16)
 
     return output
+
+
+if __name__ == "__main__":
+    import torch
+    import torch_npu
+
+    batch = 1
+    dim = 8192
+    kernel_width = 4
+    state_len = kernel_width - 1  # 3
+    slots = 202
+
+    device = "npu:0"
+    tilelang.disable_cache()
+    tilelang.cache.clear_cache()
+
+    x = torch.randn(batch, dim, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(dim, kernel_width, dtype=torch.bfloat16, device=device)
+    # conv_state in PyTorch convention: [slots, dim, state_len]
+    conv_state = torch.zeros(slots, dim, state_len, dtype=torch.bfloat16, device=device)
+    state_indices = torch.tensor([1], dtype=torch.int32, device=device)
+
+    print(f"x={x.shape}, weight={weight.shape}, conv_state={conv_state.shape}, state_indices={state_indices}")
+    print("Calling causal_conv1d_decode...")
+    result = causal_conv1d_decode(x, conv_state, weight, conv_state_indices=state_indices)
+    print(f"result={result.shape}, dtype={result.dtype}")
+    print(f"result first 5: {result[0, :5].tolist()}")
+    print("SUCCESS")

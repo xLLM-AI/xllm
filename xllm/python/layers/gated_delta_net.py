@@ -125,15 +125,25 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         state_indices: torch.Tensor,
         has_initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor:
+        a: torch.Tensor,
+        b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         self._conv_state_dim_first(conv_state)
-        return kernels.causal_conv1d_prefill(
+        return kernels.gdn_prefill_prepare(
             mixed_qkv,
             self.conv1d_weight,
             conv_state,
             state_indices,
             has_initial_state,
             cu_seqlens,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.key_head_dim,
+            self.value_head_dim,
         )
 
     def _conv_decode(
@@ -152,17 +162,16 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
     def _gdn_prefill(
         self,
-        mixed_qkv: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
         ssm_state: torch.Tensor,
         state_indices: torch.Tensor,
         has_initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: Fuse cache gather/zero/scatter and null-row output masking into
-        # the GDN kernels. The current staging is intentionally kept for this
-        # correctness PR and should be removed in the next performance PR.
         non_null_state = state_indices > 0
         use_initial_state = non_null_state & has_initial_state
         cache_indices = state_indices.to(torch.long)
@@ -172,16 +181,6 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             use_initial_state[:, None, None, None],
             initial_state,
             torch.zeros_like(initial_state),
-        )
-        q, k, v, g, beta = kernels.fused_gdn_prefill_post_conv(
-            mixed_qkv=mixed_qkv,
-            a=a,
-            b=b,
-            a_log=self.A_log,
-            dt_bias=self.dt_bias,
-            num_key_heads=self.num_k_heads,
-            key_head_dim=self.key_head_dim,
-            value_head_dim=self.value_head_dim,
         )
         output, final_state = kernels.chunk_gated_delta_rule(
             q,
@@ -193,11 +192,12 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             cu_seqlens,
             self.gdn_prefill_backend,
         )
+        num_tokens = q.shape[0]
         sequence_lengths = cu_seqlens.diff().to(dtype=torch.long)
         token_mask = torch.repeat_interleave(
             non_null_state,
             sequence_lengths,
-            output_size=mixed_qkv.shape[0],
+            output_size=num_tokens,
         )
         output = torch.where(token_mask[:, None, None], output, 0.0)
         ssm_state.index_copy_(
@@ -256,21 +256,25 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             has_initial_state = has_initial_state.to(device=hidden.device, dtype=torch.bool)
             if has_initial_state.shape != state_indices.shape:
                 raise ValueError("has_initial_state must match linear_state_indices")
-            mixed_qkv = self._conv_prefill(
+            q, k, v, g, beta = self._conv_prefill(
                 mixed_qkv,
                 conv_state,
                 state_indices,
                 has_initial_state,
                 cu_seqlens,
+                a,
+                b,
             )
         else:
             mixed_qkv = self._conv_decode(mixed_qkv, conv_state, state_indices)
 
         if is_prefill:
             output = self._gdn_prefill(
-                mixed_qkv,
-                a,
-                b,
+                q,
+                k,
+                v,
+                g,
+                beta,
                 ssm_state,
                 state_indices,
                 has_initial_state,

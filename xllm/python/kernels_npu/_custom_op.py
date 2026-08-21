@@ -66,6 +66,77 @@ def _rms_norm_fake(
     return torch.empty_like(input)
 
 
+def _rms_norm_gated_fake(
+    input: torch.Tensor,
+    gate: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    del gate, weight, eps
+    return torch.empty_like(input)
+
+
+def _l2_norm_fake(
+    input: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    del eps
+    return torch.empty_like(input)
+
+
+def _chunk_gated_delta_rule_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del q, k, g, beta, cu_seqlens
+    num_seqs = initial_state.shape[0]
+    return torch.empty_like(v), torch.empty_like(initial_state)
+
+
+def _causal_conv1d_qkv_prefill_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_qk_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del weight, conv_state, state_indices, has_initial_state, query_start_loc
+    num_tokens = x.shape[0]
+    opts = x.options().dtype(torch.bfloat16)
+    q = torch.empty(1, num_tokens, num_qk_heads, head_k_dim, **opts)
+    k = torch.empty(1, num_tokens, num_qk_heads, head_k_dim, **opts)
+    v = torch.empty(1, num_tokens, num_v_heads, head_v_dim, **opts)
+    return q, k, v
+
+
+def _fused_sigmoid_gating_delta_rule_decode_fake(
+    a_log: torch.Tensor,
+    a: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b: torch.Tensor,
+    ssm_state: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    del a_log, a, dt_bias, k, b, ssm_state, state_indices, cu_seqlens, scale
+    # Output shape matches v: [num_tokens, num_value_heads, value_dim]
+    return torch.empty_like(v)
+
+
 def _fused_add_rms_norm_fake(
     input: torch.Tensor,
     residual: torch.Tensor,
@@ -891,6 +962,14 @@ def _dequant_swiglu_quant_fake(
 
 
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
+register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
+register_fake("xllm_ops::l2_norm", _l2_norm_fake)
+register_fake("xllm_ops::chunk_gated_delta_rule", _chunk_gated_delta_rule_fake)
+register_fake("xllm_ops::causal_conv1d_qkv_prefill", _causal_conv1d_qkv_prefill_fake)
+register_fake(
+    "xllm_ops::fused_sigmoid_gating_delta_rule_decode",
+    _fused_sigmoid_gating_delta_rule_decode_fake,
+)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
