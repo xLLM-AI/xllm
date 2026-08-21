@@ -78,6 +78,10 @@ bool build_messages(const google::protobuf::RepeatedPtrField<
                                 "message content type is invalid.");
         return false;
       }
+
+      if (item.type() != "text" && item.has_uuid()) {
+        contents.back().uuid = item.uuid();
+      }
     }
 
     out_messages.emplace_back(req_message.role(), std::move(contents));

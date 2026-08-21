@@ -469,20 +469,8 @@ std::shared_ptr<Request> VLMMaster::generate_request(
   xllm::ScopeGuard rate_limit_guard(
       [this] { get_rate_limiter()->decrease_one_request(); });
 
-  static MMInputTransfer mm_input_transfer;
-
-  MMInput mm_inputs(std::move(payload));
-  MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
-  if (code != MMErrCode::SUCCESS) {
-    std::string error_message = MMErrToString(code);
-    LOG(ERROR) << error_message;
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
-    return nullptr;
-  }
-
   MMData mm_data;
-  if (!mm_inputs.empty() &&
-      !processor_->process_multimodal(mm_inputs, mm_data)) {
+  if (!processor_->process_mm_input(messages, std::move(payload), mm_data)) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Failed to process multimodal input.");
     return nullptr;

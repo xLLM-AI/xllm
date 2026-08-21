@@ -47,6 +47,9 @@ message MMInputData {
   optional Embedding image_embedding = 6;
   optional Embedding video_embedding = 7;
   optional Embedding audio_embedding = 8;
+
+  // Optional client-supplied stable identifier for a multimodal item.
+  optional string uuid = 9;
 }
 
 message MMChatMessage {

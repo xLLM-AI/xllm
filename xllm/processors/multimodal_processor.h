@@ -51,6 +51,10 @@ class MultimodalProcessorBase {
   virtual bool process_multimodal(const MMInput& inputs,
                                   MMData& data) const = 0;
 
+  virtual bool process_mm_input(const std::vector<Message>& messages,
+                                std::string payload,
+                                MMData& out);
+
  protected:
   MultimodalProcessorBase(
       std::shared_ptr<Tokenizer> tokenizer,
@@ -62,6 +66,11 @@ class MultimodalProcessorBase {
   void assign_mm_hash_keys(const MMInput& mm_input, MMData& mm_data) const;
 
   void pad_to_max_length(std::vector<int32_t>& token_ids) const;
+
+  // Download/decode helper used by process_mm_input. Stateless and thread-safe;
+  // each processor owns its own (the decorator's inner one stays idle since
+  // only the outermost object's process_mm_input is called).
+  MMInputTransfer transfer_;
 
  private:
   std::shared_ptr<Tokenizer> tokenizer_;
