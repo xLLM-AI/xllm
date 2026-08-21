@@ -74,7 +74,9 @@ def test_full_world_ep_partitions_glm_experts() -> None:
 
     assert moe.local_expert_start == 6
     assert moe.local_expert_end == 8
+    moe.allocate_experts_w13_for_loading()
     assert moe.experts_w13.shape == (2, 16, 16)
+    moe.allocate_experts_w2_for_loading()
     assert moe.experts_w2.shape == (2, 16, 8)
 
 
