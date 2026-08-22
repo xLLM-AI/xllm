@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/util/dit_model_discovery.h"
 #include "llm/py_causal_lm.h"
 #include "models.h"
@@ -83,7 +84,8 @@ bool is_torch_only_model_type(const std::string& model_type) {
       "qwen3_5_moe_mtp",
       "qwen3_next",
       "minimax_m2"};
-  return kTorchOnlyModelTypes.count(model_type) != 0;
+  return kTorchOnlyModelTypes.count(model_type) != 0 ||
+         is_dflash2_draft_model_type(model_type);
 }
 #endif
 

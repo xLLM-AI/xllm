@@ -411,6 +411,14 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t block_size = options_.block_size();
+  // Hybrid targets (for example Qwen3.8 GDN) mark validation as spec-verify
+  // before entering this generic builder.  They must keep one sequence row
+  // with an N+1-token query so recurrent state is checkpointed and committed
+  // by the model's spec-verify kernel instead of being expanded into N+1
+  // independent decode rows.
+  const bool use_chunked_spec_verify =
+      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
+      input.input_params.is_spec_verify;
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
 
@@ -421,7 +429,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   buf.out_token_ids.reserve(total_num_val_tokens);
   buf.out_positions.reserve(total_num_val_tokens);
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
-  if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (!use_chunked_spec_verify) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
@@ -450,16 +458,13 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
         row.token_id = -val_idx;
       }
       row.position_offset = val_idx;
-      row.append_kv_len =
-          !::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
-      row.append_q_len_one =
-          !::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
-      row.append_block_table =
-          !::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
+      row.append_kv_len = !use_chunked_spec_verify;
+      row.append_q_len_one = !use_chunked_spec_verify;
+      row.append_block_table = !use_chunked_spec_verify;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
     }
 
-    if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+    if (use_chunked_spec_verify) {
       const int32_t kv_len_after_validation = kv_len + num_speculative_tokens;
       specBuilder::update_kv_seq_lens_and_max(
           atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
@@ -479,7 +484,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
                                           token_options,
                                           position_options);
   // update the input_params
-  if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (!use_chunked_spec_verify) {
     input_params.meta.num_sequences = total_num_val_tokens;
     input_params.meta.q_max_seq_len = 1;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
@@ -487,7 +492,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
     input_params.meta.q_max_seq_len = num_val_tokens;
     input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   }
-  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (use_chunked_spec_verify) {
     specBuilder::update_input_params(input_params,
                                      buf,
                                      num_val_tokens,

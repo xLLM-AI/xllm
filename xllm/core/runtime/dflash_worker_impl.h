@@ -99,6 +99,11 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   struct DraftBlock {
     torch::Tensor token_ids;
     torch::Tensor probs;
+    // Optional exact proposal distribution [batch, num_speculative_tokens,
+    // vocab]. DFlash2 populates this because its selector samples from a sparse
+    // top-k distribution; retaining only the chosen probability would make
+    // rejection recovery inexact.
+    torch::Tensor dense_probs;
     // Optional acceptance-probability estimate, [batch, num_speculative_tokens]
     // fp32 in [0, 1]. Populated by DSpark's ConfidenceHead when available;
     // consumed by the adaptive-speculative pruning controller. When undefined,
@@ -228,6 +233,9 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 #endif
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
+  // Preformatted labels keep per-position acceptance telemetry allocation-free
+  // on the decode hot path.
+  std::vector<std::string> speculative_position_labels_;
   dflash_detail::DSparkSasMode draft_sas_mode_ =
       dflash_detail::DSparkSasMode::NOT_DSPARK;
 };

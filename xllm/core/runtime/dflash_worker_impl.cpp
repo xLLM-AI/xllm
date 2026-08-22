@@ -15,16 +15,18 @@ limitations under the License.
 
 #include "runtime/dflash_worker_impl.h"
 
+#include <c10/util/SmallVector.h>
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "common/metrics.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -37,6 +39,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
 #if defined(USE_NPU)
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #endif
@@ -89,6 +92,22 @@ runtime::Options draft_options(const runtime::Options& options) {
       .num_speculative_tokens(draft_num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
   return opts;
+}
+
+KVCacheShape dflash2_draft_kv_cache_shape(const KVCacheShape& target_shape,
+                                          const ModelArgs& draft_model_args,
+                                          const ParallelArgs& parallel_args,
+                                          int64_t block_size) {
+  CHECK_GT(parallel_args.dp_size(), 0);
+  CHECK_GT(parallel_args.cp_size(), 0);
+  const int64_t dp_local_tp_size =
+      parallel_args.world_size() /
+      (parallel_args.dp_size() * parallel_args.cp_size());
+  CHECK_GT(dp_local_tp_size, 0);
+  KVCacheCapacity draft_capacity;
+  draft_capacity.n_blocks(target_shape.key_cache_shape()[0])
+      .block_size(block_size);
+  return KVCacheShape(draft_capacity, draft_model_args, dp_local_tp_size);
 }
 
 void expand_block_parallel_sequence_rows(ModelInputParams& input_params,
@@ -146,6 +165,59 @@ void wait_metadata_ready_event(const ForwardInput& input, Stream& stream) {
       << "failed to wait DFlash metadata ready event";
 }
 
+#if defined(USE_NPU)
+void build_dflash_expanded_spec_verify_graph_input(
+    ModelInputParams& input_params,
+    const torch::Device& device,
+    int32_t block_size) {
+  if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
+      !input_params.is_spec_verify ||
+      !input_params.meta.batch_forward_type.is_chunked_prefill()) {
+    return;
+  }
+  const auto& q_seq_lens = input_params.attention.host.q_seq_lens;
+  const auto& kv_seq_lens = input_params.attention.host.kv_seq_lens;
+  CHECK(!q_seq_lens.empty());
+  CHECK_EQ(q_seq_lens.size(), kv_seq_lens.size());
+  CHECK(input_params.attention.device.block_tables.defined());
+  CHECK_GE(input_params.attention.device.block_tables.size(0),
+           static_cast<int64_t>(q_seq_lens.size()));
+
+  std::vector<int32_t> expanded_kv_seq_lens =
+      layer::ExpandedDecodeMetadataBuilder::build_tokenwise_kv_seq_lens(
+          q_seq_lens, kv_seq_lens);
+  torch::Tensor expanded_kv_seq_lens_device =
+      torch::tensor(expanded_kv_seq_lens,
+                    torch::TensorOptions()
+                        .dtype(torch::kInt)
+                        .device(torch::kCPU)
+                        .pinned_memory(true))
+          .to(device, /*non_blocking=*/true);
+
+  std::vector<torch::Tensor> expanded_block_rows;
+  expanded_block_rows.reserve(expanded_kv_seq_lens.size());
+  for (int64_t seq_idx = 0; seq_idx < static_cast<int64_t>(q_seq_lens.size());
+       ++seq_idx) {
+    for (int32_t token_idx = 0;
+         token_idx < q_seq_lens[static_cast<size_t>(seq_idx)];
+         ++token_idx) {
+      expanded_block_rows.emplace_back(
+          input_params.attention.device.block_tables.select(/*dim=*/0,
+                                                            seq_idx));
+    }
+  }
+  CHECK(!expanded_block_rows.empty());
+  torch::Tensor expanded_block_tables =
+      torch::stack(expanded_block_rows, /*dim=*/0).contiguous();
+  layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+      input_params,
+      expanded_kv_seq_lens_device,
+      expanded_block_tables,
+      std::move(expanded_kv_seq_lens),
+      block_size);
+}
+#endif
+
 std::optional<ForwardOutput> run_llm_no_sync_impl(
     LLMWorkerImpl& worker,
     const ForwardInput& input,
@@ -154,9 +226,13 @@ std::optional<ForwardOutput> run_llm_no_sync_impl(
     ForwardInput* processed_output = nullptr) {
   ForwardInput processed_input;
   worker.prepare_work_before_execute_on_stream(
-      input, processed_input, prepare_stream);
-  std::optional<ForwardOutput> output =
-      worker.execute_no_sync_on_stream(processed_input, compute_stream);
+      input,
+      processed_input,
+      prepare_stream,
+      /*record_ready_event=*/&prepare_stream != &compute_stream);
+  worker.set_hierarchy_layer_synchronizer(processed_input.input_params);
+  std::optional<ForwardOutput> output = worker.execute_no_sync_on_stream(
+      processed_input, compute_stream, /*record_ready_event=*/false);
   if (processed_output != nullptr) {
     *processed_output = std::move(processed_input);
   }
@@ -200,7 +276,6 @@ void build_query_rows(const ForwardInput& input,
   buf.out_kv_seq_lens.reserve(metadata_rows);
   buf.out_q_seq_lens.reserve(metadata_rows);
   buf.out_q_cu_seq_lens.reserve(metadata_rows + 1);
-  buf.out_q_cu_seq_lens.emplace_back(0);
 
   selected_idxes.reserve(num_sequences * query_width);
 
@@ -311,6 +386,12 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
          "parallelism (cp_size > 1).";
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       parallel_args, device, draft_options(options));
+  speculative_position_labels_.reserve(
+      static_cast<size_t>(options.num_speculative_tokens()));
+  for (int32_t position = 0; position < options.num_speculative_tokens();
+       ++position) {
+    speculative_position_labels_.emplace_back(std::to_string(position));
+  }
 
   // Adaptive per-seq validate pruning. DP is supported: the worker gathers
   // each rank's true validate token count over the DP group before the target
@@ -389,10 +470,18 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       // basis and reduces acceptance to near-random levels.
     } else {
 #if defined(USE_NPU)
-      auto head = impl_->get_npu_lm_head();
-      draft_impl_->set_npu_lm_head(head);
-      auto word_embedding = impl_->get_npu_word_embedding();
-      draft_impl_->set_npu_word_embedding(word_embedding);
+      if (SpeculativeConfig::is_dflash2_algorithm(
+              options_.speculative_algorithm())) {
+        auto head = impl_->get_lm_head();
+        draft_impl_->set_lm_head(head);
+        auto word_embedding = impl_->get_word_embedding();
+        draft_impl_->set_word_embedding(word_embedding);
+      } else {
+        auto head = impl_->get_npu_lm_head();
+        draft_impl_->set_npu_lm_head(head);
+        auto word_embedding = impl_->get_npu_word_embedding();
+        draft_impl_->set_npu_word_embedding(word_embedding);
+      }
 #else
       auto head = impl_->get_lm_head();
       draft_impl_->set_lm_head(head);
@@ -422,6 +511,20 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     CHECK_LT(mask_token_id_, draft_vocab_size)
         << "Block-diffusion mask_token_id (" << mask_token_id_
         << ") must be < draft vocab_size (" << draft_vocab_size << ").";
+    if (SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())) {
+      const int32_t requested_block_size =
+          options_.num_speculative_tokens() + 1;
+      CHECK_EQ(requested_block_size, draft_args.dflash2_block_size())
+          << "DFlash2 runtime block size must match the checkpoint's trained "
+             "dflash_config.block_size.";
+      const ModelArgs& target_args = impl_->context_.get_model_args();
+      CHECK(!has_linear_attention_layers(target_args) ||
+            ::xllm::ExecutionConfig::get_instance().enable_graph())
+          << "DFlash2 with a hybrid recurrent target requires ACL Graph: the "
+             "expanded spec-verify replay path preserves the accepted GDN "
+             "checkpoint, while eager validation is not lossless.";
+    }
     // Context hidden comes from the target.
     const ModelArgs& target_args = impl_->context_.get_model_args();
     const int64_t num_target_layers =
@@ -459,7 +562,17 @@ bool DFlashWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   bool draft_allocated = true;
   const WorkerImpl::Status draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    draft_allocated = draft_impl_->allocate_kv_cache(kv_cache_shape);
+    if (SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())) {
+      const KVCacheShape draft_shape =
+          dflash2_draft_kv_cache_shape(kv_cache_shape,
+                                       draft_impl_->context_.get_model_args(),
+                                       parallel_args_,
+                                       options_.block_size());
+      draft_allocated = draft_impl_->allocate_kv_cache(draft_shape);
+    } else {
+      draft_allocated = draft_impl_->allocate_kv_cache(kv_cache_shape);
+    }
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
@@ -495,8 +608,19 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
   bool draft_allocated = true;
   const WorkerImpl::Status draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
-        kv_cache_transfer_, kv_cache_shape);
+    if (SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())) {
+      const KVCacheShape draft_shape =
+          dflash2_draft_kv_cache_shape(kv_cache_shape,
+                                       draft_impl_->context_.get_model_args(),
+                                       parallel_args_,
+                                       options_.block_size());
+      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
+          kv_cache_transfer_, draft_shape);
+    } else {
+      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
+          kv_cache_transfer_, kv_cache_shape);
+    }
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
@@ -1072,12 +1196,27 @@ SampleOutput DFlashWorkerImpl::validate(
           .index({ISlice(),
                   ISlice(/*start=*/0, /*end=*/effective_speculative_tokens)})
           .contiguous();
-  auto [draft_token_ids, draft_probs] =
-      specBuilder::draftProbs::build_validate_tensors_from_block(
-          pruned_token_ids,
-          pruned_probs,
-          vocab_size,
-          enable_opt_validate_probs);
+  torch::Tensor draft_token_ids = pruned_token_ids.to(torch::kLong);
+  torch::Tensor draft_probs;
+  if (draft_block.dense_probs.defined()) {
+    CHECK_EQ(draft_block.dense_probs.dim(), 3)
+        << "DFlash2 dense proposal probs must be [batch, width, vocab].";
+    CHECK_EQ(draft_block.dense_probs.size(2), vocab_size)
+        << "DFlash2 proposal vocab must match target vocab.";
+    draft_probs = draft_block.dense_probs
+                      .index({ISlice(),
+                              ISlice(/*start=*/0,
+                                     /*end=*/effective_speculative_tokens),
+                              ISlice()})
+                      .contiguous();
+  } else {
+    std::tie(draft_token_ids, draft_probs) =
+        specBuilder::draftProbs::build_validate_tensors_from_block(
+            pruned_token_ids,
+            pruned_probs,
+            vocab_size,
+            enable_opt_validate_probs);
+  }
   return validate(sampling_params,
                   draft_token_ids,
                   draft_probs,
@@ -1231,9 +1370,46 @@ void DFlashWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   ForwardInput prepared_input = input;
   prepared_input.metadata_ready_event.reset();
+  const bool use_linear_spec_verify =
+      impl_ != nullptr &&
+      has_linear_attention_layers(impl_->context_.get_model_args());
+  prepared_input.input_params.is_spec_verify = use_linear_spec_verify;
   SpeculativeWorkerImpl::prepare_validate_inputs(prepared_input,
                                                  validate_input);
   validate_input.input_params.embedding.input_embedding = torch::Tensor();
+  if (use_linear_spec_verify) {
+    ModelInputParams& input_params = validate_input.input_params;
+    std::vector<int32_t> accepted_prefix_lengths(
+        input.input_params.meta.num_sequences, 1);
+    if (embedding_cache_ != nullptr &&
+        !input.input_params.embedding.embedding_ids.empty()) {
+      accepted_prefix_lengths = embedding_cache_->read_accepted_prefix_lengths(
+          input.input_params.embedding.embedding_ids,
+          input.input_params.embedding.request_ids);
+    }
+    input_params.num_accepted_tokens_host.assign(
+        accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
+    input_params.num_accepted_tokens =
+        torch::tensor(accepted_prefix_lengths,
+                      validate_input.token_ids.options().dtype(torch::kInt32));
+    if (!input_params.attention.host.q_seq_lens.empty()) {
+      std::vector<int32_t> q_cu_seq_lens;
+      q_cu_seq_lens.reserve(input_params.attention.host.q_seq_lens.size() + 1);
+      q_cu_seq_lens.emplace_back(0);
+      for (int32_t q_len : input_params.attention.host.q_seq_lens) {
+        q_cu_seq_lens.emplace_back(q_cu_seq_lens.back() + q_len);
+      }
+      input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens);
+    }
+    // The generic builder materializes the device buffer before the hybrid
+    // cumulative lengths above are canonicalized.  Rebind it so GDN sees
+    // [0, q_len_0, ...] rather than the stale pre-verify host layout.
+    input_params.attention.rebuild_device_buffer(device_);
+#if defined(USE_NPU)
+    build_dflash_expanded_spec_verify_graph_input(
+        input_params, device_.unwrap(), options_.block_size());
+#endif
+  }
   record_metadata_ready_event(*prepare_stream_, validate_input);
 }
 
@@ -1463,6 +1639,14 @@ void DFlashWorkerImpl::write_target_context_to_cache(
 std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
     const DraftBlock& draft_block,
     const ForwardInput& input) {
+  // The current Qwen3.8 GDN spec-verify kernel requires a uniform validation
+  // width.  Keep DFlash adaptive pruning off for hybrid targets until the
+  // generic varlen builder carries the same recurrent checkpoint contract as
+  // MTP's specialized path.
+  if (impl_ != nullptr &&
+      has_linear_attention_layers(impl_->context_.get_model_args())) {
+    return {};
+  }
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
   if (adaptive_spec_controller_ == nullptr ||
       !adaptive_spec_controller_->enabled()) {
@@ -1562,6 +1746,8 @@ void DFlashWorkerImpl::record_validate_metrics(
   const int64_t* token_data = next_tokens_cpu.const_data_ptr<int64_t>();
   int64_t num_draft_tokens = 0;
   int64_t accepted_count = 0;
+  c10::SmallVector<int64_t, 8> accepted_per_position(
+      static_cast<size_t>(num_speculative_tokens), 0);
   for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
     // seq_width = target-side validate width for this seq (anchor + drafts).
     // Under adaptive per-seq varlen prune it is per_seq_val_tokens[i], else
@@ -1580,19 +1766,30 @@ void DFlashWorkerImpl::record_validate_metrics(
     const int32_t prefix_len = seq_width - 1;
     num_draft_tokens += prefix_len;
 
-    // Count accepted drafts by walking columns [0, prefix_len) — the first
-    // -1 marks the boundary where the sampler rejected. Padding tail past
-    // prefix_len is ignored so it never counts as rejection.
+    // next_tokens column 0 is the token committed by the target; accepted
+    // draft position i is represented by column i + 1. Walk the complete
+    // per-seq output (draft prefix plus target bonus/replacement), then remove
+    // that guaranteed first token. Padding past seq_width is ignored.
     const int64_t row_offset =
         static_cast<int64_t>(seq_id) * static_cast<int64_t>(width);
-    int32_t emitted = 0;
-    for (int32_t token_idx = 0; token_idx < prefix_len; ++token_idx) {
+    int32_t emitted_len = 0;
+    for (int32_t token_idx = 0; token_idx < seq_width; ++token_idx) {
       if (token_data[row_offset + token_idx] < 0) {
         break;
       }
-      ++emitted;
+      ++emitted_len;
     }
-    accepted_count += emitted;
+    const int32_t accepted = std::min(prefix_len, std::max(emitted_len - 1, 0));
+    accepted_count += accepted;
+    for (int32_t position = 0; position < accepted; ++position) {
+      ++accepted_per_position[static_cast<size_t>(position)];
+    }
+  }
+  for (int32_t position = 0; position < num_speculative_tokens; ++position) {
+    MULTI_COUNTER_ADD(
+        speculative_num_accepted_tokens_per_pos,
+        speculative_position_labels_[static_cast<size_t>(position)],
+        accepted_per_position[static_cast<size_t>(position)]);
   }
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total, accepted_count);

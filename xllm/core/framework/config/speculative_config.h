@@ -29,6 +29,8 @@ class JsonReader;
 
 class SpeculativeConfig final {
  public:
+  inline static constexpr std::string_view kDFlash2Algorithm = "DFlash2";
+
   SpeculativeConfig() = default;
   ~SpeculativeConfig() = default;
 
@@ -44,7 +46,11 @@ class SpeculativeConfig final {
   // classify without an initialized singleton.
   static bool requires_aux_hidden_capture(std::string_view algorithm) {
     return algorithm == "Eagle3" || algorithm == "DFlash" ||
-           algorithm == "DSpark";
+           is_dflash2_algorithm(algorithm) || algorithm == "DSpark";
+  }
+
+  static constexpr bool is_dflash2_algorithm(std::string_view algorithm) {
+    return algorithm == kDFlash2Algorithm;
   }
 
   static bool is_mtp_algorithm(std::string_view algorithm) {
@@ -60,7 +66,9 @@ class SpeculativeConfig final {
   // classified separately via is_mtp_algorithm; callers that also accept MTP
   // must OR the two.
   static bool is_block_diffusion_algorithm(std::string_view algorithm) {
-    return iequals(algorithm, "dflash") || iequals(algorithm, "dspark");
+    return iequals(algorithm, "dflash") ||
+           iequals(algorithm, kDFlash2Algorithm) ||
+           iequals(algorithm, "dspark");
   }
 
   void from_flags();

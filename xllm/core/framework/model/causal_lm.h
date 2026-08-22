@@ -53,6 +53,14 @@ struct ModelGraphMetadataState {
   virtual ~ModelGraphMetadataState() = default;
 };
 
+struct DFlash2CandidateOutput {
+  // Candidate vocabulary ids [batch, draft_steps, top_k]. Edge logits use
+  // [batch, draft_steps, predecessor_top_k, successor_top_k]; at step zero
+  // every predecessor entry represents the same anchor token.
+  torch::Tensor candidate_ids;
+  torch::Tensor edge_logits;
+};
+
 class CausalLM : public torch::nn::Module {
  public:
   ~CausalLM() override = default;
@@ -179,6 +187,14 @@ class CausalLM : public torch::nn::Module {
                                        const torch::Tensor& device_cache_slots,
                                        std::vector<KVCache>& kv_caches,
                                        const ModelInputParams& input_params) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
+
+  virtual DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) {
     NOT_IMPLEMENTED();
     return {};
   }
@@ -312,6 +328,18 @@ class CausalLMImpl : public CausalLM {
                                         kv_caches,
                                         input_params);
     }
+  }
+
+  DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) override {
+    if constexpr (detail::has_dflash2_candidates<Model>::value) {
+      return model_->dflash2_candidates(
+          hidden_states, unary_logits, anchor_token_ids);
+    }
+    return CausalLM::dflash2_candidates(
+        hidden_states, unary_logits, anchor_token_ids);
   }
 
   torch::Tensor dspark_markov_bias(
