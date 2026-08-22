@@ -25,6 +25,7 @@ from xllm.python.attention.backend import (
 )
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.platform import current_platform
 
@@ -212,7 +213,7 @@ class ModelExecutor:
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
-    ) -> torch.Tensor:
+    ) -> ModelExecutionOutput:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
 

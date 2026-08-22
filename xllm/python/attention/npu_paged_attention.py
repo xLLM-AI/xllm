@@ -388,6 +388,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         # prefix.
         cp_context = get_forward_context().cp_context
         if cp_context is not None:
+            if not layer.causal:
+                raise NotImplementedError("non-causal draft attention does not support context parallelism")
             return self._prefill_cp(q_3d, k_3d, v_3d, metadata, cp_context, k_cache, v_cache)
 
         # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
@@ -396,7 +398,16 @@ class NpuPagedAttentionBackend(AttentionBackend):
         if metadata.is_prefill or metadata.is_chunked_prefill:
             if self._use_expanded_decode:
                 return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
-            return self._prefill(q_3d, k_3d, v_3d, k_cache, v_cache, metadata, num_tokens)
+            return self._prefill(
+                q_3d,
+                k_3d,
+                v_3d,
+                k_cache,
+                v_cache,
+                metadata,
+                num_tokens,
+                layer.causal,
+            )
         return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
 
     def execute_mla(
@@ -741,8 +752,11 @@ class NpuPagedAttentionBackend(AttentionBackend):
         v_cache: torch.Tensor,
         metadata: AttentionMetadata,
         num_tokens: int,
+        causal: bool,
     ) -> torch.Tensor:
         actual_seq = self._cumulative_seq_lens(metadata, num_tokens)
+        atten_mask = self._causal_mask if causal else None
+        sparse_mode = _SPARSE_MODE_RIGHT_DOWN_CAUSAL if causal else _SPARSE_MODE_NONE
 
         # Prefix-cache hit (or chunked prefill with prior context): part of the
         # KV already lives in the paged cache, so this forward only carries the
@@ -759,7 +773,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 k_flat,
                 v_flat,
                 pse_shift=None,
-                atten_mask=self._causal_mask,
+                atten_mask=atten_mask,
                 block_table=self._block_table_i32,
                 actual_seq_lengths=actual_seq,
                 actual_seq_lengths_kv=self._actual_seq_kv,
@@ -768,7 +782,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 input_layout="TND",
                 num_key_value_heads=self.num_kv_heads,
                 block_size=block_size,
-                sparse_mode=_SPARSE_MODE_RIGHT_DOWN_CAUSAL,
+                sparse_mode=sparse_mode,
                 softmax_lse_flag=False,
             )
             return output.reshape(num_tokens, self.num_heads * self.head_dim)
@@ -778,14 +792,14 @@ class NpuPagedAttentionBackend(AttentionBackend):
             k_3d,
             v_3d,
             pse_shift=None,
-            atten_mask=self._causal_mask,
+            atten_mask=atten_mask,
             actual_seq_lengths=actual_seq,
             actual_seq_lengths_kv=actual_seq,
             num_heads=self.num_heads,
             scale=self.scale,
             input_layout="TND",
             num_key_value_heads=self.num_kv_heads,
-            sparse_mode=_SPARSE_MODE_RIGHT_DOWN_CAUSAL,
+            sparse_mode=sparse_mode,
             softmax_lse_flag=False,
         )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)

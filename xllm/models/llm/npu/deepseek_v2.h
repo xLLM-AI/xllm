@@ -175,7 +175,8 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() &&
         !input_params.meta.batch_forward_type.is_decode()) {
       attn_mask = attn_mask_.get_attn_mask(512, dtype_, device_);
-    } else if (input_params.meta.batch_forward_type.is_prefill()) {
+    } else if (input_params.meta.batch_forward_type.is_prefill() ||
+               input_params.meta.batch_forward_type.is_chunked_prefill()) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else if (num_speculative_tokens_ > 0) {
       // TODO :the judgement of gen_free_mask need more check

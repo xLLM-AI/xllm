@@ -68,6 +68,21 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override;
 
+  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                               const torch::Tensor& positions,
+                               const torch::Tensor& device_cache_slots,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& input_params) override;
+
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) override;
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) override;
+
+  bool has_dspark_confidence_head() const override;
+
   void load_model(std::unique_ptr<ModelLoader> loader) override;
 
   torch::Device device() const override { return device_; }
@@ -83,6 +98,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
  private:
   pybind11::dict build_config_dict(const ParallelArgs& parallel_args) const;
+  const pybind11::object& get_or_build_python_kv_caches(
+      std::vector<KVCache>& kv_caches);
 
   ModelArgs model_args_;
   torch::TensorOptions options_;
@@ -103,6 +120,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   pybind11::object py_model_;
   pybind11::object config_dict_;
+  pybind11::object python_kv_caches_;
+  int64_t python_kv_cache_layer_count_ = 0;
 };
 
 }  // namespace xllm
