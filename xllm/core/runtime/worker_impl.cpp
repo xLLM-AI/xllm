@@ -1954,9 +1954,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   tokenizer_ = std::move(tokenizer);
 
   const std::string& speculative_algorithm = options_.speculative_algorithm();
-  const bool is_block_diffusion = speculative_algorithm == "DFlash" ||
-                                  speculative_algorithm == "DFlash2" ||
-                                  speculative_algorithm == "DSpark";
+  const bool is_block_diffusion =
+      speculative_algorithm == "DFlash" ||
+      SpeculativeConfig::is_dflash2_algorithm(speculative_algorithm) ||
+      speculative_algorithm == "DSpark";
 
 #if defined(USE_NPU)
   if (options_.enable_speculative_decode() &&
@@ -1970,10 +1971,13 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       const bool is_dspark = speculative_algorithm == "DSpark";
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      std::string draft_model_type = is_dspark ? "DSparkDraftModel"
-                                     : speculative_algorithm == "DFlash2"
-                                         ? "DFlash2DraftModel"
-                                         : "DFlashDraftModel";
+      std::string draft_model_type = "DFlashDraftModel";
+      if (is_dspark) {
+        draft_model_type = "DSparkDraftModel";
+      } else if (SpeculativeConfig::is_dflash2_algorithm(
+                     speculative_algorithm)) {
+        draft_model_type = std::string(kDFlash2DraftModelType);
+      }
       if (is_deepseek_v4_dspark) {
         draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
       }

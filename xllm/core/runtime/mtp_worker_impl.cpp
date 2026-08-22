@@ -1352,9 +1352,11 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
-  // The hybrid target owns recurrent GDN state, while the Qwen MTP draft
-  // is a pure full-attention model. Do not forward target-only slot metadata
-  // into the draft prefill; it has no matching validity mask or state cache.
+  // Block-diffusion and MTP workers both reuse a hybrid target's ForwardInput,
+  // but their Qwen draft models are pure full-attention models. Keep this
+  // cleanup at the MTP draft seam as well: otherwise target-only recurrent
+  // slot metadata makes MTP prefill independently enter a stateful path for
+  // which it has neither a validity mask nor a recurrent cache.
   input_params.embedding.linear_state_ids.clear();
   input_params.embedding.linear_state_indices = torch::Tensor();
   input_params.linear_state_cache_ops.clear();

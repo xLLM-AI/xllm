@@ -51,7 +51,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     // module after both workers finish loading.  Merely replacing the holder
     // after register_module() would leave the original large-vocabulary module
     // owned by torch::nn::Module and keep its device memory alive.
-    if (model_args.model_type() != "DFlash2DraftModel") {
+    if (!is_dflash2_draft_model_type(model_args.model_type())) {
       embed_tokens_ =
           register_module("embed_tokens", layer::WordEmbedding(context));
     }

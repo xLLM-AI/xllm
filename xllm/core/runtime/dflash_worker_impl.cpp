@@ -470,7 +470,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       // basis and reduces acceptance to near-random levels.
     } else {
 #if defined(USE_NPU)
-      if (options_.speculative_algorithm() == "DFlash2") {
+      if (SpeculativeConfig::is_dflash2_algorithm(
+              options_.speculative_algorithm())) {
         auto head = impl_->get_lm_head();
         draft_impl_->set_lm_head(head);
         auto word_embedding = impl_->get_word_embedding();
@@ -510,7 +511,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     CHECK_LT(mask_token_id_, draft_vocab_size)
         << "Block-diffusion mask_token_id (" << mask_token_id_
         << ") must be < draft vocab_size (" << draft_vocab_size << ").";
-    if (options_.speculative_algorithm() == "DFlash2") {
+    if (SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())) {
       const int32_t requested_block_size =
           options_.num_speculative_tokens() + 1;
       CHECK_EQ(requested_block_size, draft_args.dflash2_block_size())
@@ -560,7 +562,8 @@ bool DFlashWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   bool draft_allocated = true;
   const WorkerImpl::Status draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    if (options_.speculative_algorithm() == "DFlash2") {
+    if (SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())) {
       const KVCacheShape draft_shape =
           dflash2_draft_kv_cache_shape(kv_cache_shape,
                                        draft_impl_->context_.get_model_args(),
@@ -605,7 +608,8 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
   bool draft_allocated = true;
   const WorkerImpl::Status draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    if (options_.speculative_algorithm() == "DFlash2") {
+    if (SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())) {
       const KVCacheShape draft_shape =
           dflash2_draft_kv_cache_shape(kv_cache_shape,
                                        draft_impl_->context_.get_model_args(),

@@ -57,7 +57,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
-    } else if (algorithm == "DFlash2") {
+    } else if (SpeculativeConfig::is_dflash2_algorithm(algorithm)) {
       impl_ = new DFlash2WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DSpark") {
       impl_ = new DSparkWorkerImpl(parallel_args, device, options);

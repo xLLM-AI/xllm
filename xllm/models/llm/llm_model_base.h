@@ -182,7 +182,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     // registered module, so the unused vocabulary projection would otherwise
     // remain resident on the device.
     const bool shares_target_lm_head =
-        context.get_model_args().model_type() == "DFlash2DraftModel";
+        is_dflash2_draft_model_type(context.get_model_args().model_type());
     if (!embedding_mode_ && !shares_target_lm_head) {
       lm_head_ = register_module("lm_head", layer::LmHead(context));
     } else if (embedding_mode_) {

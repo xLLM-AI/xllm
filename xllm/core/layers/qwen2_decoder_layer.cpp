@@ -52,7 +52,7 @@ Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
                                   options,
                                   mlp_module_prefix));
 
-  use_dflash2_conv_ = model_args.model_type() == "DFlash2DraftModel";
+  use_dflash2_conv_ = is_dflash2_draft_model_type(model_args.model_type());
   if (use_dflash2_conv_) {
     attention_conv_ = register_module(
         "attention_conv",

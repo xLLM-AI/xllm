@@ -30,6 +30,12 @@ limitations under the License.
 
 namespace xllm {
 
+inline constexpr std::string_view kDFlash2DraftModelType = "DFlash2DraftModel";
+
+inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
+  return model_type == kDFlash2DraftModelType;
+}
+
 struct ModelArgs {
   // Expose every plain-data field to the generic property reflection layer so
   // the embedded Python model executor can receive the full, already-parsed

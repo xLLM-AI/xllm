@@ -25,13 +25,9 @@ limitations under the License.
 namespace {
 inline bool is_qwen3_model(const std::string& model_type) {
   static const std::unordered_set<std::string> qwen3_type_set = {
-      "qwen3",
-      "qwen3_vl",
-      "qwen3_moe",
-      "qwen3_vl_moe",
-      "oxygenvlm",
-      "DFlash2DraftModel"};
-  return qwen3_type_set.contains(model_type);
+      "qwen3", "qwen3_vl", "qwen3_moe", "qwen3_vl_moe", "oxygenvlm"};
+  return qwen3_type_set.contains(model_type) ||
+         xllm::is_dflash2_draft_model_type(model_type);
 }
 
 #if defined(USE_CUDA) || defined(USE_DCU)
