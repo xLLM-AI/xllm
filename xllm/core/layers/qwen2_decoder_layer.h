@@ -41,7 +41,7 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict);
 
-  void verify_dflash2_loaded_weights(const std::string& prefix) const;
+  void verify_loaded_weights(const std::string& prefix) const;
 
   torch::Tensor forward(torch::Tensor& x,
                         std::optional<torch::Tensor>& residual,

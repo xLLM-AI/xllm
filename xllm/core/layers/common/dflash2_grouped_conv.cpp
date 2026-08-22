@@ -41,6 +41,11 @@ torch::Tensor dflash2_grouped_conv(const torch::Tensor& hidden_states,
   CHECK_EQ(base.size(1), hidden_states.size(1));
 
   const int64_t num_tokens = hidden_states.size(0);
+  // Rows must be laid out as contiguous, fixed-width blocks per sequence.
+  // The modulo position below is only valid when every sequence begins on a
+  // block_size boundary.
+  CHECK_EQ(num_tokens % block_size, 0)
+      << "DFlash2 convolution rows must contain complete sequence blocks.";
   torch::Tensor blocks =
       hidden_states.view({num_tokens, num_groups, group_size});
   torch::Tensor coefficients =

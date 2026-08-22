@@ -85,13 +85,16 @@ void Qwen2DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
   }
 }
 
-void Qwen2DecoderLayerImpl::verify_dflash2_loaded_weights(
+void Qwen2DecoderLayerImpl::verify_loaded_weights(
     const std::string& prefix) const {
-  if (!use_dflash2_conv_) {
-    return;
+  attention_->verify_loaded_weights(prefix + "self_attn.");
+  mlp_->verify_loaded_weights(prefix + "mlp.");
+  input_norm_->verify_loaded_weights(prefix + "input_layernorm.");
+  post_norm_->verify_loaded_weights(prefix + "post_attention_layernorm.");
+  if (use_dflash2_conv_) {
+    attention_conv_->verify_loaded_weights(prefix + "attention_conv.");
+    mlp_conv_->verify_loaded_weights(prefix + "mlp_conv.");
   }
-  attention_conv_->verify_loaded_weights(prefix + "attention_conv.");
-  mlp_conv_->verify_loaded_weights(prefix + "mlp_conv.");
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>

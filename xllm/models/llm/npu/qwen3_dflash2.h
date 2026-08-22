@@ -189,8 +189,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     selector_.verify_loaded_weights();
     verify_context_kv_weights();
     for (int32_t i = 0; i < static_cast<int32_t>(layers_.size()); ++i) {
-      layers_[i]->verify_dflash2_loaded_weights("layers." + std::to_string(i) +
-                                                ".");
+      layers_[i]->verify_loaded_weights("layers." + std::to_string(i) + ".");
     }
   }
 
@@ -284,17 +283,34 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
                                      int32_t max_kv_len,
                                      torch::Dtype dtype,
                                      torch::Device device) override {
-    torch::Tensor mask = QWen3ModelImpl::gen_append_attn_mask(
-                             /*q_len=*/1, kv_len, max_kv_len, dtype, device)
-                             .repeat({q_len, 1});
-    if (sliding_window_ > 0 && kv_len > sliding_window_) {
-      const int32_t masked_prefix = kv_len - sliding_window_;
-      const float mask_value = dtype == torch::kFloat16
-                                   ? -std::numeric_limits<float>::infinity()
-                                   : -9984.0f;
-      mask.slice(/*dim=*/1, /*start=*/0, masked_prefix).fill_(mask_value);
-    }
-    return mask;
+    CHECK_GT(q_len, 0);
+    CHECK_GE(kv_len, q_len);
+    CHECK_GE(max_kv_len, kv_len);
+
+    const torch::TensorOptions index_options =
+        torch::TensorOptions().dtype(torch::kLong).device(device);
+    const torch::Tensor key_positions =
+        torch::arange(max_kv_len, index_options).view({1, max_kv_len});
+    const torch::Tensor query_offsets =
+        torch::arange(q_len, index_options).view({q_len, 1});
+    const int64_t first_query_position = kv_len - q_len;
+    const torch::Tensor first_visible_key =
+        query_offsets + first_query_position - (sliding_window_ - 1);
+    const torch::Tensor last_visible_key =
+        query_offsets + first_query_position + (block_size_ - 1);
+    const torch::Tensor masked = key_positions.lt(first_visible_key) |
+                                 key_positions.gt(last_visible_key) |
+                                 key_positions.ge(kv_len);
+
+    // Match AttentionMask's numeric convention: fp16 uses -inf while other
+    // dtypes use the FIA-compatible finite sentinel.
+    const float mask_value = dtype == torch::kFloat16
+                                 ? -std::numeric_limits<float>::infinity()
+                                 : -9984.0f;
+    const torch::TensorOptions mask_options =
+        torch::TensorOptions().dtype(dtype).device(device);
+    return torch::zeros({q_len, max_kv_len}, mask_options)
+        .masked_fill(masked, mask_value);
   }
 
  private:
