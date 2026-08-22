@@ -17,8 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "common/global_flags.h"
-#include "core/framework/config/speculative_config.h"
 #include "framework/model_loader.h"
 
 namespace xllm {
@@ -48,14 +46,13 @@ runtime::Options eagle3_draft_options(const runtime::Options& options) {
 Eagle3WorkerImpl::Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : MTPWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          eagle3_main_options(options),
-          eagle3_draft_options(options),
-          ::xllm::SpeculativeConfig::get_instance().enable_opt_validate_probs(),
-          /*enable_adaptive_speculative_decode=*/false) {
+    : MTPWorkerImpl(parallel_args,
+                    device,
+                    options,
+                    eagle3_main_options(options),
+                    eagle3_draft_options(options),
+                    /*enable_adaptive_speculative_decode=*/false) {
+  // Context parallelism does not expose the auxiliary hidden states.
   CHECK_LE(parallel_args.cp_size(), 1)
       << "EAGLE-3 speculative decoding does not support context parallelism "
          "(cp_size > 1).";
@@ -79,8 +76,7 @@ bool Eagle3WorkerImpl::init_model(const std::string& model_weights_path,
       torch::Tensor d2t_tensor = state_dict->get_tensor("d2t");
       if (d2t_tensor.defined()) {
         auto arange_tensor = torch::arange(d2t_tensor.size(0));
-        hot_token_id_ = d2t_tensor + arange_tensor;
-        hot_token_id_ = hot_token_id_.to(device_);
+        hot_token_id_ = (d2t_tensor + arange_tensor).to(device_, torch::kLong);
         LOG(INFO) << "Eagle3WorkerImpl: Loaded d2t tensor from state_dict, "
                      "hot_token_id size: "
                   << hot_token_id_.size(0);
@@ -102,10 +98,23 @@ void Eagle3WorkerImpl::process_draft_sample_output(
   // Keep probability compression behavior fully aligned with MTP.
   MTPWorkerImpl::process_draft_sample_output(sample_output);
 
-  // EAGLE-3 specific: map draft token IDs to target token IDs.
+  // Realign reduced draft-vocab outputs to the full target vocab; a model
+  // without d2t (hot_token_id_) is already full-vocab and needs none.
   if (!hot_token_id_.defined() || !sample_output.next_tokens.defined() ||
       sample_output.next_tokens.numel() == 0) {
     return;
+  }
+
+  // Scatter q so the (p-q)+ residual keeps full target mass where the draft
+  // cannot propose (q=0), letting rejection sampling align q with p.
+  if (sample_output.probs.defined()) {
+    const int64_t target_vocab_size = context_.get_model_args().vocab_size();
+    torch::Tensor full_vocab_probs =
+        torch::zeros({sample_output.probs.size(0), target_vocab_size},
+                     sample_output.probs.options());
+    full_vocab_probs.index_put_({torch::indexing::Slice(), hot_token_id_},
+                                sample_output.probs);
+    sample_output.probs = full_vocab_probs;
   }
 
   sample_output.next_tokens =

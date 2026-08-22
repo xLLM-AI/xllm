@@ -113,19 +113,20 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
     }
   }
 
-  BlockSampleOutput sample_output;
-  {
+  BlockSample sampled = [&]() {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     SamplingParameters sampling_params_on_device = input.sampling_params.to(
         base_logits.device(), base_logits.scalar_type());
-    sample_output = sample_block(
+    if (draft_sampling_mode_ == DraftSamplingMode::GREEDY) {
+      force_greedy_draft_sampling(sampling_params_on_device);
+    }
+    return sample_block(
         base_logits, last_hidden, anchor_token_ids, sampling_params_on_device);
-  }
+  }();
 
   DraftBlock draft_block;
-  draft_block.token_ids = std::move(sample_output.token_ids);
-  draft_block.probs = std::move(sample_output.probs);
-  draft_block.confidence_probs = std::move(sample_output.confidence_probs);
+  draft_block.proposal = std::move(sampled.proposal);
+  draft_block.confidence_probs = std::move(sampled.confidence_probs);
   draft_block.retained_inputs = take_retained_inputs(*draft_output);
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
@@ -133,7 +134,7 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
   return draft_block;
 }
 
-DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
+DSparkWorkerImpl::BlockSample DSparkWorkerImpl::sample_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& last_hidden,
     const torch::Tensor& anchor_token_ids,
@@ -162,12 +163,14 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
     CHECK_EQ(last_hidden.size(1), num_speculative_tokens)
         << "DSpark last_hidden n_spec mismatch.";
   }
+  const bool need_draft_probs = draft_probs_required(
+      draft_sampling_mode_, sampling_params.all_greedy_sample);
   SamplingParameters step_sampling_params = sampling_params;
   const torch::TensorOptions index_options =
       torch::TensorOptions().dtype(torch::kInt).device(base_logits.device());
   step_sampling_params.selected_token_idxes = torch::empty({0}, index_options);
   step_sampling_params.sample_idxes = torch::empty({0}, index_options);
-  step_sampling_params.return_probs = !step_sampling_params.all_greedy_sample;
+  step_sampling_params.return_probs = need_draft_probs;
   step_sampling_params.logprobs = false;
   step_sampling_params.max_top_logprobs = 0;
   step_sampling_params.use_beam_search = false;
@@ -175,11 +178,10 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
   torch::Tensor token_ids = torch::empty(
       {num_reqs, num_speculative_tokens},
       torch::TensorOptions().dtype(torch::kLong).device(base_logits.device()));
-  torch::Tensor proposal_probs =
-      torch::empty({num_reqs, num_speculative_tokens},
-                   torch::TensorOptions()
-                       .dtype(torch::kFloat32)
-                       .device(base_logits.device()));
+  std::vector<torch::Tensor> probs_steps;
+  if (need_draft_probs) {
+    probs_steps.reserve(num_speculative_tokens);
+  }
   // Filled after the sample loop by a single batched ConfidenceHead call; stays
   // undefined when confidence is disabled.
   torch::Tensor confidence_probs;
@@ -205,29 +207,10 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
     torch::Tensor sampled_token_ids = sample_output.next_tokens;
     synchronize_sampled_token_ids(sampled_token_ids, step_sampling_params);
 
-    torch::Tensor selected_proposal_probs;
-    if (step_sampling_params.all_greedy_sample) {
-      selected_proposal_probs = torch::ones({num_reqs},
-                                            torch::TensorOptions()
-                                                .dtype(torch::kFloat32)
-                                                .device(base_logits.device()));
-    } else {
-      CHECK_EQ(sample_output.probs.dim(), 2)
-          << "DSpark random/mixed sampling requires dense proposal probs.";
-      selected_proposal_probs =
-          sample_output.probs.gather(/*dim=*/1, sampled_token_ids.view({-1, 1}))
-              .view({-1})
-              .to(torch::kFloat32);
-      if (!step_sampling_params.all_random_sample) {
-        selected_proposal_probs =
-            torch::where(step_sampling_params.do_sample,
-                         selected_proposal_probs,
-                         torch::ones_like(selected_proposal_probs));
-      }
-    }
-
     token_ids.index_put_({ISlice(), token_idx}, sampled_token_ids);
-    proposal_probs.index_put_({ISlice(), token_idx}, selected_proposal_probs);
+    if (need_draft_probs) {
+      probs_steps.emplace_back(std::move(sample_output.probs));
+    }
     previous_token_ids = sampled_token_ids;
   }
 
@@ -251,9 +234,10 @@ DSparkWorkerImpl::BlockSampleOutput DSparkWorkerImpl::sample_block(
         << "batched confidence probs n_spec mismatch";
   }
 
-  return {.token_ids = std::move(token_ids),
-          .probs = std::move(proposal_probs),
-          .confidence_probs = std::move(confidence_probs)};
+  return {need_draft_probs ? DraftProposal(std::move(token_ids),
+                                           torch::stack(probs_steps, /*dim=*/1))
+                           : DraftProposal(std::move(token_ids)),
+          std::move(confidence_probs)};
 }
 
 void DSparkWorkerImpl::synchronize_sampled_token_ids(

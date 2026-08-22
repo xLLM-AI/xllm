@@ -187,7 +187,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `speculative_suffix_min_token_prob` | `double` | `0.1` | Suffix speculation 使用的最小 token 概率。 |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Suffix speculation 全局最大缓存请求数；`-1` 表示不限，`0` 表示禁用。 |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | 是否使用 tree-based suffix speculation，而不是 path speculation。 |
-| `enable_opt_validate_probs` | `bool` | `false` | validate 阶段是否直接使用 selected-only `draft_probs [B,S]`；设为 `false` 时会将 selected-only cache 值恢复为 dense `[B,S,V]`。 |
+| `draft_sampling_mode` | `string` | `"greedy"` | draft 模型生成 proposal token 的采样方式：`greedy`、`probabilistic`。仅 `MTP`、`DSpark`、`Eagle3` 支持 `probabilistic`。 |
 | `enable_atb_spec_kernel` | `bool` | `false` | 是否使用 ATB speculative kernel。 |
 
 ## ProfileConfig

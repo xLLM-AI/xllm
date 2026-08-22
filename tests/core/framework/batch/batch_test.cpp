@@ -42,6 +42,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/prefix_cache/block_hasher.h"
 #include "framework/request/stopping_checker.h"
+#include "framework/sampling/draft_proposal.h"
 #include "framework/sampling/rejection_sampler.h"
 #include "framework/sampling/sampling_params.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -1424,9 +1425,9 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
                                      /*all_greedy_sample=*/true,
                                      /*logprobs=*/false,
                                      /*max_top_logprobs=*/0);
+  DraftProposal draft_proposal = DraftProposal(draft_token_ids);
   const SampleOutput accepted_output =
-      rejection_sampler.forward(draft_token_ids,
-                                torch::zeros({2, 5}, torch::kFloat32),
+      rejection_sampler.forward(draft_proposal,
                                 target_logits,
                                 bonus_token_ids,
                                 /*mask_out_rejected_tokens=*/true);

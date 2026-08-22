@@ -52,6 +52,7 @@
 - Add MaCa and additional platform-compatibility layers, and promote `xllm_atb_layers` to main.
 
 ### Bugfix
+- Separate greedy and probabilistic speculative draft proposals for rejection sampling. **Migration:** the `enable_opt_validate_probs` flag is removed and replaced by `draft_sampling_mode` (`greedy` | `probabilistic`, default `greedy`); startups passing `--enable_opt_validate_probs` now abort as an unknown flag. The draft now defaults to greedy proposals — the emitted token distribution is unchanged, but the speculative acceptance rate differs from the previous temperature-following draft on `temperature > 0` workloads; set `draft_sampling_mode=probabilistic` (MTP / DSpark / Eagle3, including reduced-vocab `d2t` Eagle3) to restore the prior probabilistic draft.
 - Fix MTP correctness under asynchronous execution, including cross-TP-rank state divergence, TPOT latency accounting, DP synchronization, overlap input preparation, and acceptance-rate regressions.
 - Fix DeepSeek-V4 MTP hidden-state flow, schedule-overlap, and multi-device MTP input handling.
 - Fix Qwen3.5 DP empty-shard crashes, causal-conv decode, W8A8 weight loading, and quant weight loading on MLU.
