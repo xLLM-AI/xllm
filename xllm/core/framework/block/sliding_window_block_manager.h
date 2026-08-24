@@ -31,6 +31,14 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
   explicit SlidingWindowBlockManager(const Options& options);
   ~SlidingWindowBlockManager() override = default;
 
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      size_t num_tokens) override;
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
+      size_t num_tokens) override;
+
   // Deallocate leading blocks that have slid out of the window; leaves
   // invalid placeholders in their slots. Called by the composite after a
   // successful allocate commit.
@@ -49,6 +57,10 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
   uint32_t swa_blocks_per_seq() const { return options_.swa_blocks_per_seq(); }
 
  private:
+  size_t num_out_of_window_blocks(const KVCacheState& kv_state,
+                                  size_t cached_tokens) const;
+  size_t num_reclaimable_out_of_window_blocks(const KVCacheState& kv_state,
+                                              size_t cached_tokens) const;
   void release_out_of_window(Sequence* seq,
                              KVCacheState& kv_state,
                              size_t cached_tokens);
