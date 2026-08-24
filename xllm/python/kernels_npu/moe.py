@@ -44,6 +44,72 @@ def _grouped_matmul_swiglu_quant_v2(
     )
 
 
+def dequant_swiglu_quant(
+    x: torch.Tensor,
+    weight_scale: torch.Tensor | None,
+    activation_scale: torch.Tensor | None,
+    bias: torch.Tensor | None = None,
+    quant_scale: torch.Tensor | None = None,
+    quant_offset: torch.Tensor | None = None,
+    group_index: torch.Tensor | None = None,
+    activate_left: bool = True,
+    quant_mode: int = 1,
+    swiglu_mode: int = 1,
+    clamp_limit: float = 0.0,
+    glu_alpha: float = 1.0,
+    glu_bias: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the fused dequantization, SwiGLU, and dynamic quantization."""
+    return torch.ops.xllm_ops.dequant_swiglu_quant(
+        x,
+        weight_scale,
+        activation_scale,
+        bias,
+        quant_scale,
+        quant_offset,
+        group_index,
+        activate_left,
+        quant_mode,
+        swiglu_mode,
+        clamp_limit,
+        glu_alpha,
+        glu_bias,
+    )
+
+
+def moe_gating_top_k_hash(
+    x: torch.Tensor,
+    k: int,
+    bias: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    tid2eid: torch.Tensor | None,
+    k_group: int,
+    group_count: int,
+    routed_scaling_factor: float,
+    eps: float,
+    group_select_mode: int,
+    renorm: int,
+    norm_type: int,
+    out_flag: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Select experts with the DeepSeek-V4 hash-routing gate."""
+    return torch.ops.xllm_ops.moe_gating_top_k_hash(
+        x,
+        k,
+        bias,
+        input_ids,
+        tid2eid,
+        k_group,
+        group_count,
+        routed_scaling_factor,
+        eps,
+        group_select_mode,
+        renorm,
+        norm_type,
+        out_flag,
+    )
+
+
 def supports_cutlass_moe(device: torch.device) -> bool:
     """Return whether ``device`` has the native expert GEMMs.
 
@@ -180,6 +246,159 @@ def grouped_moe(
     )
 
 
+def _group_gemm(
+    *,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    per_token_scale: torch.Tensor | None,
+    group_list: torch.Tensor,
+    split_item: int,
+    group_type: int,
+    group_list_type: int,
+    output_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    outputs = torch.ops.npu.npu_grouped_matmul(
+        x=[x],
+        weight=[weight],
+        scale=None if scale is None else [scale],
+        per_token_scale=None if per_token_scale is None else [per_token_scale],
+        group_list=group_list,
+        split_item=split_item,
+        group_type=group_type,
+        group_list_type=group_list_type,
+        output_dtype=output_dtype,
+    )
+    return outputs[0]
+
+
+def _grouped_moe_with_selected_experts_impl(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    """Run grouped quantized experts with pre-computed routing (no gate).
+
+    The routing and W8A8 grouped-matmul sequence mirrors the native NPU
+    ``FusedMoEImpl::select_experts`` and ``forward_expert`` paths.
+    """
+    num_tokens = hidden_states.shape[0]
+    expert_num = num_total_experts if num_total_experts > 0 else w13.shape[0]
+    local_expert_count = num_experts_per_rank if num_experts_per_rank > 0 else w13.shape[0]
+    active_range = [start_expert_id, start_expert_id + local_expert_count]
+    if start_expert_id < 0 or active_range[1] > expert_num:
+        raise ValueError(f"active expert range {active_range} is outside [0, {expert_num})")
+    if w13.shape[0] != local_expert_count or w2.shape[0] != local_expert_count:
+        raise ValueError("local expert count must match the first dimension of w13 and w2")
+    expanded_hidden, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
+        hidden_states,
+        topk_ids.to(torch.int32),
+        scale=None,
+        active_num=num_tokens * topk_ids.size(-1),
+        expert_num=expert_num,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=active_range,
+        quant_mode=-1,
+    )
+    from xllm.python import kernels as _kernels
+
+    sorted_hidden_i8, pertoken_scale = _kernels.dynamic_quant(expanded_hidden)
+    if pertoken_scale is None:
+        raise RuntimeError("dynamic_quant did not return a per-token scale")
+    if expert_tokens.numel() < local_expert_count:
+        raise RuntimeError("npu_moe_init_routing_v2 returned fewer groups than local experts")
+    group_list = expert_tokens[:local_expert_count].to(torch.int64)
+    gemm1_out = _group_gemm(
+        x=sorted_hidden_i8,
+        weight=w13,
+        scale=None,
+        per_token_scale=None,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=torch.int32,
+    )
+    act_i8, act_pt = _kernels.dequant_swiglu_quant(
+        x=gemm1_out,
+        weight_scale=w13_scale,
+        activation_scale=pertoken_scale,
+        bias=None,
+        quant_scale=None,
+        quant_offset=None,
+        group_index=group_list,
+        activate_left=True,
+        quant_mode=1,
+        swiglu_mode=1,
+        clamp_limit=swiglu_limit,
+        glu_alpha=1.0,
+        glu_bias=0.0,
+    )
+    del w13_offset, w2_offset
+    output = _group_gemm(
+        x=act_i8,
+        weight=w2,
+        scale=w2_scale.to(hidden_states.dtype),
+        per_token_scale=act_pt,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=hidden_states.dtype,
+    )
+    local_mask = (topk_ids >= active_range[0]) & (topk_ids < active_range[1])
+    local_topk_weights = topk_weights * local_mask.to(topk_weights.dtype)
+    return torch_npu.npu_moe_token_unpermute(
+        permuted_tokens=output,
+        sorted_indices=expanded_row_idx.abs(),
+        probs=local_topk_weights.to(output.dtype),
+    )
+
+
+@torch.library.custom_op("xllm_python::grouped_moe_with_selected_experts", mutates_args=())
+def grouped_moe_with_selected_experts(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    return _grouped_moe_with_selected_experts_impl(
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_offset,
+        w2_offset,
+        num_total_experts,
+        start_expert_id,
+        num_experts_per_rank,
+        swiglu_limit,
+    )
+
+
 @grouped_moe.register_fake
 def _grouped_moe_fake(
     hidden_states: torch.Tensor,
@@ -210,6 +429,27 @@ def _grouped_moe_fake(
         routed_scaling_factor,
         active_expert_range,
     )
+    return torch.empty_like(hidden_states)
+
+
+@grouped_moe_with_selected_experts.register_fake
+def _grouped_moe_with_selected_experts_fake(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    del topk_weights, topk_ids, w13, w2, w13_scale, w2_scale, w13_offset, w2_offset
+    del num_total_experts, start_expert_id, num_experts_per_rank, swiglu_limit
     return torch.empty_like(hidden_states)
 
 
@@ -514,11 +754,14 @@ def _moe_gmm2_combine_fake(
 
 
 __all__ = [
+    "dequant_swiglu_quant",
+    "moe_gating_top_k_hash",
     "supports_cutlass_moe",
     "prepare_grouped_moe_weights",
     "grouped_moe",
     "moe_gate_routing",
     "moe_expert_compute",
+    "grouped_moe_with_selected_experts",
     "moe_fused_topk",
     "cutlass_fused_moe",
     "fused_moe",

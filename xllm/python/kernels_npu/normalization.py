@@ -39,6 +39,7 @@ def fused_add_rms_norm_dynamic_quant(
         output_mask=[True, False],
     )
     return outputs[0], outputs[3], outputs[2]
+rms_norm_dynamic_quant = torch.ops.xllm_ops.rms_norm_dynamic_quant
 
 
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -84,6 +85,7 @@ __all__ = [
     "rms_norm",
     "fused_add_rms_norm",
     "fused_add_rms_norm_dynamic_quant",
+    "rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
 ]

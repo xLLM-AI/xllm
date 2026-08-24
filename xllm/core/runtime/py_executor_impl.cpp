@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <Python.h>
 #include <glog/logging.h>
-#include <pybind11/embed.h>
+#include <pybind11/pybind11.h>
 #include <torch/extension.h>
 
 #include <memory>
@@ -58,9 +58,7 @@ void clear_python_object(py::object& object) {
   object = py::object();
 }
 
-}  // namespace
-
-PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
+void register_xllm_runtime_module(py::module_& m) {
   register_attention_metadata_views(m);
 
 #if defined(USE_NPU)
@@ -75,6 +73,23 @@ PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
 #endif
 }
 
+void ensure_xllm_runtime_module() {
+  py::module_ sys = py::module_::import("sys");
+  py::dict modules = py::reinterpret_borrow<py::dict>(sys.attr("modules"));
+  const py::str module_name("xllm_runtime");
+  if (modules.contains(module_name)) {
+    return;
+  }
+
+  py::object module_object =
+      py::module_::import("types").attr("ModuleType")(module_name);
+  py::module_ module = py::reinterpret_borrow<py::module_>(module_object);
+  register_xllm_runtime_module(module);
+  modules[module_name] = module;
+}
+
+}  // namespace
+
 PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                const ModelArgs& args,
                                const torch::Device& device,
@@ -87,7 +102,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
 
   py::gil_scoped_acquire gil;
-  py::module_::import("xllm_runtime");
+  ensure_xllm_runtime_module();
   py::module_ executor_module =
       py::module_::import("xllm.python.model_executor.executor");
   py_executor_ = executor_module.attr("ModelExecutor")(

@@ -522,6 +522,374 @@ def _sparse_flash_attention_out_fake(
     return output
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek-V4 DSA kernel fakes
+# ---------------------------------------------------------------------------
+
+# Matches kDsaMetadataBufferElements in xllm_ops_api.h.
+_DSA_METADATA_BUFFER_ELEMENTS = 1024
+
+
+def _rms_norm_dynamic_quant_fake(
+    input: torch.Tensor, weight: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del weight, eps
+    return input.new_empty(input.shape, dtype=torch.int8), input.new_empty(input.shape[:-1], dtype=torch.float32)
+
+
+def _npu_inplace_partial_rotary_mul_fake(
+    x: torch.Tensor,
+    r1: torch.Tensor,
+    r2: torch.Tensor,
+    rotary_mode: str,
+    partial_slice: list[int],
+) -> None:
+    del x, r1, r2, rotary_mode, partial_slice
+
+
+def _hc_pre_fake(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_mult: int,
+    hc_sinkhorn_iters: int,
+    norm_eps: float,
+    hc_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del hc_fn, hc_scale, hc_base, hc_sinkhorn_iters, norm_eps, hc_eps
+    if x.dim() == 4:
+        y_shape = (x.size(0), x.size(1), x.size(3))
+        post_shape = (x.size(0), x.size(1), hc_mult)
+        comb_shape = (x.size(0), x.size(1), hc_mult, hc_mult)
+    else:
+        y_shape = (x.size(0), x.size(2))
+        post_shape = (x.size(0), hc_mult)
+        comb_shape = (x.size(0), hc_mult, hc_mult)
+    attn_input = x.new_empty(y_shape, dtype=x.dtype)
+    post = x.new_empty(post_shape, dtype=torch.float32)
+    comb = x.new_empty(comb_shape, dtype=torch.float32)
+    return attn_input, post, comb
+
+
+def _hc_post_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor:
+    del post, comb
+    # hc_post returns [T, hc_mult, hidden] (the merged residual streams).
+    return residual.new_empty(residual.shape, dtype=residual.dtype)
+
+
+def _compressor_fake(
+    x: torch.Tensor,
+    wkv: torch.Tensor,
+    wgate: torch.Tensor,
+    kv_state: torch.Tensor,
+    score_state: torch.Tensor,
+    ape: torch.Tensor,
+    norm_weight: torch.Tensor,
+    rope_sin: torch.Tensor,
+    rope_cos: torch.Tensor,
+    kv_block_table: torch.Tensor | None,
+    score_block_table: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None,
+    seqused: torch.Tensor | None,
+    start_pos: torch.Tensor | None,
+    rope_head_dim: int,
+    cmp_ratio: int,
+    coff: int,
+    norm_eps: float,
+    rotary_mode: int,
+    enable_grad: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    del (
+        wkv,
+        wgate,
+        kv_state,
+        score_state,
+        ape,
+        rope_cos,
+        kv_block_table,
+        score_block_table,
+        cu_seqlens,
+        seqused,
+        start_pos,
+        rope_head_dim,
+        norm_eps,
+        rotary_mode,
+    )
+    head_dim = norm_weight.size(0)
+    if x.dim() == 3:
+        compressed_seq = (x.size(1) + cmp_ratio - 1) // cmp_ratio
+        cmp_kv_shape = (x.size(0), compressed_seq, head_dim)
+        grad_shapes = (
+            (x.size(0), x.size(1), coff * head_dim),
+            (x.size(0), compressed_seq, coff * cmp_ratio, head_dim),
+            (x.size(0), compressed_seq, head_dim),
+            (x.size(0), compressed_seq),
+        )
+    else:
+        compressed_seq = rope_sin.size(0)
+        cmp_kv_shape = (compressed_seq, head_dim)
+        grad_shapes = (
+            (x.size(0), coff * head_dim),
+            (compressed_seq, coff * cmp_ratio, head_dim),
+            (compressed_seq, head_dim),
+            (compressed_seq,),
+        )
+    outputs = [x.new_empty(cmp_kv_shape, dtype=x.dtype)]
+    if enable_grad:
+        outputs.extend(x.new_empty(shape, dtype=x.dtype) for shape in grad_shapes)
+    else:
+        outputs.extend(x.new_empty((0,), dtype=x.dtype) for _ in grad_shapes)
+    return tuple(outputs)  # type: ignore[return-value]
+
+
+def _sparse_attn_sharedkv_fake(
+    q: torch.Tensor,
+    ori_kv: torch.Tensor | None,
+    cmp_kv: torch.Tensor | None,
+    ori_sparse_indices: torch.Tensor | None,
+    cmp_sparse_indices: torch.Tensor | None,
+    ori_block_table: torch.Tensor | None,
+    cmp_block_table: torch.Tensor | None,
+    cu_seqlens_q: torch.Tensor | None,
+    cu_seqlens_ori_kv: torch.Tensor | None,
+    cu_seqlens_cmp_kv: torch.Tensor | None,
+    seqused_q: torch.Tensor | None,
+    seqused_kv: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+    metadata: torch.Tensor | None,
+    softmax_scale: float,
+    cmp_ratio: int,
+    ori_mask_mode: int,
+    cmp_mask_mode: int,
+    ori_win_left: int,
+    ori_win_right: int,
+    layout_q: str,
+    layout_kv: str,
+    return_softmax_lse: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del (
+        ori_kv,
+        cmp_kv,
+        ori_sparse_indices,
+        cmp_sparse_indices,
+        ori_block_table,
+        cmp_block_table,
+        sinks,
+        metadata,
+        softmax_scale,
+        cmp_ratio,
+        ori_mask_mode,
+        cmp_mask_mode,
+        ori_win_left,
+        ori_win_right,
+        layout_q,
+        layout_kv,
+    )
+    out = q.new_empty(q.shape, dtype=q.dtype)
+    lse_shape = (*q.shape[:-1], 1) if return_softmax_lse else (0,)
+    lse = q.new_empty(lse_shape, dtype=torch.float32)
+    return out, lse
+
+
+def _sparse_attn_sharedkv_metadata_fake(
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
+    cu_seqlens_q: torch.Tensor | None,
+    cu_seqlens_ori_kv: torch.Tensor | None,
+    cu_seqlens_cmp_kv: torch.Tensor | None,
+    seqused_q: torch.Tensor | None,
+    seqused_kv: torch.Tensor | None,
+    batch_size: int,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    ori_topk: int,
+    cmp_topk: int,
+    cmp_ratio: int,
+    ori_mask_mode: int,
+    cmp_mask_mode: int,
+    ori_win_left: int,
+    ori_win_right: int,
+    layout_q: str,
+    layout_kv: str,
+    has_ori_kv: bool,
+    has_cmp_kv: bool,
+) -> torch.Tensor:
+    del (
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_kv,
+        ori_topk,
+        cmp_topk,
+        cmp_ratio,
+        ori_mask_mode,
+        cmp_mask_mode,
+        ori_win_left,
+        ori_win_right,
+        layout_q,
+        layout_kv,
+        has_ori_kv,
+        has_cmp_kv,
+    )
+    for tensor in (
+        cu_seqlens_q,
+        cu_seqlens_ori_kv,
+        cu_seqlens_cmp_kv,
+        seqused_q,
+        seqused_kv,
+    ):
+        if tensor is not None:
+            return tensor.new_empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
+    return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32, device="npu")
+
+
+def _quant_lightning_indexer_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_dequant_scale: torch.Tensor,
+    key_dequant_scale: torch.Tensor,
+    query_quant_mode: int,
+    key_quant_mode: int,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_key: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    metadata: torch.Tensor | None,
+    layout_query: str,
+    layout_key: str,
+    sparse_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    cmp_ratio: int,
+    return_value: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del (
+        weights,
+        query_dequant_scale,
+        key_dequant_scale,
+        query_quant_mode,
+        key_quant_mode,
+        block_table,
+        metadata,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        cmp_ratio,
+    )
+    key_head_num = key.size(1) if layout_key == "TND" else key.size(2)
+    if layout_query == "BSND":
+        out_shape = (query.size(0), query.size(1), key_head_num, sparse_count)
+    else:
+        out_shape = (query.size(0), key_head_num, sparse_count)
+    out = query.new_zeros(out_shape, dtype=torch.int32)
+    val = (
+        query.new_empty(out_shape, dtype=torch.float32) if return_value else query.new_empty((0,), dtype=torch.float32)
+    )
+    return out, val
+
+
+def _quant_lightning_indexer_metadata_fake(
+    num_heads_q: int,
+    num_heads_k: int,
+    head_dim: int,
+    query_quant_mode: int,
+    key_quant_mode: int,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_key: torch.Tensor | None,
+    batch_size: int,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    layout_query: str,
+    layout_key: str,
+    sparse_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    cmp_ratio: int,
+    device: str,
+) -> torch.Tensor:
+    del (
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        query_quant_mode,
+        key_quant_mode,
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        layout_query,
+        layout_key,
+        sparse_count,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        cmp_ratio,
+    )
+    for tensor in (actual_seq_lengths_query, actual_seq_lengths_key):
+        if tensor is not None:
+            return tensor.new_empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32)
+    return torch.empty((_DSA_METADATA_BUFFER_ELEMENTS,), dtype=torch.int32, device=device)
+
+
+def _moe_gating_top_k_hash_fake(
+    x: torch.Tensor,
+    k: int,
+    bias: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    tid2eid: torch.Tensor | None,
+    k_group: int,
+    group_count: int,
+    routed_scaling_factor: float,
+    eps: float,
+    group_select_mode: int,
+    renorm: int,
+    norm_type: int,
+    out_flag: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del bias, input_ids, tid2eid, k_group, group_count, routed_scaling_factor
+    del eps, group_select_mode, renorm, norm_type, out_flag
+    y_shape = (*x.shape[:-1], k)
+    y = x.new_empty(y_shape, dtype=x.dtype)
+    expert_idx = x.new_empty(y_shape, dtype=torch.int32)
+    out = x.new_empty(x.shape, dtype=torch.float32)
+    return y, expert_idx, out
+
+
+def _dequant_swiglu_quant_fake(
+    x: torch.Tensor,
+    weight_scale: torch.Tensor | None,
+    activation_scale: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    quant_scale: torch.Tensor | None,
+    quant_offset: torch.Tensor | None,
+    group_index: torch.Tensor | None,
+    activate_left: bool,
+    quant_mode: int,
+    swiglu_mode: int,
+    clamp_limit: float,
+    glu_alpha: float,
+    glu_bias: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del weight_scale, activation_scale, bias, quant_scale, quant_offset
+    del group_index, activate_left, quant_mode, swiglu_mode
+    del clamp_limit, glu_alpha, glu_bias
+    # Output is half of input's last dim (SwiGLU splits gate/up).
+    out_dim = x.size(-1) // 2
+    act_quantized = x.new_empty((*x.shape[:-1], out_dim), dtype=torch.int8)
+    act_scale = x.new_empty(x.shape[:-1], dtype=torch.float32)
+    return act_quantized, act_scale
+
+
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
@@ -548,3 +916,15 @@ register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
 register_fake("xllm_ops::sparse_flash_attention", _sparse_flash_attention_fake)
 register_fake("xllm_ops::sparse_flash_attention_out", _sparse_flash_attention_out_fake)
+register_fake("xllm_ops::rms_norm_dynamic_quant", _rms_norm_dynamic_quant_fake)
+register_fake(
+    "xllm_ops::npu_inplace_partial_rotary_mul",
+    _npu_inplace_partial_rotary_mul_fake,
+)
+register_fake("xllm_ops::compressor", _compressor_fake)
+register_fake("xllm_ops::moe_gating_top_k_hash", _moe_gating_top_k_hash_fake)
+register_fake("xllm_ops::dequant_swiglu_quant", _dequant_swiglu_quant_fake)
+register_fake("xllm_ops::hc_pre", _hc_pre_fake)
+register_fake("xllm_ops::hc_post", _hc_post_fake)
+register_fake("xllm_ops::sparse_attn_sharedkv", _sparse_attn_sharedkv_fake)
+register_fake("xllm_ops::sparse_attn_sharedkv_metadata", _sparse_attn_sharedkv_metadata_fake)
