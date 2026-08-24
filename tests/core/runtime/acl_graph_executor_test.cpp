@@ -49,6 +49,7 @@ limitations under the License.
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
@@ -1162,9 +1163,15 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
       options,
       /*need_update_attn_mask=*/false,
       /*is_hybrid_linear_attention=*/false);
-  EXPECT_EQ(persistent_param.q_seq_lens().size(0), 30);
-  EXPECT_EQ(persistent_param.kv_seq_lens().size(0), 30);
-  EXPECT_EQ(persistent_param.persistent_block_tables().size(0), 30);
+  const int64_t expected_token_capacity =
+      runtime::get_decode_graph_token_bucket(
+          static_cast<int64_t>(options.max_seqs_per_batch()) *
+              options.num_decoding_tokens(),
+          options.enable_graph_mode_decode_no_padding());
+  EXPECT_EQ(persistent_param.q_seq_lens().size(0), expected_token_capacity);
+  EXPECT_EQ(persistent_param.kv_seq_lens().size(0), expected_token_capacity);
+  EXPECT_EQ(persistent_param.persistent_block_tables().size(0),
+            expected_token_capacity);
 
   constexpr int64_t kValidateRows = 12;
   const torch::TensorOptions int_options =
@@ -1319,13 +1326,22 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
 
   ::xllm::npu::GraphPersistentParam target_param(args, device, options);
   target_param.set_aux_hidden_states(aux_hidden_states);
-  EXPECT_EQ(target_param.aux_hidden_states().size(0), 30);
+  const int64_t expected_target_capacity =
+      runtime::get_decode_graph_token_bucket(
+          static_cast<int64_t>(options.max_seqs_per_batch()) *
+              options.num_decoding_tokens(),
+          options.enable_graph_mode_decode_no_padding());
+  EXPECT_EQ(target_param.aux_hidden_states().size(0), expected_target_capacity);
 
   options.is_draft_engine(true);
   ::xllm::npu::GraphPersistentParam draft_param(args, device, options);
   draft_param.set_aux_hidden_states(aux_hidden_states.slice(
       /*dim=*/0, /*start=*/0, /*end=*/options.max_seqs_per_batch()));
-  EXPECT_EQ(draft_param.aux_hidden_states().size(0), 10);
+  const int64_t expected_draft_capacity =
+      runtime::get_decode_graph_token_bucket(
+          options.max_seqs_per_batch(),
+          options.enable_graph_mode_decode_no_padding());
+  EXPECT_EQ(draft_param.aux_hidden_states().size(0), expected_draft_capacity);
 
   speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }

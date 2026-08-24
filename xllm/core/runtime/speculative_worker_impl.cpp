@@ -83,11 +83,19 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
       static_cast<int64_t>(options.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options.max_tokens_per_batch());
+  estimate_options.max_tokens_per_chunk_for_prefill =
+      static_cast<int64_t>(options.max_tokens_per_chunk_for_prefill());
   estimate_options.max_linear_state_cache_slots =
       options.max_linear_state_cache_slots();
   estimate_options.is_draft_engine = options.is_draft_engine();
+  estimate_options.enable_chunked_prefill = options.enable_chunked_prefill();
+  estimate_options.enable_schedule_overlap = options.enable_schedule_overlap();
+  const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   estimate_options.enable_prefix_cache =
-      KVCacheConfig::get_instance().enable_prefix_cache();
+      kv_cache_config.enable_prefix_cache() &&
+      !kv_cache_config.enable_xtensor();
+  estimate_options.enable_disagg_pd = options.enable_disagg_pd();
+  estimate_options.instance_role = options.instance_role();
   return estimate_options;
 }
 
