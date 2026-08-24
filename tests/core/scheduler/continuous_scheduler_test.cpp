@@ -633,6 +633,43 @@ TEST(BlockManagerPoolTest, AllocateFailureRollsBackSharedPrefixBlocks) {
 }
 
 TEST(ContinuousSchedulerTest,
+     BlockExhaustionDefersRequestAfterCurrentBatchHasWork) {
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      2.0);
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/4, /*block_size=*/4);
+  ContinuousScheduler::Options options =
+      create_scheduler_options(/*max_tokens_per_batch=*/16,
+                               /*max_seqs_per_batch=*/2,
+                               /*num_speculative_tokens=*/0,
+                               /*max_tokens_per_chunk_for_prefill=*/8,
+                               /*dp_size=*/1);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), options);
+
+  auto scheduled_request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4, 5, 6, 7, 8}, 1, 30000);
+  auto deferred_request = generate_request_with_prompt_tokens(
+      {9, 10, 11, 12, 13, 14, 15, 16}, 1, 30000);
+  ASSERT_TRUE(scheduler->add_request(scheduled_request));
+  ASSERT_TRUE(scheduler->add_request(deferred_request));
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches.front().size(), 1u);
+  EXPECT_EQ(batches.front()[0], scheduled_request->sequences()[0].get());
+  EXPECT_EQ(scheduler->get_running_requests().size(), 1u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+  EXPECT_FALSE(deferred_request->finished());
+  EXPECT_EQ(
+      deferred_request->sequences()[0]->kv_state().num_blocks(BlockType::KV),
+      0u);
+
+  (void)engine.release();
+}
+
+TEST(ContinuousSchedulerTest,
      PDDecodeBestOfNExpandsAndSharesPromptViaPrefixCache) {
   // Disagg PD decode instance flow:
   //   1. request arrives from the prefill instance with kv_cache_tokens_num

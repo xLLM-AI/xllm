@@ -301,12 +301,21 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
   return std::min<int64_t>(auto_blocks, max_blocks);
 }
 
-Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
+constexpr int64_t kDsv4SwaPaddingBlocks = 1;
+
+bool is_dsv4_prefill_or_mix_role(InstanceRole instance_role) {
+  return instance_role == InstanceRole::DEFAULT ||
+         instance_role == InstanceRole::PREFILL ||
+         instance_role == InstanceRole::MIX;
+}
+
+int64_t calculate_dsv4_minimum_swa_count(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options) {
   const int64_t max_seqs =
       std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
   const int64_t block_size = options.block_size;
+  CHECK_GT(block_size, 0) << "DSV4 block_size must be positive";
   const int64_t semantic_window = std::max(model_args.window_size(), 1);
   const int64_t max_model_len = model_args.max_seq_len();
   const int64_t window_size =
@@ -314,9 +323,57 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
                         : semantic_window;
   const int64_t swa_blocks_per_seq =
       get_swa_blocks_per_seq(window_size, block_size);
-  const int64_t burst_blocks = util::ceil_div(
-      std::max(options.max_tokens_per_batch, static_cast<int64_t>(1)),
-      block_size);
+
+  if (is_dsv4_prefill_or_mix_role(options.instance_role)) {
+    const bool use_chunk_limit = options.enable_chunked_prefill &&
+                                 options.max_tokens_per_chunk_for_prefill > 0;
+    const int64_t chunk_tokens =
+        use_chunk_limit
+            ? options.max_tokens_per_chunk_for_prefill
+            : std::max(options.max_tokens_per_batch, static_cast<int64_t>(1));
+    const int64_t chunk_blocks = util::ceil_div(chunk_tokens, block_size);
+    return max_seqs * (swa_blocks_per_seq + chunk_blocks + 1) +
+           kDsv4SwaPaddingBlocks;
+  }
+  CHECK(options.instance_role == InstanceRole::DECODE)
+      << "unsupported DSV4 SWA estimation instance_role="
+      << static_cast<int32_t>(options.instance_role);
+  const int64_t speculative_tokens =
+      std::max(options.num_speculative_tokens, static_cast<int64_t>(0));
+  const int64_t speculative_reserve_tokens =
+      speculative_tokens * (options.enable_schedule_overlap ? 2 : 1);
+  const int64_t decode_window_blocks =
+      util::ceil_div(window_size + speculative_reserve_tokens, block_size);
+  return max_seqs * decode_window_blocks * 2 + kDsv4SwaPaddingBlocks;
+}
+
+int64_t dsv4_common_unit_bytes(const Dsv4KVCacheEstimateCost& cache_cost,
+                               int64_t common_blocks_per_unit) {
+  CHECK_GT(cache_cost.manager_blocks_per_unit, 0);
+  CHECK_EQ(common_blocks_per_unit % cache_cost.manager_blocks_per_unit, 0);
+  const int64_t compressed_units =
+      common_blocks_per_unit / cache_cost.manager_blocks_per_unit;
+  return compressed_units * cache_cost.token_unit_bytes;
+}
+
+void set_dsv4_compressed_counts(const Dsv4KVCacheEstimateCost& cache_cost,
+                                int64_t token_unit_count,
+                                KVCacheCapacity* kv_cache_cap) {
+  CHECK(kv_cache_cap != nullptr);
+  if (cache_cost.n_c4_layers > 0 && cache_cost.n_c128_layers > 0) {
+    kv_cache_cap->c128_count(token_unit_count);
+    kv_cache_cap->c4_count(32 * token_unit_count);
+  } else if (cache_cost.n_c4_layers > 0) {
+    kv_cache_cap->c4_count(token_unit_count);
+  } else if (cache_cost.n_c128_layers > 0) {
+    kv_cache_cap->c128_count(token_unit_count);
+  }
+}
+
+Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
+    const ModelArgs& model_args,
+    const KVCacheEstimateOptions& options) {
+  const int64_t block_size = options.block_size;
   const int64_t head_dim = model_args.head_dim();
   const int64_t index_head_dim =
       std::max<int64_t>(model_args.index_head_dim(), 1);
@@ -326,8 +383,17 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       static_cast<int64_t>(torch::elementSize(options.dtype));
 
   Dsv4KVCacheEstimateCost cache_cost;
-  cache_cost.swa_count =
-      swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
+  cache_cost.swa_count = calculate_dsv4_minimum_swa_count(model_args, options);
+  LOG(INFO) << "DSV4 minimum SWA block request: model_type="
+            << model_args.model_type()
+            << ", is_draft_engine=" << options.is_draft_engine
+            << ", enable_disagg_pd=" << options.enable_disagg_pd
+            << ", instance_role=" << static_cast<int32_t>(options.instance_role)
+            << ", max_seqs_per_batch=" << options.max_seqs_per_batch
+            << ", max_tokens_per_batch=" << options.max_tokens_per_batch
+            << ", max_tokens_per_chunk_for_prefill="
+            << options.max_tokens_per_chunk_for_prefill
+            << ", swa_count=" << cache_cost.swa_count;
   for (int64_t i = 0; i < model_args.n_layers(); ++i) {
     const int32_t ratio = i < static_cast<int64_t>(compress_ratios.size())
                               ? compress_ratios[static_cast<size_t>(i)]
@@ -341,21 +407,21 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
   const int64_t n_c1_layers =
       model_args.n_layers() - cache_cost.n_c4_layers - cache_cost.n_c128_layers;
 
-  const int64_t swa_bytes_per_c1_layer =
-      cache_cost.swa_count * block_size * head_dim * dtype_size;
-  const int64_t swa_bytes_per_c4_layer =
-      cache_cost.swa_count *
-      (block_size * head_dim * dtype_size +
-       block_size * (2 * head_dim * float32_size) * 2 +
-       block_size * (2 * index_head_dim * float32_size) * 2);
-  const int64_t swa_bytes_per_c128_layer =
-      cache_cost.swa_count * (block_size * head_dim * dtype_size +
-                              block_size * head_dim * float32_size * 2);
+  const int64_t swa_bytes_per_c1_block = block_size * head_dim * dtype_size;
+  const int64_t swa_bytes_per_c4_block =
+      block_size * head_dim * dtype_size +
+      block_size * (2 * head_dim * float32_size) * 2 +
+      block_size * (2 * index_head_dim * float32_size) * 2;
+  const int64_t swa_bytes_per_c128_block =
+      block_size * head_dim * dtype_size +
+      block_size * head_dim * float32_size * 2;
 
+  cache_cost.swa_bytes_per_block =
+      n_c1_layers * swa_bytes_per_c1_block +
+      cache_cost.n_c4_layers * swa_bytes_per_c4_block +
+      cache_cost.n_c128_layers * swa_bytes_per_c128_block;
   cache_cost.constant_swa_bytes =
-      n_c1_layers * swa_bytes_per_c1_layer +
-      cache_cost.n_c4_layers * swa_bytes_per_c4_layer +
-      cache_cost.n_c128_layers * swa_bytes_per_c128_layer;
+      cache_cost.swa_count * cache_cost.swa_bytes_per_block;
 
   const DeepSeekV4CachePolicy cache_policy =
       get_dsv4_cache_policy(options.dtype);
@@ -389,10 +455,12 @@ void init_dsv4_counts(const ModelArgs& model_args,
   CHECK(kv_cache_cap != nullptr);
   const Dsv4KVCacheEstimateCost cache_cost =
       estimate_dsv4_kv_cache_cost(model_args, options);
-  int64_t token_mem = std::max(
-      static_cast<int64_t>(0),
-      kv_cache_cap->cache_size_in_bytes() - cache_cost.constant_swa_bytes);
-
+  CHECK_GE(kv_cache_cap->cache_size_in_bytes(), cache_cost.constant_swa_bytes)
+      << "no memory for the minimum DSV4 SWA cache, required="
+      << readable_size(cache_cost.constant_swa_bytes)
+      << ", available=" << readable_size(kv_cache_cap->cache_size_in_bytes());
+  int64_t token_mem =
+      kv_cache_cap->cache_size_in_bytes() - cache_cost.constant_swa_bytes;
   if (options.draft_model_args != nullptr) {
     CHECK(options.draft_options != nullptr)
         << "DSV4 draft options must be provided with draft model args";
@@ -404,24 +472,35 @@ void init_dsv4_counts(const ModelArgs& model_args,
         *options.draft_model_args, *options.draft_options);
     const int64_t constant_bytes =
         cache_cost.constant_swa_bytes + draft_cost.constant_swa_bytes;
-    CHECK_GT(kv_cache_cap->cache_size_in_bytes(), constant_bytes)
+    CHECK_GE(kv_cache_cap->cache_size_in_bytes(), constant_bytes)
         << "no memory left for speculative target/draft fixed kv cache "
            "allocation";
 
-    const int64_t token_unit_bytes =
-        cache_cost.token_unit_bytes + draft_cost.token_unit_bytes;
-    CHECK_GT(token_unit_bytes, 0)
-        << "mtp target and draft token unit bytes must be positive";
+    const int64_t common_blocks_per_unit = std::max(
+        cache_cost.manager_blocks_per_unit, draft_cost.manager_blocks_per_unit);
+    const int64_t target_common_unit_bytes =
+        dsv4_common_unit_bytes(cache_cost, common_blocks_per_unit);
+    const int64_t draft_common_unit_bytes =
+        dsv4_common_unit_bytes(draft_cost, common_blocks_per_unit);
+    const int64_t combined_unit_bytes =
+        target_common_unit_bytes + draft_common_unit_bytes;
+    const int64_t remaining_bytes =
+        kv_cache_cap->cache_size_in_bytes() - constant_bytes;
+    if (combined_unit_bytes > 0) {
+      CHECK_GE(remaining_bytes, combined_unit_bytes)
+          << "minimum DSV4 target/draft SWA caches leave insufficient memory "
+             "for one compressed cache unit, swa_required="
+          << readable_size(constant_bytes)
+          << ", compressed_unit_required=" << readable_size(combined_unit_bytes)
+          << ", available="
+          << readable_size(kv_cache_cap->cache_size_in_bytes());
+    }
     const int64_t token_unit_count =
-        (kv_cache_cap->cache_size_in_bytes() - constant_bytes) /
-        token_unit_bytes;
-    CHECK_GT(token_unit_count, 0)
-        << "no memory left for speculative target/draft kv cache token "
-           "blocks";
+        combined_unit_bytes > 0 ? remaining_bytes / combined_unit_bytes : 0;
 
     const int64_t adjusted_cache_size_in_bytes =
         cache_cost.constant_swa_bytes +
-        token_unit_count * cache_cost.token_unit_bytes;
+        token_unit_count * target_common_unit_bytes;
     CHECK_GT(adjusted_cache_size_in_bytes, 0)
         << "no memory left for speculative target/draft kv cache allocation";
     LOG(INFO) << "speculative kv cache capacity adjusted from "
@@ -429,32 +508,34 @@ void init_dsv4_counts(const ModelArgs& model_args,
               << readable_size(adjusted_cache_size_in_bytes)
               << ", target_constant_bytes=" << cache_cost.constant_swa_bytes
               << ", draft_constant_bytes=" << draft_cost.constant_swa_bytes
-              << ", target_token_unit_bytes=" << cache_cost.token_unit_bytes
-              << ", draft_token_unit_bytes=" << draft_cost.token_unit_bytes
+              << ", target_common_unit_bytes=" << target_common_unit_bytes
+              << ", draft_common_unit_bytes=" << draft_common_unit_bytes
+              << ", common_blocks_per_unit=" << common_blocks_per_unit
               << ", token_unit_count=" << token_unit_count;
     kv_cache_cap->cache_size_in_bytes(adjusted_cache_size_in_bytes);
-    token_mem = token_unit_count * cache_cost.token_unit_bytes;
+    token_mem = token_unit_count * target_common_unit_bytes;
   } else {
     CHECK(options.draft_options == nullptr)
         << "DSV4 draft options require draft model args";
+    if (cache_cost.token_unit_bytes > 0) {
+      CHECK_GE(token_mem, cache_cost.token_unit_bytes)
+          << "minimum DSV4 SWA cache leaves insufficient memory for one "
+             "compressed cache unit, swa_required="
+          << readable_size(cache_cost.constant_swa_bytes)
+          << ", compressed_unit_required="
+          << readable_size(cache_cost.token_unit_bytes) << ", available="
+          << readable_size(kv_cache_cap->cache_size_in_bytes());
+    }
   }
 
   kv_cache_cap->swa_count(cache_cost.swa_count);
   kv_cache_cap->c4_count(0);
   kv_cache_cap->c128_count(0);
-  if (cache_cost.n_c4_layers > 0 && cache_cost.n_c128_layers > 0) {
-    if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
-      kv_cache_cap->c128_count(token_mem / cache_cost.token_unit_bytes);
-      kv_cache_cap->c4_count(32 * kv_cache_cap->c128_count());
-    }
-  } else if (cache_cost.n_c4_layers > 0) {
-    if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
-      kv_cache_cap->c4_count(token_mem / cache_cost.token_unit_bytes);
-    }
-  } else if (cache_cost.n_c128_layers > 0) {
-    if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
-      kv_cache_cap->c128_count(token_mem / cache_cost.token_unit_bytes);
-    }
+  // Keep SWA at the operational minimum calculated above. Prefix-cache entries
+  // share this pool; any remaining memory is reserved for compressed history.
+  if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
+    const int64_t token_unit_count = token_mem / cache_cost.token_unit_bytes;
+    set_dsv4_compressed_counts(cache_cost, token_unit_count, kv_cache_cap);
   }
 
   CHECK_GT(kv_cache_cap->swa_count(), 0) << "DSV4 swa_count must be > 0";

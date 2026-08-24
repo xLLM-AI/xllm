@@ -163,6 +163,7 @@ BlockManagerPool::Options make_typed_cache_options() {
       .enable_host_offload(true)
       .sliding_window_size(kWindow)
       .swa_blocks_per_seq(swa_blocks_per_seq)
+      .swa_num_blocks(266)
       .max_tokens_per_batch(32768)
       .max_seqs_per_batch(4)
       // SlidingWindow + BlockManagerImpl (C4) + BlockManagerImpl (C128).
@@ -385,9 +386,10 @@ TEST(HierarchyBlockManagerPoolTest,
   sequence.kv_state().set_kv_cache_tokens_num(kPromptTokens);
   pool.deallocate(&sequence);
 
-  // Only completed blocks are offloaded: 156 SWA blocks, 39 C4 blocks, and
-  // one C128 checkpoint. The partial SWA tail is not inserted or offloaded.
-  EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 196u);
+  // Decode allocates only the active SWA window. Here that window is the
+  // partial tail block, so no SWA block is offloaded. Only the complete C128
+  // cache unit (32 C4 blocks plus one C128 checkpoint) is offloaded.
+  EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 33u);
 }
 
 TEST(HierarchyBlockManagerPoolTest, AllocateSharedMountsMatchesWithoutH2d) {
@@ -1307,7 +1309,7 @@ TEST(HierarchyBlockManagerPoolTest,
 
   pool.prefetch_from_storage(request);
   ASSERT_NE(engine.result(), nullptr);
-  EXPECT_EQ(engine.transfer_infos().size(), 128u + 32u + 1u);
+  EXPECT_EQ(engine.transfer_infos().size(), 1u + 32u + 1u);
 
   const std::vector<uint8_t> hits(engine.transfer_infos().size(), 1);
   ASSERT_TRUE(engine.result()->set_batch_result(
@@ -1321,7 +1323,13 @@ TEST(HierarchyBlockManagerPoolTest,
   ASSERT_TRUE(pool.update_prefetch_result(request, /*timeout=*/0));
 
   pool.allocate_shared(sequence);
-  EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::SWA), 128u);
+  const Slice<Block> swa_blocks =
+      sequence->host_kv_state().blocks(BlockType::SWA);
+  ASSERT_EQ(swa_blocks.size(), 128u);
+  for (size_t i = 0; i + 1 < swa_blocks.size(); ++i) {
+    EXPECT_FALSE(swa_blocks[i].is_valid());
+  }
+  EXPECT_TRUE(swa_blocks.back().is_valid());
   EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::C4), 32u);
   EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::C128), 1u);
   EXPECT_EQ(sequence->kv_cache_tokens_num(), 16384u);
@@ -1331,7 +1339,8 @@ TEST(HierarchyBlockManagerPoolTest,
 TEST(HierarchyBlockManagerPoolTest,
      TypedStoragePrefetchKeepsSwaHitsAfterMiddleMiss) {
   constexpr size_t kPromptTokens = 32769;
-  constexpr size_t kMissedSwaOrdinal = 100;
+  constexpr size_t kMissedSwaOrdinal = 0;
+  constexpr size_t kMissedSwaBlock = 127;
   BlockManagerPool::Options options = make_typed_cache_options();
   options.enable_kvcache_store(true);
   FakePrefetchEngine engine(/*worker_count=*/2);
@@ -1356,7 +1365,7 @@ TEST(HierarchyBlockManagerPoolTest,
     }
     ++swa_ordinal;
   }
-  ASSERT_EQ(swa_ordinal, 256u);
+  ASSERT_EQ(swa_ordinal, 2u);
   ASSERT_LT(missed_result_index, engine.transfer_infos().size());
 
   const size_t split = engine.transfer_infos().size() / 2;
@@ -1388,8 +1397,7 @@ TEST(HierarchyBlockManagerPoolTest,
   const Slice<Block> swa_blocks =
       sequence->host_kv_state().blocks(BlockType::SWA);
   ASSERT_EQ(swa_blocks.size(), 256u);
-  EXPECT_FALSE(swa_blocks[kMissedSwaOrdinal].is_valid());
-  EXPECT_TRUE(swa_blocks[kMissedSwaOrdinal + 1].is_valid());
+  EXPECT_FALSE(swa_blocks[kMissedSwaBlock].is_valid());
   EXPECT_TRUE(swa_blocks.back().is_valid());
   EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::C4), 64u);
   EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::C128), 2u);

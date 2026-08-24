@@ -108,8 +108,9 @@ class KVCacheState {
   // inserted. For sparse SWA this is a logical position and may span invalid
   // placeholders. Grows monotonically:
   //   - Admission mount: set to that type's retained probe-vector length.
-  //   - Pre-grow hook: after inserting a run [cursor, end), advance cursor to
-  //     `end`.
+  //   - Pre-grow hook: after processing positions through `end`, advance the
+  //     cursor to `end`. Sparse SWA may intentionally insert only the trailing
+  //     window of each cache unit while skipping earlier positions.
   //   - reset(): cleared alongside the rest of the sequence's cache state.
   size_t num_cached_blocks(BlockType type) const;
   // Per-type cursor table. Callers that need a stable snapshot must copy it.

@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/util/utils.h"
 
 // ATB includes
@@ -58,13 +59,16 @@ int64_t get_decode_graph_capacity(const runtime::Options& options) {
 int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
       << "num_decoding_tokens must be > 0 for graph token capacity";
+  int64_t token_capacity = options.max_seqs_per_batch();
   if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
-    return options.max_seqs_per_batch();
+    return runtime::get_decode_graph_token_bucket(
+        token_capacity, options.enable_graph_mode_decode_no_padding());
   }
   if (options.enable_speculative_decode() && !options.is_draft_engine()) {
-    return options.max_seqs_per_batch() * options.num_decoding_tokens();
+    token_capacity *= options.num_decoding_tokens();
   }
-  return options.max_seqs_per_batch();
+  return runtime::get_decode_graph_token_bucket(
+      token_capacity, options.enable_graph_mode_decode_no_padding());
 }
 
 float get_dp_ep_all2all_buffer_factor(int64_t length) {

@@ -743,16 +743,52 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
         << "Mooncake prefetch admission requires an empty Sequence state.";
 
     const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
+    const auto* composite = static_cast<const CompositeBlockManager*>(
+        block_managers_[dp_rank].get());
     auto plan = std::make_shared<PrefetchPlan>();
     plan->sequence = sequence;
 
     plan->host_probes = CompositeBlockManager::probe_prefix_cache(
         sequence, host_block_managers_[dp_rank]);
+    const bool is_swa_compressed =
+        composite->leaf_combination() ==
+        CompositeBlockManager::LeafCombination::SWA_COMPRESSED;
+    size_t cacheable_tokens = sequence->tokens().size();
+    size_t cache_unit_size = 0;
+    if (is_swa_compressed) {
+      ProbeResult* c128_probe = find_probe(&plan->host_probes, BlockType::C128);
+      CHECK(c128_probe != nullptr);
+      cache_unit_size = c128_probe->block_size;
+      CHECK_GT(cache_unit_size, 0u);
+      cacheable_tokens = (cacheable_tokens / cache_unit_size) * cache_unit_size;
+
+      size_t cacheable_units = cacheable_tokens / cache_unit_size;
+      for (const ProbeResult& probe : plan->host_probes) {
+        CHECK(probe.leaf != nullptr);
+        CHECK_GT(probe.block_size, 0u);
+        CHECK_EQ(cache_unit_size % probe.block_size, 0u);
+        size_t blocks_per_unit = cache_unit_size / probe.block_size;
+        if (probe.type == BlockType::SWA) {
+          const size_t blocks_per_window =
+              static_cast<size_t>(probe.leaf->options().swa_blocks_per_seq());
+          CHECK_GT(blocks_per_window, 0u);
+          blocks_per_unit = std::min(blocks_per_unit, blocks_per_window);
+        }
+        const size_t available_blocks =
+            probe.leaf->num_free_blocks() +
+            probe.leaf->num_blocks_in_prefix_cache();
+        cacheable_units =
+            std::min(cacheable_units, available_blocks / blocks_per_unit);
+      }
+      cacheable_tokens = cacheable_units * cache_unit_size;
+    }
+
     for (size_t probe_index = 0; probe_index < plan->host_probes.size();
          ++probe_index) {
       ProbeResult& probe = plan->host_probes[probe_index];
       CHECK(probe.leaf != nullptr);
-      const size_t full_blocks = sequence->tokens().size() / probe.block_size;
+      CHECK_GT(probe.block_size, 0u);
+      const size_t full_blocks = cacheable_tokens / probe.block_size;
       if (probe.blocks.size() > full_blocks) {
         trim_blocks_from_back(probe.leaf, &probe.blocks, full_blocks);
       }
@@ -760,6 +796,19 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
 
       std::vector<size_t> missing;
       for (size_t block_index = 0; block_index < full_blocks; ++block_index) {
+        if (is_swa_compressed && probe.type == BlockType::SWA) {
+          CHECK_EQ(cache_unit_size % probe.block_size, 0u);
+          const size_t blocks_per_unit = cache_unit_size / probe.block_size;
+          const size_t blocks_per_window =
+              static_cast<size_t>(probe.leaf->options().swa_blocks_per_seq());
+          CHECK_GT(blocks_per_unit, 0u);
+          CHECK_GT(blocks_per_window, 0u);
+          if (blocks_per_window < blocks_per_unit &&
+              block_index % blocks_per_unit <
+                  blocks_per_unit - blocks_per_window) {
+            continue;
+          }
+        }
         if (!probe.blocks[block_index].is_valid()) {
           missing.emplace_back(block_index);
         }

@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "common/types.h"
 #include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/layerwise_split_layout.h"
 
@@ -41,10 +42,15 @@ struct KVCacheEstimateOptions {
   int64_t max_seqs_per_batch = 0;
   int64_t num_speculative_tokens = 0;
   int64_t max_tokens_per_batch = 0;
+  int64_t max_tokens_per_chunk_for_prefill = 0;
   int64_t max_linear_state_cache_slots = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
   int32_t layerwise_split_size = 1;
+  bool enable_chunked_prefill = true;
+  bool enable_schedule_overlap = true;
+  bool enable_disagg_pd = false;
+  InstanceRole instance_role = InstanceRole::DEFAULT;
   const ModelArgs* draft_model_args = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };
@@ -53,6 +59,7 @@ struct Dsv4KVCacheEstimateCost {
   int64_t swa_count = 0;
   int64_t n_c4_layers = 0;
   int64_t n_c128_layers = 0;
+  int64_t swa_bytes_per_block = 0;
   int64_t constant_swa_bytes = 0;
   int64_t token_unit_bytes = 0;
   int64_t manager_blocks_per_unit = 1;
