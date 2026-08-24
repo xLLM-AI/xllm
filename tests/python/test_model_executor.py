@@ -36,6 +36,7 @@ from xllm.python.attention.backend import (  # noqa: E402
     AttentionBackend,
     AttentionMetadata,
     LayerCache,
+    normalize_layer_caches,
 )
 from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402
@@ -160,6 +161,32 @@ class TestNpuGraphBackendResolution:
 
 
 class TestCreateAttentionBackend:
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
+    def test_deepseek_v4_creates_csa_backend(self, _mock_is_npu):
+        attn = _make_attention_layer(head_dim=512)
+        module = types.ModuleType("xllm.python.attention.csa_attention")
+        module.CsaAttentionBackend = StubAttentionBackend
+        config = {
+            "model_type": "deepseek_v4",
+            "compress_ratios": [1, 4, 128],
+            "num_hidden_layers": 3,
+            "window_size": 128,
+            "index_topk": 512,
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+            "qk_rope_head_dim": 64,
+        }
+        with patch.dict(sys.modules, {module.__name__: module}):
+            backend = _create_attention_backend(attn, torch.device("npu"), torch.bfloat16, config)
+
+        assert isinstance(backend, StubAttentionBackend)
+        assert backend.init_kwargs["attn_head_dim"] == 512
+        assert backend.init_kwargs["n_layers"] == 3
+        assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
+
     @patch(
         "xllm.python.model_executor.executor.current_platform.is_npu",
         return_value=True,
@@ -751,6 +778,52 @@ class TestDecodeAclGraphSpeculativeMetadata:
 # ---------------------------------------------------------------------------
 # Tests: ModelExecutor.bind_kv_caches
 # ---------------------------------------------------------------------------
+
+
+class TestNormalizeLayerCaches:
+    def test_legacy_five_slot_cache_keeps_generic_layout(self):
+        tensors = tuple(torch.full((1,), value) for value in range(1, 6))
+
+        cache = normalize_layer_caches([tensors])[0]
+
+        assert cache.key is tensors[0]
+        assert cache.value is tensors[1]
+        assert cache.index is tensors[2]
+        assert cache.conv is tensors[3]
+        assert cache.ssm is tensors[4]
+        assert cache.swa is None
+        assert cache.compress_kv_state is None
+        assert cache.compress_score_state is None
+        assert cache.compress_index_kv_state is None
+        assert cache.compress_index_score_state is None
+        assert cache.indexer_scale is None
+
+    def test_deepseek_v4_eleven_slot_cache_maps_all_slots(self):
+        tensors = tuple(torch.full((1,), value) for value in range(1, 12))
+
+        cache = normalize_layer_caches([tensors])[0]
+
+        assert (
+            cache.key,
+            cache.value,
+            cache.index,
+            cache.conv,
+            cache.ssm,
+            cache.swa,
+            cache.compress_kv_state,
+            cache.compress_score_state,
+            cache.compress_index_kv_state,
+            cache.compress_index_score_state,
+            cache.indexer_scale,
+        ) == tensors
+
+    def test_empty_deepseek_v4_slots_are_normalized_to_none(self):
+        cache = normalize_layer_caches([(torch.ones(1), torch.ones(1), *(torch.empty(0),) * 9)])[0]
+
+        assert cache.key is not None
+        assert cache.value is not None
+        assert cache.index is None
+        assert cache.indexer_scale is None
 
 
 class TestBindKvCaches:

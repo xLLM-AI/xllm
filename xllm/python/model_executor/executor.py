@@ -42,7 +42,26 @@ def _create_attention_backend(
     first_attention: Attention,
     device: torch.device,
     dtype: torch.dtype,
+    config: dict | None = None,
 ) -> AttentionBackend:
+    config = config or {}
+    model_type = config.get("model_type", "")
+    if model_type == "deepseek_v4" and current_platform.is_npu():
+        from xllm.python.attention.csa_attention import CsaAttentionBackend
+
+        return CsaAttentionBackend(
+            compress_ratios=list(config.get("compress_ratios", [])),
+            window_size=int(config.get("window_size", 128)),
+            n_layers=int(config.get("n_layers", config.get("num_hidden_layers", 0))),
+            num_heads=first_attention.num_heads,
+            attn_head_dim=first_attention.head_dim,
+            index_topk=int(config.get("index_topk", 512)),
+            index_n_heads=int(config.get("index_n_heads", 64)),
+            index_head_dim=int(config.get("index_head_dim", 128)),
+            rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
+            device=device,
+            dtype=dtype,
+        )
     if current_platform.is_npu():
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
@@ -97,7 +116,7 @@ class ModelExecutor:
         first_parameter = next(model.parameters())
         device = first_parameter.device
         self._num_attention_layers = len(attention_layers)
-        self.attention_backend = _create_attention_backend(first_attention, device, first_parameter.dtype)
+        self.attention_backend = _create_attention_backend(first_attention, device, first_parameter.dtype, config)
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)

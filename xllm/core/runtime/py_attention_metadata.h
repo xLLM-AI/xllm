@@ -71,6 +71,7 @@ class PyAttentionMetadataView final {
   pybind11::object kv_seq_lens_host() const;
   const std::vector<int32_t>& kv_seq_lens_host_values() const;
   pybind11::object q_seq_lens_host() const;
+  pybind11::list multi_block_tables() const;
   pybind11::object block_table() const;
   pybind11::object kv_seq_lens() const;
   pybind11::object linear_state_indices() const;
@@ -79,6 +80,22 @@ class PyAttentionMetadataView final {
   const std::vector<int32_t>& dp_is_decode() const;
   pybind11::object q_seq_lens() const;
   PyExpandedDecodeMetadataView expanded_decode_metadata() const;
+  int64_t max_query_len() const;
+  int64_t max_seq_len() const;
+  pybind11::object dsa_metadata() const;
+  void set_dsa_metadata(pybind11::object value);
+  pybind11::object dsa_positions() const;
+  void set_dsa_positions(pybind11::object value);
+  pybind11::object dsa_cos_sin() const;
+  void set_dsa_cos_sin(pybind11::object value);
+  pybind11::object dsa_c4_cos_sin() const;
+  void set_dsa_c4_cos_sin(pybind11::object value);
+  pybind11::object dsa_c128_cos_sin() const;
+  void set_dsa_c128_cos_sin(pybind11::object value);
+  int64_t dsa_graph_block_table_cols() const;
+  void set_dsa_graph_block_table_cols(int64_t value);
+  bool dsa_graph_mode() const;
+  void set_dsa_graph_mode(bool value);
   bool is_prefill() const;
   bool is_chunked_prefill() const;
 
@@ -91,9 +108,17 @@ class PyAttentionMetadataView final {
   std::shared_ptr<layer::AttentionMetadata> metadata_;
   torch::Tensor kv_seq_lens_host_;
   torch::Tensor q_seq_lens_host_;
+  std::vector<torch::Tensor> multi_block_tables_;
   torch::Tensor linear_state_indices_;
   std::vector<int32_t> dp_token_counts_;
   std::vector<int32_t> dp_is_decode_;
+  std::shared_ptr<void> dsa_metadata_holder_;
+  torch::Tensor dsa_positions_;
+  torch::Tensor dsa_cos_sin_;
+  torch::Tensor dsa_c4_cos_sin_;
+  torch::Tensor dsa_c128_cos_sin_;
+  int64_t dsa_graph_block_table_cols_ = 0;
+  bool dsa_graph_mode_ = false;
 };
 
 }  // namespace xllm

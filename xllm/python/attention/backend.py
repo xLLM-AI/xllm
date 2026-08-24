@@ -44,11 +44,35 @@ class LayerCache:
     index: torch.Tensor | None = None
     conv: torch.Tensor | None = None
     ssm: torch.Tensor | None = None
-    index_scale: torch.Tensor | None = None
+    # DeepSeek-V4 compressed-attention cache slots. Generic models leave these
+    # as None; the tuple order is shared with PyExecutorImpl::bind_kv_caches.
+    swa: torch.Tensor | None = None
+    compress_kv_state: torch.Tensor | None = None
+    compress_score_state: torch.Tensor | None = None
+    compress_index_kv_state: torch.Tensor | None = None
+    compress_index_score_state: torch.Tensor | None = None
+    indexer_scale: torch.Tensor | None = None
+
+    @property
+    def index_scale(self) -> torch.Tensor | None:
+        """Legacy MLA alias for the shared indexer scale cache."""
+        return self.indexer_scale
 
 
 #: Field order of the tuple form, which is what the C++ executor hands over.
-_LAYER_CACHE_SLOTS = ("key", "value", "index", "conv", "ssm", "index_scale")
+_LAYER_CACHE_SLOTS = (
+    "key",
+    "value",
+    "index",
+    "conv",
+    "ssm",
+    "swa",
+    "compress_kv_state",
+    "compress_score_state",
+    "compress_index_kv_state",
+    "compress_index_score_state",
+    "indexer_scale",
+)
 
 LayerCacheInput = LayerCache | tuple[torch.Tensor | None, ...]
 
@@ -83,6 +107,17 @@ class AttentionMetadata(Protocol):
     paged_kv_last_page_len_host: torch.Tensor | None
     block_table: torch.Tensor | None
     kv_seq_lens: torch.Tensor | None
+    max_query_len: int
+    max_seq_len: int
+    multi_block_tables: Sequence[torch.Tensor | None]
+    # Legacy C++/pybind DSAMetadata field names retained for ABI compatibility.
+    dsa_metadata: object | None
+    dsa_positions: torch.Tensor | None
+    dsa_cos_sin: torch.Tensor | None
+    dsa_c4_cos_sin: torch.Tensor | None
+    dsa_c128_cos_sin: torch.Tensor | None
+    dsa_graph_block_table_cols: int
+    dsa_graph_mode: bool
     linear_state_indices: torch.Tensor | None
     has_initial_state: torch.Tensor | None
     dp_token_counts: Sequence[int]
@@ -122,6 +157,25 @@ class MlaPreprocessContext:
     kv_cache: torch.Tensor
     rope_cache: torch.Tensor
     slot_mapping: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CsaIndexContext:
+    """Per-forward cache and metadata view consumed by the DSV4 indexer."""
+
+    index_cache: torch.Tensor
+    indexer_scale: torch.Tensor | None
+    slot_mapping: torch.Tensor
+    block_table: torch.Tensor | None
+    cmp_block_table: torch.Tensor | None
+    kv_state: torch.Tensor | None
+    score_state: torch.Tensor | None
+    kv_block_table: torch.Tensor | None
+    score_block_table: torch.Tensor | None
+    actual_seq_q: torch.Tensor
+    actual_seq_kv: torch.Tensor
+    start_pos: torch.Tensor | None
+    qli_metadata: torch.Tensor | None
 
 
 class AttentionBackend(ABC):
