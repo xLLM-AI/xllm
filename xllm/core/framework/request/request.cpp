@@ -94,9 +94,13 @@ void Request::log_statistic(double total_latency) {
   int idx = 0;
   for (const auto& seq : sequences()) {
     double ttft = seq->time_to_first_token_latency_seconds();
-    size_t gen_tokens = state_.enable_schedule_overlap
-                            ? seq->num_generated_tokens() - 1
-                            : seq->num_generated_tokens();
+    size_t gen_tokens = seq->num_generated_tokens();
+    // NOTE: Avoid counting the extra execution step in overlap scenario.
+    // Guard against size_t underflow: a cancelled request may generate 0
+    // tokens, and 0 - 1 would wrap to SIZE_MAX in the log output.
+    if (state_.enable_schedule_overlap && gen_tokens > 0) {
+      --gen_tokens;
+    }
     double tpot = 0.0;
     double gen_speed = 0.0;
     if (gen_tokens > 1 && total_latency > ttft && ttft > 0) {
