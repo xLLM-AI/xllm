@@ -15,9 +15,11 @@ limitations under the License.
 
 #include "scheduler/scheduler_policy.h"
 
+#include <absl/time/clock.h>
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <list>
 #include <memory>
@@ -27,6 +29,7 @@ limitations under the License.
 #include <vector>
 
 #include "continuous_scheduler.h"
+#include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
@@ -183,6 +186,154 @@ class PendingReleaseBlockManagerPool final : public BlockManagerPool {
   }
 
   int32_t allocate_calls_ = 0;
+};
+
+class RestoreWaitingBlockManagerPool final : public BlockManagerPool {
+ public:
+  RestoreWaitingBlockManagerPool()
+      : BlockManagerPool(make_options(), /*dp_size=*/1) {}
+
+  bool allocate(Sequence* /*sequence*/, size_t /*num_tokens*/) override {
+    ++allocate_calls_;
+    return !pending_async_release_;
+  }
+
+  void allocate_shared(Sequence* sequence) override {
+    ++allocate_shared_calls_;
+    sequence->kv_state().set_prefix_cache_matched();
+  }
+
+  bool has_pending_async_block_release() const override {
+    return pending_async_release_;
+  }
+
+  void set_pending_async_release(bool pending) {
+    pending_async_release_ = pending;
+  }
+
+  int32_t allocate_calls() const { return allocate_calls_; }
+
+  int32_t allocate_shared_calls() const { return allocate_shared_calls_; }
+
+ private:
+  static BlockManagerPool::Options make_options() {
+    BlockManagerPool::Options options;
+    options.num_blocks_ = 256;
+    options.block_size_ = 128;
+    options.max_seqs_per_batch_ = 16;
+    options.enable_prefix_cache_ = true;
+    return options;
+  }
+
+  bool pending_async_release_ = true;
+  int32_t allocate_calls_ = 0;
+  int32_t allocate_shared_calls_ = 0;
+};
+
+class DecodeVictimBlockManagerPool final : public BlockManagerPool {
+ public:
+  DecodeVictimBlockManagerPool()
+      : BlockManagerPool(make_options(), /*dp_size=*/1) {}
+
+  bool allocate(Sequence* /*sequence*/, size_t /*num_tokens*/) override {
+    return false;
+  }
+
+  bool supports_host_cache_restore() const override { return true; }
+
+  void deallocate(Request* request) override {
+    BlockManagerPool::deallocate(request);
+    pending_async_release_ = true;
+  }
+
+  bool has_pending_async_block_release() const override {
+    return pending_async_release_;
+  }
+
+  void complete_async_release() { pending_async_release_ = false; }
+
+ private:
+  static BlockManagerPool::Options make_options() {
+    BlockManagerPool::Options options;
+    options.num_blocks_ = 256;
+    options.block_size_ = 128;
+    options.max_seqs_per_batch_ = 16;
+    options.enable_prefix_cache_ = true;
+    return options;
+  }
+
+  bool pending_async_release_ = false;
+};
+
+class RestorePriorityBlockManagerPool final : public BlockManagerPool {
+ public:
+  RestorePriorityBlockManagerPool()
+      : BlockManagerPool(make_options(), /*dp_size=*/1) {}
+
+  void set_sequences(Sequence* blocked, Sequence* victim) {
+    blocked_ = blocked;
+    victim_ = victim;
+  }
+
+  bool allocate(Sequence* sequence, size_t /*num_tokens*/) override {
+    if (sequence == blocked_) {
+      if (free_blocks_ < kBlockedGrowthBlocks) {
+        return false;
+      }
+      free_blocks_ -= kBlockedGrowthBlocks;
+      return true;
+    }
+    if (sequence == victim_) {
+      if (free_blocks_ < kVictimRestoreBlocks) {
+        return false;
+      }
+      free_blocks_ -= kVictimRestoreBlocks;
+      return true;
+    }
+    return false;
+  }
+
+  void allocate_shared(Sequence* sequence) override {
+    if (sequence != victim_) {
+      return;
+    }
+    CHECK_GT(sequence->num_tokens(), 0u);
+    sequence->kv_state().set_prefix_cache_matched();
+    sequence->kv_state().set_kv_cache_tokens_num(sequence->num_tokens() - 1);
+  }
+
+  bool supports_host_cache_restore() const override { return true; }
+
+  void deallocate(Request* request) override {
+    BlockManagerPool::deallocate(request);
+    pending_async_release_ = true;
+  }
+
+  bool has_pending_async_block_release() const override {
+    return pending_async_release_;
+  }
+
+  void complete_release() {
+    pending_async_release_ = false;
+    free_blocks_ = kVictimRestoreBlocks;
+  }
+
+ private:
+  static BlockManagerPool::Options make_options() {
+    BlockManagerPool::Options options;
+    options.num_blocks_ = 10;
+    options.block_size_ = 128;
+    options.max_seqs_per_batch_ = 16;
+    options.enable_prefix_cache_ = true;
+    return options;
+  }
+
+  static constexpr size_t kBlockedGrowthBlocks = 1;
+  static constexpr size_t kVictimRestoreBlocks = 3;
+  Sequence* blocked_ = nullptr;
+  Sequence* victim_ = nullptr;
+  size_t free_blocks_ = 0;
+  bool pending_async_release_ = false;
 };
 
 class TestUnifiedPolicy final : public UnifiedPolicy {
@@ -416,6 +567,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
   DequeQueue chunk_queue;
   DequeQueue decode_queue;
   std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
   std::vector<std::shared_ptr<Request>> running_requests;
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
@@ -425,6 +577,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
       .chunk_queue = chunk_queue,
       .decode_queue = decode_queue,
       .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
       .running_requests = running_requests,
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
@@ -477,6 +630,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   DequeQueue chunk_queue;
   DequeQueue decode_queue;
   std::list<std::shared_ptr<Request>> unified_queue{requests[0], requests[1]};
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
   std::vector<std::shared_ptr<Request>> running_requests;
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
@@ -486,6 +640,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
       .chunk_queue = chunk_queue,
       .decode_queue = decode_queue,
       .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
       .running_requests = running_requests,
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
@@ -547,6 +702,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   DequeQueue chunk_queue;
   DequeQueue decode_queue;
   std::list<std::shared_ptr<Request>> unified_queue{requests.front()};
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
   std::vector<std::shared_ptr<Request>> running_requests;
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
@@ -556,6 +712,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
       .chunk_queue = chunk_queue,
       .decode_queue = decode_queue,
       .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
       .running_requests = running_requests,
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
@@ -583,6 +740,435 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   EXPECT_EQ(unified_queue.size(), 1u);
   EXPECT_TRUE(running_sequences.empty());
   EXPECT_TRUE(finished.empty());
+}
+
+TEST(SchedulerPolicyTest,
+     RestoreWaitingDefersUntilAsyncReleaseThenSchedulesPrefill) {
+  constexpr int32_t kPromptTokens = 128;
+  constexpr int32_t kHostRestoreTokens = 256;
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1);
+  BatchMode mode{
+      .enable_mix_batch = false,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  PrefillFirstPolicy policy(mode, options);
+  RestoreWaitingBlockManagerPool block_manager_pool;
+  BlockManagerPool::Options prefix_cache_options;
+  prefix_cache_options.num_blocks_ = 4;
+  prefix_cache_options.block_size_ = 128;
+  prefix_cache_options.max_seqs_per_batch_ = 16;
+  BlockManagerPool prefix_cache_pool(prefix_cache_options, /*dp_size=*/1);
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({kPromptTokens},
+                       {kPromptTokens + 1},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  std::vector<std::shared_ptr<Request>> cached_requests =
+      generate_request({kHostRestoreTokens},
+                       {1},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  Sequence* sequence = requests.front()->sequences().front().get();
+  Sequence* cached_sequence =
+      cached_requests.front()->sequences().front().get();
+  sequence->kv_state().set_kv_cache_tokens_num(kPromptTokens);
+  for (int32_t token_id = 0; token_id <= kPromptTokens; ++token_id) {
+    sequence->append_token(token_id);
+  }
+  sequence->kv_state().set_kv_cache_tokens_num(0);
+  ASSERT_TRUE(prefix_cache_pool.allocate(cached_sequence));
+  sequence->host_kv_state().mount_composite_shared(
+      BlockType::KV, cached_sequence->kv_state().take_blocks(BlockType::KV));
+  sequence->host_kv_state().set_kv_cache_tokens_num(kHostRestoreTokens);
+  sequence->host_kv_state().set_prefix_cache_matched();
+  sequence->set_host_cache_match(/*restore_tokens=*/kHostRestoreTokens,
+                                 /*copy_units=*/2);
+  EXPECT_EQ(requests.front()->num_prefix_cache_tokens(), 0u);
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting{
+      {requests.front(), absl::Now()}};
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, budget, finished);
+
+  EXPECT_EQ(block_manager_pool.allocate_calls(), 0);
+  EXPECT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_TRUE(running_sequences.empty());
+
+  block_manager_pool.set_pending_async_release(false);
+  policy.schedule(state, budget, finished);
+
+  EXPECT_EQ(block_manager_pool.allocate_shared_calls(), 1);
+  EXPECT_EQ(block_manager_pool.allocate_calls(), 1);
+  EXPECT_TRUE(decode_restore_waiting.empty());
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequences.front(),
+            requests.front()->sequences().front().get());
+  EXPECT_EQ(requests.front()->num_prefix_cache_tokens(), 0u);
+  EXPECT_LE(requests.front()->num_prefix_cache_tokens(),
+            sequence->num_prompt_tokens());
+  EXPECT_TRUE(finished.empty());
+}
+
+TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
+  ScopedConfigValue<double> host_blocks_factor(
+      KVCacheStoreConfig::get_instance().host_blocks_factor(), 2.0);
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1);
+  options.enable_disagg_pd() = true;
+  options.enable_pd_ooc() = false;
+  options.instance_role() = InstanceRole::DECODE;
+  options.enable_schedule_overlap() = false;
+  BatchMode mode{
+      .enable_mix_batch = false,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  PrefillFirstPolicy policy(mode, options);
+  DecodeVictimBlockManagerPool block_manager_pool;
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({128, 128, 128},
+                       {2, 2, 2},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  for (const std::shared_ptr<Request>& request : requests) {
+    Sequence* sequence = request->sequences().front().get();
+    sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+    sequence->append_token(Token(1));
+  }
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  decode_queue.push(requests[0], /*if_back=*/true);
+  decode_queue.push(requests[1], /*if_back=*/true);
+  decode_queue.push(requests[2], /*if_back=*/true);
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, budget, finished);
+
+  EXPECT_EQ(decode_restore_waiting.size(), 1u);
+  ASSERT_FALSE(decode_restore_waiting.empty());
+  EXPECT_EQ(decode_restore_waiting.front().request.get(), requests[2].get());
+  EXPECT_TRUE(requests[2]->preempted());
+  EXPECT_TRUE(requests[2]->sequences().front()->is_prefill_stage());
+  EXPECT_FALSE(requests[1]->preempted());
+  EXPECT_EQ(decode_queue.size(), 2u);
+  ASSERT_FALSE(decode_queue.empty());
+  EXPECT_EQ(decode_queue.top().get(), requests[0].get());
+  EXPECT_EQ(decode_queue.back().get(), requests[1].get());
+  EXPECT_EQ(budget.num_preempted_requests, 1u);
+  EXPECT_TRUE(prefill_queue.empty());
+  EXPECT_TRUE(running_sequences.empty());
+  EXPECT_TRUE(finished.empty());
+
+  ScheduleBudget pending_budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  policy.schedule(state, pending_budget, finished);
+
+  EXPECT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_FALSE(requests[1]->preempted());
+  EXPECT_EQ(decode_queue.size(), 2u);
+  EXPECT_EQ(decode_queue.back().get(), requests[1].get());
+  EXPECT_EQ(pending_budget.num_preempted_requests, 0u);
+
+  block_manager_pool.complete_async_release();
+  ScheduleBudget released_budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  policy.schedule(state, released_budget, finished);
+
+  EXPECT_EQ(decode_restore_waiting.size(), 2u);
+  EXPECT_TRUE(requests[1]->preempted());
+  EXPECT_EQ(decode_queue.size(), 1u);
+  EXPECT_EQ(released_budget.num_preempted_requests, 1u);
+}
+
+TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
+  ScopedConfigValue<double> host_blocks_factor(
+      KVCacheStoreConfig::get_instance().host_blocks_factor(), 2.0);
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1);
+  options.enable_disagg_pd() = true;
+  options.enable_pd_ooc() = false;
+  options.instance_role() = InstanceRole::DECODE;
+  options.enable_schedule_overlap() = false;
+  BatchMode mode{
+      .enable_mix_batch = false,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  PrefillFirstPolicy policy(mode, options);
+  RestorePriorityBlockManagerPool block_manager_pool;
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({128, 128},
+                       {2, 2},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  Sequence* blocked = requests[0]->sequences().front().get();
+  Sequence* victim = requests[1]->sequences().front().get();
+  for (const std::shared_ptr<Request>& request : requests) {
+    Sequence* sequence = request->sequences().front().get();
+    sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+    sequence->append_token(Token(1));
+  }
+  block_manager_pool.set_sequences(blocked, victim);
+
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  decode_queue.push(requests[0], /*if_back=*/true);
+  decode_queue.push(requests[1], /*if_back=*/true);
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget initial_budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, initial_budget, finished);
+
+  ASSERT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_EQ(decode_restore_waiting.front().request.get(), requests[1].get());
+  EXPECT_EQ(decode_queue.size(), 1u);
+  EXPECT_EQ(decode_queue.top().get(), requests[0].get());
+  EXPECT_TRUE(running_sequences.empty());
+
+  block_manager_pool.complete_release();
+  ScheduleBudget released_budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+
+  policy.schedule(state, released_budget, finished);
+
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequences.front(), blocked);
+  ASSERT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_EQ(decode_restore_waiting.front().request.get(), requests[1].get());
+  EXPECT_TRUE(decode_queue.empty());
+}
+
+TEST(SchedulerPolicyTest,
+     DecodeFirstRetriesBlockedDecodeBeforeRestoringVictim) {
+  ScopedConfigValue<double> host_blocks_factor(
+      KVCacheStoreConfig::get_instance().host_blocks_factor(), 2.0);
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1);
+  options.enable_disagg_pd() = true;
+  options.enable_pd_ooc() = false;
+  options.instance_role() = InstanceRole::DECODE;
+  options.enable_schedule_overlap() = false;
+  BatchMode mode{
+      .enable_mix_batch = true,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  DecodeFirstPolicy policy(mode, options);
+  RestorePriorityBlockManagerPool block_manager_pool;
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({128, 128},
+                       {2, 2},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  Sequence* blocked = requests[0]->sequences().front().get();
+  Sequence* victim = requests[1]->sequences().front().get();
+  for (const std::shared_ptr<Request>& request : requests) {
+    Sequence* sequence = request->sequences().front().get();
+    sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+    sequence->append_token(Token(1));
+  }
+  block_manager_pool.set_sequences(blocked, victim);
+
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  decode_queue.push(requests[0], /*if_back=*/true);
+  decode_queue.push(requests[1], /*if_back=*/true);
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget initial_budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, initial_budget, finished);
+
+  ASSERT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_EQ(decode_restore_waiting.front().request.get(), requests[1].get());
+  EXPECT_EQ(decode_queue.size(), 1u);
+  EXPECT_EQ(decode_queue.top().get(), requests[0].get());
+  EXPECT_TRUE(running_sequences.empty());
+
+  block_manager_pool.complete_release();
+  ScheduleBudget released_budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+
+  policy.schedule(state, released_budget, finished);
+
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequences.front(), blocked);
+  ASSERT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_EQ(decode_restore_waiting.front().request.get(), requests[1].get());
+  EXPECT_TRUE(decode_queue.empty());
 }
 
 // TEST-2:
