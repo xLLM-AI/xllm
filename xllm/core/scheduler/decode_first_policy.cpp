@@ -55,6 +55,7 @@ void DecodeFirstPolicy::schedule(
 
   // Step 1: schedule decode requests first (decode-maximal batching).
   schedule_decode_from_queue(&state.decode_queue, state, budget);
+  schedule_decode_restore(state, budget);
   const bool has_decode = !state.running_sequences.empty();
 
   // Step 2: schedule prefill requests (continuations from chunk_queue first,

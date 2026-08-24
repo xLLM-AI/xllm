@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "scheduler/scheduler_policy.h"
 
+#include <absl/time/clock.h>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -27,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
 #include "util/timer.h"
@@ -449,6 +451,43 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
   }
 }
 
+void SchedulerPolicy::schedule_decode_restore(SchedulerState& state,
+                                              ScheduleBudget& budget) {
+  if (state.decode_restore_waiting.empty() ||
+      state.kv_cache_manager->has_pending_async_block_release() ||
+      budget_exhausted(budget)) {
+    return;
+  }
+
+  DecodeRestoreEntry& entry = state.decode_restore_waiting.front();
+  const std::shared_ptr<Request>& request = entry.request;
+  CHECK(request != nullptr);
+  CHECK_EQ(request->sequences().size(), 1u);
+  Sequence* sequence = request->sequences().front().get();
+  CHECK(sequence != nullptr);
+
+  const size_t num_tokens =
+      compute_prefill_tokens(sequence, budget.remaining_token_budget, state);
+  if (num_tokens == 0 || num_tokens > budget.remaining_token_budget ||
+      budget.remaining_seq_budget == 0) {
+    return;
+  }
+
+  size_t actual_tokens = 0;
+  if (!allocate_for_prefill(sequence, num_tokens, &actual_tokens, state)) {
+    return;
+  }
+
+  CHECK_LE(actual_tokens, budget.remaining_token_budget);
+  state.running_requests.emplace_back(request);
+  state.running_sequences.emplace_back(sequence);
+  state.running_sequences_budgets.emplace_back(actual_tokens);
+  budget.remaining_token_budget -= actual_tokens;
+  --budget.remaining_seq_budget;
+  cache_in_batch_prefix({sequence}, {actual_tokens}, state);
+  state.decode_restore_waiting.pop_front();
+}
+
 // =============================================================================
 // Decode scheduling
 // =============================================================================
@@ -648,8 +687,15 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       break;
     }
 
-    // Blocks exhausted: first try preempting from chunk_queue (has KV blocks
-    // to free), then from the decode queue's lowest priority.
+    // Blocks exhausted: wait for an in-flight async release before selecting
+    // another victim. The released blocks remain unavailable until the
+    // transfer completes.
+    if (state.kv_cache_manager->has_pending_async_block_release()) {
+      return;
+    }
+
+    // First try preempting from chunk_queue (has KV blocks to free), then
+    // from the decode queue's lowest priority.
     if (!has_enough_blocks && !state.chunk_queue.empty()) {
       std::shared_ptr<Request> request_to_preempt = state.chunk_queue.back();
       ++budget.num_preempted_requests;
@@ -657,16 +703,20 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       state.chunk_queue.pop_back();
       request_to_preempt->set_preempted();
       state.prefill_queue.push(request_to_preempt);
+      if (state.kv_cache_manager->has_pending_async_block_release()) {
+        return;
+      }
       continue;
     }
     if (!has_enough_blocks && queue->size() > 1) {
       std::shared_ptr<Request> request_to_preempt = queue->back();
       if (request_to_preempt.get() != request.get()) {
         ++budget.num_preempted_requests;
-        state.kv_cache_manager->deallocate(request_to_preempt.get());
+        enqueue_decode_restore(request_to_preempt, state);
         queue->pop_back();
-        request_to_preempt->set_preempted();
-        state.prefill_queue.push(request_to_preempt);
+        if (state.kv_cache_manager->has_pending_async_block_release()) {
+          return;
+        }
         continue;
       }
     }
@@ -684,6 +734,42 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
                                    /*budget_exhausted=*/false);
     break;
   }
+}
+
+bool SchedulerPolicy::should_wait_for_decode_restore(
+    const std::shared_ptr<Request>& request,
+    const SchedulerState& state) const {
+  if (!state.options.enable_disagg_pd() || state.options.enable_pd_ooc() ||
+      !state.options.instance_role().has_value() ||
+      state.options.instance_role().value() != InstanceRole::DECODE ||
+      !state.enable_prefix_cache || state.options.enable_schedule_overlap() ||
+      !state.kv_cache_manager->supports_host_cache_restore() ||
+      ::xllm::KVCacheStoreConfig::get_instance().host_blocks_factor() <= 1.0 ||
+      request == nullptr || request->sequences().size() != 1 ||
+      request->check_beam_search()) {
+    return false;
+  }
+
+  return state.options.num_speculative_tokens() == 0 ||
+         ::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
+             "MTP";
+}
+
+void SchedulerPolicy::enqueue_decode_restore(
+    const std::shared_ptr<Request>& request,
+    SchedulerState& state) {
+  const bool should_wait = should_wait_for_decode_restore(request, state);
+  if (should_wait) {
+    clear_mtp_bootstrap(request.get(), state);
+  }
+  state.kv_cache_manager->deallocate(request.get());
+  request->set_preempted();
+  if (should_wait) {
+    state.decode_restore_waiting.emplace_back(
+        DecodeRestoreEntry{request, absl::Now()});
+    return;
+  }
+  state.prefill_queue.push(request);
 }
 
 // =============================================================================
@@ -775,7 +861,8 @@ void SchedulerPolicy::report_metrics(const SchedulerState& state,
                                      double elapsed_seconds,
                                      size_t num_preempted_requests) {
   GAUGE_SET(num_running_requests, state.running_requests.size());
-  GAUGE_SET(num_waiting_requests, state.prefill_queue.size());
+  GAUGE_SET(num_waiting_requests,
+            state.prefill_queue.size() + state.decode_restore_waiting.size());
   GAUGE_SET(num_preempted_requests, num_preempted_requests);
   GAUGE_SET(num_running_sequences, state.running_sequences.size());
   GAUGE_SET(kv_cache_utilization_perc,

@@ -51,13 +51,6 @@ DEFINE_bool(kv_push_dst_rotate,
             "KV-split rank to spread incast across D workers.");
 
 namespace xllm {
-namespace {
-
-bool supports_prefix_cache(const std::string& instance_role) {
-  return instance_role == "PREFILL" || instance_role == "MIX";
-}
-
-}  // namespace
 
 void DisaggPDConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_disagg_pd);
@@ -121,13 +114,6 @@ void DisaggPDConfig::normalize_mlu(KVCacheConfig& kv_cache_config,
     LOG(WARNING) << "MLU disaggregated PD does not support schedule overlap; "
                  << "forcing enable_schedule_overlap=false.";
     scheduler_config.enable_schedule_overlap(false);
-  }
-  if (kv_cache_config.enable_prefix_cache() &&
-      !supports_prefix_cache(instance_role())) {
-    LOG(WARNING) << "MLU disaggregated PD role " << instance_role()
-                 << " does not support prefix cache; "
-                 << "forcing enable_prefix_cache=false.";
-    kv_cache_config.enable_prefix_cache(false);
   }
   if (enable_pd_ooc()) {
     LOG(WARNING) << "MLU disaggregated PD does not support pd_ooc; "

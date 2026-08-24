@@ -16,6 +16,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "core/framework/sampling/sampler.h"
+#include "platform/platform.h"
 
 namespace xllm {
 namespace {
@@ -30,6 +31,17 @@ SamplingParameters make_greedy_params(int64_t batch_size) {
   params.all_greedy_sample = true;
   params.all_random_sample = false;
   return params;
+}
+
+bool uses_device_random_sample() {
+  return Platform::is_mlu() || Platform::is_cuda() || Platform::is_dcu();
+}
+
+torch::Device get_random_sample_device() {
+  if (uses_device_random_sample()) {
+    return torch::Device(Platform::type_torch(), 0);
+  }
+  return torch::Device(torch::kCPU);
 }
 
 TEST(SamplerFilterMaskTest, GreedySamplingHonorsMixedRows) {
@@ -47,12 +59,20 @@ TEST(SamplerFilterMaskTest, GreedySamplingHonorsMixedRows) {
 }
 
 TEST(SamplerFilterMaskTest, RandomSamplingCannotSelectDisallowedToken) {
+  if (uses_device_random_sample() && Platform::device_count() == 0) {
+    GTEST_SKIP() << "Random sampling backend device is unavailable";
+  }
+
   SamplingParameters params = make_greedy_params(/*batch_size=*/1);
   params.do_sample = torch::ones({1}, torch::kBool);
   params.all_greedy_sample = false;
   params.all_random_sample = true;
   params.filter_mask = torch::tensor({{-1.0e9F, 0.0F, -1.0e9F}});
   torch::Tensor logits = torch::tensor({{100.0F, 1.0F, 100.0F}});
+
+  const torch::Device device = get_random_sample_device();
+  params = params.to(device, torch::kFloat32);
+  logits = logits.to(device);
 
   Sampler sampler;
   SampleOutput output = sampler.forward(logits, params);

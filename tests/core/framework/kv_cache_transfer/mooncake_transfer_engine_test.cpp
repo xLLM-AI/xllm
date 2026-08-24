@@ -35,6 +35,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "platform/device.h"
@@ -655,6 +656,8 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       .n_heads(4)
       .n_kv_heads(4)
       .head_dim(1);
+  KVCacheCapacity cache_capacity;
+  cache_capacity.n_blocks(4).block_size(3);
 
   transfer.configure_cache_layout(make_args(/*rank=*/0,
                                             /*world_size=*/2,
@@ -662,10 +665,12 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                   model_args,
                                   /*block_token_capacity=*/3,
                                   /*is_spec_draft=*/false);
+  const KVCacheShape main_shape(cache_capacity, model_args, /*world_size=*/2);
   std::vector<KVCache> main_caches;
   main_caches.emplace_back(
-      KVCacheTensors{torch::zeros({4, 3, 2, 1}), torch::zeros({4, 3, 2, 1})});
-  transfer.register_kv_cache(main_caches, KVCacheShape(), torch::kFloat32);
+      KVCacheTensors{torch::zeros(main_shape.key_cache_shape()),
+                     torch::zeros(main_shape.value_cache_shape())});
+  transfer.register_kv_cache(main_caches, main_shape, torch::kFloat32);
 
   transfer.configure_cache_layout(make_args(/*rank=*/0,
                                             /*world_size=*/1,
@@ -673,11 +678,12 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                   model_args,
                                   /*block_token_capacity=*/3,
                                   /*is_spec_draft=*/true);
+  const KVCacheShape draft_shape(cache_capacity, model_args, /*world_size=*/1);
   std::vector<KVCache> draft_caches;
   draft_caches.emplace_back(
-      KVCacheTensors{torch::zeros({4, 3, 4, 1}), torch::zeros({4, 3, 4, 1})});
-  transfer.register_kv_cache_spec(
-      draft_caches, KVCacheShape(), torch::kFloat32);
+      KVCacheTensors{torch::zeros(draft_shape.key_cache_shape()),
+                     torch::zeros(draft_shape.value_cache_shape())});
+  transfer.register_kv_cache_spec(draft_caches, draft_shape, torch::kFloat32);
 
   EXPECT_EQ(transfer.local_cache_layout_.coordinates.tp_size, 2);
   ASSERT_EQ(transfer.local_cache_layout_.tensors.size(), 4U);

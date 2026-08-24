@@ -378,6 +378,10 @@ TEST(KVCacheEstimationTest,
   target_options.max_seqs_per_batch = 4;
   KVCacheEstimateOptions draft_options = target_options;
   draft_options.is_draft_engine = true;
+
+  const KVCacheCapacity target_only_capacity =
+      estimate_kv_cache_capacity(target_args, target_options);
+
   target_options.draft_model_args = &draft_args;
   target_options.draft_options = &draft_options;
 
@@ -389,9 +393,10 @@ TEST(KVCacheEstimationTest,
       /*head_dim=*/16 * /*float32_bytes=*/4;
   EXPECT_LE(capacity.cache_size_in_bytes() + kDraftSwaBytes,
             target_options.cache_size_in_bytes);
-  EXPECT_EQ(capacity.swa_count(), 19);
-  EXPECT_EQ(capacity.c4_count(), 64);
-  EXPECT_EQ(capacity.c128_count(), 2);
+  EXPECT_EQ(capacity.swa_count(), target_only_capacity.swa_count());
+  EXPECT_EQ(capacity.c4_count() + 32, target_only_capacity.c4_count());
+  EXPECT_EQ(capacity.c128_count() + 1, target_only_capacity.c128_count());
+  EXPECT_LT(capacity.n_blocks(), target_only_capacity.n_blocks());
 }
 
 TEST(KVCacheEstimationTest,

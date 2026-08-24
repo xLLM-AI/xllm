@@ -42,6 +42,7 @@ cc_test(
   SRCS
     sampler_filter_mask_test.cpp
   DEPS
+    :platform
     :sampler
     GTest::gtest_main
 )

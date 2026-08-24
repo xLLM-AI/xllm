@@ -49,6 +49,14 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+constexpr absl::Duration kDecodeRestoreTimeout = absl::Seconds(60);
+constexpr char kDecodeRestoreTimeoutMessage[] =
+    "Decode request could not reacquire device KV cache within 60 seconds";
+
+}  // namespace
+
 void CancelRequestQueue::submit(std::shared_ptr<Request> request) {
   std::lock_guard<std::mutex> lock(mutex_);
   requests_.emplace_back(std::move(request));
@@ -297,6 +305,35 @@ void ContinuousScheduler::clear_mtp_bootstrap(Request* request) {
   sequence->clear_mtp_bootstrap_embedding();
 }
 
+void ContinuousScheduler::drain_decode_restore_waiting(
+    std::vector<std::shared_ptr<Request>>& finished) {
+  const absl::Time now = absl::Now();
+  for (auto it = decode_restore_waiting_.begin();
+       it != decode_restore_waiting_.end();) {
+    std::shared_ptr<Request>& request = it->request;
+    CHECK(request != nullptr);
+    request->update_connection_status();
+    if (request->finished() || request->cancelled()) {
+      clear_mtp_bootstrap(request.get());
+      kv_cache_manager_->deallocate(request.get());
+      finished.emplace_back(request);
+      it = decode_restore_waiting_.erase(it);
+      continue;
+    }
+    if (now - it->started_at < kDecodeRestoreTimeout) {
+      ++it;
+      continue;
+    }
+
+    clear_mtp_bootstrap(request.get());
+    kv_cache_manager_->deallocate(request.get());
+    response_processor_->process_failed_request(
+        request,
+        {StatusCode::RESOURCE_EXHAUSTED, kDecodeRestoreTimeoutMessage});
+    it = decode_restore_waiting_.erase(it);
+  }
+}
+
 std::vector<Batch> ContinuousScheduler::prepare_batch() {
   Timer timer;
   drain_prefetched_requests();
@@ -305,6 +342,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   // Common phases (strategy-independent)
   policy_->drain_request_queue(state, request_queue_);
   auto finished = policy_->collect_finished(state);
+  drain_decode_restore_waiting(finished);
 
   // Initialize budget
   ScheduleBudget budget;
@@ -351,6 +389,7 @@ SchedulerState ContinuousScheduler::make_state() {
       .chunk_queue = *chunk_queue_,
       .decode_queue = *decode_queue_,
       .unified_queue = unified_queue_,
+      .decode_restore_waiting = decode_restore_waiting_,
       .running_requests = running_requests_,
       .running_sequences = running_sequences_,
       .running_sequences_budgets = running_sequences_budgets_,
@@ -962,8 +1001,9 @@ void ContinuousScheduler::preempt_all_running_requests() {
 }
 
 void ContinuousScheduler::abort_all_running_requests() {
-  const size_t total_to_abort =
-      running_requests_.size() + decode_queue_->size() + chunk_queue_->size();
+  const size_t total_to_abort = running_requests_.size() +
+                                decode_queue_->size() + chunk_queue_->size() +
+                                decode_restore_waiting_.size();
   if (total_to_abort == 0) {
     return;
   }
@@ -1006,6 +1046,12 @@ void ContinuousScheduler::abort_all_running_requests() {
   while (!decode_queue_->empty()) {
     abort_one(decode_queue_->top());
     decode_queue_->pop_top();
+  }
+
+  // 4. Decode victims that are waiting for D2H publication or HBM capacity.
+  while (!decode_restore_waiting_.empty()) {
+    abort_one(decode_restore_waiting_.front().request);
+    decode_restore_waiting_.pop_front();
   }
 
   // Clear running state.

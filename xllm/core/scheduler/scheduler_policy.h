@@ -18,6 +18,7 @@ limitations under the License.
 #include <folly/MPMCQueue.h>
 
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <memory>
 #include <vector>
@@ -47,6 +48,7 @@ struct SchedulerState {
   RequestPriorityQueue& chunk_queue;
   RequestPriorityQueue& decode_queue;
   std::list<std::shared_ptr<Request>>& unified_queue;
+  std::deque<DecodeRestoreEntry>& decode_restore_waiting;
 
   // Current batch state (reset each step).
   std::vector<std::shared_ptr<Request>>& running_requests;
@@ -159,6 +161,7 @@ class SchedulerPolicy {
                             SchedulerState& state,
                             bool skip_shared = false);
   void allocate_shared_blocks_for(Sequence* seq, SchedulerState& state);
+  void schedule_decode_restore(SchedulerState& state, ScheduleBudget& budget);
 
   // ===== Decode scheduling =====
   void schedule_decode_from_queue(RequestPriorityQueue* queue,
@@ -183,6 +186,10 @@ class SchedulerPolicy {
       size_t allocated_seqs,
       double allocated_estimate_latency,
       bool budget_exhausted);
+  bool should_wait_for_decode_restore(const std::shared_ptr<Request>& request,
+                                      const SchedulerState& state) const;
+  void enqueue_decode_restore(const std::shared_ptr<Request>& request,
+                              SchedulerState& state);
 
   // ===== Helpers =====
   void cache_in_batch_prefix(const std::vector<Sequence*>& sequences,
