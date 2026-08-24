@@ -16,6 +16,16 @@ cc_test(
     pybind11::embed
 )
 
+# Keep the embedded-Python NPU probes isolated from the parallel CTest pool.
+# This limits shared-device contention but is not a substitute for validating
+# each operator's supported parameter combinations.
+set_tests_properties(
+  NpuXllmOpsTest.Dsv4QuantLightningIndexerPythonWrapperRunsOnA3
+  NpuXllmOpsTest.Dsv4QuantLightningIndexerProductionShapeRunsOnA3
+  NpuXllmOpsTest.Dsv4SparseAttentionPythonWrapperRunsOnA3
+  PROPERTIES RUN_SERIAL TRUE
+)
+
 # Temporarily disabled: Dsv4ScatterCache tests are unstable in the current
 # NPU test environment.
 # cc_test(

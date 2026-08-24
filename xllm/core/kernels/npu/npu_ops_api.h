@@ -446,4 +446,5 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     int64_t dispatch_quant_out_dtype = 0,
     int64_t topo_type = 0,
     int64_t rank_num_per_server = 2);
+
 }  // namespace xllm::kernel::npu
