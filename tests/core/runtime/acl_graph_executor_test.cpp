@@ -1216,8 +1216,97 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
       options,
       /*need_update_attn_mask=*/false,
       /*is_hybrid_linear_attention=*/true);
-  EXPECT_EQ(hybrid_persistent_param.q_seq_lens().size(0), 10);
-  EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 10);
+  // 10 seqs x 3 decoding tokens = 30 rows -> bucket 32 -> 11 metadata rows.
+  EXPECT_EQ(hybrid_persistent_param.q_seq_lens().size(0), 11);
+  EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 11);
+
+  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
+}
+
+TEST(AclGraphPersistentParamTest, HybridSpecVerifyMetadataCoversBucketPadding) {
+  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
+  const bool original_enable_atb_spec_kernel =
+      speculative_config.enable_atb_spec_kernel();
+  speculative_config.enable_atb_spec_kernel(false);
+
+  ModelArgs args;
+  args.model_type("qwen3_5_text");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(4);
+  options.max_tokens_per_batch(64);
+  options.num_decoding_tokens(5);
+  options.enable_speculative_decode(true);
+  options.is_draft_engine(false);
+
+  const torch::Device device("npu:0");
+  // 4 seqs x 5 decoding tokens = 20 rows -> bucket 32 -> 7 metadata rows.
+  ::xllm::npu::GraphPersistentParam persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/true);
+  // 4 seqs x 5 decoding tokens = 20 rows -> bucket 32 -> 7 metadata rows.
+  EXPECT_EQ(persistent_param.q_seq_lens().size(0), 7);
+  EXPECT_EQ(persistent_param.persistent_block_tables().size(0), 7);
+
+  constexpr int64_t kNumSequences = 4;
+  constexpr int64_t kSpecWidth = 5;
+  constexpr int64_t kActualNumTokens = kNumSequences * kSpecWidth;  // 20
+  constexpr int64_t kBucketNumTokens = 32;
+  const torch::TensorOptions int_options =
+      torch::dtype(torch::kInt).device(device);
+  // Capture sees the real 20 validate tokens; padding to bucket 32 happens
+  // inside update() via padded_num_tokens.
+  const torch::Tensor tokens = torch::arange(kActualNumTokens, int_options);
+  const torch::Tensor positions = torch::arange(kActualNumTokens, int_options);
+  ModelInputParams params;
+  params.is_spec_verify = true;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.num_sequences = kNumSequences;
+  params.meta.q_max_seq_len = kSpecWidth;
+  params.attention.host.q_seq_lens.assign(kNumSequences, kSpecWidth);
+  params.attention.host.kv_seq_lens.assign(kNumSequences, 8);
+  params.attention.device.q_seq_lens =
+      torch::full({kNumSequences}, kSpecWidth, int_options);
+  params.attention.device.kv_seq_lens =
+      torch::full({kNumSequences}, 8, int_options);
+  params.attention.device.new_cache_slots =
+      torch::zeros({kActualNumTokens}, int_options);
+  params.attention.device.block_tables =
+      torch::zeros({kNumSequences, 2}, int_options);
+  // Hybrid spec verify consumes token-wise expanded metadata: one row per
+  // (sequence, draft token) with kv_seq_lens growing inside each sequence.
+  params.graph.use_expanded_decode_for_spec_verify_attention = true;
+  constexpr int64_t kKvLen = 20;
+  std::vector<int32_t> expanded_kv_seq_lens_vec;
+  expanded_kv_seq_lens_vec.reserve(kActualNumTokens);
+  for (int64_t seq = 0; seq < kNumSequences; ++seq) {
+    for (int64_t token = 0; token < kSpecWidth; ++token) {
+      expanded_kv_seq_lens_vec.emplace_back(
+          static_cast<int32_t>(kKvLen - kSpecWidth + token + 1));
+    }
+  }
+  params.graph.expanded_kv_seq_lens =
+      torch::tensor(expanded_kv_seq_lens_vec, int_options);
+  params.graph.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
+  params.graph.expanded_block_tables =
+      torch::zeros({kActualNumTokens, 2}, int_options);
+
+  std::optional<ModelInputParams> capture_params;
+  EXPECT_NO_THROW(capture_params = persistent_param.update(
+                      tokens,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      positions,
+                      params,
+                      /*padded_num_tokens=*/kBucketNumTokens,
+                      /*return_capture_params=*/true));
 
   speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
