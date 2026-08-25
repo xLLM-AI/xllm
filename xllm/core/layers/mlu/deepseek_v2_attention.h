@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/layers/mlu/dsa_topk_relay.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
+#include "framework/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/process_group.h"
 #include "framework/quant_args.h"
@@ -54,6 +55,8 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   };
 
   DeepseekV2AttentionImpl() = default;
+  explicit DeepseekV2AttentionImpl(const ModelContext& context,
+                                   bool enable_indexer = true);
   DeepseekV2AttentionImpl(const ModelArgs& args,
                           const QuantArgs& quant_args,
                           const ParallelArgs& parallel_args,
@@ -251,7 +254,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   std::shared_ptr<RotaryEmbeddingBase> rotary_emb_;
   std::shared_ptr<RotaryEmbeddingBase> indexer_rotary_emb_;
   Indexer indexer_{nullptr};
-  std::unique_ptr<Stream> sp_comm_stream_;
+  std::shared_ptr<Stream> sp_comm_stream_;
   Attention dcp_full_head_attn_{nullptr};
 };
 TORCH_MODULE(DeepseekV2Attention);

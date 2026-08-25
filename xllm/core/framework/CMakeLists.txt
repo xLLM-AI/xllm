@@ -58,6 +58,7 @@ cc_library(
   SRCS
     model_context.cpp
   DEPS
+    :platform
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

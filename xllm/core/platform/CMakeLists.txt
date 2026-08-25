@@ -9,6 +9,7 @@ cc_library(
     platform
   HDRS
     stream.h
+    model_stream_registry.h
     device.h
     platform.h
     device_name_utils.h
@@ -31,6 +32,7 @@ cc_library(
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:numa_utils.h>
   SRCS
     stream.cpp
+    model_stream_registry.cpp
     device.cpp
     platform.cpp
     device_name_utils.cpp

@@ -32,6 +32,7 @@ limitations under the License.
 #include "layers/mlu/fused_moe.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
+#include "platform/model_stream_registry.h"
 #include "platform/platform.h"
 
 namespace xllm {
@@ -60,6 +61,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
                    .dtype(torch::kBFloat16)
                    .device(Platform::type_torch(), 0)
                    .requires_grad(false);
+    stream_registry_ = std::make_shared<ModelStreamRegistry>(options_.device());
     model_args_ = test::create_default_model_args();
     model_args_.hidden_size() = 256;
     model_args_.moe_intermediate_size() = 256;
@@ -208,14 +210,25 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
 
   DeepseekV2SparseMoEBlock create_block() const {
     return DeepseekV2SparseMoEBlock(
-        model_args_, quant_args_, parallel_args_, options_);
+        model_args_,
+        quant_args_,
+        parallel_args_,
+        options_,
+        stream_registry_->get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry_->get(ExecutionStreamRole::AUXILIARY_COMPUTE));
   }
 
   FusedMoE create_raw_moe() const {
     const FusedMoEArgs moe_args{.is_gated = true,
                                 .enable_result_reduction = false};
     return FusedMoE(
-        model_args_, moe_args, quant_args_, parallel_args_, options_);
+        model_args_,
+        moe_args,
+        quant_args_,
+        parallel_args_,
+        options_,
+        stream_registry_->get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry_->get(ExecutionStreamRole::AUXILIARY_COMPUTE));
   }
 
   torch::Tensor run_comm(torch::Tensor x, ProcessGroup* pg) const {
@@ -234,6 +247,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;
+  std::shared_ptr<ModelStreamRegistry> stream_registry_;
   std::unique_ptr<test::MockProcessGroup> global_pg_;
   std::unique_ptr<test::MockProcessGroup> dp_pg_;
   std::unique_ptr<test::MockProcessGroup> tp_pg_;

@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <type_traits>
+
 #include "common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
 #include "layers/common/dp_utils.h"
@@ -25,6 +27,22 @@ namespace xllm {
 namespace layer {
 
 namespace {
+
+template <typename MoEModule, typename MoEImpl>
+MoEModule create_fused_moe_from_context(const ModelContext& context,
+                                        const FusedMoEArgs& moe_args) {
+  if constexpr (std::is_constructible_v<MoEImpl,
+                                        const ModelContext&,
+                                        const FusedMoEArgs&>) {
+    return MoEModule(context, moe_args);
+  } else {
+    return MoEModule(context.get_model_args(),
+                     moe_args,
+                     context.get_quant_args(),
+                     context.get_parallel_args(),
+                     context.get_tensor_options());
+  }
+}
 
 #if defined(USE_MLU)
 bool use_moe_all2all(bool enable_deep_ep,
@@ -76,12 +94,10 @@ Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
 
   // Initialize mlp
   if (use_moe) {
-    moe_mlp_ = register_module("mlp",
-                               FusedMoE(model_args,
-                                        FusedMoEArgs{.is_gated = true},
-                                        quant_args,
-                                        parallel_args_,
-                                        options));
+    moe_mlp_ =
+        register_module("mlp",
+                        create_fused_moe_from_context<FusedMoE, FusedMoEImpl>(
+                            context, FusedMoEArgs{.is_gated = true}));
   } else {
     const std::string mlp_module_prefix =
         "model.layers." + std::to_string(layer_id) + ".mlp";

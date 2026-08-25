@@ -32,6 +32,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/fused_moe.h"
 #include "layers/mlu/tests_utils.h"
+#include "platform/model_stream_registry.h"
 #include "platform/platform.h"
 
 namespace xllm {
@@ -71,6 +72,7 @@ class DeepseekV4SparseMoEBlockTest : public ::testing::Test {
                    .dtype(torch::kBFloat16)
                    .device(Platform::type_torch(), 0)
                    .requires_grad(false);
+    stream_registry_ = std::make_shared<ModelStreamRegistry>(options_.device());
     model_args_ = test::create_default_model_args();
     model_args_.model_type() = "deepseek_v4";
     model_args_.hidden_size() = 256;
@@ -194,7 +196,13 @@ class DeepseekV4SparseMoEBlockTest : public ::testing::Test {
 
   DeepseekV4SparseMoEBlock create_block(bool use_hash = false) const {
     return DeepseekV4SparseMoEBlock(
-        model_args_, quant_args_, parallel_args_, options_, use_hash);
+        model_args_,
+        quant_args_,
+        parallel_args_,
+        options_,
+        use_hash,
+        stream_registry_->get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry_->get(ExecutionStreamRole::AUXILIARY_COMPUTE));
   }
 
   FusedMoE create_raw_moe(bool enable_result_reduction = true) const {
@@ -203,7 +211,13 @@ class DeepseekV4SparseMoEBlockTest : public ::testing::Test {
         .enable_result_reduction = enable_result_reduction,
         .use_hash = false};
     return FusedMoE(
-        model_args_, moe_args, quant_args_, parallel_args_, options_);
+        model_args_,
+        moe_args,
+        quant_args_,
+        parallel_args_,
+        options_,
+        stream_registry_->get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry_->get(ExecutionStreamRole::AUXILIARY_COMPUTE));
   }
 
   FusedMoEImpl::RouteInfo route_for(FusedMoE moe,
@@ -232,6 +246,7 @@ class DeepseekV4SparseMoEBlockTest : public ::testing::Test {
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;
+  std::shared_ptr<ModelStreamRegistry> stream_registry_;
   std::unique_ptr<test::MockProcessGroup> global_pg_;
   std::unique_ptr<test::MockProcessGroup> dp_pg_;
   std::unique_ptr<test::MockProcessGroup> tp_pg_;

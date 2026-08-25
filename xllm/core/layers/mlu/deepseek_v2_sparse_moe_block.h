@@ -65,10 +65,13 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
   };
 
   DeepseekV2SparseMoEBlockImpl() = default;
-  DeepseekV2SparseMoEBlockImpl(const ModelArgs& model_args,
-                               const QuantArgs& quant_args,
-                               const ParallelArgs& parallel_args,
-                               const torch::TensorOptions& options);
+  DeepseekV2SparseMoEBlockImpl(
+      const ModelArgs& model_args,
+      const QuantArgs& quant_args,
+      const ParallelArgs& parallel_args,
+      const torch::TensorOptions& options,
+      const std::shared_ptr<Stream>& routed_comm_stream,
+      const std::shared_ptr<Stream>& shared_compute_stream);
 
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;

@@ -29,16 +29,23 @@ DeepseekV2SparseMoEBlockImpl::DeepseekV2SparseMoEBlockImpl(
     const ModelArgs& model_args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
-    const torch::TensorOptions& options)
+    const torch::TensorOptions& options,
+    const std::shared_ptr<Stream>& routed_comm_stream,
+    const std::shared_ptr<Stream>& shared_compute_stream)
     : parallel_args_(parallel_args) {
   enable_deep_ep_ =
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
       parallel_args_.ep_size() > 1;
   const FusedMoEArgs moe_args{.is_gated = true,
                               .enable_result_reduction = false};
-  moe_ = register_module(
-      "moe",
-      FusedMoE(model_args, moe_args, quant_args, parallel_args, options));
+  moe_ = register_module("moe",
+                         FusedMoE(model_args,
+                                  moe_args,
+                                  quant_args,
+                                  parallel_args,
+                                  options,
+                                  routed_comm_stream,
+                                  shared_compute_stream));
 }
 
 void DeepseekV2SparseMoEBlockImpl::load_state_dict(
@@ -208,7 +215,6 @@ DeepseekV2SparseMoEBlockImpl::forward(torch::Tensor x,
                                   static_cast<bool>(comm_fns.launch_reduce) &&
                                   static_cast<bool>(comm_fns.finish_reduce);
   if (can_overlap_reduce) {
-    moe_->init_async(x);
     Stream* comm_stream = moe_->routed_stream();
     CHECK(comm_stream != nullptr) << "forward overlap requires routed stream";
 
@@ -274,7 +280,6 @@ DeepseekV2SparseMoEBlockImpl::forward_sp(
                    comm_fns);
   }
 
-  moe_->init_async(x);
   Stream* comm_stream = moe_->shared_stream();
   CHECK(comm_stream != nullptr) << "forward_sp requires shared stream";
 

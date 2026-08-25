@@ -27,6 +27,7 @@ limitations under the License.
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/tests_utils.h"
+#include "platform/model_stream_registry.h"
 #include "platform/platform.h"
 
 namespace xllm {
@@ -40,6 +41,7 @@ class Qwen3_5FusedMoETest : public ::testing::Test {
                    .dtype(torch::kBFloat16)
                    .device(Platform::type_torch(), 0)
                    .requires_grad(false);
+    stream_registry_ = std::make_shared<ModelStreamRegistry>(options_.device());
     parallel_args_ = test::create_default_parallel_args(process_group_);
   }
 
@@ -64,7 +66,13 @@ class Qwen3_5FusedMoETest : public ::testing::Test {
     const FusedMoEArgs moe_args{.is_gated = true,
                                 .enable_result_reduction = true};
     return Qwen3_5FusedMoE(Qwen3_5FusedMoEImpl(
-        model_args, moe_args, quant_args, parallel_args_, options_));
+        model_args,
+        moe_args,
+        quant_args,
+        parallel_args_,
+        options_,
+        stream_registry_->get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry_->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
   }
 
   StateDict create_gate_up_dict() {
@@ -90,6 +98,7 @@ class Qwen3_5FusedMoETest : public ::testing::Test {
   }
 
   torch::TensorOptions options_;
+  std::shared_ptr<ModelStreamRegistry> stream_registry_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   std::unique_ptr<ProcessGroup> process_group_;
 };

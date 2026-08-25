@@ -36,11 +36,14 @@ class DeepseekV4SparseMoEBlockTestPeer;
 class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
  public:
   DeepseekV4SparseMoEBlockImpl() = default;
-  DeepseekV4SparseMoEBlockImpl(const ModelArgs& model_args,
-                               const QuantArgs& quant_args,
-                               const ParallelArgs& parallel_args,
-                               const torch::TensorOptions& options,
-                               bool use_hash);
+  DeepseekV4SparseMoEBlockImpl(
+      const ModelArgs& model_args,
+      const QuantArgs& quant_args,
+      const ParallelArgs& parallel_args,
+      const torch::TensorOptions& options,
+      bool use_hash,
+      const std::shared_ptr<Stream>& routed_comm_stream,
+      const std::shared_ptr<Stream>& shared_compute_stream);
 
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;

@@ -95,12 +95,18 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
           model_args.hidden_size(), model_args.rms_norm_eps(), options));
 
   if (use_moe) {
-    moe_mlp_ = register_module("mlp",
-                               Qwen3_5FusedMoE(model_args,
-                                               FusedMoEArgs{.is_gated = true},
-                                               quant_args,
-                                               parallel_args_,
-                                               options));
+    const std::shared_ptr<ModelStreamRegistry>& stream_registry =
+        context.stream_registry();
+    moe_mlp_ = register_module(
+        "mlp",
+        Qwen3_5FusedMoE(
+            model_args,
+            FusedMoEArgs{.is_gated = true},
+            quant_args,
+            parallel_args_,
+            options,
+            stream_registry->get(ExecutionStreamRole::COMMUNICATION),
+            stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
   } else {
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),

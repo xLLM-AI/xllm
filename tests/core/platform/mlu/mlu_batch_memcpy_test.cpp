@@ -358,5 +358,17 @@ TEST_F(MLUBatchMemcpyTest, RejectsStreamFromAnotherDevice) {
       batch_memcpy_->submit_h2d({host}, {other_tensor}, stream_.get()));
 }
 
+TEST_F(MLUBatchMemcpyTest, DeviceStreamPoolUsesRepresentedDevice) {
+  if (Platform::device_count() < 2) {
+    GTEST_SKIP() << "Two MLU devices are required for device binding test.";
+  }
+
+  Device other_device(/*device_index=*/1);
+  other_device.set_device();
+  std::unique_ptr<Stream> target_stream = device_->get_stream_from_pool();
+  EXPECT_EQ(target_stream->get_stream()->device_index(), device_->index());
+  device_->set_device();
+}
+
 }  // namespace
 }  // namespace xllm::mlu
