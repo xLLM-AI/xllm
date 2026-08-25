@@ -41,6 +41,7 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
@@ -486,6 +487,8 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
   estimate_options.n_local_linear_v_heads = n_local_linear_v_heads_;
   estimate_options.max_seqs_per_batch =
       static_cast<int64_t>(options_.max_seqs_per_batch());
+  estimate_options.max_concurrent_requests = static_cast<int64_t>(
+      ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
   estimate_options.num_speculative_tokens =
       static_cast<int64_t>(options_.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =

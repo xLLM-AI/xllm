@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -69,6 +70,28 @@ int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   }
   return runtime::get_decode_graph_token_bucket(
       token_capacity, options.enable_graph_mode_decode_no_padding());
+}
+
+bool graph_mode_decode_no_padding_enabled() {
+  // Immutable after ExecutionConfig::initialize() in the entrypoint.
+  static const bool enabled = [] {
+    return ::xllm::ExecutionConfig::get_instance()
+        .enable_graph_mode_decode_no_padding();
+  }();
+  return enabled;
+}
+
+int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
+  const int64_t seq_capacity = get_decode_graph_capacity(options);
+  const int64_t num_decoding_tokens = options.num_decoding_tokens();
+  // Bucket padding rows still consume sequence-scoped metadata:
+  // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
+  const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
+      seq_capacity * num_decoding_tokens,
+      graph_mode_decode_no_padding_enabled());
+  const int64_t padded_seq_capacity =
+      (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
+  return std::max(seq_capacity, padded_seq_capacity);
 }
 
 float get_dp_ep_all2all_buffer_factor(int64_t length) {
@@ -215,12 +238,14 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   const int64_t max_tokens_per_batch = options.max_tokens_per_batch();
   // Graph-mode token capacity is narrower than max_tokens_per_batch: ACL graph
   // only serves decode / spec-verify batches, so the relevant row upper bound
-  // comes from decode graph capacity instead.
+  // comes from decode graph capacity instead. The value is already
+  // bucket-aligned by get_decode_graph_token_capacity.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
-  // Hybrid spec verify keeps sequence-scoped metadata, while non-hybrid MTP
-  // expands every proposal token into its own decode metadata row.
+  // Hybrid spec verify keeps sequence-scoped metadata (with bucket padding,
+  // see get_hybrid_metadata_capacity), while non-hybrid MTP expands every
+  // proposal token into its own decode metadata row.
   const int64_t metadata_capacity = is_hybrid_linear_attention
-                                        ? get_decode_graph_capacity(options)
+                                        ? get_hybrid_metadata_capacity(options)
                                         : max_graph_tokens;
 
   const int64_t max_seq_len = args_.max_position_embeddings();
