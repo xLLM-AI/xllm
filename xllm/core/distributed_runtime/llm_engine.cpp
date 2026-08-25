@@ -125,11 +125,9 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   dp_batch_generations_.resize(dp_size_, 0);
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
-  const bool use_model_sharding =
-      cp_size_ > 1 && Platform::uses_model_cp_sharding();
-  // Effective TP: MLU=dp_local; NPU=dp_local/cp_size.
-  const bool mlu_overlap = use_model_sharding && Platform::is_mlu();
-  dp_local_tp_size_ = mlu_overlap ? dp_local_size_ : dp_local_size_ / cp_size_;
+  // MLU and NPU model-side CP both use orthogonal CP x attention-TP, so the
+  // DP-local TP width is divided by CP.
+  dp_local_tp_size_ = dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster
   link_threadpool_ = std::make_unique<ThreadPool>(

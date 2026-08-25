@@ -27,6 +27,18 @@ message SessionInfo {
   WorkerCacheLayoutManifest cache_layout_manifest = 2;
 }
 
+enum CachePeerMode {
+  CACHE_PEER_MODE_UNSPECIFIED = 0;
+  CACHE_PEER_MODE_ACTIVE = 1;
+  CACHE_PEER_MODE_PLAN_ONLY = 2;
+  CACHE_PEER_MODE_ABSENT = 3;
+}
+
+message CachePeerRequest {
+  WorkerCacheLayoutManifest destination_manifest = 1;
+  CachePeerMode mode = 2;
+}
+
 enum CacheNamespace {
   CACHE_NAMESPACE_MAIN = 0;
   CACHE_NAMESPACE_SPEC_DRAFT = 1;
@@ -109,5 +121,6 @@ message WorkerCacheLayoutManifest {
 service MooncakeTransferEngineService {
   rpc OpenSession(SessionInfo) returns (Status) {}
   rpc CloseSession(SessionInfo) returns (Status) {}
+  rpc SetCachePeer(CachePeerRequest) returns (Status) {}
   rpc GetCacheLayoutManifest(Empty) returns (WorkerCacheLayoutManifest) {}
 }

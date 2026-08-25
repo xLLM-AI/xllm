@@ -16,7 +16,6 @@ limitations under the License.
 #include "framework/kv_cache_transfer/reshard_planner.h"
 
 #include <algorithm>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -64,6 +63,7 @@ using LogicalTensorKey =
     std::tuple<CacheNamespace, int64_t, int32_t, int32_t, std::string>;
 using RegionGroup = std::vector<const AtomicLogicalRegion*>;
 using RegionGroups = std::map<LogicalTensorKey, RegionGroup>;
+using CoverageKey = std::pair<int32_t, int32_t>;
 
 Status invalid(const std::string& message) {
   return Status(StatusCode::INVALID_ARGUMENT, message);
@@ -237,9 +237,8 @@ Status validate_tensor_pair(const AtomicLogicalRegion& source,
 
 Status validate_coverage_for_sources(
     const std::vector<AtomicLogicalRegion>& source_regions,
-    const std::vector<AtomicLogicalRegion>& destination_regions) {
+    const RegionGroups& destination_groups) {
   const RegionGroups source_groups = group_regions(source_regions);
-  const RegionGroups destination_groups = group_regions(destination_regions);
   for (const auto& [key, destinations] : destination_groups) {
     const auto source_it = source_groups.find(key);
     if (source_it == source_groups.end()) {
@@ -342,6 +341,9 @@ Status validate_source_instance(
   }
 
   const ParallelCoordinates& expected = reference.coordinates;
+  if (expected.cp_size % expected.kv_split_size != 0) {
+    return invalid("source cp_size must be divisible by kv_split_size");
+  }
   if (multiply_overflows(static_cast<uint64_t>(expected.dp_size),
                          static_cast<uint64_t>(expected.cp_size)) ||
       multiply_overflows(static_cast<uint64_t>(expected.dp_size) *
@@ -380,6 +382,93 @@ Status validate_source_instance(
                  coordinates.dp_rank, coordinates.cp_rank, coordinates.tp_rank)
              .second) {
       return invalid("source worker manifest set contains a duplicate rank");
+    }
+  }
+  return Status();
+}
+
+bool has_static_overlap(const WorkerCacheLayoutManifest& source,
+                        const RegionGroups& destination_groups) {
+  std::vector<AtomicLogicalRegion> source_regions;
+  expand_manifest(source, /*only_static_owner=*/true, &source_regions);
+  const RegionGroups source_groups = group_regions(source_regions);
+  for (const auto& [key, sources] : source_groups) {
+    const auto destination_it = destination_groups.find(key);
+    if (destination_it == destination_groups.end()) {
+      continue;
+    }
+    for (const AtomicLogicalRegion* source_region : sources) {
+      for (const AtomicLogicalRegion* destination_region :
+           destination_it->second) {
+        if (source_region->logical_offset < logical_end(*destination_region) &&
+            destination_region->logical_offset < logical_end(*source_region)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+Status select_collapsed_writers(
+    const std::vector<WorkerCacheLayoutManifest>& sources,
+    const RegionGroups& destination_groups,
+    std::vector<size_t>* writers,
+    std::set<CoverageKey>* required_groups) {
+  using CpWorkers = std::map<int32_t, std::vector<size_t>>;
+  std::map<CoverageKey, CpWorkers> cp_groups;
+  std::map<std::pair<int32_t, int32_t>, int32_t> cp_kv_ranks;
+  for (size_t index = 0; index < sources.size(); ++index) {
+    const ParallelCoordinates& coordinates = sources[index].coordinates;
+    const std::pair<int32_t, int32_t> cp_key = {coordinates.dp_rank,
+                                                coordinates.cp_rank};
+    const auto [kv_it, inserted] =
+        cp_kv_ranks.emplace(cp_key, coordinates.kv_split_rank);
+    if (!inserted && kv_it->second != coordinates.kv_split_rank) {
+      return invalid("source CP partition disagrees on KV-split rank");
+    }
+    cp_groups[{coordinates.dp_rank, coordinates.kv_split_rank}]
+             [coordinates.cp_rank]
+                 .emplace_back(index);
+  }
+
+  const size_t expected_cp_count =
+      static_cast<size_t>(sources.front().coordinates.cp_size /
+                          sources.front().coordinates.kv_split_size);
+  for (const auto& [group, cp_workers] : cp_groups) {
+    if (cp_workers.size() != expected_cp_count) {
+      return invalid("CP replica group has an unexpected partition count");
+    }
+    required_groups->emplace(group);
+    // Lowest CP rank is the deterministic writer; replicas are PLAN_ONLY.
+    for (size_t index : cp_workers.begin()->second) {
+      if (has_static_overlap(sources[index], destination_groups)) {
+        writers->emplace_back(index);
+      }
+    }
+  }
+  return Status();
+}
+
+Status validate_writer_coverage(
+    const std::map<CoverageKey, std::vector<AtomicLogicalRegion>>&
+        writer_regions,
+    const std::set<CoverageKey>& required_groups,
+    const RegionGroups& destination_groups) {
+  for (const CoverageKey& group : required_groups) {
+    const auto writers_it = writer_regions.find(group);
+    if (writers_it == writer_regions.end()) {
+      return invalid("source DP rank " + std::to_string(group.first) +
+                     ", KV-split rank " + std::to_string(group.second) +
+                     " cannot cover destination: destination logical bytes "
+                     "have no source writer");
+    }
+    const Status coverage =
+        validate_coverage_for_sources(writers_it->second, destination_groups);
+    if (!coverage.ok()) {
+      return invalid("source DP rank " + std::to_string(group.first) +
+                     ", KV-split rank " + std::to_string(group.second) +
+                     " cannot cover destination: " + coverage.message());
     }
   }
   return Status();
@@ -683,15 +772,14 @@ Status bind_regions(
 
 }  // namespace
 
-bool ReshardPlanner::source_participates(
-    const WorkerCacheLayoutManifest& source,
-    const WorkerCacheLayoutManifest& destination) const {
-  return supports_partition_pair(source.coordinates, destination.coordinates);
-}
-
-Status ReshardPlanner::validate_destination_coverage(
+Status ReshardPlanner::select_sources(
     const std::vector<WorkerCacheLayoutManifest>& sources,
-    const WorkerCacheLayoutManifest& destination) const {
+    const WorkerCacheLayoutManifest& destination,
+    std::vector<size_t>* selected_indices) const {
+  if (selected_indices == nullptr) {
+    return invalid("selected source index output must not be null");
+  }
+  selected_indices->clear();
   const Status destination_status = validate_worker_cache_layout(destination);
   if (!destination_status.ok()) {
     return invalid("invalid destination layout: " +
@@ -709,48 +797,59 @@ Status ReshardPlanner::validate_destination_coverage(
   std::vector<AtomicLogicalRegion> destination_regions;
   expand_manifest(
       destination, /*only_static_owner=*/false, &destination_regions);
-  using PartitionKey = std::pair<int32_t, int32_t>;
-  std::map<PartitionKey, std::vector<AtomicLogicalRegion>> by_partition;
+  const RegionGroups destination_groups = group_regions(destination_regions);
   const bool collapse_partitions = !same_partition_sizes(
       sources.front().coordinates, destination.coordinates);
-  for (const WorkerCacheLayoutManifest& source : sources) {
-    if (!source_participates(source, destination)) {
-      continue;
+  std::vector<size_t> writers;
+  std::set<CoverageKey> required_groups;
+  if (collapse_partitions) {
+    const Status selection = select_collapsed_writers(
+        sources, destination_groups, &writers, &required_groups);
+    if (!selection.ok()) {
+      return selection;
     }
+  } else {
+    for (size_t index = 0; index < sources.size(); ++index) {
+      const ParallelCoordinates& coordinates = sources[index].coordinates;
+      if (!same_partition(coordinates, destination.coordinates)) {
+        continue;
+      }
+      required_groups.emplace(coordinates.dp_rank, 0);
+      if (has_static_overlap(sources[index], destination_groups)) {
+        writers.emplace_back(index);
+      }
+    }
+  }
+
+  std::map<CoverageKey, std::vector<AtomicLogicalRegion>> writer_regions;
+  for (size_t index : writers) {
+    const WorkerCacheLayoutManifest& source = sources[index];
     const Status compatibility = validate_compatibility(source, destination);
     if (!compatibility.ok()) {
       return compatibility;
     }
-    const int32_t partition_rank =
-        collapse_partitions ? source.coordinates.cp_rank : 0;
-    std::vector<AtomicLogicalRegion>& regions =
-        by_partition[PartitionKey{source.coordinates.dp_rank, partition_rank}];
-    expand_manifest(source, /*only_static_owner=*/true, &regions);
+    const int32_t kv_partition =
+        collapse_partitions ? source.coordinates.kv_split_rank : 0;
+    expand_manifest(
+        source,
+        /*only_static_owner=*/true,
+        &writer_regions[{source.coordinates.dp_rank, kv_partition}]);
   }
 
-  if (by_partition.empty()) {
-    return invalid("no source workers belong to the destination partition");
+  const Status coverage = validate_writer_coverage(
+      writer_regions, required_groups, destination_groups);
+  if (!coverage.ok()) {
+    return coverage;
   }
-  const int32_t partitions_per_dp =
-      collapse_partitions ? sources.front().coordinates.cp_size : 1;
-  const size_t expected_partition_count =
-      static_cast<size_t>(sources.front().coordinates.dp_size) *
-      static_cast<size_t>(partitions_per_dp);
-  if (by_partition.size() != expected_partition_count) {
-    return invalid(
-        "source DP manifest set is incomplete for destination partition");
-  }
-
-  for (const auto& [partition, source_regions] : by_partition) {
-    const Status coverage =
-        validate_coverage_for_sources(source_regions, destination_regions);
-    if (!coverage.ok()) {
-      return invalid("source DP rank " + std::to_string(partition.first) +
-                     ", CP rank " + std::to_string(partition.second) +
-                     " cannot cover destination: " + coverage.message());
-    }
-  }
+  selected_indices->swap(writers);
   return Status();
+}
+
+Status ReshardPlanner::validate_destination_coverage(
+    const std::vector<WorkerCacheLayoutManifest>& sources,
+    const WorkerCacheLayoutManifest& destination) const {
+  std::vector<size_t> selected_indices;
+  return select_sources(sources, destination, &selected_indices);
 }
 
 Status ReshardPlanner::build_outgoing_plan(

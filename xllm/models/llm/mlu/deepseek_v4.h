@@ -40,6 +40,7 @@ limitations under the License.
 #include "core/layers/common/dsa_metadata.h"
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/word_embedding.h"
+#include "core/layers/mlu/deepseek_v4/deepseek_v4_cp_context.h"
 #include "core/layers/mlu/deepseek_v4/deepseek_v4_decoder_layer.h"
 #include "core/layers/mlu/deepseek_v4/dsa_cache_mapping.h"
 #include "core/layers/mlu/deepseek_v4/dsa_empty_dp_input.h"
@@ -88,6 +89,9 @@ class DeepseekV4ModelImpl final
     const ModelArgs& model_args = context.get_model_args();
     const torch::TensorOptions options = context.get_tensor_options();
     const ParallelArgs& parallel_args = context.get_parallel_args();
+    cp_size_ = parallel_args.cp_size();
+    cp_rank_ = parallel_args.cp_rank();
+    cp_group_ = parallel_args.cp_group_;
 
     layers_.reserve(model_args.n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
@@ -98,10 +102,7 @@ class DeepseekV4ModelImpl final
     window_size_ = model_args.window_size();
 
     num_heads_ = model_args.n_heads();
-    dp_local_tp_size_ =
-        std::max<int64_t>(parallel_args.world_size() /
-                              std::max<int64_t>(parallel_args.dp_size(), 1),
-                          1);
+    dp_local_tp_size_ = std::max<int64_t>(parallel_args.tp_size(), 1);
     CHECK_EQ(num_heads_ % dp_local_tp_size_, 0)
         << "[DSV4][Init] n_heads must be divisible by local tp size. n_heads="
         << num_heads_ << ", local_tp_size=" << dp_local_tp_size_;
@@ -204,23 +205,48 @@ class DeepseekV4ModelImpl final
       prepare_dsa_metadata(attn_metadata, runtime_device);
     }
 
+    std::optional<layer::mlu_v4_cp::DeepseekV4CpContext> cp_context;
+    const bool cp_candidate =
+        cp_size_ > 1 && cp_group_ != nullptr && !is_empty_dp_rank &&
+        !mlu_graph_forward &&
+        modified_input_params.meta.batch_forward_type.no_decode() &&
+        attn_metadata.dsa_metadata != nullptr;
+    if (cp_candidate) {
+      const std::vector<int32_t> query_lengths =
+          layer::mlu_v4_cp::query_lengths_from_cumulative(
+              modified_input_params.attention.host.q_seq_lens,
+              positions.size(0));
+      cp_context = layer::mlu_v4_cp::build_cp_context(
+          cp_size_, cp_rank_, cp_group_, query_lengths, positions);
+      if (cp_context.has_value()) {
+        h = layer::mlu_v4_cp::shard_rows(h, cp_context.value());
+        positions = cp_context->local_positions;
+      }
+    }
+
     std::optional<torch::Tensor> residual;
     std::optional<layer::DeepseekV4PendingMHC> pending_mhc;
     for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
       prepare_layer_metadata(attn_metadata, static_cast<int32_t>(layer_idx));
-      h = layers_[layer_idx]->forward(h,
-                                      residual,
-                                      positions,
-                                      attn_metadata,
-                                      kv_caches[layer_idx],
-                                      modified_input_params,
-                                      tokens,
-                                      &pending_mhc,
-                                      layer_idx + 1 == layers_.size());
+      h = layers_[layer_idx]->forward(
+          h,
+          residual,
+          positions,
+          attn_metadata,
+          kv_caches[layer_idx],
+          modified_input_params,
+          tokens,
+          &pending_mhc,
+          layer_idx + 1 == layers_.size(),
+          cp_context.has_value() ? &cp_context.value() : nullptr);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(layer_idx),
                                               h.device())) {
         return ModelOutput();
       }
+    }
+
+    if (cp_context.has_value()) {
+      h = layer::mlu_v4_cp::gather_restore(h, cp_context.value());
     }
 
     // Stash the pre-hc_head 3D hidden for the MTP draft.
@@ -243,6 +269,9 @@ class DeepseekV4ModelImpl final
   layer::DeepseekV4HCHead hc_head_{nullptr};
   int64_t num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
+  int32_t cp_size_ = 1;
+  int32_t cp_rank_ = 0;
+  ProcessGroup* cp_group_ = nullptr;
 };
 TORCH_MODULE(DeepseekV4Model);
 
@@ -490,6 +519,11 @@ inline void validate_deepseek_v4_args(const ModelArgs& args,
   CHECK_GT(args.n_routed_experts(), 0)
       << "deepseek_v4 config n_routed_experts must be > 0, got "
       << args.n_routed_experts();
+  CHECK_GT(args.o_groups(), 0)
+      << "deepseek_v4 config o_groups must be > 0, got " << args.o_groups();
+  CHECK_EQ(args.n_heads() % args.o_groups(), 0)
+      << "deepseek_v4 config n_heads must be divisible by o_groups, got "
+      << args.n_heads() << " and " << args.o_groups();
   CHECK_GT(args.n_activated_experts(), 0)
       << "deepseek_v4 config n_activated_experts/num_experts_per_tok must be "
          "> 0, got "

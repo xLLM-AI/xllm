@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdlib>
 #include <limits>
 #include <numeric>
+#include <unordered_set>
 
 #include "common/metrics.h"
 #include "util/net.h"
@@ -45,6 +46,33 @@ bool close_remote_session(MooncakeTransferEngineCore* core,
   stub->CloseSession(&cntl, &session_info, &response, nullptr);
   if (cntl.Failed() || !response.ok()) {
     LOG(ERROR) << "CloseSession failed, " << cntl.ErrorText();
+    return false;
+  }
+  return true;
+}
+
+bool set_remote_cache_peer(MooncakeTransferEngineCore* core,
+                           uint64_t cluster_id,
+                           const WorkerCacheLayoutManifest& manifest,
+                           proto::CachePeerMode mode,
+                           const std::string& endpoint) {
+  proto::MooncakeTransferEngineService_Stub* stub =
+      core->get_or_create_stub(cluster_id);
+  if (stub == nullptr) {
+    LOG(ERROR) << "Create cache peer RPC channel failed for " << endpoint;
+    return false;
+  }
+
+  proto::CachePeerRequest request;
+  cache_layout_to_proto(manifest, request.mutable_destination_manifest());
+  request.set_mode(mode);
+  proto::Status response;
+  brpc::Controller controller;
+  stub->SetCachePeer(&controller, &request, &response, nullptr);
+  if (controller.Failed() || !response.ok()) {
+    LOG(ERROR) << "SetCachePeer failed for " << endpoint
+               << ", rpc_error=" << controller.ErrorText()
+               << ", peer_ok=" << response.ok();
     return false;
   }
   return true;
@@ -164,9 +192,7 @@ bool MooncakeTransferEngineCore::open_session(const uint64_t cluster_id,
             << ", remote_addr=" << remote_addr;
 
   auto it = handles_.find(remote_addr);
-  const bool requires_layout_negotiation =
-      cluster_id != 0 && local_cache_layout_.has_value();
-  if (it != handles_.end() && !requires_layout_negotiation) {
+  if (it != handles_.end()) {
     if (!increment_existing) {
       LOG(INFO) << "Session already exists for " << remote_addr;
       return true;
@@ -188,10 +214,6 @@ bool MooncakeTransferEngineCore::open_session(const uint64_t cluster_id,
 
     proto::SessionInfo request;
     request.set_addr(addr_);
-    if (local_cache_layout_.has_value()) {
-      cache_layout_to_proto(*local_cache_layout_,
-                            request.mutable_cache_layout_manifest());
-    }
     proto::Status response;
     brpc::Controller cntl;
     stub->OpenSession(&cntl, &request, &response, nullptr);
@@ -205,33 +227,43 @@ bool MooncakeTransferEngineCore::open_session(const uint64_t cluster_id,
               << ", local_addr=" << addr_;
   }
 
-  // A weight-transfer session may already exist before KV cache registration.
-  // The RPC above must still run after a manifest is published so the peer can
-  // replace its outgoing plan for the current incarnation/generation.
+  return acquire_session_locked(remote_addr);
+}
+
+bool MooncakeTransferEngineCore::acquire_session_locked(
+    const std::string& remote_addr) {
+  auto it = handles_.find(remote_addr);
   if (it != handles_.end()) {
     ++it->second.ref_count;
-    LOG(INFO) << "Reusing negotiated session for " << remote_addr
-              << ", ref_count=" << it->second.ref_count;
     return true;
   }
-
-  // Keep a local handle as well as asking the peer to open one. WRITE uses
-  // the peer-side handle created by the RPC, while READ needs this local
-  // handle to address the peer's registered segment.
-  Transport::SegmentHandle handle = engine_->openSegment(remote_addr);
+  if (engine_ == nullptr) {
+    LOG(ERROR) << "Mooncake engine is not initialized.";
+    return false;
+  }
+  const Transport::SegmentHandle handle = engine_->openSegment(remote_addr);
   if (handle == static_cast<Transport::SegmentHandle>(-1)) {
     LOG(ERROR) << "Fail to connect to " << remote_addr;
     return false;
   }
-
-  SessionInfo session_info;
-  session_info.handle = handle;
-  session_info.ref_count = 1;
-  handles_[remote_addr] = session_info;
-
-  LOG(INFO) << "Created new session for " << remote_addr << ", ref_count=1";
-
+  handles_[remote_addr] = SessionInfo{handle, 1};
   return true;
+}
+
+void MooncakeTransferEngineCore::release_session_locked(
+    const std::string& remote_addr) {
+  auto it = handles_.find(remote_addr);
+  if (it == handles_.end()) {
+    return;
+  }
+  --it->second.ref_count;
+  if (it->second.ref_count > 0) {
+    return;
+  }
+  if (it->second.handle != static_cast<SegmentHandle>(-1)) {
+    engine_->closeSegment(it->second.handle);
+  }
+  handles_.erase(it);
 }
 
 bool MooncakeTransferEngineCore::close_session(const uint64_t cluster_id,
@@ -255,7 +287,6 @@ bool MooncakeTransferEngineCore::close_session(const uint64_t cluster_id,
         engine_->closeSegment(handle);
       }
       handles_.erase(it);
-      outgoing_plans_.erase(remote_addr);
     }
     // close_remote_session() obtains the core mutex through
     // get_or_create_stub(). Release it after updating local state to avoid
@@ -281,7 +312,6 @@ bool MooncakeTransferEngineCore::close_session(const uint64_t cluster_id,
     engine_->closeSegment(handle);
   }
   handles_.erase(it);
-  outgoing_plans_.erase(remote_addr);
 
   LOG(INFO) << "Closed session for " << remote_addr;
 
@@ -305,6 +335,10 @@ Status MooncakeTransferEngineCore::set_local_cache_layout(
     return status;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!cache_peer_links_.empty()) {
+    return Status(StatusCode::UNAVAILABLE,
+                  "cache layout cannot change while cache peers are linked");
+  }
   if (local_cache_layout_.has_value() &&
       local_cache_layout_->incarnation_id == manifest.incarnation_id &&
       manifest.layout_generation <= local_cache_layout_->layout_generation) {
@@ -312,7 +346,6 @@ Status MooncakeTransferEngineCore::set_local_cache_layout(
                   "cache layout generation must increase monotonically");
   }
   local_cache_layout_ = manifest;
-  outgoing_plans_.clear();
   return Status();
 }
 
@@ -322,11 +355,49 @@ MooncakeTransferEngineCore::local_cache_layout() const {
   return local_cache_layout_;
 }
 
-Status MooncakeTransferEngineCore::install_peer_cache_layout(
-    const WorkerCacheLayoutManifest& peer_manifest) {
+Status MooncakeTransferEngineCore::set_cache_peer(
+    const WorkerCacheLayoutManifest& peer_manifest,
+    CachePeerMode mode) {
+  const Status manifest_status = validate_worker_cache_layout(peer_manifest);
+  if (!manifest_status.ok()) {
+    return manifest_status;
+  }
+
   std::optional<WorkerCacheLayoutManifest> local_manifest;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto existing = cache_peer_links_.find(peer_manifest.addr);
+    const bool identity_matches =
+        existing != cache_peer_links_.end() &&
+        existing->second.destination_incarnation ==
+            peer_manifest.incarnation_id &&
+        existing->second.destination_layout_generation ==
+            peer_manifest.layout_generation;
+    if (mode == CachePeerMode::ABSENT) {
+      if (!identity_matches) {
+        return Status();
+      }
+      if (existing->second.holds_session) {
+        release_session_locked(peer_manifest.addr);
+      }
+      cache_peer_links_.erase(existing);
+      return Status();
+    }
+    if (identity_matches) {
+      if (existing->second.mode == mode) {
+        return Status();
+      }
+      return Status(StatusCode::INVALID_ARGUMENT,
+                    "cache peer mode change requires unlink");
+    }
+    if (existing != cache_peer_links_.end() &&
+        existing->second.destination_incarnation ==
+            peer_manifest.incarnation_id &&
+        peer_manifest.layout_generation <
+            existing->second.destination_layout_generation) {
+      return Status(StatusCode::INVALID_ARGUMENT,
+                    "peer cache layout generation is stale");
+    }
     local_manifest = local_cache_layout_;
   }
   if (!local_manifest.has_value()) {
@@ -334,22 +405,43 @@ Status MooncakeTransferEngineCore::install_peer_cache_layout(
                   "local cache layout is not registered");
   }
 
-  ReshardPlanTemplate plan;
-  ReshardPlanner planner;
-  const Status status =
-      planner.build_outgoing_plan(*local_manifest, peer_manifest, &plan);
-  if (!status.ok()) {
-    return status;
+  std::optional<ReshardPlanTemplate> plan;
+  if (mode == CachePeerMode::ACTIVE) {
+    ReshardPlanTemplate active_plan;
+    const Status plan_status = ReshardPlanner().build_outgoing_plan(
+        *local_manifest, peer_manifest, &active_plan);
+    if (!plan_status.ok()) {
+      return plan_status;
+    }
+    if (active_plan.regions.empty()) {
+      return Status(StatusCode::INVALID_ARGUMENT,
+                    "active cache peer requires a non-empty plan");
+    }
+    plan = std::move(active_plan);
   }
+
   std::lock_guard<std::mutex> lock(mutex_);
   if (!local_cache_layout_.has_value() ||
-      local_cache_layout_->incarnation_id != plan.source_incarnation ||
-      local_cache_layout_->layout_generation != plan.source_layout_generation) {
+      local_cache_layout_->incarnation_id != local_manifest->incarnation_id ||
+      local_cache_layout_->layout_generation !=
+          local_manifest->layout_generation) {
     return Status(StatusCode::UNAVAILABLE,
                   "local cache layout changed during plan construction");
   }
-  const auto existing = outgoing_plans_.find(peer_manifest.addr);
-  if (existing != outgoing_plans_.end() &&
+
+  const auto existing = cache_peer_links_.find(peer_manifest.addr);
+  if (existing != cache_peer_links_.end() &&
+      existing->second.destination_incarnation ==
+          peer_manifest.incarnation_id &&
+      existing->second.destination_layout_generation ==
+          peer_manifest.layout_generation) {
+    if (existing->second.mode == mode) {
+      return Status();
+    }
+    return Status(StatusCode::INVALID_ARGUMENT,
+                  "cache peer mode change requires unlink");
+  }
+  if (existing != cache_peer_links_.end() &&
       existing->second.destination_incarnation ==
           peer_manifest.incarnation_id &&
       peer_manifest.layout_generation <
@@ -357,7 +449,23 @@ Status MooncakeTransferEngineCore::install_peer_cache_layout(
     return Status(StatusCode::INVALID_ARGUMENT,
                   "peer cache layout generation is stale");
   }
-  outgoing_plans_[peer_manifest.addr] = std::move(plan);
+
+  const bool holds_session = mode == CachePeerMode::ACTIVE;
+  if (holds_session && !acquire_session_locked(peer_manifest.addr)) {
+    return Status(StatusCode::UNAVAILABLE,
+                  "failed to open cache peer data session");
+  }
+
+  CachePeerLink link;
+  link.destination_incarnation = peer_manifest.incarnation_id;
+  link.destination_layout_generation = peer_manifest.layout_generation;
+  link.mode = mode;
+  link.plan = std::move(plan);
+  link.holds_session = holds_session;
+  if (existing != cache_peer_links_.end() && existing->second.holds_session) {
+    release_session_locked(peer_manifest.addr);
+  }
+  cache_peer_links_[peer_manifest.addr] = std::move(link);
   return Status();
 }
 
@@ -365,12 +473,12 @@ bool MooncakeTransferEngineCore::has_outgoing_plan(
     const std::string& remote_addr,
     CacheNamespace cache_namespace) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto plan_it = outgoing_plans_.find(remote_addr);
-  if (plan_it == outgoing_plans_.end()) {
+  const auto link_it = cache_peer_links_.find(remote_addr);
+  if (link_it == cache_peer_links_.end() || !link_it->second.plan.has_value()) {
     return false;
   }
-  return std::any_of(plan_it->second.regions.begin(),
-                     plan_it->second.regions.end(),
+  return std::any_of(link_it->second.plan->regions.begin(),
+                     link_it->second.plan->regions.end(),
                      [cache_namespace](const StridedRegionTemplate& region) {
                        return region.cache_namespace == cache_namespace;
                      });
@@ -379,7 +487,7 @@ bool MooncakeTransferEngineCore::has_outgoing_plan(
 bool MooncakeTransferEngineCore::has_reshard_plan(
     const std::string& remote_addr) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return outgoing_plans_.find(remote_addr) != outgoing_plans_.end();
+  return cache_peer_links_.find(remote_addr) != cache_peer_links_.end();
 }
 
 Status MooncakeTransferEngineCore::bind_outgoing_regions(
@@ -391,12 +499,20 @@ Status MooncakeTransferEngineCore::bind_outgoing_regions(
   std::optional<ReshardPlanTemplate> plan;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto plan_it = outgoing_plans_.find(remote_addr);
-    if (plan_it == outgoing_plans_.end()) {
+    const auto link_it = cache_peer_links_.find(remote_addr);
+    if (link_it == cache_peer_links_.end()) {
       return Status(StatusCode::UNAVAILABLE,
-                    "no outgoing reshard plan for " + remote_addr);
+                    "cache peer not negotiated: " + remote_addr);
     }
-    plan = plan_it->second;
+    if (link_it->second.mode == CachePeerMode::PLAN_ONLY) {
+      regions->clear();
+      return Status();
+    }
+    plan = link_it->second.plan;
+  }
+  if (!plan.has_value()) {
+    return Status(StatusCode::UNAVAILABLE,
+                  "active cache peer has no reshard plan");
   }
   RequestRegionBinder binder;
   return binder.bind(*plan, mappings, cache_namespace, layer_id, regions);
@@ -411,12 +527,20 @@ Status MooncakeTransferEngineCore::bind_outgoing_regions_explicit(
   std::optional<ReshardPlanTemplate> plan;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto plan_it = outgoing_plans_.find(remote_addr);
-    if (plan_it == outgoing_plans_.end()) {
+    const auto link_it = cache_peer_links_.find(remote_addr);
+    if (link_it == cache_peer_links_.end()) {
       return Status(StatusCode::UNAVAILABLE,
-                    "no outgoing reshard plan for " + remote_addr);
+                    "cache peer not negotiated: " + remote_addr);
     }
-    plan = plan_it->second;
+    if (link_it->second.mode == CachePeerMode::PLAN_ONLY) {
+      regions->clear();
+      return Status();
+    }
+    plan = link_it->second.plan;
+  }
+  if (!plan.has_value()) {
+    return Status(StatusCode::UNAVAILABLE,
+                  "active cache peer has no reshard plan");
   }
   RequestRegionBinder binder;
   return binder.bind_explicit(
@@ -507,6 +631,66 @@ MooncakeTransferEngine::create_rpc_channel(uint64_t cluster_id) {
   return core_.get_or_create_stub(cluster_id);
 }
 
+bool MooncakeTransferEngine::fetch_cache_layout(
+    uint64_t cluster_id,
+    const std::string& remote_addr,
+    WorkerCacheLayoutManifest* manifest) {
+  proto::MooncakeTransferEngineService_Stub* stub =
+      create_rpc_channel(cluster_id);
+  if (stub == nullptr) {
+    LOG(ERROR) << "Failed to create cache layout RPC channel, cluster_id="
+               << cluster_id;
+    return false;
+  }
+  proto::Empty request;
+  proto::WorkerCacheLayoutManifest response;
+  brpc::Controller controller;
+  stub->GetCacheLayoutManifest(&controller, &request, &response, nullptr);
+  if (controller.Failed()) {
+    LOG(ERROR) << "GetCacheLayoutManifest failed: " << controller.ErrorText();
+    return false;
+  }
+  const Status status = cache_layout_from_proto(response, manifest);
+  if (!status.ok()) {
+    LOG(ERROR) << "Invalid remote cache layout from " << remote_addr << ": "
+               << status.message();
+    return false;
+  }
+  if (manifest->addr != remote_addr || manifest->cluster_id != cluster_id) {
+    LOG(ERROR) << "Remote cache layout endpoint mismatch, expected="
+               << cluster_id << "/" << remote_addr
+               << ", manifest=" << manifest->cluster_id << "/"
+               << manifest->addr;
+    return false;
+  }
+  return true;
+}
+
+bool MooncakeTransferEngine::set_remote_peer(
+    uint64_t cluster_id,
+    const std::string& remote_addr,
+    const WorkerCacheLayoutManifest& manifest,
+    CachePeerMode mode) {
+  proto::CachePeerMode proto_mode = proto::CACHE_PEER_MODE_ABSENT;
+  if (mode == CachePeerMode::ACTIVE) {
+    proto_mode = proto::CACHE_PEER_MODE_ACTIVE;
+  } else if (mode == CachePeerMode::PLAN_ONLY) {
+    proto_mode = proto::CACHE_PEER_MODE_PLAN_ONLY;
+  }
+  return set_remote_cache_peer(
+      &core_, cluster_id, manifest, proto_mode, remote_addr);
+}
+
+bool MooncakeTransferEngine::open_local_session(
+    const std::string& remote_addr) {
+  return core_.open_session(/*cluster_id=*/0, remote_addr);
+}
+
+bool MooncakeTransferEngine::close_local_session(
+    const std::string& remote_addr) {
+  return core_.close_session(/*cluster_id=*/0, remote_addr);
+}
+
 bool MooncakeTransferEngine::open_session(const uint64_t cluster_id,
                                           const std::string& remote_addr) {
   if (!core_.open_session(cluster_id, remote_addr)) {
@@ -519,6 +703,29 @@ bool MooncakeTransferEngine::open_session(const uint64_t cluster_id,
 
 bool MooncakeTransferEngine::close_session(const uint64_t cluster_id,
                                            const std::string& remote_addr) {
+  std::optional<LocalCachePeer> cache_peer;
+  {
+    std::lock_guard<std::mutex> lock(session_mutex_);
+    const auto peer_it = cache_peers_.find(remote_addr);
+    if (peer_it != cache_peers_.end()) {
+      cache_peer = peer_it->second;
+    }
+  }
+  if (cache_peer.has_value()) {
+    if (!set_remote_peer(cluster_id,
+                         remote_addr,
+                         cache_peer->destination_manifest,
+                         CachePeerMode::ABSENT)) {
+      return false;
+    }
+    if (cache_peer->holds_session && !close_local_session(remote_addr)) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(session_mutex_);
+    cache_peers_.erase(remote_addr);
+    return true;
+  }
+
   {
     std::lock_guard<std::mutex> lock(session_mutex_);
     const auto it = session_ref_counts_.find(remote_addr);
@@ -555,62 +762,69 @@ bool MooncakeTransferEngine::link_sessions(
   std::vector<WorkerCacheLayoutManifest> remote_manifests;
   remote_manifests.reserve(cluster_ids.size());
   for (size_t index = 0; index < cluster_ids.size(); ++index) {
-    proto::MooncakeTransferEngineService_Stub* stub =
-        create_rpc_channel(cluster_ids[index]);
-    if (stub == nullptr) {
-      LOG(ERROR) << "Failed to create cache layout RPC channel, cluster_id="
-                 << cluster_ids[index];
-      return false;
-    }
-    proto::Empty request;
-    proto::WorkerCacheLayoutManifest response;
-    brpc::Controller controller;
-    stub->GetCacheLayoutManifest(&controller, &request, &response, nullptr);
-    if (controller.Failed()) {
-      LOG(ERROR) << "GetCacheLayoutManifest failed: " << controller.ErrorText();
-      return false;
-    }
     WorkerCacheLayoutManifest remote_manifest;
-    const Status status = cache_layout_from_proto(response, &remote_manifest);
-    if (!status.ok()) {
-      LOG(ERROR) << "Invalid remote cache layout from " << remote_addrs[index]
-                 << ": " << status.message();
-      return false;
-    }
-    if (remote_manifest.addr != remote_addrs[index] ||
-        remote_manifest.cluster_id != cluster_ids[index]) {
-      LOG(ERROR) << "Remote cache layout endpoint mismatch, expected="
-                 << cluster_ids[index] << "/" << remote_addrs[index]
-                 << ", manifest=" << remote_manifest.cluster_id << "/"
-                 << remote_manifest.addr;
+    if (!fetch_cache_layout(
+            cluster_ids[index], remote_addrs[index], &remote_manifest)) {
       return false;
     }
     remote_manifests.emplace_back(std::move(remote_manifest));
   }
 
   ReshardPlanner planner;
-  const Status coverage =
-      planner.validate_destination_coverage(remote_manifests, *local_manifest);
-  if (!coverage.ok()) {
+  std::vector<size_t> selected_indices;
+  const Status selection = planner.select_sources(
+      remote_manifests, *local_manifest, &selected_indices);
+  if (!selection.ok()) {
     LOG(ERROR) << "Remote cache layouts cannot cover local destination: "
-               << coverage.message();
+               << selection.message();
     return false;
   }
 
   std::vector<size_t> opened_indices;
-  opened_indices.reserve(cluster_ids.size());
-  for (size_t index = 0; index < cluster_ids.size(); ++index) {
-    if (!planner.source_participates(remote_manifests[index],
-                                     *local_manifest)) {
-      continue;
+  opened_indices.reserve(selected_indices.size());
+  const std::unordered_set<size_t> selected_set(selected_indices.begin(),
+                                                selected_indices.end());
+  bool linked = true;
+  for (size_t index = 0; index < remote_manifests.size(); ++index) {
+    const bool active = selected_set.find(index) != selected_set.end();
+    const CachePeerMode mode =
+        active ? CachePeerMode::ACTIVE : CachePeerMode::PLAN_ONLY;
+    if (!set_remote_peer(
+            cluster_ids[index], remote_addrs[index], *local_manifest, mode)) {
+      linked = false;
+      break;
     }
-    if (!open_session(cluster_ids[index], remote_addrs[index])) {
-      for (size_t opened_index : opened_indices) {
-        close_session(cluster_ids[opened_index], remote_addrs[opened_index]);
+    if (active && !open_local_session(remote_addrs[index])) {
+      linked = false;
+      break;
+    }
+    if (active) {
+      opened_indices.emplace_back(index);
+    }
+  }
+
+  if (!linked) {
+    // A failed RPC response may still have published state on the source.
+    for (size_t index = 0; index < remote_manifests.size(); ++index) {
+      if (!set_remote_peer(cluster_ids[index],
+                           remote_addrs[index],
+                           *local_manifest,
+                           CachePeerMode::ABSENT)) {
+        LOG(ERROR) << "Cache peer rollback failed for " << remote_addrs[index];
       }
-      return false;
     }
-    opened_indices.emplace_back(index);
+    for (size_t index : opened_indices) {
+      close_local_session(remote_addrs[index]);
+    }
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(session_mutex_);
+  for (size_t index = 0; index < remote_manifests.size(); ++index) {
+    LocalCachePeer cache_peer;
+    cache_peer.destination_manifest = *local_manifest;
+    cache_peer.holds_session = selected_set.find(index) != selected_set.end();
+    cache_peers_[remote_addrs[index]] = std::move(cache_peer);
   }
   return true;
 }
@@ -998,30 +1212,57 @@ void MooncakeTransferEngineService::OpenSession(
 
   std::string remote_addr(request->addr());
   MooncakeTransferEngineCore& core = MooncakeTransferEngineCore::get_instance();
-  if (request->has_cache_layout_manifest()) {
-    WorkerCacheLayoutManifest peer_manifest;
-    const Status decode_status = cache_layout_from_proto(
-        request->cache_layout_manifest(), &peer_manifest);
-    if (!decode_status.ok() || peer_manifest.addr != remote_addr) {
-      LOG(ERROR) << "OpenSession received an invalid peer cache layout: "
-                 << decode_status.message();
-      response->set_ok(false);
-      return;
-    }
-    const Status plan_status = core.install_peer_cache_layout(peer_manifest);
-    if (!plan_status.ok()) {
-      LOG(ERROR) << "OpenSession failed to build outgoing reshard plan: "
-                 << plan_status.message();
-      response->set_ok(false);
-      return;
-    }
-  }
   const bool result = core.open_session(
-      0,
-      remote_addr,
-      /*increment_existing=*/!request->has_cache_layout_manifest());
+      /*cluster_id=*/0, remote_addr, /*increment_existing=*/true);
 
   response->set_ok(result);
+}
+
+void MooncakeTransferEngineService::SetCachePeer(
+    ::google::protobuf::RpcController* controller,
+    const proto::CachePeerRequest* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  if (request == nullptr || response == nullptr || controller == nullptr) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+  if (!request->has_destination_manifest() ||
+      request->mode() == proto::CACHE_PEER_MODE_UNSPECIFIED) {
+    LOG(ERROR) << "SetCachePeer request is incomplete.";
+    response->set_ok(false);
+    return;
+  }
+
+  WorkerCacheLayoutManifest peer_manifest;
+  const Status decode_status =
+      cache_layout_from_proto(request->destination_manifest(), &peer_manifest);
+  if (!decode_status.ok()) {
+    LOG(ERROR) << "SetCachePeer received an invalid cache layout: "
+               << decode_status.message();
+    response->set_ok(false);
+    return;
+  }
+
+  CachePeerMode mode = CachePeerMode::ABSENT;
+  if (request->mode() == proto::CACHE_PEER_MODE_ACTIVE) {
+    mode = CachePeerMode::ACTIVE;
+  } else if (request->mode() == proto::CACHE_PEER_MODE_PLAN_ONLY) {
+    mode = CachePeerMode::PLAN_ONLY;
+  } else if (request->mode() != proto::CACHE_PEER_MODE_ABSENT) {
+    LOG(ERROR) << "SetCachePeer received an invalid mode.";
+    response->set_ok(false);
+    return;
+  }
+
+  const Status status =
+      MooncakeTransferEngineCore::get_instance().set_cache_peer(peer_manifest,
+                                                                mode);
+  if (!status.ok()) {
+    LOG(ERROR) << "SetCachePeer failed: " << status.message();
+  }
+  response->set_ok(status.ok());
 }
 
 void MooncakeTransferEngineService::GetCacheLayoutManifest(

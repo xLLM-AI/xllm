@@ -120,6 +120,8 @@ void validate_layerwise_split_size_startup_config(const Options& options,
       << "layerwise_split_size > 1 does not support KV split.";
 }
 
+}  // namespace
+
 std::optional<std::string> validate_model_cp(const Options& options,
                                              EngineType engine_type,
                                              const std::string& model_type,
@@ -149,7 +151,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
              "disable the speculative algorithm, or wait for MLU worker-side "
              "CP";
     }
-    if (model_type != "deepseek_v32" && model_type != "glm_moe_dsa") {
+    if (!is_mlu_model_cp_capable(model_type)) {
       return "MLU CP does not support model_type=" + model_type;
     }
     if (options.instance_role() != InstanceRole::DEFAULT &&
@@ -159,14 +161,15 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.dp_size() != 1) {
       return "MLU CP requires dp_size == 1";
     }
-    if (options.cp_size() != global_world_size) {
-      return "MLU CP requires cp_size == global world size";
+    if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+      return "MLU CP requires world_size divisible by dp_size * cp_size "
+             "(orthogonal CP x TP layout)";
     }
     if (ParallelConfig::get_instance().kv_split_size() != 1) {
       return "MLU CP requires kv_split_size == 1";
     }
-    if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
-      return "MLU CP requires ep_size == 1 or global world size";
+    if (options.ep_size() != global_world_size) {
+      return "MLU CP requires ep_size == global world size";
     }
     return std::nullopt;
   }
@@ -283,6 +286,8 @@ std::optional<std::string> validate_model_cp(const Options& options,
   return "cp_size > 1 is only supported on platforms with model-side CP "
          "(MLU/NPU); disable CP (cp_size=1) or use MLU/NPU.";
 }
+
+namespace {
 
 void print_startup_banner(const std::filesystem::path& model_path,
                           const std::string& backend,

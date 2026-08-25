@@ -20,6 +20,8 @@ limitations under the License.
 #include <atomic>
 #include <functional>
 #include <future>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -97,6 +99,11 @@ class Master {
   static std::atomic<bool> idle_running_;
   std::thread idle_thread_;
 };
+
+std::optional<std::string> validate_model_cp(const Options& options,
+                                             EngineType engine_type,
+                                             const std::string& model_type,
+                                             int32_t global_world_size);
 
 std::unique_ptr<Master> create_master(const std::string& backend,
                                       const Options& options);

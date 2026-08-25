@@ -404,7 +404,6 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.b = w13_;
     group_gemm_params.token_count = selected_expert_info.token_count_slice;
     if (is_smoothquant_) {
-      prepare_scale_layout();
       torch::Tensor a_scale =
           selected_expert_info.input_scale.value().flatten();
       selected_expert_info.input_scale =
@@ -481,7 +480,6 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.b = w2_;
     group_gemm_params.token_count = selected_expert_info.token_count_slice;
     if (is_smoothquant_) {
-      prepare_scale_layout();
       group_gemm_params.a_scale = act_out_scale;
       group_gemm_params.b_scale = w2_scale_;
       if (!w2_scale_quant_flag_.empty()) {
@@ -637,6 +635,11 @@ void FusedMoEImpl::load_state_dict(const StateDict& state_dict) {
   }
   gate_->load_state_dict(state_dict.get_dict_with_prefix("gate."));
   load_experts(state_dict.get_dict_with_prefix("experts."));
+  if (is_smoothquant_ && w13_scale_is_loaded_ && w2_scale_is_loaded_) {
+    // This conversion reallocates registered scale tensors, so do it before
+    // MLU graph capture begins and owns its temporary allocation pool.
+    prepare_scale_layout();
+  }
 }
 
 }  // namespace layer

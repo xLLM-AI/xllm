@@ -33,11 +33,11 @@ TEST(NpuCpCapabilityTest, RegisteredCpCapableModels) {
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4_mtp"));
   EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa"));
   EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa_mtp"));
-  // The registry must advertise NPU_MODEL for these and NONE for the rest.
+  // The registry must advertise MODEL for these and NONE for the rest.
   EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v32"),
-            CpShardingMode::NPU_MODEL);
+            CpShardingMode::MODEL);
   EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("glm_moe_dsa_mtp"),
-            CpShardingMode::NPU_MODEL);
+            CpShardingMode::MODEL);
 }
 
 TEST(NpuCpCapabilityTest, UnregisteredModelsAreNotCapable) {

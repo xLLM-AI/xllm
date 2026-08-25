@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <functional>
+#include <vector>
 
 #include "parallel_args.h"
 #include "process_group.h"

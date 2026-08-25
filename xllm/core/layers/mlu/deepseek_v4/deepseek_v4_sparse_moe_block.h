@@ -26,6 +26,7 @@ limitations under the License.
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
+#include "layers/mlu/deepseek_v4/deepseek_v4_cp_context.h"
 #include "layers/mlu/fused_moe.h"
 
 namespace xllm {
@@ -55,6 +56,9 @@ class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
                                  const torch::Tensor& topk_weights,
                                  const torch::Tensor& topk_ids,
                                  const ModelInputParams& input_params);
+  torch::Tensor forward_cp(const torch::Tensor& local_hidden_states,
+                           const std::optional<torch::Tensor>& local_input_ids,
+                           const mlu_v4_cp::DeepseekV4CpContext& cp_context);
 
  private:
   bool need_gather() const;

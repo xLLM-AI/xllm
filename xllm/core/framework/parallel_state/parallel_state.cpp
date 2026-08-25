@@ -260,17 +260,17 @@ std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
   CHECK_GE(global_rank, 0);
   CHECK_LT(global_rank, world_size);
 
-  // rank layout: dp_rank * (cp_size * attn_tp_size) + cp_rank * attn_tp_size +
-  // tp_rank
-  const int32_t tp_stride = attn_tp_size;
+  // rank = dp_rank * (cp_size * attn_tp_size) + cp_rank * attn_tp_size
+  //      + attn_tp_rank
   const int32_t dp_stride = cp_size * attn_tp_size;
   const int32_t dp_rank = global_rank / dp_stride;
-  const int32_t tp_rank = global_rank % attn_tp_size;
+  const int32_t attn_tp_rank = global_rank % attn_tp_size;
 
   std::vector<int32_t> ranks;
   ranks.reserve(cp_size);
   for (int32_t cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
-    ranks.push_back(dp_rank * dp_stride + cp_rank * tp_stride + tp_rank);
+    ranks.emplace_back(dp_rank * dp_stride + cp_rank * attn_tp_size +
+                       attn_tp_rank);
   }
   return ranks;
 }

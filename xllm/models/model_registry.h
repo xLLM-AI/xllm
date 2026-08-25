@@ -60,11 +60,11 @@ using QuantArgsLoader =
 using TokenizerArgsLoader =
     std::function<bool(const JsonReader& json, TokenizerArgs* args)>;
 
-// Model-advertised CP mode: NONE or NPU_MODEL (shard after embed / merge
-// before LM head).
+// Model-advertised CP mode: NONE or MODEL (shard after embed / merge before
+// LM head). Backend capability queries decide the concrete model data path.
 enum class CpShardingMode : int8_t {
   NONE = 0,
-  NPU_MODEL = 1,
+  MODEL = 1,
 };
 
 // TODO: add default args loader.
@@ -159,6 +159,8 @@ bool resolve_model_registration_name(const std::string& model_type,
 // Idempotent. `resolved_name` must already be backend-resolved (see
 // resolve_model_registration) so qwen3_atb etc. are not misclassified.
 bool is_npu_model_cp_capable(const std::string& resolved_name);
+
+bool is_mlu_model_cp_capable(const std::string& resolved_name);
 
 bool resolve_model_registration(const std::string& model_type,
                                 const std::string& requested_npu_kernel_backend,

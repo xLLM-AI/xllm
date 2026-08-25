@@ -505,8 +505,10 @@ TEST(ReshardPlannerTest, MqaReplicationUsesOneStaticSourceWriter) {
       make_instance(/*tp_size=*/4, /*global_heads=*/1, 17, "destination");
   ReshardPlanner planner;
   for (const WorkerCacheLayoutManifest& destination : destinations) {
+    std::vector<size_t> selected_indices;
     ASSERT_TRUE(
-        planner.validate_destination_coverage(sources, destination).ok());
+        planner.select_sources(sources, destination, &selected_indices).ok());
+    EXPECT_EQ(selected_indices, std::vector<size_t>({0}));
     ReshardPlanTemplate owner_plan;
     ReshardPlanTemplate replica_plan;
     ASSERT_TRUE(
@@ -617,10 +619,128 @@ TEST(ReshardPlannerTest, SelectsMatchingCpPartitionFromCompleteSourceSet) {
   destination.coordinates.kv_split_size = 2;
   destination.coordinates.kv_split_rank = 1;
 
-  const Status status = ReshardPlanner().validate_destination_coverage(
-      {cp_zero, cp_one}, destination);
+  std::vector<size_t> selected_indices;
+  const Status status = ReshardPlanner().select_sources(
+      {cp_zero, cp_one}, destination, &selected_indices);
 
   EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(selected_indices, std::vector<size_t>({1}));
+}
+
+TEST(ReshardPlannerTest, SelectsLowestCpReplicaForPartitionCollapse) {
+  const std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/4,
+      /*kv_split_size=*/1,
+      /*tp_size=*/2,
+      /*global_heads=*/4,
+      /*first_buffer_id=*/3,
+      "source");
+  const WorkerCacheLayoutManifest destination =
+      make_head_manifest(0, 1, 4, 17, "destination");
+  std::vector<size_t> selected_indices;
+
+  const Status status =
+      ReshardPlanner().select_sources(sources, destination, &selected_indices);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(selected_indices, std::vector<size_t>({0, 1}));
+  for (size_t index : selected_indices) {
+    EXPECT_EQ(sources[index].coordinates.cp_rank, 0);
+  }
+}
+
+TEST(ReshardPlannerTest, SelectsSingleOwnerForPcpMqaDecodeWorkers) {
+  const std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/4,
+      /*kv_split_size=*/1,
+      /*tp_size=*/2,
+      /*global_heads=*/1,
+      /*first_buffer_id=*/3,
+      "source");
+  const std::vector<WorkerCacheLayoutManifest> destinations =
+      make_instance(/*tp_size=*/8,
+                    /*global_heads=*/1,
+                    /*first_buffer_id=*/17,
+                    "destination");
+  ReshardPlanner planner;
+
+  for (const WorkerCacheLayoutManifest& destination : destinations) {
+    std::vector<size_t> selected_indices;
+    ASSERT_TRUE(
+        planner.select_sources(sources, destination, &selected_indices).ok());
+    EXPECT_EQ(selected_indices, std::vector<size_t>({0}));
+  }
+
+  ReshardPlanTemplate replica_plan;
+  ASSERT_TRUE(
+      planner.build_outgoing_plan(sources[2], destinations[0], &replica_plan)
+          .ok());
+  EXPECT_FALSE(replica_plan.regions.empty());
+}
+
+TEST(ReshardPlannerTest, SelectsOneCpOwnerPerKvSplitPartition) {
+  const std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/4,
+      /*kv_split_size=*/2,
+      /*tp_size=*/2,
+      /*global_heads=*/4,
+      /*first_buffer_id=*/3,
+      "source");
+  const WorkerCacheLayoutManifest destination =
+      make_head_manifest(0, 1, 4, 17, "destination");
+  std::vector<size_t> selected_indices;
+
+  const Status status =
+      ReshardPlanner().select_sources(sources, destination, &selected_indices);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(selected_indices, std::vector<size_t>({0, 1, 4, 5}));
+  EXPECT_EQ(sources[selected_indices[0]].coordinates.cp_rank, 0);
+  EXPECT_EQ(sources[selected_indices[2]].coordinates.cp_rank, 2);
+}
+
+TEST(ReshardPlannerTest, IgnoresPlanOnlyCpDescriptorMismatch) {
+  std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/2,
+      /*kv_split_size=*/1,
+      /*tp_size=*/2,
+      /*global_heads=*/4,
+      /*first_buffer_id=*/3,
+      "source");
+  sources[2].tensors[0].shard.spans[0].logical_offset_bytes = 2;
+  const WorkerCacheLayoutManifest destination =
+      make_head_manifest(0, 1, 4, 17, "destination");
+  std::vector<size_t> selected_indices;
+
+  const Status status =
+      ReshardPlanner().select_sources(sources, destination, &selected_indices);
+
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(selected_indices, std::vector<size_t>({0, 1}));
+}
+
+TEST(ReshardPlannerTest, RejectsKvGroupWithoutWriter) {
+  std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/4,
+      /*kv_split_size=*/2,
+      /*tp_size=*/2,
+      /*global_heads=*/4,
+      /*first_buffer_id=*/3,
+      "source");
+  for (size_t index : {4U, 5U}) {
+    sources[index].tensors[0].shard.spans[0].logical_tensor = "missing_key";
+    sources[index].tensors[0].shard.spans[1].logical_tensor = "missing_key";
+  }
+  const WorkerCacheLayoutManifest destination =
+      make_head_manifest(0, 1, 4, 17, "destination");
+  std::vector<size_t> selected_indices = {99};
+
+  const Status status =
+      ReshardPlanner().select_sources(sources, destination, &selected_indices);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("no source writer"), std::string::npos);
+  EXPECT_TRUE(selected_indices.empty());
 }
 
 TEST(ReshardPlannerTest, CollapsesPrefillCpAndKvSplitIntoDecodePartition) {
@@ -635,10 +755,10 @@ TEST(ReshardPlannerTest, CollapsesPrefillCpAndKvSplitIntoDecodePartition) {
       make_head_manifest(0, 1, 4, 17, "destination");
   ReshardPlanner planner;
 
-  ASSERT_TRUE(planner.validate_destination_coverage(sources, destination).ok());
-  for (const WorkerCacheLayoutManifest& source : sources) {
-    EXPECT_TRUE(planner.source_participates(source, destination));
-  }
+  std::vector<size_t> selected_indices;
+  ASSERT_TRUE(
+      planner.select_sources(sources, destination, &selected_indices).ok());
+  EXPECT_EQ(selected_indices, std::vector<size_t>({0, 1, 2, 3}));
 
   std::vector<std::vector<uint8_t>> source_bytes(sources.size());
   std::vector<uint8_t> destination_bytes(
@@ -735,6 +855,24 @@ TEST(ReshardPlannerTest, RejectsIncompleteSourceWorkerSet) {
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("incomplete"), std::string::npos);
+}
+
+TEST(ReshardPlannerTest, RejectsNonDivisibleCpAndKvSplitSizes) {
+  const std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/3,
+      /*kv_split_size=*/2,
+      /*tp_size=*/1,
+      /*global_heads=*/1,
+      /*first_buffer_id=*/3,
+      "source");
+  const WorkerCacheLayoutManifest destination =
+      make_head_manifest(0, 1, 1, 17, "destination");
+
+  const Status status =
+      ReshardPlanner().validate_destination_coverage(sources, destination);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("divisible"), std::string::npos);
 }
 
 TEST(ReshardPlannerTest, RejectsDuplicateSourceRank) {
