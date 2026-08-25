@@ -262,6 +262,8 @@ message DisaggGenerationsRequest {
   // Number of prompt tokens served from the prefill prefix cache.
   int32 num_cached_tokens = 15;
   repeated KVTransferGroup source_groups = 20;
+  // Cumulative end-to-end latency measured by the source at handoff.
+  optional double upstream_elapsed_seconds = 21;
 }
 
 message DisaggGenerationsRequests {

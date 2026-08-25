@@ -1652,6 +1652,7 @@ void PDOOCScheduler::prefill_send_first_generation() {
       // TODO: Async call later
       proto::Status resp;
       brpc::Controller cntl;
+      gen->set_upstream_elapsed_seconds(request->end_to_end_latency_seconds());
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
 
       if (cntl.Failed() || !resp.ok()) {
@@ -1710,6 +1711,7 @@ bool PDOOCScheduler::decode_schedule(std::shared_ptr<Request>& request,
 bool PDOOCScheduler::decode_recv_multi_generations(
     const std::string& req_id,
     const std::vector<proto::RemoteToken>& migration_tokens,
+    double upstream_elapsed_seconds,
     const std::string& kv_cache_transfer_mode,
     std::vector<uint64_t> src_cluster_ids,
     std::vector<std::string> src_addrs,
@@ -1734,14 +1736,20 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     request->sequences()[0]->enable_checking_prefill_token();
   }
 
+  double time_to_first_token_latency_seconds = 0.0;
+  for (const auto& remote_token : migration_tokens) {
+    if (remote_token.time_to_first_token_latency_seconds() > 0) {
+      time_to_first_token_latency_seconds =
+          remote_token.time_to_first_token_latency_seconds();
+      break;
+    }
+  }
+  restore_disaggregated_latency(request.get(),
+                                time_to_first_token_latency_seconds,
+                                upstream_elapsed_seconds);
+
   // Add all migration tokens to the sequence
   for (const auto& remote_token : migration_tokens) {
-    if (remote_token.time_to_first_token_latency_seconds() > 0 &&
-        request->sequences()[0]->time_to_first_token_latency_seconds() <= 0) {
-      request->sequences()[0]->set_time_to_first_token_latency_seconds(
-          remote_token.time_to_first_token_latency_seconds());
-    }
-
     Token token(remote_token.token_id());
     if (remote_token.has_logprob()) {
       token.logprob = remote_token.logprob();
@@ -2168,6 +2176,8 @@ void PDOOCScheduler::prefill_send_multi_generations() {
       // TODO: Async call later
       proto::Status resp;
       brpc::Controller cntl;
+      multi_req->set_upstream_elapsed_seconds(
+          request->end_to_end_latency_seconds());
       stub->MultiGenerations(&cntl, &multi_reqs, &resp, nullptr);
       if (cntl.Failed() || !resp.ok()) {
         LOG(ERROR) << "Failed to send multi generations, " << cntl.ErrorText()

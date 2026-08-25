@@ -131,6 +131,8 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
         warmup_for_graph();
       }
 #if defined(USE_NPU)
+    } else if (options_.instance_role() == InstanceRole::DECODE) {
+      LOG(INFO) << "Skipping eager warmup for decode-only instance";
     } else {
       warmup_for_eager();
 #endif
