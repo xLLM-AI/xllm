@@ -230,13 +230,16 @@ void release_prefix_cache(BlockManagerPool* block_manager) {
 
 bool recv_first_generation(DisaggPDScheduler* scheduler,
                            const torch::Tensor& mtp_embedding,
-                           int32_t num_cached_tokens = 0) {
+                           int32_t num_cached_tokens = 0,
+                           double time_to_first_token_latency_seconds = 0.1,
+                           double upstream_elapsed_seconds = 0.0) {
   return scheduler->decode_recv_first_generation(
       "req",
       /*token_id=*/42,
       /*has_logprob=*/false,
       /*logprob=*/0.0f,
-      /*time_to_first_token_latency_seconds=*/0.1,
+      time_to_first_token_latency_seconds,
+      upstream_elapsed_seconds,
       /*top_tokens=*/{},
       /*top_logprobs=*/{},
       /*kv_cache_transfer_mode=*/"PUSH",
@@ -371,6 +374,7 @@ TEST(DisaggPDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
       /*has_logprob=*/false,
       /*logprob=*/0.0f,
       /*time_to_first_token_latency_seconds=*/0.1,
+      /*upstream_elapsed_seconds=*/0.0,
       /*top_tokens=*/{},
       /*top_logprobs=*/{},
       /*kv_cache_transfer_mode=*/"PULL",
@@ -412,6 +416,67 @@ TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   // pre-fix it was created_time + ttft (~now+100ms), yielding a negative ITL.
   int64_t first_itl = queued->sequences()[0]->tbt(absl::Now());
   EXPECT_GE(first_itl, 0);
+}
+
+TEST(DisaggPDSchedulerTest, DecodeLatencyIncludesPrefillTtft) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  Sequence* sequence = request->sequences()[0].get();
+  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+  ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
+
+  constexpr double kPrefillTtftSeconds = 10.0;
+  EXPECT_TRUE(recv_first_generation(&scheduler,
+                                    torch::Tensor(),
+                                    /*num_cached_tokens=*/0,
+                                    kPrefillTtftSeconds));
+
+  std::shared_ptr<Request> queued;
+  ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
+  EXPECT_GE(queued->end_to_end_latency_seconds(), kPrefillTtftSeconds);
+  EXPECT_LT(queued->elapsed_seconds(), kPrefillTtftSeconds);
+}
+
+TEST(DisaggPDSchedulerTest, DecodeLatencyUsesCumulativeUpstreamElapsed) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  Sequence* sequence = request->sequences()[0].get();
+  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+  ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
+
+  constexpr double kTtftSeconds = 2.0;
+  constexpr double kUpstreamElapsedSeconds = 10.0;
+  EXPECT_TRUE(recv_first_generation(&scheduler,
+                                    torch::Tensor(),
+                                    /*num_cached_tokens=*/0,
+                                    kTtftSeconds,
+                                    kUpstreamElapsedSeconds));
+
+  std::shared_ptr<Request> queued;
+  ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
+  EXPECT_DOUBLE_EQ(
+      queued->sequences()[0]->time_to_first_token_latency_seconds(),
+      kTtftSeconds);
+  EXPECT_GE(queued->end_to_end_latency_seconds(), kUpstreamElapsedSeconds);
+  EXPECT_LT(queued->elapsed_seconds(), kTtftSeconds);
+
+  queued->sequences()[0]->append_token(Token(43));
+  queued->sequences()[0]->append_token(Token(44));
+  queued->sequences()[0]->append_token(Token(45));
+  const size_t generated_tokens =
+      queued->sequences()[0]->num_generated_tokens();
+  ASSERT_EQ(generated_tokens, 4U);
+  const double generation_latency_seconds =
+      queued->end_to_end_latency_seconds() - kTtftSeconds;
+  const double average_tpot_milliseconds =
+      generation_latency_seconds * 1000.0 / (generated_tokens - 1);
+  EXPECT_GE(average_tpot_milliseconds,
+            (kUpstreamElapsedSeconds - kTtftSeconds) * 1000.0 /
+                (generated_tokens - 1));
 }
 
 TEST(DisaggPDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
@@ -577,6 +642,27 @@ TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
   EXPECT_EQ(proto::DisaggRequest::kIncludeStopStrInOutputFieldNumber, 39);
   EXPECT_EQ(proto::DisaggRequest::kJsonObjectFieldNumber, 40);
   EXPECT_EQ(proto::DisaggRequest::kJsonReasoningEnabledFieldNumber, 41);
+}
+
+TEST(DisaggPDSchedulerTest, GenerationLatencyFieldsPreserveWireTags) {
+  proto::DisaggGenerationsRequest request;
+  request.set_upstream_elapsed_seconds(12.5);
+  proto::RemoteToken* token = request.add_tokens();
+  token->set_time_to_first_token_latency_seconds(2.5);
+
+  std::string serialized;
+  ASSERT_TRUE(request.SerializeToString(&serialized));
+
+  proto::DisaggGenerationsRequest decoded;
+  ASSERT_TRUE(decoded.ParseFromString(serialized));
+  ASSERT_TRUE(decoded.has_upstream_elapsed_seconds());
+  EXPECT_DOUBLE_EQ(decoded.upstream_elapsed_seconds(), 12.5);
+  ASSERT_EQ(decoded.tokens_size(), 1);
+  EXPECT_DOUBLE_EQ(decoded.tokens(0).time_to_first_token_latency_seconds(),
+                   2.5);
+  EXPECT_EQ(proto::DisaggGenerationsRequest::kUpstreamElapsedSecondsFieldNumber,
+            21);
+  EXPECT_EQ(proto::RemoteToken::kTimeToFirstTokenLatencySecondsFieldNumber, 6);
 }
 
 }  // namespace xllm

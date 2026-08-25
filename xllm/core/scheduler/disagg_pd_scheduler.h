@@ -74,6 +74,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
       bool has_logprob,
       float logprob,
       double time_to_first_token_latency_seconds,
+      double upstream_elapsed_seconds,
       std::vector<int64_t> top_tokens,
       std::vector<float> top_logprobs,
       const std::string& kv_cache_transfer_mode,
@@ -124,6 +125,10 @@ class DisaggPDScheduler : public ContinuousScheduler {
   void profile_tpot();
 
   void cache_prefill_blocks(Request* request);
+
+  void restore_disaggregated_latency(Request* request,
+                                     double time_to_first_token_latency_seconds,
+                                     double upstream_elapsed_seconds);
 
   // check remote instance info, if not exist, get from master service
   bool check_remote_instance_info(const std::string& instance_name);
