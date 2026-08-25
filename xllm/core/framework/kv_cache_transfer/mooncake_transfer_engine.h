@@ -37,6 +37,12 @@ using namespace mooncake;
 
 class MooncakeTransferEngineService;
 
+enum class CachePeerMode : int8_t {
+  ACTIVE = 0,
+  PLAN_ONLY = 1,
+  ABSENT = 2,
+};
+
 // Singleton core that holds the actual TransferEngine and brpc Server.
 // Multiple MooncakeTransferEngine instances share this core.
 class MooncakeTransferEngineCore {
@@ -63,8 +69,8 @@ class MooncakeTransferEngineCore {
 
   Status set_local_cache_layout(const WorkerCacheLayoutManifest& manifest);
   std::optional<WorkerCacheLayoutManifest> local_cache_layout() const;
-  Status install_peer_cache_layout(
-      const WorkerCacheLayoutManifest& peer_manifest);
+  Status set_cache_peer(const WorkerCacheLayoutManifest& peer_manifest,
+                        CachePeerMode mode);
   bool has_outgoing_plan(const std::string& remote_addr,
                          CacheNamespace cache_namespace) const;
   bool has_reshard_plan(const std::string& remote_addr) const;
@@ -89,6 +95,8 @@ class MooncakeTransferEngineCore {
  private:
   proto::MooncakeTransferEngineService_Stub* get_or_create_stub_locked(
       uint64_t cluster_id);
+  bool acquire_session_locked(const std::string& remote_addr);
+  void release_session_locked(const std::string& remote_addr);
 
   MooncakeTransferEngineCore() = default;
   ~MooncakeTransferEngineCore();
@@ -113,9 +121,17 @@ class MooncakeTransferEngineCore {
     SegmentHandle handle = static_cast<SegmentHandle>(-1);
     int32_t ref_count = 0;
   };
+  // PLAN_ONLY stores identity only; ACTIVE also owns the plan and session.
+  struct CachePeerLink {
+    std::string destination_incarnation;
+    uint64_t destination_layout_generation = 0;
+    CachePeerMode mode = CachePeerMode::PLAN_ONLY;
+    std::optional<ReshardPlanTemplate> plan;
+    bool holds_session = false;
+  };
   std::unordered_map<std::string, SessionInfo> handles_;
   std::optional<WorkerCacheLayoutManifest> local_cache_layout_;
-  std::unordered_map<std::string, ReshardPlanTemplate> outgoing_plans_;
+  std::unordered_map<std::string, CachePeerLink> cache_peer_links_;
   std::unordered_map<uint64_t, proto::MooncakeTransferEngineService_Stub*>
       stub_map_;
 };
@@ -200,13 +216,31 @@ class MooncakeTransferEngine {
   proto::MooncakeTransferEngineService_Stub* create_rpc_channel(
       uint64_t cluster_id);
 
+ protected:
+  virtual bool fetch_cache_layout(uint64_t cluster_id,
+                                  const std::string& remote_addr,
+                                  WorkerCacheLayoutManifest* manifest);
+  virtual bool set_remote_peer(uint64_t cluster_id,
+                               const std::string& remote_addr,
+                               const WorkerCacheLayoutManifest& manifest,
+                               CachePeerMode mode);
+  virtual bool open_local_session(const std::string& remote_addr);
+  virtual bool close_local_session(const std::string& remote_addr);
+
  private:
+  // Preserve the exact identity used by idempotent ABSENT requests.
+  struct LocalCachePeer {
+    WorkerCacheLayoutManifest destination_manifest;
+    bool holds_session = false;
+  };
+
   uint16_t listen_port_;
   std::vector<uint64_t> buf_bytes_;
   Device device_;
   MooncakeTransferEngineCore& core_;
   std::mutex session_mutex_;
   std::unordered_map<std::string, int32_t> session_ref_counts_;
+  std::unordered_map<std::string, LocalCachePeer> cache_peers_;
 };
 
 class MooncakeTransferEngineService
@@ -223,6 +257,11 @@ class MooncakeTransferEngineService
 
   void CloseSession(google::protobuf::RpcController* controller,
                     const proto::SessionInfo* request,
+                    proto::Status* response,
+                    google::protobuf::Closure* done) override;
+
+  void SetCachePeer(google::protobuf::RpcController* controller,
+                    const proto::CachePeerRequest* request,
                     proto::Status* response,
                     google::protobuf::Closure* done) override;
 

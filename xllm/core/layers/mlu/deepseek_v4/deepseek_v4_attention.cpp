@@ -21,6 +21,7 @@ limitations under the License.
 #include <cmath>
 #include <cstdint>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "kernels/mlu/mlu_ops_api.h"
@@ -158,6 +159,12 @@ DeepseekV4AttentionImpl::DeepseekV4AttentionImpl(
 
   tp_rank_ = parallel_args.tp_group_->rank();
   tp_size_ = parallel_args.tp_group_->world_size();
+  CHECK_EQ(n_heads_ % tp_size_, 0)
+      << "DeepSeek V4 attention heads must be divisible by attention TP.";
+  CHECK_GE(o_groups_, tp_size_)
+      << "DeepSeek V4 output groups must cover every attention TP rank.";
+  CHECK_EQ(o_groups_ % tp_size_, 0)
+      << "DeepSeek V4 output groups must be divisible by attention TP.";
   n_local_heads_ = n_heads_ / tp_size_;
   n_local_groups_ = o_groups_ / tp_size_;
 
@@ -381,9 +388,11 @@ torch::Tensor DeepseekV4AttentionImpl::project_output(
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>
-DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
-                                 torch::Tensor& hidden_states,
-                                 KVCache& kv_cache) {
+DeepseekV4AttentionImpl::forward(
+    const AttentionMetadata& attn_metadata,
+    torch::Tensor& hidden_states,
+    KVCache& kv_cache,
+    const mlu_v4_cp::DeepseekV4CpContext* cp_context) {
   CHECK(attn_metadata.dsa_metadata)
       << "DeepseekV4Attention requires DSAMetadata.";
   CHECK(attn_metadata.q_seq_lens.defined())
@@ -408,6 +417,14 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
   std::vector<torch::Tensor> parts =
       hidden_proj.split(/*split_size=*/hidden_proj_sizes_, /*dim=*/-1);
 
+  parallel_state::GatherAsyncCtx projection_tail_gather;
+  if (cp_context != nullptr) {
+    const int64_t q_projection_size = hidden_proj_sizes_.front();
+    projection_tail_gather = mlu_v4_cp::launch_gather_rows(
+        hidden_proj.slice(/*dim=*/-1, /*start=*/q_projection_size),
+        *cp_context);
+  }
+
   const bool uses_compressed_rope =
       compress_ratio_ == 4 || compress_ratio_ == 128;
   const torch::Tensor& active_sin_table =
@@ -418,20 +435,38 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
       uses_compressed_rope ? dsa.compressed_inverse_sin_table
                            : dsa.inverse_sin_table;
   torch::Tensor qr;
-  const bool use_fused_decode = !is_prefill && !is_chunked_prefill;
+  const torch::Tensor& query_positions =
+      cp_context != nullptr ? cp_context->local_positions : dsa.input_positions;
+  const bool use_fused_decode =
+      cp_context == nullptr && !is_prefill && !is_chunked_prefill;
   torch::Tensor q = project_q(parts[0],
                               qr,
                               use_fused_decode,
                               active_sin_table,
                               active_cos_table,
-                              dsa.input_positions);
-  torch::Tensor kv = project_kv(parts[1]);
+                              query_positions);
+
+  std::vector<torch::Tensor> global_projection_parts;
+  if (cp_context != nullptr) {
+    torch::Tensor projection_tail = mlu_v4_cp::finish_gather_restore(
+        std::move(projection_tail_gather), *cp_context);
+    const std::vector<int64_t> projection_tail_sizes(
+        hidden_proj_sizes_.begin() + 1, hidden_proj_sizes_.end());
+    global_projection_parts = projection_tail.split(
+        /*split_size=*/projection_tail_sizes, /*dim=*/-1);
+  } else {
+    global_projection_parts.assign(parts.begin() + 1, parts.end());
+  }
+
+  parallel_state::GatherAsyncCtx indexer_qr_gather;
+  if (cp_context != nullptr && compress_ratio_ == 4) {
+    indexer_qr_gather = mlu_v4_cp::launch_gather_rows(qr, *cp_context);
+  }
+
+  torch::Tensor kv = project_kv(global_projection_parts[0]);
   if (!use_fused_decode) {
-    apply_last_rope(q,
-                    active_sin_table,
-                    active_cos_table,
-                    dsa.input_positions,
-                    rope_head_dim_);
+    apply_last_rope(
+        q, active_sin_table, active_cos_table, query_positions, rope_head_dim_);
   }
   apply_last_rope(kv,
                   active_sin_table,
@@ -453,10 +488,13 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
   if (is_prefill || is_chunked_prefill) {
     write_cache(kv, swa_cache, ori_slot);
     ori_cache_for_attn = swa_cache;
-    ori_context_lens = dsa.input_positions + 1;
+    ori_context_lens = query_positions + 1;
     ori_max_context_len = attn_metadata.max_seq_len;
     ori_table_rows =
         torch::repeat_interleave(ori_block_table, attn_metadata.q_seq_lens, 0);
+    if (cp_context != nullptr) {
+      ori_table_rows = mlu_v4_cp::shard_rows(ori_table_rows, *cp_context);
+    }
   } else {
     write_cache(kv, swa_cache, ori_slot);
     ori_cache_for_attn = swa_cache;
@@ -505,8 +543,8 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
                          cmp_state_block_table,
                          dsa.compressed_sin_table,
                          dsa.compressed_cos_table,
-                         /*projected_kv=*/parts[2],
-                         /*projected_score=*/parts[3]);
+                         /*projected_kv=*/global_projection_parts[1],
+                         /*projected_score=*/global_projection_parts[2]);
     torch::Tensor cmp_context_lens;
     torch::Tensor cmp_table_for_attn;
     torch::Tensor cmp_cache_for_attn = cmp_cache;
@@ -525,9 +563,14 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
               dsa.block_tables, layer_id_, mapping.index_kv_state_cache_idx)};
       AttentionMetadata indexer_metadata =
           make_indexer_metadata(attn_metadata, index_block_table, index_slot);
+      torch::Tensor indexer_qr = qr;
+      if (cp_context != nullptr) {
+        indexer_qr = mlu_v4_cp::finish_gather_restore(
+            std::move(indexer_qr_gather), *cp_context);
+      }
       std::tie(cmp_table_for_attn, cmp_context_lens) =
           indexer_->forward(hidden_states,
-                            qr,
+                            indexer_qr,
                             index_cache,
                             index_state,
                             indexer_metadata,
@@ -535,14 +578,24 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
                             is_prefill || is_chunked_prefill,
                             dsa.compressed_sin_table,
                             dsa.compressed_cos_table,
-                            /*projected_weights=*/parts[4],
-                            /*projected_kv=*/parts[5],
-                            /*projected_score=*/parts[6]);
+                            /*projected_weights=*/global_projection_parts[3],
+                            /*projected_kv=*/global_projection_parts[4],
+                            /*projected_score=*/global_projection_parts[5]);
+      if (cp_context != nullptr) {
+        cmp_table_for_attn =
+            mlu_v4_cp::shard_rows(cmp_table_for_attn, *cp_context);
+        cmp_context_lens = mlu_v4_cp::shard_rows(cmp_context_lens, *cp_context);
+      }
       cmp_cache_for_attn = flatten_slot_cache(cmp_cache);
       cmp_max_context = dsa.index_total_c4_len > 0 ? index_topk_ : 0;
     } else {
       cmp_context_lens = dsa.c128_attn_metadata.context_lens;
       cmp_table_for_attn = dsa.c128_attn_metadata.block_table_for_attn;
+      if (cp_context != nullptr) {
+        cmp_context_lens = mlu_v4_cp::shard_rows(cmp_context_lens, *cp_context);
+        cmp_table_for_attn =
+            mlu_v4_cp::shard_rows(cmp_table_for_attn, *cp_context);
+      }
       cmp_max_context = dsa.c128_attn_metadata.max_context_len;
     }
 
@@ -569,7 +622,7 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
   apply_last_rope(attn_output,
                   active_inverse_sin_table,
                   active_cos_table,
-                  dsa.input_positions,
+                  query_positions,
                   rope_head_dim_);
   output = project_output(attn_output);
   return {output, std::nullopt};

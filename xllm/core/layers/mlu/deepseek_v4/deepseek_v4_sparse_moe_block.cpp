@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <numeric>
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
@@ -30,6 +32,16 @@ namespace {
 torch::Tensor reshape_topk(const torch::Tensor& topk, int64_t hidden_rows) {
   const int64_t topk_size = topk.size(-1);
   return topk.reshape({hidden_rows, topk_size}).contiguous();
+}
+
+std::pair<int32_t, int32_t> split_range(int32_t size,
+                                        int32_t parts,
+                                        int32_t rank) {
+  const int32_t base = size / parts;
+  const int32_t remainder = size % parts;
+  const int32_t count = base + (rank < remainder ? 1 : 0);
+  const int32_t offset = rank * base + std::min(rank, remainder);
+  return {offset, count};
 }
 
 }  // namespace
@@ -185,6 +197,111 @@ torch::Tensor DeepseekV4SparseMoEBlockImpl::forward_selected(
         std::move(output), row_token_nums, parallel_args_);
   }
   return output.reshape(hidden_shape);
+}
+
+torch::Tensor DeepseekV4SparseMoEBlockImpl::forward_cp(
+    const torch::Tensor& local_hidden_states,
+    const std::optional<torch::Tensor>& local_input_ids,
+    const mlu_v4_cp::DeepseekV4CpContext& cp_context) {
+  ProcessGroup* ep_group = routed_pg();
+  ProcessGroup* tp_group = parallel_args_.tp_group_;
+  CHECK(ep_group != nullptr);
+  CHECK(tp_group != nullptr);
+  const int32_t tp_size = tp_group->world_size();
+  const int32_t tp_rank = tp_group->rank();
+  const int32_t ep_size = ep_group->world_size();
+  CHECK_EQ(ep_size, cp_context.cp_group->world_size() * tp_size)
+      << "DeepSeek V4 CP-aware MoE currently requires dp_size == 1 and a "
+         "world-sized EP group.";
+
+  const int32_t local_tokens =
+      static_cast<int32_t>(local_hidden_states.size(0));
+  const std::pair<int32_t, int32_t> local_range =
+      split_range(local_tokens, tp_size, tp_rank);
+  const int32_t local_offset = local_range.first;
+  const int32_t local_unique_tokens = local_range.second;
+  torch::Tensor unique_hidden = local_hidden_states.narrow(
+      /*dim=*/0, local_offset, local_unique_tokens);
+
+  std::vector<int32_t> unique_tokens_per_ep_rank;
+  unique_tokens_per_ep_rank.reserve(static_cast<size_t>(ep_size));
+  for (int32_t ep_rank = 0; ep_rank < ep_size; ++ep_rank) {
+    const int32_t cp_rank = ep_rank / tp_size;
+    const int32_t attention_tp_rank = ep_rank % tp_size;
+    const int32_t cp_tokens =
+        cp_context.geometry.tokens_per_rank[static_cast<size_t>(cp_rank)];
+    unique_tokens_per_ep_rank.emplace_back(
+        split_range(cp_tokens, tp_size, attention_tp_rank).second);
+  }
+
+  torch::Tensor gathered_hidden = parallel_state::gather(
+      unique_hidden, ep_group, unique_tokens_per_ep_rank);
+  std::optional<torch::Tensor> gathered_ids = std::nullopt;
+  if (local_input_ids.has_value()) {
+    torch::Tensor unique_ids = local_input_ids.value().narrow(
+        /*dim=*/0, local_offset, local_unique_tokens);
+    gathered_ids =
+        parallel_state::gather(unique_ids, ep_group, unique_tokens_per_ep_rank);
+  }
+
+  FusedMoEImpl::RouteInfo route =
+      moe_->prep_route(gathered_hidden, gathered_ids);
+  std::vector<int64_t> gathered_shape = gathered_hidden.sizes().vec();
+  torch::Tensor gathered_rows =
+      gathered_hidden.reshape({-1, gathered_hidden.size(-1)}).contiguous();
+  const int64_t row_factor = gathered_rows.size(0) / gathered_hidden.size(0);
+  torch::Tensor shared_out = moe_->forward_shared(gathered_rows);
+  torch::Tensor routed_out = moe_->forward_experts(
+      gathered_rows, /*enable_all2all_communication=*/false, route);
+
+  std::vector<int32_t> rows_per_ep_rank;
+  rows_per_ep_rank.reserve(unique_tokens_per_ep_rank.size());
+  int32_t max_rows = 0;
+  for (int32_t token_count : unique_tokens_per_ep_rank) {
+    const int32_t row_count = static_cast<int32_t>(token_count * row_factor);
+    rows_per_ep_rank.emplace_back(row_count);
+    max_rows = std::max(max_rows, row_count);
+  }
+
+  std::vector<torch::Tensor> padded_routed_parts;
+  padded_routed_parts.reserve(rows_per_ep_rank.size());
+  int64_t row_offset = 0;
+  for (int32_t row_count : rows_per_ep_rank) {
+    torch::Tensor part = routed_out.narrow(/*dim=*/0, row_offset, row_count);
+    if (row_count < max_rows) {
+      torch::Tensor padding = torch::zeros(
+          {max_rows - row_count, routed_out.size(-1)}, routed_out.options());
+      part = torch::cat({part, padding}, /*dim=*/0);
+    }
+    padded_routed_parts.emplace_back(part);
+    row_offset += row_count;
+  }
+  torch::Tensor padded_routed =
+      torch::cat(padded_routed_parts, /*dim=*/0).contiguous();
+  torch::Tensor unique_output =
+      parallel_state::reduce_scatter(padded_routed, ep_group);
+  const int32_t local_unique_rows =
+      rows_per_ep_rank[static_cast<size_t>(ep_group->rank())];
+  unique_output = unique_output.narrow(/*dim=*/0, 0, local_unique_rows);
+
+  const int64_t shared_offset =
+      std::accumulate(rows_per_ep_rank.begin(),
+                      rows_per_ep_rank.begin() + ep_group->rank(),
+                      int64_t{0});
+  if (shared_out.defined()) {
+    unique_output.add_(shared_out.narrow(
+        /*dim=*/0, shared_offset, local_unique_rows));
+  }
+
+  gathered_shape[0] = local_unique_tokens;
+  unique_output = unique_output.reshape(gathered_shape);
+  std::vector<int32_t> tp_token_counts;
+  tp_token_counts.reserve(static_cast<size_t>(tp_size));
+  for (int32_t rank = 0; rank < tp_size; ++rank) {
+    tp_token_counts.emplace_back(
+        split_range(local_tokens, tp_size, rank).second);
+  }
+  return parallel_state::gather(unique_output, tp_group, tp_token_counts);
 }
 
 }  // namespace layer

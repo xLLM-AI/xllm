@@ -58,7 +58,8 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
       const ModelInputParams& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt,
       std::optional<DeepseekV4PendingMHC>* pending_mhc = nullptr,
-      bool is_last_layer = true);
+      bool is_last_layer = true,
+      const mlu_v4_cp::DeepseekV4CpContext* cp_context = nullptr);
 
  private:
   std::optional<torch::Tensor> route_input_ids(

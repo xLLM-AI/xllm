@@ -30,6 +30,7 @@ limitations under the License.
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/mlu/deepseek_v4/compressor.h"
+#include "layers/mlu/deepseek_v4/deepseek_v4_cp_context.h"
 #include "layers/mlu/deepseek_v4/deepseek_v4_indexer.h"
 #include "layers/mlu/deepseek_v4/dsa_cache_mapping.h"
 
@@ -49,7 +50,8 @@ class DeepseekV4AttentionImpl final : public torch::nn::Module {
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
       const AttentionMetadata& attn_metadata,
       torch::Tensor& hidden_states,
-      KVCache& kv_cache);
+      KVCache& kv_cache,
+      const mlu_v4_cp::DeepseekV4CpContext* cp_context = nullptr);
 
   void load_state_dict(const StateDict& state_dict);
 

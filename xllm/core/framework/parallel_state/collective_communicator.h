@@ -41,7 +41,7 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> tp_group_;
   std::unique_ptr<ProcessGroup> encoder_dp_group_;
   std::unique_ptr<ProcessGroup> single_rank_group_;
-  // Owns NPU standalone CP ProcessGroup (empty on MLU).
+  // Owns a standalone CP ProcessGroup for orthogonal model-side CP.
   std::unique_ptr<ProcessGroup> cp_group_;
   std::unique_ptr<ProcessGroup> moe_tp_group_;
   std::unique_ptr<ProcessGroup> moe_ep_group_;

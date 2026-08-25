@@ -196,11 +196,23 @@ bool is_npu_model_cp_capable(const std::string& resolved_name) {
   static std::once_flag once;
   std::call_once(once, []() {
     for (const std::string& name : kCpCapableModels) {
-      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::NPU_MODEL);
+      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
     }
   });
-  return ModelRegistry::get_cp_sharding_mode(resolved_name) ==
-         CpShardingMode::NPU_MODEL;
+  return kCpCapableModels.contains(resolved_name);
+}
+
+bool is_mlu_model_cp_capable(const std::string& resolved_name) {
+  static const std::unordered_set<std::string> kCpCapableModels = {
+      "deepseek_v4",
+  };
+  static std::once_flag once;
+  std::call_once(once, []() {
+    for (const std::string& name : kCpCapableModels) {
+      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
+    }
+  });
+  return kCpCapableModels.contains(resolved_name);
 }
 
 ModelRegistry* ModelRegistry::get_instance() {

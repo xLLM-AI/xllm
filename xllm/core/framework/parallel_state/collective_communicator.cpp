@@ -391,7 +391,7 @@ void CollectiveCommunicator::create_process_groups(
   parallel_args_->python_rendezvous_host_ = host;
   parallel_args_->python_rendezvous_port_ = world_group_port;
 
-  // Orthogonal CP x TP (NPU TORCH only): the rank layout is
+  // Orthogonal CP x TP: the rank layout is
   //   rank = dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
   // so tensor parallelism spans world_size / (dp_size * cp_size), NOT
   // world_size / dp_size. Narrowing tp_size here is what makes attention head
@@ -400,20 +400,15 @@ void CollectiveCommunicator::create_process_groups(
   // make ranks r and r + tp_size hold the same heads and double-accumulate in
   // the all-reduce, which is a silent numerical error rather than a crash.
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
-  bool use_orthogonal_cp = false;
-#if defined(USE_NPU)
-  use_orthogonal_cp =
-      ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
-      normalized_cp_size > 1;
-#endif
-  int32_t tp_size = use_orthogonal_cp
-                        ? world_size / (dp_size * normalized_cp_size)
-                        : world_size / dp_size;
+  CHECK_EQ(world_size % (dp_size * normalized_cp_size), 0)
+      << "world_size (" << world_size
+      << ") must be divisible by dp_size * cp_size (" << dp_size << " * "
+      << normalized_cp_size << ")";
+  const int32_t tp_size = world_size / (dp_size * normalized_cp_size);
   CHECK_GT(tp_size, 0) << "attention tp_size must be positive: world_size="
                        << world_size << ", dp_size=" << dp_size
                        << ", cp_size=" << normalized_cp_size;
-  CHECK_EQ(tp_size * dp_size * (use_orthogonal_cp ? normalized_cp_size : 1),
-           world_size)
+  CHECK_EQ(tp_size * dp_size * normalized_cp_size, world_size)
       << "world_size (" << world_size << ") must equal dp_size * cp_size * "
       << "tp_size (" << dp_size << " * " << normalized_cp_size << " * "
       << tp_size << ")";
@@ -468,8 +463,7 @@ void CollectiveCommunicator::create_process_groups(
   }
   port += tp_group_count + single_rank_group_port_gap + single_rank_group_count;
 
-#if defined(USE_NPU)
-  if (use_orthogonal_cp) {
+  if (normalized_cp_size > 1) {
     // A CP group varies cp_rank while holding (dp_rank, tp_rank) fixed, so its
     // members are strided by tp_size and cannot be expressed by the contiguous
     // or `trans` groupings of the size-only overload. Enumerate the ranks
@@ -490,24 +484,23 @@ void CollectiveCommunicator::create_process_groups(
     const int32_t cp_group_index =
         (global_rank / dp_stride) * tp_size + global_rank % tp_size;
     const int32_t cp_group_count = dp_size * tp_size;
-    cp_group_ =
-        create_process_group(global_rank,
-                             cp_local_rank,
-                             cp_ranks,
-                             world_size,
-                             normalized_cp_size,
-                             port + cp_group_index + 1,
-                             get_rank_table_server_host(cp_ranks.front(), host),
-                             "cp_group",
-                             device);
+    std::string cp_host = host;
+#if defined(USE_NPU)
+    cp_host = get_rank_table_server_host(cp_ranks.front(), host);
+#endif
+    cp_group_ = create_process_group(global_rank,
+                                     cp_local_rank,
+                                     cp_ranks,
+                                     world_size,
+                                     normalized_cp_size,
+                                     port + cp_group_index + 1,
+                                     cp_host,
+                                     "cp_group",
+                                     device);
     parallel_args_->cp_group_ = cp_group_.get();
     port += cp_group_count;
-  } else
-#endif
-  {
-    // The current MLU model-side CP path spans the full DP-local rank set,
-    // which is also represented by tp_group_ today. Keep a distinct CP handle
-    // so an orthogonal CP x TP topology can provide its own process group.
+  } else {
+    // CP is disabled, so the TP group remains the CP collective handle.
     parallel_args_->cp_group_ = tp_group_.get();
   }
 

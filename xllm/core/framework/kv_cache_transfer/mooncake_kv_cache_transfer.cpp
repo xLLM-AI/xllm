@@ -652,18 +652,7 @@ void MooncakeKVCacheTransferBase::merge_kv_blocks(
     const int32_t dst_tp_size = dst_world_size / dst_dp_size;
     const int32_t begin = info.dp_rank * dst_tp_size;
     const int32_t end = begin + dst_tp_size;
-    const bool has_negotiated_plan =
-        std::any_of(info.remote_instance_info.addrs.begin() + begin,
-                    info.remote_instance_info.addrs.begin() + end,
-                    [this](const std::string& remote_addr) {
-                      return mooncake_te_->has_reshard_plan(remote_addr);
-                    });
     for (int32_t dst_rank = begin; dst_rank < end; ++dst_rank) {
-      if (has_negotiated_plan &&
-          !mooncake_te_->has_reshard_plan(
-              info.remote_instance_info.addrs[dst_rank])) {
-        continue;
-      }
       merge_kv_info(merged_kv_infos, info, dst_rank);
     }
   }
@@ -697,57 +686,29 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
       result = false;
       continue;
     }
-    std::vector<int64_t> layer_ids = {layer_index};
-
     for (const std::string& key : keys) {
       const KVCacheInfo& kv_info = merged_kv_infos.at(key);
-      if (mooncake_te_->has_reshard_plan(kv_info.dst_addr)) {
-        std::vector<ByteRegion> regions;
-        const Status bind_status =
-            mooncake_te_->bind_outgoing_regions(kv_info.dst_addr,
-                                                kv_info.mappings,
-                                                cache_namespace,
-                                                layer_index,
-                                                &regions);
-        if (!bind_status.ok()) {
-          LOG(ERROR) << "Bind KV byte regions failed, layer=" << layer_index
-                     << ", destination=" << kv_info.dst_addr << ": "
-                     << bind_status.message();
-          result = false;
-          continue;
-        }
-        if (regions.empty()) {
-          continue;
-        }
-        const bool success = mooncake_te_->move_memory_regions(
-            kv_info.dst_addr,
-            regions,
-            MooncakeTransferEngine::MoveOpcode::WRITE);
-        if (!success) {
-          LOG(ERROR) << "Push KV byte regions failed, layer=" << layer_index
-                     << ", destination=" << kv_info.dst_addr;
-          result = false;
-        }
-        continue;
-      }
-
-      // Compatibility path for callers that have not performed LinkInstance
-      // layout negotiation (principally existing component tests). Production
-      // linked peers always use the byte-region plan above.
-      std::vector<MooncakeTransferEngine::BufferTransferMapping>
-          buffer_mappings;
-      if (!append_buffer_mappings(
-              layout, layer_ids, kv_info.mappings, &buffer_mappings)) {
+      std::vector<ByteRegion> regions;
+      const Status bind_status =
+          mooncake_te_->bind_outgoing_regions(kv_info.dst_addr,
+                                              kv_info.mappings,
+                                              cache_namespace,
+                                              layer_index,
+                                              &regions);
+      if (!bind_status.ok()) {
+        LOG(ERROR) << "Bind KV byte regions failed, layer=" << layer_index
+                   << ", destination=" << kv_info.dst_addr << ": "
+                   << bind_status.message();
         result = false;
         continue;
       }
-
-      const bool success = mooncake_te_->move_memory_groups(
-          kv_info.dst_addr,
-          buffer_mappings,
-          MooncakeTransferEngine::MoveOpcode::WRITE);
+      if (regions.empty()) {
+        continue;
+      }
+      const bool success = mooncake_te_->move_memory_regions(
+          kv_info.dst_addr, regions, MooncakeTransferEngine::MoveOpcode::WRITE);
       if (!success) {
-        LOG(ERROR) << "Push kv blocks failed, layer = " << layer_index
+        LOG(ERROR) << "Push KV byte regions failed, layer=" << layer_index
                    << ", destination=" << kv_info.dst_addr;
         result = false;
       }
@@ -1093,61 +1054,49 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
       }
       auto* xtensor_te =
           static_cast<MooncakeTransferEngine*>(mooncake_te_.get());
-      bool ret = false;
-      if (xtensor_te->has_reshard_plan(kv_info.dst_addr)) {
-        ExplicitResourceMapping key_mapping;
-        key_mapping.group_id = mapping_it->group_id;
-        key_mapping.role = static_cast<int32_t>(KVCacheTensorRole::KEY);
-        key_mapping.local_ids = mapping_it->local_ids;
-        key_mapping.remote_ids = mapping_it->remote_ids;
-        key_mapping.local_offsets.reserve(src_blocks.size());
-        key_mapping.remote_offsets.reserve(src_blocks.size());
+      ExplicitResourceMapping key_mapping;
+      key_mapping.group_id = mapping_it->group_id;
+      key_mapping.role = static_cast<int32_t>(KVCacheTensorRole::KEY);
+      key_mapping.local_ids = mapping_it->local_ids;
+      key_mapping.remote_ids = mapping_it->remote_ids;
+      key_mapping.local_offsets.reserve(src_blocks.size());
+      key_mapping.remote_offsets.reserve(src_blocks.size());
 
-        ExplicitResourceMapping value_mapping;
-        value_mapping.group_id = mapping_it->group_id;
-        value_mapping.role = static_cast<int32_t>(KVCacheTensorRole::VALUE);
-        value_mapping.local_ids = mapping_it->local_ids;
-        value_mapping.remote_ids = mapping_it->remote_ids;
-        value_mapping.local_offsets.reserve(src_blocks.size());
-        value_mapping.remote_offsets.reserve(src_blocks.size());
-        for (size_t offset_index = 0; offset_index < src_offsets.size();
-             offset_index += 2) {
-          key_mapping.local_offsets.emplace_back(src_offsets[offset_index]);
-          key_mapping.remote_offsets.emplace_back(dst_offsets[offset_index]);
-          value_mapping.local_offsets.emplace_back(
-              src_offsets[offset_index + 1]);
-          value_mapping.remote_offsets.emplace_back(
-              dst_offsets[offset_index + 1]);
-        }
-
-        std::vector<ByteRegion> regions;
-        const Status bind_status = xtensor_te->bind_outgoing_regions_explicit(
-            kv_info.dst_addr,
-            {key_mapping, value_mapping},
-            CacheNamespace::MAIN,
-            layer_index,
-            &regions);
-        if (!bind_status.ok()) {
-          LOG(ERROR) << "Bind XTensor KV byte regions failed, layer="
-                     << layer_index << ", destination=" << kv_info.dst_addr
-                     << ": " << bind_status.message();
-          result = false;
-          continue;
-        }
-        ret = regions.empty() || xtensor_te->move_memory_regions(
-                                     kv_info.dst_addr,
-                                     regions,
-                                     MooncakeTransferEngine::MoveOpcode::WRITE);
-      } else {
-        // Compatibility path for tests and callers that intentionally bypass
-        // LinkInstance layout negotiation.
-        ret = xtensor_te->move_memory_by_global_offsets(
-            kv_info.dst_addr,
-            src_offsets,
-            dst_offsets,
-            static_cast<size_t>(size_per_block_),
-            MooncakeTransferEngine::MoveOpcode::WRITE);
+      ExplicitResourceMapping value_mapping;
+      value_mapping.group_id = mapping_it->group_id;
+      value_mapping.role = static_cast<int32_t>(KVCacheTensorRole::VALUE);
+      value_mapping.local_ids = mapping_it->local_ids;
+      value_mapping.remote_ids = mapping_it->remote_ids;
+      value_mapping.local_offsets.reserve(src_blocks.size());
+      value_mapping.remote_offsets.reserve(src_blocks.size());
+      for (size_t offset_index = 0; offset_index < src_offsets.size();
+           offset_index += 2) {
+        key_mapping.local_offsets.emplace_back(src_offsets[offset_index]);
+        key_mapping.remote_offsets.emplace_back(dst_offsets[offset_index]);
+        value_mapping.local_offsets.emplace_back(src_offsets[offset_index + 1]);
+        value_mapping.remote_offsets.emplace_back(
+            dst_offsets[offset_index + 1]);
       }
+
+      std::vector<ByteRegion> regions;
+      const Status bind_status = xtensor_te->bind_outgoing_regions_explicit(
+          kv_info.dst_addr,
+          {key_mapping, value_mapping},
+          CacheNamespace::MAIN,
+          layer_index,
+          &regions);
+      if (!bind_status.ok()) {
+        LOG(ERROR) << "Bind XTensor KV byte regions failed, layer="
+                   << layer_index << ", destination=" << kv_info.dst_addr
+                   << ": " << bind_status.message();
+        result = false;
+        continue;
+      }
+      const bool ret =
+          regions.empty() || xtensor_te->move_memory_regions(
+                                 kv_info.dst_addr,
+                                 regions,
+                                 MooncakeTransferEngine::MoveOpcode::WRITE);
       if (!ret) {
         LOG(ERROR) << "push_kv_blocks_impl failed at layer " << layer_index;
         result = false;

@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -81,8 +82,9 @@ struct ReshardPlanTemplate {
 
 class ReshardPlanner final {
  public:
-  bool source_participates(const WorkerCacheLayoutManifest& source,
-                           const WorkerCacheLayoutManifest& destination) const;
+  Status select_sources(const std::vector<WorkerCacheLayoutManifest>& sources,
+                        const WorkerCacheLayoutManifest& destination,
+                        std::vector<size_t>* selected_indices) const;
 
   Status validate_destination_coverage(
       const std::vector<WorkerCacheLayoutManifest>& sources,
