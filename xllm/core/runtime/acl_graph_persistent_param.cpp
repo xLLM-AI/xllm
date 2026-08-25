@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -69,6 +70,36 @@ int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   }
   return runtime::get_decode_graph_token_bucket(
       token_capacity, options.enable_graph_mode_decode_no_padding());
+}
+
+bool graph_mode_decode_no_padding_enabled() {
+  // Immutable after ExecutionConfig::initialize() in the entrypoint.
+  static const bool enabled = [] {
+    return ::xllm::ExecutionConfig::get_instance()
+        .enable_graph_mode_decode_no_padding();
+  }();
+  return enabled;
+}
+
+int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
+  const int64_t seq_capacity = get_decode_graph_capacity(options);
+  const int64_t num_decoding_tokens = options.num_decoding_tokens();
+  // Bucket padding rows still consume sequence-scoped metadata:
+  // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
+  const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
+      seq_capacity * num_decoding_tokens,
+      graph_mode_decode_no_padding_enabled());
+  const int64_t padded_seq_capacity =
+      (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
+  return std::max(seq_capacity, padded_seq_capacity);
+}
+
+int64_t get_bucketed_decode_graph_token_capacity(
+    const runtime::Options& options) {
+  // Token-scoped buffers are sliced to bucketed token counts: 20 rows -> 32.
+  return runtime::get_decode_graph_token_bucket(
+      get_decode_graph_token_capacity(options),
+      graph_mode_decode_no_padding_enabled());
 }
 
 float get_dp_ep_all2all_buffer_factor(int64_t length) {
@@ -217,10 +248,13 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
-  // Hybrid spec verify keeps sequence-scoped metadata, while non-hybrid MTP
-  // expands every proposal token into its own decode metadata row.
+  const int64_t bucketed_max_graph_tokens =
+      get_bucketed_decode_graph_token_capacity(options);
+  // Hybrid spec verify keeps sequence-scoped metadata (with bucket padding,
+  // see get_hybrid_metadata_capacity), while non-hybrid MTP expands every
+  // proposal token into its own decode metadata row.
   const int64_t metadata_capacity = is_hybrid_linear_attention
-                                        ? get_decode_graph_capacity(options)
+                                        ? get_hybrid_metadata_capacity(options)
                                         : max_graph_tokens;
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -280,7 +314,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
   persistent_expanded_block_tables_ =
-      torch::zeros({max_graph_tokens, max_block_table_len},
+      torch::zeros({bucketed_max_graph_tokens, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
 
   torch::Dtype dtype = util::parse_dtype(args.dtype(), device);
@@ -299,15 +333,16 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // token capacity instead of the much larger max_tokens_per_batch prefill
   // budget.
   if (need_update_attn_mask_) {
-    persistent_mask_ = torch::zeros({max_graph_tokens, max_seq_len},
+    persistent_mask_ = torch::zeros({bucketed_max_graph_tokens, max_seq_len},
                                     torch::dtype(dtype).device(device));
-    persistent_mask_zero_template_ = torch::zeros(
-        {max_graph_tokens, max_seq_len}, torch::dtype(dtype).device(device));
+    persistent_mask_zero_template_ =
+        torch::zeros({bucketed_max_graph_tokens, max_seq_len},
+                     torch::dtype(dtype).device(device));
     const float mask_fill_value = (dtype == torch::kFloat16)
                                       ? -std::numeric_limits<float>::infinity()
                                       : -9984.0f;
     persistent_mask_fill_template_ =
-        torch::full({max_graph_tokens, max_seq_len},
+        torch::full({bucketed_max_graph_tokens, max_seq_len},
                     mask_fill_value,
                     torch::dtype(dtype).device(device));
   }
