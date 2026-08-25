@@ -707,11 +707,9 @@ KVCacheCapacity estimate_kv_cache_capacity(
   kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +
                                      num_speculative_tokens);
   kv_cache_cap.linear_ssm_checkpoint_stride(num_speculative_tokens + 1);
-#if !defined(USE_NPU)
-  if (options.is_draft_engine) {
+  if (options.is_draft_engine && model_args.num_nextn_predict_layers() > 0) {
     kv_cache_cap.n_layers(model_args.num_nextn_predict_layers());
   }
-#endif
 
   if (enable_dsv4_estimation) {
     init_dsv4_counts(model_args, options, &kv_cache_cap);
