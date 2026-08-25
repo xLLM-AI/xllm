@@ -68,6 +68,7 @@ class PDOOCScheduler : public DisaggPDScheduler {
   bool decode_recv_multi_generations(
       const std::string& req_id,
       const std::vector<proto::RemoteToken>& migration_tokens,
+      double upstream_elapsed_seconds,
       const std::string& kv_cache_transfer_mode,
       std::vector<uint64_t> src_cluster_ids,
       std::vector<std::string> src_addrs,

@@ -55,6 +55,7 @@ void PDOOCServiceImpl::decode_recv_multi_generations(
     bool success = pd_ooc_scheduler_->decode_recv_multi_generations(
         multi_gen.req_id(),
         migration_tokens,
+        multi_gen.upstream_elapsed_seconds(),
         multi_gen.kv_cache_transfer_mode(),
         std::move(cluster_ids),
         std::move(addrs),

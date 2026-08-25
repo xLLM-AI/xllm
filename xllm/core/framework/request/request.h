@@ -75,6 +75,11 @@ class Request : public RequestBase {
 
   void log_statistic(double total_latency);
 
+  // Rebase local elapsed time with cumulative upstream latency at handoff.
+  void set_upstream_latency_seconds(double upstream_latency_seconds);
+
+  double end_to_end_latency_seconds() const;
+
   void log_error_statistic(Status status);
 
   absl::Time created_time() const { return created_time_; }
@@ -186,6 +191,8 @@ class Request : public RequestBase {
   bool starved_ = false;
 
   size_t num_prefix_cache_tokens_ = 0;
+
+  double end_to_end_latency_offset_seconds_ = 0.0;
 
   void create_sequences_group();
 };

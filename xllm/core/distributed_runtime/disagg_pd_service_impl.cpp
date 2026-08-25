@@ -349,6 +349,7 @@ void DisaggPDServiceImpl::decode_recv_first_generation(
         first_token.has_logprob(),
         first_token.logprob(),
         first_token.time_to_first_token_latency_seconds(),
+        gen.upstream_elapsed_seconds(),
         std::move(top_tokens),
         std::move(top_logprobs),
         gen.kv_cache_transfer_mode(),

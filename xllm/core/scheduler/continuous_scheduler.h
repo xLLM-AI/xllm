@@ -331,9 +331,9 @@ class ContinuousScheduler : public Scheduler {
   // token budget for each running sequence
   std::vector<size_t> running_sequences_budgets_;
 
-  // preemptable requests that hold cache slots, sorted by priority from high to
+  // preemptible requests that hold cache slots, sorted by priority from high to
   // low.
-  std::deque<std::shared_ptr<Request>> preemptable_requests_;
+  std::deque<std::shared_ptr<Request>> preemptible_requests_;
 
   std::shared_ptr<CancelRequestQueue> cancel_request_queue_;
 

@@ -89,6 +89,16 @@ bool Request::expand_sequences(bool share_prefix) {
   return sequences_group_->expand_sequences(share_prefix);
 }
 
+void Request::set_upstream_latency_seconds(double upstream_latency_seconds) {
+  const double latency_offset = upstream_latency_seconds - elapsed_seconds();
+  end_to_end_latency_offset_seconds_ =
+      std::max(end_to_end_latency_offset_seconds_, latency_offset);
+}
+
+double Request::end_to_end_latency_seconds() const {
+  return elapsed_seconds() + end_to_end_latency_offset_seconds_;
+}
+
 void Request::log_statistic(double total_latency) {
   // log the request statistics
   int idx = 0;

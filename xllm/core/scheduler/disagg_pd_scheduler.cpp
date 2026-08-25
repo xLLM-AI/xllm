@@ -20,6 +20,7 @@ limitations under the License.
 #include <brpc/server.h>
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <limits>
 #include <random>
 
@@ -421,7 +422,7 @@ void DisaggPDScheduler::dispatch_requests() {
     }
 
     // NOTE: TODO: maybe we need to support batch disatch
-    // later, this meybe decrease the communication cost.
+    // later, this maybe decrease the communication cost.
     // currently we only support one request per dispatch.
 
     // TODO: try to get a batch request.
@@ -814,6 +815,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       proto::Status resp;
       brpc::Controller cntl;
       Timer rpc_timer;
+      gen->set_upstream_elapsed_seconds(request->end_to_end_latency_seconds());
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
       const double rpc_seconds = rpc_timer.elapsed_seconds();
       VLOG(1) << "Prefill first-generation request_id=" << request->request_id()
@@ -873,6 +875,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     bool has_logprob,
     float logprob,
     double time_to_first_token_latency_seconds,
+    double upstream_elapsed_seconds,
     std::vector<int64_t> top_tokens,
     std::vector<float> top_logprobs,
     const std::string& kv_cache_transfer_mode,
@@ -974,12 +977,12 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
 
   // update latency metrics
-  sequence->set_time_to_first_token_latency_seconds(
-      time_to_first_token_latency_seconds);
+  restore_disaggregated_latency(request.get(),
+                                time_to_first_token_latency_seconds,
+                                upstream_elapsed_seconds);
   // Rebase the ITL clock to the moment Decode receives the first token. The
-  // prefill->decode transfer cost is attributed to TTFT, not ITL;
-  // reconstructing prefill's first-token timestamp would require cross-machine
-  // clock sync.
+  // cumulative handoff latency is tracked by Request, while ITL only measures
+  // the local interval after the first token is received.
   sequence->tbt(absl::Now());
 
   // TODO: we only support one sequence for currently.
@@ -1082,6 +1085,28 @@ bool DisaggPDScheduler::decode_recv_first_generation(
           << ", enqueue_ms=" << enqueue_timer.elapsed_seconds() * 1000.0
           << ", total_ms=" << receive_timer.elapsed_seconds() * 1000.0;
   return true;
+}
+
+void DisaggPDScheduler::restore_disaggregated_latency(
+    Request* request,
+    double time_to_first_token_latency_seconds,
+    double upstream_elapsed_seconds) {
+  CHECK(request != nullptr);
+  CHECK(!request->sequences().empty());
+
+  Sequence* sequence = request->sequences()[0].get();
+  if (time_to_first_token_latency_seconds > 0 &&
+      sequence->time_to_first_token_latency_seconds() <= 0) {
+    sequence->set_time_to_first_token_latency_seconds(
+        time_to_first_token_latency_seconds);
+  }
+
+  const double cumulative_upstream_latency_seconds =
+      std::max(upstream_elapsed_seconds,
+               sequence->time_to_first_token_latency_seconds());
+  if (cumulative_upstream_latency_seconds > 0) {
+    request->set_upstream_latency_seconds(cumulative_upstream_latency_seconds);
+  }
 }
 
 bool DisaggPDScheduler::try_allocate(Sequence* sequence) {

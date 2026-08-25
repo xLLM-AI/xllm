@@ -105,7 +105,7 @@ void AsyncResponseProcessor::process_completed_request(
   auto runnable = [this, request = request]() mutable {
     AUTO_COUNTER(responsing_latency_seconds_non_stream);
 
-    double end_2_end_latency_seconds = request->elapsed_seconds();
+    double end_2_end_latency_seconds = request->end_to_end_latency_seconds();
     // update the metrics for the request
     HISTOGRAM_OBSERVE(end_2_end_latency_milliseconds,
                       static_cast<int64_t>(end_2_end_latency_seconds * 1000.0));
@@ -142,7 +142,7 @@ void AsyncResponseProcessor::batch_process_completed_requests(
                      request = request,
                      request_output = &request_outputs[i]]() mutable {
       AUTO_COUNTER(responsing_latency_seconds_non_stream);
-      double end_2_end_latency_seconds = request->elapsed_seconds();
+      double end_2_end_latency_seconds = request->end_to_end_latency_seconds();
       // update the metrics for the request
       HISTOGRAM_OBSERVE(
           end_2_end_latency_milliseconds,

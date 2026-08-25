@@ -935,7 +935,7 @@ double ProfileManager::run_request(int32_t token_length,
   sequences_budget.reserve(batch_size);
   requests.reserve(batch_size);
 
-  // batch sequences with the same kv cahce and token length
+  // batch sequences with the same kv cache and token length
   for (int32_t i = 0; i < batch_size; i++) {
     // generate random token ids and request
     std::shared_ptr<Request> request =
@@ -983,7 +983,7 @@ double ProfileManager::run_request(
   sequences_budget.reserve(token_length_vec.size());
   requests.reserve(token_length_vec.size());
 
-  // batch sequences with the same kv cahce and token length
+  // batch sequences with the same kv cache and token length
   for (int32_t i = 0; i < token_length_vec.size(); i++) {
     // generate random token ids and request
     int32_t token_length = token_length_vec[i];

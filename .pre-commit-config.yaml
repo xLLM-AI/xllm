@@ -16,7 +16,7 @@ repos:
     args: [
       --toml, pyproject.toml,
       '--skip', 'build/**,third_party/**,*.svg,*.ptx.h',
-      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt'
+      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt,MAPE,mape'
     ]
     additional_dependencies:
       - tomli

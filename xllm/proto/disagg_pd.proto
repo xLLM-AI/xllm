@@ -271,6 +271,8 @@ message DisaggGenerationsRequest {
   // The request uses the opt-in non-MLA heterogeneous TP restore path.
   bool heterogeneous_pd = 16;
   repeated KVTransferGroup source_groups = 20;
+  // Cumulative end-to-end latency measured by the source at handoff.
+  optional double upstream_elapsed_seconds = 21;
 }
 
 message DisaggGenerationsRequests {
