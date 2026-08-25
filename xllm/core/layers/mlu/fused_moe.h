@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -34,6 +35,8 @@ limitations under the License.
 #include "util/tensor_helper.h"
 
 namespace xllm {
+class ModelContext;
+
 namespace layer {
 
 class FusedMoEImpl : public torch::nn::Module {
@@ -44,11 +47,14 @@ class FusedMoEImpl : public torch::nn::Module {
   };
 
   FusedMoEImpl() = default;
+  FusedMoEImpl(const ModelContext& context, const FusedMoEArgs& moe_args);
   FusedMoEImpl(const ModelArgs& model_args,
                const FusedMoEArgs& moe_args,
                const QuantArgs& quant_args,
                const ParallelArgs& parallel_args,
-               const torch::TensorOptions& options);
+               const torch::TensorOptions& options,
+               const std::shared_ptr<Stream>& routed_comm_stream,
+               const std::shared_ptr<Stream>& shared_compute_stream);
 
   RouteInfo prep_route(
       torch::Tensor& hidden_states,
@@ -64,9 +70,6 @@ class FusedMoEImpl : public torch::nn::Module {
   virtual void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;
   bool has_shared() const { return static_cast<bool>(shared_experts_); }
-  void init_async(const torch::Tensor& hidden_states) {
-    init_streams(hidden_states);
-  }
   ProcessGroup* shared_pg() const { return shared_pg_; }
   Stream* shared_stream() const { return shared_stream_.get(); }
   Stream* routed_stream() const { return routed_stream_.get(); }
@@ -125,7 +128,6 @@ class FusedMoEImpl : public torch::nn::Module {
                       const std::optional<torch::Tensor>& input_ids);
   void check_route(const torch::Tensor& hidden_states_2d,
                    const RouteInfo& route_info) const;
-  void init_streams(const torch::Tensor& hidden_states);
   torch::Tensor compute_routed_experts(
       torch::Tensor expand_hidden_states,
       torch::ScalarType hidden_states_dtype,
@@ -155,11 +157,10 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor dispatch_recv_token_tensor_head_;
   torch::Tensor dispatch_recv_token_tensor_tail_;
 
-  // streams for parallel shared experts
-  std::unique_ptr<Stream> shared_stream_;
-  std::unique_ptr<Stream> routed_stream_;
+  // Model-scoped streams for the final communication/shared-expert overlap.
+  std::shared_ptr<Stream> shared_stream_;
+  std::shared_ptr<Stream> routed_stream_;
   xllm::Device device_;
-  bool stream_initialized_ = false;
   bool use_hash_ = false;
 
   MoEGate gate_{nullptr};

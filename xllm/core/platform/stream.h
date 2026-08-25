@@ -21,6 +21,7 @@ limitations under the License.
 #endif
 // clang-format on
 
+#include <c10/core/Device.h>
 #include <c10/core/Event.h>
 #include <c10/core/Stream.h>
 #include <c10/core/StreamGuard.h>
@@ -59,6 +60,7 @@ using PlatformStream = c10::hip::HIPStream;
 class Stream {
  public:
   explicit Stream(const int32_t timeout = -1);
+  explicit Stream(const c10::Device& device, const int32_t timeout = -1);
   ~Stream() = default;
 
   Stream(const Stream&) = delete;

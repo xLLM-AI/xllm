@@ -94,10 +94,18 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
       DeepseekV4Attention(
           model_args, quant_args, parallel_args, options, layer_id_));
 
+  const std::shared_ptr<ModelStreamRegistry>& stream_registry =
+      context.stream_registry();
   sparse_moe_ = register_module(
       "mlp",
       DeepseekV4SparseMoEBlock(
-          model_args, quant_args, parallel_args, options, use_hash_));
+          model_args,
+          quant_args,
+          parallel_args,
+          options,
+          use_hash_,
+          stream_registry->get(ExecutionStreamRole::COMMUNICATION),
+          stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
 }
 
 void DeepseekV4DecoderLayerImpl::set_cache_mapping(

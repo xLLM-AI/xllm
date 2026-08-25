@@ -192,8 +192,6 @@ torch::Tensor FusedMoEImpl::forward_experts_base(
     return final_hidden_states;
   }
 
-  init_streams(hidden_states);
-
   torch::Tensor shared_expert_output;
   final_comm_allreduce(
       final_hidden_states, hidden_states, shared_expert_output);

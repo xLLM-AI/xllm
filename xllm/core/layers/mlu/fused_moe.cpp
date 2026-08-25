@@ -24,19 +24,35 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model_context.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
+#include "platform/model_stream_registry.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
 
 namespace xllm {
 namespace layer {
 
+FusedMoEImpl::FusedMoEImpl(const ModelContext& context,
+                           const FusedMoEArgs& moe_args)
+    : FusedMoEImpl(
+          context.get_model_args(),
+          moe_args,
+          context.get_quant_args(),
+          context.get_parallel_args(),
+          context.get_tensor_options(),
+          context.stream_registry()->get(ExecutionStreamRole::COMMUNICATION),
+          context.stream_registry()->get(
+              ExecutionStreamRole::AUXILIARY_COMPUTE)) {}
+
 FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
-                           const torch::TensorOptions& options)
+                           const torch::TensorOptions& options,
+                           const std::shared_ptr<Stream>& routed_comm_stream,
+                           const std::shared_ptr<Stream>& shared_compute_stream)
     : num_total_experts_(model_args.n_routed_experts()),
       topk_(model_args.num_experts_per_tok()),
       hidden_size_(model_args.hidden_size()),
@@ -52,6 +68,13 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
       parallel_args_(parallel_args),
       options_(options),
       device_(options.device()) {
+  CHECK(routed_comm_stream != nullptr)
+      << "FusedMoE requires a model-scoped communication stream";
+  CHECK(shared_compute_stream != nullptr)
+      << "FusedMoE requires a model-scoped auxiliary compute stream";
+  routed_stream_ = routed_comm_stream;
+  shared_stream_ = shared_compute_stream;
+
   const int64_t num_experts = num_total_experts_;
   const int64_t intermediate_size =
       static_cast<int64_t>(model_args.moe_intermediate_size());
@@ -356,17 +379,6 @@ torch::Tensor FusedMoEImpl::create_group_gemm_output(
 
   // utilize the pre-calculated output_shape
   return workspace.slice(0, 0, required_elements).view(output_shape);
-}
-
-void FusedMoEImpl::init_streams(const torch::Tensor& hidden_states) {
-  if (stream_initialized_) {
-    return;
-  }
-
-  device_ = xllm::Device(hidden_states.device());
-  routed_stream_ = device_.get_stream_from_pool();
-  shared_stream_ = device_.get_stream_from_pool();
-  stream_initialized_ = true;
 }
 
 torch::Tensor FusedMoEImpl::compute_routed_experts(

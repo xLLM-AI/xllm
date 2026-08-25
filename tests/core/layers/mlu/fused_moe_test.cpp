@@ -19,13 +19,17 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <future>
+
 #include "framework/model/model_args.h"
+#include "framework/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
+#include "platform/model_stream_registry.h"
 #include "platform/platform.h"
 
 namespace xllm {
@@ -45,9 +49,14 @@ class FusedMoETest : public ::testing::Test {
                    .dtype(torch::kBFloat16)
                    .device(Platform::type_torch(), 0)
                    .requires_grad(false);
-
     // Create mock ProcessGroup and initialize ParallelArgs
     parallel_args_ = test::create_default_parallel_args(mock_process_group_);
+    model_context_ =
+        ModelContext(parallel_args_, model_args_, quant_args_, options_);
+    routed_comm_stream_ = model_context_.stream_registry()->get(
+        ExecutionStreamRole::COMMUNICATION);
+    shared_compute_stream_ = model_context_.stream_registry()->get(
+        ExecutionStreamRole::AUXILIARY_COMPUTE);
 
     // Note: FusedMoE will be created by individual test cases with their
     // desired dimensions
@@ -273,8 +282,13 @@ class FusedMoETest : public ::testing::Test {
     const FusedMoEArgs moe_args{
         .is_gated = is_gated,
         .enable_result_reduction = enable_result_reduction};
-    return FusedMoE(
-        FusedMoEImpl(args, moe_args, quant_args_, parallel_args_, options_));
+    return FusedMoE(FusedMoEImpl(args,
+                                 moe_args,
+                                 quant_args_,
+                                 parallel_args_,
+                                 options_,
+                                 routed_comm_stream_,
+                                 shared_compute_stream_));
   }
 
   void set_tp_ctx(int64_t world_size) {
@@ -339,6 +353,9 @@ class FusedMoETest : public ::testing::Test {
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;
+  ModelContext model_context_;
+  std::shared_ptr<Stream> routed_comm_stream_;
+  std::shared_ptr<Stream> shared_compute_stream_;
 
   // Helper to create a mock ProcessGroup for testing
   std::unique_ptr<xllm::ProcessGroup> mock_process_group_;
@@ -347,6 +364,100 @@ class FusedMoETest : public ::testing::Test {
   // Expected output for precision verification
   std::vector<float> expected_output_;
 };
+
+TEST_F(FusedMoETest, ContextConstructorResolvesModelScopedRoleStreams) {
+  const FusedMoEArgs moe_args{.is_gated = true};
+  FusedMoE fused_moe(model_context_, moe_args);
+
+  EXPECT_EQ(fused_moe->routed_stream(), routed_comm_stream_.get());
+  EXPECT_EQ(fused_moe->shared_stream(), shared_compute_stream_.get());
+}
+
+TEST_F(FusedMoETest, SharesModelScopedRoleStreamsAcrossLayers) {
+  FusedMoE first = create_fused_moe(/*num_experts=*/4,
+                                    /*top_k=*/2,
+                                    /*num_expert_group=*/1,
+                                    /*topk_group=*/1,
+                                    /*route_scale=*/1.0,
+                                    /*hidden_size=*/256,
+                                    /*intermediate_size=*/128);
+  FusedMoE second = create_fused_moe(/*num_experts=*/4,
+                                     /*top_k=*/2,
+                                     /*num_expert_group=*/1,
+                                     /*topk_group=*/1,
+                                     /*route_scale=*/1.0,
+                                     /*hidden_size=*/256,
+                                     /*intermediate_size=*/128);
+
+  EXPECT_EQ(first->routed_stream(), second->routed_stream());
+  EXPECT_EQ(first->shared_stream(), second->shared_stream());
+  EXPECT_NE(first->routed_stream(), first->shared_stream());
+  EXPECT_EQ(first->routed_stream(), routed_comm_stream_.get());
+  EXPECT_EQ(first->shared_stream(), shared_compute_stream_.get());
+}
+
+TEST_F(FusedMoETest, ModelContextReusesStreamsByExecutionRole) {
+  const ModelContext context(
+      parallel_args_, model_args_, quant_args_, options_);
+  const std::shared_ptr<ModelStreamRegistry>& registry =
+      context.stream_registry();
+
+  std::shared_ptr<Stream> first_communication =
+      registry->get(ExecutionStreamRole::COMMUNICATION);
+  std::shared_ptr<Stream> second_communication =
+      registry->get(ExecutionStreamRole::COMMUNICATION);
+  std::shared_ptr<Stream> auxiliary_compute =
+      registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE);
+
+  EXPECT_EQ(first_communication, second_communication);
+  EXPECT_NE(first_communication, auxiliary_compute);
+}
+
+TEST_F(FusedMoETest, SeparateModelContextsOwnSeparateStreamRegistries) {
+  const ModelContext first_context(
+      parallel_args_, model_args_, quant_args_, options_);
+  const ModelContext second_context(
+      parallel_args_, model_args_, quant_args_, options_);
+
+  EXPECT_NE(first_context.stream_registry(), second_context.stream_registry());
+  EXPECT_NE(
+      first_context.stream_registry()->get(ExecutionStreamRole::COMMUNICATION),
+      second_context.stream_registry()->get(
+          ExecutionStreamRole::COMMUNICATION));
+}
+
+TEST_F(FusedMoETest, CopiedAndDerivedContextsShareStreamRegistry) {
+  const ModelContext context(
+      parallel_args_, model_args_, quant_args_, options_);
+  const ModelContext copied_context = context;
+  const ModelContext parallel_context =
+      context.with_parallel_args(parallel_args_);
+  const ModelContext quant_context = context.with_quant_args(quant_args_);
+
+  EXPECT_EQ(context.stream_registry(), copied_context.stream_registry());
+  EXPECT_EQ(context.stream_registry(), parallel_context.stream_registry());
+  EXPECT_EQ(context.stream_registry(), quant_context.stream_registry());
+}
+
+TEST_F(FusedMoETest, ConcurrentRoleRequestsReturnOneStream) {
+  constexpr int32_t kThreadCount = 8;
+  const ModelContext context(
+      parallel_args_, model_args_, quant_args_, options_);
+  const std::shared_ptr<ModelStreamRegistry>& registry =
+      context.stream_registry();
+  std::vector<std::future<std::shared_ptr<Stream>>> futures;
+  futures.reserve(kThreadCount);
+  for (int32_t i = 0; i < kThreadCount; ++i) {
+    futures.emplace_back(std::async(std::launch::async, [registry]() {
+      return registry->get(ExecutionStreamRole::COMMUNICATION);
+    }));
+  }
+
+  std::shared_ptr<Stream> expected = futures.front().get();
+  for (int32_t i = 1; i < kThreadCount; ++i) {
+    EXPECT_EQ(expected, futures[i].get());
+  }
+}
 
 TEST_F(FusedMoETest, LoadStateDictTest) {
   // Test loading weights into the FusedMoE
@@ -747,8 +858,13 @@ TEST_F(FusedMoETest, DeepSeekV4MoETest) {
   const FusedMoEArgs moe_args{
       .is_gated = true, .enable_result_reduction = true, .use_hash = false};
 
-  auto fused_moe = FusedMoE(
-      FusedMoEImpl(args, moe_args, quant_args_, parallel_args_, options_));
+  auto fused_moe = FusedMoE(FusedMoEImpl(args,
+                                         moe_args,
+                                         quant_args_,
+                                         parallel_args_,
+                                         options_,
+                                         routed_comm_stream_,
+                                         shared_compute_stream_));
 
   auto weight_dict =
       create_test_weights(num_experts, hidden_size, intermediate_size);
@@ -808,8 +924,13 @@ TEST_F(FusedMoETest, DeepSeekV4HashMoETest) {
   const FusedMoEArgs moe_args{
       .is_gated = true, .enable_result_reduction = true, .use_hash = true};
 
-  auto fused_moe = FusedMoE(
-      FusedMoEImpl(args, moe_args, quant_args_, parallel_args_, options_));
+  auto fused_moe = FusedMoE(FusedMoEImpl(args,
+                                         moe_args,
+                                         quant_args_,
+                                         parallel_args_,
+                                         options_,
+                                         routed_comm_stream_,
+                                         shared_compute_stream_));
 
   auto weight_dict =
       create_test_weights(num_experts, hidden_size, intermediate_size);

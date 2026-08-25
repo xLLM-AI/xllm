@@ -23,6 +23,19 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+
+DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(const ModelContext& context,
+                                                 bool enable_indexer)
+    : DeepseekV2AttentionImpl(context.get_model_args(),
+                              context.get_quant_args(),
+                              context.get_parallel_args(),
+                              context.get_tensor_options(),
+                              context.get_optimization_config(),
+                              enable_indexer) {
+  sp_comm_stream_ =
+      context.stream_registry()->get(ExecutionStreamRole::COMMUNICATION);
+}
+
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     const ModelArgs& args,
     const QuantArgs& quant_args,

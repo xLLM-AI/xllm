@@ -28,7 +28,9 @@ class Qwen3_5FusedMoEImpl final : public FusedMoEImpl {
                       const FusedMoEArgs& moe_args,
                       const QuantArgs& quant_args,
                       const ParallelArgs& parallel_args,
-                      const torch::TensorOptions& options);
+                      const torch::TensorOptions& options,
+                      const std::shared_ptr<Stream>& routed_comm_stream,
+                      const std::shared_ptr<Stream>& shared_compute_stream);
 
   void load_state_dict(const StateDict& state_dict) override;
 

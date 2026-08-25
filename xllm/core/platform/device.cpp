@@ -165,7 +165,7 @@ int Device::synchronize_default_stream() {
 }
 
 std::unique_ptr<Stream> Device::get_stream_from_pool(const int32_t timeout) {
-  return std::make_unique<Stream>(timeout);
+  return std::make_unique<Stream>(device_, timeout);
 }
 
 std::unique_ptr<Stream> Device::current_stream() const {

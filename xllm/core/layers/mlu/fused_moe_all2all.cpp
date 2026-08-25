@@ -159,8 +159,6 @@ torch::Tensor FusedMoEImpl::forward_experts_all2all(
     const torch::Tensor& hidden_states,
     const std::optional<RouteInfo>& route_info,
     const std::optional<torch::Tensor>& input_ids) {
-  init_streams(hidden_states);
-
   torch::Tensor shared_expert_output;
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
   torch::ScalarType hidden_states_dtype = hidden_states.dtype().toScalarType();

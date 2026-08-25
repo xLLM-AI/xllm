@@ -46,9 +46,9 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
   const bool compute_topk = !attn_metadata.is_dummy && reused_topk == nullptr;
 
   Device device(hidden_states.device());
-  if (sp_comm_stream_ == nullptr) {
-    sp_comm_stream_ = device.get_stream_from_pool();
-  }
+  CHECK(sp_comm_stream_ != nullptr)
+      << "sequence-parallel attention requires a model-scoped communication "
+         "stream";
   if (compute_topk) {
     index_pre = indexer_->sp_pre(hidden_states,
                                  query_prep.q_norm,
