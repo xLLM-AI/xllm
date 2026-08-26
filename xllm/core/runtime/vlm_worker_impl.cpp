@@ -25,7 +25,9 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
+#include "common/macros.h"
 #include "common/metrics.h"
+#include "core/framework/config/load_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -98,6 +100,78 @@ std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
   }
   auto ret = device_.synchronize_default_stream();
   return output;
+}
+
+std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input,
+    Stream& compute_stream,
+    bool record_ready_event) {
+  const bool empty_shard =
+      input.input_params.meta.num_sequences == 0 &&
+      (!input.token_ids.defined() || input.token_ids.numel() == 0);
+  if (empty_shard) {
+    return ForwardOutput{};
+  }
+
+  c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
+#if defined(USE_NPU)
+  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
+    SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
+  }
+#endif
+  CHECK(compute_stream.wait_event(input.metadata_ready_event))
+      << "failed to wait ForwardInput metadata ready event";
+
+  Timer timer;
+  auto model_output = model_executor_->forward(
+      input.token_ids, input.positions, kv_caches_, input.input_params);
+  auto& sampling_params = input.sampling_params;
+  torch::Tensor logits;
+  if (sampling_params.selected_token_idxes.defined()) {
+    logits = model_->logits(model_output.hidden_states,
+                            sampling_params.selected_token_idxes);
+  }
+
+  COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
+
+  ForwardOutput output;
+  if (sampling_params.selected_token_idxes.defined()) {
+    auto sample_output = sampler_->forward(logits, sampling_params);
+    output.logits = logits;
+    COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
+
+    output.sample_output = sample_output;
+    output.do_sample = sampling_params.do_sample;
+    output.logprobs = sampling_params.logprobs;
+    output.max_top_logprobs = sampling_params.max_top_logprobs;
+  }
+
+  // Keep input tensors alive until downstream consumers finish on this stream.
+  output.retained_inputs.emplace_back(std::make_shared<ForwardInput>(input));
+  if (record_ready_event) {
+    std::unique_ptr<Stream> current = device_.current_stream();
+    output.ready_event = current->record_event();
+    if (output.ready_event == nullptr) {
+      current->synchronize();
+    }
+  }
+  return output;
+}
+
+std::optional<ForwardOutput> VLMWorkerImpl::step_for_schedule_overlap(
+    const ForwardInput& input) {
+  // VLM has no linear-attention recurrent state to restore, so the LLM
+  // worker's slot-restore preamble is unnecessary here.
+  return execute_no_sync_on_stream(input, *compute_stream_);
+}
+
+ForwardInput
+VLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
+    ForwardInput& input) {
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
+      << "failed to wait last step output ready event";
+  return update_input_by_last_step_output(input);
 }
 
 }  // namespace xllm
