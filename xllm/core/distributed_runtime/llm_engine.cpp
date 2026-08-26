@@ -65,9 +65,85 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+namespace {
 
 // Extra weight pages reserved for mapping/alignment overhead.
 constexpr size_t kXTensorWeightPageSafetyMargin = 20;
+
+// Fill Decode-side link/unlink endpoints for one worker.
+//
+// TP-invariant KV (MLA / DeepSeek-V4 / glm_moe_dsa, ...): full cache blocks can
+// move across TP sizes. Match merge_kv_blocks: P rank r pushes to D workers
+// r % src_tp_size, r % src_tp_size + src_tp_size, ... so D worker w links to P
+// index (w % src_tp_size) for every kv_split shard. src_tp_size is the
+// kv-split-axis width (world/dp/kv_split), not physical TP.
+//
+// TP-sharded KV (e.g. qwen3): head shards need multi-source concat under hetero
+// TP (P TP2 -> D TP1). Keep get_src_tp_ranks so each D worker links every P TP
+// shard that routes to it.
+//
+// P layout: rank = dp_i * src_cp_tp_size + split_j * src_tp_size + tp_rank
+void fill_pd_link_targets(const size_t worker_rank,
+                          const int32_t src_dp_size,
+                          const int32_t src_kv_split_size,
+                          const int32_t src_world_size,
+                          const int32_t dst_tp_size,
+                          const bool kv_cache_is_tp_invariant,
+                          const std::vector<uint64_t>& cluster_ids,
+                          const std::vector<std::string>& addrs,
+                          const std::vector<uint16_t>& ports,
+                          std::vector<uint64_t>& target_cluster_ids,
+                          std::vector<std::string>& target_addrs,
+                          std::vector<uint16_t>& target_ports) {
+  const int32_t src_cp_tp_size = src_world_size / src_dp_size;
+  const int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
+
+  if (kv_cache_is_tp_invariant) {
+    const int32_t src_tp_rank =
+        static_cast<int32_t>(worker_rank % static_cast<size_t>(src_tp_size));
+    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
+                                  static_cast<size_t>(src_kv_split_size);
+    target_cluster_ids.reserve(endpoint_count);
+    target_addrs.reserve(endpoint_count);
+    target_ports.reserve(endpoint_count);
+
+    for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
+      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
+        const int32_t p_idx =
+            dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
+        target_cluster_ids.emplace_back(cluster_ids[p_idx]);
+        target_addrs.emplace_back(addrs[p_idx]);
+        target_ports.emplace_back(ports[p_idx]);
+      }
+    }
+    return;
+  }
+
+  const int32_t dst_tp_rank =
+      static_cast<int32_t>(worker_rank % static_cast<size_t>(dst_tp_size));
+  const std::vector<int32_t> src_tp_ranks =
+      get_src_tp_ranks(dst_tp_rank, src_tp_size, dst_tp_size);
+  const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
+                                static_cast<size_t>(src_kv_split_size) *
+                                src_tp_ranks.size();
+  target_cluster_ids.reserve(endpoint_count);
+  target_addrs.reserve(endpoint_count);
+  target_ports.reserve(endpoint_count);
+
+  for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
+    for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
+      for (int32_t src_tp_rank : src_tp_ranks) {
+        const int32_t p_idx =
+            dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
+        target_cluster_ids.emplace_back(cluster_ids[p_idx]);
+        target_addrs.emplace_back(addrs[p_idx]);
+        target_ports.emplace_back(ports[p_idx]);
+      }
+    }
+  }
+}
+
+}  // namespace
 
 LLMEngine::LLMEngine(const runtime::Options& options,
                      std::shared_ptr<DistManager> dist_manager)
@@ -930,12 +1006,11 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
                              const int32_t src_dp_size,
                              const int32_t src_kv_split_size) {
   const int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
+  // Align with DisaggPDScheduler: enable_mla OR model-type classifier.
+  const bool kv_cache_is_tp_invariant =
+      args_.enable_mla() ||
+      util::is_tp_invariant_kv_cache_model_type(args_.model_type());
 
-  // Each D worker connects to every P worker that routes KV blocks to its TP
-  // rank. When P TP is larger, multiple P ranks share one D-side owner.
-  // P layout: rank = dp_i * src_cp_tp_size + split_j * src_tp_size + tp_rank
-  int32_t src_cp_tp_size = src_world_size / src_dp_size;
-  int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -943,28 +1018,18 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    const int32_t dst_tp_rank =
-        static_cast<int32_t>(worker_rank % dp_local_tp_size_);
-    const std::vector<int32_t> src_tp_ranks =
-        get_src_tp_ranks(dst_tp_rank, src_tp_size, dp_local_tp_size_);
-    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
-                                  static_cast<size_t>(src_kv_split_size) *
-                                  src_tp_ranks.size();
-    target_cluster_ids.reserve(endpoint_count);
-    target_addrs.reserve(endpoint_count);
-    target_ports.reserve(endpoint_count);
-
-    for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
-      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        for (int32_t src_tp_rank : src_tp_ranks) {
-          const int32_t p_idx =
-              dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
-          target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-          target_addrs.emplace_back(addrs[p_idx]);
-          target_ports.emplace_back(ports[p_idx]);
-        }
-      }
-    }
+    fill_pd_link_targets(worker_rank,
+                         src_dp_size,
+                         src_kv_split_size,
+                         src_world_size,
+                         static_cast<int32_t>(dp_local_tp_size_),
+                         kv_cache_is_tp_invariant,
+                         cluster_ids,
+                         addrs,
+                         ports,
+                         target_cluster_ids,
+                         target_addrs,
+                         target_ports);
 
     folly::Promise<bool> promise;
     auto future = promise.getSemiFuture();
@@ -997,10 +1062,11 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                const int32_t src_dp_size,
                                const int32_t src_kv_split_size) {
   const int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
-
   // Symmetric to link_cluster; uses the same owner mapping.
-  int32_t src_cp_tp_size = src_world_size / src_dp_size;
-  int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
+  const bool kv_cache_is_tp_invariant =
+      args_.enable_mla() ||
+      util::is_tp_invariant_kv_cache_model_type(args_.model_type());
+
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -1008,28 +1074,18 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    const int32_t dst_tp_rank =
-        static_cast<int32_t>(worker_rank % dp_local_tp_size_);
-    const std::vector<int32_t> src_tp_ranks =
-        get_src_tp_ranks(dst_tp_rank, src_tp_size, dp_local_tp_size_);
-    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
-                                  static_cast<size_t>(src_kv_split_size) *
-                                  src_tp_ranks.size();
-    target_cluster_ids.reserve(endpoint_count);
-    target_addrs.reserve(endpoint_count);
-    target_ports.reserve(endpoint_count);
-
-    for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
-      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        for (int32_t src_tp_rank : src_tp_ranks) {
-          const int32_t p_idx =
-              dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
-          target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-          target_addrs.emplace_back(addrs[p_idx]);
-          target_ports.emplace_back(ports[p_idx]);
-        }
-      }
-    }
+    fill_pd_link_targets(worker_rank,
+                         src_dp_size,
+                         src_kv_split_size,
+                         src_world_size,
+                         static_cast<int32_t>(dp_local_tp_size_),
+                         kv_cache_is_tp_invariant,
+                         cluster_ids,
+                         addrs,
+                         ports,
+                         target_cluster_ids,
+                         target_addrs,
+                         target_ports);
 
     folly::Promise<bool> promise;
     auto future = promise.getSemiFuture();
