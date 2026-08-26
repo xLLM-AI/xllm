@@ -349,6 +349,20 @@ void CollectiveCommunicator::create_process_groups(
 
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB") {
+    if (::xllm::KernelConfig::get_instance().enable_mega_moe()) {
+      const int32_t attn_tp_size = world_size / (dp_size * cp_size);
+      const int32_t moe_ep_port = port + 1 + (cp_size > 1 ? attn_tp_size : 0);
+      moe_ep_group_ = create_process_group(global_rank,
+                                           world_size,
+                                           ep_size,
+                                           moe_ep_port,
+                                           true,
+                                           host,
+                                           "moe_ep_group",
+                                           device);
+      parallel_args_->moe_ep_group_ = moe_ep_group_.get();
+    }
+
     // ATB owns TP/DP/EP; build a standalone HCCL CP ProcessGroup for
     // model-side AllGather.
     if (cp_size > 1) {
