@@ -60,6 +60,19 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
                                  const ModelInputParams& params) {
   torch::NoGradGuard no_grad;
   auto& mm_data = params.multimodal.mm_data;
+
+  // Pure decode steps carry no multimodal data, so get_input_embeddings would
+  // just do a plain token lookup. Skipping the host-side embedding here lets
+  // the graph run embed_tokens on its persistent token buffer instead, which
+  // keeps the captured graph input address stable across double-buffered slots
+  // (a host-computed embedding tensor is reallocated every step and would make
+  // graph replay read a stale/mismatched buffer).
+  const bool decode_only =
+      params.meta.batch_forward_type.is_decode() && !mm_data.valid();
+  if (decode_only && llm_executor_) {
+    return llm_executor_->run(tokens, positions, kv_caches, params);
+  }
+
   if (encoder_cache_) {
     EncoderCacheLookupVisitor lookup(encoder_cache_.get());
     mm_data.foreach (lookup);
@@ -103,6 +116,18 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   }
 
   return model_->forward(tokens, fwd_positions, kv_caches, params);
+}
+
+void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
+                                          const torch::Tensor& positions,
+                                          std::vector<KVCache>& kv_caches,
+                                          const ModelInputParams& params) {
+  // Decode-only double-buffer graph prewarm. Delegate to the inner graph
+  // executor built in enable_graph mode; multimodal prefill steps never reach
+  // here because the worker gates this on decode-phase input params.
+  if (llm_executor_) {
+    llm_executor_->prepare_graph_input(tokens, positions, kv_caches, params);
+  }
 }
 
 }  // namespace xllm

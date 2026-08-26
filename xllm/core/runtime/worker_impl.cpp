@@ -726,7 +726,8 @@ bool WorkerImpl::can_prepare_npu_graph_decode_input(
   return !options_.enable_speculative_decode() &&
          ::xllm::ExecutionConfig::get_instance().enable_graph() &&
          ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
-         enable_schedule_overlap() && options_.backend() == "llm" &&
+         enable_schedule_overlap() &&
+         (options_.backend() == "llm" || options_.backend() == "vlm") &&
          input_params.meta.batch_forward_type.has_decode();
 #else
   (void)input_params;
@@ -741,7 +742,7 @@ bool WorkerImpl::can_prepare_without_compute_stream_wait(
   return !options_.enable_speculative_decode() &&
          ::xllm::ExecutionConfig::get_instance().enable_graph() &&
          ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
-         options_.backend() == "llm";
+         (options_.backend() == "llm" || options_.backend() == "vlm");
 #else
   (void)input_params;
   return false;
