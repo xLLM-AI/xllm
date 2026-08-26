@@ -25,6 +25,7 @@ limitations under the License.
 #include "framework/eplb/expert_weight_buffer_shm.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context.h"
+#include "framework/parallel_state/mega_moe_comm_resource.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "framework/state_dict/state_dict.h"
 #include "loader/deepseek_v32_decoder_loader.h"
@@ -136,6 +137,11 @@ class NpuDeepseekV32DecoderLayerImpl : public BaseLayer {
   void initialize_quantization_parameters(
       atb_speed::deepseekV2::DecoderLayerParam& param);
 
+  void initialize_mega_moe_resource(const ParallelArgs& parallel_args);
+
+  torch::Tensor encode_mega_moe_scale(const torch::Tensor& scale,
+                                      const torch::Tensor& offset) const;
+
   void merge_and_copy_gate_up_weights(
       torch::Tensor& target_buffer,
       const std::vector<torch::Tensor>& experts_gate,
@@ -159,7 +165,8 @@ class NpuDeepseekV32DecoderLayerImpl : public BaseLayer {
                                const torch::Tensor& shared_topk_indices,
                                torch::Tensor* output_topk_indices,
                                bool skip_topk,
-                               bool output_topk);
+                               bool output_topk,
+                               bool enable_mega_moe);
 
   torch::Tensor block_tables_placeholder_;
   std::string model_name_;
@@ -229,6 +236,11 @@ class NpuDeepseekV32DecoderLayerImpl : public BaseLayer {
 
   torch::Tensor expert_routing_map_;
   torch::Tensor expert_routing_map_buffer_;
+  std::vector<atb::Tensor> prefill_atb_weight_tensors_;
+  torch::Tensor prefill_gateup_scale_;
+  torch::Tensor prefill_down_scale_;
+  std::shared_ptr<MegaMoeCommResource> mega_moe_comm_resource_;
+  atb::Tensor mega_moe_context_tensor_;
 };
 TORCH_MODULE(NpuDeepseekV32DecoderLayer);
 
