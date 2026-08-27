@@ -2,6 +2,16 @@ include(cc_test)
 
 cc_test(
   NAME
+    host_kv_transfer_test
+  SRCS
+    host_transfer/transfer_test.cpp
+  DEPS
+    :kv_cache_transfer
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     push_route_test
   SRCS
     push_route_test.cpp
@@ -57,10 +67,20 @@ target_link_libraries(mooncake_transfer_engine_test PRIVATE
   "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
 endif()
 
-if(USE_MLU)
+if(USE_NPU OR USE_MLU)
 cc_test(
   NAME
-    quantized_indexer_host_offload_test
+    basic_host_kv_transfer_test
+  SRCS
+    host_transfer/basic_transfer_test.cpp
+  DEPS
+    :kv_cache_transfer
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    hierarchy_kv_cache_transfer_test
   SRCS
     hierarchy_kv_cache_transfer_test.cpp
   DEPS

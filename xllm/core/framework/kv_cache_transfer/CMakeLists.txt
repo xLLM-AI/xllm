@@ -66,6 +66,9 @@ cc_library(
   HDRS
     kv_cache_transfer.h
     kv_cache_store.h
+    host_transfer/layout.h
+    host_transfer/transfer.h
+    host_transfer/basic_transfer.h
     prefetch_result.h
     hierarchy_kv_cache_transfer.h
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_transfer_engine.h>
@@ -74,6 +77,9 @@ cc_library(
   SRCS
     kv_cache_transfer.cpp
     kv_cache_store.cpp
+    host_transfer/layout.cpp
+    host_transfer/transfer.cpp
+    host_transfer/basic_transfer.cpp
     hierarchy_kv_cache_transfer.cpp
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_transfer_engine.cpp>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>

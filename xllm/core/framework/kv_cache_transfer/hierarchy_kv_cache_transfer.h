@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <torch/torch.h>
-
 #include <map>
 #include <memory>
 #include <mutex>
@@ -28,33 +26,18 @@ limitations under the License.
 #include "framework/block/block.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/kv_cache_utils.h"
+#include "framework/kv_cache_transfer/host_transfer/transfer.h"
 #include "framework/model/model_input_params.h"
-#include "platform/batch_memcpy.h"
 #include "platform/device.h"
-#include "platform/layer_synchronizer.h"
-#include "util/blockingconcurrentqueue.h"
 #include "util/threadpool.h"
 
 namespace xllm {
+
 class KVCacheStore;
 
-class HierarchyKVCacheTransfer {
+class HierarchyKVCacheTransfer final {
  public:
-  struct LayerBatchRange {
-    int64_t begin_layer = 0;
-    int64_t end_layer = 0;
-  };
-
-  struct CopyPlan {
-    std::vector<torch::Tensor> src_tensors;
-    std::vector<torch::Tensor> dst_tensors;
-  };
-
   using GroupedCaches = std::map<BlockType, std::vector<KVCache*>>;
-
-  // Host prefix caches: one real KVCache per block type, allocated over
-  // page-aligned + mlock'd + NPU-registered host memory. Shape per tensor is
-  // [host_blocks, layer_count, ...per_block_dims].
   using HostGroupedCaches = std::map<BlockType, std::unique_ptr<KVCache>>;
 
   struct Options {
@@ -82,54 +65,44 @@ class HierarchyKVCacheTransfer {
   ~HierarchyKVCacheTransfer();
 
   uint32_t transfer_kv_blocks(
-      const uint64_t batch_id,
+      uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
-
-  uint32_t transfer_kv_blocks(const uint64_t batch_id,
+  uint32_t transfer_kv_blocks(uint64_t batch_id,
                               Slice<BlockTransferInfo>& block_transfer_info);
-
   std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info);
-
   void set_layer_synchronizer(ModelInputParams& params);
 
  private:
-  friend class HierarchyKVCacheTransferTestPeer;
-
-  void build_device_block_type_map();
-  void create_host_cache();
-  CopyPlan build_copy_plan(
+  GroupedCaches build_device_groups(
+      std::map<BlockType, std::vector<int64_t>>* layer_ids) const;
+  void create_host_cache(const GroupedCaches& device_groups);
+  HostKVLayout create_host_kv_layout(
+      const GroupedCaches& device_groups,
+      const std::map<BlockType, std::vector<int64_t>>& layer_ids) const;
+  static HostKVRequest make_request(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      const LayerBatchRange& layer_batch_range) const;
+      TransferType transfer_type);
 
   uint32_t offload(const std::vector<BlockTransferInfo>& block_transfer_info);
-  bool offload_to_host(Slice<BlockTransferInfo>& block_transfer_info);
-  bool load_from_host(
-      std::shared_ptr<LayerSynchronizer> synchronizer,
-      const std::vector<BlockTransferInfo>& block_transfer_info);
+  bool offload_to_host(const HostKVRequest& request);
+  bool load_from_host(const HostKVRequest& request,
+                      const HostKVLoadHandle& handle);
 
- private:
   Options options_;
   Device device_;
-  const Stream* compute_stream_ = nullptr;
-
   std::unique_ptr<ThreadPool> load_threadpool_;
-  moodycamel::BlockingConcurrentQueue<std::unique_ptr<Stream>> copy_stream_;
 
   std::vector<xllm::KVCache>* kv_caches_ptr_ = nullptr;
   KVCacheShape kv_cache_shape_;
   KVCacheCreateOptions create_options_;
-  GroupedCaches device_kv_caches_;
-  std::map<BlockType, std::vector<int64_t>> device_block_type_layer_ids_;
   HostGroupedCaches host_kv_caches_;
-  std::vector<LayerBatchRange> layer_batch_ranges_;
 
-  std::unique_ptr<BatchMemcpy> batch_memcpy_;
+  std::unique_ptr<HostKVTransfer> host_kv_transfer_;
   std::unique_ptr<KVCacheStore> kv_cache_store_;
 
   mutable std::mutex mutex_;
-  std::unordered_map<uint64_t, std::shared_ptr<LayerSynchronizer>>
-      layer_wise_load_synchronizer_;
+  std::unordered_map<uint64_t, HostKVLoadHandle> load_handles_;
 };
 
 }  // namespace xllm

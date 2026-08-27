@@ -239,7 +239,7 @@ TEST_F(MLULayerSynchronizerTest, ModelInputWaitsAtRangeBoundaries) {
       synchronizer->record_stream(/*layer_index=*/0, copy_stream.get()));
   ModelInputParams params;
   params.parallel.layer_wise_load_synchronizer = synchronizer;
-  params.parallel.layers_per_bacth_copy = 2;
+  params.parallel.layers_per_event = 2;
 
   EXPECT_TRUE(params.synchronize_layer(/*layer_idx=*/0));
   EXPECT_TRUE(params.synchronize_layer(/*layer_idx=*/1));

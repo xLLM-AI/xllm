@@ -264,7 +264,7 @@ class Options {
   // Prefetch from kvcache store copy batch size
   PROPERTY(uint32_t, prefetch_batch_size) = 2;
 
-  // Layer wise H2D copy batchs
+  // Host KV layer-wise copy batches.
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
   // beam width for beam search

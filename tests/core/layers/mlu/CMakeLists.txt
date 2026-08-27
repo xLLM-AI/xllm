@@ -226,6 +226,7 @@ cc_test(
     :config
     :block
     :mlu_layers
+    :model_context
     :parallel_state
     :state_dict
     GTest::gtest_main
