@@ -35,6 +35,7 @@ limitations under the License.
 #endif
 #include "core/common/metrics.h"
 #include "core/framework/speculative/mtp_async_state.h"
+#include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/kernels/ops_api.h"
 #include "core/platform/device.h"
@@ -447,7 +448,8 @@ bool AclGraph::capture(CausalLM* model,
   aclrtSynchronizeStream(graph_stream_);
   aclrtSynchronizeStream(stream);
   graph_.replay();
-  update_graph_tasks(graph_params.value());
+  update_graph_tasks(graph_params.value(),
+                     /*update_causal_conv1d_tasks=*/true);
   if (capture_static_graph_tasks) {
     capture_static_graph_task_signature(graph_params.value());
   }
@@ -455,26 +457,70 @@ bool AclGraph::capture(CausalLM* model,
   return true;
 }
 
-bool AclGraph::update_graph_tasks(const ModelInputParams& params) {
-  if (graph_task_context_ == nullptr ||
-      graph_task_context_->causal_conv1d_tasks.empty()) {
+bool AclGraph::update_graph_tasks(const ModelInputParams& params,
+                                  bool update_causal_conv1d_tasks) {
+  if (graph_task_context_ == nullptr) {
     return false;
   }
 
-  const std::vector<int64_t> empty_host_args;
-  CHECK(!params.parallel.query_start_loc.empty())
-      << "causal_conv1d graph update requires padded query_start_loc";
-  CHECK(!params.embedding.linear_state_ids.empty())
-      << "causal_conv1d graph update requires padded cache indices";
-
-  std::vector<int64_t> linear_state_indices_host(
-      params.embedding.linear_state_ids.begin(),
-      params.embedding.linear_state_ids.end());
-
   c10_npu::NPUStream update_stream = update_stream_.value();
   c10_npu::NPUStreamGuard stream_guard(update_stream);
+  auto& causal_conv1d_tasks = graph_task_context_->causal_conv1d_tasks;
+  auto& fused_infer_attention_tasks =
+      graph_task_context_->fused_infer_attention_tasks;
 
-  for (auto& task : graph_task_context_->causal_conv1d_tasks) {
+  const bool has_causal_conv1d_tasks =
+      update_causal_conv1d_tasks && !causal_conv1d_tasks.empty();
+  const bool has_fused_infer_attention_tasks =
+      !fused_infer_attention_tasks.empty();
+  if (!has_causal_conv1d_tasks && !has_fused_infer_attention_tasks) {
+    return false;
+  }
+
+  std::vector<int64_t> empty_host_args;
+  std::vector<int64_t> linear_state_indices_host;
+  if (has_causal_conv1d_tasks) {
+    CHECK(!params.parallel.query_start_loc.empty())
+        << "causal_conv1d graph update requires padded query_start_loc";
+    CHECK(!params.embedding.linear_state_ids.empty())
+        << "causal_conv1d graph update requires padded cache indices";
+    linear_state_indices_host.assign(params.embedding.linear_state_ids.begin(),
+                                     params.embedding.linear_state_ids.end());
+  }
+
+  size_t graph_batch_size = 0;
+  std::vector<int64_t> actual_seq_lengths_kv;
+  if (has_fused_infer_attention_tasks) {
+    const auto& first_task = fused_infer_attention_tasks.front();
+    graph_batch_size = static_cast<size_t>(first_task.query.size(0));
+    const FusedInferAttentionGraphBranch graph_branch = first_task.branch;
+    for (const FusedInferAttentionGraphTask& task :
+         fused_infer_attention_tasks) {
+      CHECK(task.branch == graph_branch)
+          << "FIA graph tasks must share one decode branch";
+      CHECK_EQ(static_cast<size_t>(task.query.size(0)), graph_batch_size)
+          << "FIA graph tasks must share the captured batch size";
+    }
+    const std::vector<int32_t>& source_kv_seq_lens =
+        graph_branch == FusedInferAttentionGraphBranch::kSpecVerify
+            ? params.graph.expanded_kv_seq_lens_vec
+            : params.attention.host.kv_seq_lens;
+    if (graph_branch == FusedInferAttentionGraphBranch::kSpecVerify) {
+      CHECK(params.is_spec_verify)
+          << "spec FIA graph task requires spec-verify params";
+      CHECK(params.graph.use_expanded_decode_for_spec_verify_attention)
+          << "spec FIA graph task requires expanded decode metadata";
+    }
+    CHECK_LE(source_kv_seq_lens.size(), graph_batch_size)
+        << "FIA graph update KV lengths exceed captured query tokens";
+
+    actual_seq_lengths_kv.assign(graph_batch_size, 1);
+    for (size_t index = 0; index < source_kv_seq_lens.size(); ++index) {
+      actual_seq_lengths_kv[index] = source_kv_seq_lens[index];
+    }
+  }
+
+  auto update_causal_conv1d_task = [&](CausalConv1dGraphTask& task) {
     CHECK_EQ(params.parallel.query_start_loc.back(), task.x.size(0))
         << "causal_conv1d graph update host args must be padded to the "
            "capture x.shape[0]";
@@ -509,14 +555,69 @@ bool AclGraph::update_graph_tasks(const ModelInputParams& params) {
     if (task.event != nullptr) {
       task.event->record(update_stream);
     }
+  };
+
+  auto update_fused_infer_attention_task =
+      [&](FusedInferAttentionGraphTask& task) {
+        c10_npu::graph_task_update_begin(update_stream, task.handle);
+        kernel::npu::npu_fused_infer_attention_decode_out(
+            task.query,
+            task.key,
+            task.value,
+            task.block_table,
+            task.actual_seq_lengths,
+            actual_seq_lengths_kv,
+            task.num_heads,
+            task.num_key_value_heads,
+            task.scale,
+            task.block_size,
+            task.workspace,
+            task.output,
+            task.softmax_lse);
+        c10_npu::graph_task_update_end(update_stream);
+        if (task.event != nullptr) {
+          task.event->record(update_stream);
+        }
+      };
+
+  size_t causal_conv1d_index =
+      update_causal_conv1d_tasks ? 0 : causal_conv1d_tasks.size();
+  size_t fused_infer_attention_index = 0;
+  while (causal_conv1d_index < causal_conv1d_tasks.size() ||
+         fused_infer_attention_index < fused_infer_attention_tasks.size()) {
+    const bool causal_conv1d_available =
+        causal_conv1d_index < causal_conv1d_tasks.size();
+    const bool fused_infer_attention_available =
+        fused_infer_attention_index < fused_infer_attention_tasks.size();
+    if (causal_conv1d_available && fused_infer_attention_available) {
+      CHECK_NE(causal_conv1d_tasks[causal_conv1d_index].capture_order,
+               fused_infer_attention_tasks[fused_infer_attention_index]
+                   .capture_order)
+          << "ACL graph task capture order must be unique";
+    }
+    const bool update_causal_conv1d =
+        causal_conv1d_available &&
+        (!fused_infer_attention_available ||
+         causal_conv1d_tasks[causal_conv1d_index].capture_order <
+             fused_infer_attention_tasks[fused_infer_attention_index]
+                 .capture_order);
+    if (update_causal_conv1d) {
+      update_causal_conv1d_task(causal_conv1d_tasks[causal_conv1d_index]);
+      ++causal_conv1d_index;
+    } else {
+      update_fused_infer_attention_task(
+          fused_infer_attention_tasks[fused_infer_attention_index]);
+      ++fused_infer_attention_index;
+    }
   }
   return true;
 }
 
-void AclGraph::signal_static_graph_tasks(
+void AclGraph::signal_static_causal_conv1d_tasks(
     const c10_npu::NPUStream& signal_stream) {
   CHECK(graph_task_context_ != nullptr);
-  for (auto& task : graph_task_context_->causal_conv1d_tasks) {
+  c10_npu::NPUStreamGuard stream_guard(signal_stream);
+  for (CausalConv1dGraphTask& task : graph_task_context_->causal_conv1d_tasks) {
     CHECK(task.event != nullptr)
         << "static graph-task replay requires a captured ready event";
     task.event->record(signal_stream);
@@ -633,6 +734,11 @@ void AclGraph::update_spec_verify_attention_tiling(
       spec_verify_kv_split_core_count_);
 }
 
+bool AclGraph::has_fused_infer_attention_graph_tasks() const {
+  return graph_task_context_ != nullptr &&
+         !graph_task_context_->fused_infer_attention_tasks.empty();
+}
+
 ModelOutput AclGraph::replay(CausalLM* model,
                              const torch::Tensor& tokens,
                              const torch::Tensor& positions,
@@ -685,13 +791,18 @@ ModelOutput AclGraph::replay(CausalLM* model,
         tokens, params, actual_num_tokens, num_tokens_);
   } else {
     auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
-    graph_params = persistent_param_.update(tokens,
-                                            k_cache,
-                                            v_cache,
-                                            positions,
-                                            params,
-                                            num_tokens_,
-                                            needs_graph_metadata);
+    graph_params =
+        persistent_param_.update(tokens,
+                                 k_cache,
+                                 v_cache,
+                                 positions,
+                                 params,
+                                 num_tokens_,
+                                 needs_graph_metadata,
+                                 /*skip_token_update=*/false,
+                                 /*for_capture=*/false,
+                                 /*update_paged_attention_plan=*/
+                                 !has_fused_infer_attention_graph_tasks());
     if (needs_graph_metadata) {
       CHECK(graph_params.has_value())
           << "ACL graph replay requires persistent params for graph metadata";
@@ -714,22 +825,18 @@ ModelOutput AclGraph::replay(CausalLM* model,
       params.graph.spec_verify_static_graph_tasks_prepared;
   CHECK(!static_graph_tasks_prepared || use_static_graph_tasks)
       << "prepared static graph tasks do not match the replay signature";
-  if (use_static_graph_tasks && !static_graph_tasks_prepared) {
-    // Cold/fallback path: the final-draft pre-submit could not find this graph
-    // variant. Signal its task-ready events immediately before replay; steady
-    // supported-width cycles use the compute-stream pre-submit path instead.
-    CHECK(update_stream_.has_value());
-    signal_static_graph_tasks(update_stream_.value());
-  }
   graph_.replay();
   if (model->is_hybrid_linear_attention()) {
     CHECK(graph_params.has_value())
         << "update() should return ModelInputParams for graph task update";
-    if (use_static_graph_tasks) {
-      // This graph variant's task-ready event was recorded before replay.
-    } else {
-      update_graph_tasks(graph_params.value());
-    }
+    const bool causal_conv1d_tasks_prepared =
+        use_static_graph_tasks && static_graph_tasks_prepared;
+    // Static MTP preparation only signals causal-conv tasks before the final
+    // draft. FIA host parameters remain dynamic and are updated after replay
+    // starts, where their task updates overlap target graph execution.
+    update_graph_tasks(
+        graph_params.value(),
+        /*update_causal_conv1d_tasks=*/!causal_conv1d_tasks_prepared);
   }
   make_current_stream_wait_for_graph(stream);
 
@@ -759,7 +866,10 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                            params,
                            num_tokens_,
                            /*return_capture_params=*/false,
-                           /*skip_token_update=*/true);
+                           /*skip_token_update=*/true,
+                           /*for_capture=*/false,
+                           /*update_paged_attention_plan=*/
+                           !has_fused_infer_attention_graph_tasks());
   replay_inputs_prepared_.store(true, std::memory_order_release);
 }
 
@@ -770,7 +880,28 @@ bool AclGraph::prepare_static_mtp_graph_tasks(
       make_static_graph_task_signature(signal)) {
     return false;
   }
-  signal_static_graph_tasks(signal_stream);
+  if (graph_task_context_ == nullptr) {
+    return false;
+  }
+  const auto& fused_infer_attention_tasks =
+      graph_task_context_->fused_infer_attention_tasks;
+  if (!fused_infer_attention_tasks.empty()) {
+    const size_t graph_batch_size =
+        static_cast<size_t>(fused_infer_attention_tasks.front().query.size(0));
+    if (signal.spec_width != static_cast<int64_t>(graph_batch_size) ||
+        signal.max_kv_seq_len !=
+            signal.base_kv_seq_len + signal.spec_width - 1) {
+      return false;
+    }
+    for (const FusedInferAttentionGraphTask& task :
+         fused_infer_attention_tasks) {
+      CHECK(task.branch == FusedInferAttentionGraphBranch::kSpecVerify)
+          << "static MTP graph cannot contain regular FIA decode tasks";
+      CHECK_EQ(static_cast<size_t>(task.query.size(0)), graph_batch_size)
+          << "static MTP FIA tasks must share captured query rows";
+    }
+  }
+  signal_static_causal_conv1d_tasks(signal_stream);
   return true;
 }
 
