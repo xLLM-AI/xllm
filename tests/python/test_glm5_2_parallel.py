@@ -23,6 +23,7 @@ import torch
 
 from xllm.python.models import glm5_2
 from xllm.python.models.glm5_2 import Glm52Config, Glm52ForCausalLM
+from xllm.python.models.weight_utils import W8A8WeightLoader
 
 
 def _config(**overrides) -> dict:
@@ -74,9 +75,11 @@ def test_full_world_ep_partitions_glm_experts() -> None:
 
     assert moe.local_expert_start == 6
     assert moe.local_expert_end == 8
+    assert moe.num_local_experts == 2
+
     moe.allocate_experts_w13_for_loading()
-    assert moe.experts_w13.shape == (2, 16, 16)
     moe.allocate_experts_w2_for_loading()
+    assert moe.experts_w13.shape == (2, 16, 16)
     assert moe.experts_w2.shape == (2, 16, 8)
 
 
@@ -140,12 +143,11 @@ def test_invalid_glm_parallel_topology_is_rejected(overrides: dict, message: str
         cfg.validate()
 
 
-class _RecordingLoader:
+class _RecordingLoader(W8A8WeightLoader):
     latest: _RecordingLoader | None = None
 
-    def __init__(self, _model, _state_dicts, tp_size: int, tp_rank: int) -> None:
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
+    def __init__(self, model, state_dicts, tp_size: int, tp_rank: int) -> None:
+        super().__init__(model, state_dicts, tp_size, tp_rank)
         self.loaded: list[str] = []
         self.shared_shards: list[tuple[str, int, int]] = []
         type(self).latest = self
@@ -166,37 +168,30 @@ class _RecordingLoader:
             return torch.zeros(16, 1)
         raise AssertionError(f"unexpected expert tensor: {name}")
 
-    def shard(
-        self,
-        tensor: torch.Tensor,
-        dim: int,
-        world: int | None = None,
-        rank: int | None = None,
-    ) -> torch.Tensor:
-        world = self.tp_size if world is None else world
-        rank = self.tp_rank if rank is None else rank
-        if world <= 1:
-            return tensor
-        size = tensor.size(dim) // world
-        return tensor.narrow(dim, rank * size, size).contiguous()
-
     def copy_in(self, name: str, tensor: torch.Tensor) -> None:
         self.loaded.append(name)
         assert tensor.is_contiguous()
 
-    def load_w8a8_a(self, prefix: str, proj: str, _shard_dims: dict | None = None) -> None:
+    def load_w8a8_projection(self, prefix: str, proj: str, _shard_dims: dict | None = None) -> None:
         self.loaded.append(prefix + proj)
 
-    def load_w8a8_b(self, prefix: str) -> None:
+    def load_w8a8_mlp(
+        self,
+        prefix: str,
+        world: int | None = None,
+        rank: int | None = None,
+    ) -> None:
         self.loaded.append(prefix)
         if ".shared_experts." in prefix:
-            self.shared_shards.append((prefix, self.tp_size, self.tp_rank))
+            self.shared_shards.append((prefix, world, rank))
 
 
 def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch) -> None:
     model = Glm52ForCausalLM(_config(ep_rank=2))
     model.model.layers[0].self_attn.process_weights_after_loading = MagicMock()
-    model.model.layers[0].mlp.process_weights_after_loading = MagicMock()
+    model.model.layers[0].mlp.process_experts_w13_after_loading = MagicMock()
+    model.model.layers[0].mlp.process_experts_w2_after_loading = MagicMock()
+    model.model.layers[0].mlp.shared_experts.process_weights_after_loading = MagicMock()
     monkeypatch.setattr(glm5_2, "W8A8WeightLoader", _RecordingLoader)
 
     model.load_weights([], tp_rank=0, tp_size=2)

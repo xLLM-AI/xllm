@@ -41,7 +41,12 @@ from xllm.python.layers import (
     RotaryEmbedding,
 )
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.qwen3 import Qwen3Config, Qwen3DecoderLayer
+from xllm.python.models.qwen3 import (
+    Qwen3Config,
+    Qwen3DecoderLayer,
+    load_qwen3_backbone,
+)
+from xllm.python.models.weight_utils import WeightLoader, kv_replica_shard
 
 # ---------------------------------------------------------------------------
 # Vision config
@@ -936,28 +941,20 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         Key layout: ``model.visual.*`` -> ``vision_model.*``,
         ``model.language_model.*`` -> ``model.*``, ``lm_head.*`` -> ``lm_head.*``.
         """
-        self._load_vision_weights(state_dicts)
-        self._load_llm_weights(state_dicts, tp_rank, tp_size)
-        self._load_lm_head(state_dicts, tp_rank, tp_size)
+        self._load_vision_weights(WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("model.visual.",)))
+        # LLM loader also carries `""` so `lm_head.weight` (unprefixed) resolves.
+        llm_loader = WeightLoader(
+            self, state_dicts, tp_size, tp_rank, src_prefixes=("model.language_model.", "model.", "")
+        )
+        self._load_llm_weights(llm_loader)
+        if not self.text_cfg.tie_word_embeddings:
+            llm_loader.copy_shard("lm_head.weight", dim=0)
 
-    def _copy(self, param_name: str, tensor: torch.Tensor) -> None:
-        """Copy a (possibly sharded) checkpoint tensor into a model parameter."""
-        param = self.get_parameter(param_name)
-        param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-    def _load_vision_weights(self, state_dicts: list) -> None:
+    def _load_vision_weights(self, loader: WeightLoader) -> None:
         """Load vision tower weights (replicated, no TP sharding)."""
-        prefix = "model.visual."
-
-        def load(name: str) -> torch.Tensor:
-            full = prefix + name
-            for sd in state_dicts:
-                if sd.has(full):
-                    return sd.get_tensor(full)
-            raise KeyError(f"checkpoint tensor not found: {full}")
 
         def copy(param_name: str, ckpt_name: str | None = None) -> None:
-            self._copy("vision_model." + param_name, load(ckpt_name or param_name))
+            loader.copy_in("vision_model." + param_name, loader.load_tensor(ckpt_name or param_name))
 
         # patch_embed (Conv3d): checkpoint names carry an extra ".proj".
         copy("patch_embed.weight", "patch_embed.proj.weight")
@@ -996,91 +993,18 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             for t in merger_ts:
                 copy(f"deepstack_merger_list.{i}.{t}")
 
-    def _load_llm_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        """Load LLM weights with TP sharding (same logic as qwen3.py)."""
+    def _load_llm_weights(self, loader: WeightLoader) -> None:
         cfg = self.text_cfg
-        kv_replicas = tp_size // cfg.n_kv_heads if cfg.n_kv_heads < tp_size else 1
-        kv_rank = tp_rank // kv_replicas if kv_replicas > 1 else tp_rank
-        kv_world = tp_size // kv_replicas if kv_replicas > 1 else tp_size
+        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, loader.tp_rank, loader.tp_size)
 
-        def find(name: str):
-            for pre in ("model.language_model.", "model."):
-                full = pre + name
-                for sd in state_dicts:
-                    if sd.has(full):
-                        return sd, full
-            raise KeyError(f"checkpoint tensor not found: {name}")
+        loader.copy_in("model.embed_tokens.weight", loader.load_shard("embed_tokens.weight", dim=1))
 
-        def load(name: str) -> torch.Tensor:
-            sd, full = find(name)
-            return sd.get_tensor(full)
-
-        def shard(name: str, dim: int, kv: bool = False) -> torch.Tensor:
-            t = load(name)
-            w = kv_world if kv else tp_size
-            if w <= 1:
-                return t
-            chunk = t.size(dim) // w
-            r = kv_rank if kv else tp_rank
-            return t.narrow(dim, r * chunk, chunk).contiguous()
-
-        def copy(param_name: str, ckpt_name: str | None = None) -> None:
-            self._copy("model." + param_name, load(ckpt_name or param_name))
-
-        # embed_tokens (sharded on hidden dim).
-        self._copy("model.embed_tokens.weight", shard("embed_tokens.weight", dim=1))
-
-        norm_ts = (
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "self_attn.q_norm.weight",
-            "self_attn.k_norm.weight",
+        load_qwen3_backbone(
+            loader,
+            self.model.layers,
+            kv_world=kv_world,
+            kv_rank=kv_rank,
+            attention_bias=cfg.attention_bias,
         )
-        for i in range(cfg.n_layers):
-            p = f"layers.{i}."
-            for t in norm_ts:
-                copy(p + t)
-            # qkv_proj = concat of the TP-sharded q / k / v projections.
-            self._copy(
-                "model." + p + "self_attn.qkv_proj.weight",
-                torch.cat(
-                    [
-                        shard(p + "self_attn.q_proj.weight", 0),
-                        shard(p + "self_attn.k_proj.weight", 0, kv=True),
-                        shard(p + "self_attn.v_proj.weight", 0, kv=True),
-                    ],
-                    dim=0,
-                ),
-            )
-            self._copy(
-                "model." + p + "self_attn.o_proj.weight",
-                shard(p + "self_attn.o_proj.weight", dim=1),
-            )
-            # gate_up_proj = concat of the TP-sharded gate / up projections.
-            self._copy(
-                "model." + p + "mlp.gate_up_proj.weight",
-                torch.cat(
-                    [shard(p + "mlp.gate_proj.weight", 0), shard(p + "mlp.up_proj.weight", 0)],
-                    dim=0,
-                ),
-            )
-            self._copy(
-                "model." + p + "mlp.down_proj.weight",
-                shard(p + "mlp.down_proj.weight", dim=1),
-            )
 
-        copy("norm.weight")
-
-    def _load_lm_head(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        """Load lm_head weights (sharded on vocab dim); tied embed skips."""
-        if self.text_cfg.tie_word_embeddings:
-            return  # tied to embed_tokens — already loaded.
-        t = next(
-            (sd.get_tensor("lm_head.weight") for sd in state_dicts if sd.has("lm_head.weight")),
-            None,
-        )
-        assert t is not None, "checkpoint tensor not found: lm_head.weight"
-        if tp_size > 1:
-            chunk = t.size(0) // tp_size
-            t = t.narrow(0, tp_rank * chunk, chunk).contiguous()
-        self._copy("lm_head.weight", t)
+        loader.copy_in("model.norm.weight", loader.load_tensor("norm.weight"))

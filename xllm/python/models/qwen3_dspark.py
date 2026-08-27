@@ -27,6 +27,7 @@ from xllm.python.models.qwen3_dflash import (
     DFlashQwen3Config,
     DFlashQwen3Model,
 )
+from xllm.python.models.weight_utils import WeightLoader
 
 
 @dataclass
@@ -80,35 +81,12 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         self.model.load_weights(state_dicts, tp_rank, tp_size)
 
-        def find(name: str):
-            candidates = (name, f"model.{name}")
-            for candidate in candidates:
-                for state_dict in state_dicts:
-                    if state_dict.has(candidate):
-                        return state_dict, candidate
-            return None
-
-        def load_tensor(name: str) -> torch.Tensor:
-            found = find(name)
-            if found is None:
-                raise KeyError(f"checkpoint tensor not found: {name}")
-            state_dict, key = found
-            return state_dict.get_tensor(key)
-
-        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
-            param = self.get_parameter(param_name)
-            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-        markov_w1 = load_tensor("markov_head.markov_w1.weight")
-        markov_w2 = load_tensor("markov_head.markov_w2.weight")
-        copy_in("markov_head.markov_w1.weight", markov_w1)
-        copy_in("markov_head.markov_w2.weight", markov_w2)
-
+        loader = WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("", "model."))
+        loader.copy_replicated("markov_head.markov_w1.weight")
+        loader.copy_replicated("markov_head.markov_w2.weight")
         if self.confidence_head is not None:
-            confidence_weight = load_tensor("confidence_head.proj.weight")
-            confidence_bias = load_tensor("confidence_head.proj.bias")
-            copy_in("confidence_head.proj.weight", confidence_weight)
-            copy_in("confidence_head.proj.bias", confidence_bias)
+            loader.copy_replicated("confidence_head.proj.weight")
+            loader.copy_replicated("confidence_head.proj.bias")
 
     def write_context_kv(
         self,

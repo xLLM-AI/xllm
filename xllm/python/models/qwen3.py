@@ -45,6 +45,7 @@ from xllm.python.model_executor.forward_context import (
 )  # noqa: F401
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
+from xllm.python.models.weight_utils import WeightLoader, gqa_head_split, kv_replica_shard
 
 
 @dataclass
@@ -99,20 +100,9 @@ class Qwen3Config:
             layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
         )
 
-    def head_split(self) -> tuple[int, int, int]:
-        """Per-rank ``(num_heads, num_kv_heads, num_kv_head_replicas)``."""
-        tp = self.tp_size
-        assert self.n_heads % tp == 0, f"n_heads {self.n_heads} not divisible by tp_size {tp}"
-        num_heads = self.n_heads // tp
-        if self.n_kv_heads >= tp:
-            assert self.n_kv_heads % tp == 0, f"n_kv_heads {self.n_kv_heads} not divisible by tp_size {tp}"
-            num_kv_heads = self.n_kv_heads // tp
-            replicas = 1
-        else:
-            assert tp % self.n_kv_heads == 0, f"tp_size {tp} not divisible by n_kv_heads {self.n_kv_heads}"
-            num_kv_heads = 1
-            replicas = tp // self.n_kv_heads
-        return num_heads, num_kv_heads, replicas
+    def head_split(self) -> tuple[int, int]:
+        """Per-rank ``(num_heads, num_kv_heads)``."""
+        return gqa_head_split(self.n_heads, self.n_kv_heads, self.tp_size)
 
 
 class Qwen3Attention(nn.Module):
@@ -126,7 +116,7 @@ class Qwen3Attention(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
-        num_heads, num_kv_heads, replicas = cfg.head_split()
+        num_heads, num_kv_heads = cfg.head_split()
         tp = cfg.tp_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -350,6 +340,64 @@ class Qwen3Model(nn.Module):
         return self.aux_hidden_capture.finalize(hidden, aux_hidden_buffer)
 
 
+def load_qwen3_attention(
+    loader: WeightLoader,
+    src: str,
+    dst: str,
+    *,
+    kv_world: int,
+    kv_rank: int,
+    attention_bias: bool = False,
+) -> None:
+    """Load one GQA self-attention block: q/k norm, fused qkv, o_proj, optional bias."""
+    loader.copy_in(dst + "self_attn.q_norm.weight", loader.load_tensor(src + "self_attn.q_norm.weight"))
+    loader.copy_in(dst + "self_attn.k_norm.weight", loader.load_tensor(src + "self_attn.k_norm.weight"))
+
+    q = loader.load_shard(src + "self_attn.q_proj.weight", 0)
+    k = loader.load_shard(src + "self_attn.k_proj.weight", 0, world=kv_world, rank=kv_rank)
+    v = loader.load_shard(src + "self_attn.v_proj.weight", 0, world=kv_world, rank=kv_rank)
+    loader.copy_in(dst + "self_attn.qkv_proj.weight", torch.cat([q, k, v], dim=0))
+    loader.copy_in(dst + "self_attn.o_proj.weight", loader.load_shard(src + "self_attn.o_proj.weight", 1))
+
+    if attention_bias:
+        qb = loader.load_shard(src + "self_attn.q_proj.bias", 0)
+        kb = loader.load_shard(src + "self_attn.k_proj.bias", 0, world=kv_world, rank=kv_rank)
+        vb = loader.load_shard(src + "self_attn.v_proj.bias", 0, world=kv_world, rank=kv_rank)
+        loader.copy_in(dst + "self_attn.qkv_proj.bias", torch.cat([qb, kb, vb], dim=0))
+        # o_proj bias is replicated and added after the all-reduce, so every
+        # rank loads the full (unsharded) bias.
+        loader.copy_in(dst + "self_attn.o_proj.bias", loader.load_tensor(src + "self_attn.o_proj.bias"))
+
+
+def load_qwen3_backbone(
+    loader: WeightLoader,
+    layers: nn.ModuleList,
+    *,
+    kv_world: int,
+    kv_rank: int,
+    attention_bias: bool = False,
+    dst_prefix: str = "model.",
+) -> None:
+    """Load every Qwen3-dense decoder layer (norms, attention, MLP), then finalize.
+
+    ``dst_prefix``: ``"model."`` for a top-level CausalLM, ``""`` when the loader
+    targets the decoder module directly.
+    """
+    for i, layer in enumerate(layers):
+        src = f"layers.{i}."
+        dst = f"{dst_prefix}layers.{i}."
+        loader.copy_in(dst + "input_layernorm.weight", loader.load_tensor(src + "input_layernorm.weight"))
+        loader.copy_in(
+            dst + "post_attention_layernorm.weight",
+            loader.load_tensor(src + "post_attention_layernorm.weight"),
+        )
+        load_qwen3_attention(loader, src, dst, kv_world=kv_world, kv_rank=kv_rank, attention_bias=attention_bias)
+        loader.load_gated_mlp(dst + "mlp.", src + "mlp.")
+
+        layer.self_attn.o_proj.process_weights_after_loading()
+        layer.mlp.down_proj.process_weights_after_loading()
+
+
 class Qwen3ForCausalLM(PyModelBase):
     """Top-level entry the C++ PyCausalLM drives."""
 
@@ -387,83 +435,20 @@ class Qwen3ForCausalLM(PyModelBase):
     ) -> None:
         cfg = self.cfg
 
-        total_kv_heads = cfg.n_kv_heads
-        kv_replicas = tp_size // total_kv_heads if total_kv_heads < tp_size else 1
-        kv_rank = tp_rank // kv_replicas if kv_replicas > 1 else tp_rank
-        kv_world = tp_size // kv_replicas if kv_replicas > 1 else tp_size
+        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
+        loader = WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("model.", ""))
 
-        def find(name: str):
-            for sd in state_dicts:
-                if sd.has(name):
-                    return sd
-            return None
+        loader.copy_shard("model.embed_tokens.weight", dim=1)
 
-        def load_tensor(name: str) -> torch.Tensor:
-            sd = find(name)
-            assert sd is not None, f"checkpoint tensor not found: {name}"
-            return sd.get_tensor(name)
+        load_qwen3_backbone(
+            loader,
+            self.model.layers,
+            kv_world=kv_world,
+            kv_rank=kv_rank,
+            attention_bias=cfg.attention_bias,
+        )
 
-        def shard(name: str, dim: int, kv: bool = False) -> torch.Tensor:
-            sd = find(name)
-            assert sd is not None, f"checkpoint tensor not found: {name}"
-            r = kv_rank if kv else tp_rank
-            w = kv_world if kv else tp_size
-            t = sd.get_tensor(name)
-            if w <= 1:
-                return t
-            chunk_size = t.size(dim) // w
-            return t.narrow(dim, r * chunk_size, chunk_size).contiguous()
+        loader.copy_replicated("model.norm.weight")
 
-        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
-            param = self.get_parameter(param_name)
-            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-        embed_name = "model.embed_tokens.weight"
-        if not find(embed_name):
-            embed_name = "embed_tokens.weight"
-        copy_in("model.embed_tokens.weight", shard(embed_name, dim=1))
-
-        for i in range(cfg.n_layers):
-            p = f"model.layers.{i}."
-
-            copy_in(p + "input_layernorm.weight", load_tensor(p + "input_layernorm.weight"))
-            copy_in(p + "post_attention_layernorm.weight", load_tensor(p + "post_attention_layernorm.weight"))
-            copy_in(p + "self_attn.q_norm.weight", load_tensor(p + "self_attn.q_norm.weight"))
-            copy_in(p + "self_attn.k_norm.weight", load_tensor(p + "self_attn.k_norm.weight"))
-
-            q = shard(p + "self_attn.q_proj.weight", dim=0)
-            k = shard(p + "self_attn.k_proj.weight", dim=0, kv=True)
-            v = shard(p + "self_attn.v_proj.weight", dim=0, kv=True)
-            copy_in(p + "self_attn.qkv_proj.weight", torch.cat([q, k, v], dim=0))
-
-            copy_in(p + "self_attn.o_proj.weight", shard(p + "self_attn.o_proj.weight", dim=1))
-
-            if cfg.attention_bias:
-                qb = shard(p + "self_attn.q_proj.bias", dim=0)
-                kb = shard(p + "self_attn.k_proj.bias", dim=0, kv=True)
-                vb = shard(p + "self_attn.v_proj.bias", dim=0, kv=True)
-                copy_in(p + "self_attn.qkv_proj.bias", torch.cat([qb, kb, vb], dim=0))
-                # o_proj bias is replicated and added after the all-reduce, so
-                # every rank loads the full (unsharded) bias.
-                copy_in(p + "self_attn.o_proj.bias", load_tensor(p + "self_attn.o_proj.bias"))
-
-            gate = shard(p + "mlp.gate_proj.weight", dim=0)
-            up = shard(p + "mlp.up_proj.weight", dim=0)
-            copy_in(p + "mlp.gate_up_proj.weight", torch.cat([gate, up], dim=0))
-
-            copy_in(p + "mlp.down_proj.weight", shard(p + "mlp.down_proj.weight", dim=1))
-
-            layer = self.model.layers[i]
-            layer.self_attn.o_proj.process_weights_after_loading()
-            layer.mlp.down_proj.process_weights_after_loading()
-
-        norm_name = "model.norm.weight"
-        if not find(norm_name):
-            norm_name = "norm.weight"
-        copy_in("model.norm.weight", load_tensor(norm_name))
-
-        if cfg.tie_word_embeddings:
-            lm_name = embed_name
-        else:
-            lm_name = "lm_head.weight"
-        copy_in("lm_head.weight", shard(lm_name, dim=0))
+        lm_name = "embed_tokens.weight" if cfg.tie_word_embeddings else "lm_head.weight"
+        loader.copy_in("lm_head.weight", loader.load_shard(lm_name, dim=0))

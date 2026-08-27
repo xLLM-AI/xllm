@@ -19,15 +19,12 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from xllm.python import distributed, kernels
-
-if TYPE_CHECKING:
-    from xllm_weight_loader import StateDict
 from xllm.python.attention.backend import (
     AttentionBackend,
     MlaIndexContext,
@@ -46,6 +43,12 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
 )
 from xllm.python.models.base import PyModelBase
+from xllm.python.models.weight_utils import (
+    W8A8WeightLoader,
+    effective_moe_tp,
+    mla_head_split,
+    moe_shard,
+)
 
 _SHARED_EXPERT_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
 
@@ -372,9 +375,8 @@ class DeepseekV3Config:
         )
 
     def head_split(self) -> tuple[int, int]:
-        """Per-rank (num_heads_local, num_kv_heads_local=1)."""
-        num_heads_local = self.n_heads // self.tp_size
-        return num_heads_local, 1
+        """Per-rank (num_heads_local, num_kv_heads_local=1) — MLA has one latent KV head per rank."""
+        return mla_head_split(self.n_heads, self.tp_size)
 
     def validate(self) -> None:
         if self.ep_size not in (1, self.world_size):
@@ -494,111 +496,6 @@ class W8A8DynamicLinear(nn.Module):
         )
 
 
-class W8A8WeightLoader:
-    """Shared W8A8 weight-loading helpers for a model's ``load_weights``.
-
-    Owns the byte-identical checkpoint tensor lookup / TP sharding / W8A8
-    projection- and MLP-weight packing used by every W8A8 DSA model. The
-    model-specific per-layer loop (which projections/experts to load and in
-    what order) stays in each model; only the mechanics live here.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        state_dicts: list[StateDict],
-        tp_size: int,
-        tp_rank: int,
-    ) -> None:
-        self._params_by_name = dict(model.named_parameters())
-        self._buffers_by_name = dict(model.named_buffers())
-        self._state_dicts = state_dicts
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
-
-    def find(self, name: str) -> Optional[StateDict]:
-        for sd in self._state_dicts:
-            if sd.has(name):
-                return sd
-        return None
-
-    def load_tensor(self, name: str) -> torch.Tensor:
-        sd = self.find(name)
-        assert sd is not None, f"checkpoint tensor not found: {name}"
-        return sd.get_tensor(name)
-
-    def shard(
-        self,
-        t: torch.Tensor,
-        dim: int,
-        world: Optional[int] = None,
-        rank: Optional[int] = None,
-    ) -> torch.Tensor:
-        world = self.tp_size if world is None else world
-        rank = self.tp_rank if rank is None else rank
-        if world <= 1:
-            return t
-        cs = t.size(dim) // world
-        return t.narrow(dim, rank * cs, cs).contiguous()
-
-    def copy_in(self, param_name: str, tensor: torch.Tensor) -> None:
-        p = self._params_by_name.get(param_name)
-        if p is None:
-            p = self._buffers_by_name.get(param_name)
-        assert p is not None, f"no parameter/buffer named {param_name}"
-        p.data.copy_(tensor.to(dtype=p.dtype, device=p.device))
-
-    def load_w8a8_a(self, prefix: str, proj: str, shard_dims: Optional[dict] = None) -> None:
-        for suffix in ("weight", "deq_scale", "quant_bias", "input_scale", "input_offset"):
-            t = self.load_tensor(prefix + proj + "." + suffix)
-            dim = (shard_dims or {}).get(suffix)
-            if dim is not None:
-                t = self.shard(t, dim=dim)
-            self.copy_in(prefix + proj + "." + suffix, t)
-
-    def load_fused_w8a8_a(
-        self,
-        prefix: str,
-        target_proj: str,
-        source_projs: tuple[str, ...],
-    ) -> None:
-        for suffix in ("weight", "deq_scale", "quant_bias"):
-            tensors = [self.load_tensor(prefix + proj + "." + suffix) for proj in source_projs]
-            self.copy_in(
-                prefix + target_proj + "." + suffix,
-                torch.cat(tensors, dim=0).contiguous(),
-            )
-
-        for suffix in ("input_scale", "input_offset"):
-            tensors = [self.load_tensor(prefix + proj + "." + suffix) for proj in source_projs]
-            reference = tensors[0]
-            if any(not torch.equal(reference, tensor) for tensor in tensors[1:]):
-                names = ", ".join(source_projs)
-                raise ValueError(f"{prefix}{names} must share {suffix} for fused W8A8")
-            self.copy_in(prefix + target_proj + "." + suffix, reference)
-
-    def load_w8a8_b(self, mlp_pfx: str) -> None:
-        gw = self.load_tensor(mlp_pfx + "gate_proj.weight")
-        gs = self.load_tensor(mlp_pfx + "gate_proj.weight_scale")
-        go = self.load_tensor(mlp_pfx + "gate_proj.weight_offset")
-        uw = self.load_tensor(mlp_pfx + "up_proj.weight")
-        us = self.load_tensor(mlp_pfx + "up_proj.weight_scale")
-        uo = self.load_tensor(mlp_pfx + "up_proj.weight_offset")
-        self.copy_in(
-            mlp_pfx + "gate_up_proj.weight", torch.cat([self.shard(gw, 0), self.shard(uw, 0)], dim=0).contiguous()
-        )
-        self.copy_in(
-            mlp_pfx + "gate_up_proj.weight_scale", torch.cat([self.shard(gs, 0), self.shard(us, 0)], dim=0).contiguous()
-        )
-        self.copy_in(
-            mlp_pfx + "gate_up_proj.weight_offset",
-            torch.cat([self.shard(go, 0), self.shard(uo, 0)], dim=0).contiguous(),
-        )
-        self.copy_in(mlp_pfx + "down_proj.weight", self.shard(self.load_tensor(mlp_pfx + "down_proj.weight"), dim=1))
-        self.copy_in(mlp_pfx + "down_proj.weight_scale", self.load_tensor(mlp_pfx + "down_proj.weight_scale"))
-        self.copy_in(mlp_pfx + "down_proj.weight_offset", self.load_tensor(mlp_pfx + "down_proj.weight_offset"))
-
-
 class DeepseekV3MLP(nn.Module):
     """Dense gated-SiLU FFN (layers < first_k_dense_replace)."""
 
@@ -627,6 +524,18 @@ class DeepseekV3MLP(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.gate_up_proj.process_weights_after_loading()
         self.down_proj.process_weights_after_loading()
+
+    def load_from_checkpoint(
+        self,
+        loader: W8A8WeightLoader,
+        mlp_prefix: str,
+        *,
+        world: int | None = None,
+        rank: int | None = None,
+    ) -> None:
+        """Load a dense W8A8 MLP; ``world``/``rank`` = ``None`` means use the loader's TP."""
+        loader.load_w8a8_mlp(mlp_prefix, world=world, rank=rank)
+        self.process_weights_after_loading()
 
     def forward(
         self,
@@ -701,8 +610,7 @@ class DeepseekV3MLAAttention(Attention):
         device: torch.device,
     ) -> None:
         tp = cfg.tp_size
-        assert cfg.n_heads % tp == 0
-        num_heads = cfg.n_heads // tp
+        num_heads, _ = cfg.head_split()
         kv_lora = cfg.kv_lora_rank
         qk_nope = cfg.qk_nope_head_dim
         qk_rope = cfg.qk_rope_head_dim
@@ -1148,7 +1056,7 @@ class DeepseekV3MoE(nn.Module):
         self.dp_rank = cfg.dp_rank
         self.moe_tp_size = cfg.moe_tp_size
 
-        tp = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
+        tp = effective_moe_tp(cfg)
         assert self.moe_inter % tp == 0
         self.inter_local = self.moe_inter // tp
 
@@ -1180,17 +1088,6 @@ class DeepseekV3MoE(nn.Module):
             torch.empty(
                 num_local_experts,
                 2 * self.inter_local,
-                1,
-                dtype=torch.float32,
-                device=device,
-            ),
-        )
-        self.register_buffer(
-            "experts_w13_offset",
-            torch.empty(
-                num_local_experts,
-                2 * self.inter_local,
-                1,
                 dtype=torch.float32,
                 device=device,
             ),
@@ -1198,16 +1095,6 @@ class DeepseekV3MoE(nn.Module):
         self.experts_w2 = nn.Parameter(
             torch.empty(0, dtype=torch.int8, device=device),
             requires_grad=False,
-        )
-        self.register_buffer(
-            "experts_w2_scale",
-            torch.empty(
-                num_local_experts,
-                self.hidden,
-                1,
-                dtype=torch.float32,
-                device=device,
-            ),
         )
         self.register_buffer(
             "experts_w2_scale_compute",
@@ -1219,25 +1106,14 @@ class DeepseekV3MoE(nn.Module):
             ),
             persistent=False,
         )
-        self.register_buffer(
-            "experts_w2_offset",
-            torch.empty(
-                num_local_experts,
-                self.hidden,
-                1,
-                dtype=torch.float32,
-                device=device,
-            ),
-        )
         shared_inter = cfg.moe_intermediate_size * cfg.n_shared_experts
-        shared_tp = cfg.moe_tp_size if cfg.ep_size > 1 else None
         self.shared_experts = DeepseekV3MLP(
             cfg,
             shared_inter,
             dtype,
             device,
             skip_tp_reduce=True,
-            tp_override=shared_tp,
+            tp_override=tp,
         )
         self._expert_parallel_enabled = hasattr(torch, "npu") and device.type in ("npu", "privateuseone")
         self._gate_overlap_enabled = self._expert_parallel_enabled and os.environ.get("XLLM_MOE_GATE_OVERLAP") == "1"
@@ -1278,34 +1154,55 @@ class DeepseekV3MoE(nn.Module):
         del transposed
 
     def process_experts_w13_after_loading(self) -> None:
-        assert torch.all(self.experts_w13_offset == 0), (
-            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w13_offset == 0)"
-        )
         self._format_and_release_expert_weight(self.experts_w13)
 
     def process_experts_w2_after_loading(self) -> None:
-        assert torch.all(self.experts_w2_offset == 0), (
-            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w2_offset == 0)"
-        )
         self._format_and_release_expert_weight(self.experts_w2)
 
-    def process_weights_after_loading(self, *, skip_expert_format: bool = False) -> None:
-        assert torch.all(self.experts_w13_offset == 0), (
-            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w13_offset == 0)"
+    def load_experts(
+        self,
+        loader: W8A8WeightLoader,
+        src_prefix: str,
+        *,
+        world: int,
+        rank: int,
+    ) -> None:
+        """Allocate, fill, and format the stacked W8A8 experts, staged w13 then w2.
+
+        Staging keeps peak load memory at one raw int8 expert buffer, not two.
+        The grouped-MoE path keeps no per-expert offset buffer, so each expert's
+        symmetric-int8 (zero ``weight_offset``) invariant is asserted here while
+        its shard is warm.
+        """
+        self.allocate_experts_w13_for_loading()
+        for idx, j in enumerate(range(self.local_expert_start, self.local_expert_end)):
+            src = f"{src_prefix}{j}."
+            loader.assert_symmetric_int8(src, ("gate_proj", "up_proj"))
+            w = loader.pack_gate_up(src, "weight", world=world, rank=rank)
+            s = loader.pack_gate_up(src, "weight_scale", world=world, rank=rank)
+            self.experts_w13.data[idx].copy_(w)
+            self.experts_w13_scale.data[idx].copy_(s.reshape(-1))
+        self.process_experts_w13_after_loading()
+        self.allocate_experts_w2_for_loading()
+        for idx, j in enumerate(range(self.local_expert_start, self.local_expert_end)):
+            src = f"{src_prefix}{j}."
+            loader.assert_symmetric_int8(src, ("down_proj",))
+            w, s = loader.load_w8a8_down(src, world=world, rank=rank)
+            self.experts_w2.data[idx].copy_(w)
+            # GMM2 needs bf16 scales; compute buffer holds the cast.
+            self.experts_w2_scale_compute.data[idx].copy_(s.reshape(-1))
+        self.process_experts_w2_after_loading()
+
+    def load_from_checkpoint(self, loader: W8A8WeightLoader, mlp_prefix: str) -> None:
+        """Load this routed-MoE layer: experts, router gate, and shared experts."""
+        world, rank = moe_shard(self.cfg)
+        self.load_experts(loader, mlp_prefix + "experts.", world=world, rank=rank)
+        loader.copy_replicated(mlp_prefix + "gate.weight")
+        loader.copy_in(
+            mlp_prefix + "e_score_correction_bias",
+            loader.load_tensor(mlp_prefix + "gate.e_score_correction_bias"),
         )
-        assert torch.all(self.experts_w2_offset == 0), (
-            "DeepseekV3MoE int8-grouped path needs symmetric int8 experts (experts_w2_offset == 0)"
-        )
-        if not skip_expert_format:
-            self.process_experts_w13_after_loading()
-            self.process_experts_w2_after_loading()
-        self.experts_w13_scale.data = self.experts_w13_scale.data.view(self.num_local_experts, -1).contiguous()
-        # GMM1 uses FP32 scales; GMM2 uses BF16 scales.
-        self.experts_w13_offset.data = self.experts_w13_offset.data.view(self.num_local_experts, -1).contiguous()
-        self.experts_w2_scale.data = self.experts_w2_scale.data.view(self.num_local_experts, -1).contiguous()
-        self.experts_w2_scale_compute.copy_(self.experts_w2_scale)
-        self.experts_w2_offset.data = self.experts_w2_offset.data.view(self.num_local_experts, -1).contiguous()
-        self.shared_experts.process_weights_after_loading()
+        self.shared_experts.load_from_checkpoint(loader, mlp_prefix + "shared_experts.", world=world, rank=rank)
 
     def _run_routed_experts(self, hidden: torch.Tensor) -> torch.Tensor:
         logits = self.gate(hidden.to(torch.float32))
@@ -1695,38 +1592,33 @@ class DeepseekV3ForCausalLM(PyModelBase):
         tp_size: int,
         load_lm_head: bool = True,
         load_embedding: bool = True,
+        loader: Optional[W8A8WeightLoader] = None,
     ) -> None:
         cfg = self.cfg
-        loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
+        if loader is None:
+            loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
 
         if load_embedding:
-            loader.copy_in(
-                "model.embed_tokens.weight",
-                loader.shard(loader.load_tensor("model.embed_tokens.weight"), dim=1),
-            )
+            loader.copy_shard("model.embed_tokens.weight", dim=1)
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
-            loader.copy_in(p + "input_layernorm.weight", loader.load_tensor(p + "input_layernorm.weight"))
-            loader.copy_in(
-                p + "post_attention_layernorm.weight", loader.load_tensor(p + "post_attention_layernorm.weight")
-            )
+            loader.copy_replicated(p + "input_layernorm.weight")
+            loader.copy_replicated(p + "post_attention_layernorm.weight")
             attn = p + "self_attn."
-            loader.load_fused_w8a8_a(
+            loader.load_fused_w8a8_projection(
                 attn,
                 "qkv_a_proj",
                 ("kv_a_proj_with_mqa", "q_a_proj"),
             )
-            loader.copy_in(attn + "q_a_layernorm.weight", loader.load_tensor(attn + "q_a_layernorm.weight"))
-            loader.load_w8a8_a(attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0})
-            loader.copy_in(attn + "kv_a_layernorm.weight", loader.load_tensor(attn + "kv_a_layernorm.weight"))
-            loader.copy_in(
-                attn + "kv_b_proj.weight", loader.shard(loader.load_tensor(attn + "kv_b_proj.weight"), dim=0)
-            )
-            loader.load_w8a8_a(attn, "o_proj", {"weight": 1})
+            loader.copy_replicated(attn + "q_a_layernorm.weight")
+            loader.load_w8a8_projection(attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0})
+            loader.copy_replicated(attn + "kv_a_layernorm.weight")
+            loader.copy_shard(attn + "kv_b_proj.weight", dim=0)
+            loader.load_w8a8_projection(attn, "o_proj", {"weight": 1})
             if cfg.index_topk > 0:
                 idx = attn + "indexer."
-                loader.copy_in(idx + "wq_b.weight", loader.load_tensor(idx + "wq_b.weight"))
+                loader.copy_replicated(idx + "wq_b.weight")
                 loader.copy_in(
                     idx + "wk_weights_proj.weight",
                     torch.cat(
@@ -1735,91 +1627,14 @@ class DeepseekV3ForCausalLM(PyModelBase):
                             loader.load_tensor(idx + "weights_proj.weight"),
                         ],
                         dim=0,
-                    ).contiguous(),
+                    ),
                 )
-                loader.copy_in(idx + "k_norm.weight", loader.load_tensor(idx + "k_norm.weight"))
-                loader.copy_in(idx + "k_norm.bias", loader.load_tensor(idx + "k_norm.bias"))
+                loader.copy_replicated(idx + "k_norm.weight")
+                loader.copy_replicated(idx + "k_norm.bias")
             self.model.layers[i].self_attn.process_weights_after_loading()
 
-            if i < cfg.first_k_dense_replace:
-                loader.load_w8a8_b(p + "mlp.")
-                self.model.layers[i].mlp.process_weights_after_loading()
-            else:
-                se = p + "mlp.experts."
-                moe = self.model.layers[i].mlp
-                moe.allocate_experts_w13_for_loading()
-                w13_param = self.get_parameter(p + "mlp.experts_w13")
-                w13_scale = self.get_buffer(p + "mlp.experts_w13_scale")
-                w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
-                expert_start = moe.local_expert_start
-                expert_end = moe.local_expert_end
-                shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
-                shard_rank = cfg.moe_tp_rank if cfg.ep_size > 1 else cfg.tp_rank
-                for j in range(expert_start, expert_end):
-                    local_idx = j - expert_start
-                    gw = loader.load_tensor(se + f"{j}.gate_proj.weight")
-                    gs = loader.load_tensor(se + f"{j}.gate_proj.weight_scale")
-                    go = loader.load_tensor(se + f"{j}.gate_proj.weight_offset")
-                    uw = loader.load_tensor(se + f"{j}.up_proj.weight")
-                    us = loader.load_tensor(se + f"{j}.up_proj.weight_scale")
-                    uo = loader.load_tensor(se + f"{j}.up_proj.weight_offset")
-                    w13_param.data[local_idx].copy_(
-                        torch.cat(
-                            [
-                                loader.shard(gw, 0, shard_world, shard_rank),
-                                loader.shard(uw, 0, shard_world, shard_rank),
-                            ],
-                            dim=0,
-                        ).contiguous()
-                    )
-                    w13_scale.data[local_idx].copy_(
-                        torch.cat(
-                            [
-                                loader.shard(gs, 0, shard_world, shard_rank),
-                                loader.shard(us, 0, shard_world, shard_rank),
-                            ],
-                            dim=0,
-                        ).contiguous()
-                    )
-                    w13_offset.data[local_idx].copy_(
-                        torch.cat(
-                            [
-                                loader.shard(go, 0, shard_world, shard_rank),
-                                loader.shard(uo, 0, shard_world, shard_rank),
-                            ],
-                            dim=0,
-                        ).contiguous()
-                    )
+            self.model.layers[i].mlp.load_from_checkpoint(loader, p + "mlp.")
 
-                moe.process_experts_w13_after_loading()
-                moe.allocate_experts_w2_for_loading()
-                w2_param = self.get_parameter(p + "mlp.experts_w2")
-                w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
-                w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                for j in range(expert_start, expert_end):
-                    local_idx = j - expert_start
-                    dw = loader.load_tensor(se + f"{j}.down_proj.weight")
-                    ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
-                    do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
-                    w2_param.data[local_idx].copy_(loader.shard(dw, 1, shard_world, shard_rank).contiguous())
-                    w2_scale.data[local_idx].copy_(ds.contiguous())
-                    w2_offset.data[local_idx].copy_(do.contiguous())
-
-                moe.process_experts_w2_after_loading()
-                loader.copy_in(p + "mlp.gate.weight", loader.load_tensor(p + "mlp.gate.weight"))
-                loader.copy_in(
-                    p + "mlp.e_score_correction_bias", loader.load_tensor(p + "mlp.gate.e_score_correction_bias")
-                )
-                saved_tp = (loader.tp_size, loader.tp_rank)
-                loader.tp_size = shard_world
-                loader.tp_rank = shard_rank
-                loader.load_w8a8_b(p + "mlp.shared_experts.")
-                loader.tp_size, loader.tp_rank = saved_tp
-                moe.process_weights_after_loading(skip_expert_format=True)
-
-        loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))
+        loader.copy_replicated("model.norm.weight")
         if load_lm_head:
-            loader.copy_in(
-                "lm_head.weight",
-                loader.shard(loader.load_tensor("lm_head.weight"), dim=0),
-            )
+            loader.copy_shard("lm_head.weight", dim=0)
