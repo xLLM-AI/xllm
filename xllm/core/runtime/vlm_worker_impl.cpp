@@ -32,10 +32,41 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
+#include "runtime/params_utils.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
 
 namespace xllm {
+
+namespace {
+
+void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
+  CHECK(stream.wait_event(input.metadata_ready_event))
+      << "failed to wait ForwardInput metadata ready event";
+}
+
+StreamEventPtr record_current_stream_event(const Device& device) {
+  std::unique_ptr<Stream> stream = device.current_stream();
+  StreamEventPtr event = stream->record_event();
+  if (event == nullptr) {
+    stream->synchronize();
+  }
+  return event;
+}
+
+torch::Tensor select_hidden_rows(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& selected_idxes) {
+  if (!hidden_states.defined() || !selected_idxes.defined() ||
+      selected_idxes.numel() == 0) {
+    return torch::Tensor();
+  }
+  torch::Tensor idxes = selected_idxes.to(
+      torch::dtype(torch::kLong).device(hidden_states.device()),
+      /*non_blocking=*/false);
+  return hidden_states.index_select(/*dim=*/0, idxes).contiguous();
+}
+
+}  // namespace
 
 VLMWorkerImpl::VLMWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
@@ -57,6 +88,74 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
 }
 
 std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
+  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
+#if defined(USE_NPU)
+    if (!enable_schedule_overlap()) {
+      aclrtStream current_stream =
+          c10_npu::getCurrentNPUStream(device_.index()).stream();
+      atb::Context* atb_context =
+          const_cast<atb::Context*>(context_.get_atb_context());
+      atb_context->SetExecuteStream(current_stream);
+      std::unique_ptr<Stream> stream = device_.current_stream();
+      wait_input_ready_events(input, *stream);
+      return step_internal(input, ForwardSyncPolicy::LEGACY);
+    } else {
+      SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
+      wait_input_ready_events(input, *compute_stream_);
+      return step_internal(input, ForwardSyncPolicy::LEGACY);
+    }
+#else
+    std::unique_ptr<Stream> stream = device_.current_stream();
+    wait_input_ready_events(input, *stream);
+    return step_internal(input, ForwardSyncPolicy::LEGACY);
+#endif
+  }
+  std::unique_ptr<Stream> stream = device_.current_stream();
+  wait_input_ready_events(input, *stream);
+  return step_internal(input, ForwardSyncPolicy::LEGACY);
+}
+
+std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input,
+    Stream& compute_stream) {
+  return execute_no_sync_on_stream(
+      input, compute_stream, /*record_ready_event=*/true);
+}
+
+std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input,
+    Stream& compute_stream,
+    bool record_ready_event) {
+  const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
+  c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
+  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
+#if defined(USE_NPU)
+    if (!enable_schedule_overlap()) {
+      aclrtStream current_acl_stream =
+          c10_npu::getCurrentNPUStream(device_.index()).stream();
+      atb::Context* atb_context =
+          const_cast<atb::Context*>(context_.get_atb_context());
+      atb_context->SetExecuteStream(current_acl_stream);
+      wait_input_ready_events(input, compute_stream);
+      return step_internal(input, sync_policy, record_ready_event);
+    } else {
+      SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
+      wait_input_ready_events(input, compute_stream);
+      return step_internal(input, sync_policy, record_ready_event);
+    }
+#else
+    wait_input_ready_events(input, compute_stream);
+    return step_internal(input, sync_policy, record_ready_event);
+#endif
+  }
+  wait_input_ready_events(input, compute_stream);
+  return step_internal(input, sync_policy, record_ready_event);
+}
+
+std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
+    const ForwardInput& input,
+    ForwardSyncPolicy sync_policy,
+    bool record_ready_event) {
   Timer timer;
   const bool empty_shard =
       input.input_params.meta.num_sequences == 0 &&
@@ -70,17 +169,49 @@ std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
   auto& sampling_params = input.sampling_params;
+  const bool has_aux_hidden_states = model_output.aux_hidden_states.defined();
   torch::Tensor logits;
+  torch::Tensor lm_head_selected_token_idxes;
+  torch::Tensor selected_hidden_from_lm_head;
+  torch::Tensor selected_aux_hidden;
+  torch::Tensor selected_hidden_for_target_cache;
   if (sampling_params.selected_token_idxes.defined()) {
-    logits = model_->logits(model_output.hidden_states,
-                            sampling_params.selected_token_idxes);
+    lm_head_selected_token_idxes = choose_lm_head_selected_token_idxes(
+        sampling_params.selected_token_idxes,
+        input.input_params,
+        context_.get_parallel_args(),
+        model_output.hidden_states.size(0),
+        model_output.hidden_states.device());
+    if (options_.enable_speculative_decode()) {
+      logits = model_->logits(model_output.hidden_states,
+                              lm_head_selected_token_idxes,
+                              selected_hidden_from_lm_head);
+      if (has_aux_hidden_states) {
+        selected_aux_hidden = select_hidden_rows(model_output.aux_hidden_states,
+                                                 lm_head_selected_token_idxes);
+      } else if (selected_hidden_from_lm_head.defined()) {
+        selected_hidden_for_target_cache = selected_hidden_from_lm_head;
+      } else if (!input.input_params.meta.batch_forward_type.is_decode() &&
+                 !is_spec_draft_) {
+        selected_hidden_for_target_cache = select_hidden_rows(
+            has_aux_hidden_states ? model_output.aux_hidden_states
+                                  : model_output.hidden_states,
+            lm_head_selected_token_idxes);
+      }
+    } else {
+      logits = model_->logits(model_output.hidden_states,
+                              lm_head_selected_token_idxes);
+    }
   }
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
       !options_.enable_speculative_decode()) {
-    auto ret = device_.synchronize_default_stream();
+    if (sync_policy == ForwardSyncPolicy::LEGACY) {
+      auto ret = device_.synchronize_default_stream();
+      (void)ret;
+    }
     return std::nullopt;
   }
 
@@ -98,63 +229,43 @@ std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
   }
-  auto ret = device_.synchronize_default_stream();
-  return output;
-}
 
-std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
-    const ForwardInput& input,
-    Stream& compute_stream,
-    bool record_ready_event) {
-  const bool empty_shard =
-      input.input_params.meta.num_sequences == 0 &&
-      (!input.token_ids.defined() || input.token_ids.numel() == 0);
-  if (empty_shard) {
-    return ForwardOutput{};
-  }
-
-  c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
-#if defined(USE_NPU)
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-    SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
-  }
-#endif
-  CHECK(compute_stream.wait_event(input.metadata_ready_event))
-      << "failed to wait ForwardInput metadata ready event";
-
-  Timer timer;
-  auto model_output = model_executor_->forward(
-      input.token_ids, input.positions, kv_caches_, input.input_params);
-  auto& sampling_params = input.sampling_params;
-  torch::Tensor logits;
-  if (sampling_params.selected_token_idxes.defined()) {
-    logits = model_->logits(model_output.hidden_states,
-                            sampling_params.selected_token_idxes);
-  }
-
-  COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
-
-  ForwardOutput output;
-  if (sampling_params.selected_token_idxes.defined()) {
-    auto sample_output = sampler_->forward(logits, sampling_params);
-    output.logits = logits;
-    COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
-
-    output.sample_output = sample_output;
-    output.do_sample = sampling_params.do_sample;
-    output.logprobs = sampling_params.logprobs;
-    output.max_top_logprobs = sampling_params.max_top_logprobs;
-  }
-
-  // Keep input tensors alive until downstream consumers finish on this stream.
-  output.retained_inputs.emplace_back(std::make_shared<ForwardInput>(input));
-  if (record_ready_event) {
-    std::unique_ptr<Stream> current = device_.current_stream();
-    output.ready_event = current->record_event();
-    if (output.ready_event == nullptr) {
-      current->synchronize();
+  if (options_.enable_speculative_decode()) {
+    torch::Tensor embeddings;
+    if (has_aux_hidden_states) {
+      embeddings = model_output.aux_hidden_states;
+    } else {
+      embeddings = model_output.hidden_states;
+    }
+    if (!input.input_params.meta.batch_forward_type.is_decode() &&
+        !is_spec_draft_) {
+      output.sample_output.embeddings = embeddings;
+      if (selected_hidden_for_target_cache.defined()) {
+        output.sample_output.selected_embeddings =
+            selected_hidden_for_target_cache;
+      }
+    } else if (sampling_params.selected_token_idxes.defined()) {
+      if (selected_aux_hidden.defined()) {
+        output.sample_output.embeddings = selected_aux_hidden;
+      } else if (selected_hidden_from_lm_head.defined()) {
+        output.sample_output.embeddings = selected_hidden_from_lm_head;
+      } else {
+        output.sample_output.embeddings =
+            select_hidden_rows(embeddings, lm_head_selected_token_idxes);
+      }
     }
   }
+
+  if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
+    output.retained_inputs.emplace_back(std::make_shared<ForwardInput>(input));
+    if (record_ready_event && enable_schedule_overlap()) {
+      output.ready_event = record_current_stream_event(device_);
+    }
+    return output;
+  }
+
+  auto ret = device_.synchronize_default_stream();
+  (void)ret;
   return output;
 }
 

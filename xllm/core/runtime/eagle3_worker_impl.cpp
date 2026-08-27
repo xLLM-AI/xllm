@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "framework/model_loader.h"
+#include "runtime/llm_worker_impl.h"
 
 namespace xllm {
 
@@ -37,7 +38,11 @@ runtime::Options eagle3_draft_options(const runtime::Options& options) {
       .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(0)
-      .enable_graph_aux_hidden_states(false);
+      .enable_graph(false)
+      .enable_graph_mode_decode_no_padding(false)
+      .enable_prefill_piecewise_graph(false)
+      .enable_graph_aux_hidden_states(true)
+      .backend("llm");
   return opts;
 }
 
@@ -45,12 +50,14 @@ runtime::Options eagle3_draft_options(const runtime::Options& options) {
 
 Eagle3WorkerImpl::Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
-                                   const runtime::Options& options)
+                                   const runtime::Options& options,
+                                   WorkerType worker_type)
     : MTPWorkerImpl(parallel_args,
                     device,
                     options,
                     eagle3_main_options(options),
                     eagle3_draft_options(options),
+                    worker_type,
                     /*enable_adaptive_speculative_decode=*/false) {
   // Context parallelism does not expose the auxiliary hidden states.
   CHECK_LE(parallel_args.cp_size(), 1)
@@ -68,6 +75,12 @@ bool Eagle3WorkerImpl::init_model(const std::string& model_weights_path,
   // Load hot_token_id_ directly from state_dict (EAGLE-3 specific)
   // This should be done after draft model is loaded
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    use_draft_token_mapping_ = !uses_embedded_eagle3_draft();
+    if (!use_draft_token_mapping_) {
+      hot_token_id_ = torch::Tensor();
+      return result;
+    }
+
     // d2t stores diffs between draft id and target id
     // hot_token_id = d2t + arange(d2t.size(0))
     auto model_loader = ModelLoader::create(model_weights_path);
@@ -98,9 +111,9 @@ void Eagle3WorkerImpl::process_draft_sample_output(
   // Keep probability compression behavior fully aligned with MTP.
   MTPWorkerImpl::process_draft_sample_output(sample_output);
 
-  // Realign reduced draft-vocab outputs to the full target vocab; a model
-  // without d2t (hot_token_id_) is already full-vocab and needs none.
-  if (!hot_token_id_.defined() || !sample_output.next_tokens.defined() ||
+  // EAGLE-3 specific: map draft token IDs to target token IDs.
+  if (!use_draft_token_mapping_ || !hot_token_id_.defined() ||
+      !sample_output.next_tokens.defined() ||
       sample_output.next_tokens.numel() == 0) {
     return;
   }
@@ -119,6 +132,43 @@ void Eagle3WorkerImpl::process_draft_sample_output(
 
   sample_output.next_tokens =
       hot_token_id_.index_select(0, sample_output.next_tokens);
+}
+
+void Eagle3WorkerImpl::check_draft_input_embedding(
+    const torch::Tensor& embedding,
+    const std::string& phase) const {
+  if (!embedding.defined()) {
+    CHECK_NE(phase, "prefill")
+        << "Eagle3 prefill requires verifier aux hidden-state embeddings. "
+        << "Check that target model captures three aux hidden-state layers.";
+    return;
+  }
+
+  const int64_t expected_hidden_size =
+      3 * context_.get_model_args().hidden_size();
+  const int64_t draft_hidden_size =
+      draft_impl_ == nullptr ? 0 : draft_impl_->hidden_size();
+  CHECK_EQ(embedding.dim(), 2)
+      << "Eagle3 " << phase << " embedding must be a 2-D tensor, got dim "
+      << embedding.dim();
+  CHECK_GT(embedding.size(0), 0)
+      << "Eagle3 " << phase << " embedding must contain at least one row.";
+  if (phase == "decode") {
+    CHECK(embedding.size(-1) == expected_hidden_size ||
+          embedding.size(-1) == draft_hidden_size)
+        << "Eagle3 " << phase
+        << " embedding hidden size mismatch, expected 3 * target hidden size "
+        << expected_hidden_size << " or draft hidden size " << draft_hidden_size
+        << ", got " << embedding.size(-1);
+    return;
+  }
+
+  CHECK_EQ(embedding.size(-1), expected_hidden_size)
+      << "Eagle3 " << phase
+      << " embedding hidden size mismatch, expected 3 * target hidden size "
+      << expected_hidden_size << ", got " << embedding.size(-1)
+      << ". Check that target model captures three aux hidden-state layers "
+         "for Eagle3.";
 }
 
 }  // namespace xllm

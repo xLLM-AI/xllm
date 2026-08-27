@@ -26,12 +26,20 @@ limitations under the License.
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/speculative/spec_input_builder.h"
+#include "runtime/llm_worker_impl.h"
+#include "runtime/vlm_worker_impl.h"
 #include "util/slice.h"
 #include "util/tensor_helper.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
 namespace xllm {
+
+int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
+  const int64_t dp_size = std::max<int64_t>(parallel_args.dp_size(), 1);
+  const int64_t cp_size = std::max<int64_t>(parallel_args.cp_size(), 1);
+  return std::max<int64_t>(parallel_args.world_size() / dp_size / cp_size, 1);
+}
 
 namespace {
 #define TENSOR_REPEAT(tensor_, repeats)                                       \
@@ -43,12 +51,6 @@ namespace {
 
 Slice<int32_t> tensor_slice(const torch::Tensor& tensor) {
   return {tensor.data_ptr<int32_t>(), static_cast<size_t>(tensor.numel())};
-}
-
-int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
-  const int64_t dp_size = std::max<int64_t>(parallel_args.dp_size(), 1);
-  const int64_t cp_size = std::max<int64_t>(parallel_args.cp_size(), 1);
-  return std::max<int64_t>(parallel_args.world_size() / dp_size / cp_size, 1);
 }
 
 KVCacheEstimateOptions make_kv_cache_estimate_options(
@@ -236,12 +238,21 @@ SpeculativeWorkerImpl::SpeculativeWorkerImpl(
     const ParallelArgs& parallel_args,
     const torch::Device& device,
     const runtime::Options& options,
-    const runtime::Options& target_options)
+    const runtime::Options& target_options,
+    WorkerType worker_type)
     : WorkerImpl(parallel_args, device, options),
       draft_sampling_mode_(
           parse_draft_sampling_mode(options.draft_sampling_mode())) {
-  impl_ =
-      std::make_unique<LLMWorkerImpl>(parallel_args, device, target_options);
+  if (worker_type == WorkerType::LLM) {
+    impl_ =
+        std::make_unique<LLMWorkerImpl>(parallel_args, device, target_options);
+  } else if (worker_type == WorkerType::VLM) {
+    impl_ =
+        std::make_unique<VLMWorkerImpl>(parallel_args, device, target_options);
+  } else {
+    LOG(FATAL) << "Unsupported speculative worker type: "
+               << worker_type.to_string();
+  }
 }
 
 bool SpeculativeWorkerImpl::init_model(const std::string& model_weights_path,
@@ -249,6 +260,7 @@ bool SpeculativeWorkerImpl::init_model(const std::string& model_weights_path,
                                        MasterStatus master_status) {
   // Base class only loads the target model.
   bool result = true;
+  CHECK(impl_ != nullptr);
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     result = impl_->WorkerImpl::init_model(
         model_weights_path, random_seed, master_status);
@@ -495,7 +507,6 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
       specBuilder::make_decode_row_context(input);
 
   Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-  Slice<int32_t> positions = tensor_slice(input.positions_host);
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
@@ -514,13 +525,8 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   std::vector<int32_t> atb_q_cu_seq_lens_vec = {};
   int32_t atb_kv_max_seq_len = 0;
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    int32_t start_position = positions[seq_id];
     int32_t kv_len =
         specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
-    CHECK_EQ(start_position + 1, kv_len)
-        << "validate position/kv_len mismatch, seq_id=" << seq_id
-        << ", start_position=" << start_position << ", kv_len=" << kv_len;
-
     for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
       specBuilder::RowSpec row;
       row.seq_id = seq_id;
@@ -642,7 +648,6 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
       specBuilder::make_decode_row_context(input);
 
   Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-  Slice<int32_t> positions = tensor_slice(input.positions_host);
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
@@ -655,12 +660,8 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
                                row_ctx.block_table_stride);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    int32_t start_position = positions[seq_id];
     int32_t kv_len =
         specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
-    CHECK_EQ(start_position + 1, kv_len)
-        << "validate position/kv_len mismatch, seq_id=" << seq_id
-        << ", start_position=" << start_position << ", kv_len=" << kv_len;
     const int32_t seq_val_tokens =
         per_seq_val_tokens[static_cast<size_t>(seq_id)];
 

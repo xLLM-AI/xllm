@@ -42,6 +42,7 @@ limitations under the License.
 #endif
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
+#include "runtime/llm_worker_impl.h"
 #include "util/json_reader.h"
 #include "util/timer.h"
 
@@ -146,8 +147,8 @@ void wait_metadata_ready_event(const ForwardInput& input, Stream& stream) {
       << "failed to wait DFlash metadata ready event";
 }
 
-std::optional<ForwardOutput> run_llm_no_sync_impl(
-    LLMWorkerImpl& worker,
+std::optional<ForwardOutput> run_worker_no_sync_impl(
+    WorkerImpl& worker,
     const ForwardInput& input,
     Stream& prepare_stream,
     Stream& compute_stream,
@@ -300,7 +301,8 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
     : SpeculativeWorkerImpl(parallel_args,
                             device,
                             options,
-                            target_options(options)) {
+                            target_options(options),
+                            WorkerType::LLM) {
   // DFlash feeds the target's captured intermediate-layer aux hidden states
   // into the draft's context K/V. Under context parallelism the worker only
   // exposes the lm_head-gathered final hidden (see llm_worker_impl.cpp), not
@@ -531,8 +533,8 @@ ForwardInput DFlashWorkerImpl::update_input_by_last_step_output(
 std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
     const ForwardInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
-    std::optional<ForwardOutput> output =
-        run_llm_no_sync_impl(*impl_, input, *prepare_stream_, *compute_stream_);
+    std::optional<ForwardOutput> output = run_worker_no_sync_impl(
+        *impl_, input, *prepare_stream_, *compute_stream_);
     // Active prefill ranks write the draft context KV without a draft forward.
     // Keep idle ranks symmetric: a draft MoE forward here would enter EP
     // collectives that active ranks never join and deadlock the whole group.
@@ -563,7 +565,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // Warmup only: prime the draft; its output is unused. Keep it alive until the
   // sync below so the no-sync draft input is not freed while the target forward
   // launched next can reuse the buffer.
-  std::optional<ForwardOutput> draft_output = run_llm_no_sync_impl(
+  std::optional<ForwardOutput> draft_output = run_worker_no_sync_impl(
       *draft_impl_, query_input, *prepare_stream_, *compute_stream_);
 
   ForwardInput validate_input = input;
@@ -578,7 +580,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // its own uniform (unpruned) count. No-op unless adaptive + dp_size>1.
   sync_dp_global_token_nums_for_idle_rank(validate_input.input_params);
   ForwardOutput output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
   // See above: sync the no-sync draft and target forwards before returning.
@@ -591,11 +593,11 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
     const ForwardInput& input) {
   Timer timer;
   ForwardInput processed_target_input;
-  ForwardOutput output = run_llm_no_sync_impl(*impl_,
-                                              input,
-                                              *prepare_stream_,
-                                              *compute_stream_,
-                                              &processed_target_input)
+  ForwardOutput output = run_worker_no_sync_impl(*impl_,
+                                                 input,
+                                                 *prepare_stream_,
+                                                 *compute_stream_,
+                                                 &processed_target_input)
                              .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
@@ -733,7 +735,7 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
   prepare_query_inputs(input, query_input);
 
   ForwardOutput draft_output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *draft_impl_, query_input, *prepare_stream_, *compute_stream_)
           .value();
   // Overlap validate input preparation with the async draft forward: the draft
@@ -963,7 +965,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   sync_dp_global_token_nums_after_prune(validate_input.input_params,
                                         local_total_val_tokens);
   ForwardOutput target_output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,

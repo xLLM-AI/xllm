@@ -26,6 +26,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
 #include "framework/sampling/draft_proposal.h"
+#include "runtime/llm_worker_impl.h"
 #include "runtime/speculative_worker_impl.h"
 #include "util/utils.h"
 

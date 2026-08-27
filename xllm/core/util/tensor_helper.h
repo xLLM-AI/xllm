@@ -68,6 +68,12 @@ inline torch::Tensor safe_to(const torch::Tensor& t,
   return t.defined() ? t.to(options, non_blocking) : t;
 };
 
+// Creates an independent contiguous tensor that is detached from autograd.
+inline torch::Tensor clone_contiguous_detached_tensor(
+    const torch::Tensor& tensor) {
+  return tensor.contiguous().clone().detach();
+};
+
 inline std::vector<char> get_the_bytes(std::string filename) {
   std::ifstream input(filename, std::ios::binary);
   std::vector<char> bytes((std::istreambuf_iterator<char>(input)),

@@ -32,10 +32,12 @@ enum class ServingMode : int8_t {
 };
 
 // Maps an engine-layer EngineType to its corresponding ServingMode.
-// SSM (speculative decoding) serves the same API as LLM.
+// SSM (speculative decoding) serves the same API as LLM. VLMSSM is the
+// speculative variant of VLM and keeps the VLM API surface.
 inline ServingMode to_serving_mode(EngineType engine_type) {
   switch (static_cast<EngineType::Value>(engine_type)) {
     case EngineType::VLM:
+    case EngineType::VLMSSM:
       return ServingMode::VLM;
     case EngineType::DIT:
       return ServingMode::DIT;

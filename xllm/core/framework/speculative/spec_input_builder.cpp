@@ -320,22 +320,27 @@ void append_decode_row(const DecodeRowContext& ctx,
   CHECK_GE(row.seq_id, 0);
   CHECK_LT(row.seq_id, ctx.num_sequences);
   CHECK_LT(static_cast<size_t>(row.seq_id), ctx.positions.size());
-  const int32_t new_position = ctx.positions[row.seq_id] + row.position_offset;
-  CHECK_GE(new_position, 0) << "invalid decode position";
+  const int32_t model_position =
+      ctx.positions[row.seq_id] + row.position_offset;
+  const int32_t cache_position =
+      calc_kv_len(ctx.kv_seq_lens, row.seq_id, row.position_offset) - 1;
+  CHECK_GE(model_position, 0) << "invalid decode model position";
+  CHECK_GE(cache_position, 0) << "invalid decode cache position";
 
   // All decode paths can toggle which fields are emitted, so one row builder
   // can serve draft/validate/first-decode/update-last-step scenarios.
   if (row.append_token) {
     buf.out_token_ids.emplace_back(resolve_row_token_id(ctx, row));
   }
-  buf.out_positions.emplace_back(new_position);
+  buf.out_positions.emplace_back(model_position);
+
   if (ctx.model_managed_multiblock) {
     CHECK(!ctx.multi_block_tables.empty())
         << "model-managed multiblock input requires an SWA manager";
     CHECK_LT(static_cast<size_t>(row.seq_id),
              ctx.multi_block_tables.front().size());
     buf.out_new_cache_slots.emplace_back(calc_ring_slot_id(
-        new_position,
+        cache_position,
         ctx.multi_block_tables.front()[static_cast<size_t>(row.seq_id)],
         block_size));
     if (row.append_block_table) {
@@ -355,7 +360,7 @@ void append_decode_row(const DecodeRowContext& ctx,
     const Slice<int32_t> block_table_slice =
         get_block_table_slice(ctx, row.seq_id);
     buf.out_new_cache_slots.emplace_back(
-        calc_slot_id(new_position, block_table_slice, block_size));
+        calc_slot_id(cache_position, block_table_slice, block_size));
     if (row.append_block_table) {
       if (buf.out_block_table_stride == 0) {
         buf.out_block_table_stride =
