@@ -278,6 +278,11 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
 
+  LOAD_ARG_OR(markov_rank, "markov_rank", 0);
+  LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
+  LOAD_ARG_OR(
+      confidence_head_with_markov, "confidence_head_with_markov", false);
+
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();
   });

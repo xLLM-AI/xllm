@@ -39,7 +39,7 @@ class LayerSynchronizer(Protocol):
     forward to finish.
     """
 
-    def record_event(self, layer_id: int) -> None: ...
+    def record_event(self, layer_id: int) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
