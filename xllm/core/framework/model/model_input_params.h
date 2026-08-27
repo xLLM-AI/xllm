@@ -875,7 +875,7 @@ struct ParallelInput {
 #elif defined(USE_NPU)
   std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer = nullptr;
 #endif
-  uint32_t layers_per_bacth_copy = std::numeric_limits<uint32_t>::max();
+  uint32_t layers_per_event = std::numeric_limits<uint32_t>::max();
   std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
 #if defined(USE_NPU) || defined(USE_MUSA)
   std::vector<int64_t> query_start_loc;
@@ -893,7 +893,7 @@ struct ParallelInput {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif
-    out.layers_per_bacth_copy = layers_per_bacth_copy;
+    out.layers_per_event = layers_per_event;
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
 #if defined(USE_NPU) || defined(USE_MUSA)
     out.query_start_loc = query_start_loc;
@@ -1112,9 +1112,9 @@ struct ModelInputParams {
 
   bool synchronize_layer(uint32_t layer_idx) const {
     if (parallel.layer_wise_load_synchronizer != nullptr &&
-        layer_idx % parallel.layers_per_bacth_copy == 0) {
+        layer_idx % parallel.layers_per_event == 0) {
       if (!parallel.layer_wise_load_synchronizer->synchronize_layer(
-              layer_idx / parallel.layers_per_bacth_copy)) {
+              layer_idx / parallel.layers_per_event)) {
         return false;
       }
     }

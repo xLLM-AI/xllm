@@ -30,6 +30,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/model_context.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -784,7 +785,6 @@ AttentionRunResult run_attention_prefill_once(
     const torch::Tensor& hidden_states,
     KVCache& kv_cache,
     bool enable_full_weight_path,
-    bool enable_fused_mla_kernel,
     BatchForwardType batch_forward_type = BatchForwardType::PREFILL,
     int32_t prefix_len = 0,
     bool build_cp_context = true,
@@ -793,15 +793,9 @@ AttentionRunResult run_attention_prefill_once(
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
-  OptimizationConfig optimization_config;
-  optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
-  optimization_config.enable_fused_indexer_qk = false;
-  DeepseekV2Attention attention(args,
-                                quant_args,
-                                effective_parallel_args,
-                                options,
-                                optimization_config,
-                                enable_indexer);
+  ModelContext model_context(
+      effective_parallel_args, args, quant_args, options);
+  DeepseekV2Attention attention(model_context, enable_indexer);
   attention->load_state_dict(state_dict);
   const int32_t token_num = static_cast<int32_t>(tokens.numel());
   AttentionMetadata metadata =
@@ -948,19 +942,16 @@ int32_t run_attention_prefill_repl_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto repl_result =
-            run_attention_prefill_once(model_args,
-                                       quant_args,
-                                       parallel_args,
-                                       options,
-                                       state_dict,
-                                       tokens,
-                                       positions,
-                                       hidden_states,
-                                       full_weight_kv_cache,
-                                       true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+        auto repl_result = run_attention_prefill_once(model_args,
+                                                      quant_args,
+                                                      parallel_args,
+                                                      options,
+                                                      state_dict,
+                                                      tokens,
+                                                      positions,
+                                                      hidden_states,
+                                                      full_weight_kv_cache,
+                                                      true);
 
         xllm_device.synchronize_default_stream();
         check_repl_output_contract(repl_result,
@@ -1011,19 +1002,16 @@ int32_t run_attention_prefill_fallback_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto repl_result =
-            run_attention_prefill_once(model_args,
-                                       quant_args,
-                                       parallel_args,
-                                       options,
-                                       state_dict,
-                                       tokens,
-                                       positions,
-                                       hidden_states,
-                                       full_weight_kv_cache,
-                                       true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+        auto repl_result = run_attention_prefill_once(model_args,
+                                                      quant_args,
+                                                      parallel_args,
+                                                      options,
+                                                      state_dict,
+                                                      tokens,
+                                                      positions,
+                                                      hidden_states,
+                                                      full_weight_kv_cache,
+                                                      true);
 
         xllm_device.synchronize_default_stream();
         check_repl_output_contract(repl_result,
@@ -1087,9 +1075,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
                                                     positions,
                                                     hidden_states,
                                                     full_weight_kv_cache,
-                                                    true,
-                                                    /*enable_fused_mla_kernel=*/
-                                                    false);
+                                                    true);
 
         xllm_device.synchronize_default_stream();
         check_sp_output_contract(sp_result,
@@ -1173,7 +1159,6 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    hidden_states,
                                    full_layer_cache,
                                    /*enable_full_weight_path=*/true,
-                                   /*enable_fused_mla_kernel=*/false,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
                                    /*build_cp_context=*/true,
@@ -1207,7 +1192,6 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    hidden_states,
                                    shared_layer_cache,
                                    /*enable_full_weight_path=*/true,
-                                   /*enable_fused_mla_kernel=*/false,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
                                    /*build_cp_context=*/true,
@@ -1290,7 +1274,6 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                        hidden_states,
                                        baseline_kv_cache,
                                        /*enable_full_weight_path=*/true,
-                                       /*enable_fused_mla_kernel=*/false,
                                        BatchForwardType::PREFILL,
                                        /*prefix_len=*/0,
                                        /*build_cp_context=*/false);
@@ -1304,9 +1287,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                        positions,
                                        hidden_states,
                                        sp_kv_cache,
-                                       /*enable_full_weight_path=*/true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+                                       /*enable_full_weight_path=*/true);
 
         xllm_device.synchronize_default_stream();
         check_repl_output_contract(baseline_result,
@@ -1393,19 +1374,16 @@ int32_t run_attention_chunked_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto sp_prefix_result =
-            run_attention_prefill_once(model_args,
-                                       quant_args,
-                                       parallel_args,
-                                       options,
-                                       state_dict,
-                                       prefix_tokens,
-                                       prefix_positions,
-                                       prefix_hidden_states,
-                                       full_weight_kv_cache,
-                                       true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+        auto sp_prefix_result = run_attention_prefill_once(model_args,
+                                                           quant_args,
+                                                           parallel_args,
+                                                           options,
+                                                           state_dict,
+                                                           prefix_tokens,
+                                                           prefix_positions,
+                                                           prefix_hidden_states,
+                                                           full_weight_kv_cache,
+                                                           true);
         check_sp_output_contract(sp_prefix_result,
                                  prefix_len,
                                  model_args.hidden_size(),
@@ -1427,8 +1405,6 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                        chunk1_hidden_states,
                                        full_weight_kv_cache,
                                        true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false,
                                        BatchForwardType::CHUNKED_PREFILL,
                                        prefix_len);
 
@@ -1454,7 +1430,6 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                        chunk2_hidden_states,
                                        full_weight_kv_cache,
                                        true,
-                                       /*enable_fused_mla_kernel=*/false,
                                        BatchForwardType::CHUNKED_PREFILL,
                                        prefix_len + chunk1_len);
 
