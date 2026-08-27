@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <string>
 #include <vector>
 
 #include "attention.h"
@@ -32,6 +33,9 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+
+bool is_qwen3_5_model_type(const std::string& model_type);
+bool should_enable_qwen3_5_fia_decode(const std::string& model_type);
 
 class Qwen3NextAttentionImpl : public torch::nn::Module {
  public:

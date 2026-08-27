@@ -866,7 +866,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     uint32_t padded_num_tokens,
     bool return_capture_params,
     bool skip_token_update,
-    bool for_capture) {
+    bool for_capture,
+    bool update_paged_attention_plan) {
   CHECK_GT(padded_num_tokens, 0) << "padded_num_tokens must be > 0";
   const uint32_t actual_num_tokens = tokens.size(0);
   const bool is_decode = params.meta.batch_forward_type.is_decode();
@@ -1225,7 +1226,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
               persistent_host_q_seq_lens_.begin());
   }
 
-  if (uses_paged_attention_tiling()) {
+  if (uses_paged_attention_tiling() && update_paged_attention_plan) {
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
     if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
