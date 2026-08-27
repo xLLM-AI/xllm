@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "common/macros.h"
 #include "framework/batch/batch.h"
@@ -37,6 +38,7 @@ struct SpecVerifyGraphTaskSignal {
   int64_t num_accepted_tokens = 0;
   int64_t spec_width = 0;
   int64_t block_table_width = 0;
+  int64_t base_kv_seq_len = 0;
   int64_t max_kv_seq_len = 0;
 };
 

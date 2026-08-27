@@ -355,6 +355,8 @@ AttentionMetadata build_attention_metadata(
 #endif
 
 #if defined(USE_NPU)
+  attn_metadata.acl_graph_task_update_context =
+      params.graph.acl_graph_task_update_context;
   // Determine if we should use ACL graph mode:
   // - --enable_graph=true
   // - Must be decode phase or spec-verify chunked prefill

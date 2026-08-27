@@ -376,6 +376,7 @@ torch::Tensor run_causal_conv1d_graph_update(
   task.pad_slot_id = xllm::npu::kCausalConv1dGraphPadSlotId;
   task.run_mode = xllm::npu::kCausalConv1dRunModeUpdate;
   task.branch = branch;
+  task.capture_order = graph_context->next_capture_order++;
   task.handle = handle;
   task.event = std::move(event);
   graph_context->causal_conv1d_tasks.emplace_back(std::move(task));

@@ -74,6 +74,46 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     bool softmax_lse_flag = false,
     bool is_causal = true);
 
+torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size);
+
+void npu_fused_infer_attention_decode_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    const torch::Tensor& workspace,
+    torch::Tensor& output,
+    torch::Tensor& softmax_lse);
+
+void npu_fused_infer_attention_decode_out_cached(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    torch::Tensor& output);
+
 void batch_chunked_paged_prefill(const torch::Tensor& query,
                                  const torch::Tensor& k_cache,
                                  const torch::Tensor& v_cache,

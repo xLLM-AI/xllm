@@ -17,13 +17,26 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <string>
 #include <tuple>
 #include <vector>
 
 #include "common/flash_comm1_context.h"
+#include "core/framework/config/execution_config.h"
 
 namespace xllm {
 namespace layer {
+
+bool is_qwen3_5_model_type(const std::string& model_type) {
+  return model_type == "qwen3_5" || model_type == "qwen3_5_text" ||
+         model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text" ||
+         model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp";
+}
+
+bool should_enable_qwen3_5_fia_decode(const std::string& model_type) {
+  return ExecutionConfig::get_instance().enable_fia_decode() &&
+         is_qwen3_5_model_type(model_type);
+}
 
 Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
     const ModelArgs& args,
@@ -101,12 +114,15 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                                              options));
 
   // 6. Attention
-  attn_ = register_module("attn",
-                          Attention(num_heads_,
-                                    head_dim_,
-                                    scaling_,
-                                    num_kv_heads_,
-                                    args.sliding_window()));
+  attn_ = register_module(
+      "attn",
+      Attention(num_heads_,
+                head_dim_,
+                scaling_,
+                num_kv_heads_,
+                args.sliding_window(),
+                /*enable_fia_decode=*/
+                should_enable_qwen3_5_fia_decode(args.model_type())));
 
   // 7. Fused split_qkv_rmsnorm_mrope kernel setup
   rotary_dim_ = static_cast<int64_t>(head_dim_ * args.partial_rotary_factor());

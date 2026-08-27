@@ -22,6 +22,7 @@ limitations under the License.
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "common/metrics.h"
@@ -45,6 +46,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
+#include "core/layers/npu_torch/qwen3_next_attention.h"
 #include "core/layers/npu_torch/tests_utils.h"
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/acl_graph_persistent_param.h"
@@ -138,6 +140,7 @@ TEST(AclGraphStaticGraphTaskSignatureTest,
       .num_accepted_tokens = 4,
       .spec_width = 5,
       .block_table_width = 64,
+      .base_kv_seq_len = 252,
       .max_kv_seq_len = 256,
   };
 
@@ -147,6 +150,50 @@ TEST(AclGraphStaticGraphTaskSignatureTest,
 
   params.parallel.query_start_loc.push_back(6);
   EXPECT_FALSE(npu::make_static_graph_task_signature(params).has_value());
+}
+
+TEST(Qwen35FiaRoutingTest, UsesExactModelTypeWhitelist) {
+  const std::vector<std::string> supported_model_types = {
+      "qwen3_5",
+      "qwen3_5_text",
+      "qwen3_5_moe",
+      "qwen3_5_moe_text",
+      "qwen3_5_mtp",
+      "qwen3_5_moe_mtp",
+  };
+  for (const std::string& model_type : supported_model_types) {
+    EXPECT_TRUE(layer::is_qwen3_5_model_type(model_type)) << model_type;
+  }
+
+  const std::vector<std::string> unsupported_model_types = {
+      "",
+      "qwen3_next",
+      "qwen3_5_future",
+      "qwen3_50",
+  };
+  for (const std::string& model_type : unsupported_model_types) {
+    EXPECT_FALSE(layer::is_qwen3_5_model_type(model_type)) << model_type;
+  }
+}
+
+TEST(Qwen35FiaRoutingTest, RequiresExplicitEnableFlag) {
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  const bool original_enable_fia_decode = execution_config.enable_fia_decode();
+
+  execution_config.enable_fia_decode(false);
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_text"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_text"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_mtp"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_mtp"));
+
+  execution_config.enable_fia_decode(true);
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_text"));
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_text"));
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_mtp"));
+  EXPECT_TRUE(layer::should_enable_qwen3_5_fia_decode("qwen3_5_moe_mtp"));
+  EXPECT_FALSE(layer::should_enable_qwen3_5_fia_decode("qwen3_next"));
+
+  execution_config.enable_fia_decode(original_enable_fia_decode);
 }
 
 namespace {
@@ -1175,7 +1222,7 @@ TEST(AclGraphPersistentParamTest, HybridSpecVerifyMetadataCoversBucketPadding) {
 TEST(AclGraphPersistentParamTest,
      GenericSpecVerifyCaptureKeepsPersistentBlockTableWidth) {
   constexpr int32_t kSpecWidth = 6;
-  constexpr int64_t kActiveBlockTableWidth = 2;
+  constexpr int64_t kActiveBlockTableWidth = 5;
   ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");

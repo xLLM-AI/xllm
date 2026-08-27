@@ -161,6 +161,8 @@ DECLARE_int32(acl_graph_decode_batch_size_limit);
 
 DECLARE_string(python_graph_backend);
 
+DECLARE_bool(enable_fia_decode);
+
 DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_string(master_node_addr);
