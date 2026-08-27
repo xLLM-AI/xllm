@@ -143,6 +143,13 @@ DECLARE_COUNTER(request_handling_latency_seconds_completion);
 DECLARE_COUNTER(tokenization_latency_seconds);
 DECLARE_COUNTER(chat_template_latency_seconds);
 
+// latency of multimodal preprocessing in milliseconds
+DECLARE_HISTOGRAM(mm_input_loading_latency_milliseconds);
+DECLARE_HISTOGRAM(mm_preprocess_latency_milliseconds);
+
+// encoder cache hit rate in percent
+DECLARE_HISTOGRAM(encoder_cache_hit_rate);
+
 // latency of prefix cache operations in seconds
 DECLARE_COUNTER(prefix_cache_latency_seconds_insert);
 DECLARE_COUNTER(prefix_cache_latency_seconds_match);

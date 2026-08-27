@@ -219,7 +219,10 @@ std::shared_ptr<Request> VLMRequestFactory::create(
   static MMInputTransfer mm_input_transfer;
 
   MMInput mm_inputs(std::move(payload));
+  Timer load_timer;
   MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
+  HISTOGRAM_OBSERVE(mm_input_loading_latency_milliseconds,
+                    static_cast<int64_t>(load_timer.elapsed_milliseconds()));
   if (code != MMErrCode::SUCCESS) {
     std::string error_message = MMErrToString(code);
     LOG(ERROR) << error_message;
@@ -228,11 +231,17 @@ std::shared_ptr<Request> VLMRequestFactory::create(
   }
 
   MMData mm_data;
-  if (!mm_inputs.empty() &&
-      !processor_->process_multimodal(mm_inputs, mm_data)) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Failed to process multimodal input.");
-    return nullptr;
+  if (!mm_inputs.empty()) {
+    Timer preprocess_timer;
+    bool ok = processor_->process_multimodal(mm_inputs, mm_data);
+    HISTOGRAM_OBSERVE(
+        mm_preprocess_latency_milliseconds,
+        static_cast<int64_t>(preprocess_timer.elapsed_milliseconds()));
+    if (!ok) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "Failed to process multimodal input.");
+      return nullptr;
+    }
   }
 
   Timer timer;

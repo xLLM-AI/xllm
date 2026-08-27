@@ -44,6 +44,16 @@ DEFINE_COUNTER(tokenization_latency_seconds,
 DEFINE_COUNTER(chat_template_latency_seconds,
                "Chat template latency in seconds");
 
+// multimodal preprocessing metrics
+DEFINE_HISTOGRAM(mm_input_loading_latency_milliseconds,
+                 "Latency of multimodal input loading and decoding in "
+                 "milliseconds");
+DEFINE_HISTOGRAM(mm_preprocess_latency_milliseconds,
+                 "Latency of multimodal input preprocessing in milliseconds");
+
+DEFINE_HISTOGRAM(encoder_cache_hit_rate,
+                 "Histogram of encoder cache hit rate in percent");
+
 // block manager metrics
 DEFINE_COUNTER(prefix_cache_latency_seconds_insert,
                "Latency of prefix cache insert in seconds");
