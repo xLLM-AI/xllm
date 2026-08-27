@@ -951,6 +951,63 @@ TEST(CompositeBlockManagerTest, DecodeInitialSwaAllocationKeepsOnlyWindowTail) {
   manager.deallocate_for_sequence(&seq);
 }
 
+TEST(CompositeBlockManagerTest,
+     DecodeInitialSwaAllocationCoversNonAlignedWindow) {
+  const uint32_t window_size = kBaseBlockSize;
+  BlockManager::Options opts = MakeCompositeOptions(
+      /*base_num_blocks=*/4096,
+      kBaseBlockSize,
+      window_size,
+      /*max_seqs_per_batch=*/1);
+  opts.instance_is_decode(true)
+      .enable_prefix_cache(false)
+      .num_speculative_tokens(5)
+      .swa_num_blocks(/*two windows plus padding=*/5);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const size_t num_tokens = 10000;
+  const size_t logical_blocks =
+      (num_tokens + kBaseBlockSize - 1) / kBaseBlockSize;
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(num_tokens, 7));
+
+  ASSERT_TRUE(manager.allocate_sequence(&seq, num_tokens));
+  const std::vector<Block> swa = SwaBlocks(seq);
+  ASSERT_EQ(swa.size(), logical_blocks);
+  for (size_t i = 0; i < logical_blocks - 2; ++i) {
+    EXPECT_FALSE(swa[i].is_valid());
+  }
+  EXPECT_TRUE(swa[logical_blocks - 2].is_valid());
+  EXPECT_TRUE(swa[logical_blocks - 1].is_valid());
+
+  manager.deallocate_for_sequence(&seq);
+}
+
+TEST(CompositeBlockManagerTest,
+     DecodeInitialSwaAllocationKeepsBlockContainingWindowStart) {
+  const uint32_t window_size = kBaseBlockSize;
+  BlockManager::Options opts = MakeCompositeOptions(
+      /*base_num_blocks=*/4096,
+      kBaseBlockSize,
+      window_size,
+      /*max_seqs_per_batch=*/1);
+  opts.instance_is_decode(true)
+      .enable_prefix_cache(false)
+      .num_speculative_tokens(0)
+      .swa_num_blocks(/*two windows plus padding=*/5);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const size_t num_tokens = 2 * kBaseBlockSize - 1;
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(num_tokens, 7));
+
+  ASSERT_TRUE(manager.allocate_sequence(&seq, num_tokens));
+  const std::vector<Block> swa = SwaBlocks(seq);
+  ASSERT_EQ(swa.size(), 2u);
+  EXPECT_TRUE(swa[0].is_valid());
+  EXPECT_TRUE(swa[1].is_valid());
+
+  manager.deallocate_for_sequence(&seq);
+}
+
 // Qwen3.5 GDN D-side (instance_is_decode=true, LINEAR present): the LINEAR
 // leaf should stop advertising prefix cache, so build_composite_leaves
 // classifies FLAT_KV_LINEAR down to FLAT_KV and no restore-source mount
