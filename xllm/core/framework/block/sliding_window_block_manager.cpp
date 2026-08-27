@@ -82,14 +82,18 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
   const size_t block_size = options_.block_size();
   CHECK_GT(block_size, 0u);
   const size_t logical_blocks = (num_tokens + block_size - 1) / block_size;
-  const size_t active_blocks = std::min(
-      logical_blocks, static_cast<size_t>(options_.swa_blocks_per_seq()));
+  const size_t sliding_window_tokens =
+      std::max<size_t>(options_.sliding_window_size(), 1);
+  const size_t window_start =
+      num_tokens - std::min(num_tokens, sliding_window_tokens);
+  const size_t inactive_blocks = window_start / block_size;
+  const size_t active_blocks = logical_blocks - inactive_blocks;
   std::vector<Block> live_blocks = allocate(active_blocks);
   if (live_blocks.size() != active_blocks) {
     return std::nullopt;
   }
 
-  std::vector<Block> sparse_blocks(logical_blocks - active_blocks);
+  std::vector<Block> sparse_blocks(inactive_blocks);
   sparse_blocks.insert(sparse_blocks.end(),
                        std::make_move_iterator(live_blocks.begin()),
                        std::make_move_iterator(live_blocks.end()));
