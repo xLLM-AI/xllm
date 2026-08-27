@@ -395,7 +395,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       // basis and reduces acceptance to near-random levels.
     } else {
       const bool python_weights_shared =
-          draft_impl_->share_weights_from(*impl_);
+          draft_impl_->WorkerImpl::share_weights_from(*impl_);
       if (!python_weights_shared) {
 #if defined(USE_NPU)
         auto head = impl_->get_npu_lm_head();
