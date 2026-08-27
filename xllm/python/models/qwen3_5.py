@@ -33,6 +33,8 @@ from xllm.python.layers import (
 )
 from xllm.python.layers.gated_delta_net import Qwen3_5GatedDeltaNet
 from xllm.python.models.base import PyModelBase
+from xllm.python.models.qwen3 import load_qwen3_attention
+from xllm.python.models.weight_utils import WeightLoader, gqa_head_split, kv_replica_shard
 
 
 @dataclass
@@ -182,15 +184,8 @@ class Qwen3_5Config:
             and layer_id not in self.mlp_only_layers
         )
 
-    def full_head_split(self) -> tuple[int, int, int]:
-        num_heads = self.n_heads // self.tp_size
-        if self.n_kv_heads >= self.tp_size:
-            if self.n_kv_heads % self.tp_size:
-                raise ValueError("num_key_value_heads must be divisible by tp_size")
-            return num_heads, self.n_kv_heads // self.tp_size, 1
-        if self.tp_size % self.n_kv_heads:
-            raise ValueError("tp_size must be divisible by num_key_value_heads")
-        return num_heads, 1, self.tp_size // self.n_kv_heads
+    def head_split(self) -> tuple[int, int]:
+        return gqa_head_split(self.n_heads, self.n_kv_heads, self.tp_size)
 
 
 class Qwen3_5SparseMoEBlock(nn.Module):
@@ -287,7 +282,7 @@ class Qwen3_5Attention(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
-        self.num_heads, self.num_kv_heads, _ = cfg.full_head_split()
+        self.num_heads, self.num_kv_heads = cfg.head_split()
         self.head_dim = cfg.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -456,171 +451,109 @@ class Qwen3_5ForCausalLM(PyModelBase):
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         cfg = self.cfg
-
-        def find(name: str):
-            for state_dict in state_dicts:
-                if state_dict.has(name):
-                    return state_dict
-            return None
-
-        prefixes = ("model.language_model.", "model.", "")
-        model_prefix = next(
-            (prefix for prefix in prefixes if find(prefix + "embed_tokens.weight")),
-            None,
+        loader = WeightLoader(
+            self,
+            state_dicts,
+            tp_size,
+            tp_rank,
+            src_prefixes=("model.language_model.", "model.", ""),
         )
-        if model_prefix is None:
-            raise KeyError("Qwen3.5 embedding weight was not found")
 
-        def tensor(name: str) -> torch.Tensor:
-            state_dict = find(name)
-            if state_dict is None:
-                raise KeyError(f"checkpoint tensor not found: {name}")
-            return state_dict.get_tensor(name)
+        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
 
-        def shard_tensor(name: str, dim: int, rank: int = tp_rank, world: int = tp_size) -> torch.Tensor:
-            value = tensor(name)
-            if world == 1:
-                return value
-            if value.size(dim) % world:
-                raise ValueError(f"cannot shard {name} across {world} ranks")
-            return value.chunk(world, dim=dim)[rank].contiguous()
+        # linear_attention branch only: split fused in_proj_qkv (and conv1d)
+        # into (key, key, value) global chunks, then TP-shard each chunk.
+        global_key = cfg.linear_num_key_heads * cfg.linear_key_head_dim
+        global_value = cfg.linear_num_value_heads * cfg.linear_value_head_dim
+        qkv_sizes = (global_key, global_key, global_value)
 
-        def copy_in(name: str, value: torch.Tensor) -> None:
-            parameter = self.get_parameter(name)
-            parameter.data.copy_(value)
+        def split_shard_cat(t: torch.Tensor) -> torch.Tensor:
+            return torch.cat([loader.shard(p, 0, contiguous=False) for p in t.split(qkv_sizes, dim=0)])
 
-        def shard_kv(name: str, dim: int = 0) -> torch.Tensor:
-            if cfg.n_kv_heads >= tp_size:
-                return shard_tensor(name, dim)
-            replicas = tp_size // cfg.n_kv_heads
-            return shard_tensor(name, dim, tp_rank // replicas, cfg.n_kv_heads)
+        # MoE experts are sharded on the expert axis by EP, then on the
+        # intermediate axis by MoE-TP; both tuples are load-time constants.
+        ep = (cfg.ep_size, cfg.ep_rank)
+        mtp = (cfg.moe_tp_size, cfg.moe_tp_rank)
 
-        copy_in(
+        loader.copy_in(
             "model.embed_tokens.weight",
-            shard_tensor(model_prefix + "embed_tokens.weight", 1),
+            loader.load_shard("embed_tokens.weight", 1),
         )
         for layer_id, layer_type in enumerate(cfg.layer_types):
-            source = f"{model_prefix}layers.{layer_id}."
+            source = f"layers.{layer_id}."
             target = f"model.layers.{layer_id}."
             for norm in ("input_layernorm.weight", "post_attention_layernorm.weight"):
-                copy_in(target + norm, tensor(source + norm))
+                loader.copy_in(target + norm, loader.load_tensor(source + norm))
 
             if layer_type == "full_attention":
-                q = shard_tensor(source + "self_attn.q_proj.weight", 0)
-                k = shard_kv(source + "self_attn.k_proj.weight")
-                v = shard_kv(source + "self_attn.v_proj.weight")
-                copy_in(target + "self_attn.qkv_proj.weight", torch.cat((q, k, v)))
-                copy_in(
-                    target + "self_attn.o_proj.weight",
-                    shard_tensor(source + "self_attn.o_proj.weight", 1),
-                )
-                if cfg.attention_bias:
-                    q_bias = shard_tensor(source + "self_attn.q_proj.bias", 0)
-                    k_bias = shard_kv(source + "self_attn.k_proj.bias")
-                    v_bias = shard_kv(source + "self_attn.v_proj.bias")
-                    copy_in(
-                        target + "self_attn.qkv_proj.bias",
-                        torch.cat((q_bias, k_bias, v_bias)),
-                    )
-                    copy_in(
-                        target + "self_attn.o_proj.bias",
-                        tensor(source + "self_attn.o_proj.bias"),
-                    )
-                copy_in(
-                    target + "self_attn.q_norm.weight",
-                    tensor(source + "self_attn.q_norm.weight"),
-                )
-                copy_in(
-                    target + "self_attn.k_norm.weight",
-                    tensor(source + "self_attn.k_norm.weight"),
+                load_qwen3_attention(
+                    loader,
+                    source,
+                    target,
+                    kv_world=kv_world,
+                    kv_rank=kv_rank,
+                    attention_bias=cfg.attention_bias,
                 )
             else:
                 linear = source + "linear_attn."
-                qkv = tensor(linear + "in_proj_qkv.weight")
-                global_key = cfg.linear_num_key_heads * cfg.linear_key_head_dim
-                global_value = cfg.linear_num_value_heads * cfg.linear_value_head_dim
-                q, k, v = qkv.split((global_key, global_key, global_value), dim=0)
-                q = q.chunk(tp_size, dim=0)[tp_rank]
-                k = k.chunk(tp_size, dim=0)[tp_rank]
-                v = v.chunk(tp_size, dim=0)[tp_rank]
-                copy_in(target + "linear_attn.in_proj_qkv.weight", torch.cat((q, k, v)))
+                loader.copy_in(
+                    target + "linear_attn.in_proj_qkv.weight",
+                    split_shard_cat(loader.load_tensor(linear + "in_proj_qkv.weight")),
+                )
                 for projection in ("in_proj_z", "in_proj_b", "in_proj_a"):
-                    copy_in(
+                    loader.copy_in(
                         target + f"linear_attn.{projection}.weight",
-                        shard_tensor(linear + f"{projection}.weight", 0),
+                        loader.load_shard(linear + f"{projection}.weight", 0),
                     )
-                conv = tensor(linear + "conv1d.weight").squeeze(1)
-                cq, ck, cv = conv.split((global_key, global_key, global_value), dim=0)
-                copy_in(
+                loader.copy_in(
                     target + "linear_attn.conv1d_weight",
-                    torch.cat(
-                        (
-                            cq.chunk(tp_size)[tp_rank],
-                            ck.chunk(tp_size)[tp_rank],
-                            cv.chunk(tp_size)[tp_rank],
-                        )
-                    ),
+                    split_shard_cat(loader.load_tensor(linear + "conv1d.weight").squeeze(1)),
                 )
                 for name in ("A_log", "dt_bias"):
-                    copy_in(
+                    loader.copy_in(
                         target + f"linear_attn.{name}",
-                        shard_tensor(linear + name, 0),
+                        loader.load_shard(linear + name, 0),
                     )
-                copy_in(
+                loader.copy_in(
                     target + "linear_attn.norm_weight",
-                    tensor(linear + "norm.weight"),
+                    loader.load_tensor(linear + "norm.weight"),
                 )
-                copy_in(
+                loader.copy_in(
                     target + "linear_attn.out_proj.weight",
-                    shard_tensor(linear + "out_proj.weight", 1),
+                    loader.load_shard(linear + "out_proj.weight", 1),
                 )
 
             if cfg.is_moe_layer(layer_id):
                 moe = source + "mlp."
-                copy_in(target + "mlp.experts.gate.weight", tensor(moe + "gate.weight"))
-                copy_in(
+                loader.copy_in(target + "mlp.experts.gate.weight", loader.load_tensor(moe + "gate.weight"))
+                loader.copy_in(
                     target + "mlp.shared_expert_gate.weight",
-                    tensor(moe + "shared_expert_gate.weight"),
+                    loader.load_tensor(moe + "shared_expert_gate.weight"),
                 )
 
-                gate_up = tensor(moe + "experts.gate_up_proj")
-                start_expert = cfg.ep_rank * (cfg.num_experts // cfg.ep_size)
-                gate_up = gate_up.narrow(0, start_expert, cfg.num_experts // cfg.ep_size)
+                # contiguous=False: one materialization at the final cat/copy, not per split.
+                gate_up = loader.shard(
+                    loader.load_tensor(moe + "experts.gate_up_proj"), 0, *ep, contiguous=False
+                )
                 gate, up = gate_up.chunk(2, dim=1)
-                gate = gate.chunk(cfg.moe_tp_size, dim=1)[cfg.moe_tp_rank]
-                up = up.chunk(cfg.moe_tp_size, dim=1)[cfg.moe_tp_rank]
+                gate = loader.shard(gate, 1, *mtp, contiguous=False)
+                up = loader.shard(up, 1, *mtp, contiguous=False)
                 # The checkpoint is [gate, up]; xLLM CUTLASS SwiGLU
                 # consumes [linear/up, gate].
-                copy_in(target + "mlp.experts.w13", torch.cat((up, gate), dim=1))
+                loader.copy_in(target + "mlp.experts.w13", torch.cat((up, gate), dim=1))
 
-                down = tensor(moe + "experts.down_proj").narrow(0, start_expert, cfg.num_experts // cfg.ep_size)
-                copy_in(
-                    target + "mlp.experts.w2",
-                    down.chunk(cfg.moe_tp_size, dim=2)[cfg.moe_tp_rank],
+                down = loader.shard(
+                    loader.load_tensor(moe + "experts.down_proj"), 0, *ep, contiguous=False
                 )
+                loader.copy_in(target + "mlp.experts.w2", loader.shard(down, 2, *mtp, contiguous=False))
 
                 shared = moe + "shared_expert."
-                shared_gate = shard_tensor(shared + "gate_proj.weight", 0)
-                shared_up = shard_tensor(shared + "up_proj.weight", 0)
-                copy_in(
-                    target + "mlp.shared_expert.gate_up_proj.weight",
-                    torch.cat((shared_gate, shared_up)),
-                )
-                copy_in(
-                    target + "mlp.shared_expert.down_proj.weight",
-                    shard_tensor(shared + "down_proj.weight", 1),
-                )
+                loader.load_gated_mlp(target + "mlp.shared_expert.", shared)
             else:
-                gate = shard_tensor(source + "mlp.gate_proj.weight", 0)
-                up = shard_tensor(source + "mlp.up_proj.weight", 0)
-                copy_in(target + "mlp.gate_up_proj.weight", torch.cat((gate, up)))
-                copy_in(
-                    target + "mlp.down_proj.weight",
-                    shard_tensor(source + "mlp.down_proj.weight", 1),
-                )
+                loader.load_gated_mlp(target + "mlp.", source + "mlp.")
 
-        copy_in("model.norm.weight", tensor(model_prefix + "norm.weight"))
+        loader.copy_in("model.norm.weight", loader.load_tensor("norm.weight"))
         lm_head_name = "lm_head.weight"
-        if cfg.tie_word_embeddings or find(lm_head_name) is None:
-            lm_head_name = model_prefix + "embed_tokens.weight"
-        copy_in("lm_head.weight", shard_tensor(lm_head_name, 0))
+        if cfg.tie_word_embeddings or not loader.has(lm_head_name):
+            lm_head_name = "embed_tokens.weight"
+        loader.copy_in("lm_head.weight", loader.load_shard(lm_head_name, 0))

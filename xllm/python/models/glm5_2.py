@@ -15,7 +15,7 @@
 """GLM-5.2 (model_type=glm_moe_dsa) causal LM, adapted from DeepSeek-V3.2.
 
 Shared machinery is imported from ``deepseek_v32``: W8A8 linears, dense MLP,
-MoE, YaRN RoPE, the W8A8 weight loader, and the MLA RoPE helpers. Only the
+MoE, YaRN RoPE, and the MLA RoPE helpers. Only the
 GLM-5.2 structural deltas live here:
 
   * cross-layer top-k sharing -- ``indexer_types`` marks full/shared layers;
@@ -65,13 +65,13 @@ from xllm.python.models.deepseek_v32 import (
 )
 from xllm.python.models.deepseek_v32 import (
     W8A8StaticLinear,
-    W8A8WeightLoader,
     _apply_half_rope,
     _gather_interleave_cos_sin,
     _interleave_rope_with,
     _tp_rank_from_device,
     _yarn_get_mscale,
 )
+from xllm.python.models.weight_utils import W8A8WeightLoader, effective_moe_tp, mla_head_split
 
 
 @dataclass
@@ -256,8 +256,7 @@ class Glm52Config:
                 raise ValueError("n_routed_experts must be divisible by ep_size")
             if self.moe_tp_size * self.ep_size != self.world_size:
                 raise ValueError("world_size must equal moe_tp_size * ep_size")
-        effective_moe_tp_size = self.moe_tp_size if self.ep_size > 1 else self.tp_size
-        if self.moe_intermediate_size % effective_moe_tp_size:
+        if self.moe_intermediate_size % effective_moe_tp(self):
             raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
         if not 0 <= self.tp_rank < self.tp_size:
             raise ValueError("tp_rank must be in [0, tp_size)")
@@ -301,9 +300,8 @@ class Glm52Config:
         self.mlp_layer_types = ["dense"] * n_dense + ["sparse"] * (self.n_layers - n_dense)
 
     def head_split(self) -> tuple[int, int]:
-        """Per-rank (num_heads_local, num_kv_heads_local=1)."""
-        num_heads_local = self.n_heads // self.tp_size
-        return num_heads_local, 1
+        """Per-rank (num_heads_local, num_kv_heads_local=1) — MLA has one latent KV head per rank."""
+        return mla_head_split(self.n_heads, self.tp_size)
 
 
 class Glm52MLAAttention(Attention):
@@ -317,8 +315,7 @@ class Glm52MLAAttention(Attention):
         device: torch.device,
     ) -> None:
         tp = cfg.tp_size
-        assert cfg.n_heads % tp == 0
-        num_heads = cfg.n_heads // tp
+        num_heads, _ = cfg.head_split()
         kv_lora = cfg.kv_lora_rank
         qk_nope = cfg.qk_nope_head_dim
         qk_rope = cfg.qk_rope_head_dim
@@ -708,107 +705,30 @@ class Glm52ForCausalLM(PyModelBase):
         cfg = self.cfg
         loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
 
-        loader.copy_in(
-            "model.embed_tokens.weight", loader.shard(loader.load_tensor("model.embed_tokens.weight"), dim=1)
-        )
+        loader.copy_shard("model.embed_tokens.weight", dim=1)
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
-            loader.copy_in(p + "input_layernorm.weight", loader.load_tensor(p + "input_layernorm.weight"))
-            loader.copy_in(
-                p + "post_attention_layernorm.weight", loader.load_tensor(p + "post_attention_layernorm.weight")
-            )
+            loader.copy_replicated(p + "input_layernorm.weight")
+            loader.copy_replicated(p + "post_attention_layernorm.weight")
             attn = p + "self_attn."
-            loader.load_w8a8_a(attn, "q_a_proj")
-            loader.copy_in(attn + "q_a_layernorm.weight", loader.load_tensor(attn + "q_a_layernorm.weight"))
-            loader.load_w8a8_a(attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0})
-            loader.load_w8a8_a(attn, "kv_a_proj_with_mqa")
-            loader.copy_in(attn + "kv_a_layernorm.weight", loader.load_tensor(attn + "kv_a_layernorm.weight"))
-            loader.copy_in(
-                attn + "kv_b_proj.weight", loader.shard(loader.load_tensor(attn + "kv_b_proj.weight"), dim=0)
-            )
-            loader.load_w8a8_a(attn, "o_proj", {"weight": 1})
+            loader.load_w8a8_projection(attn, "q_a_proj")
+            loader.copy_replicated(attn + "q_a_layernorm.weight")
+            loader.load_w8a8_projection(attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0})
+            loader.load_w8a8_projection(attn, "kv_a_proj_with_mqa")
+            loader.copy_replicated(attn + "kv_a_layernorm.weight")
+            loader.copy_shard(attn + "kv_b_proj.weight", dim=0)
+            loader.load_w8a8_projection(attn, "o_proj", {"weight": 1})
             if not self.model.layers[i].self_attn.is_shared:
                 idx = attn + "indexer."
-                loader.load_w8a8_a(idx, "wq_b")
-                loader.copy_in(idx + "wk.weight", loader.load_tensor(idx + "wk.weight"))
-                loader.copy_in(idx + "k_norm.weight", loader.load_tensor(idx + "k_norm.weight"))
-                loader.copy_in(idx + "k_norm.bias", loader.load_tensor(idx + "k_norm.bias"))
-                loader.copy_in(idx + "weights_proj.weight", loader.load_tensor(idx + "weights_proj.weight"))
+                loader.load_w8a8_projection(idx, "wq_b")
+                loader.copy_replicated(idx + "wk.weight")
+                loader.copy_replicated(idx + "k_norm.weight")
+                loader.copy_replicated(idx + "k_norm.bias")
+                loader.copy_replicated(idx + "weights_proj.weight")
             self.model.layers[i].self_attn.process_weights_after_loading()
 
-            if isinstance(self.model.layers[i].mlp, Glm52MLP):
-                loader.load_w8a8_b(p + "mlp.")
-                self.model.layers[i].mlp.process_weights_after_loading()
-            else:
-                se = p + "mlp.experts."
-                moe_layer = self.model.layers[i].mlp
-                moe_layer.allocate_experts_w13_for_loading()
-                w13_param = self.get_parameter(p + "mlp.experts_w13")
-                w13_scale = self.get_buffer(p + "mlp.experts_w13_scale")
-                w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
-                expert_start = moe_layer.local_expert_start
-                expert_end = moe_layer.local_expert_end
-                shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
-                shard_rank = cfg.moe_tp_rank if cfg.ep_size > 1 else cfg.tp_rank
-                for j in range(expert_start, expert_end):
-                    local_idx = j - expert_start
-                    gw = loader.load_tensor(se + f"{j}.gate_proj.weight")
-                    gs = loader.load_tensor(se + f"{j}.gate_proj.weight_scale")
-                    go = loader.load_tensor(se + f"{j}.gate_proj.weight_offset")
-                    uw = loader.load_tensor(se + f"{j}.up_proj.weight")
-                    us = loader.load_tensor(se + f"{j}.up_proj.weight_scale")
-                    uo = loader.load_tensor(se + f"{j}.up_proj.weight_offset")
-                    w13_param.data[local_idx].copy_(
-                        torch.cat(
-                            [
-                                loader.shard(gw, 0, shard_world, shard_rank),
-                                loader.shard(uw, 0, shard_world, shard_rank),
-                            ],
-                            dim=0,
-                        ).contiguous()
-                    )
-                    w13_scale.data[local_idx].copy_(
-                        torch.cat(
-                            [
-                                loader.shard(gs, 0, shard_world, shard_rank),
-                                loader.shard(us, 0, shard_world, shard_rank),
-                            ],
-                            dim=0,
-                        ).contiguous()
-                    )
-                    w13_offset.data[local_idx].copy_(
-                        torch.cat(
-                            [
-                                loader.shard(go, 0, shard_world, shard_rank),
-                                loader.shard(uo, 0, shard_world, shard_rank),
-                            ],
-                            dim=0,
-                        ).contiguous()
-                    )
+            self.model.layers[i].mlp.load_from_checkpoint(loader, p + "mlp.")
 
-                moe_layer.allocate_experts_w2_for_loading()
-                w2_param = self.get_parameter(p + "mlp.experts_w2")
-                w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
-                w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                for j in range(expert_start, expert_end):
-                    local_idx = j - expert_start
-                    dw = loader.load_tensor(se + f"{j}.down_proj.weight")
-                    ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
-                    do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
-                    w2_param.data[local_idx].copy_(loader.shard(dw, 1, shard_world, shard_rank).contiguous())
-                    w2_scale.data[local_idx].copy_(ds.contiguous())
-                    w2_offset.data[local_idx].copy_(do.contiguous())
-                loader.copy_in(p + "mlp.gate.weight", loader.load_tensor(p + "mlp.gate.weight"))
-                loader.copy_in(
-                    p + "mlp.e_score_correction_bias", loader.load_tensor(p + "mlp.gate.e_score_correction_bias")
-                )
-                saved_tp = (loader.tp_size, loader.tp_rank)
-                loader.tp_size = shard_world
-                loader.tp_rank = shard_rank
-                loader.load_w8a8_b(p + "mlp.shared_experts.")
-                loader.tp_size, loader.tp_rank = saved_tp
-                self.model.layers[i].mlp.process_weights_after_loading()
-
-        loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))
-        loader.copy_in("lm_head.weight", loader.shard(loader.load_tensor("lm_head.weight"), dim=0))
+        loader.copy_replicated("model.norm.weight")
+        loader.copy_shard("lm_head.weight", dim=0)

@@ -26,7 +26,8 @@ from xllm.python import distributed, kernels
 from xllm.python.layers import RMSNorm
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.qwen3 import Qwen3Config, Qwen3Model
+from xllm.python.models.qwen3 import Qwen3Config, Qwen3Model, load_qwen3_backbone
+from xllm.python.models.weight_utils import WeightLoader, kv_replica_shard
 
 
 @dataclass
@@ -231,93 +232,22 @@ class DFlashQwen3Model(Qwen3Model):
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         cfg = self.cfg
-        kv_replicas = tp_size // cfg.n_kv_heads if cfg.n_kv_heads < tp_size else 1
-        kv_rank = tp_rank // kv_replicas if kv_replicas > 1 else tp_rank
-        kv_world = tp_size // kv_replicas if kv_replicas > 1 else tp_size
+        loader = WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("", "model."))
+        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
 
-        def find(name: str):
-            candidates = (name, f"model.{name}")
-            for candidate in candidates:
-                for state_dict in state_dicts:
-                    if state_dict.has(candidate):
-                        return state_dict, candidate
-            return None
+        self.fc.load_weight(loader.load_tensor("fc.weight"), tp_rank)
+        loader.copy_replicated("hidden_norm.weight")
 
-        def load_tensor(name: str) -> torch.Tensor:
-            found = find(name)
-            if found is None:
-                raise KeyError(f"checkpoint tensor not found: {name}")
-            state_dict, key = found
-            return state_dict.get_tensor(key)
+        load_qwen3_backbone(
+            loader,
+            self.layers,
+            kv_world=kv_world,
+            kv_rank=kv_rank,
+            attention_bias=cfg.attention_bias,
+            dst_prefix="",
+        )
 
-        def shard(name: str, dim: int, kv: bool = False) -> torch.Tensor:
-            tensor = load_tensor(name)
-            rank = kv_rank if kv else tp_rank
-            world = kv_world if kv else tp_size
-            if world <= 1:
-                return tensor
-            chunk_size = tensor.size(dim) // world
-            return tensor.narrow(dim, rank * chunk_size, chunk_size).contiguous()
-
-        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
-            param = self.get_parameter(param_name)
-            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-        self.fc.load_weight(load_tensor("fc.weight"), tp_rank)
-        copy_in("hidden_norm.weight", load_tensor("hidden_norm.weight"))
-
-        for layer_id in range(cfg.n_layers):
-            prefix = f"layers.{layer_id}."
-            target = f"layers.{layer_id}."
-            for norm_name in (
-                "input_layernorm.weight",
-                "post_attention_layernorm.weight",
-                "self_attn.q_norm.weight",
-                "self_attn.k_norm.weight",
-            ):
-                copy_in(target + norm_name, load_tensor(prefix + norm_name))
-
-            q_weight = shard(prefix + "self_attn.q_proj.weight", dim=0)
-            k_weight = shard(prefix + "self_attn.k_proj.weight", dim=0, kv=True)
-            v_weight = shard(prefix + "self_attn.v_proj.weight", dim=0, kv=True)
-            copy_in(
-                target + "self_attn.qkv_proj.weight",
-                torch.cat((q_weight, k_weight, v_weight)),
-            )
-            copy_in(
-                target + "self_attn.o_proj.weight",
-                shard(prefix + "self_attn.o_proj.weight", dim=1),
-            )
-
-            if cfg.attention_bias:
-                q_bias = shard(prefix + "self_attn.q_proj.bias", dim=0)
-                k_bias = shard(prefix + "self_attn.k_proj.bias", dim=0, kv=True)
-                v_bias = shard(prefix + "self_attn.v_proj.bias", dim=0, kv=True)
-                copy_in(
-                    target + "self_attn.qkv_proj.bias",
-                    torch.cat((q_bias, k_bias, v_bias)),
-                )
-                copy_in(
-                    target + "self_attn.o_proj.bias",
-                    load_tensor(prefix + "self_attn.o_proj.bias"),
-                )
-
-            gate_weight = shard(prefix + "mlp.gate_proj.weight", dim=0)
-            up_weight = shard(prefix + "mlp.up_proj.weight", dim=0)
-            copy_in(
-                target + "mlp.gate_up_proj.weight",
-                torch.cat((gate_weight, up_weight)),
-            )
-            copy_in(
-                target + "mlp.down_proj.weight",
-                shard(prefix + "mlp.down_proj.weight", dim=1),
-            )
-
-            layer = self.layers[layer_id]
-            layer.self_attn.o_proj.process_weights_after_loading()
-            layer.mlp.down_proj.process_weights_after_loading()
-
-        copy_in("norm.weight", load_tensor("norm.weight"))
+        loader.copy_replicated("norm.weight")
         self._build_context_kv_buffers()
 
 
