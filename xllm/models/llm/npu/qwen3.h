@@ -15,8 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <c10/core/DeviceGuard.h>
 #include <torch/nn/functional/normalization.h>
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -27,6 +29,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/state_dict/state_dict.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -62,6 +65,8 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     norm_ = register_module("norm", layer::NpuRMSNorm(context));
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
+    restored_embed_tokens_ = register_module("restored_embed_tokens",
+                                             layer::NpuWordEmbedding(context));
     atb_pos_emb_ = layer::NpuPosEmbedding(context);
     cos_sin_ = layer::rotary::get_concat_rotary_embedding(
         128,
@@ -84,6 +89,78 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       layers_.push_back(block);
       blocks_->push_back(block);
     }
+  }
+
+  void load_restored_embed_tokens(const StateDict& state_dict,
+                                  torch::Tensor global_rotation,
+                                  const torch::Device& device) {
+    auto embed_weight = state_dict.get_tensor("embed_tokens.weight");
+    if (!embed_weight.defined()) {
+      return;
+    }
+
+    CHECK_EQ(embed_weight.dim(), 2) << "Embedding weight must be a 2D tensor";
+    CHECK_EQ(global_rotation.dim(), 2)
+        << "QuaRot global_rotation must be a 2D tensor";
+    CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
+        << "QuaRot global_rotation must be square";
+    CHECK_EQ(embed_weight.size(1), global_rotation.size(0))
+        << "QuaRot global_rotation hidden size mismatch, expected "
+        << embed_weight.size(1) << ", got " << global_rotation.size(0);
+
+    torch::Tensor restored;
+    {
+      torch::DeviceGuard device_guard(device);
+      auto npu_options =
+          torch::TensorOptions().dtype(torch::kFloat32).device(device);
+      auto cpu_options = torch::TensorOptions()
+                             .dtype(embed_weight.scalar_type())
+                             .device(torch::kCPU);
+      auto embed_weight_npu =
+          embed_weight.to(npu_options, /*non_blocking=*/false, /*copy=*/true)
+              .contiguous();
+      auto rotation_t_npu =
+          global_rotation.to(npu_options, /*non_blocking=*/false, /*copy=*/true)
+              .transpose(0, 1)
+              .contiguous();
+      restored = torch::matmul(embed_weight_npu, rotation_t_npu)
+                     .to(cpu_options, /*non_blocking=*/false, /*copy=*/true)
+                     .contiguous();
+    }
+    StateDict embed_state_dict({{"weight", restored}});
+    restored_embed_tokens_->load_state_dict(embed_state_dict);
+    has_restored_embed_tokens_ = true;
+  }
+
+  bool has_restored_embed_tokens() const { return has_restored_embed_tokens_; }
+
+  bool has_restored_npu_word_embedding() const {
+    return has_restored_embed_tokens_;
+  }
+
+  void verify_restored_embed_tokens(const std::string& prefix) const {
+    if (has_restored_embed_tokens_) {
+      restored_embed_tokens_->verify_loaded_weights(prefix + "embed_tokens.");
+    }
+  }
+
+  void merge_restored_embed_tokens() {
+    if (has_restored_embed_tokens_) {
+      restored_embed_tokens_->merge_loaded_weights();
+    }
+  }
+
+  void merge_and_move_restored_embed_tokens() {
+    if (has_restored_embed_tokens_) {
+      restored_embed_tokens_->merge_and_move_pinned_host();
+    }
+  }
+
+  layer::NpuWordEmbedding get_npu_word_embedding() override {
+    if (has_restored_embed_tokens_) {
+      return restored_embed_tokens_;
+    }
+    return LlmModelImplBase<QWen3DecoderLayer>::get_npu_word_embedding();
   }
 
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -243,13 +320,16 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
  private:
   torch::Tensor viusal_pos_mask_;
   AuxHiddenCapture aux_capture_;
+  bool has_restored_embed_tokens_ = false;
+  layer::NpuWordEmbedding restored_embed_tokens_{nullptr};
 };
 TORCH_MODULE(QWen3Model);
 
 class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
  public:
   QWen3ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<QWen3Model>(context) {}
+      : LlmForCausalLMImplBase<QWen3Model>(context),
+        device_(context.get_tensor_options().device()) {}
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
@@ -260,6 +340,142 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
     return torch::nn::functional::normalize(
         h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
   }
+
+  bool has_restored_npu_word_embedding() const {
+    return model_->has_restored_npu_word_embedding();
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> loader,
+                  std::string prefix = "model.") override {
+    torch::Tensor global_rotation =
+        load_optional_quarot_rotation(loader->model_weights_path());
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      auto model_state_dict = state_dict->get_dict_with_prefix(
+          std::vector<std::string>{"model.language_model.",
+                                   "language_model.model.",
+                                   prefix,
+                                   "model.",
+                                   ""});
+      model_->load_state_dict(model_state_dict);
+      if (global_rotation.defined()) {
+        model_->load_restored_embed_tokens(
+            model_state_dict, global_rotation, device_);
+      }
+      if (!embedding_mode_) {
+        if (tie_word_embeddings) {
+          npu_lm_head_->load_state_dict(
+              state_dict->get_dict_with_prefix(std::vector<std::string>{
+                  prefix + "embed_tokens.", "embed_tokens."}));
+        } else {
+          npu_lm_head_->load_state_dict(
+              state_dict->get_dict_with_prefix("lm_head."));
+        }
+      }
+    }
+
+    model_->verify_loaded_weights(prefix);
+    model_->verify_restored_embed_tokens(prefix);
+    if (!embedding_mode_) {
+      if (tie_word_embeddings) {
+        npu_lm_head_->verify_loaded_weights("embed_tokens.");
+      } else {
+        npu_lm_head_->verify_loaded_weights("lm_head.");
+      }
+    }
+
+    model_->merge_loaded_weights();
+    model_->merge_restored_embed_tokens();
+    if (!embedding_mode_) {
+      npu_lm_head_->merge_loaded_weights();
+    }
+  }
+
+  void lazy_load_model(std::unique_ptr<ModelLoader> loader,
+                       std::string prefix = "model.") override {
+    if (keep_host_weights) {
+      LOG(INFO) << "Model weights are already kept on host.";
+      return;
+    }
+    torch::Tensor global_rotation =
+        load_optional_quarot_rotation(loader->model_weights_path());
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      auto model_state_dict = state_dict->get_dict_with_prefix(
+          std::vector<std::string>{"model.language_model.",
+                                   "language_model.model.",
+                                   prefix,
+                                   "model.",
+                                   ""});
+      model_->load_state_dict(model_state_dict);
+      if (global_rotation.defined()) {
+        model_->load_restored_embed_tokens(
+            model_state_dict, global_rotation, device_);
+      }
+      if (!embedding_mode_) {
+        if (tie_word_embeddings) {
+          npu_lm_head_->load_state_dict(
+              state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
+        } else {
+          npu_lm_head_->load_state_dict(
+              state_dict->get_dict_with_prefix("lm_head."));
+        }
+      }
+    }
+
+    model_->verify_loaded_weights(prefix);
+    model_->verify_restored_embed_tokens(prefix);
+    if (!embedding_mode_) {
+      if (tie_word_embeddings) {
+        npu_lm_head_->verify_loaded_weights(prefix + "embed_tokens.");
+      } else {
+        npu_lm_head_->verify_loaded_weights("lm_head.");
+      }
+    }
+
+    model_->merge_and_move_pinned_host();
+    model_->merge_and_move_restored_embed_tokens();
+    if (!embedding_mode_) {
+      npu_lm_head_->merge_and_move_pinned_host();
+    }
+
+    keep_host_weights = true;
+  }
+
+ private:
+  torch::Tensor load_optional_quarot_rotation(
+      const std::filesystem::path& model_path) {
+    const std::filesystem::path quarot_path =
+        model_path / "optional" / "quarot.safetensors";
+    if (!std::filesystem::exists(quarot_path)) {
+      return torch::Tensor();
+    }
+
+    auto state_dict = StateDictFromSafeTensor::load(quarot_path.string());
+    torch::Tensor global_rotation = state_dict->get_tensor("global_rotation");
+    if (!global_rotation.defined()) {
+      LOG(WARNING) << "Optional QuaRot file exists but global_rotation is "
+                      "missing: "
+                   << quarot_path.string();
+      return torch::Tensor();
+    }
+    CHECK_EQ(global_rotation.dim(), 2)
+        << "QuaRot global_rotation must be a 2D tensor";
+    CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
+        << "QuaRot global_rotation must be square";
+
+    auto global_rotation_cpu = global_rotation
+                                   .to(torch::TensorOptions()
+                                           .dtype(torch::kFloat32)
+                                           .device(torch::kCPU),
+                                       /*non_blocking=*/false,
+                                       /*copy=*/true)
+                                   .contiguous();
+    LOG(INFO) << "Loaded optional QuaRot global_rotation from "
+              << quarot_path.string()
+              << ", shape=" << global_rotation_cpu.sizes();
+    return global_rotation_cpu;
+  }
+
+  torch::Device device_;
 };
 TORCH_MODULE(QWen3ForCausalLM);
 

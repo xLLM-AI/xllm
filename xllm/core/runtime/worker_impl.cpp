@@ -1190,6 +1190,13 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
       input, processed_input, *prepare_stream_);
 }
 
+std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& /*input*/,
+    Stream& /*compute_stream*/) {
+  LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
+  return std::nullopt;
+}
+
 void WorkerImpl::prepare_work_before_execute_on_stream(
     const ForwardInput& input,
     ForwardInput& processed_input,
@@ -1913,6 +1920,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   device_.set_seed(random_seed);
 
   auto model_loader = ModelLoader::create(model_weights_path);
+  if (options_.is_draft_engine() && !options_.model_path().empty() &&
+      options_.model_path() != model_weights_path) {
+    model_loader->set_reference_model_weights_path(options_.model_path());
+  }
   model_weights_path_ = std::move(model_weights_path);
 
   auto args = model_loader->model_args();

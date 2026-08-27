@@ -51,8 +51,12 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
   virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
+      Stream& compute_stream) override;
+
+  std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
       Stream& compute_stream,
-      bool record_ready_event = true);
+      bool record_ready_event);
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
       const ForwardInput& input);
@@ -83,8 +87,16 @@ class LLMWorkerImpl : public WorkerImpl {
     return model_->get_npu_word_embedding();
   };
 
+  bool has_restored_npu_word_embedding() {
+    return model_->has_restored_npu_word_embedding();
+  };
+
   void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     model_->set_npu_word_embedding(embedding);
+  };
+
+  void set_restored_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
+    model_->set_restored_npu_word_embedding(embedding);
   };
 
 #endif
@@ -115,7 +127,6 @@ class LLMWorkerImpl : public WorkerImpl {
   bool share_weights_from(LLMWorkerImpl& source) {
     return model_->share_weights_from(*source.model_);
   }
-
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no
   // attention and its shape doesn't match the decode graph. See CausalLM.

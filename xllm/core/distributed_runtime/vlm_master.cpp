@@ -44,6 +44,11 @@ namespace xllm {
 
 namespace {
 
+bool should_use_vlm_speculative_engine(const Options& options) {
+  return options.speculative_algorithm() != "Suffix" &&
+         !options.draft_model_path().value_or("").empty();
+}
+
 std::vector<Message> build_user_messages_from_image_urls(
     std::string prompt,
     const std::vector<std::string>& image_urls) {
@@ -62,12 +67,14 @@ std::vector<Message> build_user_messages_from_image_urls(
 }  // namespace
 
 VLMMaster::VLMMaster(const Options& options)
-    : Master(options, EngineType::VLM) {
+    : Master(options,
+             should_use_vlm_speculative_engine(options) ? EngineType::VLMSSM
+                                                        : EngineType::VLM) {
   if (!is_leader()) {
     return;
   }
 
-  CHECK(engine_->init());
+  CHECK(engine_->init(master_status_));
 
   model_args_ = engine_->model_args();
 
@@ -87,6 +94,7 @@ VLMMaster::VLMMaster(const Options& options)
       .max_seqs_per_batch(options.max_seqs_per_batch())
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())
+      .num_speculative_tokens(options_.num_speculative_tokens())
       .dp_size(options_.dp_size())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_chunked_prefill(options_.enable_chunked_prefill())

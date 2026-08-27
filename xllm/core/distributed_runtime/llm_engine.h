@@ -152,6 +152,8 @@ class LLMEngine : public Engine {
   bool xtensor_sleep(MasterStatus master_status);
   bool xtensor_wakeup(const WakeupOptions& options);
 
+  template <typename TargetEngine>
+  friend class SpeculativeEngineBase;
   // setup workers internal
   void setup_workers(const runtime::Options& options);
   bool init_model(MasterStatus master_status = MasterStatus::WAKEUP);

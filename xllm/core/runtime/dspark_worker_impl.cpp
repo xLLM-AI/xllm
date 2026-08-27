@@ -24,6 +24,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "framework/parallel_state/process_group.h"
 #include "framework/sampling/sampler.h"
+#include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
 
 namespace xllm {

@@ -28,6 +28,8 @@ class ColumParallelLinearLoader : public BaseLoader {
   void load_state_dict(const StateDict& state_dict) override;
   void verify_loaded_weights() const override;
   void verify_loaded_weights(const std::string& weight_str) const override;
+
+  void fuse_eagle3_quarot_input_rotation(torch::Tensor global_rotation);
 };
 }  // namespace layer
 }  // namespace xllm

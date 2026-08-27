@@ -139,8 +139,13 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
     return nullptr;
   }
+  virtual bool has_restored_npu_word_embedding() { return false; }
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     NOT_IMPLEMENTED();
+  }
+  virtual void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) {
+    set_npu_word_embedding(embedding);
   }
 
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,
@@ -418,11 +423,28 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
+  bool has_restored_npu_word_embedding() override {
+    if constexpr (detail::has_restored_npu_word_embedding<Model>::value) {
+      return model_->has_restored_npu_word_embedding();
+    } else {
+      return CausalLM::has_restored_npu_word_embedding();
+    }
+  }
+
   void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
     if constexpr (detail::has_set_npu_word_embedding<Model>::value) {
       model_->set_npu_word_embedding(embedding);
     } else {
       CausalLM::set_npu_word_embedding(embedding);
+    }
+  }
+
+  void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) override {
+    if constexpr (detail::has_set_restored_npu_word_embedding<Model>::value) {
+      model_->set_restored_npu_word_embedding(embedding);
+    } else {
+      CausalLM::set_restored_npu_word_embedding(embedding);
     }
   }
 

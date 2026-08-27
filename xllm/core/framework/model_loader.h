@@ -44,6 +44,13 @@ class ModelLoader {
   virtual std::string model_weights_path() const = 0;
   virtual int64_t get_total_weight_size() const { return 0; }
 
+  void set_reference_model_weights_path(const std::string& path) {
+    reference_model_weights_path_ = path;
+  }
+  const std::string& reference_model_weights_path() const {
+    return reference_model_weights_path_;
+  }
+
   // Returns the total byte size of non-decoder-layer weights
   // (embed_tokens, norm, lm_head). Used by rolling load to size XTensor
   // weight pages without including decoder layer weights.
@@ -60,6 +67,7 @@ class ModelLoader {
   QuantArgs quant_args_;
   // tokenizer args
   TokenizerArgs tokenizer_args_;
+  std::string reference_model_weights_path_;
 
  public:
   // create a model loader from the given path
