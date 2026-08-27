@@ -392,17 +392,21 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       // the draft backbone/Markov head project through the wrong vocabulary
       // basis and reduces acceptance to near-random levels.
     } else {
+      const bool python_weights_shared =
+          draft_impl_->share_weights_from(*impl_);
+      if (!python_weights_shared) {
 #if defined(USE_NPU)
-      auto head = impl_->get_npu_lm_head();
-      draft_impl_->set_npu_lm_head(head);
-      auto word_embedding = impl_->get_npu_word_embedding();
-      draft_impl_->set_npu_word_embedding(word_embedding);
+        auto head = impl_->get_npu_lm_head();
+        draft_impl_->set_npu_lm_head(head);
+        auto word_embedding = impl_->get_npu_word_embedding();
+        draft_impl_->set_npu_word_embedding(word_embedding);
 #else
-      auto head = impl_->get_lm_head();
-      draft_impl_->set_lm_head(head);
-      auto word_embedding = impl_->get_word_embedding();
-      draft_impl_->set_word_embedding(word_embedding);
+        auto head = impl_->get_lm_head();
+        draft_impl_->set_lm_head(head);
+        auto word_embedding = impl_->get_word_embedding();
+        draft_impl_->set_word_embedding(word_embedding);
 #endif
+      }
     }
 
     JsonReader reader;

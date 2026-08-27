@@ -23,7 +23,7 @@ from xllm.python.model_executor.forward_context import (
     LayerSynchronizer,
     forward_context,
 )
-from xllm.python.model_executor.runners.base import BaseRunner
+from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOutput
 
 
 def _per_seq_lens_from_metadata(metadata: AttentionMetadata) -> list[int] | None:
@@ -53,7 +53,7 @@ class EagerRunner(BaseRunner):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
-    ) -> torch.Tensor:
+    ) -> ModelExecutionOutput:
         self.attention_backend.prepare(metadata)
 
         cp_context = None

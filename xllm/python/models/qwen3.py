@@ -43,6 +43,7 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
     record_layer_event,
 )  # noqa: F401
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
 
 
@@ -65,6 +66,7 @@ class Qwen3Config:
     tp_rank: int = 0
     dp_size: int = 1
     dp_rank: int = 0
+    layers_to_capture: tuple[int, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3Config:
@@ -94,6 +96,7 @@ class Qwen3Config:
             tp_rank=int(pick("tp_rank", default=0)),
             dp_size=int(pick("dp_size", default=1)),
             dp_rank=int(pick("dp_rank", default=0)),
+            layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
         )
 
     def head_split(self) -> tuple[int, int, int]:
@@ -113,7 +116,14 @@ class Qwen3Config:
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(self, cfg: Qwen3Config, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        cfg: Qwen3Config,
+        layer_id: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        causal: bool = True,
+    ) -> None:
         super().__init__()
         self.layer_id = layer_id
         num_heads, num_kv_heads, replicas = cfg.head_split()
@@ -149,6 +159,7 @@ class Qwen3Attention(nn.Module):
             scale=self.head_dim**-0.5,
             sliding_window=cfg.sliding_window,
             layer_id=layer_id,
+            causal=causal,
         )
 
     def forward(
@@ -217,11 +228,12 @@ class Qwen3DecoderLayer(nn.Module):
         layer_id: int,
         dtype: torch.dtype,
         device: torch.device,
+        causal: bool = True,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
         self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
-        self.self_attn = Qwen3Attention(cfg, layer_id, dtype, device)
+        self.self_attn = Qwen3Attention(cfg, layer_id, dtype, device, causal=causal)
         self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.mlp = GatedMLP(
             cfg.hidden_size,
@@ -255,13 +267,27 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
-    def __init__(self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        cfg: Qwen3Config,
+        dtype: torch.dtype,
+        device: torch.device,
+        *,
+        causal: bool = True,
+        create_embedding: bool = True,
+    ) -> None:
         super().__init__()
         tp = cfg.tp_size
         assert cfg.hidden_size % tp == 0
-        self.embed_tokens = HiddenParallelEmbedding(
-            cfg.vocab_size, cfg.hidden_size // tp, tp, dtype=dtype, device=device
-        )
+        self.embed_tokens: HiddenParallelEmbedding | None = None
+        if create_embedding:
+            self.embed_tokens = HiddenParallelEmbedding(
+                cfg.vocab_size,
+                cfg.hidden_size // tp,
+                tp,
+                dtype=dtype,
+                device=device,
+            )
         self.rotary = RotaryEmbedding(
             cfg.head_dim,
             cfg.max_position_embeddings,
@@ -269,15 +295,25 @@ class Qwen3Model(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.layers = nn.ModuleList([Qwen3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
+        self.layers = nn.ModuleList(
+            Qwen3DecoderLayer(cfg, i, dtype, device, causal=causal) for i in range(cfg.n_layers)
+        )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+        invalid_capture_layers = [layer_id for layer_id in cfg.layers_to_capture if layer_id >= cfg.n_layers]
+        if invalid_capture_layers:
+            raise ValueError(
+                f"layers_to_capture must be smaller than n_layers ({cfg.n_layers}): {invalid_capture_layers}"
+            )
+        self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         mrope_section: list[int] | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.embed_tokens is None:
+            raise RuntimeError("input embedding has not been initialized")
         hidden = self.embed_tokens(input_ids)
         # The fused QK-norm+RoPE kernel requires int64 position ids, but C++
         # passes them as int32. Cast once here instead of once per layer. In the
@@ -290,10 +326,14 @@ class Qwen3Model(nn.Module):
         # active on prefill with cp_size>1; cp_context is None otherwise.
         cp_context = get_forward_context().cp_context
         if cp_context is not None:
+            if self.aux_hidden_capture.enabled:
+                raise NotImplementedError("aux hidden capture does not support context parallelism")
             hidden = cp_shard_rows(hidden, cp_context)
             positions = cp_shard_positions(positions, cp_context).contiguous()
         residual: torch.Tensor | None = None
+        aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden)
         for i, layer in enumerate(self.layers):
+            self.aux_hidden_capture.capture_layer(i, hidden, residual, aux_hidden_buffer)
             hidden, residual = layer(
                 hidden,
                 residual,
@@ -307,7 +347,7 @@ class Qwen3Model(nn.Module):
         hidden, _ = self.norm(hidden, residual)
         if cp_context is not None:
             hidden = cp_merge_rows(hidden, cp_context)
-        return hidden
+        return self.aux_hidden_capture.finalize(hidden, aux_hidden_buffer)
 
 
 class Qwen3ForCausalLM(PyModelBase):
