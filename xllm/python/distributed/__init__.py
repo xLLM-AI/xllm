@@ -26,6 +26,10 @@ from xllm.python.distributed.collectives import (
     init_process_group,
     init_tp_group,
     layerwise_rank,
+    moe_ep_all_reduce,
+    moe_tp_all_reduce,
+    tp_all_gather,
+    tp_all_reduce,
     tp_rank,
 )
 
@@ -37,6 +41,10 @@ __all__ = [
     "cp_world_size",
     "layerwise_rank",
     "broadcast_",
+    "tp_all_reduce",
+    "tp_all_gather",
+    "moe_tp_all_reduce",
+    "moe_ep_all_reduce",
     "all_reduce_",
     "all_gather",
     "all_gather_variable",

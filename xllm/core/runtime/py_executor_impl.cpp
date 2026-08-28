@@ -42,6 +42,8 @@ namespace py = pybind11;
 namespace xllm {
 namespace {
 
+thread_local PyCausalLM* active_py_causal_lm = nullptr;
+
 py::object optional_tensor(const torch::Tensor& tensor) {
   return tensor.defined() ? py::cast(tensor) : py::none();
 }
@@ -67,6 +69,31 @@ void clear_python_object(py::object& object) {
 
 void register_xllm_runtime_module(py::module_& m) {
   register_attention_metadata_views(m);
+
+  m.def("tp_all_reduce", [](torch::Tensor tensor) {
+    if (active_py_causal_lm != nullptr) {
+      active_py_causal_lm->tp_all_reduce(tensor);
+    }
+    return tensor;
+  });
+  m.def("tp_all_gather", [](torch::Tensor tensor, int64_t dim) {
+    if (active_py_causal_lm != nullptr) {
+      return active_py_causal_lm->tp_all_gather(tensor, dim);
+    }
+    return tensor;
+  });
+  m.def("moe_tp_all_reduce", [](torch::Tensor tensor) {
+    if (active_py_causal_lm != nullptr) {
+      active_py_causal_lm->moe_tp_all_reduce(tensor);
+    }
+    return tensor;
+  });
+  m.def("moe_ep_all_reduce", [](torch::Tensor tensor) {
+    if (active_py_causal_lm != nullptr) {
+      active_py_causal_lm->moe_ep_all_reduce(tensor);
+    }
+    return tensor;
+  });
 
 #if defined(USE_NPU)
   py::class_<NPULayerSynchronizerImpl,
@@ -120,7 +147,12 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
 }
 
-PyExecutorImpl::~PyExecutorImpl() { clear_python_object(py_executor_); }
+PyExecutorImpl::~PyExecutorImpl() {
+  if (active_py_causal_lm == py_causal_lm_) {
+    active_py_causal_lm = nullptr;
+  }
+  clear_python_object(py_executor_);
+}
 
 ForwardInput PyExecutorImpl::prepare_inputs(Batch& batch) {
   return batch.prepare_forward_input(
@@ -133,6 +165,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                 const ModelInputParams& params) {
   torch::NoGradGuard no_grad;
   COUNTER_INC(num_model_execution_total_eager);
+  active_py_causal_lm = py_causal_lm_;
 
   // Build or reuse attention metadata.
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =

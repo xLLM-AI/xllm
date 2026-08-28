@@ -362,6 +362,9 @@ class CsaAttentionBackend(AttentionBackend):
         # different ACL optional-input path and causes small decode drift.
         use_prefill_attn = is_prefill or is_chunked_prefill
         cu_seqlens_ori_kv_for_attn = seq_q if use_prefill_attn else None
+        sinks = getattr(layer, "attn_sink", None) if getattr(layer, "attn_sink_loaded", False) else None
+        if sinks is not None:
+            sinks = sinks.to(q.device, dtype=torch.float32).contiguous()
         out, _lse = _sparse_attn_sharedkv(
             q=q,
             ori_kv=ori_kv_for_attn,
@@ -379,7 +382,7 @@ class CsaAttentionBackend(AttentionBackend):
             seqused_kv=seq_kv,
             # sinks: the attention sink parameter (attn_sink) is required by the
             # sparse_attn_sharedkv kernel (C++ :949 passes attn_sink_ when loaded).
-            sinks=layer.attn_sink if hasattr(layer, "attn_sink") else None,
+            sinks=sinks,
             metadata=sparse_meta_for_kernel,
             softmax_scale=self.scale,
             cmp_ratio=compress_ratio,
