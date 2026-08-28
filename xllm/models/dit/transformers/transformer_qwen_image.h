@@ -159,6 +159,34 @@ inline torch::Tensor qwen_image_joint_attention(
 }
 
 namespace qwenimage {
+#if defined(USE_NPU)
+inline torch::Tensor qwen_npu_fusion_attention_v3(
+    const torch::Tensor& joint_query,
+    const torch::Tensor& joint_key,
+    const torch::Tensor& joint_value,
+    int64_t head_num) {
+  const double scale = std::pow(static_cast<double>(joint_query.size(3)), -0.5);
+  auto query_bnsd = joint_query.permute({0, 2, 1, 3}).contiguous();
+  auto key_bnsd = joint_key.permute({0, 2, 1, 3}).contiguous();
+  auto value_bnsd = joint_value.permute({0, 2, 1, 3}).contiguous();
+  auto results = at_npu::native::custom_ops::npu_fusion_attention_v3(
+      query_bnsd,
+      key_bnsd,
+      value_bnsd,
+      head_num,
+      /*input_layout=*/"BNSD",
+      /*pse=*/torch::nullopt,
+      /*padding_mask=*/torch::nullopt,
+      /*atten_mask=*/torch::nullopt,
+      scale,
+      /*keep_prob=*/1.0,
+      /*pre_tockens=*/65535,
+      /*next_tockens=*/65535);
+  return std::get<0>(results).permute({0, 2, 1, 3}).contiguous();
+}
+
+#endif
+
 // TODO: This class should be extracted from dit class and integrated into a
 // common class.
 class RMSNormImpl final : public torch::nn::Module {
@@ -1644,21 +1672,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto joint_value = torch::cat({txt_value, img_value}, 1);
 
 #if defined(USE_NPU)
-    auto results = at_npu::native::custom_ops::npu_fusion_attention(
+    auto joint_hidden_states = qwenimage::qwen_npu_fusion_attention_v3(
         joint_query,
         joint_key,
         joint_value,
-        heads / ::xllm::ParallelConfig::get_instance().sp_size(),
-        /*input_layout=*/"BSND",
-        /*pse=*/torch::nullopt,
-        /*padding_mask=*/torch::nullopt,
-        /*atten_mask*/ torch::nullopt,
-        /*scale=*/pow(joint_query.size(3), -0.5),
-        /*keep_prob=*/1.0,
-        /*pre_tockens=*/65535,
-        /*next_tockens=*/65535);
-
-    auto joint_hidden_states = std::get<0>(results);
+        heads / ::xllm::ParallelConfig::get_instance().sp_size());
 #else
     auto joint_hidden_states =
         qwen_image_joint_attention(joint_query, joint_key, joint_value);
@@ -1824,21 +1842,8 @@ class QwenDoubleStreamAttnProcessorCMO2_0Impl : public torch::nn::Module {
     auto joint_value = torch::cat({txt_value, img_value}, 1);
 
 #if defined(USE_NPU)
-    auto results = at_npu::native::custom_ops::npu_fusion_attention(
-        joint_query,
-        joint_key,
-        joint_value,
-        q_heads_ / sp_size,
-        /*input_layout=*/"BSND",
-        /*pse=*/torch::nullopt,
-        /*padding_mask=*/torch::nullopt,
-        /*atten_mask*/ torch::nullopt,
-        /*scale=*/pow(joint_query.size(3), -0.5),
-        /*keep_prob=*/1.0,
-        /*pre_tockens=*/65535,
-        /*next_tockens=*/65535);
-
-    auto joint_hidden_states = std::get<0>(results);
+    auto joint_hidden_states = qwenimage::qwen_npu_fusion_attention_v3(
+        joint_query, joint_key, joint_value, q_heads_ / sp_size);
 #else
     auto joint_hidden_states =
         qwen_image_joint_attention(joint_query, joint_key, joint_value);
