@@ -77,6 +77,16 @@ bool MLUBatchMemcpy::submit_h2d(const std::vector<torch::Tensor>& src_tensors,
               CompletionMode::SUBMIT_ONLY);
 }
 
+bool MLUBatchMemcpy::submit_d2h(const std::vector<torch::Tensor>& src_tensors,
+                                const std::vector<torch::Tensor>& dst_tensors,
+                                Stream* stream) {
+  return copy(src_tensors,
+              dst_tensors,
+              stream,
+              Direction::D2H,
+              CompletionMode::SUBMIT_ONLY);
+}
+
 bool MLUBatchMemcpy::copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                               const std::vector<torch::Tensor>& dst_tensors,
                               Stream* stream) {

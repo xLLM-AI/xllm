@@ -5,6 +5,17 @@ get_filename_component(_xllm_build_import_root
 
 cc_test(
   NAME
+    pack_cache_blocks_test
+  SRCS
+    pack_cache_blocks_test.cpp
+  DEPS
+    :mlu_kernels
+    torch
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     scaled_quantize_mlu_test
   SRCS
     scaled_quantize_test.cpp

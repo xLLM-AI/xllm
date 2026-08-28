@@ -78,6 +78,8 @@ class Platform final {
     return is_npu() || is_mlu();
   }
 
+  static constexpr bool supports_compact_host_kv_transfer() { return is_mlu(); }
+
   static constexpr bool supports_mtp_decode_graph_warmup() {
     return is_mlu() || is_npu();
   }

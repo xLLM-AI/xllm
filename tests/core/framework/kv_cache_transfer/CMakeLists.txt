@@ -67,6 +67,29 @@ target_link_libraries(mooncake_transfer_engine_test PRIVATE
   "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
 endif()
 
+if(USE_MLU)
+cc_test(
+  NAME
+    compact_load_test
+  SRCS
+    host_transfer/compact_load_test.cpp
+  DEPS
+    :kv_cache_transfer
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    compact_offload_test
+  SRCS
+    host_transfer/compact_offload_test.cpp
+  DEPS
+    :kv_cache_transfer
+    GTest::gtest_main
+)
+
+endif()
+
 if(USE_NPU OR USE_MLU)
 cc_test(
   NAME

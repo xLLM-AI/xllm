@@ -37,6 +37,10 @@ class MLUBatchMemcpy final : public BatchMemcpy {
                   const std::vector<torch::Tensor>& dst_tensors,
                   Stream* stream) override;
 
+  bool submit_d2h(const std::vector<torch::Tensor>& src_tensors,
+                  const std::vector<torch::Tensor>& dst_tensors,
+                  Stream* stream) override;
+
   bool copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                 const std::vector<torch::Tensor>& dst_tensors,
                 Stream* stream) override;

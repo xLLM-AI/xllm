@@ -22,13 +22,90 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "framework/kv_cache_transfer/host_transfer/compact_transfer.h"
 #include "framework/kv_cache_transfer/host_transfer/layout.h"
+#include "framework/kv_cache_transfer/host_transfer/transfer.h"
 #include "platform/device.h"
 #include "platform/layer_synchronizer.h"
 #include "platform/platform.h"
 
 namespace xllm {
 namespace {
+
+HostKVLayout make_layout(const Device& device, int64_t num_layers) {
+  const torch::TensorOptions host_options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+  const torch::TensorOptions device_options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(device.unwrap());
+  HostKVGroupLayout group;
+  group.group_id = 9;
+  group.host_roles.emplace(KVCacheTensorRole::KEY,
+                           torch::zeros({1, num_layers, 1}, host_options));
+  group.layers.reserve(num_layers);
+  for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    group.layers.emplace_back(HostKVLayerLayout{
+        layer_id,
+        layer_id,
+        {{KVCacheTensorRole::KEY, torch::zeros({1, 1}, device_options)}}});
+  }
+  return HostKVLayout(num_layers, {std::move(group)}, device.unwrap());
+}
+
+TEST(BasicHostKVTransferTest, KeepsLayerBatchingEdgeSemantics) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "An accelerator device is required for Host KV transfer.";
+  }
+
+  Device device(/*device_index=*/0);
+  device.set_device();
+  device.init_device_context();
+  std::unique_ptr<Stream> compute_stream = device.current_stream();
+
+  BasicHostKVTransfer single_window(make_layout(device, /*num_layers=*/4),
+                                    device,
+                                    *compute_stream,
+                                    /*layer_copy_batches=*/0);
+  HostKVLoadHandle single_handle = single_window.prepare_load();
+  EXPECT_EQ(single_handle.synchronizer->size(), 1U);
+  EXPECT_EQ(single_handle.layers_per_event, 4U);
+  single_window.drain();
+
+  BasicHostKVTransfer per_layer(make_layout(device, /*num_layers=*/4),
+                                device,
+                                *compute_stream,
+                                /*layer_copy_batches=*/8);
+  HostKVLoadHandle per_layer_handle = per_layer.prepare_load();
+  EXPECT_EQ(per_layer_handle.synchronizer->size(), 4U);
+  EXPECT_EQ(per_layer_handle.layers_per_event, 1U);
+  per_layer.drain();
+}
+
+TEST(HostKVTransferFactoryTest, SelectsConfiguredStrategy) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "An accelerator device is required for Host KV transfer.";
+  }
+
+  Device device(/*device_index=*/0);
+  device.set_device();
+  device.init_device_context();
+  std::unique_ptr<Stream> compute_stream = device.current_stream();
+
+  HostKVTransferConfig config;
+  std::unique_ptr<HostKVTransfer> automatic = create_host_kv_transfer(
+      make_layout(device, /*num_layers=*/1), device, *compute_stream, config);
+  if (Platform::supports_compact_host_kv_transfer()) {
+    EXPECT_NE(dynamic_cast<CompactHostKVTransfer*>(automatic.get()), nullptr);
+  } else {
+    EXPECT_NE(dynamic_cast<BasicHostKVTransfer*>(automatic.get()), nullptr);
+  }
+  automatic->drain();
+
+  config.mode = HostKVTransferMode::BASIC;
+  std::unique_ptr<HostKVTransfer> basic = create_host_kv_transfer(
+      make_layout(device, /*num_layers=*/1), device, *compute_stream, config);
+  EXPECT_NE(dynamic_cast<BasicHostKVTransfer*>(basic.get()), nullptr);
+  basic->drain();
+}
 
 TEST(BasicHostKVTransferTest, RoundTripUsesConfiguredLayerEventGroups) {
   if (Platform::device_count() < 1) {

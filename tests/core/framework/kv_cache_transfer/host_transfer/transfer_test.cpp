@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "framework/kv_cache_transfer/host_transfer/layout.h"
+#include "framework/kv_cache_transfer/host_transfer/transfer_utils.h"
 #include "platform/layer_synchronizer.h"
 
 namespace xllm {
@@ -111,10 +112,60 @@ TEST(HostKVTransferTest, RejectsInvalidRequestsBeforeSubmission) {
   EXPECT_FALSE(transfer.load(HostKVRequest{}, handle));
   EXPECT_FALSE(transfer.offload(HostKVRequest{}));
   EXPECT_FALSE(transfer.load(HostKVRequest{{HostKVMapping{99, 0, 0}}}, handle));
+  EXPECT_FALSE(transfer.load(HostKVRequest{{HostKVMapping{3, -1, 0}}}, handle));
+  EXPECT_FALSE(transfer.offload(HostKVRequest{{HostKVMapping{3, 0, -1}}}));
   EXPECT_FALSE(transfer.offload(HostKVRequest{{HostKVMapping{3, 2, 0}}}));
   EXPECT_FALSE(transfer.load(HostKVRequest{{HostKVMapping{3, 0, 2}}}, handle));
   EXPECT_EQ(transfer.load_calls(), 0U);
   EXPECT_EQ(transfer.offload_calls(), 0U);
+}
+
+TEST(HostKVTransferUtilsTest, GetsLayersPerEventForRequestedBatchCount) {
+  EXPECT_EQ(get_layers_per_event(/*num_layers=*/7, /*requested_batches=*/0),
+            7U);
+  EXPECT_EQ(get_layers_per_event(/*num_layers=*/7, /*requested_batches=*/1),
+            7U);
+  EXPECT_EQ(get_layers_per_event(/*num_layers=*/7, /*requested_batches=*/3),
+            2U);
+  EXPECT_EQ(get_layers_per_event(/*num_layers=*/7, /*requested_batches=*/7),
+            1U);
+  EXPECT_EQ(get_layers_per_event(/*num_layers=*/7, /*requested_batches=*/9),
+            1U);
+  EXPECT_DEATH(get_layers_per_event(/*num_layers=*/0, /*requested_batches=*/1),
+               "layer count must be positive");
+}
+
+TEST(HostKVTransferUtilsTest, BuildsRangesIncludingPartialTail) {
+  const std::vector<LayerRange> ranges =
+      build_layer_ranges(/*num_layers=*/7, /*layers_per_event=*/2);
+
+  ASSERT_EQ(ranges.size(), 4U);
+  EXPECT_EQ(ranges[0].begin, 0);
+  EXPECT_EQ(ranges[0].end, 2);
+  EXPECT_EQ(ranges[1].begin, 2);
+  EXPECT_EQ(ranges[1].end, 4);
+  EXPECT_EQ(ranges[2].begin, 4);
+  EXPECT_EQ(ranges[2].end, 6);
+  EXPECT_EQ(ranges[3].begin, 6);
+  EXPECT_EQ(ranges[3].end, 7);
+}
+
+TEST(HostKVTransferUtilsTest, GroupsInOrderAndPreservesMappingOrder) {
+  const HostKVRequest request{
+      {HostKVMapping{7, 3, 1}, HostKVMapping{3, 4, 0}, HostKVMapping{7, 2, 0}}};
+
+  const GroupedHostKVMappings grouped = group_mappings(request);
+
+  ASSERT_EQ(grouped.size(), 2U);
+  auto group_it = grouped.begin();
+  EXPECT_EQ(group_it->first, 3);
+  ASSERT_EQ(group_it->second.size(), 1U);
+  EXPECT_EQ(group_it->second[0].host_block_id, 4);
+  ++group_it;
+  EXPECT_EQ(group_it->first, 7);
+  ASSERT_EQ(group_it->second.size(), 2U);
+  EXPECT_EQ(group_it->second[0].host_block_id, 3);
+  EXPECT_EQ(group_it->second[1].host_block_id, 2);
 }
 
 TEST(HostKVTransferTest, EnforcesDirectionScopedDestinations) {

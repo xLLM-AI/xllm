@@ -61,6 +61,31 @@ class ScopedBatchCopyFault final {
   ScopedBatchCopyFault& operator=(const ScopedBatchCopyFault&) = delete;
 };
 
+class DefaultD2HBatchMemcpy final : public xllm::BatchMemcpy {
+ public:
+  void init(int32_t /*device_id*/) override {}
+
+  bool submit_h2d(const std::vector<torch::Tensor>& /*src_tensors*/,
+                  const std::vector<torch::Tensor>& /*dst_tensors*/,
+                  xllm::Stream* /*stream*/) override {
+    return true;
+  }
+
+  bool copy_d2h(const std::vector<torch::Tensor>& /*src_tensors*/,
+                const std::vector<torch::Tensor>& /*dst_tensors*/,
+                xllm::Stream* /*stream*/) override {
+    ++copy_calls_;
+    return copy_result_;
+  }
+
+  void set_copy_result(bool copy_result) { copy_result_ = copy_result; }
+  int32_t copy_calls() const { return copy_calls_; }
+
+ private:
+  bool copy_result_ = true;
+  int32_t copy_calls_ = 0;
+};
+
 void wait_for_queue_gate(void* user_data) {
   std::atomic<bool>* gate_open = static_cast<std::atomic<bool>*>(user_data);
   while (!gate_open->load(std::memory_order_acquire)) {
@@ -114,6 +139,17 @@ extern "C" CNresult __wrap_cnQueueSync(CNqueue queue) {
 
 namespace xllm::mlu {
 namespace {
+
+TEST(BatchMemcpyTest, SubmitD2HFallsBackToSynchronousCopy) {
+  DefaultD2HBatchMemcpy batch_memcpy;
+
+  EXPECT_TRUE(batch_memcpy.submit_d2h({}, {}, nullptr));
+  EXPECT_EQ(batch_memcpy.copy_calls(), 1);
+
+  batch_memcpy.set_copy_result(false);
+  EXPECT_FALSE(batch_memcpy.submit_d2h({}, {}, nullptr));
+  EXPECT_EQ(batch_memcpy.copy_calls(), 2);
+}
 
 std::vector<torch::Tensor> rows(const torch::Tensor& tensor) {
   std::vector<torch::Tensor> result;
@@ -253,6 +289,85 @@ TEST_F(MLUBatchMemcpyTest, SubmitH2DReturnsBeforeCopyStreamCompletes) {
   EXPECT_TRUE(torch::all(device_tensor.cpu() == 23).item<bool>());
 }
 
+TEST_F(MLUBatchMemcpyTest, SubmitD2HReturnsBeforeCopyStreamCompletes) {
+  torch::Tensor source;
+  HostPageAlignedRegion source_region;
+  create_host_page_aligned_tensor({16}, torch::kUInt8, &source, &source_region);
+  source.fill_(29);
+  const torch::Tensor device_tensor = torch::zeros(
+      {16},
+      torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  torch::Tensor restored;
+  HostPageAlignedRegion restored_region;
+  create_host_page_aligned_tensor(
+      {16}, torch::kUInt8, &restored, &restored_region);
+  ASSERT_TRUE(
+      batch_memcpy_->submit_h2d({source}, {device_tensor}, stream_.get()));
+  ASSERT_EQ(stream_->synchronize(), 0);
+
+  std::atomic<bool> gate_open{false};
+  ASSERT_EQ(
+      cnrtInvokeHostFunc(
+          stream_->get_stream()->stream(), wait_for_queue_gate, &gate_open),
+      cnrtSuccess);
+  std::future<bool> submit_result =
+      std::async(std::launch::async, [this, &device_tensor, &restored]() {
+        device_->set_device();
+        device_->init_device_context();
+        return batch_memcpy_->submit_d2h(
+            {device_tensor}, {restored}, stream_.get());
+      });
+  const std::future_status submit_status =
+      submit_result.wait_for(std::chrono::milliseconds(250));
+  gate_open.store(true, std::memory_order_release);
+
+  ASSERT_EQ(submit_result.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(submit_result.get());
+  ASSERT_EQ(stream_->synchronize(), 0);
+  EXPECT_EQ(submit_status, std::future_status::ready);
+  EXPECT_TRUE(torch::equal(source, restored));
+}
+
+TEST_F(MLUBatchMemcpyTest, CopyD2HWaitsForCopyStreamCompletes) {
+  torch::Tensor source;
+  HostPageAlignedRegion source_region;
+  create_host_page_aligned_tensor({16}, torch::kUInt8, &source, &source_region);
+  source.fill_(41);
+  const torch::Tensor device_tensor = torch::zeros(
+      {16},
+      torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  torch::Tensor restored;
+  HostPageAlignedRegion restored_region;
+  create_host_page_aligned_tensor(
+      {16}, torch::kUInt8, &restored, &restored_region);
+  ASSERT_TRUE(
+      batch_memcpy_->submit_h2d({source}, {device_tensor}, stream_.get()));
+  ASSERT_EQ(stream_->synchronize(), 0);
+
+  std::atomic<bool> gate_open{false};
+  ASSERT_EQ(
+      cnrtInvokeHostFunc(
+          stream_->get_stream()->stream(), wait_for_queue_gate, &gate_open),
+      cnrtSuccess);
+  std::future<bool> copy_result =
+      std::async(std::launch::async, [this, &device_tensor, &restored]() {
+        device_->set_device();
+        device_->init_device_context();
+        return batch_memcpy_->copy_d2h(
+            {device_tensor}, {restored}, stream_.get());
+      });
+  const std::future_status copy_status =
+      copy_result.wait_for(std::chrono::milliseconds(100));
+  gate_open.store(true, std::memory_order_release);
+
+  ASSERT_EQ(copy_result.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_TRUE(copy_result.get());
+  EXPECT_EQ(copy_status, std::future_status::timeout);
+  EXPECT_TRUE(torch::equal(source, restored));
+}
+
 TEST_F(MLUBatchMemcpyTest, SubmissionFailureDrainsPreviouslySubmittedChunks) {
   constexpr int64_t kDescriptorCount = 4097;
   torch::Tensor host;
@@ -297,6 +412,58 @@ TEST_F(MLUBatchMemcpyTest, SubmissionFailureDrainsPreviouslySubmittedChunks) {
   EXPECT_TRUE(torch::all(device_tensor[4096].cpu() == 0).item<bool>());
 }
 
+TEST_F(MLUBatchMemcpyTest,
+       D2HSubmissionFailureDrainsPreviouslySubmittedChunks) {
+  constexpr int64_t kDescriptorCount = 4097;
+  torch::Tensor source;
+  HostPageAlignedRegion source_region;
+  create_host_page_aligned_tensor(
+      {kDescriptorCount, 1}, torch::kUInt8, &source, &source_region);
+  source.fill_(37);
+  const torch::Tensor device_tensor = torch::zeros(
+      {kDescriptorCount, 1},
+      torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  torch::Tensor restored;
+  HostPageAlignedRegion restored_region;
+  create_host_page_aligned_tensor(
+      {kDescriptorCount, 1}, torch::kUInt8, &restored, &restored_region);
+  restored.zero_();
+  ASSERT_TRUE(batch_memcpy_->submit_h2d(
+      rows(source), rows(device_tensor), stream_.get()));
+  ASSERT_EQ(stream_->synchronize(), 0);
+
+  std::atomic<bool> gate_open{false};
+  ASSERT_EQ(
+      cnrtInvokeHostFunc(
+          stream_->get_stream()->stream(), wait_for_queue_gate, &gate_open),
+      cnrtSuccess);
+  ScopedBatchCopyFault fault(BatchCopyFault::FAIL_SECOND_SUBMISSION);
+  const std::vector<torch::Tensor> device_rows = rows(device_tensor);
+  const std::vector<torch::Tensor> restored_rows = rows(restored);
+  std::future<bool> submit_result =
+      std::async(std::launch::async, [this, &device_rows, &restored_rows]() {
+        device_->set_device();
+        device_->init_device_context();
+        return batch_memcpy_->submit_d2h(
+            device_rows, restored_rows, stream_.get());
+      });
+
+  const std::future_status drain_status =
+      submit_result.wait_for(std::chrono::milliseconds(100));
+  gate_open.store(true, std::memory_order_release);
+
+  ASSERT_EQ(submit_result.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_FALSE(submit_result.get());
+  EXPECT_EQ(drain_status, std::future_status::timeout);
+  EXPECT_EQ(g_batch_submit_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(g_queue_sync_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_TRUE(
+      torch::all(restored.slice(/*dim=*/0, /*start=*/0, /*end=*/4096) == 37)
+          .item<bool>());
+  EXPECT_TRUE(torch::all(restored[4096] == 0).item<bool>());
+}
+
 TEST_F(MLUBatchMemcpyTest, UndrainableSubmissionFailureTerminatesProcess) {
   torch::Tensor host;
   HostPageAlignedRegion host_region;
@@ -332,9 +499,15 @@ TEST_F(MLUBatchMemcpyTest, RejectsInvalidInputs) {
   EXPECT_FALSE(
       batch_memcpy_->copy_d2h({host[0]}, {device_tensor[0]}, stream_.get()));
   EXPECT_FALSE(
+      batch_memcpy_->submit_d2h({host[0]}, {device_tensor[0]}, stream_.get()));
+  EXPECT_FALSE(
       batch_memcpy_->submit_h2d({host[0]}, {device_tensor[0]}, nullptr));
+  EXPECT_FALSE(
+      batch_memcpy_->submit_d2h({device_tensor[0]}, {host[0]}, nullptr));
   EXPECT_FALSE(batch_memcpy_->submit_h2d(
       {torch::Tensor()}, {device_tensor[0]}, stream_.get()));
+  EXPECT_FALSE(
+      batch_memcpy_->submit_d2h({torch::Tensor()}, {host[0]}, stream_.get()));
 }
 
 TEST_F(MLUBatchMemcpyTest, RejectsStreamFromAnotherDevice) {
@@ -356,6 +529,8 @@ TEST_F(MLUBatchMemcpyTest, RejectsStreamFromAnotherDevice) {
 
   EXPECT_FALSE(
       batch_memcpy_->submit_h2d({host}, {other_tensor}, stream_.get()));
+  EXPECT_FALSE(
+      batch_memcpy_->submit_d2h({other_tensor}, {host}, stream_.get()));
 }
 
 TEST_F(MLUBatchMemcpyTest, DeviceStreamPoolUsesRepresentedDevice) {
