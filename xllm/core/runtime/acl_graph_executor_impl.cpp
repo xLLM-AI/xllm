@@ -224,6 +224,13 @@ ModelOutput forward_eager(CausalLM* model,
   return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 
+bool is_mla_graph_eagle3_target(const CausalLM* model,
+                                const runtime::Options& options) {
+  return model->supports_mla_graph_kv_bucketing() &&
+         options.enable_speculative_decode() && !options.is_draft_engine() &&
+         options.speculative_algorithm() == "Eagle3";
+}
+
 void hash_graph_key_value(uint64_t& hash, uint64_t value) {
   constexpr uint64_t kFnvPrime = 1099511628211ull;
   for (int32_t i = 0; i < 8; ++i) {
@@ -1027,6 +1034,14 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << options_.cp_size()
         << ") shards prefill rows, which the captured graph shape does not "
            "describe.";
+    COUNTER_INC(num_model_execution_total_eager);
+    return run_eager();
+  }
+  if (is_mla_graph_eagle3_target(model_, options_)) {
+    LOG_FIRST_N(WARNING, 1)
+        << "Falling back to eager mode for MLA Eagle3 target validation; the "
+           "ACL graph path is not adapted for Eagle3 aux hidden-state "
+           "validation yet.";
     COUNTER_INC(num_model_execution_total_eager);
     return run_eager();
   }

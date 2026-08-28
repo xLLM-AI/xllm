@@ -856,7 +856,7 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
     // only their transformer body is replicated with TP1 parallel arguments.
     if (!draft_owns_shared_weights) {
       const bool python_weights_shared =
-          draft_impl_->WorkerImpl::share_weights_from(*impl_);
+          draft_impl_->share_weights_from(*impl_);
       if (!python_weights_shared) {
         const bool share_lm_head = share_target_lm_head_with_draft();
 #if defined(USE_NPU)

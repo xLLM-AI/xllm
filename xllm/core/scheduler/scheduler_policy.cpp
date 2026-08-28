@@ -101,6 +101,57 @@ SchedulerPolicy::SchedulerPolicy(const BatchMode& mode,
                                  const ContinuousScheduler::Options& options)
     : batch_mode_(mode), options_(options) {}
 
+bool SchedulerPolicy::should_limit_prefill_requests(
+    const SchedulerState& state) const {
+  return state.model_args.max_concurrent_prefills_per_dp() > 0;
+}
+
+int32_t SchedulerPolicy::select_prefill_dp_rank(
+    const Sequence* sequence,
+    const SchedulerState& state) const {
+  const size_t cap = static_cast<size_t>(
+      state.model_args.max_concurrent_prefills_per_dp());
+  const int32_t dp_size = state.options.dp_size();
+  std::vector<size_t> per_dp_counts(dp_size, 0);
+  for (const auto& request : state.running_requests) {
+    if (request == nullptr) {
+      continue;
+    }
+    std::vector<bool> counted_dp_ranks(dp_size, false);
+    for (const auto& running_sequence : request->sequences()) {
+      if (!running_sequence || !running_sequence->is_prefill_stage()) {
+        continue;
+      }
+      const int32_t dp_rank = running_sequence->dp_rank();
+      if (dp_rank >= 0 && dp_rank < dp_size && !counted_dp_ranks[dp_rank]) {
+        ++per_dp_counts[dp_rank];
+        counted_dp_ranks[dp_rank] = true;
+      }
+    }
+  }
+
+  const int32_t current_dp_rank = sequence->dp_rank();
+  if (current_dp_rank >= 0 && current_dp_rank < dp_size) {
+    return per_dp_counts[current_dp_rank] < cap ? current_dp_rank : -1;
+  }
+
+  const std::vector<size_t> free_blocks =
+      state.kv_cache_manager->num_free_blocks();
+  int32_t selected_dp_rank = -1;
+  size_t selected_free_blocks = 0;
+  for (int32_t dp_rank = 0; dp_rank < dp_size; ++dp_rank) {
+    if (static_cast<size_t>(dp_rank) >= free_blocks.size() ||
+        per_dp_counts[dp_rank] >= cap) {
+      continue;
+    }
+    if (selected_dp_rank < 0 || free_blocks[dp_rank] > selected_free_blocks) {
+      selected_dp_rank = dp_rank;
+      selected_free_blocks = free_blocks[dp_rank];
+    }
+  }
+  return selected_dp_rank;
+}
+
 void SchedulerPolicy::adjust_latency_budget_and_reorder(
     RequestPriorityQueue* /*first_queue*/,
     RequestPriorityQueue* /*second_queue*/,
@@ -240,6 +291,20 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     for (auto& prefill_sequence : request->sequences()) {
       if (prefill_sequence->finished()) {
         continue;
+      }
+
+      if (should_limit_prefill_requests(state)) {
+        const int32_t dp_rank =
+            select_prefill_dp_rank(prefill_sequence.get(), state);
+        if (dp_rank < 0) {
+          LOG_EVERY_N(INFO, 100)
+              << "[prefill_cap] no eligible DP rank is below the cap of "
+              << state.model_args.max_concurrent_prefills_per_dp()
+              << " prefill requests; deferring remaining prefills";
+          can_schedule = false;
+          break;
+        }
+        prefill_sequence->set_dp_rank(dp_rank);
       }
 
       size_t num_tokens = compute_prefill_tokens(

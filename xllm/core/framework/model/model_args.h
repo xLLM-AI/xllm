@@ -452,9 +452,10 @@ struct ModelArgs {
   // Enables the target-side runtime path for an embedded Eagle3 draft.
   PROPERTY(bool, enable_embedded_eagle3_draft) = false;
 
-  // Maximum media-prefill requests admitted concurrently on each DP rank.
+  // Workaround knob: maximum prefill requests admitted concurrently on each
+  // DP rank for models that need bounded prefill concurrency.
   // Zero keeps the limit disabled.
-  PROPERTY(int32_t, max_concurrent_media_prefills_per_dp) = 0;
+  PROPERTY(int32_t, max_concurrent_prefills_per_dp) = 0;
 
   // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
