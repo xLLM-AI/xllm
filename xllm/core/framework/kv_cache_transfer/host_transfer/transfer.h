@@ -31,8 +31,14 @@ struct HostKVLoadHandle {
   uint32_t layers_per_event = 1;
 };
 
+enum class HostKVTransferMode : uint8_t {
+  AUTO,
+  BASIC,
+};
+
 struct HostKVTransferConfig {
   uint32_t layer_copy_batches = 1;
+  HostKVTransferMode mode = HostKVTransferMode::AUTO;
 };
 
 class HostKVTransfer {

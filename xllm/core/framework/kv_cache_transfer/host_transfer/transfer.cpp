@@ -24,7 +24,10 @@ limitations under the License.
 #include <utility>
 
 #include "framework/kv_cache_transfer/host_transfer/basic_transfer.h"
+#include "framework/kv_cache_transfer/host_transfer/compact_transfer.h"
+#include "platform/batch_memcpy.h"
 #include "platform/layer_synchronizer.h"
+#include "platform/platform.h"
 
 namespace xllm {
 namespace {
@@ -116,6 +119,11 @@ std::unique_ptr<HostKVTransfer> create_host_kv_transfer(
     const Device& device,
     const Stream& compute_stream,
     const HostKVTransferConfig& config) {
+  if (config.mode == HostKVTransferMode::AUTO &&
+      Platform::supports_compact_host_kv_transfer()) {
+    return std::make_unique<CompactHostKVTransfer>(
+        std::move(layout), device, compute_stream, config.layer_copy_batches);
+  }
   return std::make_unique<BasicHostKVTransfer>(
       std::move(layout), device, compute_stream, config.layer_copy_batches);
 }

@@ -33,6 +33,7 @@ class BatchMemcpy {
 
   virtual void init(int32_t device_id) = 0;
 
+  // After initialization, submissions may arrive concurrently from streams.
   // Submits H2D copies without waiting for stream completion. A true result
   // requires the caller to protect buffer lifetime with stream ordering,
   // events, or explicit synchronization. A false result guarantees that any
@@ -42,6 +43,14 @@ class BatchMemcpy {
   virtual bool submit_h2d(const std::vector<torch::Tensor>& src_tensors,
                           const std::vector<torch::Tensor>& dst_tensors,
                           Stream* stream) = 0;
+
+  // Submits D2H copies. The default keeps synchronous D2H behavior for
+  // backends without submit-only support.
+  virtual bool submit_d2h(const std::vector<torch::Tensor>& src_tensors,
+                          const std::vector<torch::Tensor>& dst_tensors,
+                          Stream* stream) {
+    return copy_d2h(src_tensors, dst_tensors, stream);
+  }
 
   virtual bool copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                         const std::vector<torch::Tensor>& dst_tensors,

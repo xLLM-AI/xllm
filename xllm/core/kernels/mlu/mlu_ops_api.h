@@ -27,6 +27,10 @@ limitations under the License.
 
 namespace xllm::kernel::mlu {
 
+void pack_cache_blocks(const std::vector<torch::Tensor>& sources,
+                       const torch::Tensor& block_ids,
+                       const std::vector<torch::Tensor>& destinations);
+
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,
                   const torch::Tensor& sin,

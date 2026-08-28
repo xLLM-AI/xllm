@@ -69,6 +69,7 @@ cc_library(
     host_transfer/layout.h
     host_transfer/transfer.h
     host_transfer/basic_transfer.h
+    host_transfer/compact_transfer.h
     prefetch_result.h
     hierarchy_kv_cache_transfer.h
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_transfer_engine.h>
@@ -79,7 +80,11 @@ cc_library(
     kv_cache_store.cpp
     host_transfer/layout.cpp
     host_transfer/transfer.cpp
+    host_transfer/transfer_utils.cpp
     host_transfer/basic_transfer.cpp
+    host_transfer/compact_transfer.cpp
+    host_transfer/compact_load_executor.cpp
+    host_transfer/compact_offload_executor.cpp
     hierarchy_kv_cache_transfer.cpp
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_transfer_engine.cpp>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>
@@ -102,4 +107,5 @@ cc_library(
     proto::xllm_proto
     $<$<BOOL:${USE_NPU}>:platform_npu>
     $<$<BOOL:${USE_DCU}>:hip::host>
+    $<$<BOOL:${USE_MLU}>:mlu_kernels>
 )

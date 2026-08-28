@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "framework/kv_cache_transfer/host_transfer/transfer_utils.h"
 #include "platform/batch_memcpy.h"
 #include "platform/device.h"
 #include "platform/layer_synchronizer.h"
@@ -33,11 +34,6 @@ namespace {
 
 constexpr int32_t kStreamTimeoutMs = 60000;
 constexpr size_t kCopyStreamCount = 6;
-
-struct LayerRange {
-  int64_t begin = 0;
-  int64_t end = 0;
-};
 
 struct CopyPlan {
   std::vector<torch::Tensor> src_tensors;
@@ -77,23 +73,6 @@ class CopyStreamLease final {
   CopyStreamQueue* streams_ = nullptr;
   std::unique_ptr<Stream> stream_;
 };
-
-std::vector<LayerRange> build_ranges(int64_t num_layers,
-                                     uint32_t requested_batches) {
-  std::vector<LayerRange> ranges;
-  uint32_t layers_per_event =
-      requested_batches == 0
-          ? static_cast<uint32_t>(num_layers)
-          : static_cast<uint32_t>(num_layers) / requested_batches;
-  layers_per_event = std::max<uint32_t>(layers_per_event, 1);
-  ranges.reserve((static_cast<uint32_t>(num_layers) + layers_per_event - 1) /
-                 layers_per_event);
-  for (int64_t begin = 0; begin < num_layers; begin += layers_per_event) {
-    ranges.emplace_back(
-        LayerRange{begin, std::min(begin + layers_per_event, num_layers)});
-  }
-  return ranges;
-}
 
 CopyPlan build_plan(const HostKVLayout& layout,
                     const HostKVRequest& request,
@@ -144,7 +123,9 @@ class BasicHostKVTransfer::Impl final {
       : layout_(layout),
         device_(device),
         compute_stream_(compute_stream),
-        ranges_(build_ranges(layout.num_layers(), layer_copy_batches)),
+        layers_per_event_(
+            get_layers_per_event(layout.num_layers(), layer_copy_batches)),
+        ranges_(build_layer_ranges(layout.num_layers(), layers_per_event_)),
         batch_memcpy_(std::move(batch_memcpy)) {
     if (batch_memcpy_ == nullptr) {
       batch_memcpy_ = create_batch_memcpy(device_);
@@ -164,9 +145,7 @@ class BasicHostKVTransfer::Impl final {
 
   uint32_t event_count() const { return static_cast<uint32_t>(ranges_.size()); }
 
-  uint32_t layers_per_event() const {
-    return static_cast<uint32_t>(ranges_.front().end - ranges_.front().begin);
-  }
+  uint32_t layers_per_event() const { return layers_per_event_; }
 
   bool load(const HostKVRequest& request, const HostKVLoadHandle& handle) {
     CopyStreamLease stream(&streams_);
@@ -223,6 +202,7 @@ class BasicHostKVTransfer::Impl final {
   const HostKVLayout& layout_;
   Device device_;
   const Stream& compute_stream_;
+  uint32_t layers_per_event_ = 1;
   std::vector<LayerRange> ranges_;
   std::unique_ptr<BatchMemcpy> batch_memcpy_;
   CopyStreamQueue streams_;

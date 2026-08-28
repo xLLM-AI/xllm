@@ -178,6 +178,8 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
     create_host_cache(device_groups);
     HostKVTransferConfig config;
     config.layer_copy_batches = options_.layers_wise_copy_batchs();
+    config.mode = options_.enable_kvcache_store() ? HostKVTransferMode::BASIC
+                                                  : HostKVTransferMode::AUTO;
     host_kv_transfer_ =
         create_host_kv_transfer(create_host_kv_layout(device_groups, layer_ids),
                                 device_,
