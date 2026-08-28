@@ -26,14 +26,15 @@ limitations under the License. -->
 
 ### 📢 新闻
 <!-- only keep the latest 3 news, others should be folded -->
+- 2026-08-27: 🎉  我们 day-0 支持了[GLM-5.3-Flash](https://modelscope.cn/models/ZhipuAI/GLM-5.3-Flash)模型的推理服务，部署请参考[部署文档](https://github.com/xLLM-AI/xllm/blob/preview/glm-5.3-flash/testspace/run_glm_53_flash.sh)。
 - 2026-07-06: 🎉 xLLM 正式捐赠给开放原子开源基金会！
 - 2026-06-13: 🎉 我们 day-0 支持了[MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) 模型的推理服务，部署请参考[部署文档](https://github.com/xLLM-AI/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh)。
-- 2026-04-24: 🎉 我们 day-0 支持了[DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) 模型的推理服务，部署请参考[部署文档](https://github.com/xLLM-AI/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh)。
 
 
 <details>
 <summary>更多新闻</summary>
 
+- 2026-04-24: 🎉  我们 day-0 支持了[DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) 模型的推理服务，部署请参考[部署文档](https://github.com/xLLM-AI/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh)。
 - 2026-02-12: 🎉 我们 day-0 支持了最新的[GLM-5](https://github.com/zai-org/GLM-5) 模型的高效推理服务，部署请参考[部署文档](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md)。
 - 2025-12-21: 🎉 我们在第一时间内支持了[GLM-4.7](https://github.com/zai-org)模型的高效推理。
 - 2025-12-08: 🎉 我们在第一时间内支持了[GLM-4.6V](https://github.com/zai-org/GLM-V)模型的高效推理。

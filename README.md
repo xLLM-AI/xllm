@@ -26,13 +26,14 @@ limitations under the License. -->
 
 ### 📢 News
 <!-- only keep the latest 3 news, others should be folded -->
+- 2026-08-27: 🎉  We day-0 support the [GLM-5.3-Flash](https://modelscope.cn/models/ZhipuAI/GLM-5.3-Flash) model, please refer to the [Deployment  Document](https://github.com/xLLM-AI/xllm/blob/preview/glm-5.3-flash/testspace/run_glm_53_flash.sh) for deployment.
 - 2026-07-06: 🎉 xLLM is officially donated to the OpenAtom Foundation!
 - 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/xLLM-AI/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
-- 2026-04-24: 🎉 We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model, please refer to the [Deployment Document](https://github.com/xLLM-AI/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
 
 <details>
 <summary>More News</summary>
 
+- 2026-04-24: 🎉  We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model, please refer to the [Deployment Document](https://github.com/xLLM-AI/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
 - 2026-02-12: 🎉 We day-0 support high-performance inference for the [GLM-5](https://github.com/zai-org/GLM-5) model, please refer to the [Deployment Document](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md) for deployment.
 - 2025-12-21: 🎉 We day-0 support high-performance inference for the [GLM-4.7](https://github.com/zai-org) model.
 - 2025-12-08: 🎉 We day-0 support high-performance inference for the [GLM-4.6V](https://github.com/zai-org/GLM-V) model.
