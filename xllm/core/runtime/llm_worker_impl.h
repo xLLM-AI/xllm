@@ -76,41 +76,7 @@ class LLMWorkerImpl : public WorkerImpl {
 #if defined(USE_NPU)
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const Stream& signal_stream);
-
-  layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };
-
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    model_->set_npu_lm_head(head);
-  };
-
-  layer::NpuWordEmbedding get_npu_word_embedding() {
-    return model_->get_npu_word_embedding();
-  };
-
-  bool has_restored_npu_word_embedding() {
-    return model_->has_restored_npu_word_embedding();
-  };
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
-    model_->set_npu_word_embedding(embedding);
-  };
-
-  void set_restored_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
-    model_->set_restored_npu_word_embedding(embedding);
-  };
-
 #endif
-  layer::LmHead get_lm_head() { return model_->get_lm_head(); };
-
-  void set_lm_head(layer::LmHead& head) { model_->set_lm_head(head); };
-
-  layer::WordEmbedding get_word_embedding() {
-    return model_->get_word_embedding();
-  };
-
-  void set_word_embedding(layer::WordEmbedding& embedding) {
-    model_->set_word_embedding(embedding);
-  };
 
   torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
     return model_->dspark_markov_bias(previous_token_ids);
@@ -124,9 +90,6 @@ class LLMWorkerImpl : public WorkerImpl {
     return model_->has_dspark_confidence_head();
   }
 
-  bool share_weights_from(LLMWorkerImpl& source) {
-    return model_->share_weights_from(*source.model_);
-  }
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no
   // attention and its shape doesn't match the decode graph. See CausalLM.

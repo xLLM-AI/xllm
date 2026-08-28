@@ -572,6 +572,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -584,6 +585,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = nullptr,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,
@@ -635,6 +637,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -647,6 +650,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = &profile_manager,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,
@@ -707,6 +711,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -719,6 +724,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = &profile_manager,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,
@@ -803,6 +809,7 @@ TEST(SchedulerPolicyTest,
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -815,6 +822,7 @@ TEST(SchedulerPolicyTest,
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = nullptr,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,
@@ -895,6 +903,7 @@ TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -907,6 +916,7 @@ TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = nullptr,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,
@@ -1017,6 +1027,7 @@ TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1029,6 +1040,7 @@ TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = nullptr,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,
@@ -1118,6 +1130,7 @@ TEST(SchedulerPolicyTest,
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
+  ModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1130,6 +1143,7 @@ TEST(SchedulerPolicyTest,
       .kv_cache_manager = &block_manager_pool,
       .profile_manager = nullptr,
       .response_processor = nullptr,
+      .model_args = model_args,
       .last_step_prefill = last_step_prefill,
       .options = options,
       .min_speculative_tokens_required = 0,

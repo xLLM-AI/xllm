@@ -140,8 +140,6 @@ class LLMEngine : public Engine {
           layer_offsets) override;
 
  private:
-  friend class SpeculativeEngine;
-
   // ---- RL deep-sleep path (SleepableAllocator), isolated from the xtensor
   // ---- (PageAllocator) sleep/wakeup path. ----
   // True when the engine uses the RL SleepableAllocator path (enable_sleep_mode

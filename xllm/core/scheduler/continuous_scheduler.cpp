@@ -396,6 +396,7 @@ SchedulerState ContinuousScheduler::make_state() {
       .kv_cache_manager = kv_cache_manager_,
       .profile_manager = profile_manager_.get(),
       .response_processor = response_processor_.get(),
+      .model_args = engine_->model_args(),
       .last_step_prefill = last_step_prefill_,
       .options = options_,
       .min_speculative_tokens_required = min_speculative_tokens_required_,
