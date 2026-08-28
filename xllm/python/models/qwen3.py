@@ -289,11 +289,6 @@ class Qwen3Model(nn.Module):
             Qwen3DecoderLayer(cfg, i, dtype, device, causal=causal) for i in range(cfg.n_layers)
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
-        invalid_capture_layers = [layer_id for layer_id in cfg.layers_to_capture if layer_id >= cfg.n_layers]
-        if invalid_capture_layers:
-            raise ValueError(
-                f"layers_to_capture must be smaller than n_layers ({cfg.n_layers}): {invalid_capture_layers}"
-            )
         self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
 
     def forward(
@@ -323,7 +318,6 @@ class Qwen3Model(nn.Module):
         residual: torch.Tensor | None = None
         aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden)
         for i, layer in enumerate(self.layers):
-            self.aux_hidden_capture.capture_layer(i, hidden, residual, aux_hidden_buffer)
             hidden, residual = layer(
                 hidden,
                 residual,
@@ -333,6 +327,7 @@ class Qwen3Model(nn.Module):
                 None,
                 mrope_section,
             )
+            self.aux_hidden_capture.capture_layer(i, hidden, residual, aux_hidden_buffer)
             record_layer_event(i)
         hidden, _ = self.norm(hidden, residual)
         if cp_context is not None:

@@ -104,7 +104,7 @@ def test_qwen3_model_returns_captured_residual_streams_in_config_order(
     assert isinstance(output, tuple)
     hidden, aux_hidden = output
     torch.testing.assert_close(hidden, embedded + 6.0)
-    torch.testing.assert_close(aux_hidden, torch.cat((embedded + 3.0, embedded + 1.0), dim=-1))
+    torch.testing.assert_close(aux_hidden, torch.cat((embedded + 6.0, embedded + 3.0), dim=-1))
 
 
 def test_qwen3_model_returns_tensor_when_capture_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
