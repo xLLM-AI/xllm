@@ -554,6 +554,10 @@ if(USE_NPU)
       $ENV{ATB_HOME_PATH}/lib
       $ENV{NPU_TOOLKIT_HOME}/lib64
   )
+  if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+    add_link_options(
+      "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+  endif()
   ## Adapt to the modification in DeekSeekV4 where the installation path of xllm_ops has been changed to custom_xllm_math
   if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/lib")
     link_directories(

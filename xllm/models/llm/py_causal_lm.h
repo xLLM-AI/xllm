@@ -93,6 +93,11 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   bool share_weights_from(CausalLM& source) override;
 
+  void tp_all_reduce(torch::Tensor& tensor);
+  torch::Tensor tp_all_gather(const torch::Tensor& tensor, int64_t dim);
+  void moe_tp_all_reduce(torch::Tensor& tensor);
+  void moe_ep_all_reduce(torch::Tensor& tensor);
+
   pybind11::object& python_model() { return py_model_; }
   const pybind11::object& config_dict() const { return config_dict_; }
 
@@ -119,6 +124,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   int64_t layerwise_split_size_ = 1;
   int64_t layerwise_split_rank_ = 0;
   ProcessGroup* tp_group_ = nullptr;
+  ProcessGroup* moe_tp_group_ = nullptr;
+  ProcessGroup* moe_ep_group_ = nullptr;
 
   pybind11::object py_model_;
   pybind11::object config_dict_;

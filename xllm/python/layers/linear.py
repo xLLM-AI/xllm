@@ -69,7 +69,7 @@ class ColumnParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.linear(x, self.weight, self.bias)
         if self.gather_output and self.tp_size > 1:
-            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
+            out = distributed.tp_all_gather(out, dim=-1, world_size=self.tp_size)
         return out
 
 
@@ -127,7 +127,7 @@ class RowParallelLinear(nn.Module):
         else:
             out = torch.nn.functional.linear(x, self.weight)
         if self.tp_size > 1 and self.reduce_results:
-            distributed.all_reduce_(out)
+            distributed.tp_all_reduce(out)
         if self.bias is not None:
             out = out + self.bias
         return out

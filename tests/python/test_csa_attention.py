@@ -368,7 +368,11 @@ def test_prefill_persists_swa_for_decode_and_omits_ori_kv_cu_seqlens(
     swa = torch.zeros(2, 128, 1, 512, dtype=torch.float32)
     backend.bind_kv_caches([LayerCache(key=None, value=None, swa=swa)])
     block_table = torch.tensor([[1]], dtype=torch.int32)
-    layer = SimpleNamespace(layer_id=0, attn_sink=None)
+    layer = SimpleNamespace(
+        layer_id=0,
+        attn_sink=torch.tensor([1.0], dtype=torch.float32),
+        attn_sink_loaded=False,
+    )
     calls: list[dict] = []
 
     def fake_sparse_attn(**kwargs):
@@ -405,3 +409,9 @@ def test_prefill_persists_swa_for_decode_and_omits_ori_kv_cu_seqlens(
     backend.execute(torch.zeros(1, 8, 512), decode_kv, decode_kv, layer)
     assert torch.equal(swa[1, 2], decode_kv[0])
     assert calls[-1]["cu_seqlens_ori_kv"] is None
+    assert calls[-1]["sinks"] is None
+
+    layer.attn_sink_loaded = True
+    prepare_step(kv_len=3, q_len=1, is_prefill=False)
+    backend.execute(torch.zeros(1, 8, 512), decode_kv, decode_kv, layer)
+    assert torch.equal(calls[-1]["sinks"], layer.attn_sink)

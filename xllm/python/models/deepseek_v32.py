@@ -442,10 +442,18 @@ class W8A8StaticLinear(nn.Module):
 class W8A8DynamicLinear(nn.Module):
     """Dynamic-activation W8A8 linear (MLP / experts)."""
 
-    def __init__(self, in_features: int, out_features: int, device: torch.device) -> None:
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        device: torch.device,
+        transpose_weight_after_loading: bool = True,
+    ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.transpose_weight_after_loading = transpose_weight_after_loading
+        self._weight_is_transposed = False
         self.weight = nn.Parameter(
             torch.empty(out_features, in_features, dtype=torch.int8, device=device),
             requires_grad=False,
@@ -456,7 +464,9 @@ class W8A8DynamicLinear(nn.Module):
     def process_weights_after_loading(self) -> None:
         if not bool(torch.all(self.weight_offset == 0)):
             raise ValueError("W8A8DynamicLinear requires symmetric INT8 weights with zero weight_offset")
-        self.weight.data = kernels.prepare_quant_weight(self.weight.data)
+        if self.transpose_weight_after_loading:
+            self.weight.data = kernels.prepare_quant_weight(self.weight.data)
+            self._weight_is_transposed = True
         self.weight_scale.data = self.weight_scale.data.flatten().contiguous()
         self.weight_offset.data = self.weight_offset.data.flatten().contiguous()
 
@@ -475,7 +485,7 @@ class W8A8DynamicLinear(nn.Module):
         return kernels.quant_matmul(
             x_int8,
             self.weight,
-            False,
+            not self._weight_is_transposed,
             self.weight_scale,
             None,
             pertoken,
@@ -487,13 +497,22 @@ class W8A8DynamicLinear(nn.Module):
         return kernels.quant_matmul(
             x_int8,
             self.weight,
-            False,
+            not self._weight_is_transposed,
             self.weight_scale,
             None,
             None,
             None,
             torch.int32,
         )
+
+
+def _swiglu_with_clamp(x: torch.Tensor, limit: float) -> torch.Tensor:
+    gate, up = x.chunk(2, dim=-1)
+    if 0.0 < limit < 1_000_000.0:
+        gate = gate.float().clamp_max(limit)
+        up = up.float().clamp(min=-limit, max=limit)
+        return (torch.nn.functional.silu(gate) * up).to(x.dtype)
+    return kernels.silu_and_mul(x)
 
 
 class DeepseekV3MLP(nn.Module):
@@ -507,6 +526,7 @@ class DeepseekV3MLP(nn.Module):
         device: torch.device,
         skip_tp_reduce: bool = False,
         tp_override: Optional[int] = None,
+        swiglu_limit: float = 0.0,
     ) -> None:
         super().__init__()
         tp = tp_override if tp_override is not None else cfg.tp_size
@@ -514,6 +534,7 @@ class DeepseekV3MLP(nn.Module):
         inter_local = intermediate_size // tp
         self.tp = tp
         self.skip_tp_reduce = skip_tp_reduce
+        self.swiglu_limit = swiglu_limit
         self.gate_up_proj = W8A8DynamicLinear(cfg.hidden_size, 2 * inter_local, device)
         self.down_proj = W8A8DynamicLinear(
             inter_local,
@@ -571,7 +592,7 @@ class DeepseekV3MLP(nn.Module):
         if tp_reduce_add is not None:
             out = out + tp_reduce_add
         if reduce_result:
-            distributed.all_reduce_(out)
+            distributed.tp_all_reduce(out)
         return out
 
     def quantize_and_project_gate_up(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -589,13 +610,13 @@ class DeepseekV3MLP(nn.Module):
         gate_up: torch.Tensor,
         tp_reduce_add: torch.Tensor | None,
     ) -> torch.Tensor:
-        act = kernels.silu_and_mul(gate_up)
+        act = _swiglu_with_clamp(gate_up, self.swiglu_limit)
         reduce_result = self.tp > 1 and (not self.skip_tp_reduce or tp_reduce_add is not None)
         out = self.down_proj(act)
         if tp_reduce_add is not None:
             out = out + tp_reduce_add
         if reduce_result:
-            distributed.all_reduce_(out)
+            distributed.tp_all_reduce(out)
         return out
 
 
