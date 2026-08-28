@@ -150,21 +150,19 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-// Hooks run before a layer, so output layer L is captured at L + 1.
+// Draft target_layer_ids are used directly as post-layer capture ids.
 std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path) {
   JsonReader reader;
   const std::string config_path = model_weights_path + "/config.json";
   CHECK(reader.parse(config_path))
       << "Failed to parse block-diffusion draft config: " << config_path;
-  std::vector<int32_t> capture_layer_ids;
-  for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           std::vector<std::string>{"dspark_target_layer_ids",
-                                    "target_layer_ids",
-                                    "dflash_config.target_layer_ids"},
-           std::vector<int32_t>{})) {
-    capture_layer_ids.emplace_back(layer_id + 1);
-  }
+  std::vector<int32_t> capture_layer_ids =
+      reader.value_or<std::vector<int32_t>>(
+          std::vector<std::string>{"dspark_target_layer_ids",
+                                   "target_layer_ids",
+                                   "dflash_config.target_layer_ids"},
+          std::vector<int32_t>{});
   CHECK(!capture_layer_ids.empty())
       << "Block-diffusion draft config requires dspark_target_layer_ids, "
          "target_layer_ids, or dflash_config.target_layer_ids: "
@@ -2019,7 +2017,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
       args.layers_to_capture().empty()) {
     const int32_t num_layers = static_cast<int32_t>(args.n_layers());
-    args.layers_to_capture({2, num_layers / 2, num_layers - 3});
+    // EAGLE-3 low/mid/high default, as 0-based post-layer output indices.
+    args.layers_to_capture({1, num_layers / 2 - 1, num_layers - 4});
   }
 #else
   if (options_.enable_speculative_decode()) {

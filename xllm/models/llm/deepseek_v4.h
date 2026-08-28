@@ -990,7 +990,7 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
-      const int32_t capture_layer = static_cast<int32_t>(i + 1);
+      const int32_t capture_layer = static_cast<int32_t>(i);
       if (aux_capture_.should_capture(capture_layer)) {
         torch::Tensor captured = h.dim() == 3 ? h.mean(/*dim=*/1) : h;
         aux_capture_.capture_layer(capture_layer, captured, std::nullopt);

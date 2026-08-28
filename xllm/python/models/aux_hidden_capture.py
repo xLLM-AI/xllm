@@ -20,7 +20,7 @@ import torch
 
 
 class AuxHiddenCapture:
-    """Captures selected layer inputs into a buffer in config order."""
+    """Captures selected layer outputs into a buffer in config order."""
 
     def __init__(self, layers_to_capture: tuple[int, ...]) -> None:
         self._layers_to_capture = layers_to_capture

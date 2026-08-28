@@ -279,9 +279,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
       auto& layer = layers_[i];
       const int32_t layer_index = i;
-      // ATB keeps `h` as the full residual stream, so no separate residual.
-      aux_capture_.capture_layer(layer_index, h, std::nullopt);
-
       if (layer_forward_interrupted_) {
         LOG(INFO) << "Forward interrupted at layer: " << i;
         return ModelOutput();
@@ -303,6 +300,8 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
           h = h + deep_stacks[i];
         }
       }
+      // ATB keeps `h` as the full residual stream, so no separate residual.
+      aux_capture_.capture_layer(layer_index, h, std::nullopt);
     }
     auto hidden_states = norm_(h, 0);
     return aux_capture_.finalize(hidden_states);
