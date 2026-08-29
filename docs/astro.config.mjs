@@ -189,6 +189,11 @@ export default defineConfig({
 									translations: { 'zh-CN': 'GLM' },
 									collapsed: true,
 									items: [
+                                                                                {
+                                                                                        label: 'GLM-5.3-Flash',
+                                                                                        translations: { 'zh-CN': 'GLM-5.3-Flash' },
+                                                                                        slug: 'cookbook/autoregressive_models/glm/glm_5_3_flash',
+                                                                                },
 										{
 											label: 'GLM-5.2',
 											translations: { 'zh-CN': 'GLM-5.2' },
