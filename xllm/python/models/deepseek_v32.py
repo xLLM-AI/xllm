@@ -1157,6 +1157,28 @@ class DeepseekV3MoE(nn.Module):
         self.local_expert_start = self.ep_rank * num_local_experts
         self.local_expert_end = self.local_expert_start + num_local_experts
 
+        enable_eplb = getattr(cfg, "enable_eplb", False)
+        redundant_experts_num = getattr(cfg, "redundant_experts_num", 0) if enable_eplb else 0
+        self.enable_eplb = enable_eplb
+        self.redundant_experts_num = redundant_experts_num
+        # Slot-reuse mode: device_experts_num stays at num_local_experts to
+        # avoid exceeding the NPU fused GMM kernel groupList length limit.
+        # EPLB replaces cold expert weights in-place within fixed slots.
+        self.device_experts_num = num_local_experts
+
+        if enable_eplb:
+            from xllm.python.layers.eplb import build_initial_expert_ids, build_log2phy_map
+
+            moe_tp_rank = getattr(cfg, "moe_tp_rank", 0)
+            # Slot-reuse: no redundant slots at init, each slot holds one unique expert.
+            initial_expert_ids = build_initial_expert_ids(self.num_experts, self.ep_size, self.device_experts_num, 0)
+            log2phy_list = build_log2phy_map(initial_expert_ids, self.num_experts, self.ep_rank, moe_tp_rank)
+            self.register_buffer(
+                "log2phy_map",
+                torch.tensor(log2phy_list, dtype=torch.int32, device=device),
+                persistent=False,
+            )
+
         # Match the ATB router's FP32 precision.
         self.gate = nn.Linear(
             cfg.hidden_size,
@@ -1309,6 +1331,23 @@ class DeepseekV3MoE(nn.Module):
 
     def _run_routed_experts(self, hidden: torch.Tensor) -> torch.Tensor:
         logits = self.gate(hidden.to(torch.float32))
+        if self.enable_eplb:
+            return kernels.grouped_moe(
+                hidden,
+                logits,
+                self.experts_w13,
+                self.experts_w2,
+                self.experts_w13_scale,
+                self.experts_w2_scale_compute,
+                self.e_score_correction_bias,
+                self.topk,
+                self.topk_group,
+                self.n_group,
+                self.cfg.norm_topk_prob,
+                self.routed_scaling,
+                [self.ep_rank * self.device_experts_num, (self.ep_rank + 1) * self.device_experts_num],
+                self.log2phy_map,
+            )
         return kernels.grouped_moe(
             hidden,
             logits,
@@ -1659,6 +1698,8 @@ class DeepseekV3ForCausalLM(PyModelBase):
                         f"dp_size ({self.cfg.dp_size}) when ep_size > 1"
                     )
                 self.cfg.moe_tp_size = self.cfg.moe_tp_size // self.cfg.dp_size
+        self.cfg.enable_eplb = bool(config.get("enable_eplb", False))
+        self.cfg.redundant_experts_num = int(config.get("redundant_experts_num", 0))
         if hasattr(self.cfg, "validate"):
             self.cfg.validate()
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
@@ -1823,3 +1864,99 @@ class DeepseekV3ForCausalLM(PyModelBase):
                 "lm_head.weight",
                 loader.shard(loader.load_tensor("lm_head.weight"), dim=0),
             )
+
+    def _moe_layers(self) -> list[DeepseekV3MoE]:
+        """Return all MoE layers indexed by their position in the layer stack."""
+        layers: list[DeepseekV3MoE] = []
+        if self.model is None:
+            return layers
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, DeepseekV3MoE):
+                layers.append(layer.mlp)
+        return layers
+
+    def prepare_expert_weight(self, layer_id: int, expert_ids: list[int]) -> None:
+        """Prepare pending EPLB state for a single MoE layer.
+
+        Called from C++ EplbExecutor worker thread (via GIL).
+        C++ passes expert_ids of length ep_size * cpp_device_experts_num where
+        cpp_device_experts_num = num_local_experts + redundant_experts_num.
+        Python uses slot-reuse mode (device_experts_num = num_local_experts),
+        so we slice using the C++ stride and take only the first num_local slots.
+        """
+        from xllm.python.layers.eplb import (
+            build_log2phy_map,
+            slice_rank_expert_ids,
+        )
+
+        moe_layers = self._moe_layers()
+        if layer_id < 0 or layer_id >= len(moe_layers):
+            return
+        moe = moe_layers[layer_id]
+        if not moe.enable_eplb:
+            return
+
+        # C++ stride includes redundant slots
+        cpp_device_experts_num = moe.num_local_experts + moe.redundant_experts_num
+        pending_local_full = slice_rank_expert_ids(expert_ids, moe.ep_rank, cpp_device_experts_num)
+        # Take only the first num_local_experts slots (slot-reuse: no extra physical slots)
+        pending_local = pending_local_full[: moe.num_local_experts]
+        moe_tp_rank = getattr(moe.cfg, "moe_tp_rank", 0)
+        pending_log2phy = build_log2phy_map(expert_ids, moe.num_experts, moe.ep_rank, moe_tp_rank)
+        moe._pending_expert_ids = expert_ids
+        moe._pending_local_ids = pending_local
+        moe._pending_log2phy = torch.tensor(pending_log2phy, dtype=torch.int32, device=moe.log2phy_map.device)
+        moe._last_prepare_ok = True
+
+    def start_expert_weight_transfer(self, layer_id: int) -> None:
+        """Begin weight copy for changed slots (local D2D for now)."""
+        moe_layers = self._moe_layers()
+        if layer_id < 0 or layer_id >= len(moe_layers):
+            return
+        moe = moe_layers[layer_id]
+        if not moe.enable_eplb or not hasattr(moe, "_pending_local_ids"):
+            return
+        if moe.experts_w13.numel() == 0:
+            return
+        active_local = getattr(moe, "_active_local_ids", None)
+        if active_local is None:
+            from xllm.python.layers.eplb import build_initial_expert_ids, slice_rank_expert_ids
+
+            initial = build_initial_expert_ids(moe.num_experts, moe.ep_size, moe.device_experts_num, 0)
+            active_local = slice_rank_expert_ids(initial, moe.ep_rank, moe.device_experts_num)
+        pending_local = moe._pending_local_ids
+        for slot in range(moe.device_experts_num):
+            if slot < len(pending_local) and slot < len(active_local):
+                if pending_local[slot] != active_local[slot]:
+                    src_expert = pending_local[slot]
+                    src_slot = None
+                    for s, eid in enumerate(active_local):
+                        if eid == src_expert:
+                            src_slot = s
+                            break
+                    if src_slot is not None and src_slot != slot:
+                        moe.experts_w13.data[slot].copy_(moe.experts_w13.data[src_slot])
+                        moe.experts_w2.data[slot].copy_(moe.experts_w2.data[src_slot])
+                        moe.experts_w13_scale.data[slot].copy_(moe.experts_w13_scale.data[src_slot])
+                        moe.experts_w2_scale_compute.data[slot].copy_(moe.experts_w2_scale_compute.data[src_slot])
+
+    def update_expert_weight(self, layer_id: int) -> None:
+        """Atomically activate pending EPLB state."""
+        moe_layers = self._moe_layers()
+        if layer_id < 0 or layer_id >= len(moe_layers):
+            return
+        moe = moe_layers[layer_id]
+        if not moe.enable_eplb or not hasattr(moe, "_pending_log2phy"):
+            return
+        moe.log2phy_map.copy_(moe._pending_log2phy)
+        moe._active_local_ids = moe._pending_local_ids
+        del moe._pending_expert_ids
+        del moe._pending_local_ids
+        del moe._pending_log2phy
+
+    def last_prepare_expert_weight_ok(self, layer_id: int) -> bool:
+        moe_layers = self._moe_layers()
+        if layer_id < 0 or layer_id >= len(moe_layers):
+            return True
+        moe = moe_layers[layer_id]
+        return getattr(moe, "_last_prepare_ok", True)

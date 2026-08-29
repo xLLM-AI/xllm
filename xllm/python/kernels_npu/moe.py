@@ -97,6 +97,7 @@ def grouped_moe(
     renormalize: bool,
     routed_scaling_factor: float,
     active_expert_range: list[int] | None = None,
+    log2phy_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Route and run grouped quantized experts as one fused operator.
 
@@ -134,15 +135,18 @@ def grouped_moe(
         routed_scaling_factor=routed_scaling_factor,
         eps=1e-20,
     )
+    if log2phy_map is not None:
+        topk_ids = log2phy_map[topk_ids.long()].to(torch.int32)
     num_tokens = hidden_states.shape[0]
     num_experts = gating_output.shape[1]
     expert_range = active_expert_range if active_expert_range is not None else [0, num_experts]
+    routing_num_experts = expert_range[1] if log2phy_map is not None else num_experts
     sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
         hidden_states,
         topk_ids.to(torch.int32),
         scale=None,
         active_num=num_tokens * topk,
-        expert_num=num_experts,
+        expert_num=routing_num_experts,
         # GMM v2 consumes cumulative expert-token offsets.
         expert_tokens_num_type=0,
         expert_tokens_num_flag=True,
@@ -195,6 +199,7 @@ def _grouped_moe_fake(
     renormalize: bool,
     routed_scaling_factor: float,
     active_expert_range: list[int] | None = None,
+    log2phy_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     del (
         gating_output,
@@ -209,6 +214,7 @@ def _grouped_moe_fake(
         renormalize,
         routed_scaling_factor,
         active_expert_range,
+        log2phy_map,
     )
     return torch.empty_like(hidden_states)
 

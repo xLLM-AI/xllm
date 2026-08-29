@@ -99,7 +99,10 @@ def _config(**overrides) -> DeepseekV3Config:
         "world_size": 1,
     }
     values.update(overrides)
-    return DeepseekV3Config.from_dict(values)
+    cfg = DeepseekV3Config.from_dict(values)
+    cfg.enable_eplb = values.get("enable_eplb", False)
+    cfg.redundant_experts_num = values.get("redundant_experts_num", 0)
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -365,3 +368,185 @@ class TestDeepseekV3MoEForward:
 
         # dp_rank=1: offset=sum([3])=3, narrow(0, 3, 4) → [4, 64]
         assert result.shape[0] == 4
+
+
+# ---------------------------------------------------------------------------
+# EPLB (Expert Parallel Load Balancing) tests
+# ---------------------------------------------------------------------------
+
+
+class TestEplbHelpers:
+    """Unit tests for xllm.python.layers.eplb helper functions."""
+
+    def test_build_initial_expert_ids_basic(self):
+        from xllm.python.layers.eplb import build_initial_expert_ids
+
+        ids = build_initial_expert_ids(num_total_experts=16, ep_size=2, device_experts_num=9, redundant_experts_num=1)
+        assert len(ids) == 18
+        assert ids[:8] == list(range(8))
+        assert ids[8] == 7
+        assert ids[9:17] == list(range(8, 16))
+        assert ids[17] == 15
+
+    def test_slice_rank_expert_ids(self):
+        from xllm.python.layers.eplb import build_initial_expert_ids, slice_rank_expert_ids
+
+        ids = build_initial_expert_ids(16, 2, 9, 1)
+        rank0 = slice_rank_expert_ids(ids, 0, 9)
+        rank1 = slice_rank_expert_ids(ids, 1, 9)
+        assert len(rank0) == 9
+        assert rank0 == ids[:9]
+        assert rank1 == ids[9:]
+
+    def test_build_log2phy_map_all_mapped(self):
+        from xllm.python.layers.eplb import build_initial_expert_ids, build_log2phy_map
+
+        ids = build_initial_expert_ids(16, 2, 9, 1)
+        log2phy = build_log2phy_map(ids, 16, ep_rank=0)
+        assert len(log2phy) == 16
+        assert all(p >= 0 for p in log2phy)
+
+    def test_build_log2phy_map_rotation(self):
+        from xllm.python.layers.eplb import build_initial_expert_ids, build_log2phy_map
+
+        ids = build_initial_expert_ids(16, 2, 9, 1)
+        map_r0 = build_log2phy_map(ids, 16, ep_rank=0, moe_tp_rank_in_group=0)
+        map_r0_tp1 = build_log2phy_map(ids, 16, ep_rank=0, moe_tp_rank_in_group=1)
+        assert map_r0[7] != map_r0_tp1[7]
+
+    def test_remap_expert_ids_tensor(self):
+        from xllm.python.layers.eplb import remap_expert_ids
+
+        log2phy = torch.tensor([5, 3, 1, 0, 4, 2], dtype=torch.int32)
+        topk_ids = torch.tensor([[0, 2], [4, 5]], dtype=torch.int32)
+        remapped = remap_expert_ids(topk_ids, log2phy)
+        expected = torch.tensor([[5, 1], [4, 2]], dtype=torch.int32)
+        assert torch.equal(remapped, expected)
+
+    def test_expand_redundant_weight_storage(self):
+        from xllm.python.layers.eplb import expand_redundant_weight_storage
+
+        tensor = torch.randn(10, 4, 4)
+        tensor[8] = torch.ones(4, 4) * 99.0
+        expand_redundant_weight_storage(tensor, num_local_experts=9, device_experts_num=10)
+        assert torch.equal(tensor[9], tensor[8])
+
+
+class TestDeepseekV3MoEEplb:
+    """Test DeepseekV3MoE with EPLB enabled."""
+
+    def setup_method(self):
+        distributed.all_gather.reset_mock()
+        distributed.all_gather.side_effect = lambda x, **kw: x
+        distributed.all_reduce_.reset_mock()
+        kernels.grouped_moe.reset_mock()
+
+    def test_eplb_moe_has_log2phy_map(self):
+        cfg = _config(
+            ep_size=2,
+            ep_rank=0,
+            moe_tp_size=1,
+            world_size=2,
+            enable_eplb=True,
+            redundant_experts_num=1,
+        )
+        moe = DeepseekV3MoE(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu"))
+        assert hasattr(moe, "log2phy_map")
+        assert moe.log2phy_map.shape[0] == 16
+        # Slot-reuse: device_experts_num == num_local_experts (no extra slots)
+        assert moe.device_experts_num == 8
+
+
+# ---------------------------------------------------------------------------
+# EPLB dynamic prepare/activate lifecycle tests
+# ---------------------------------------------------------------------------
+
+
+class TestEplbLifecycle:
+    """Test the prepare/activate dynamic EPLB bridge."""
+
+    def _make_causal_lm(self) -> DeepseekV3ForCausalLM:
+        from xllm.python.models.deepseek_v32 import DeepseekV3ForCausalLM
+
+        config = {
+            "hidden_size": 64,
+            "n_layers": 2,
+            "n_heads": 4,
+            "head_dim": 16,
+            "intermediate_size": 128,
+            "vocab_size": 1024,
+            "q_lora_rank": 32,
+            "kv_lora_rank": 16,
+            "qk_nope_head_dim": 8,
+            "qk_rope_head_dim": 8,
+            "v_head_dim": 16,
+            "index_n_heads": 4,
+            "index_head_dim": 16,
+            "index_topk": 64,
+            "first_k_dense_replace": 0,
+            "moe_layer_freq": 1,
+            "n_routed_experts": 16,
+            "n_shared_experts": 1,
+            "num_experts_per_tok": 4,
+            "n_group": 4,
+            "topk_group": 2,
+            "routed_scaling_factor": 2.5,
+            "topk_method": "noaux_tc",
+            "norm_topk_prob": True,
+            "moe_intermediate_size": 32,
+            "tp_size": 1,
+            "tp_rank": 0,
+            "ep_size": 2,
+            "ep_rank": 0,
+            "dp_size": 1,
+            "dp_rank": 0,
+            "moe_tp_size": 1,
+            "moe_tp_rank": 0,
+            "world_size": 2,
+            "enable_eplb": True,
+            "redundant_experts_num": 1,
+            "device": "cpu",
+        }
+        return DeepseekV3ForCausalLM(config, build_model=True)
+
+    def test_prepare_sets_pending_state(self):
+        from xllm.python.layers.eplb import build_initial_expert_ids
+
+        model = self._make_causal_lm()
+        moe_layers = model._moe_layers()
+        assert len(moe_layers) >= 1
+
+        # Simulate C++ EplbManager expert_ids (length = ep_size * cpp_device_experts_num)
+        # cpp_device_experts_num = num_local + redundant = 8 + 1 = 9
+        new_expert_ids = build_initial_expert_ids(16, 2, 9, 1)
+        new_expert_ids[8] = 5  # swap redundant slot to expert 5
+
+        model.prepare_expert_weight(0, new_expert_ids)
+        moe = moe_layers[0]
+        assert hasattr(moe, "_pending_log2phy")
+        assert moe._pending_log2phy.shape[0] == 16
+
+    def test_update_activates_new_map(self):
+        from xllm.python.layers.eplb import build_initial_expert_ids
+
+        model = self._make_causal_lm()
+        moe = model._moe_layers()[0]
+        old_map = moe.log2phy_map.clone()
+
+        # Simulate C++ moving expert 10 into rank 0's slot 7 (replacing expert 7)
+        # C++ expert_ids: rank 0 has 9 slots, rank 1 has 9 slots
+        new_expert_ids = build_initial_expert_ids(16, 2, 9, 1)
+        # Replace slot 7 on rank 0 with expert 10 (from rank 1)
+        new_expert_ids[7] = 10
+
+        model.prepare_expert_weight(0, new_expert_ids)
+        model.start_expert_weight_transfer(0)
+        model.update_expert_weight(0)
+
+        # Expert 10 should now map to local slot 7
+        assert moe.log2phy_map[10].item() == 7
+        assert not hasattr(moe, "_pending_log2phy")
+
+    def test_last_prepare_ok_returns_true(self):
+        model = self._make_causal_lm()
+        assert model.last_prepare_expert_weight_ok(0) is True

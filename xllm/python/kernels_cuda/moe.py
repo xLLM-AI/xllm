@@ -161,6 +161,7 @@ def grouped_moe(
     num_expert_groups: int,
     renormalize: bool,
     active_expert_range: list[int] | None = None,
+    log2phy_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Route and run grouped quantized experts as one fused operator.
 

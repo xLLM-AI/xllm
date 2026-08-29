@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
@@ -87,6 +88,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   dp_size_ = (dp_group != nullptr) ? dp_group->world_size() : 1;
   dp_rank_ = (dp_group != nullptr) ? dp_group->rank() : 0;
   ep_size_ = parallel_args.ep_size();
+  enable_eplb_ = ::xllm::EPLBConfig::get_instance().enable_eplb();
 
   CHECK(parallel_args.moe_tp_group_ != nullptr);
   ProcessGroup* moe_tp_group = parallel_args.moe_tp_group_;
@@ -208,6 +210,9 @@ py::dict PyCausalLM::build_config_dict(
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
+  d["enable_eplb"] = ::xllm::EPLBConfig::get_instance().enable_eplb();
+  d["redundant_experts_num"] =
+      ::xllm::EPLBConfig::get_instance().redundant_experts_num();
   return d;
 }
 
@@ -255,6 +260,49 @@ bool PyCausalLM::share_weights_from(CausalLM& source) {
 
   py::gil_scoped_acquire gil;
   detail::share_python_model_weights(py_model_, source_model->py_model_);
+  return true;
+}
+
+void PyCausalLM::prepare_expert_weight(int32_t layer_id,
+                                       const std::vector<int32_t>& expert_ids) {
+  if (!enable_eplb_) {
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  if (py::hasattr(py_model_, "prepare_expert_weight")) {
+    py_model_.attr("prepare_expert_weight")(layer_id, expert_ids);
+  }
+}
+
+void PyCausalLM::start_expert_weight_transfer(int32_t layer_id) {
+  if (!enable_eplb_) {
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  if (py::hasattr(py_model_, "start_expert_weight_transfer")) {
+    py_model_.attr("start_expert_weight_transfer")(layer_id);
+  }
+}
+
+void PyCausalLM::update_expert_weight(int32_t layer_id) {
+  if (!enable_eplb_) {
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  if (py::hasattr(py_model_, "update_expert_weight")) {
+    py_model_.attr("update_expert_weight")(layer_id);
+  }
+}
+
+bool PyCausalLM::last_prepare_expert_weight_ok(int32_t layer_id) const {
+  if (!enable_eplb_) {
+    return true;
+  }
+  py::gil_scoped_acquire gil;
+  if (py::hasattr(py_model_, "last_prepare_expert_weight_ok")) {
+    return py_model_.attr("last_prepare_expert_weight_ok")(layer_id)
+        .cast<bool>();
+  }
   return true;
 }
 

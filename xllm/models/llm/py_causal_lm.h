@@ -73,8 +73,11 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Device device() const override { return device_; }
   const torch::TensorOptions& options() const override { return options_; }
 
-  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
-  void update_expert_weight(int32_t) override {}
+  void prepare_expert_weight(int32_t layer_id,
+                             const std::vector<int32_t>& expert_ids) override;
+  void start_expert_weight_transfer(int32_t layer_id) override;
+  void update_expert_weight(int32_t layer_id) override;
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const override;
 
   bool share_weights_from(CausalLM& source) override;
 
@@ -99,6 +102,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   int64_t ep_rank_ = 0;
   int64_t cp_size_ = 1;
   int64_t cp_rank_ = 0;
+  bool enable_eplb_ = false;
   ProcessGroup* tp_group_ = nullptr;
 
   pybind11::object py_model_;
