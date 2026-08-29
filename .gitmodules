@@ -50,3 +50,7 @@
 	path = third_party/xxHash
 	url = https://gitcode.com/xLLM-AI/xxHash.git
 	fetchRecurseSubmodules = false
+[submodule "third_party/GVirt"]
+	path = third_party/GVirt
+	url = https://gitcode.com/openEuler/GVirt.git
+	fetchRecurseSubmodules = false
