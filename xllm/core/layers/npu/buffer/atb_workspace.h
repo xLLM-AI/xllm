@@ -36,9 +36,9 @@ class AtbWorkspace {
 
   AtbWorkspace& operator=(const AtbWorkspace&) = delete;
 
-  AtbWorkspace(AtbWorkspace&&) = default;
+  AtbWorkspace(AtbWorkspace&&) noexcept = default;
 
-  AtbWorkspace& operator=(AtbWorkspace&&) = default;
+  AtbWorkspace& operator=(AtbWorkspace&&) noexcept = default;
 
   void* get_workspace_buffer(uint64_t bufferSize);
 
