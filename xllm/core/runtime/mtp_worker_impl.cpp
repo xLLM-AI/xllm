@@ -3740,40 +3740,6 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   const bool dp_enabled = parallel_args_.dp_size() > 1;
   const bool use_chunked_prefill =
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
-  const bool force_uniform_eagle3_rows =
-      uses_embedded_eagle3_draft() && dp_enabled && !use_chunked_prefill;
-  const bool has_dp_token_counts =
-      input_params.parallel.dp_global_token_nums.size() ==
-      static_cast<size_t>(parallel_args_.dp_size());
-  ProcessGroup* dp_row_count_group = nullptr;
-  ProcessGroup* world_row_count_group = nullptr;
-  auto collect_row_count_group = [&](const ParallelArgs& args) {
-    if (dp_row_count_group == nullptr &&
-        args.dp_local_process_group_ != nullptr &&
-        args.dp_local_process_group_->world_size() ==
-            static_cast<int32_t>(
-                input_params.parallel.dp_global_token_nums.size())) {
-      dp_row_count_group = args.dp_local_process_group_;
-    }
-    if (world_row_count_group == nullptr && args.process_group_ != nullptr &&
-        args.process_group_->world_size() > 1) {
-      world_row_count_group = args.process_group_;
-    }
-  };
-  collect_row_count_group(parallel_args_);
-  if (impl_ != nullptr) {
-    collect_row_count_group(impl_->context_.get_parallel_args());
-  }
-  if (draft_impl_ != nullptr) {
-    collect_row_count_group(draft_impl_->context_.get_parallel_args());
-  }
-  const bool can_sync_variable_dp_rows =
-      dp_enabled && !force_uniform_eagle3_rows && !use_chunked_prefill &&
-      has_dp_token_counts &&
-      (dp_row_count_group != nullptr || world_row_count_group != nullptr);
-  const bool use_uniform_single_dp_rows =
-      dp_enabled && !force_uniform_eagle3_rows && !use_chunked_prefill &&
-      !can_sync_variable_dp_rows;
   CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
       << "draft extend state count mismatch";
 
@@ -3863,11 +3829,11 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       selected_row_idx.emplace_back(2 * seq_id + 1);
       continue;
     }
-    const bool has_prev_token =
-        state.prev_token_id >= 0 && state.prev_embedding.defined();
-    const bool use_two_rows = force_two_rows || force_uniform_eagle3_rows ||
-                              (!use_uniform_single_dp_rows &&
-                               state.all_draft_accepted && has_prev_token);
+    // Keep DP draft-extend rows uniform. Empty DP ranks skip draft preparation,
+    // so this path must not depend on a row-count collective reached by only
+    // active ranks.
+    const bool use_two_rows =
+        force_two_rows || dp_enabled || state.all_draft_accepted;
     if (use_two_rows) {
       int32_t prev_token_id = state.prev_token_id;
       int32_t prev_position_offset = -1;
@@ -3964,7 +3930,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
            input_params.parallel.raw_dp_global_token_nums) {
         token_num *= 2;
       }
-    } else if (dp_enabled && force_uniform_eagle3_rows) {
+    } else if (dp_enabled) {
       constexpr int32_t num_extend_tokens = 2;
       for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
         token_num *= num_extend_tokens;
@@ -3973,57 +3939,6 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
            input_params.parallel.raw_dp_global_token_nums) {
         token_num *= num_extend_tokens;
       }
-    } else if (dp_enabled && can_sync_variable_dp_rows) {
-      CHECK_EQ(input_params.parallel.dp_global_token_nums.size(),
-               static_cast<size_t>(parallel_args_.dp_size()))
-          << "dp token counts should be available for every DP rank";
-      torch::Tensor local_rows = torch::tensor(
-          {static_cast<int32_t>(buf.out_positions.size())},
-          torch::dtype(torch::kInt).device(device_));
-      torch::Tensor gathered_rows = local_rows;
-      if (dp_row_count_group != nullptr) {
-        gathered_rows = dp_row_count_group->allgather_base_sync(local_rows);
-      } else {
-        CHECK(world_row_count_group != nullptr)
-            << "variable DP draft rows require a DP or world process group";
-        gathered_rows = world_row_count_group->allgather_base_sync(local_rows);
-      }
-      torch::Tensor gathered_rows_cpu =
-          gathered_rows.reshape({-1}).to(torch::kCPU).contiguous();
-      const int32_t* gathered_data =
-          gathered_rows_cpu.const_data_ptr<int32_t>();
-      if (dp_row_count_group != nullptr) {
-        CHECK_EQ(gathered_rows_cpu.numel(),
-                 static_cast<int64_t>(
-                     input_params.parallel.dp_global_token_nums.size()))
-            << "gathered draft extend row count does not match DP size";
-        for (int32_t i = 0; i < gathered_rows_cpu.numel(); ++i) {
-          input_params.parallel.dp_global_token_nums[static_cast<size_t>(i)] =
-              gathered_data[i];
-        }
-      } else {
-        const int32_t dp_size = parallel_args_.dp_size();
-        const int32_t world_size =
-            static_cast<int32_t>(gathered_rows_cpu.numel());
-        CHECK_EQ(world_size % dp_size, 0)
-            << "world row count gather size must be divisible by DP size";
-        const int32_t local_tp_size = world_size / dp_size;
-        const int32_t local_tp_rank =
-            world_row_count_group->rank() % local_tp_size;
-        for (int32_t dp_rank = 0; dp_rank < dp_size; ++dp_rank) {
-          const int32_t world_row_idx = dp_rank * local_tp_size + local_tp_rank;
-          input_params.parallel.dp_global_token_nums[dp_rank] =
-              gathered_data[world_row_idx];
-        }
-      }
-      if (!input_params.parallel.raw_dp_global_token_nums.empty()) {
-        input_params.parallel.raw_dp_global_token_nums =
-            input_params.parallel.dp_global_token_nums;
-      }
-    } else if (dp_enabled && use_uniform_single_dp_rows) {
-      // The no-process-group fallback emits exactly one draft-extend row per
-      // live request, so the original per-DP token counts remain valid and no
-      // row-count collective is needed.
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
       input_params.parallel.dp_global_token_nums[0] =
           static_cast<int32_t>(buf.out_positions.size());
