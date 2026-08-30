@@ -21,20 +21,18 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from xllm.python import distributed
-from xllm.python.layers import (
-    Attention,
-    ColumnParallelLinear,
-    FusedMoE,
-    GatedMLP,
-    GemmaRMSNorm,
-    HiddenParallelEmbedding,
-    RowParallelLinear,
+from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
+from xllm.python.layers.qwen3_5_decoder_layer import (
+    PartialRotaryEmbedding,
+    Qwen3_5LoadContext,
+    get_qwen3_5_decoder_layer_class,
 )
-from xllm.python.layers.gated_delta_net import Qwen3_5GatedDeltaNet
+from xllm.python.model_loader import (
+    ScopedWeightLoader,
+    copy_parameter,
+)
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.qwen3 import load_qwen3_attention
-from xllm.python.models.weight_utils import WeightLoader, gqa_head_split, kv_replica_shard
+from xllm.python.models.weight_utils import gqa_head_split
 
 
 @dataclass
@@ -188,204 +186,6 @@ class Qwen3_5Config:
         return gqa_head_split(self.n_heads, self.n_kv_heads, self.tp_size)
 
 
-class Qwen3_5SparseMoEBlock(nn.Module):
-    def __init__(self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device) -> None:
-        super().__init__()
-        # The routed and shared branches each produce a partial sum over the same
-        # set of ranks whenever every group spans the whole world, and the gate is
-        # computed from replicated hidden states so it is bit-identical on every
-        # rank. Summing first then reducing once is therefore exact, and removes
-        # one of the three all-reduces this block would otherwise issue per layer.
-        # With dp_size > 1 the groups no longer coincide, so each branch keeps its
-        # own reduction.
-        self.fuse_reductions = cfg.dp_size == 1 and cfg.tp_size > 1
-        self.experts = FusedMoE(
-            hidden_size=cfg.hidden_size,
-            intermediate_size=cfg.moe_intermediate_size,
-            num_experts=cfg.num_experts,
-            top_k=cfg.num_experts_per_tok,
-            renormalize=cfg.norm_topk_prob,
-            moe_tp_size=cfg.moe_tp_size,
-            moe_tp_rank=cfg.moe_tp_rank,
-            ep_size=cfg.ep_size,
-            ep_rank=cfg.ep_rank,
-            dp_size=cfg.dp_size,
-            dp_rank=cfg.dp_rank,
-            dtype=dtype,
-            device=device,
-            reduce_results=not self.fuse_reductions,
-        )
-        self.shared_expert = GatedMLP(
-            cfg.hidden_size,
-            cfg.shared_expert_intermediate_size,
-            cfg.tp_size,
-            dtype,
-            device,
-            reduce_results=not self.fuse_reductions,
-        )
-        self.shared_expert_gate = nn.Linear(cfg.hidden_size, 1, bias=False, dtype=dtype, device=device)
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        routed = self.experts(hidden)
-        shared = self.shared_expert(hidden)
-        shared_gate = torch.sigmoid(self.shared_expert_gate(hidden))
-        output = routed + shared * shared_gate
-        if self.fuse_reductions:
-            distributed.all_reduce_(output)
-        return output
-
-
-class PartialRotaryEmbedding(nn.Module):
-    def __init__(
-        self,
-        head_dim: int,
-        rotary_dim: int,
-        max_position: int,
-        rope_theta: float,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
-        super().__init__()
-        if rotary_dim <= 0 or rotary_dim % 2:
-            raise ValueError("partial rotary dimension must be positive and even")
-        self.head_dim = head_dim
-        self.rotary_dim = rotary_dim
-        inv_freq = 1.0 / (
-            rope_theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim)
-        )
-        freqs = torch.outer(torch.arange(max_position, dtype=torch.float32, device=device), inv_freq)
-        self.register_buffer("cos", freqs.cos().to(dtype), persistent=False)
-        self.register_buffer("sin", freqs.sin().to(dtype), persistent=False)
-
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        first, second = x.chunk(2, dim=-1)
-        return torch.cat((-second, first), dim=-1)
-
-    def forward(self, positions: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        rotary, passthrough = x.split([self.rotary_dim, self.head_dim - self.rotary_dim], dim=-1)
-        pos = positions.to(torch.long)
-        cos = torch.cat((self.cos[pos], self.cos[pos]), dim=-1).unsqueeze(1)
-        sin = torch.cat((self.sin[pos], self.sin[pos]), dim=-1).unsqueeze(1)
-        rotary = rotary * cos + self._rotate_half(rotary) * sin
-        return torch.cat((rotary, passthrough), dim=-1)
-
-
-class Qwen3_5Attention(nn.Module):
-    def __init__(
-        self,
-        cfg: Qwen3_5Config,
-        layer_id: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        rotary: PartialRotaryEmbedding,
-    ) -> None:
-        super().__init__()
-        self.layer_id = layer_id
-        self.num_heads, self.num_kv_heads = cfg.head_split()
-        self.head_dim = cfg.head_dim
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        q_multiplier = 2 if cfg.attn_output_gate else 1
-        self.attn_output_gate = cfg.attn_output_gate
-        self.qkv_proj = ColumnParallelLinear(
-            cfg.hidden_size,
-            q_multiplier * self.q_size + 2 * self.kv_size,
-            cfg.tp_size,
-            bias=cfg.attention_bias,
-            dtype=dtype,
-            device=device,
-        )
-        self.o_proj = RowParallelLinear(
-            self.q_size,
-            cfg.hidden_size,
-            cfg.tp_size,
-            bias=cfg.attention_bias,
-            dtype=dtype,
-            device=device,
-        )
-        self.q_norm = GemmaRMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
-        self.k_norm = GemmaRMSNorm(self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device)
-        self.rotary = rotary
-        self.attn = Attention(
-            self.num_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            self.head_dim**-0.5,
-            0,
-            layer_id,
-        )
-
-    def forward(self, positions: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
-        qkv = self.qkv_proj(hidden)
-        if self.attn_output_gate:
-            q_gate, k, v = qkv.split([2 * self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_dim)
-            q, gate = q_gate.chunk(2, dim=-1)
-        else:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q = q.view(-1, self.num_heads, self.head_dim)
-            gate = None
-        k = k.view(-1, self.num_kv_heads, self.head_dim)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        q = self.rotary(positions, q).reshape(-1, self.q_size)
-        k = self.rotary(positions, k).reshape(-1, self.kv_size)
-        output = self.attn(q, k, v)
-        if gate is not None:
-            output = output * torch.sigmoid(gate.reshape(-1, self.q_size))
-        return self.o_proj(output)
-
-
-class Qwen3_5DecoderLayer(nn.Module):
-    def __init__(
-        self,
-        cfg: Qwen3_5Config,
-        layer_id: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        rotary: PartialRotaryEmbedding,
-    ) -> None:
-        super().__init__()
-        self.layer_type = cfg.layer_types[layer_id]
-        self.input_layernorm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
-        if self.layer_type == "full_attention":
-            self.self_attn = Qwen3_5Attention(cfg, layer_id, dtype, device, rotary)
-        elif self.layer_type == "linear_attention":
-            self.linear_attn = Qwen3_5GatedDeltaNet(cfg, layer_id, dtype, device)
-        else:
-            raise ValueError(f"unsupported Qwen3.5 layer type: {self.layer_type}")
-        self.post_attention_layernorm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
-        if cfg.is_moe_layer(layer_id):
-            self.mlp = Qwen3_5SparseMoEBlock(cfg, dtype, device)
-        else:
-            self.mlp = GatedMLP(
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                cfg.tp_size,
-                dtype,
-                device,
-            )
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        residual: torch.Tensor | None,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden
-            hidden = self.input_layernorm(hidden)
-        else:
-            hidden, residual = self.input_layernorm(hidden, residual)
-        if self.layer_type == "full_attention":
-            hidden = self.self_attn(positions, hidden)
-        else:
-            hidden = self.linear_attn(hidden)
-        hidden, residual = self.post_attention_layernorm(hidden, residual)
-        return self.mlp(hidden), residual
-
-
 class Qwen3_5Model(nn.Module):
     def __init__(self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
@@ -407,19 +207,11 @@ class Qwen3_5Model(nn.Module):
             dtype,
             device,
         )
-        self.layers = nn.ModuleList(
-            Qwen3_5DecoderLayer(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers)
-        )
+        decoder_layer_cls = get_qwen3_5_decoder_layer_class(device)
+        self.layers = nn.ModuleList(decoder_layer_cls(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers))
         self.norm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # TODO: The current tilelang-ascend version has a cache bug that prevents kernels with
-        # dynamic symbols from being cached, causing the service to crash. This is a temporary
-        # workaround; we will resubmit once tilelang-ascend fixes the issue.
-        import tilelang
-
-        tilelang.disable_cache()
-        tilelang.cache.clear_cache()
         hidden = self.embed_tokens(input_ids)
         residual: torch.Tensor | None = None
         for layer in self.layers:
@@ -450,110 +242,40 @@ class Qwen3_5ForCausalLM(PyModelBase):
         )
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        cfg = self.cfg
-        loader = WeightLoader(
-            self,
-            state_dicts,
-            tp_size,
-            tp_rank,
-            src_prefixes=("model.language_model.", "model.", ""),
+        all_weights = ScopedWeightLoader(state_dicts)
+        model_weights = all_weights.find_root(
+            ("model.language_model.", "model.", ""),
+            "embed_tokens.weight",
         )
-
-        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
-
-        # linear_attention branch only: split fused in_proj_qkv (and conv1d)
-        # into (key, key, value) global chunks, then TP-shard each chunk.
-        global_key = cfg.linear_num_key_heads * cfg.linear_key_head_dim
-        global_value = cfg.linear_num_value_heads * cfg.linear_value_head_dim
-        qkv_sizes = (global_key, global_key, global_value)
-
-        def split_shard_cat(t: torch.Tensor) -> torch.Tensor:
-            return torch.cat([loader.shard(p, 0, contiguous=False) for p in t.split(qkv_sizes, dim=0)])
-
-        # MoE experts are sharded on the expert axis by EP, then on the
-        # intermediate axis by MoE-TP; both tuples are load-time constants.
-        ep = (cfg.ep_size, cfg.ep_rank)
-        mtp = (cfg.moe_tp_size, cfg.moe_tp_rank)
-
-        loader.copy_in(
-            "model.embed_tokens.weight",
-            loader.load_shard("embed_tokens.weight", 1),
+        context = Qwen3_5LoadContext(tp_rank=tp_rank, tp_size=tp_size)
+        copy_parameter(
+            self.model.embed_tokens.weight,
+            model_weights.shard(
+                "embed_tokens.weight",
+                1,
+                tp_rank,
+                tp_size,
+            ),
+            model_weights.prefix + "embed_tokens.weight",
         )
-        for layer_id, layer_type in enumerate(cfg.layer_types):
-            source = f"layers.{layer_id}."
-            target = f"model.layers.{layer_id}."
-            for norm in ("input_layernorm.weight", "post_attention_layernorm.weight"):
-                loader.copy_in(target + norm, loader.load_tensor(source + norm))
-
-            if layer_type == "full_attention":
-                load_qwen3_attention(
-                    loader,
-                    source,
-                    target,
-                    kv_world=kv_world,
-                    kv_rank=kv_rank,
-                    attention_bias=cfg.attention_bias,
-                )
-            else:
-                linear = source + "linear_attn."
-                loader.copy_in(
-                    target + "linear_attn.in_proj_qkv.weight",
-                    split_shard_cat(loader.load_tensor(linear + "in_proj_qkv.weight")),
-                )
-                for projection in ("in_proj_z", "in_proj_b", "in_proj_a"):
-                    loader.copy_in(
-                        target + f"linear_attn.{projection}.weight",
-                        loader.load_shard(linear + f"{projection}.weight", 0),
-                    )
-                loader.copy_in(
-                    target + "linear_attn.conv1d_weight",
-                    split_shard_cat(loader.load_tensor(linear + "conv1d.weight").squeeze(1)),
-                )
-                for name in ("A_log", "dt_bias"):
-                    loader.copy_in(
-                        target + f"linear_attn.{name}",
-                        loader.load_shard(linear + name, 0),
-                    )
-                loader.copy_in(
-                    target + "linear_attn.norm_weight",
-                    loader.load_tensor(linear + "norm.weight"),
-                )
-                loader.copy_in(
-                    target + "linear_attn.out_proj.weight",
-                    loader.load_shard(linear + "out_proj.weight", 1),
-                )
-
-            if cfg.is_moe_layer(layer_id):
-                moe = source + "mlp."
-                loader.copy_in(target + "mlp.experts.gate.weight", loader.load_tensor(moe + "gate.weight"))
-                loader.copy_in(
-                    target + "mlp.shared_expert_gate.weight",
-                    loader.load_tensor(moe + "shared_expert_gate.weight"),
-                )
-
-                # contiguous=False: one materialization at the final cat/copy, not per split.
-                gate_up = loader.shard(
-                    loader.load_tensor(moe + "experts.gate_up_proj"), 0, *ep, contiguous=False
-                )
-                gate, up = gate_up.chunk(2, dim=1)
-                gate = loader.shard(gate, 1, *mtp, contiguous=False)
-                up = loader.shard(up, 1, *mtp, contiguous=False)
-                # The checkpoint is [gate, up]; xLLM CUTLASS SwiGLU
-                # consumes [linear/up, gate].
-                loader.copy_in(target + "mlp.experts.w13", torch.cat((up, gate), dim=1))
-
-                down = loader.shard(
-                    loader.load_tensor(moe + "experts.down_proj"), 0, *ep, contiguous=False
-                )
-                loader.copy_in(target + "mlp.experts.w2", loader.shard(down, 2, *mtp, contiguous=False))
-
-                shared = moe + "shared_expert."
-                loader.load_gated_mlp(target + "mlp.shared_expert.", shared)
-            else:
-                loader.load_gated_mlp(target + "mlp.", source + "mlp.")
-
-        loader.copy_in("model.norm.weight", loader.load_tensor("norm.weight"))
-        lm_head_name = "lm_head.weight"
-        if cfg.tie_word_embeddings or not loader.has(lm_head_name):
+        for layer_id, layer in enumerate(self.model.layers):
+            layer.load_weights(
+                model_weights.with_prefix(f"layers.{layer_id}."),
+                context,
+            )
+        copy_parameter(
+            self.model.norm.weight,
+            model_weights.tensor("norm.weight"),
+            model_weights.prefix + "norm.weight",
+        )
+        if self.cfg.tie_word_embeddings or not all_weights.has("lm_head.weight"):
+            lm_head_weights = model_weights
             lm_head_name = "embed_tokens.weight"
-        loader.copy_in("lm_head.weight", loader.load_shard(lm_head_name, 0))
+        else:
+            lm_head_weights = all_weights
+            lm_head_name = "lm_head.weight"
+        copy_parameter(
+            self.lm_head.weight,
+            lm_head_weights.shard(lm_head_name, 0, tp_rank, tp_size),
+            lm_head_weights.prefix + lm_head_name,
+        )

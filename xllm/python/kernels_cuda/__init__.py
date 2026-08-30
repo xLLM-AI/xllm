@@ -48,7 +48,6 @@ from .gated_delta_net import (
     chunk_gated_delta_rule,
     fused_gdn_prefill_post_conv,
     fused_recurrent_gated_delta_rule_packed_decode,
-    gdn_prefill_prepare,
     resolve_gdn_prefill_backend,
 )
 from .linear import prepare_row_parallel_weight
@@ -116,7 +115,6 @@ __all__ = [
     "causal_conv1d_prefill",
     "causal_conv1d_decode",
     "resolve_gdn_prefill_backend",
-    "gdn_prefill_prepare",
     "fused_gdn_prefill_post_conv",
     "fused_recurrent_gated_delta_rule_packed_decode",
     "chunk_gated_delta_rule",

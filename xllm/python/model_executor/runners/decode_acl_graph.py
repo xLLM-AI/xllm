@@ -665,6 +665,11 @@ class DecodeAclGraphRunner(BaseRunner):
                 dtype=torch.int32,
                 device=device,
             ),
+            linear_state_indices=torch.zeros(
+                padded_batch_size,
+                dtype=torch.int32,
+                device=device,
+            ),
             paged_kv_indptr_host=torch.zeros(padded_batch_size + 1, dtype=torch.int32, device="cpu"),
             paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
             kv_seq_lens_host_values=[1] * padded_batch_size,
@@ -750,6 +755,11 @@ class DecodeAclGraphRunner(BaseRunner):
             static_metadata.paged_kv_last_page_len,
             padded_batch_size,
         )
+        linear_state_indices = getattr(metadata, "linear_state_indices", None)
+        if linear_state_indices is not None:
+            static_metadata.linear_state_indices[:batch_size].copy_(linear_state_indices)
+        if padded_batch_size > batch_size:
+            static_metadata.linear_state_indices[batch_size:].zero_()
         self._fill_host_metadata(entry, kv_seq_lens_host_values, batch_size)
 
         if input_embedding is not None:

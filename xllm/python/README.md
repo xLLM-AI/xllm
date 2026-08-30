@@ -19,9 +19,15 @@ operators.
 
 ### `layers/`
 
-Reusable neural-network layers and parameter ownership. A layer calls
-`kernels`, which is already bound to the active platform, so a layer contains no
-hardware branch.
+Reusable neural-network layers and parameter ownership. Simple layers call the
+active `kernels` package directly. A complex model may instead own distinct
+`layers/<device>/<model>/` lowerings when devices require different operator
+boundaries, parameter layouts, persistent workspaces, or graph lifecycle.
+
+Qwen3.5 is the reference layout for this exception: its public model shell is
+shared, while CUDA and NPU select separate decoder-layer implementations once
+during construction. Backend selection must not occur inside the forward hot
+path, and peer layer packages must not import one another.
 
 ### `kernels_<device>/`
 
@@ -43,11 +49,13 @@ xllm.python.initialize_runtime()
 from xllm.python import kernels
 ```
 
-Layers and models write `from xllm.python import kernels` and reach a fixed
-name, so they carry no hardware branch. `setup.py` ships only the package
-matching `--device`. xLLM builds for more devices than the executor covers, so
-a device without a peer package ships the rest of `xllm.python` and runtime
-initialization raises for its platform.
+Reusable layers and backend-owned layers may write
+`from xllm.python import kernels` and reach the package selected during runtime
+initialization. A backend-owned layer is imported only after its device has
+been selected, so its API may follow that backend's native fusion boundary.
+`setup.py` ships only the kernel package matching `--device`. xLLM builds for
+more devices than the executor covers, so a device without a peer package ships
+the rest of `xllm.python` and runtime initialization raises for its platform.
 
 This is one of two places where the executor branches on hardware. The other is
 `model_executor/executor.py`, which selects the attention backend and the graph
@@ -131,8 +139,9 @@ The registry rejects an unsupported combination before importing the model
 implementation.
 
 Semantically similar operators on different platforms may use different public
-functions, Torch schemas, fusion boundaries, and parameters. Each platform's
-tests define its own kernel contract.
+functions, Torch schemas, fusion boundaries, parameters, and model-layer
+composition. Each platform's tests define its own kernel contract; do not add
+a peer facade solely to make a shared complex layer compile.
 
 ### `distributed/`
 

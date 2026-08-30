@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NPU causal-convolution kernels (PyTorch small-op implementation).
-
-Implements the same semantics as the CUDA Triton reference in
-``kernels_cuda/triton/causal_conv1d.py`` using only standard PyTorch
-operations. Performance is not optimized; correctness and precision
-alignment are the goals.
-"""
+"""NPU causal-convolution kernel bindings."""
 
 from __future__ import annotations
 
@@ -62,32 +56,48 @@ def causal_conv1d_decode(
     weight: torch.Tensor,
     conv_state: torch.Tensor,
     state_indices: torch.Tensor,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Convolve one token per sequence and update the convolution states.
 
     Args:
         value: Activations of shape ``[batch_size, channels]``.
-        weight: Depthwise kernel of shape ``[channels, kernel_size]``.
+        weight: Depthwise kernel of shape ``[kernel_size, channels]``.
         conv_state: Per-sequence convolution state, updated in place.
         state_indices: State slot of every sequence.
 
     Returns:
         Convolved activations with the shape and dtype of ``value``.
     """
-    from .tilelang.causal_conv1d_decode import causal_conv1d_decode as _tl_decode
-
-    # TileLang expects conv_state as [slots, dim, state_len] (PyTorch convention)
-    # Our cache is [slots, state_len, dim], so transpose before calling
-    conv_state_pt = conv_state.transpose(1, 2).contiguous()
-    result = _tl_decode(
-        x=value,
-        conv_state=conv_state_pt,
-        weight=weight,
-        conv_state_indices=state_indices,
+    from .tilelang.causal_conv1d_decode import (
+        DIM_PER_CORE,
+        _build_decode_kernel_jit,
     )
-    # TileLang writes back to conv_state_pt, copy back to original layout
-    conv_state.copy_(conv_state_pt.transpose(1, 2))
-    return result
+
+    _, dim = value.shape
+    width = weight.shape[0]
+    dtype_name = str(value.dtype).removeprefix("torch.")
+    dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
+    kernel = _build_decode_kernel_jit(
+        width,
+        dim_chunks,
+        DIM_PER_CORE,
+        dtype_name,
+        True,
+    )
+    indices = state_indices.to(dtype=torch.int32).contiguous()
+    initial_state_mode = torch.ones_like(indices, dtype=torch.int32)
+    if bias is None:
+        bias = torch.zeros(dim, dtype=value.dtype, device=value.device)
+    return kernel(
+        value.contiguous(),
+        weight,
+        conv_state,
+        indices,
+        indices,
+        initial_state_mode,
+        bias,
+    )
 
 
 __all__ = ["causal_conv1d_qkv_prefill", "causal_conv1d_decode"]

@@ -98,6 +98,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._uses_sparse_mla = False
 
         self._kv_caches: list[LayerCache] = []
+        self._num_kv_blocks: int | None = None
+        self._page_size: int | None = None
         self._metadata: AttentionMetadata | None = None
         self._graph_workspace: torch.Tensor | None = None
         self._graph_outputs: dict[int, torch.Tensor] = {}
@@ -125,17 +127,15 @@ class NpuPagedAttentionBackend(AttentionBackend):
 
     @property
     def num_kv_blocks(self) -> int:
-        if not self._kv_caches:
-            return 0
-        key_cache = self._kv_caches[0].key
-        return key_cache.shape[0] if key_cache is not None else 0
+        if self._num_kv_blocks is None:
+            raise RuntimeError("full-attention KV caches are not bound")
+        return self._num_kv_blocks
 
     @property
     def page_size(self) -> int:
-        if not self._kv_caches:
-            return 1
-        key_cache = self._kv_caches[0].key
-        return key_cache.shape[1] if key_cache is not None else 1
+        if self._page_size is None:
+            raise RuntimeError("full-attention KV caches are not bound")
+        return self._page_size
 
     @property
     def is_mla(self) -> bool:
@@ -147,7 +147,23 @@ class NpuPagedAttentionBackend(AttentionBackend):
         return self._is_mla and not self._uses_sparse_mla
 
     def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
+        full_attention_caches = [
+            (cache.key, cache.value) for cache in kv_caches if cache.key is not None and cache.value is not None
+        ]
+        if not full_attention_caches:
+            raise RuntimeError("no full-attention KV cache is bound")
+
+        page_sizes = {key.shape[1] for key, _ in full_attention_caches}
+        if len(page_sizes) != 1:
+            raise RuntimeError("full-attention layers use inconsistent page sizes")
+
+        num_kv_blocks = {key.shape[0] for key, _ in full_attention_caches}
+        if len(num_kv_blocks) != 1:
+            raise RuntimeError("full-attention layers use inconsistent KV block counts")
+
         self._kv_caches = kv_caches
+        self._page_size = page_sizes.pop()
+        self._num_kv_blocks = num_kv_blocks.pop()
         self._uses_sparse_mla = self._is_mla and any(cache.index is not None for cache in kv_caches)
 
     @staticmethod

@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reusable model layers (RMSNorm, rotary embedding, tensor-parallel linear /
-embedding).
+"""Reusable and backend-owned layers for Python model execution.
 
-Layers call :mod:`python.kernels`, which resolves to the package of the active
-hardware platform; they carry no hardware branch of their own. The dependency
-direction is ``models -> layers -> kernels``.
+Simple layers use the active :mod:`python.kernels` package directly. Complex
+models whose native fusion boundaries differ by device keep their lowering in
+``layers/<device>/`` and select it once when the model is constructed.
 """
 
 from xllm.python.layers.attention import Attention

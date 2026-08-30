@@ -38,9 +38,7 @@ _EXPORTS = {
     "gated_delta_net": (
         "chunk_gated_delta_rule",
         "fused_gdn_gating",
-        "fused_recurrent_gated_delta_rule_packed_decode",
-        "gdn_prefill_prepare",
-        "resolve_gdn_prefill_backend",
+        "fused_sigmoid_gating_delta_rule_decode",
     ),
     "linear": ("prepare_quant_weight", "prepare_row_parallel_weight"),
     "mla": (
@@ -161,9 +159,9 @@ __all__ = [
     "quant_lightning_indexer_metadata",
     "sparse_attn_sharedkv",
     "sparse_attn_sharedkv_metadata",
-    "resolve_gdn_prefill_backend",
-    "gdn_prefill_prepare",
-    "fused_recurrent_gated_delta_rule_packed_decode",
+    "causal_conv1d_qkv_prefill",
+    "fused_gdn_gating",
+    "fused_sigmoid_gating_delta_rule_decode",
     "chunk_gated_delta_rule",
 ]
 _runtime_initialized = False

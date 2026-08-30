@@ -22,26 +22,7 @@ correctness and precision alignment are the goals.
 
 from __future__ import annotations
 
-from typing import Literal
-
 import torch
-
-GdnPrefillBackend = Literal["pytorch_naive"]
-
-
-def resolve_gdn_prefill_backend(
-    capability: tuple[int, int] | None = None,
-) -> GdnPrefillBackend:
-    """Select the prefill backend for NPU.
-
-    Args:
-        capability: Ignored on NPU.
-
-    Returns:
-        The backend name to pass to :func:`chunk_gated_delta_rule`.
-    """
-    del capability
-    return "pytorch_naive"
 
 
 def fused_gdn_gating(
@@ -76,50 +57,7 @@ def fused_gdn_gating(
     return g_out, beta_out
 
 
-def gdn_prefill_prepare(
-    mixed_qkv: torch.Tensor,
-    weight: torch.Tensor,
-    conv_state: torch.Tensor,
-    state_indices: torch.Tensor,
-    has_initial_state: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    num_key_heads: int,
-    num_value_heads: int,
-    key_head_dim: int,
-    value_head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused conv + split + l2norm + gating for prefill.
-
-    Encapsulates the NPU-optimal fusion strategy: causal_conv1d_qkv does
-    conv + split + l2norm in one kernel, then fused_gdn_gating computes
-    decay and beta independently.
-
-    Returns:
-        (q, k, v, g, beta) with shapes [T, H, D] / [T, H].
-    """
-    from .causal_conv1d import causal_conv1d_qkv_prefill
-
-    q, k, v = causal_conv1d_qkv_prefill(
-        mixed_qkv,
-        weight,
-        conv_state,
-        state_indices,
-        has_initial_state,
-        cu_seqlens,
-        num_key_heads,
-        num_value_heads,
-        key_head_dim,
-        value_head_dim,
-    )
-    g, beta = fused_gdn_gating(a_log, a, b, dt_bias)
-    return q.squeeze(0), k.squeeze(0), v.squeeze(0), g.squeeze(0), beta.squeeze(0)
-
-
-def fused_recurrent_gated_delta_rule_packed_decode(
+def fused_sigmoid_gating_delta_rule_decode(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
@@ -194,7 +132,6 @@ def chunk_gated_delta_rule(
     beta: torch.Tensor,
     initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    backend: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the chunked delta rule over a variable-length batch.
 
@@ -207,12 +144,9 @@ def chunk_gated_delta_rule(
         initial_state: Recurrent state each sequence starts from.
             Shape ``[batch, num_value_heads, value_dim, key_dim]``.
         cu_seqlens: Cumulative sequence lengths.
-        backend: Ignored on NPU.
-
     Returns:
         The output with the shape of ``v`` and the final recurrent state.
     """
-    del backend
     # npu_mega_chunk_gdn expects [B, T, H, D] layout with B=1 for packed input
     # Cast g and beta to match C++ layer behavior (bf16 round-trip)
     g_input = g.to(v.dtype)
@@ -230,9 +164,7 @@ def chunk_gated_delta_rule(
 
 
 __all__ = [
-    "GdnPrefillBackend",
-    "resolve_gdn_prefill_backend",
-    "gdn_prefill_prepare",
-    "fused_recurrent_gated_delta_rule_packed_decode",
+    "fused_gdn_gating",
+    "fused_sigmoid_gating_delta_rule_decode",
     "chunk_gated_delta_rule",
 ]
