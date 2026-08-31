@@ -79,6 +79,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info) override;
 
+  std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info) override;
+
 #if defined(USE_NPU) || defined(USE_MLU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;
@@ -93,6 +96,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
  protected:
   // MTP composite: leaves own model-specific NPU input preparation.
   bool owns_npu_parallel_input_prepare() const override;
+
+  void prepare_hierarchy_kv_cache_transfers();
+  void finalize_hierarchy_kv_cache_transfers();
 
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
   std::optional<ForwardOutput> step_decode(const ForwardInput& inputs) override;
@@ -145,9 +151,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Hook for algorithm-specific draft output post-processing during decode.
   virtual void process_draft_sample_output(SampleOutput& sample_output);
 
-  virtual void check_draft_input_embedding(
-      const torch::Tensor& /*embedding*/,
-      const std::string& /*phase*/) const {}
+  virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
+                                           const std::string& /*phase*/) const {
+  }
   virtual bool share_target_lm_head_with_draft() const { return true; }
 
   SampleOutput validate(
@@ -289,6 +295,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
  protected:
   // Draft model worker
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
+  std::shared_ptr<HierarchyKVCacheTransfer> draft_transfer_owner_;
 
   // Embedding cache for speculative decoding
   std::shared_ptr<EmbeddingCache> embedding_cache_;

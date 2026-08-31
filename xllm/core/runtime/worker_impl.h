@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "common/types.h"
 #include "executor.h"
@@ -201,6 +202,26 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
+  std::shared_ptr<HierarchyKVCacheTransfer>
+  create_hierarchy_kv_cache_transfer();
+
+  void bind_hierarchy_kv_cache_transfer(
+      std::shared_ptr<HierarchyKVCacheTransfer> transfer,
+      HierarchyKVCacheTransfer::CacheRole role,
+      const Stream* producer_stream);
+
+  void register_hierarchy_kv_cache(HierarchyKVCacheTransfer& transfer,
+                                   HierarchyKVCacheTransfer::CacheRole role,
+                                   const Stream* producer_stream);
+
+  void set_hierarchy_kv_cache_transfer(
+      std::shared_ptr<HierarchyKVCacheTransfer> transfer);
+
+  std::shared_ptr<HierarchyKVCacheTransfer> get_hierarchy_kv_cache_transfer()
+      const;
+
+  void clear_hierarchy_kv_cache_transfer();
+
   void set_hierarchy_layer_synchronizer(ModelInputParams& input_params);
 
   virtual std::vector<uint8_t> prefetch_kv_blocks(
@@ -284,6 +305,11 @@ class WorkerImpl {
   }
 
  protected:
+  struct HierarchyKVCacheTransferContext {
+    KVCacheShape kv_cache_shape;
+    KVCacheCreateOptions create_options;
+  };
+
   void update_last_step_output(
       const std::optional<ForwardOutput>& output,
       const std::vector<std::string>& request_ids,
@@ -436,7 +462,11 @@ class WorkerImpl {
   InstanceRole instance_role_ = InstanceRole::DEFAULT;
 
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
-  std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
+  std::optional<HierarchyKVCacheTransfer::CacheRole> hierarchy_kv_cache_role_;
+  const Stream* hierarchy_kv_cache_producer_stream_ = nullptr;
+  std::optional<HierarchyKVCacheTransferContext>
+      hierarchy_kv_cache_transfer_context_;
+  std::shared_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
