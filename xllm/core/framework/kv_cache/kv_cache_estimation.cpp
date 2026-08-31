@@ -309,52 +309,6 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
   return std::min<int64_t>(auto_blocks, max_blocks);
 }
 
-constexpr int64_t kDsv4SwaPaddingBlocks = 1;
-
-bool is_dsv4_prefill_or_mix_role(InstanceRole instance_role) {
-  return instance_role == InstanceRole::DEFAULT ||
-         instance_role == InstanceRole::PREFILL ||
-         instance_role == InstanceRole::MIX;
-}
-
-int64_t calculate_dsv4_minimum_swa_count(
-    const ModelArgs& model_args,
-    const KVCacheEstimateOptions& options) {
-  const int64_t max_seqs =
-      std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
-  const int64_t block_size = options.block_size;
-  CHECK_GT(block_size, 0) << "DSV4 block_size must be positive";
-  const int64_t semantic_window = std::max(model_args.window_size(), 1);
-  const int64_t max_model_len = model_args.max_seq_len();
-  const int64_t window_size =
-      max_model_len > 0 ? std::min<int64_t>(semantic_window, max_model_len)
-                        : semantic_window;
-  const int64_t swa_blocks_per_seq =
-      get_swa_blocks_per_seq(window_size, block_size);
-
-  if (is_dsv4_prefill_or_mix_role(options.instance_role)) {
-    const bool use_chunk_limit = options.enable_chunked_prefill &&
-                                 options.max_tokens_per_chunk_for_prefill > 0;
-    const int64_t chunk_tokens =
-        use_chunk_limit
-            ? options.max_tokens_per_chunk_for_prefill
-            : std::max(options.max_tokens_per_batch, static_cast<int64_t>(1));
-    const int64_t chunk_blocks = util::ceil_div(chunk_tokens, block_size);
-    return max_seqs * (swa_blocks_per_seq + chunk_blocks + 1) +
-           kDsv4SwaPaddingBlocks;
-  }
-  CHECK(options.instance_role == InstanceRole::DECODE)
-      << "unsupported DSV4 SWA estimation instance_role="
-      << static_cast<int32_t>(options.instance_role);
-  const int64_t speculative_tokens =
-      std::max(options.num_speculative_tokens, static_cast<int64_t>(0));
-  const int64_t speculative_reserve_tokens =
-      speculative_tokens * (options.enable_schedule_overlap ? 2 : 1);
-  const int64_t decode_window_blocks =
-      util::ceil_div(window_size + speculative_reserve_tokens, block_size);
-  return max_seqs * decode_window_blocks * 2 + kDsv4SwaPaddingBlocks;
-}
-
 int64_t dsv4_common_unit_bytes(const Dsv4KVCacheEstimateCost& cache_cost,
                                int64_t common_blocks_per_unit) {
   CHECK_GT(cache_cost.manager_blocks_per_unit, 0);
@@ -391,17 +345,16 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       static_cast<int64_t>(torch::elementSize(options.dtype));
 
   Dsv4KVCacheEstimateCost cache_cost;
-  cache_cost.swa_count = calculate_dsv4_minimum_swa_count(model_args, options);
-  LOG(INFO) << "DSV4 minimum SWA block request: model_type="
-            << model_args.model_type()
-            << ", is_draft_engine=" << options.is_draft_engine
-            << ", enable_disagg_pd=" << options.enable_disagg_pd
-            << ", instance_role=" << static_cast<int32_t>(options.instance_role)
-            << ", max_seqs_per_batch=" << options.max_seqs_per_batch
-            << ", max_tokens_per_batch=" << options.max_tokens_per_batch
-            << ", max_tokens_per_chunk_for_prefill="
-            << options.max_tokens_per_chunk_for_prefill
-            << ", swa_count=" << cache_cost.swa_count;
+  const int64_t swa_blocks_per_seq =
+      get_swa_blocks_per_seq(model_args.window_size(), block_size);
+  const int64_t max_seqs =
+      std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
+  const int64_t burst_blocks = util::ceil_div(
+      std::max(options.max_tokens_per_batch, static_cast<int64_t>(0)),
+      block_size);
+  cache_cost.swa_count =
+      swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
+
   for (int64_t i = 0; i < model_args.n_layers(); ++i) {
     const int32_t ratio = i < static_cast<int64_t>(compress_ratios.size())
                               ? compress_ratios[static_cast<size_t>(i)]

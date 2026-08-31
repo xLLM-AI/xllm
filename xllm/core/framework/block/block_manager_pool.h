@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <queue>
 #include <vector>
@@ -119,7 +120,10 @@ class BlockManagerPool : public KVCacheManager {
   void reserve_xtensor_padding_blocks() override;
 
  protected:
-  int32_t get_manager_with_max_free_blocks() const;
+  // Select the DP rank with the most effective headroom. Prefix-cache-only
+  // blocks count as available because they can be evicted during allocation;
+  // equal candidates are selected round-robin.
+  int32_t get_manager_with_max_available_blocks() const;
   int32_t get_dp_rank(Sequence* sequence) const;
 
   bool process_beam_search(Sequence* sequence, bool need_swap = false);
@@ -127,6 +131,7 @@ class BlockManagerPool : public KVCacheManager {
  private:
   friend class BlockManagerPoolTestPeer;
 
+  mutable std::atomic<size_t> dp_selection_cursor_{0};
   std::vector<std::vector<BlockTransferInfo>> swap_block_transfer_infos_;
 
  protected:

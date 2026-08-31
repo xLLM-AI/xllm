@@ -312,13 +312,14 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
   options.dtype = torch::kFloat32;
   options.kv_cache_dtype = "auto";
   options.cache_size_in_bytes =
-      2818048 + /*two_additional_swa_blocks=*/2 * 90112;
+      2818048 + /*sixteen_additional_swa_blocks=*/16 * 90112;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 2176;
 
   KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 21);
+  EXPECT_EQ(capacity.swa_count(), 35);
 #if defined(USE_MLU)
   EXPECT_EQ(capacity.c4_count(), 64);
   EXPECT_EQ(capacity.c128_count(), 2);
@@ -339,7 +340,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4RejectsBudgetWithoutCompressedCacheUnit) {
       .window_size(128)
       .compress_ratios({1, 4, 128});
 
-  constexpr int64_t kSwaCount = 4;
+  constexpr int64_t kSwaCount = 7;
   constexpr int64_t kSwaBytesPerBlock =
       /*c1=*/128 * 16 * 4 +
       /*c4=*/128 * (16 * 4 + 2 * 16 * 4 * 2 + 2 * 8 * 4 * 2) +
@@ -351,6 +352,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4RejectsBudgetWithoutCompressedCacheUnit) {
       kSwaCount * kSwaBytesPerBlock + /*remaining_bytes=*/1;
   options.block_size = 128;
   options.max_seqs_per_batch = 1;
+  options.max_tokens_per_batch = 384;
   options.max_tokens_per_chunk_for_prefill = 128;
 
   EXPECT_DEATH(
@@ -359,7 +361,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4RejectsBudgetWithoutCompressedCacheUnit) {
       "cache unit");
 }
 
-TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesChunkCapacity) {
+TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesBatchTokenCapacity) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
@@ -374,6 +376,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesChunkCapacity) {
   options.cache_size_in_bytes = 16 * 1024 * 1024;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 385;
   options.max_tokens_per_chunk_for_prefill = 385;
   options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::PREFILL;
@@ -381,11 +384,12 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesChunkCapacity) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  // W=3, ceil(385/128)=4: 4 * (3 + 4 + 1) usable rows + padding row.
-  EXPECT_EQ(capacity.swa_count(), 33);
+  // Four sequences retain three window blocks each, plus four burst blocks,
+  // four per-sequence tail blocks, and two guard blocks.
+  EXPECT_EQ(capacity.swa_count(), 22);
 }
 
-TEST(KVCacheEstimationTest, DeepSeekV4MixUsesChunkCapacity) {
+TEST(KVCacheEstimationTest, DeepSeekV4MixUsesBatchTokenCapacity) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
@@ -407,7 +411,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4MixUsesChunkCapacity) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 33);
+  EXPECT_EQ(capacity.swa_count(), 146);
 }
 
 TEST(KVCacheEstimationTest,
@@ -435,11 +439,11 @@ TEST(KVCacheEstimationTest,
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  // W=3, ceil(385/128)=4: full-prefill mode uses the batch token bound.
-  EXPECT_EQ(capacity.swa_count(), 33);
+  // Chunking does not affect SWA sizing.
+  EXPECT_EQ(capacity.swa_count(), 22);
 }
 
-TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesTwoWindows) {
+TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesBatchTokenCapacity) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
@@ -454,17 +458,17 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesTwoWindows) {
   options.cache_size_in_bytes = 16 * 1024 * 1024;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 385;
   options.instance_role = InstanceRole::DECODE;
 
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  // W=3: 4 * 3 * 2 usable rows + padding row.
-  EXPECT_EQ(capacity.swa_count(), 25);
+  EXPECT_EQ(capacity.swa_count(), 22);
 }
 
 TEST(KVCacheEstimationTest,
-     DeepSeekV4PdDecodeAccountsForScheduleOverlapSpeculativeReserve) {
+     DeepSeekV4PdDecodeSwaCapacityIgnoresScheduleOverlap) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
@@ -479,6 +483,7 @@ TEST(KVCacheEstimationTest,
   options.cache_size_in_bytes = 16 * 1024 * 1024;
   options.block_size = 128;
   options.max_seqs_per_batch = 1;
+  options.max_tokens_per_batch = 385;
   options.num_speculative_tokens = 65;
   options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::DECODE;
@@ -486,14 +491,12 @@ TEST(KVCacheEstimationTest,
   options.enable_schedule_overlap = false;
   const KVCacheCapacity non_overlap_capacity =
       estimate_kv_cache_capacity(model_args, options);
-  // ceil((128 + 65) / 128)=2 rows per window, two windows plus padding.
-  EXPECT_EQ(non_overlap_capacity.swa_count(), 5);
+  EXPECT_EQ(non_overlap_capacity.swa_count(), 8);
 
   options.enable_schedule_overlap = true;
   const KVCacheCapacity overlap_capacity =
       estimate_kv_cache_capacity(model_args, options);
-  // ceil((128 + 2*65) / 128)=3 rows per window, two windows plus padding.
-  EXPECT_EQ(overlap_capacity.swa_count(), 7);
+  EXPECT_EQ(overlap_capacity.swa_count(), 8);
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4PrefixCacheKeepsOperationalSwaPool) {
@@ -511,6 +514,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4PrefixCacheKeepsOperationalSwaPool) {
   options.cache_size_in_bytes = 128 * 1024 * 1024;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 385;
   options.max_tokens_per_chunk_for_prefill = 385;
   options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::PREFILL;
@@ -521,7 +525,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4PrefixCacheKeepsOperationalSwaPool) {
 
   ASSERT_GT(capacity.c128_count(), 0);
   EXPECT_EQ(capacity.c4_count(), 32 * capacity.c128_count());
-  EXPECT_EQ(capacity.swa_count(), 33);
+  EXPECT_EQ(capacity.swa_count(), 22);
 }
 
 TEST(KVCacheEstimationTest,
@@ -555,7 +559,7 @@ TEST(KVCacheEstimationTest,
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 181);
+  EXPECT_EQ(capacity.swa_count(), 102);
   EXPECT_GT(capacity.c4_count(), 0);
   EXPECT_GT(capacity.c128_count(), 0);
   EXPECT_EQ(capacity.c4_count(), 32 * capacity.c128_count());
@@ -576,6 +580,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
   options.cache_size_in_bytes = 128 * 1024 * 1024;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 385;
   options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::DECODE;
   options.enable_prefix_cache = true;
@@ -583,7 +588,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 25);
+  EXPECT_EQ(capacity.swa_count(), 22);
   EXPECT_GT(capacity.c128_count(), 0);
 }
 
@@ -603,6 +608,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixKeepsOperationalSwaPool) {
   options.cache_size_in_bytes = 43 * kSwaBytesPerBlock;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 385;
   options.max_tokens_per_chunk_for_prefill = 385;
   options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::PREFILL;
@@ -611,7 +617,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixKeepsOperationalSwaPool) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 33);
+  EXPECT_EQ(capacity.swa_count(), 22);
   EXPECT_EQ(capacity.c4_count(), 0);
   EXPECT_EQ(capacity.c128_count(), 0);
 }
@@ -631,11 +637,12 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
   options.cache_size_in_bytes = 2818048;
   options.block_size = 128;
   options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 2176;
 
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.swa_count(), 21);
+  EXPECT_EQ(capacity.swa_count(), 35);
   EXPECT_EQ(capacity.c4_count(), 0);
   EXPECT_EQ(capacity.c128_count(), 0);
   EXPECT_EQ(capacity.n_blocks(), 1);
@@ -662,9 +669,12 @@ TEST(KVCacheEstimationTest,
   target_options.dtype = torch::kFloat32;
   target_options.kv_cache_dtype = "auto";
   target_options.cache_size_in_bytes =
-      2818048 + /*target_and_draft_swa_growth=*/229376;
+      2818048 + /*target_and_draft_swa_growth=*/229376 +
+      /*additional_target_swa=*/14 * 90112 +
+      /*additional_draft_swa=*/14 * 3 * 128 * 16 * 4;
   target_options.block_size = 128;
   target_options.max_seqs_per_batch = 4;
+  target_options.max_tokens_per_batch = 2176;
   KVCacheEstimateOptions draft_options = target_options;
   draft_options.is_draft_engine = true;
 
@@ -678,13 +688,16 @@ TEST(KVCacheEstimationTest,
       estimate_kv_cache_capacity(target_args, target_options);
 
   constexpr int64_t kDraftSwaBytes =
-      /*layers=*/3 * /*swa_count=*/21 * /*block_size=*/128 *
+      /*layers=*/3 * /*swa_count=*/35 * /*block_size=*/128 *
       /*head_dim=*/16 * /*float32_bytes=*/4;
   EXPECT_LE(capacity.cache_size_in_bytes() + kDraftSwaBytes,
             target_options.cache_size_in_bytes);
+  EXPECT_EQ(capacity.swa_count(), 35);
+  EXPECT_EQ(capacity.c4_count(), 64);
+  EXPECT_EQ(capacity.c128_count(), 2);
   EXPECT_EQ(capacity.swa_count(), target_only_capacity.swa_count());
-  EXPECT_EQ(capacity.c4_count() + 32, target_only_capacity.c4_count());
-  EXPECT_EQ(capacity.c128_count() + 1, target_only_capacity.c128_count());
+  EXPECT_EQ(capacity.c4_count() + 64, target_only_capacity.c4_count());
+  EXPECT_EQ(capacity.c128_count() + 2, target_only_capacity.c128_count());
   EXPECT_LT(capacity.n_blocks(), target_only_capacity.n_blocks());
 }
 
