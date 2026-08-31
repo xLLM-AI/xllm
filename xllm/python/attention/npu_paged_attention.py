@@ -83,6 +83,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         head_dim: int,
         scale: float,
         sliding_window: int,
+        is_mla: bool,
         device: torch.device,
         dtype: torch.dtype,
     ) -> None:
@@ -94,7 +95,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self.dtype = dtype
         self.device = device
         self._use_fia_v2 = _HAS_FIA_V2
-        self._is_mla = head_dim > 192 and num_kv_heads == 1
+        self._is_mla = is_mla
         self._uses_sparse_mla = False
 
         self._kv_caches: list[LayerCache] = []

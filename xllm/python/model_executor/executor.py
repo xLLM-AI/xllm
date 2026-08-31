@@ -74,6 +74,7 @@ def _create_attention_backend(
             head_dim=first_attention.head_dim,
             scale=first_attention.scale,
             sliding_window=first_attention.sliding_window,
+            is_mla=bool(config.get("enable_mla", False)),
             device=device,
             dtype=dtype,
         )
