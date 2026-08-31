@@ -181,10 +181,6 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
       << "DeepSeek V4 host prefix cache layer count must be positive.";
 
   const double factor = create_options.host_blocks_factor();
-  const int64_t host_swa_count = scale_host_block_count(pool_counts[0], factor);
-  const int64_t host_c4_count = scale_host_block_count(pool_counts[1], factor);
-  const int64_t host_c128_count =
-      scale_host_block_count(pool_counts[2], factor);
   const int64_t block_size = create_options.block_size();
   const int64_t head_dim = create_options.head_dim();
   const int64_t index_head_dim =
@@ -208,14 +204,19 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
   // after such a boundary, so the SWA host group stores the persistent window
   // for every DSV4 layer but no compressor scratch tensors.
   switch (type) {
-    case BlockType::SWA:
+    case BlockType::SWA: {
+      const int64_t host_swa_count =
+          scale_host_block_count(pool_counts[0], factor);
       host_page_aligned_regions_.reserve(1);
       create_host_tensor(host_group_shape(host_swa_count, n_heads, head_dim),
                          create_options.dtype(),
                          &swa_cache_,
                          nullptr);
       break;
-    case BlockType::C4:
+    }
+    case BlockType::C4: {
+      const int64_t host_c4_count =
+          scale_host_block_count(pool_counts[1], factor);
       host_page_aligned_regions_.reserve(3);
       create_host_tensor(host_group_shape(host_c4_count, n_heads, head_dim),
                          create_options.dtype(),
@@ -237,13 +238,17 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
                            nullptr);
       }
       break;
-    case BlockType::C128:
+    }
+    case BlockType::C128: {
+      const int64_t host_c128_count =
+          scale_host_block_count(pool_counts[2], factor);
       host_page_aligned_regions_.reserve(1);
       create_host_tensor(host_group_shape(host_c128_count, n_heads, head_dim),
                          create_options.dtype(),
                          &key_cache_,
                          nullptr);
       break;
+    }
     default:
       LOG(FATAL) << "Unsupported DeepSeek V4 host block type: "
                  << static_cast<int32_t>(type);

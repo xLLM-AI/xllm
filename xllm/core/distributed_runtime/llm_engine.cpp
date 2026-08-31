@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
@@ -711,7 +712,17 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
         << "KV cache Store requires Host cache blocks.";
   }
 
-  if (options_.host_blocks_factor() > 1.0) {
+  const bool is_mtp_draft_engine =
+      options_.is_draft_engine() &&
+      SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm());
+  if (is_mtp_draft_engine) {
+    // The speculative scheduler owns only the target engine BlockManager.
+    // Keep the draft engine's placeholder manager non-caching so a Draft
+    // model with only SWA tensors does not pretend to own logical prefixes.
+    options.enable_prefix_cache(false);
+  }
+
+  if (options_.host_blocks_factor() > 1.0 && !is_mtp_draft_engine) {
     // Translate a composite cache capacity into typed Host pools. The
     // hierarchy layer consumes only this BlockType map and does not need to
     // identify the model that produced the layout.

@@ -15,9 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -39,6 +41,21 @@ class HierarchyKVCacheTransfer final {
  public:
   using GroupedCaches = std::map<BlockType, std::vector<KVCache*>>;
   using HostGroupedCaches = std::map<BlockType, std::unique_ptr<KVCache>>;
+  using CacheHandle = uint32_t;
+
+  enum class CacheRole : uint8_t {
+    TARGET = 0,
+    DRAFT,
+  };
+
+  struct CacheRegistration {
+    CacheRole role = CacheRole::TARGET;
+    std::vector<KVCache>* device_kv_caches = nullptr;
+    KVCacheShape kv_cache_shape;
+    KVCacheCreateOptions create_options;
+    const Stream* producer_stream = nullptr;
+    std::string store_key_component;
+  };
 
   struct Options {
     PROPERTY(uint32_t, tp_rank);
@@ -56,6 +73,7 @@ class HierarchyKVCacheTransfer final {
     PROPERTY(uint32_t, store_worker_id) = 0;
   };
 
+  HierarchyKVCacheTransfer(const Options& options, const torch::Device& device);
   HierarchyKVCacheTransfer(const Options& options,
                            const torch::Device& device,
                            const Stream* compute_stream,
@@ -63,6 +81,13 @@ class HierarchyKVCacheTransfer final {
                            const KVCacheShape& kv_cache_shape,
                            const KVCacheCreateOptions& create_options);
   ~HierarchyKVCacheTransfer();
+
+  CacheHandle register_cache(CacheRegistration registration);
+  bool finalize_registration();
+  void shutdown();
+  [[nodiscard]] bool registration_finalized() const {
+    return registration_finalized_;
+  }
 
   uint32_t transfer_kv_blocks(
       uint64_t batch_id,
@@ -72,17 +97,32 @@ class HierarchyKVCacheTransfer final {
   std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info);
   void set_layer_synchronizer(ModelInputParams& params);
+  [[nodiscard]] bool supports_block_type(BlockType block_type) const;
+  [[nodiscard]] bool supports_block_type(CacheRole role,
+                                         BlockType block_type) const;
 
  private:
-  GroupedCaches build_device_groups(
-      std::map<BlockType, std::vector<int64_t>>* layer_ids) const;
-  void create_host_cache(const GroupedCaches& device_groups);
-  HostKVLayout create_host_kv_layout(
-      const GroupedCaches& device_groups,
-      const std::map<BlockType, std::vector<int64_t>>& layer_ids) const;
-  static HostKVRequest make_request(
+  struct CacheDomain {
+    CacheHandle handle = 0;
+    CacheRole role = CacheRole::TARGET;
+    std::vector<KVCache>* device_kv_caches = nullptr;
+    KVCacheShape kv_cache_shape;
+    KVCacheCreateOptions create_options;
+    GroupedCaches device_caches_by_type;
+    std::map<BlockType, std::vector<int64_t>> layer_ids_by_type;
+    HostGroupedCaches host_caches_by_type;
+    std::unique_ptr<HostKVLayout> host_layout;
+    const Stream* producer_stream = nullptr;
+    std::string store_key_component;
+  };
+
+  static int32_t domain_group_id(CacheHandle handle, BlockType block_type);
+  GroupedCaches build_device_groups(CacheDomain* domain) const;
+  void create_host_cache(CacheDomain* domain);
+  HostKVLayout create_host_kv_layout(const CacheDomain& domain) const;
+  HostKVRequest make_request(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      TransferType transfer_type);
+      TransferType transfer_type) const;
 
   uint32_t offload(const std::vector<BlockTransferInfo>& block_transfer_info);
   bool offload_to_host(const HostKVRequest& request);
@@ -93,10 +133,9 @@ class HierarchyKVCacheTransfer final {
   Device device_;
   std::unique_ptr<ThreadPool> load_threadpool_;
 
-  std::vector<xllm::KVCache>* kv_caches_ptr_ = nullptr;
-  KVCacheShape kv_cache_shape_;
-  KVCacheCreateOptions create_options_;
-  HostGroupedCaches host_kv_caches_;
+  std::vector<CacheDomain> cache_domains_;
+  bool registration_finalized_ = false;
+  bool shutdown_ = false;
 
   std::unique_ptr<HostKVTransfer> host_kv_transfer_;
   std::unique_ptr<KVCacheStore> kv_cache_store_;
