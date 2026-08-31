@@ -21,11 +21,14 @@ limitations under the License.
 
 namespace xllm {
 
-// Test-only accessor for BlockManagerPool internals. Exposes the private LINEAR
-// leaf so tests can seed checkpoints directly the way the scheduler does while
-// resolving cache ops, without widening the production API surface.
+// Test-only accessor for BlockManagerPool internals. Exposes DP selection and
+// the private LINEAR leaf without widening the production API surface.
 class BlockManagerPoolTestPeer final {
  public:
+  static int32_t select_dp_rank(BlockManagerPool& pool) {
+    return pool.get_manager_with_max_available_blocks();
+  }
+
   static LinearStateBlockManager* linear_leaf(BlockManagerPool& pool,
                                               int32_t dp_rank) {
     if (!pool.options_.enable_linear_state()) {
