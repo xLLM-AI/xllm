@@ -196,12 +196,18 @@ class TestCreateAttentionBackend:
         StubAttentionBackend,
     )
     def test_npu_device_creates_npu_backend(self, _mock_is_npu):
-        attn = _make_attention_layer()
-        backend = _create_attention_backend(attn, torch.device("npu"), torch.float16)
+        attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
+        backend = _create_attention_backend(
+            attn,
+            torch.device("npu"),
+            torch.float16,
+            {"enable_mla": False},
+        )
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["num_heads"] == 8
-        assert backend.init_kwargs["num_kv_heads"] == 2
-        assert backend.init_kwargs["head_dim"] == 64
+        assert backend.init_kwargs["num_kv_heads"] == 1
+        assert backend.init_kwargs["head_dim"] == 256
+        assert backend.init_kwargs["is_mla"] is False
 
     @patch(
         "xllm.python.model_executor.executor.current_platform.is_npu",

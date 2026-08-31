@@ -32,6 +32,7 @@ def test_uses_first_nonempty_key_cache() -> None:
         head_dim=64,
         scale=0.125,
         sliding_window=0,
+        is_mla=False,
         device=torch.device("cpu"),
         dtype=torch.float16,
     )
