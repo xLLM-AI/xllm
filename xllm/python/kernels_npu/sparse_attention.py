@@ -18,6 +18,185 @@ from __future__ import annotations
 
 import torch
 
+try:
+    import cann_ops_transformer  # noqa: F401
+except ImportError:
+    cann_ops_transformer = None
+
+
+def pool_key_indexer(
+    query: torch.Tensor,
+    pool_key: torch.Tensor,
+    weights: torch.Tensor,
+    pool_tail_k: torch.Tensor,
+    topk: int,
+    pool_size: int,
+    *,
+    return_value: bool = False,
+    q_descale: torch.Tensor | None = None,
+    k_descale: torch.Tensor | None = None,
+    actual_seq_q: torch.Tensor | None = None,
+    actual_seq_k: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    layout_q: str = "BSND",
+    layout_k: str = "BSND",
+    mask_mode: int = 3,
+    quant_mode: int = -1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run CANN's fused pool-key indexer for supported layouts."""
+    if layout_q == "BSND":
+        if query.dim() != 4 or query.size(-1) != 128 or query.numel() == 0:
+            raise ValueError("query must have shape [B, S1, N1, 128]")
+        batch_size = query.size(0)
+        expected_weights_shape = query.shape[:3]
+        if actual_seq_q is not None:
+            raise ValueError("actual_seq_q is only valid for TND")
+    elif layout_q == "TND":
+        if query.dim() != 3 or query.size(-1) != 128 or query.numel() == 0:
+            raise ValueError("query must have shape [T1, N1, 128]")
+        if actual_seq_q is None:
+            raise ValueError("layout_q=TND requires actual_seq_q")
+        if actual_seq_q.dtype != torch.int32 or actual_seq_q.dim() != 1:
+            raise TypeError("actual_seq_q must be a rank-1 int32 tensor")
+        batch_size = pool_tail_k.numel()
+        expected_weights_shape = query.shape[:2]
+    else:
+        raise ValueError("layout_q must be BSND or TND")
+
+    if layout_k == "BSND":
+        if (
+            pool_key.dim() != 4
+            or pool_key.size(0) != batch_size
+            or pool_key.size(2) != 1
+            or pool_key.size(-1) != 128
+            or pool_key.numel() == 0
+        ):
+            raise ValueError("pool_key must have shape [B, S2, 1, 128]")
+        if actual_seq_k is not None or block_table is not None:
+            raise ValueError("actual_seq_k/block_table are not valid for BSND")
+    elif layout_k == "TND":
+        if (
+            pool_key.dim() != 3
+            or pool_key.size(1) != 1
+            or pool_key.size(-1) != 128
+            or pool_key.numel() == 0
+        ):
+            raise ValueError("pool_key must have shape [T2, 1, 128]")
+        if actual_seq_k is None:
+            raise ValueError("layout_k=TND requires actual_seq_k")
+        if actual_seq_k.dtype != torch.int32 or actual_seq_k.dim() != 1:
+            raise TypeError("actual_seq_k must be a rank-1 int32 tensor")
+        if block_table is not None:
+            raise ValueError("block_table is only valid for PA_BBND")
+    elif layout_k == "PA_BBND":
+        if (
+            pool_key.dim() != 4
+            or pool_key.size(2) != 1
+            or pool_key.size(-1) != 128
+            or pool_key.numel() == 0
+        ):
+            raise ValueError("pool_key must have shape [block_num, block_size, 1, 128]")
+        if (
+            actual_seq_k is None
+            or block_table is None
+            or actual_seq_k.dtype != torch.int32
+            or actual_seq_k.dim() != 1
+            or block_table.dtype != torch.int32
+            or block_table.dim() != 2
+            or actual_seq_k.numel() != batch_size
+            or block_table.size(0) != batch_size
+        ):
+            raise ValueError("PA_BBND requires per-batch int32 actual_seq_k and block_table")
+    else:
+        raise ValueError("layout_k must be BSND, TND, or PA_BBND")
+    if weights.shape != expected_weights_shape:
+        raise ValueError("weights shape must match query layout")
+    if query.dtype not in (torch.float16, torch.bfloat16):
+        raise TypeError("query must be float16 or bfloat16")
+    if pool_key.dtype != query.dtype or weights.dtype != query.dtype:
+        raise TypeError("query, pool_key, and weights must have the same dtype")
+    if pool_tail_k.dtype != torch.int32 or pool_tail_k.dim() != 1:
+        raise TypeError("pool_tail_k must be a rank-1 int32 tensor")
+    if quant_mode not in (-1, 0, 1):
+        raise ValueError("quant_mode must be -1, 0, or 1")
+    if quant_mode == -1 and (q_descale is not None or k_descale is not None):
+        raise ValueError("q_descale/k_descale require quant_mode >= 0")
+    if q_descale is not None:
+        if q_descale.dtype != torch.float32 or q_descale.shape != query.shape[:-1]:
+            raise ValueError("q_descale must be float32 with query.shape[:-1]")
+    if k_descale is not None:
+        if k_descale.dtype != torch.float32 or k_descale.shape != pool_key.shape[:-1]:
+            raise ValueError("k_descale must be float32 with pool_key.shape[:-1]")
+    inputs = [pool_key, weights, pool_tail_k]
+    for tensor in (
+        q_descale,
+        k_descale,
+        actual_seq_q,
+        actual_seq_k,
+        block_table,
+    ):
+        if tensor is not None:
+            inputs.append(tensor)
+    if query.device.type != "npu" or any(
+        tensor.device != query.device for tensor in inputs
+    ):
+        raise ValueError("all inputs must be on the same NPU device")
+    if pool_tail_k.numel() != batch_size:
+        raise ValueError("pool_tail_k must have one element per batch")
+    if actual_seq_q is not None and actual_seq_q.numel() not in (
+        batch_size,
+        batch_size + 1,
+    ):
+        raise ValueError("actual_seq_q must contain one length per batch")
+    if actual_seq_k is not None and layout_k == "TND" and actual_seq_k.numel() not in (
+        batch_size,
+        batch_size + 1,
+    ):
+        raise ValueError("actual_seq_k must contain one length per batch")
+    # The CANN wheel accepts cumulative sequence ends without the optional
+    # leading zero. Keep the public README-compatible B+1 form, but normalize
+    # it before dispatch using shape-only slicing (graph-safe).
+    actual_seq_q_op = actual_seq_q
+    if actual_seq_q is not None and actual_seq_q.numel() == batch_size + 1:
+        actual_seq_q_op = actual_seq_q[1:]
+    actual_seq_k_op = actual_seq_k
+    if actual_seq_k is not None and layout_k == "TND" and actual_seq_k.numel() == batch_size + 1:
+        actual_seq_k_op = actual_seq_k[1:]
+    if actual_seq_q_op is not None:
+        actual_seq_q_op = actual_seq_q_op.to(torch.int32).contiguous()
+    if actual_seq_k_op is not None:
+        actual_seq_k_op = actual_seq_k_op.to(torch.int32).contiguous()
+    if block_table is not None:
+        block_table = block_table.to(torch.int32).contiguous()
+    if pool_size < 1 or pool_size > 128:
+        raise ValueError("pool_size must be in [1, 128]")
+    if topk < 1 or topk > 8192 or topk % pool_size != 0:
+        raise ValueError("topk must be in [1, 8192] and divisible by pool_size")
+    try:
+        op = torch.ops.cann_ops_transformer.pool_key_indexer
+    except (AttributeError, RuntimeError) as exc:
+        raise NotImplementedError(
+            "CANN pool_key_indexer is unavailable in this runtime"
+        ) from exc
+    return op(
+        query,
+        pool_key,
+        weights,
+        pool_tail_k,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        actual_seq_q=actual_seq_q_op,
+        actual_seq_k=actual_seq_k_op,
+        block_table=block_table,
+        layout_q=layout_q,
+        layout_k=layout_k,
+        topk=topk,
+        pool_size=pool_size,
+        mask_mode=mask_mode,
+        quant_mode=quant_mode,
+        return_value=return_value,
+    )
+
 
 def lightning_indexer(
     query: torch.Tensor,
@@ -290,6 +469,7 @@ def sparse_flash_attention_out(
 __all__ = [
     "lightning_indexer",
     "lightning_indexer_out",
+    "pool_key_indexer",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
     "scatter_nd_update",

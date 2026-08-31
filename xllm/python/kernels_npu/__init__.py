@@ -103,6 +103,7 @@ from .rotary_embedding import (
 from .sparse_attention import (
     lightning_indexer,
     lightning_indexer_out,
+    pool_key_indexer,
     quant_lightning_indexer,
     quant_lightning_indexer_metadata,
     scatter_nd_update,
@@ -150,6 +151,7 @@ __all__ = [
     "dynamic_quant",
     "lightning_indexer",
     "lightning_indexer_out",
+    "pool_key_indexer",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
     "scatter_nd_update",
