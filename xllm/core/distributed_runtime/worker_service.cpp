@@ -609,10 +609,16 @@ void WorkerService::PrefetchFromStorage(
   std::vector<BlockTransferInfo> block_transfer_info;
   proto_to_block_transfer_info(*req, block_transfer_info);
 
+  resp->set_ok(true);
+  if (google::protobuf::Closure* response_done = done_guard.release()) {
+    response_done->Run();
+  }
+
   copy_threadpool_.schedule(
       [this,
        block_transfer_info = std::move(block_transfer_info),
        stream_id = std::move(stream_id)]() mutable {
+        brpc::ScopedStream stream_guard(stream_id);
         Slice<BlockTransferInfo> transfer_slice{block_transfer_info};
         std::vector<uint8_t> hits = worker_->prefetch_kv_blocks(transfer_slice);
         const bool worker_ok = hits.size() == transfer_slice.size();
@@ -634,11 +640,7 @@ void WorkerService::PrefetchFromStorage(
         butil::IOBuf buffer;
         buffer.append(payload);
         brpc::StreamWrite(stream_id, buffer);
-        brpc::StreamClose(stream_id);
       });
-
-  resp->set_ok(true);
-  return;
 }
 
 void WorkerService::LinkCluster(::google::protobuf::RpcController* controller,

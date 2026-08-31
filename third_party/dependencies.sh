@@ -262,7 +262,7 @@ install_system_dependencies() {
 
     if command -v dnf >/dev/null 2>&1; then
         run_or_die "Failed to install dnf development packages" \
-            dnf install -y zstd-devel xxhash-devel
+            dnf --disablerepo=update install -y zstd-devel xxhash-devel
         print_success "Installed dnf packages: zstd-devel xxhash-devel"
         return
     fi

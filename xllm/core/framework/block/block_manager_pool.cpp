@@ -96,22 +96,41 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
   swap_block_transfer_infos_.resize(block_managers_.size());
 }
 
-int32_t BlockManagerPool::get_manager_with_max_free_blocks() const {
+int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
   if (block_managers_.empty()) {
     return 0;
   }
 
-  size_t max_index = 0;
-  size_t max_free = block_managers_[0]->num_free_blocks();
-
-  for (size_t i = 1; i < block_managers_.size(); ++i) {
-    const size_t current_free = block_managers_[i]->num_free_blocks();
-    if (current_free > max_free) {
-      max_free = current_free;
-      max_index = i;
+  // Prefix-cache entries consume physical free blocks but remain evictable.
+  // Rank by effective headroom instead of the raw free-list size so a DP group
+  // with an idle, full prefix cache is not mistaken for a busy group.
+  size_t max_available = 0;
+  std::vector<size_t> candidate_indices;
+  candidate_indices.reserve(block_managers_.size());
+  for (size_t i = 0; i < block_managers_.size(); ++i) {
+    const size_t total_blocks = block_managers_[i]->num_total_blocks();
+    const size_t used_blocks = block_managers_[i]->num_used_blocks();
+    CHECK_LE(used_blocks, total_blocks);
+    const size_t available_blocks = total_blocks - used_blocks;
+    if (candidate_indices.empty() || available_blocks > max_available) {
+      max_available = available_blocks;
+      candidate_indices.clear();
+      candidate_indices.emplace_back(i);
+    } else if (available_blocks == max_available) {
+      candidate_indices.emplace_back(i);
     }
   }
-  return max_index;
+
+  CHECK(!candidate_indices.empty());
+  if (candidate_indices.size() == 1) {
+    return static_cast<int32_t>(candidate_indices.front());
+  }
+  // A fixed first-match tie break concentrates requests on DP 0 when every
+  // group's physical pool is full. Rotate equal candidates to spread admission.
+  const size_t candidate_offset =
+      dp_selection_cursor_.fetch_add(1, std::memory_order_relaxed) %
+      candidate_indices.size();
+  return static_cast<int32_t>(candidate_indices[candidate_offset]);
 }
 
 int32_t BlockManagerPool::get_dp_rank(Sequence* sequence) const {
@@ -119,7 +138,7 @@ int32_t BlockManagerPool::get_dp_rank(Sequence* sequence) const {
   if (sequence->dp_rank() >= 0) {
     dp_rank = sequence->dp_rank();
   } else {
-    dp_rank = get_manager_with_max_free_blocks();
+    dp_rank = get_manager_with_max_available_blocks();
     sequence->set_dp_rank(dp_rank);
   }
   return dp_rank;
@@ -213,7 +232,7 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
 
 std::vector<Block> BlockManagerPool::allocate(size_t num_tokens,
                                               int32_t& dp_rank) {
-  dp_rank = get_manager_with_max_free_blocks();
+  dp_rank = get_manager_with_max_available_blocks();
   const size_t block_size = options_.block_size();
   const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
   // block_managers_[dp_rank] is always a CompositeBlockManager, whose
@@ -369,8 +388,15 @@ std::vector<size_t> BlockManagerPool::num_used_blocks() const {
 }
 
 double BlockManagerPool::kv_cache_utilization() const {
-  int32_t dp_rank = get_manager_with_max_free_blocks();
-  return block_managers_[dp_rank]->kv_cache_utilization();
+  if (block_managers_.empty()) {
+    return 0.0;
+  }
+  double min_utilization = block_managers_.front()->kv_cache_utilization();
+  for (size_t i = 1; i < block_managers_.size(); ++i) {
+    min_utilization =
+        std::min(min_utilization, block_managers_[i]->kv_cache_utilization());
+  }
+  return min_utilization;
 }
 
 // currently use only for profile, which not need prefix cache.
