@@ -59,14 +59,17 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
 
   // if enable_schedule_overlap, there might be pre scheduled fake token -1
   // need to figure out the valid token to check finish.
-  size_t last_token_id;
-  size_t total_tokens;
-  for (auto i = token_ids.size() - 1; i >= 0; --i) {
+  int32_t last_token_id = -1;
+  size_t total_tokens = 0;
+  for (int64_t i = static_cast<int64_t>(token_ids.size()) - 1; i >= 0; --i) {
     if (token_ids[i] >= 0) {
       last_token_id = token_ids[i];
-      total_tokens = i + 1;
+      total_tokens = static_cast<size_t>(i) + 1;
       break;
     }
+  }
+  if (total_tokens == 0) {
+    return FinishReason::NONE;
   }
 
   // check eos token
@@ -113,7 +116,7 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
   }
 
   if (max_context_len_ > 0 && total_tokens >= max_context_len_) {
-    CHECK_GE(total_tokens, num_prompt_tokens) << "Unknow error";
+    CHECK_GE(total_tokens, num_prompt_tokens) << "Unknown error";
     return FinishReason::LENGTH;
   }
 

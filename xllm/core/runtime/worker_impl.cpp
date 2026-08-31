@@ -1291,7 +1291,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
-    if (has_linear_attention_layers(context_.get_model_args())) {
+    if (!kv_caches_.empty() &&
+        has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(input_params);
       // Under schedule_overlap chunked prefill the previous chunk's forward
       // runs on compute_stream_ from a worker thread that may not have

@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "framework/block/block_manager_impl.h"
 #include "framework/request/incremental_decoder.h"
 #include "framework/request/sequence.h"
 
@@ -56,7 +57,8 @@ class SequenceStopOutputTest : public ::testing::Test {
                   bool include_stop_str_in_output = false,
                   int32_t eos_token = -1,
                   bool skip_special_tokens = false,
-                  bool logprobs = false) {
+                  bool logprobs = false,
+                  bool enable_schedule_overlap = false) {
     stopping_checker_ = StoppingChecker(max_generated_tokens,
                                         /*max_context_len=*/0,
                                         eos_token,
@@ -71,7 +73,7 @@ class SequenceStopOutputTest : public ::testing::Test {
     params.include_stop_str_in_output = include_stop_str_in_output;
     params.logprobs = logprobs;
     params.streaming = false;
-    params.enable_schedule_overlap = false;
+    params.enable_schedule_overlap = enable_schedule_overlap;
     params.rec_type = RecType::kNone;
     params.bos_token_id = 0;
     params.request_id = "stop_output_test";
@@ -93,9 +95,23 @@ class SequenceStopOutputTest : public ::testing::Test {
     sequence_->kv_state().set_kv_cache_tokens_num(prompt_tokens.size());
   }
 
+  void allocate_kv_blocks(uint32_t num_blocks = 4, uint32_t block_size = 16) {
+    BlockManager::Options options;
+    options.num_blocks(num_blocks).block_size(block_size);
+    block_manager_ = std::make_unique<BlockManagerImpl>(options);
+    std::vector<Block> blocks;
+    blocks.reserve(2);
+    for (int32_t i = 0; i < 2; ++i) {
+      blocks.emplace_back(block_manager_->allocate());
+    }
+    sequence_->kv_state().add_blocks(BlockType::KV, blocks);
+  }
+
   void append_token(int32_t token_id) {
     sequence_->append_token(Token(token_id));
   }
+
+  void append_fake() { sequence_->append_token(Token(-1)); }
 
   void append_token(int32_t token_id, float logprob) {
     Token token(token_id);
@@ -105,6 +121,7 @@ class SequenceStopOutputTest : public ::testing::Test {
 
   RequestSamplingParam sampling_param_;
   StoppingChecker stopping_checker_;
+  std::unique_ptr<BlockManagerImpl> block_manager_;
   std::unique_ptr<Sequence> sequence_;
   StopAwareTokenizer tokenizer_;
 };
@@ -450,6 +467,71 @@ TEST_F(SequenceStopOutputTest, ManualFinishKeepsLastGeneratedToken) {
   EXPECT_EQ(output.text, "A");
   ASSERT_TRUE(output.finish_reason.has_value());
   EXPECT_EQ(output.finish_reason.value(), "stop");
+}
+
+TEST_F(SequenceStopOutputTest, OverlapMtpEosCommitStopsDespiteStaleTail) {
+  initialize(/*max_generated_tokens=*/16,
+             /*stop_tokens=*/{StopAwareTokenizer::kStopTokenId},
+             /*stop_sequences=*/{},
+             /*prompt_tokens=*/{'P'},
+             /*include_stop_str_in_output=*/false,
+             /*eos_token=*/-1,
+             /*skip_special_tokens=*/false,
+             /*logprobs=*/false,
+             /*enable_schedule_overlap=*/true);
+  allocate_kv_blocks();
+
+  append_fake();
+  sequence_->update_last_step_token(Token('A'), /*token_offset=*/0);
+  append_fake();
+  sequence_->update_last_step_token(Token('B'), /*token_offset=*/1);
+  EXPECT_FALSE(sequence_->finished());
+
+  append_fake();
+  sequence_->update_last_step_token(Token(StopAwareTokenizer::kStopTokenId),
+                                    /*token_offset=*/0);
+  ASSERT_TRUE(sequence_->finished());
+  ASSERT_TRUE(sequence_->finish_reason() == FinishReason::STOP);
+}
+
+TEST_F(SequenceStopOutputTest, OverlapEosPlainFakeTailStops) {
+  initialize(/*max_generated_tokens=*/8,
+             /*stop_tokens=*/{StopAwareTokenizer::kStopTokenId},
+             /*stop_sequences=*/{},
+             /*prompt_tokens=*/{'P'},
+             /*include_stop_str_in_output=*/false,
+             /*eos_token=*/-1,
+             /*skip_special_tokens=*/false,
+             /*logprobs=*/false,
+             /*enable_schedule_overlap=*/true);
+
+  append_fake();
+  sequence_->update_last_step_token(Token('A'), /*token_offset=*/0);
+  EXPECT_FALSE(sequence_->finished());
+  append_fake();
+  sequence_->update_last_step_token(Token(StopAwareTokenizer::kStopTokenId),
+                                    /*token_offset=*/0);
+  ASSERT_TRUE(sequence_->finished());
+
+  EXPECT_EQ(sequence_->generate_output(tokenizer_).text, "A");
+}
+
+TEST_F(SequenceStopOutputTest, OverlapNonMtpUnaffectedByBoundary) {
+  initialize(/*max_generated_tokens=*/8,
+             /*stop_tokens=*/{StopAwareTokenizer::kStopTokenId},
+             /*stop_sequences=*/{},
+             /*prompt_tokens=*/{'P'},
+             /*include_stop_str_in_output=*/false,
+             /*eos_token=*/-1,
+             /*skip_special_tokens=*/false,
+             /*logprobs=*/false,
+             /*enable_schedule_overlap=*/false);
+  append_token('A');
+  EXPECT_FALSE(sequence_->finished());
+  append_token(StopAwareTokenizer::kStopTokenId);
+  ASSERT_TRUE(sequence_->finished());
+
+  EXPECT_EQ(sequence_->generate_output(tokenizer_).text, "A");
 }
 
 }  // namespace

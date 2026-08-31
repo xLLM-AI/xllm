@@ -982,8 +982,12 @@ bool Sequence::finished() const {
   finish_status_invalidated_ = false;
 
   size_t matched_stop_token_count = 0;
+  const Slice<int32_t> valid_tokens =
+      sequence_params_.enable_schedule_overlap
+          ? tokens().slice(/*start=*/0, /*end=*/cur_generated_token_idx_)
+          : tokens();
   const FinishReason finish_reason = sequence_params_.stopping_checker->check(
-      tokens(), num_prompt_tokens_, &matched_stop_token_count);
+      valid_tokens, num_prompt_tokens_, &matched_stop_token_count);
   matched_stop_token_count_ = matched_stop_token_count;
   if (finish_reason != FinishReason::NONE) {
     finish_reason_ = finish_reason;

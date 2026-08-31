@@ -1368,6 +1368,10 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
+  input_params.embedding.linear_state_ids.clear();
+  input_params.embedding.linear_state_indices = torch::Tensor();
+  input_params.linear_state_cache_ops.clear();
+  input_params.linear_state_validity_mask.clear();
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;
@@ -3571,6 +3575,10 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   clear_ready_events(extend_input);
   extend_input.device_tensors_ready = false;
   auto& input_params = extend_input.input_params;
+  input_params.embedding.linear_state_ids.clear();
+  input_params.embedding.linear_state_indices = torch::Tensor();
+  input_params.linear_state_cache_ops.clear();
+  input_params.linear_state_validity_mask.clear();
   const int32_t num_sequences = input_params.meta.num_sequences;
 
   const bool dp_enabled = parallel_args_.dp_size() > 1;

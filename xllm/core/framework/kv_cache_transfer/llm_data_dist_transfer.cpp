@@ -37,9 +37,46 @@ const std::map<torch::ScalarType, ge::DataType> kScalarTypeToDtype = {
 
 ge::DataType dtype_to_ge_dtype(torch::ScalarType dtype) {
   const auto& it = kScalarTypeToDtype.find(dtype);
-  CHECK(it != kScalarTypeToDtype.cend()) << "Unsupport data type : " << dtype;
+  CHECK(it != kScalarTypeToDtype.cend()) << "Unsupported data type : " << dtype;
   return it->second;
 }
+
+namespace {
+int64_t linear_checkpoint_stride(
+    const std::vector<RegisteredCache>& layer_caches) {
+  const RegisteredCache* conv_cache = nullptr;
+  const RegisteredCache* ssm_cache = nullptr;
+  for (const RegisteredCache& cache : layer_caches) {
+    if (!cache.tensor.defined()) {
+      continue;
+    }
+    if (cache.role == KVCacheTensorRole::CONV) {
+      conv_cache = &cache;
+    } else if (cache.role == KVCacheTensorRole::SSM) {
+      ssm_cache = &cache;
+    }
+  }
+  if (conv_cache == nullptr || ssm_cache == nullptr) {
+    return 1;
+  }
+  CHECK_GT(conv_cache->tensor.size(0), 0);
+  CHECK_EQ(ssm_cache->tensor.size(0) % conv_cache->tensor.size(0), 0);
+  return ssm_cache->tensor.size(0) / conv_cache->tensor.size(0);
+}
+
+std::vector<uint64_t> ssm_base_row_ids(const std::vector<uint64_t>& logical_ids,
+                                       int64_t checkpoint_stride) {
+  if (checkpoint_stride <= 1) {
+    return logical_ids;
+  }
+  std::vector<uint64_t> ids;
+  ids.reserve(logical_ids.size());
+  for (uint64_t logical_id : logical_ids) {
+    ids.push_back(logical_id * static_cast<uint64_t>(checkpoint_stride));
+  }
+  return ids;
+}
+}  // namespace
 
 LlmDataDistTransfer::LlmDataDistTransfer(const uint16_t listen_port,
                                          const InstanceRole& instance_role,
@@ -161,6 +198,8 @@ bool LlmDataDistTransfer::pull_kv_blocks(
        layer_id < static_cast<int64_t>(layer_registered_caches_.size());
        ++layer_id) {
     const auto& registered_caches = layer_registered_caches_[layer_id];
+    const int64_t checkpoint_stride =
+        linear_checkpoint_stride(registered_caches);
     for (const RegisteredCache& registered_cache : registered_caches) {
       const auto mapping_it =
           std::find_if(mappings.begin(),
@@ -187,6 +226,12 @@ bool LlmDataDistTransfer::pull_kv_blocks(
       if (mapping_it->local_ids.empty()) {
         continue;
       }
+      std::vector<uint64_t> remote_ids = mapping_it->remote_ids;
+      std::vector<uint64_t> local_ids = mapping_it->local_ids;
+      if (registered_cache.role == KVCacheTensorRole::SSM) {
+        remote_ids = ssm_base_row_ids(remote_ids, checkpoint_stride);
+        local_ids = ssm_base_row_ids(local_ids, checkpoint_stride);
+      }
       CacheIndex cache_index{src_cluster_id, registered_cache.cache.cache_id};
       KvCacheExtParam ext_param{};
       ext_param.src_layer_range = {0, 0};
@@ -194,8 +239,8 @@ bool LlmDataDistTransfer::pull_kv_blocks(
       ext_param.tensor_num_per_layer = 1;
       auto ret = llm_data_dist_->PullKvBlocks(cache_index,
                                               registered_cache.cache,
-                                              mapping_it->remote_ids,
-                                              mapping_it->local_ids,
+                                              remote_ids,
+                                              local_ids,
                                               ext_param);
       if (ret != LLM_SUCCESS) {
         LOG(ERROR) << "PullKvBlocks failed, layer = " << layer_id
@@ -307,6 +352,8 @@ bool LlmDataDistTransfer::push_layer_registered_caches(
         continue;
       }
 
+      const int64_t checkpoint_stride =
+          linear_checkpoint_stride(layer_registered_caches[layer_index]);
       for (const RegisteredCache& registered_cache :
            layer_registered_caches[layer_index]) {
         const int32_t group_id = registered_cache.group_id;
@@ -337,6 +384,12 @@ bool LlmDataDistTransfer::push_layer_registered_caches(
           result = false;
           continue;
         }
+        std::vector<uint64_t> local_ids = mapping_it->local_ids;
+        std::vector<uint64_t> remote_ids = mapping_it->remote_ids;
+        if (registered_cache.role == KVCacheTensorRole::SSM) {
+          local_ids = ssm_base_row_ids(local_ids, checkpoint_stride);
+          remote_ids = ssm_base_row_ids(remote_ids, checkpoint_stride);
+        }
         CacheIndex cache_index{kv_info.dst_cluster_id,
                                registered_cache.cache.cache_id};
         KvCacheExtParam ext_param{};
@@ -346,8 +399,8 @@ bool LlmDataDistTransfer::push_layer_registered_caches(
 
         auto ret = llm_data_dist_->PushKvBlocks(registered_cache.cache,
                                                 cache_index,
-                                                mapping_it->local_ids,
-                                                mapping_it->remote_ids,
+                                                local_ids,
+                                                remote_ids,
                                                 ext_param);
         if (ret != LLM_SUCCESS) {
           LOG(ERROR) << "PushKvBlocks failed, layer = " << layer_index

@@ -89,5 +89,50 @@ TEST(StoppingCheckerTest, IgnoreEosStillStopsOnStopSequence) {
             FinishReason::STOP);
 }
 
+TEST(StoppingCheckerTest, AllNegativeTokensReturnsNone) {
+  StoppingChecker checker(
+      /*max_generated_tokens=*/10,
+      /*max_context_len=*/0,
+      /*eos_token=*/2,
+      /*ignore_eos=*/false,
+      /*stop_tokens=*/std::unordered_set<int32_t>{},
+      /*stop_sequences=*/std::vector<std::vector<int32_t>>{});
+
+  EXPECT_EQ(checker.check(std::vector<int32_t>{-1, -1},
+                          /*num_prompt_tokens=*/1),
+            FinishReason::NONE);
+}
+
+TEST(StoppingCheckerTest, TrailingFakeTokenIgnoredForEos) {
+  StoppingChecker checker(
+      /*max_generated_tokens=*/10,
+      /*max_context_len=*/0,
+      /*eos_token=*/2,
+      /*ignore_eos=*/false,
+      /*stop_tokens=*/std::unordered_set<int32_t>{},
+      /*stop_sequences=*/std::vector<std::vector<int32_t>>{});
+
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 2, -1},
+                          /*num_prompt_tokens=*/1),
+            FinishReason::STOP);
+}
+
+TEST(StoppingCheckerTest, StaleNonNegativeTailMasksEos) {
+  StoppingChecker checker(
+      /*max_generated_tokens=*/10,
+      /*max_context_len=*/0,
+      /*eos_token=*/2,
+      /*ignore_eos=*/false,
+      /*stop_tokens=*/std::unordered_set<int32_t>{},
+      /*stop_sequences=*/std::vector<std::vector<int32_t>>{});
+
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 2, 99},
+                          /*num_prompt_tokens=*/1),
+            FinishReason::NONE);
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 2},
+                          /*num_prompt_tokens=*/1),
+            FinishReason::STOP);
+}
+
 }  // namespace
 }  // namespace xllm

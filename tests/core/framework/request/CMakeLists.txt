@@ -136,6 +136,8 @@ cc_test(
   SRCS
     sequence_stop_output_test.cpp
   DEPS
+    :block
+    :config
     :request
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_NPU}>:torch_npu>

@@ -860,6 +860,7 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
        layer_id < static_cast<int64_t>(spec_layer_registered_caches_.size());
        ++layer_id) {
     const auto& registered_caches = spec_layer_registered_caches_[layer_id];
+    const int64_t checkpoint_stride = get_checkpoint_stride(registered_caches);
     for (const RegisteredCache& registered_cache : registered_caches) {
       const auto mapping_it =
           std::find_if(mappings.begin(),
@@ -886,6 +887,13 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
       if (mapping_it->local_ids.empty()) {
         continue;
       }
+      std::vector<uint64_t> remote_ids = mapping_it->remote_ids;
+      std::vector<uint64_t> local_ids = mapping_it->local_ids;
+      if (registered_cache.role == KVCacheTensorRole::SSM &&
+          checkpoint_stride > 1) {
+        for (uint64_t& id : remote_ids) id *= checkpoint_stride;
+        for (uint64_t& id : local_ids) id *= checkpoint_stride;
+      }
       CacheIndex cache_index{src_cluster_id, registered_cache.cache.cache_id};
       KvCacheExtParam ext_param{};
       ext_param.src_layer_range = {0, 0};
@@ -893,8 +901,8 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
       ext_param.tensor_num_per_layer = 1;
       auto ret = llm_data_dist_->PullKvBlocks(cache_index,
                                               registered_cache.cache,
-                                              mapping_it->remote_ids,
-                                              mapping_it->local_ids,
+                                              remote_ids,
+                                              local_ids,
                                               ext_param);
       if (ret != LLM_SUCCESS) {
         LOG(ERROR) << "Pull spec KvBlocks failed, layer = " << layer_id
