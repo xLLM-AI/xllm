@@ -182,16 +182,68 @@ def test_prepare_binds_compressed_metadata_to_current_forward(monkeypatch) -> No
 
     prefill = make_metadata(84, True)
     backend.prepare(prefill)
-    backend.prepare_csa_metadata_for_forward()
+    backend.prepare_dsa_metadata_for_forward()
     prefill_compressed_metadata = prefill.dsa_metadata
     assert prefill_compressed_metadata.max_query_len == 84
 
     decode = make_metadata(85, False)
     backend.prepare(decode)
-    backend.prepare_csa_metadata_for_forward()
+    backend.prepare_dsa_metadata_for_forward()
     assert decode.dsa_metadata is not prefill_compressed_metadata
     assert decode.dsa_metadata.max_query_len == 1
     assert prefill.dsa_metadata is prefill_compressed_metadata
+
+
+def test_prepare_clears_previous_forward_state() -> None:
+    backend = _make_backend()
+    metadata = SimpleNamespace(
+        multi_block_tables=[],
+        kv_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+        q_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+        is_prefill=False,
+        is_chunked_prefill=False,
+        dsa_metadata=object(),
+        dsa_positions=torch.ones(1),
+        dsa_cos_sin=torch.ones(1),
+        dsa_c4_cos_sin=torch.ones(1),
+        dsa_c128_cos_sin=torch.ones(1),
+        dsa_graph_mode=True,
+    )
+    backend.attach_compressor(lambda *_args: None)
+    backend.attach_indexer(lambda *_args: None)
+    backend.reset_forward(metadata)
+    assert metadata.dsa_metadata is None
+    assert metadata.dsa_positions is None
+    assert metadata.dsa_cos_sin is None
+    assert metadata.dsa_c4_cos_sin is None
+    assert metadata.dsa_c128_cos_sin is None
+    assert metadata.dsa_graph_mode is False
+    assert not hasattr(backend, "_compressor_fn")
+    assert not hasattr(backend, "_indexer_fn")
+
+
+def test_dsa_api_aliases_are_equivalent(monkeypatch) -> None:
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_move_metadata_to_device", lambda _metadata: None)
+    monkeypatch.setattr(backend, "_build_precomputed_metadata", lambda *_args: None)
+    metadata = SimpleNamespace(
+        multi_block_tables=[],
+        kv_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+        q_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+        is_prefill=False,
+        is_chunked_prefill=False,
+        dsa_metadata=None,
+        dsa_positions=torch.tensor([0]),
+        dsa_cos_sin=None,
+        dsa_c4_cos_sin=None,
+        dsa_c128_cos_sin=None,
+        dsa_graph_mode=False,
+    )
+    backend.prepare_dsa_metadata_for_forward(metadata)
+    canonical = metadata.dsa_metadata
+    metadata.dsa_metadata = None
+    backend.prepare_csa_metadata_for_forward(metadata)
+    assert metadata.dsa_metadata is not canonical
 
 
 def test_graph_mode_is_explicitly_deferred() -> None:

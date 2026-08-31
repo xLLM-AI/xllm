@@ -48,9 +48,9 @@ def _create_attention_backend(
     config = config or {}
     model_type = config.get("model_type", "")
     if model_type == "deepseek_v4" and current_platform.is_npu():
-        from xllm.python.attention.csa_attention import CsaAttentionBackend
+        from xllm.python.attention.dsa_attention import DsaAttentionBackend
 
-        return CsaAttentionBackend(
+        return DsaAttentionBackend(
             compress_ratios=list(config.get("compress_ratios", [])),
             window_size=int(config.get("window_size", 128)),
             n_layers=int(config.get("n_layers", config.get("num_hidden_layers", 0))),

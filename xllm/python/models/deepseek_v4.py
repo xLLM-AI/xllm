@@ -1588,11 +1588,12 @@ class DeepseekV4Model(nn.Module):
         context = get_forward_context()
         backend = context.attention_backend
         metadata = context.metadata
+        backend.reset_forward(metadata)
         self.attach_rope_tables_to_backend(backend, positions, metadata=metadata)
-        prepare_csa = getattr(backend, "prepare_csa_metadata_for_forward", None)
-        if prepare_csa is None:
-            raise RuntimeError("DeepSeek-V4 requires prepare_csa_metadata_for_forward")
-        prepare_csa(metadata)
+        prepare_dsa = getattr(backend, "prepare_dsa_metadata_for_forward", None)
+        if prepare_dsa is None:
+            raise RuntimeError("DeepSeek-V4 requires prepare_dsa_metadata_for_forward")
+        prepare_dsa(metadata)
         if self.cfg.cp_size > 1:
             raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
         # Expand hidden into hc_mult parallel residual streams for the
@@ -1610,9 +1611,9 @@ class DeepseekV4Model(nn.Module):
             # The C++ model updates DSAMetadata::cos/sin for every layer before
             # entering the decoder. Layer 2 is the first C4 layer and must not
             # reuse the ratio-1 RoPE table selected during metadata preparation.
-            select_layer_rope = getattr(backend, "select_compressed_attention_layer_rope", None)
+            select_layer_rope = getattr(backend, "select_dsa_layer_rope", None)
             if select_layer_rope is None:
-                raise RuntimeError("DeepSeek-V4 requires select_compressed_attention_layer_rope")
+                raise RuntimeError("DeepSeek-V4 requires select_dsa_layer_rope")
             select_layer_rope(layer_id, layer_cos_sin_cache, metadata)
             hidden, residual = layer(
                 hidden,

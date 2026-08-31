@@ -179,6 +179,10 @@ class CsaIndexContext:
 
 
 class AttentionBackend(ABC):
+    def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
+        """Reset request-owned state before a model attaches current inputs."""
+        del metadata
+
     @abstractmethod
     def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         pass

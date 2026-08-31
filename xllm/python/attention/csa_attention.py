@@ -98,12 +98,11 @@ class _CompressedAttentionForwardMeta:
     kv_max_seq_len: int
 
 
-class CsaAttentionBackend(AttentionBackend):
-    """Backend for DeepSeek-V4 sliding-attention, CSA, and HCA layers on NPU.
+class DsaAttentionBackend(AttentionBackend):
+    """Unified backend for DeepSeek-V4 sliding, CSA, and HCA layers on NPU.
 
-    The filename and class use CSA terminology because CSA is the indexed sparse
-    path. The same backend also dispatches HCA and sliding-attention layers,
-    selected from each layer's compression ratio.
+    The same backend dispatches C1, C4, and C128 layers, selected from each
+    layer's compression ratio.
     """
 
     def __init__(
@@ -159,12 +158,39 @@ class CsaAttentionBackend(AttentionBackend):
             raise NotImplementedError("DeepSeek-V4 ACL graph support is not part of the eager CSA/HCA backend")
         self._metadata = metadata
 
-    def prepare_csa_metadata_for_forward(
+    def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
+        """Drop request-owned DSA state before attaching the next request.
+
+        The model calls this immediately before attaching its current RoPE
+        tables.  Keeping reset separate from :meth:`prepare` preserves the
+        required attach-then-build ordering for compressed positions.
+        """
+        metadata = self._metadata if metadata is None else metadata
+        if metadata is None:
+            return
+        metadata.dsa_metadata = None
+        metadata.dsa_positions = None
+        metadata.dsa_cos_sin = None
+        metadata.dsa_c4_cos_sin = None
+        metadata.dsa_c128_cos_sin = None
+        metadata.dsa_graph_mode = False
+        for name in (
+            "_compressor_fn",
+            "_indexer_fn",
+            "_current_hidden",
+            "_current_kv_hidden",
+            "_current_qr",
+            "_current_qr_pertoken_scale",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+
+    def prepare_dsa_metadata_for_forward(
         self,
         metadata: AttentionMetadata | None = None,
     ) -> None:
         """Build compressed-attention metadata in the current model forward."""
-        metadata = metadata or self._metadata
+        metadata = self._metadata if metadata is None else metadata
         assert metadata is not None
         multi_block_tables = list(metadata.multi_block_tables)
         kv_seq_lens_host = metadata.kv_seq_lens_host
@@ -196,7 +222,14 @@ class CsaAttentionBackend(AttentionBackend):
         self._build_precomputed_metadata(compressed_metadata, metadata)
         metadata.dsa_metadata = compressed_metadata
 
-    def select_compressed_attention_layer_rope(
+    def prepare_csa_metadata_for_forward(
+        self,
+        metadata: AttentionMetadata | None = None,
+    ) -> None:
+        """Backward-compatible alias for the canonical DSA API."""
+        self.prepare_dsa_metadata_for_forward(metadata)
+
+    def select_dsa_layer_rope(
         self,
         layer_id: int,
         cos_sin_cache: torch.Tensor,
@@ -209,7 +242,7 @@ class CsaAttentionBackend(AttentionBackend):
         the model and indexer gather it with the current input positions, but
         the selected group and lifetime are otherwise identical.
         """
-        metadata = metadata or self._metadata
+        metadata = self._metadata if metadata is None else metadata
         if metadata is None or metadata.dsa_metadata is None:
             raise RuntimeError("compressed-attention metadata must be prepared before selecting layer RoPE")
         compressed_metadata = metadata.dsa_metadata
@@ -218,13 +251,22 @@ class CsaAttentionBackend(AttentionBackend):
         compressed_metadata.cos_table = chunks[0].contiguous()
         compressed_metadata.sin_table = chunks[1].contiguous()
 
+    def select_compressed_attention_layer_rope(
+        self,
+        layer_id: int,
+        cos_sin_cache: torch.Tensor,
+        metadata: AttentionMetadata | None = None,
+    ) -> None:
+        """Backward-compatible alias for the canonical DSA API."""
+        self.select_dsa_layer_rope(layer_id, cos_sin_cache, metadata)
+
     def _populate_compressed_attention_rope(
         self,
         compressed_metadata: DsaMetadata,
         metadata: AttentionMetadata | None = None,
     ) -> None:
         """Build request-shaped RoPE tensors for the current forward."""
-        metadata = metadata or self._metadata
+        metadata = self._metadata if metadata is None else metadata
         css = getattr(metadata, "dsa_cos_sin", None) if metadata is not None else None
         if compressed_metadata.cos_table is None and css is not None and css.numel() > 0:
             compressed_metadata.cos_table, compressed_metadata.sin_table = (
@@ -460,7 +502,7 @@ class CsaAttentionBackend(AttentionBackend):
         hca_cos_sin: torch.Tensor | None = None,
         metadata: AttentionMetadata | None = None,
     ) -> None:
-        metadata = metadata or self._metadata
+        metadata = self._metadata if metadata is None else metadata
         if metadata is not None:
             metadata.dsa_positions = positions
             metadata.dsa_cos_sin = base_cos_sin
@@ -628,6 +670,11 @@ class CsaAttentionBackend(AttentionBackend):
         for layer_tensors in compressed_metadata.slot_mappings:
             for index, tensor in enumerate(layer_tensors):
                 layer_tensors[index] = tensor.to(self.device)
+
+
+# Keep the historical import stable.  There is one implementation and one
+# runtime type for C1/C4/C128; CSA is only the name of the ratio-4 path.
+CsaAttentionBackend = DsaAttentionBackend
 
 
 # ---------------------------------------------------------------------------
