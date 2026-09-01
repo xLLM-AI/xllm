@@ -409,8 +409,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
   const bool enable_linear_attention = has_linear_attention_layers(args);
   const bool enable_lighting_indexer = args.index_n_heads() > 0;
   // A model may be BOTH linear-attention (KDA layers) AND have a lighting
-  // indexer (DSA layers) — e.g. glm5_3_flash. create_kv_cache_impl dispatches ONE
-  // impl per layer, each reading only its own shape, so coexistence is
+  // indexer (DSA layers) — e.g. glm5_3_flash. create_kv_cache_impl dispatches
+  // ONE impl per layer, each reading only its own shape, so coexistence is
   // harmless. The prior exclusivity CHECK guarded a non-problem.
 
   const int64_t num_layers = get_num_layers();
@@ -730,14 +730,56 @@ ForwardInput WorkerImpl::update_input_by_last_step_output(
   return inputs;
 }
 
+void WorkerImpl::try_restore_linear_state_slots(ModelInputParams& params) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
+  if (!has_linear_attention_layers(context_.get_model_args())) {
+    return;
+  }
+  // A composite worker (e.g. MTPWorkerImpl) carries the TARGET model args but
+  // never allocates its own kv_caches_ — its inner impls each own caches and
+  // run their own restore. Skip the restore when this worker holds no
+  // recurrent cache; restoring into an unallocated pool is a hard CHECK
+  // inside restore_linear_state_slots.
+  const bool owns_recurrent_cache = std::any_of(
+      kv_caches_.begin(), kv_caches_.end(), [](const KVCache& kv_cache) {
+        return kv_cache.get_ssm_cache().defined();
+      });
+  if (!owns_recurrent_cache) {
+    return;
+  }
+  restore_linear_state_slots(kv_caches_,
+                             params.linear_state_cache_ops,
+                             params.linear_state_validity_mask);
+#endif
+}
+
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
-    const ForwardInput& input) {
-  // No linear-state restore here on purpose. LLMWorkerImpl overrides this to
-  // copy checkpoints on compute_stream_; speculative/MTP workers keep this base
-  // version but run every forward through an inner LLMWorkerImpl built with
-  // schedule-overlap off, so the checkpoint copy fires on that inner worker's
-  // non-overlap prepare_work_before_execute_on_stream path. The outer
-  // speculative worker owns no kv_caches_, so restoring here would be a no-op.
+    ForwardInput& input) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
+  // prepare_work_before_execute_on_stream defers the linear-state restore
+  // whenever schedule overlap is on (see the enable_schedule_overlap() gate
+  // there). Every non-speculative worker that owns a recurrent cache must
+  // therefore perform the restore here, on compute_stream_ in the worker
+  // thread, so chunk N's checkpoint copy is stream-ordered after chunk N-1's
+  // forward. LLMWorkerImpl overrides this to drop the default-stream sync
+  // via execute_no_sync_on_stream; other frontends (VLMWorkerImpl, future
+  // model-impl paths) inherit this base version. Only enter compute_stream_
+  // when the model actually needs the restore -- dense frontends must keep
+  // running step() on their historical stream.
+  if (has_linear_attention_layers(context_.get_model_args())) {
+    // The StreamGuard here brackets BOTH the restore and step(input) so the
+    // forward is guaranteed to read the just-restored slots even if
+    // compute_stream_ becomes a distinct pooled stream in the future.
+    c10::StreamGuard compute_guard = compute_stream_->set_stream_guard();
+    // step() will run on compute_stream_ inside this guard, so wait on the
+    // event that publishes prepare_stream_'s H2D copies before either the
+    // restore or the forward observes them.
+    CHECK(compute_stream_->wait_event(input.metadata_ready_event))
+        << "failed to wait input metadata ready event on compute stream";
+    try_restore_linear_state_slots(input.input_params);
+    return step(input);
+  }
+#endif
   return step(input);
 }
 
@@ -934,25 +976,17 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
     if (has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(input_params);
-      // A composite worker (e.g. MTPWorkerImpl) carries the TARGET model args
-      // but never allocates its own kv_caches_ — its inner impls each own
-      // caches and run their own restore. Skip the restore when this worker
-      // holds no recurrent cache; restoring into an unallocated pool is a
-      // hard CHECK inside restore_linear_state_slots.
-      const bool owns_recurrent_cache = std::any_of(
-          kv_caches_.begin(), kv_caches_.end(), [](const KVCache& kv_cache) {
-            return kv_cache.get_ssm_cache().defined();
-          });
+      // Non-overlap path: restore on the current prepare_stream_ (installed
+      // by the outer StreamGuard) so the restore copy is ordered with the
+      // subsequent metadata_ready_event that the forward will wait on.
       // Under schedule_overlap chunked prefill the previous chunk's forward
       // runs on compute_stream_ from a worker thread that may not have
       // enqueued its kernels yet when this prepare runs on the main thread.
       // Defer the slot-restore copy to step_for_schedule_overlap (worker
       // thread, on compute_stream_) so stream ordering between chunk N-1
       // writes and chunk N restore is automatic.
-      if (!enable_schedule_overlap() && owns_recurrent_cache) {
-        restore_linear_state_slots(kv_caches_,
-                                   input_params.linear_state_cache_ops,
-                                   input_params.linear_state_validity_mask);
+      if (!enable_schedule_overlap()) {
+        try_restore_linear_state_slots(input_params);
       }
     }
 #endif

@@ -222,20 +222,19 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
-    const ForwardInput& input) {
+    ForwardInput& input) {
   // Restore live recurrent-state slots from saved checkpoints here (worker
   // thread, on compute_stream_) instead of in prepare_work_before_execute on
   // prepare_stream_. The single-threaded worker pool guarantees the previous
   // chunk's forward kernels are already enqueued on compute_stream_ before
   // this task runs, so the restore copy is automatically stream-ordered
-  // after those writes without needing a cross-stream barrier.
+  // after those writes without needing a cross-stream barrier. The forward
+  // below re-enters compute_stream_ inside execute_no_sync_on_stream (which
+  // installs its own StreamGuard on the same stream), so the restore-time
+  // guard scope is deliberately kept tight to the restore only.
   if (has_linear_attention_layers(context_.get_model_args())) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
-    ModelInputParams& mutable_params =
-        const_cast<ModelInputParams&>(input.input_params);
-    restore_linear_state_slots(kv_caches_,
-                               mutable_params.linear_state_cache_ops,
-                               mutable_params.linear_state_validity_mask);
+    try_restore_linear_state_slots(input.input_params);
   }
   return execute_no_sync_on_stream(input, *compute_stream_);
 }

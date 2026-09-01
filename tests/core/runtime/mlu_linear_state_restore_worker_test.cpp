@@ -155,7 +155,7 @@ class OverlapLinearStateRestoreWorker final : public LLMWorkerImpl {
     }
   }
 
-  std::optional<ForwardOutput> run_overlap_forward(const ForwardInput& input,
+  std::optional<ForwardOutput> run_overlap_forward(ForwardInput& input,
                                                    int64_t destination_slot) {
     forward_destination_slot_ = destination_slot;
     return step_for_schedule_overlap(input);

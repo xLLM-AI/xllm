@@ -64,7 +64,7 @@ class LLMWorkerImpl : public WorkerImpl {
 
  protected:
   std::optional<ForwardOutput> step_for_schedule_overlap(
-      const ForwardInput& input) override;
+      ForwardInput& input) override;
   ForwardInput update_input_by_last_step_output_for_schedule_overlap(
       ForwardInput& input) override;
 
