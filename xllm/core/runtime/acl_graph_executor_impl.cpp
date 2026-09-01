@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/platform/npu/acl_graph_task_update_context.h"
 #include "core/util/utils.h"
 #include "platform/npu/device_capture_lock.h"
+#include "runtime/decode_graph_bucket.h"
 
 namespace xllm::npu {
 
@@ -1383,25 +1384,14 @@ void AclGraph::print_graph_tensors() const {
       << "graph hidden_states_: " << persistent_param_.hidden_states();
 }
 
-// bucket will be [1, 2, 4, 8, 16, 32, 48, 64, ..., max_seqs_per_batch]
 uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(
     uint32_t num_tokens) const {
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding()) {
-    return num_tokens;
-  }
-  if (num_tokens <= 1) {
-    return 1;
-  } else if (num_tokens <= 2) {
-    return 2;
-  } else if (num_tokens <= 4) {
-    return 4;
-  } else if (num_tokens <= 8) {
-    return 8;
-  } else {
-    // For num_tokens > 8, use multiples of 16.
-    return ((num_tokens + 15) / 16) * 16;
-  }
+  // Share the bucketing with the graph warmup plan so executor graph keys and
+  // warmup bucket coverage cannot drift apart.
+  return static_cast<uint32_t>(runtime::get_decode_graph_token_bucket(
+      num_tokens,
+      ::xllm::ExecutionConfig::get_instance()
+          .enable_graph_mode_decode_no_padding()));
 }
 
 std::optional<uint64_t>

@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -139,6 +140,47 @@ TEST(DecodeGraphWarmupPlanTest, UsesLocalDpBatchesAndKeepsPartialBatch) {
       execution_shape, /*max_global_batch_size=*/66, /*dp_size=*/4);
 
   EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 12, 20, 36, 52, 66}));
+}
+
+// With dp_size > 1 the plan sweeps DP-local batches and reports them as
+// scheduler-global sizes. Every local batch the scheduler can produce must
+// map onto a warmed token bucket.
+TEST(DecodeGraphWarmupPlanTest, CoversMtpTokenBucketsAcrossDpGroups) {
+  if (!Platform::supports_mtp_decode_graph_warmup()) {
+    GTEST_SKIP() << "MTP decode graph warmup is not supported.";
+  }
+
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/6,
+          /*num_speculative_tokens=*/5,
+          /*enable_no_padding=*/false);
+  const int32_t dp_size = 4;
+  const int32_t max_global_batch_size = 64;
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, max_global_batch_size, dp_size);
+
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 12, 24, 36, 44, 56}));
+
+  std::vector<int64_t> warmed_buckets;
+  for (const int32_t batch_size : plan.batch_sizes) {
+    const int64_t num_tokens = static_cast<int64_t>(batch_size / dp_size) *
+                               execution_shape.num_decoding_tokens;
+    warmed_buckets.push_back(runtime::get_decode_graph_token_bucket(
+        num_tokens, /*enable_no_padding=*/false));
+  }
+  for (int32_t local_batch_size = 1;
+       local_batch_size <= max_global_batch_size / dp_size;
+       ++local_batch_size) {
+    const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
+                               execution_shape.num_decoding_tokens;
+    const int64_t bucket = runtime::get_decode_graph_token_bucket(
+        num_tokens, /*enable_no_padding=*/false);
+    EXPECT_NE(std::find(warmed_buckets.begin(), warmed_buckets.end(), bucket),
+              warmed_buckets.end())
+        << "local batch " << local_batch_size
+        << " maps to unwarmed token bucket " << bucket;
+  }
 }
 
 TEST(DecodeGraphWarmupPlanTest, NoPaddingKeepsCompatibilityBatches) {
