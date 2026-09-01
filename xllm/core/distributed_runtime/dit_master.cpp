@@ -121,7 +121,6 @@ void DiTMaster::handle_request(DiTRequestParams params,
 void DiTMaster::handle_batch_request(std::vector<DiTRequestParams> params_vec,
                                      BatchDiTOutputCallback callback) {
   const size_t num_requests = params_vec.size();
-  scheduler_->incr_pending_requests(num_requests);
   for (size_t i = 0; i < num_requests; ++i) {
     handle_request(std::move(params_vec[i]),
                    std::nullopt,

@@ -18,6 +18,7 @@ limitations under the License.
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -51,11 +52,22 @@ class DiTRequest : public RequestBase {
 
   void log_statistic(double total_latency);
 
+  // Mark the request as cancelled (e.g. client disconnected).
+  void set_cancel() { cancelled_.store(true, std::memory_order_relaxed); }
+
+  // Whether the request has been cancelled.
+  bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
+
+  // Check if the client connection is still alive; if disconnected, mark
+  // the request as cancelled.  Mirrors Request::update_connection_status().
+  void update_connection_status();
+
   DiTRequestState& state() { return state_; }
 
  private:
   DiTRequestState state_;
   DiTForwardOutput output_;
+  std::atomic<bool> cancelled_{false};
 };
 
 }  // namespace xllm
