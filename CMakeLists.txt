@@ -712,10 +712,10 @@ elseif(USE_CUDA)
     " --use_fast_math"
     " -Xfatbin -compress-all")
 
-  # Parallel nvcc compilation: compile multiple GPU architectures simultaneously within each .cu
-  # file. --threads 0 = auto-detect CPU core count. Requires CUDA >= 11.2.
+  # Keep each nvcc invocation single-threaded to avoid multiplying the outer
+  # CMake/Ninja parallelism when compiling multiple GPU architectures.
   if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 11.2)
-    string(APPEND CMAKE_CUDA_FLAGS " --threads 0")
+    string(APPEND CMAKE_CUDA_FLAGS " --threads 1")
   endif()
 
   message(STATUS "CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
