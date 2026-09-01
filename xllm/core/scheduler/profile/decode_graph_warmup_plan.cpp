@@ -101,10 +101,13 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   const int32_t max_local_batch_size = max_global_batch_size / dp_size;
 
   if (execution_shape.max_graph_batch_size > 0) {
-    const int32_t max_graph_global_batch_size =
-        std::min(max_global_batch_size, execution_shape.max_graph_batch_size);
+    // The graph batch limit caps the DP-local decode batch: the executor
+    // compares the largest DP-local batch against it before entering graph
+    // mode, so the warmup sweep must apply the limit in local terms as well.
     const int32_t max_graph_local_batch_size =
-        max_graph_global_batch_size / dp_size;
+        std::min(max_local_batch_size, execution_shape.max_graph_batch_size);
+    const int32_t max_graph_global_batch_size =
+        max_graph_local_batch_size * dp_size;
     std::vector<int32_t> graph_batch_sizes;
     int64_t current_token_bucket = 0;
     for (int32_t local_batch_size = 1;
