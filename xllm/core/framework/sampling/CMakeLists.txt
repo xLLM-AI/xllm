@@ -24,6 +24,7 @@ cc_library(
     draft_sampling_mode.h
     sampling_params.h
     logits_utils.h
+    gumbel_sampling.h
     rejection_sampler.h
     sampler.h
     rec_sampler.h
@@ -32,6 +33,7 @@ cc_library(
   SRCS
     sampling_params.cpp
     logits_utils.cpp
+    gumbel_sampling.cpp
     rejection_sampler.cpp
     sampler.cpp
     rec_sampler.cpp

@@ -157,6 +157,17 @@ void run_fused_infer_attention_graph(
   task.event = std::move(event);
   graph_context->fused_infer_attention_tasks.emplace_back(std::move(task));
 }
+
+// FIA requires sparse mode 3 when an explicit attention mask is used or the
+// query is causal; DFlash2 supplies a band-mode override via fia_sparse_mode,
+// so the mask and causality controls stay independent of it.
+int64_t resolve_fia_sparse_mode(
+    const xllm::layer::AttentionMetadata& metadata) {
+  if (metadata.fia_sparse_mode >= 0) {
+    return metadata.fia_sparse_mode;
+  }
+  return (metadata.fia_attn_mask.defined() || metadata.is_causal) ? 3 : 0;
+}
 }  // namespace
 
 namespace xllm {
@@ -249,8 +260,12 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         num_kv_heads_,
         scale_,
         /*block_size=*/0,
-        /*sparse_mode=*/3,
-        "TND");
+        /*sparse_mode=*/resolve_fia_sparse_mode(attn_metadata),
+        "TND",
+        /*softmax_lse_flag=*/false,
+        /*is_causal=*/attn_metadata.is_causal,
+        /*pre_tokens=*/attn_metadata.fia_pre_tokens,
+        /*next_tokens=*/attn_metadata.fia_next_tokens);
     output.copy_(std::get<0>(fia_result).view_as(output));
   } else if (attn_metadata.is_chunked_prefill) {
     torch::Tensor k = k_cache.view({k_cache.size(0), k_cache.size(1), -1});
@@ -272,8 +287,12 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         num_kv_heads_,
         scale_,
         /*block_size=*/k_cache.size(1),
-        /*sparse_mode=*/3,
-        "TND");
+        /*sparse_mode=*/resolve_fia_sparse_mode(attn_metadata),
+        "TND",
+        /*softmax_lse_flag=*/false,
+        /*is_causal=*/attn_metadata.is_causal,
+        /*pre_tokens=*/attn_metadata.fia_pre_tokens,
+        /*next_tokens=*/attn_metadata.fia_next_tokens);
     output.copy_(std::get<0>(fia_result).view_as(output));
   }
 }

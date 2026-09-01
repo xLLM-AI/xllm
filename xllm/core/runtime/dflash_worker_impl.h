@@ -118,6 +118,13 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // stays here and a subclass flips one bit.
   virtual bool sample_from_anchor() const { return false; }
 
+  // Draft KV cache geometry hook: the base DFlash draft shares the target
+  // shape, so the default returns it unchanged. DFlash2 overrides this with
+  // its own block-size-bounded draft shape; both allocator entry points
+  // funnel through it.
+  virtual KVCacheShape draft_kv_cache_shape(
+      const KVCacheShape& target_shape) const;
+
   // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
   // the target validate input. A DSpark override of run_decode_draft calls both
   // before its draft forward.
@@ -225,6 +232,13 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 #endif
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
+  // Whether the target model owns recurrent (linear attention) layers.
+  // Fixed once the target finishes loading; the hybrid spec-verify gates and
+  // the adaptive-pruning guard read this instead of re-scanning layer_types.
+  bool target_is_hybrid_recurrent_ = false;
+  // Preformatted labels keep per-position acceptance telemetry allocation-free
+  // on the decode hot path.
+  std::vector<std::string> speculative_position_labels_;
   dflash_detail::DSparkSasMode draft_sas_mode_ =
       dflash_detail::DSparkSasMode::NOT_DSPARK;
 };

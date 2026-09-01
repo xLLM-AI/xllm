@@ -42,6 +42,8 @@ class Qwen2AttentionImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict);
 
+  void verify_loaded_weights(const std::string& prefix) const;
+
   // Get FP8 input scale from qkv_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
 
@@ -55,6 +57,12 @@ class Qwen2AttentionImpl : public torch::nn::Module {
   float scaling_;
   bool is_qwen3_style_;
   bool can_use_fused_qk_norm_rope_;
+  // The fused QKV loader only exposes an aggregate loaded flag. Preserve the
+  // logical checkpoint names across shards so verification can identify the
+  // missing projection precisely.
+  bool q_proj_weight_seen_ = false;
+  bool k_proj_weight_seen_ = false;
+  bool v_proj_weight_seen_ = false;
 
   QKVParallelLinear qkv_proj_{nullptr};
   RowParallelLinear o_proj_{nullptr};

@@ -46,8 +46,15 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 
     layers_.reserve(model_args.n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
-    embed_tokens_ =
-        register_module("embed_tokens", layer::WordEmbedding(context));
+    // DFlash2 consumes the target model's embedding table.  Do not allocate a
+    // draft-local copy here: set_word_embedding() binds the shared target
+    // module after both workers finish loading.  Merely replacing the holder
+    // after register_module() would leave the original large-vocabulary module
+    // owned by torch::nn::Module and keep its device memory alive.
+    if (!is_dflash2_draft_model_type(model_args.model_type())) {
+      embed_tokens_ =
+          register_module("embed_tokens", layer::WordEmbedding(context));
+    }
 #if defined(USE_NPU)
     attn_mask_ = layer::AttentionMask(
         options.device(), options.dtype().toScalarType(), /*mask_value=*/-9984);
@@ -182,7 +189,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
   }
 
  protected:
-  layer::AttentionMetadata get_attention_metadata(
+  virtual layer::AttentionMetadata get_attention_metadata(
       const ModelInputParams& params,
       const torch::Tensor& h) {
 #if defined(USE_NPU)
@@ -216,7 +223,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     for (int32_t j = 0; j < num_sequences; ++j) {
       const int32_t q_len = params.attention.host.q_seq_lens[j];
       const int32_t kv_len = params.attention.host.kv_seq_lens[j];
-      req_mask_vec.emplace_back(attn_mask_.gen_append_mask(
+      req_mask_vec.emplace_back(gen_append_attn_mask(
           q_len, kv_len, max_kv_seq, h.dtype().toScalarType(), h.device()));
     }
     return layer::AttentionMetadataBuilder::build(
@@ -226,6 +233,16 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
                                                   model_args_.enable_mla());
 #endif
   }
+
+#if defined(USE_NPU)
+  virtual torch::Tensor gen_append_attn_mask(int32_t q_len,
+                                             int32_t kv_len,
+                                             int32_t max_kv_len,
+                                             torch::Dtype dtype,
+                                             torch::Device device) {
+    return attn_mask_.gen_append_mask(q_len, kv_len, max_kv_len, dtype, device);
+  }
+#endif
 
  private:
 #if defined(USE_NPU)
@@ -259,6 +276,7 @@ REGISTER_CAUSAL_MODEL(qwen3, QWen3ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(model_type, "model_type", "qwen3");
   LOAD_ARG_OR(dtype, "torch_dtype", "");
+  LOAD_ARG_OR(dtype, "dtype", args->dtype());
   LOAD_ARG_OR(vocab_size, "vocab_size", 152064);
   LOAD_ARG_OR(hidden_size, "hidden_size", 3584);
   LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
@@ -271,17 +289,24 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-6);
   LOAD_ARG_OR(eos_token_id, "eos_token_id", 151643);
   LOAD_ARG_OR(rope_theta, "rope_theta", 1000000.0f);
+  LOAD_ARG_OR(rope_theta, "rope_parameters.rope_theta", args->rope_theta());
 
   // For qwen3/2.5 model < 7B,  tie_word_embeddings = true
   LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
 
   LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
+  LOAD_ARG_OR(sliding_window, "sliding_window", -1);
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
 
   LOAD_ARG_OR(markov_rank, "markov_rank", 0);
   LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
   LOAD_ARG_OR(
       confidence_head_with_markov, "confidence_head_with_markov", false);
+  LOAD_ARG_OR(dflash2_block_size, "dflash_config.block_size", 0);
+  LOAD_ARG_OR(dflash2_conv_group_size, "dflash_config.conv_group_size", 0);
+  LOAD_ARG_OR(dflash2_conv_kernel_size, "dflash_config.conv_kernel_size", 0);
+  LOAD_ARG_OR(dflash2_selector_rank, "dflash_config.selector_rank", 0);
+  LOAD_ARG_OR(dflash2_selector_top_k, "dflash_config.selector_top_k", 0);
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();

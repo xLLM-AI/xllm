@@ -52,6 +52,8 @@ class DenseMLPImpl : public torch::nn::Module {
                        const std::vector<std::string>& gate_up_name,
                        const std::string& down_name);
 
+  void verify_loaded_weights(const std::string& prefix) const;
+
   // Get FP8 input scale from gate_up_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
 
@@ -66,6 +68,10 @@ class DenseMLPImpl : public torch::nn::Module {
   std::string hidden_act_;
   double swiglu_limit_ = 0.0;
   bool apply_fc1_sequence_parallel_ = true;
+  // gate/up are fused at runtime; retain their logical checkpoint presence so
+  // a partial fused load reports the exact missing projection.
+  bool gate_proj_weight_seen_ = false;
+  bool up_proj_weight_seen_ = false;
 };
 TORCH_MODULE(DenseMLP);
 

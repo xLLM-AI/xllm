@@ -1300,7 +1300,15 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
-    if (has_linear_attention_layers(context_.get_model_args())) {
+    // SpeculativeWorkerImpl carries the target model context but delegates
+    // target/draft execution to its inner workers and therefore owns no KV
+    // cache itself.  In particular, a Qwen3.5/3.8 target advertises linear
+    // attention while the outer DFlash worker's kv_caches_ is empty.  Let the
+    // inner target worker (which owns the recurrent cache) perform preparation
+    // and restore; attempting it here would treat target cache operations as
+    // draft operations and fail discover_num_slots().
+    if (!kv_caches_.empty() &&
+        has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(input_params);
       // Under schedule_overlap chunked prefill the previous chunk's forward
       // runs on compute_stream_ from a worker thread that may not have
@@ -1957,7 +1965,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   const std::string& speculative_algorithm = options_.speculative_algorithm();
   const bool is_block_diffusion =
-      speculative_algorithm == "DFlash" || speculative_algorithm == "DSpark";
+      SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
 
 #if defined(USE_NPU)
   if (options_.enable_speculative_decode() &&
@@ -1971,8 +1979,13 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       const bool is_dspark = speculative_algorithm == "DSpark";
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      std::string draft_model_type =
-          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+      std::string draft_model_type = "DFlashDraftModel";
+      if (is_dspark) {
+        draft_model_type = "DSparkDraftModel";
+      } else if (SpeculativeConfig::is_dflash2_algorithm(
+                     speculative_algorithm)) {
+        draft_model_type = std::string(kDFlash2DraftModelType);
+      }
       if (is_deepseek_v4_dspark) {
         draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
       }

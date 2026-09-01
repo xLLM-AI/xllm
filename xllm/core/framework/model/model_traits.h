@@ -280,6 +280,17 @@ struct has_write_context_kv<
         std::declval<const ModelInputParams&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_dflash2_candidates : std::false_type {};
+
+template <typename T>
+struct has_dflash2_candidates<
+    T,
+    std::void_t<decltype(std::declval<T>()->dflash2_candidates(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
 struct has_dspark_markov_bias : std::false_type {};
 
 template <typename T>
