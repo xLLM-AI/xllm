@@ -602,7 +602,12 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
     // deep_ep_ is enabled in this case.
     LOAD_MOE_ALL_EXPERT_WEIGHT("up_proj.", "smooth", input_smooth, -1);
     LOAD_MOE_WEIGHT("down_proj.", "qweight", w2, 1);
-    LOAD_MOE_WEIGHT("down_proj.", "per_channel_scale", w2_scale, -1);
+    // Group-wise down-projection scales follow the TP-sharded intermediate
+    // dimension, unlike per-channel scales which remain [experts, hidden].
+    LOAD_MOE_WEIGHT("down_proj.",
+                    "per_channel_scale",
+                    w2_scale,
+                    quant_args_.group_size() > 0 ? 1 : -1);
     LOAD_MOE_WEIGHT("down_proj.", "smooth", act_smooth, 0);
   } else {
     LOAD_MOE_FUSED_WEIGHT("weight", w1, w3, w13);

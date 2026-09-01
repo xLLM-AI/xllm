@@ -40,11 +40,11 @@ TEST(MluCpCapabilityTest, RegistersSupportedModels) {
   EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v4"),
             CpShardingMode::MODEL);
   EXPECT_FALSE(is_mlu_model_cp_capable("deepseek_v32"));
-  EXPECT_FALSE(is_mlu_model_cp_capable("glm_moe_dsa"));
+  EXPECT_TRUE(is_mlu_model_cp_capable("glm_moe_dsa"));
   EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v32"),
             CpShardingMode::NONE);
   EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("glm_moe_dsa"),
-            CpShardingMode::NONE);
+            CpShardingMode::MODEL);
 }
 
 TEST(MluCpCapabilityTest, RejectsUnsupportedModels) {
@@ -72,22 +72,35 @@ TEST(MluCpCapabilityTest, AcceptsOrthogonalDeepseekV4TargetAndSuffix) {
           .has_value());
 }
 
-TEST(MluCpCapabilityTest, RejectsLegacyModelsAndDraftTargets) {
+TEST(MluCpCapabilityTest, SupportsGlmPcpAndRejectsDcpAndLegacyDraftTargets) {
   constexpr int32_t kWorldSize = 8;
   const Options options = make_cp_options(kWorldSize);
+  Options glm_options = options;
+  glm_options.enable_schedule_overlap(false);
 
   EXPECT_TRUE(
       validate_model_cp(options, EngineType::LLM, "deepseek_v32", kWorldSize)
           .has_value());
-  EXPECT_TRUE(
-      validate_model_cp(options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
+  EXPECT_FALSE(
+      validate_model_cp(glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
           .has_value());
+
+  ParallelConfig::get_instance().kv_split_size(kWorldSize);
+  EXPECT_TRUE(
+      validate_model_cp(glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
+          .has_value());
+  ParallelConfig::get_instance().kv_split_size(2);
+  EXPECT_TRUE(
+      validate_model_cp(glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
+          .has_value());
+  ParallelConfig::get_instance().kv_split_size(1);
+
   EXPECT_TRUE(
       validate_model_cp(options, EngineType::LLM, "deepseek_v4_mtp", kWorldSize)
           .has_value());
 }
 
-TEST(MluCpCapabilityTest, RejectsUnsupportedTopologyAndSpeculation) {
+TEST(MluCpCapabilityTest, RejectsUnsupportedTopologyAndAcceptsMtp) {
   constexpr int32_t kWorldSize = 8;
 
   Options invalid_world = make_cp_options(kWorldSize);
@@ -103,11 +116,11 @@ TEST(MluCpCapabilityTest, RejectsUnsupportedTopologyAndSpeculation) {
       validate_model_cp(invalid_ep, EngineType::LLM, "deepseek_v4", kWorldSize)
           .has_value());
 
-  Options invalid_spec = make_cp_options(kWorldSize);
-  invalid_spec.speculative_algorithm("MTP");
-  EXPECT_TRUE(validate_model_cp(
-                  invalid_spec, EngineType::SSM, "deepseek_v4", kWorldSize)
-                  .has_value());
+  Options mtp_options = make_cp_options(kWorldSize);
+  mtp_options.speculative_algorithm("MTP");
+  EXPECT_FALSE(
+      validate_model_cp(mtp_options, EngineType::SSM, "glm_moe_dsa", kWorldSize)
+          .has_value());
 
   Options invalid_kv_split = make_cp_options(kWorldSize);
   ParallelConfig::get_instance().kv_split_size(2);

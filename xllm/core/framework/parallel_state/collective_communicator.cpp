@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/framework/parallel_state/collective_communicator.h"
 
 #include <algorithm>
+#include <optional>
 
 #include "core/framework/parallel_state/mapping_npu.h"
 
@@ -35,6 +36,8 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/parallel_state/context_parallel_topology.h"
+#include "core/platform/platform.h"
 #include "parallel_args.h"
 #include "parallel_state.h"
 #include "process_group.h"
@@ -211,6 +214,16 @@ void apply_layerwise_split_config(ParallelArgs* parallel_args) {
       ParallelConfig::get_instance().layerwise_split_size());
 }
 
+std::string get_context_parallel_group_host(int32_t group_root_rank,
+                                            const std::string& fallback_host) {
+#if defined(USE_NPU)
+  return get_rank_table_server_host(group_root_rank, fallback_host);
+#else
+  (void)group_root_rank;
+  return fallback_host;
+#endif
+}
+
 }  // namespace
 
 CollectiveCommunicator::CollectiveCommunicator(int global_rank,
@@ -366,23 +379,24 @@ void CollectiveCommunicator::create_process_groups(
     // ATB owns TP/DP/EP; build a standalone HCCL CP ProcessGroup for
     // model-side AllGather.
     if (cp_size > 1) {
-      const std::vector<int32_t> cp_ranks =
-          parallel_state::compute_cp_group_ranks(
-              global_rank, world_size, dp_size, cp_size);
-      const int32_t cp_local_rank = parallel_args_->cp_rank();
+      const parallel_state::ContextParallelTopology cp_topology(global_rank,
+                                                                world_size,
+                                                                dp_size,
+                                                                cp_size,
+                                                                /*dcp_size=*/1);
+      const std::vector<int32_t>& cp_ranks = cp_topology.pcp_group_ranks();
+      const int32_t cp_local_rank = cp_topology.pcp_rank();
       CHECK_EQ(cp_ranks.size(), cp_size);
       CHECK_GE(cp_local_rank, 0);
       CHECK_LT(cp_local_rank, cp_size);
       CHECK_EQ(cp_ranks[cp_local_rank], global_rank);
       // Unique TCPStore port per CP group (keyed by attn TP rank).
-      const int32_t attn_tp_size = world_size / (dp_size * cp_size);
-      const int32_t tp_rank = global_rank % attn_tp_size;
       cp_group_ = create_process_group(global_rank,
                                        cp_local_rank,
                                        cp_ranks,
                                        world_size,
                                        cp_size,
-                                       port + 1 + tp_rank,
+                                       port + 1 + cp_topology.tp_rank(),
                                        host,
                                        "cp_group",
                                        device);
@@ -419,6 +433,12 @@ void CollectiveCommunicator::create_process_groups(
       << ") must be divisible by dp_size * cp_size (" << dp_size << " * "
       << normalized_cp_size << ")";
   const int32_t tp_size = world_size / (dp_size * normalized_cp_size);
+  const int32_t kv_split_size = parallel_args_->kv_split_size_effective();
+  std::optional<parallel_state::ContextParallelTopology> cp_topology;
+  if (normalized_cp_size > 1 || kv_split_size > 1) {
+    cp_topology.emplace(
+        global_rank, world_size, dp_size, normalized_cp_size, kv_split_size);
+  }
   CHECK_GT(tp_size, 0) << "attention tp_size must be positive: world_size="
                        << world_size << ", dp_size=" << dp_size
                        << ", cp_size=" << normalized_cp_size;
@@ -477,45 +497,65 @@ void CollectiveCommunicator::create_process_groups(
   }
   port += tp_group_count + single_rank_group_port_gap + single_rank_group_count;
 
-  if (normalized_cp_size > 1) {
-    // A CP group varies cp_rank while holding (dp_rank, tp_rank) fixed, so its
-    // members are strided by tp_size and cannot be expressed by the contiguous
-    // or `trans` groupings of the size-only overload. Enumerate the ranks
-    // explicitly instead.
-    const std::vector<int32_t> cp_ranks =
-        parallel_state::compute_cp_group_ranks(
-            global_rank, world_size, dp_size, normalized_cp_size);
-    const int32_t cp_local_rank = parallel_args_->cp_rank();
-    CHECK_EQ(static_cast<int32_t>(cp_ranks.size()), normalized_cp_size);
-    CHECK_GE(cp_local_rank, 0);
-    CHECK_LT(cp_local_rank, normalized_cp_size);
-    CHECK_EQ(cp_ranks[cp_local_rank], global_rank)
-        << "cp_rank() must index this rank inside its own CP group";
-    // One CP group per (dp_rank, tp_rank) pair. tp_rank alone is not unique:
-    // with dp=2/cp=2/tp=4 the groups {0,4} and {8,12} both have tp_rank 0 and
-    // would race for the same TCPStore port.
-    const int32_t dp_stride = normalized_cp_size * tp_size;
+  if (cp_topology.has_value()) {
+    const std::vector<int32_t>& cp_ranks = cp_topology->pcp_group_ranks();
+    const int32_t cp_local_rank = cp_topology->pcp_rank();
+    if constexpr (Platform::is_npu()) {
+      if (normalized_cp_size > 1) {
+        CHECK_EQ(cp_local_rank, parallel_args_->cp_rank());
+      }
+    }
     const int32_t cp_group_index =
-        (global_rank / dp_stride) * tp_size + global_rank % tp_size;
-    const int32_t cp_group_count = dp_size * tp_size;
-    std::string cp_host = host;
-#if defined(USE_NPU)
-    cp_host = get_rank_table_server_host(cp_ranks.front(), host);
-#endif
-    cp_group_ = create_process_group(global_rank,
-                                     cp_local_rank,
-                                     cp_ranks,
-                                     world_size,
-                                     normalized_cp_size,
-                                     port + cp_group_index + 1,
-                                     cp_host,
-                                     "cp_group",
-                                     device);
+        cp_topology->dp_rank() * tp_size + cp_topology->tp_rank();
+    cp_group_ = create_process_group(
+        global_rank,
+        cp_local_rank,
+        cp_ranks,
+        world_size,
+        normalized_cp_size,
+        port + cp_group_index + 1,
+        get_context_parallel_group_host(cp_ranks.front(), host),
+        "cp_group",
+        device);
     parallel_args_->cp_group_ = cp_group_.get();
-    port += cp_group_count;
+    port += dp_size * tp_size;
+
+    // Only MLU materializes the logical DCP topology as a collective.
+    if constexpr (Platform::is_mlu()) {
+      if (cp_topology->dcp_size() == 1) {
+        parallel_args_->dcp_group_ = parallel_args_->single_rank_group_;
+      } else if (cp_topology->dcp_size() == cp_topology->pcp_size()) {
+        parallel_args_->dcp_group_ = cp_group_.get();
+      } else {
+        const std::vector<int32_t>& dcp_ranks = cp_topology->dcp_group_ranks();
+        dcp_group_ = create_process_group(
+            global_rank,
+            cp_topology->dcp_rank(),
+            dcp_ranks,
+            world_size,
+            cp_topology->dcp_size(),
+            port + cp_topology->dp_rank() + 1,
+            get_context_parallel_group_host(dcp_ranks.front(), host),
+            "dcp_group",
+            device);
+        parallel_args_->dcp_group_ = dcp_group_.get();
+        port += dp_size;
+      }
+      CHECK_EQ(parallel_args_->dcp_group_->rank(), cp_topology->dcp_rank());
+    }
+    LOG(INFO) << "Context parallel topology: rank=" << global_rank
+              << ", tp_rank=" << cp_topology->tp_rank()
+              << ", tp_size=" << cp_topology->tp_size()
+              << ", pcp_rank=" << cp_topology->pcp_rank()
+              << ", pcp_size=" << cp_topology->pcp_size()
+              << ", dcp_rank=" << cp_topology->dcp_rank()
+              << ", dcp_size=" << cp_topology->dcp_size();
   } else {
     // CP is disabled, so the TP group remains the CP collective handle.
     parallel_args_->cp_group_ = tp_group_.get();
+    if constexpr (Platform::is_mlu()) {
+      parallel_args_->dcp_group_ = tp_group_.get();
+    }
   }
 
   if (dp_size > 1) {

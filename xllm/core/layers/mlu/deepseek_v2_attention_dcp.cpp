@@ -76,6 +76,56 @@ DcpAttentionResult neutralize_dcp_padding_rows(
 
 }  // namespace
 
+ShardedPrefillScratchCachePlan plan_sharded_prefill_scratch_cache(
+    const torch::Tensor& sorted_gathered_slots,
+    const torch::Tensor& sorted_gathered_rows,
+    const torch::Tensor& sparse_slots,
+    int64_t token_count) {
+  CHECK_EQ(sorted_gathered_slots.dim(), 1);
+  CHECK_EQ(sorted_gathered_rows.dim(), 1);
+  CHECK_EQ(sorted_gathered_slots.numel(), token_count);
+  CHECK_EQ(sorted_gathered_rows.numel(), token_count);
+  CHECK_EQ(sorted_gathered_slots.scalar_type(), torch::kInt64);
+  CHECK_EQ(sorted_gathered_rows.scalar_type(), torch::kInt64);
+  CHECK_EQ(sparse_slots.scalar_type(), torch::kInt64);
+
+  torch::Tensor insertion_points =
+      torch::searchsorted(sorted_gathered_slots, sparse_slots)
+          .clamp_max(token_count - 1);
+  torch::Tensor matched_slots =
+      sorted_gathered_slots.index_select(0, insertion_points.flatten())
+          .view_as(sparse_slots);
+  torch::Tensor matched_rows =
+      sorted_gathered_rows.index_select(0, insertion_points.flatten())
+          .view_as(sparse_slots);
+  torch::Tensor matched_sparse_slots = matched_slots == sparse_slots;
+  torch::Tensor full_remapped_slots = torch::where(
+      matched_sparse_slots, matched_rows, torch::zeros_like(matched_rows));
+
+  ShardedPrefillScratchCachePlan plan;
+  plan.remapped_slots = full_remapped_slots;
+  torch::Tensor selected_sparse_slots =
+      torch::logical_and(matched_sparse_slots, sparse_slots >= 0);
+  torch::Tensor selected_rows =
+      matched_rows.masked_select(selected_sparse_slots).contiguous();
+  torch::Tensor sorted_selected_rows = std::get<0>(torch::sort(selected_rows));
+  torch::Tensor unique_source_rows =
+      std::get<0>(torch::unique_consecutive(sorted_selected_rows));
+  const int64_t unique_count = unique_source_rows.numel();
+  if (unique_count == 0 || unique_count * 2 > token_count) {
+    return plan;
+  }
+
+  torch::Tensor compact_remapped_slots =
+      torch::searchsorted(unique_source_rows, matched_rows);
+  plan.remapped_slots = torch::where(selected_sparse_slots,
+                                     compact_remapped_slots,
+                                     torch::zeros_like(compact_remapped_slots));
+  plan.source_rows = unique_source_rows;
+  plan.use_compact = true;
+  return plan;
+}
+
 DcpAttentionResult DeepseekV2AttentionImpl::run_dcp_paged_attention(
     const torch::Tensor& q_input,
     const DsaTopkState& global_topk,
@@ -186,6 +236,52 @@ DcpAttentionResult DeepseekV2AttentionImpl::run_dcp_chunked_prefill_attention(
       merged.output.slice(/*dim=*/2, first_head, last_head).contiguous(),
       merged.lse.slice(/*dim=*/1, first_head, last_head).contiguous(),
   };
+}
+
+std::pair<AttentionMetadata, KVCache>
+DeepseekV2AttentionImpl::build_sharded_prefill_attention_cache(
+    const torch::Tensor& gathered_k,
+    const torch::Tensor& gathered_slot_mapping,
+    const torch::Tensor& sorted_gathered_slots,
+    const torch::Tensor& sorted_gathered_rows,
+    const AttentionMetadata& kernel_metadata) const {
+  CHECK(enable_mla_cache_sharding_);
+  CHECK(kernel_metadata.block_table.defined());
+  CHECK_EQ(gathered_k.size(0), gathered_slot_mapping.numel());
+  CHECK_EQ(sorted_gathered_slots.numel(), gathered_slot_mapping.numel());
+  CHECK_EQ(sorted_gathered_rows.numel(), gathered_slot_mapping.numel());
+
+  const int64_t token_count = gathered_k.size(0);
+  torch::Tensor sparse_slots = kernel_metadata.block_table.to(torch::kLong);
+  ShardedPrefillScratchCachePlan scratch_plan =
+      plan_sharded_prefill_scratch_cache(sorted_gathered_slots,
+                                         sorted_gathered_rows,
+                                         sparse_slots,
+                                         token_count);
+  torch::Tensor scratch_k_source = gathered_k;
+  if (scratch_plan.use_compact) {
+    scratch_k_source = gathered_k.index_select(0, scratch_plan.source_rows);
+  }
+  const int64_t scratch_token_count = scratch_k_source.size(0);
+  const int64_t scratch_blocks =
+      util::ceil_div(scratch_token_count, static_cast<int64_t>(block_size_));
+  torch::Tensor scratch_k_cache =
+      torch::zeros({scratch_blocks, 1, block_size_, scratch_k_source.size(-1)},
+                   gathered_k.options());
+  torch::Tensor scratch_slots =
+      torch::arange(scratch_token_count, gathered_slot_mapping.options());
+
+  xllm::kernel::ReshapePagedCacheParams write_params;
+  write_params.key = scratch_k_source.unsqueeze(1);
+  write_params.k_cache = scratch_k_cache;
+  write_params.slot_mapping = scratch_slots;
+  xllm::kernel::reshape_paged_cache(write_params);
+
+  AttentionMetadata scratch_metadata = kernel_metadata;
+  scratch_metadata.block_table =
+      scratch_plan.remapped_slots.to(kernel_metadata.block_table.scalar_type());
+  return {scratch_metadata,
+          KVCache(KVCacheTensors{scratch_k_cache, torch::Tensor()})};
 }
 
 torch::Tensor DeepseekV2AttentionImpl::forward_dcp(

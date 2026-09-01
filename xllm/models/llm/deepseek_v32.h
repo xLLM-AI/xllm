@@ -93,7 +93,8 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
             tokens,
             cp_group_,
             cp_group_->rank(),
-            cp_group_->world_size());
+            cp_group_->world_size(),
+            cp_kv_shard_layout());
       }
     }
     if (!cp_ctx.has_value()) {
@@ -104,6 +105,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
           tokens, positions, kv_caches, modified_input_params);
     }
 
+    prepare_attention_metadata(attn_metadata);
     active_cp_context_ = &cp_ctx.value();
     torch::Tensor hidden_states = embed_mod()(tokens);
     hidden_states =

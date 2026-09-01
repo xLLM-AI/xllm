@@ -1,5 +1,15 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    context_parallel_topology_test
+  SRCS
+    context_parallel_topology_test.cpp
+  DEPS
+    :parallel_state
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME

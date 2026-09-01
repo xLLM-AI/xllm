@@ -3332,7 +3332,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
-  const int32_t block_size = options_.block_size();
+  const int32_t logical_block_size =
+      options_.block_size() * parallel_args_.kv_split_size_effective();
   const bool positions_decoupled = positions_are_decoupled_from_kv_length();
 #if defined(USE_NPU)
   const bool use_explicit_spec_verify_replay_update =
@@ -3398,7 +3399,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
         row.append_kv_len = true;
         row.append_q_len_one = true;
         row.append_block_table = true;
-        specBuilder::append_decode_row(row_ctx, row, block_size, buf);
+        specBuilder::append_decode_row(
+            row_ctx, row, logical_block_size, buf);
       }
     }
   } else {
@@ -3411,7 +3413,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
         row.append_kv_len = !use_atb_spec_kernel;
         row.append_q_len_one = !use_atb_spec_kernel;
         row.append_block_table = !use_atb_spec_kernel;
-        specBuilder::append_decode_row(row_ctx, row, block_size, buf);
+        specBuilder::append_decode_row(
+            row_ctx, row, logical_block_size, buf);
       }
     }
   }
@@ -3760,7 +3763,8 @@ void MTPWorkerImpl::prepare_validate_inputs(
     max_val_tokens =
         std::max(max_val_tokens, per_seq_val_tokens[static_cast<size_t>(i)]);
   }
-  const int32_t block_size = options_.block_size();
+  const int32_t logical_block_size =
+      options_.block_size() * parallel_args_.kv_split_size_effective();
   const bool positions_decoupled = positions_are_decoupled_from_kv_length();
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
@@ -3810,7 +3814,7 @@ void MTPWorkerImpl::prepare_validate_inputs(
       row.append_kv_len = !use_atb_spec_kernel;
       row.append_q_len_one = !use_atb_spec_kernel;
       row.append_block_table = !use_atb_spec_kernel;
-      specBuilder::append_decode_row(row_ctx, row, block_size, buf);
+      specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
     }
 
     if (use_atb_spec_kernel) {
@@ -3931,7 +3935,8 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
       << "draft extend state count mismatch";
 
-  const int32_t block_size = options_.block_size();
+  const int32_t logical_block_size =
+      options_.block_size() * parallel_args_.kv_split_size_effective();
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(base_input);
   torch::TensorOptions token_options = extend_input.token_ids.options();
@@ -3979,7 +3984,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       row.append_kv_len = !use_chunked_prefill;
       row.append_q_len_one = !use_chunked_prefill;
       row.append_block_table = !use_chunked_prefill;
-      specBuilder::append_decode_row(row_ctx, row, block_size, buf);
+      specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
       if (embedding.defined()) {
         expanded_embeddings.emplace_back(to_worker_device(embedding));
       } else {
@@ -4182,7 +4187,8 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
   auto& input_params = draft_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
   const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t block_size = options_.block_size();
+  const int32_t logical_block_size =
+      options_.block_size() * parallel_args_.kv_split_size_effective();
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   specBuilder::DecodeBuildBuffers buf;
@@ -4195,7 +4201,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
     row.seq_id = seq_id;
     row.position_offset = position_offset;
     row.append_token = false;
-    specBuilder::append_decode_row(row_ctx, row, block_size, buf);
+    specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
   }
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())

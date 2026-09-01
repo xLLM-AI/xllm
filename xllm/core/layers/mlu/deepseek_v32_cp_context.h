@@ -21,11 +21,14 @@ limitations under the License.
 #include <cstdint>
 #include <numeric>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include "framework/batch/batch_forward_type.h"
+#include "framework/kv_cache/kv_shard_layout.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
+#include "layers/common/kv_shard_batch_metadata.h"
 #include "layers/mlu/deepseek_v32_sp_plan.h"
 
 namespace xllm::layer::v32_cp {
@@ -94,7 +97,7 @@ inline std::vector<int32_t> build_seq_offsets(
 
 inline torch::Tensor build_segment_length_matrix(
     const std::vector<v32_sp::DeepseekV32SPSegment>& segments,
-    int32_t v32_sp::DeepseekV32SPSegment::* length_field,
+    int32_t v32_sp::DeepseekV32SPSegment::*length_field,
     const torch::Device& device) {
   std::vector<int32_t> values;
   values.reserve(segments.size() * 2);
@@ -141,11 +144,25 @@ struct DeepseekV32CPContext {
 
   torch::Tensor gathered_reorder_index;
   torch::Tensor gathered_slot_mapping;
+  torch::Tensor local_dcp_gathered_slot_mapping;
+  torch::Tensor sorted_gathered_slot_mapping;
+  torch::Tensor sorted_gathered_slot_mapping_int64;
+  torch::Tensor sorted_gathered_slot_rows;
 
   int32_t total_tokens = 0;
   int32_t rank = 0;
   ProcessGroup* process_group = nullptr;
 };
+
+inline torch::Tensor map_logical_slots_to_local_kv_shard(
+    const torch::Tensor& logical_slots,
+    int32_t block_size,
+    int32_t kv_split_size,
+    int32_t kv_split_rank) {
+  CHECK_EQ(logical_slots.dim(), 1) << "logical slots must be one-dimensional";
+  const KVShardLayout layout(block_size, kv_split_size, kv_split_rank);
+  return localize_kv_shard_slots(logical_slots, layout);
+}
 
 inline torch::Tensor reorder_by_index(const torch::Tensor& tensor,
                                       const torch::Tensor& reorder_index);
@@ -157,7 +174,8 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
     const torch::Tensor& tokens,
     ProcessGroup* cp_group,
     int32_t curr_rank,
-    int32_t world_size) {
+    int32_t world_size,
+    std::optional<KVShardLayout> kv_shard_layout = std::nullopt) {
   if (cp_size <= 1 || world_size <= 1) {
     return std::nullopt;
   }
@@ -203,6 +221,20 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
   context.local_segments = local_segments;
   context.local_attn_metadata = build_local_prefill_attention_metadata(
       base_attn_metadata, local_segments);
+  if (base_attn_metadata.block_table.defined()) {
+    std::vector<int64_t> local_request_indices;
+    local_request_indices.reserve(local_segments.size());
+    for (const auto& segment : local_segments) {
+      local_request_indices.emplace_back(segment.req_idx);
+    }
+    torch::Tensor request_index =
+        torch::tensor(
+            local_request_indices,
+            torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU))
+            .to(base_attn_metadata.block_table.device());
+    context.local_attn_metadata.block_table =
+        base_attn_metadata.block_table.index_select(0, request_index);
+  }
   context.seg_q_starts_cpu = build_seq_offsets(
       v32_sp::extract_q_seq_lens(context.local_attn_metadata));
   context.req_q_offsets_cpu = build_seq_offsets(q_seq_lens);
@@ -254,6 +286,25 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
   if (base_attn_metadata.slot_mapping.defined()) {
     context.gathered_slot_mapping = reorder_by_index(
         base_attn_metadata.slot_mapping, context.gathered_reorder_index);
+    const int32_t local_token_count =
+        context.comm_plan.tokens_per_rank.at(curr_rank);
+    const torch::Tensor local_reorder_index =
+        context.gathered_reorder_index.narrow(
+            0, context.comm_plan.token_num_offset, local_token_count);
+    context.local_attn_metadata.slot_mapping =
+        reorder_by_index(base_attn_metadata.slot_mapping, local_reorder_index);
+    std::tie(context.sorted_gathered_slot_mapping,
+             context.sorted_gathered_slot_rows) =
+        torch::sort(context.gathered_slot_mapping);
+    context.sorted_gathered_slot_mapping_int64 =
+        context.sorted_gathered_slot_mapping.to(torch::kInt64);
+    if (kv_shard_layout.has_value()) {
+      context.local_dcp_gathered_slot_mapping = localize_kv_shard_slots(
+          context.gathered_slot_mapping, kv_shard_layout.value());
+      context.local_attn_metadata.kv_shard_batch_metadata =
+          build_kv_shard_batch_metadata(context.local_attn_metadata,
+                                        kv_shard_layout.value());
+    }
   }
   return context;
 }

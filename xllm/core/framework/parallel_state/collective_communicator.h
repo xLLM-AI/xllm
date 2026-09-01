@@ -43,6 +43,7 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> single_rank_group_;
   // Owns a standalone CP ProcessGroup for orthogonal model-side CP.
   std::unique_ptr<ProcessGroup> cp_group_;
+  std::unique_ptr<ProcessGroup> dcp_group_;
   std::unique_ptr<ProcessGroup> moe_tp_group_;
   std::unique_ptr<ProcessGroup> moe_ep_group_;
   std::unique_ptr<ProcessGroup> mc2_group_;
