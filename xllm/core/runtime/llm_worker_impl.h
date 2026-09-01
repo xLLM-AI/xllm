@@ -90,6 +90,14 @@ class LLMWorkerImpl : public WorkerImpl {
     return model_->has_dspark_confidence_head();
   }
 
+  DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) {
+    return model_->dflash2_candidates(
+        hidden_states, unary_logits, anchor_token_ids);
+  }
+
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no
   // attention and its shape doesn't match the decode graph. See CausalLM.

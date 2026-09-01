@@ -1656,6 +1656,10 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prepare_draft_sampling(prefill_input.sampling_params);
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
+  // The Qwen draft is a pure full-attention model; without this cleanup the
+  // target's recurrent slot metadata makes MTP prefill enter a stateful path
+  // it has neither a validity mask nor a recurrent cache for.
+  input_params.clear_linear_attention_state();
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;

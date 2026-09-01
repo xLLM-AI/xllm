@@ -51,6 +51,24 @@ Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
                                   parallel_args_.tp_group_,
                                   options,
                                   mlp_module_prefix));
+
+  use_dflash2_conv_ = is_dflash2_draft_model_type(model_args.model_type());
+  if (use_dflash2_conv_) {
+    attention_conv_ = register_module(
+        "attention_conv",
+        DFlash2GroupedConv(model_args.hidden_size(),
+                           model_args.dflash2_conv_kernel_size(),
+                           model_args.dflash2_conv_group_size(),
+                           model_args.dflash2_block_size(),
+                           options));
+    mlp_conv_ = register_module(
+        "mlp_conv",
+        DFlash2GroupedConv(model_args.hidden_size(),
+                           model_args.dflash2_conv_kernel_size(),
+                           model_args.dflash2_conv_group_size(),
+                           model_args.dflash2_block_size(),
+                           options));
+  }
 }
 
 void Qwen2DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
@@ -60,6 +78,23 @@ void Qwen2DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
   post_norm_->load_state_dict(
       state_dict.get_dict_with_prefix("post_attention_layernorm."));
   mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
+  if (use_dflash2_conv_) {
+    attention_conv_->load_state_dict(
+        state_dict.get_dict_with_prefix("attention_conv."));
+    mlp_conv_->load_state_dict(state_dict.get_dict_with_prefix("mlp_conv."));
+  }
+}
+
+void Qwen2DecoderLayerImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  attention_->verify_loaded_weights(prefix + "self_attn.");
+  mlp_->verify_loaded_weights(prefix + "mlp.");
+  input_norm_->verify_loaded_weights(prefix + "input_layernorm.");
+  post_norm_->verify_loaded_weights(prefix + "post_attention_layernorm.");
+  if (use_dflash2_conv_) {
+    attention_conv_->verify_loaded_weights(prefix + "attention_conv.");
+    mlp_conv_->verify_loaded_weights(prefix + "mlp_conv.");
+  }
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>
@@ -97,14 +132,30 @@ torch::Tensor Qwen2DecoderLayerImpl::forward(
   // Pre-attention norm
   std::tie(x, residual) = apply_norm(input_norm_, x, residual, pre_fp8_scale);
 
+  torch::Tensor attention_coefficients;
+  if (use_dflash2_conv_) {
+    std::tie(x, attention_coefficients) = attention_conv_->prepare(x);
+  }
+
   // Attention
   x = attention_->forward(positions, x, attn_metadata, kv_cache);
+  if (use_dflash2_conv_) {
+    x = attention_conv_->finish(x, attention_coefficients);
+  }
 
   // Post-attention norm
   std::tie(x, residual) = apply_norm(post_norm_, x, residual, post_fp8_scale);
 
+  torch::Tensor mlp_coefficients;
+  if (use_dflash2_conv_) {
+    std::tie(x, mlp_coefficients) = mlp_conv_->prepare(x);
+  }
+
   // MLP
   x = mlp_->forward(x);
+  if (use_dflash2_conv_) {
+    x = mlp_conv_->finish(x, mlp_coefficients);
+  }
 
   return x;
 }

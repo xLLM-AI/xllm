@@ -1009,6 +1009,17 @@ struct GraphInput {
 };
 
 struct ModelInputParams {
+  // Drops every recurrent (linear attention) state field.  Pure full-attention
+  // drafts (DFlash2, MTP) reuse a hybrid target's ForwardInput and must call
+  // this so target-only slot ids do not classify their rows as recurrent,
+  // which would enter a stateful path the draft has no cache for.
+  void clear_linear_attention_state() {
+    embedding.linear_state_ids.clear();
+    embedding.linear_state_indices = torch::Tensor();
+    linear_state_cache_ops.clear();
+    linear_state_validity_mask.clear();
+  }
+
   ModelInputParams to(const torch::Device& device) const {
     ModelInputParams params;
     params.meta = meta;

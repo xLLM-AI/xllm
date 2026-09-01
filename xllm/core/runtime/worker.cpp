@@ -30,6 +30,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
+#include "runtime/dflash2_worker_impl.h"
 #include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
 #include "runtime/dspark_worker_impl.h"
@@ -56,6 +57,11 @@ Worker::Worker(const ParallelArgs& parallel_args,
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options, worker_type);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (SpeculativeConfig::is_dflash2_algorithm(algorithm)) {
+#if !defined(USE_NPU)
+      LOG(FATAL) << "DFlash2 speculative decoding is only supported on NPU.";
+#endif
+      impl_ = new DFlash2WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DSpark") {
       impl_ = new DSparkWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "Suffix") {
