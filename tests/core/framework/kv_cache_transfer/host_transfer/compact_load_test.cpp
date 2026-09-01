@@ -191,7 +191,7 @@ CompactLoadLayout make_layout(const torch::Tensor& host_key,
 
 CompactLoadRequest make_request() {
   CompactLoadRequest request;
-  request.mappings = {
+  request.target_mappings = {
       CompactLoadMapping{17, 3, 2},
       CompactLoadMapping{17, 0, 4},
       CompactLoadMapping{17, 4, 0},
@@ -502,7 +502,7 @@ TEST(CompactLoadTest, RestoresOnlyRolesActiveAtEachLayer) {
       create_layer_synchronizer(/*num_layers=*/2);
   ASSERT_NE(synchronizer, nullptr);
   CompactLoadRequest request;
-  request.mappings = {
+  request.target_mappings = {
       CompactLoadMapping{23, 2, 1},
       CompactLoadMapping{23, 0, 2},
   };
@@ -606,7 +606,7 @@ TEST(CompactLoadTest, RestoresSplitMlaAndIndexerRolesThroughOneLayout) {
       create_layer_synchronizer(/*num_layers=*/1);
   ASSERT_NE(synchronizer, nullptr);
   CompactLoadRequest request;
-  request.mappings = {
+  request.target_mappings = {
       CompactLoadMapping{kGroupId, 2, 0},
       CompactLoadMapping{kGroupId, 0, 2},
   };
@@ -791,7 +791,7 @@ TEST(CompactLoadTest, RestoresPartialGroupsWithIndependentRoleNamespaces) {
       create_layer_synchronizer(/*num_layers=*/1);
   ASSERT_NE(synchronizer, nullptr);
   CompactLoadRequest partial_request;
-  partial_request.mappings = {
+  partial_request.target_mappings = {
       CompactLoadMapping{47, 2, 1},
       CompactLoadMapping{47, 0, 2},
   };
@@ -808,7 +808,7 @@ TEST(CompactLoadTest, RestoresPartialGroupsWithIndependentRoleNamespaces) {
   synchronizer = create_layer_synchronizer(/*num_layers=*/1);
   ASSERT_NE(synchronizer, nullptr);
   CompactLoadRequest full_request;
-  full_request.mappings = {
+  full_request.target_mappings = {
       CompactLoadMapping{31, 1, 0},
       CompactLoadMapping{31, 0, 2},
       CompactLoadMapping{47, 1, 0},

@@ -71,17 +71,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
-  uint32_t transfer_kv_blocks(
-      uint64_t batch_id,
-      const std::vector<BlockTransferInfo>& block_transfer_info) override;
-
-  uint32_t transfer_kv_blocks(
-      uint64_t batch_id,
-      Slice<BlockTransferInfo>& block_transfer_info) override;
-
-  std::vector<uint8_t> prefetch_kv_blocks(
-      Slice<BlockTransferInfo>& block_transfer_info) override;
-
 #if defined(USE_NPU) || defined(USE_MLU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;
@@ -96,9 +85,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
  protected:
   // MTP composite: leaves own model-specific NPU input preparation.
   bool owns_npu_parallel_input_prepare() const override;
-
-  void prepare_hierarchy_kv_cache_transfers();
-  void finalize_hierarchy_kv_cache_transfers();
 
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
   std::optional<ForwardOutput> step_decode(const ForwardInput& inputs) override;
@@ -293,13 +279,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   bool adaptive_enabled() const;
 
  protected:
-  // Draft model worker
-  std::unique_ptr<LLMWorkerImpl> draft_impl_;
-  std::shared_ptr<HierarchyKVCacheTransfer> draft_transfer_owner_;
-
-  // Embedding cache for speculative decoding
-  std::shared_ptr<EmbeddingCache> embedding_cache_;
-
   // Rejection sampling produces accepted state on the compute stream.  Keep
   // that state device-resident so the next overlap task can be fully enqueued
   // without waiting for target verification to finish.
@@ -341,10 +320,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   torch::Tensor mtp_validate_greedy_indices_;
   torch::Tensor mtp_validate_greedy_do_sample_;
   std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
-#endif
-
-#if defined(USE_NPU) || defined(USE_MLU)
-  std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
 #endif
 };
 }  // namespace xllm

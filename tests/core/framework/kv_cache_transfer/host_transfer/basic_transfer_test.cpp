@@ -78,6 +78,14 @@ TEST(BasicHostKVTransferTest, KeepsLayerBatchingEdgeSemantics) {
   EXPECT_EQ(per_layer_handle.synchronizer->size(), 4U);
   EXPECT_EQ(per_layer_handle.layers_per_event, 1U);
   per_layer.drain();
+
+  BasicHostKVTransfer composite(make_layout(device, /*num_layers=*/4),
+                                device,
+                                *compute_stream,
+                                /*layer_copy_batches=*/4);
+  HostKVLoadHandle composite_handle = composite.prepare_load(/*draft=*/true);
+  EXPECT_EQ(composite_handle.synchronizer->size(), 5U);
+  composite.drain();
 }
 
 TEST(HostKVTransferFactoryTest, SelectsConfiguredStrategy) {

@@ -75,15 +75,15 @@ class CopyStreamLease final {
 };
 
 CopyPlan build_plan(const HostKVLayout& layout,
-                    const HostKVRequest& request,
+                    const std::vector<HostKVMapping>& mappings,
                     const LayerRange& range,
                     bool is_load) {
   CopyPlan plan;
   const size_t estimated_copies =
-      request.mappings.size() * static_cast<size_t>(range.end - range.begin);
+      mappings.size() * static_cast<size_t>(range.end - range.begin);
   plan.src_tensors.reserve(estimated_copies);
   plan.dst_tensors.reserve(estimated_copies);
-  for (const HostKVMapping& mapping : request.mappings) {
+  for (const HostKVMapping& mapping : mappings) {
     const HostKVGroupLayout& group = layout.group(mapping.group_id);
     for (const HostKVLayerLayout& layer : group.layers) {
       if (layer.absolute_layer_id < range.begin ||
@@ -138,9 +138,14 @@ class BasicHostKVTransfer::Impl final {
     }
   }
 
-  HostKVLoadHandle prepare_load() const {
-    return {create_layer_synchronizer(static_cast<int64_t>(ranges_.size())),
-            layers_per_event()};
+  HostKVLoadHandle prepare_load(bool draft) const {
+    const uint32_t count = event_count() + static_cast<uint32_t>(draft);
+    HostKVLoadHandle handle{create_layer_synchronizer(count),
+                            layers_per_event()};
+    if (draft) {
+      handle.draft_event_index = event_count();
+    }
+    return handle;
   }
 
   uint32_t event_count() const { return static_cast<uint32_t>(ranges_.size()); }
@@ -151,8 +156,8 @@ class BasicHostKVTransfer::Impl final {
     CopyStreamLease stream(&streams_);
     bool stream_has_work = false;
     for (size_t index = 0; index < ranges_.size(); ++index) {
-      CopyPlan plan =
-          build_plan(layout_, request, ranges_[index], /*is_load=*/true);
+      CopyPlan plan = build_plan(
+          layout_, request.target_mappings, ranges_[index], /*is_load=*/true);
       if (!plan.src_tensors.empty()) {
         if (!batch_memcpy_->submit_h2d(
                 plan.src_tensors, plan.dst_tensors, stream.get())) {
@@ -168,21 +173,48 @@ class BasicHostKVTransfer::Impl final {
         return false;
       }
     }
+    for (const LayerRange& range : ranges_) {
+      CopyPlan plan =
+          build_plan(layout_, request.draft_mappings, range, /*is_load=*/true);
+      if (!plan.src_tensors.empty() &&
+          !batch_memcpy_->submit_h2d(
+              plan.src_tensors, plan.dst_tensors, stream.get())) {
+        if (stream_has_work) {
+          stream.drain_or_die("draft cache copy submission failed");
+        }
+        return false;
+      }
+      stream_has_work = stream_has_work || !plan.src_tensors.empty();
+    }
+    if (!request.draft_mappings.empty() &&
+        !handle.synchronizer->record_stream(
+            static_cast<int64_t>(ranges_.size()), stream.get())) {
+      if (stream_has_work) {
+        stream.drain_or_die("draft cache completion event recording failed");
+      }
+      return false;
+    }
     return true;
   }
 
   bool offload(const HostKVRequest& request) {
     CopyStreamLease stream(&streams_);
     stream.get()->wait_stream(compute_stream_);
-    for (const LayerRange& range : ranges_) {
-      CopyPlan plan = build_plan(layout_, request, range, /*is_load=*/false);
-      if (!plan.src_tensors.empty() &&
-          !batch_memcpy_->copy_d2h(
-              plan.src_tensors, plan.dst_tensors, stream.get())) {
-        return false;
-      }
-    }
-    return true;
+    const auto offload_mappings =
+        [this, &stream](const std::vector<HostKVMapping>& mappings) {
+          for (const LayerRange& range : ranges_) {
+            CopyPlan plan =
+                build_plan(layout_, mappings, range, /*is_load=*/false);
+            if (!plan.src_tensors.empty() &&
+                !batch_memcpy_->copy_d2h(
+                    plan.src_tensors, plan.dst_tensors, stream.get())) {
+              return false;
+            }
+          }
+          return true;
+        };
+    return offload_mappings(request.target_mappings) &&
+           offload_mappings(request.draft_mappings);
   }
 
   void drain() {
@@ -224,8 +256,8 @@ BasicHostKVTransfer::BasicHostKVTransfer(
 
 BasicHostKVTransfer::~BasicHostKVTransfer() { drain(); }
 
-HostKVLoadHandle BasicHostKVTransfer::prepare_load() {
-  return impl_->prepare_load();
+HostKVLoadHandle BasicHostKVTransfer::prepare_load(bool draft) {
+  return impl_->prepare_load(draft);
 }
 
 void BasicHostKVTransfer::drain() { impl_->drain(); }

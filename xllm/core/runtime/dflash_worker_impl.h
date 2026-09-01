@@ -225,11 +225,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                      const SampleOutput& validate_output);
 
  protected:
-  std::unique_ptr<LLMWorkerImpl> draft_impl_;
-  std::shared_ptr<EmbeddingCache> embedding_cache_;
-#if defined(USE_NPU) || defined(USE_MLU)
-  std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
-#endif
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
   // Whether the target model owns recurrent (linear attention) layers.

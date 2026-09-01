@@ -173,11 +173,6 @@ class MtpModelImplBase : public torch::nn::Module {
 
     prepare_legacy_expert_array(h, input_params);
 
-    // TODO(liangzhiwei20): MTP need more support for layer wise copy.
-    if (input_params.parallel.layer_wise_load_synchronizer != nullptr) {
-      LOG(FATAL) << "MTP not support layer wise copy!";
-    }
-
     torch::Tensor prev_topk_indices;
     if (input_params.mtp_topk_state != nullptr) {
       const auto state = std::dynamic_pointer_cast<const NpuMtpTopkState>(
@@ -186,6 +181,9 @@ class MtpModelImplBase : public torch::nn::Module {
           << "NPU MTP model received an incompatible top-k state.";
       prev_topk_indices = state->topk_indices();
     }
+    if (!input_params.synchronize_draft_layer()) {
+      return ModelOutput();
+    }
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
@@ -193,9 +191,6 @@ class MtpModelImplBase : public torch::nn::Module {
         event = input_params.parallel.layer_synchronizer->get_event(i);
         event_flag =
             input_params.parallel.layer_synchronizer->get_event_flag(i);
-      }
-      if (!input_params.synchronize_layer(i)) {
-        return ModelOutput();
       }
 
       auto& layer = layers_[i];

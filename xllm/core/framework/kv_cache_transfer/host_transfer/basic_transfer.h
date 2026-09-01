@@ -36,7 +36,7 @@ class BasicHostKVTransfer final : public HostKVTransfer {
                       std::unique_ptr<BatchMemcpy> batch_memcpy = nullptr);
   ~BasicHostKVTransfer() override;
 
-  HostKVLoadHandle prepare_load() override;
+  HostKVLoadHandle prepare_load(bool draft = false) override;
   void drain() override;
 
  protected:

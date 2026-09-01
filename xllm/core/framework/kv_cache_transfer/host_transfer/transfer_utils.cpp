@@ -44,9 +44,10 @@ std::vector<LayerRange> build_layer_ranges(int64_t num_layers,
   return ranges;
 }
 
-GroupedHostKVMappings group_mappings(const HostKVRequest& request) {
+GroupedHostKVMappings group_mappings(
+    const std::vector<HostKVMapping>& mappings) {
   GroupedHostKVMappings grouped;
-  for (const HostKVMapping& mapping : request.mappings) {
+  for (const HostKVMapping& mapping : mappings) {
     grouped[mapping.group_id].emplace_back(mapping);
   }
   return grouped;

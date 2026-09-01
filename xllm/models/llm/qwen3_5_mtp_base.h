@@ -148,10 +148,10 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
     }
 
     std::optional<torch::Tensor> residual = std::nullopt;
+    if (!input_params.synchronize_draft_layer()) {
+      return ModelOutput();
+    }
     for (size_t i = 0; i < layers_.size(); ++i) {
-      if (!input_params.synchronize_layer(static_cast<uint32_t>(i))) {
-        return ModelOutput();
-      }
       mtp_hidden = layers_[i]->forward(mtp_hidden,
                                        residual,
                                        positions,

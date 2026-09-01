@@ -19,6 +19,7 @@ limitations under the License.
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -96,6 +97,7 @@ class HierarchyKVCacheTransfer final {
                               Slice<BlockTransferInfo>& block_transfer_info);
   std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info);
+  std::optional<HostKVLoadHandle> take_load_handle(uint64_t batch_id);
   void set_layer_synchronizer(ModelInputParams& params);
   [[nodiscard]] bool supports_block_type(BlockType block_type) const;
   [[nodiscard]] bool supports_block_type(CacheRole role,

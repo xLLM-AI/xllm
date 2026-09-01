@@ -551,6 +551,9 @@ std::tuple<int64_t, int64_t> DFlashWorkerImpl::estimate_kv_cache_capacity() {
 bool DFlashWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
   embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
+  CHECK(impl_ != nullptr);
+  CHECK(draft_impl_ != nullptr);
+  prepare_hierarchy_kv_cache_transfers();
 
   bool target_allocated = true;
   const WorkerImpl::Status target_status = impl_->get_status();
@@ -569,13 +572,20 @@ bool DFlashWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
 
-  return target_allocated && draft_allocated;
+  const bool allocated = target_allocated && draft_allocated;
+  if (allocated) {
+    finalize_hierarchy_kv_cache_transfers();
+  }
+  return allocated;
 }
 
 #if defined(USE_NPU) || defined(USE_MLU)
 bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
   const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
+  CHECK(impl_ != nullptr);
+  CHECK(draft_impl_ != nullptr);
+  prepare_hierarchy_kv_cache_transfers();
 
   if (kv_cache_transfer_ == nullptr) {
     kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
@@ -607,7 +617,11 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
   }
 
   embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
-  return target_allocated && draft_allocated;
+  const bool allocated = target_allocated && draft_allocated;
+  if (allocated) {
+    finalize_hierarchy_kv_cache_transfers();
+  }
+  return allocated;
 }
 #endif
 
@@ -1424,6 +1438,8 @@ void DFlashWorkerImpl::write_context_kv(
   // on compute_stream_, so no explicit event dance is needed — the stream
   // orders them. Model methods below use torch ops on the same stream.
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  CHECK(input.input_params.synchronize_draft_layer())
+      << "Failed to wait for Draft Host KV load completion.";
 
 #if defined(USE_NPU)
   // PD PUSH: the draft context-KV scattered below is not covered by the target

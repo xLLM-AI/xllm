@@ -70,6 +70,12 @@ class SpeculativeConfig final {
            boost::iequals(algorithm, "dspark");
   }
 
+  static bool supports_host_kv_cache(std::string_view algorithm) {
+    return is_mtp_algorithm(algorithm) ||
+           is_block_diffusion_algorithm(algorithm) ||
+           boost::iequals(algorithm, "Eagle3");
+  }
+
   // True for the algorithms whose draft path can emit dense per-token
   // probabilities for probabilistic rejection sampling; greedy acceptance is
   // always available, so DFlash/Suffix are gated out here. DFlash2 samples

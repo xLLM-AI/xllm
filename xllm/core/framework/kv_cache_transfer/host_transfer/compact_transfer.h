@@ -43,7 +43,7 @@ class CompactHostKVTransfer final : public HostKVTransfer {
                         CompactTransferConfig config = {});
   ~CompactHostKVTransfer() override;
 
-  HostKVLoadHandle prepare_load() override;
+  HostKVLoadHandle prepare_load(bool draft = false) override;
   void drain() override;
 
  protected:
