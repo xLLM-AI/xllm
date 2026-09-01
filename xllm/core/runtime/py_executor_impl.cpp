@@ -15,10 +15,9 @@ limitations under the License.
 
 #include "core/runtime/py_executor_impl.h"
 
-#include <Python.h>
 #include <glog/logging.h>
 #include <pybind11/pybind11.h>
-#include <torch/extension.h>
+#include <torch/python.h>
 
 #include <memory>
 #include <optional>
@@ -29,6 +28,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/py_attention_metadata.h"
+#include "core/util/pybind_helper.h"
 #include "models/llm/py_causal_lm.h"
 
 #if defined(USE_NPU)
@@ -43,29 +43,6 @@ namespace xllm {
 namespace {
 
 thread_local PyCausalLM* active_py_causal_lm = nullptr;
-
-py::object optional_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() ? py::cast(tensor) : py::none();
-}
-
-py::object optional_tensor(const std::optional<torch::Tensor>& tensor) {
-  if (!tensor.has_value() || !tensor->defined()) {
-    return py::none();
-  }
-  return py::cast(*tensor);
-}
-
-void clear_python_object(py::object& object) {
-  if (!object) {
-    return;
-  }
-  if (!Py_IsInitialized()) {
-    (void)object.release();
-    return;
-  }
-  py::gil_scoped_acquire gil;
-  object = py::object();
-}
 
 void register_xllm_runtime_module(py::module_& m) {
   register_attention_metadata_views(m);
@@ -210,9 +187,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   py::object py_metadata =
       py::cast(PyAttentionMetadataView(attn_metadata, params));
-  py::object input_embedding = params.embedding.input_embedding.defined()
-                                   ? py::cast(params.embedding.input_embedding)
-                                   : py::none();
+  py::object input_embedding =
+      optional_tensor(params.embedding.input_embedding);
 
   // --- VLM: vision encode + embedding merge on image/video prefill steps ---
   // On steps carrying multimodal input, ``params.multimodal.mm_data`` holds the

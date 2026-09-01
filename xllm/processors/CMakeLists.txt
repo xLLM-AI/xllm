@@ -50,7 +50,6 @@ cc_library(
     minicpmv_prompt_processor.h
     mistral3_image_processor.h
     mistral3_prompt_processor.h
-    pywarpper_input_processor.h
     qwen2_vl_prompt_processor.h
     qwen2_vl_image_processor.h
     qwen2_vl_video_processor.h
@@ -71,7 +70,6 @@ cc_library(
     minicpmv_prompt_processor.cpp
     mistral3_image_processor.cpp
     mistral3_prompt_processor.cpp
-    pywarpper_input_processor.cpp
     qwen2_vl_prompt_processor.cpp
     qwen2_vl_image_processor.cpp
     qwen2_vl_video_processor.cpp

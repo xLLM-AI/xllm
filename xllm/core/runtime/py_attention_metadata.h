@@ -103,7 +103,6 @@ class PyAttentionMetadataView final {
   static torch::Tensor make_host_int32_view(
       const std::shared_ptr<layer::AttentionMetadata>& metadata,
       std::vector<int32_t>& host_vec);
-  static pybind11::object optional_tensor(const torch::Tensor& tensor);
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
   torch::Tensor kv_seq_lens_host_;

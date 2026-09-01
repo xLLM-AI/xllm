@@ -15,19 +15,18 @@ limitations under the License.
 
 #include "models/llm/py_causal_lm.h"
 
-#include <Python.h>
 #include <glog/logging.h>
 #include <pybind11/stl.h>
-#include <torch/extension.h>
+#include <torch/python.h>
 
 #include <memory>
 #include <string>
-#include <utility>
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/util/pybind_helper.h"
 #include "models/py_model_helper.h"
 
 #if defined(USE_NPU)
@@ -51,10 +50,6 @@ void share_python_model_weights(py::object& draft_model,
 
 namespace {
 
-py::object optional_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() ? py::cast(tensor) : py::none();
-}
-
 py::list build_python_kv_caches(std::vector<KVCache>& kv_caches) {
   py::list python_caches;
   for (KVCache& kv_cache : kv_caches) {
@@ -66,21 +61,6 @@ py::list build_python_kv_caches(std::vector<KVCache>& kv_caches) {
                        optional_tensor(kv_cache.get_ssm_cache())));
   }
   return python_caches;
-}
-
-void clear_python_object(py::object& object) {
-  if (!object) {
-    return;
-  }
-  if (!Py_IsInitialized()) {
-    // CPython has already torn down its GIL. Avoid decref during C++ static
-    // destruction; the process is exiting and the reference cannot be safely
-    // released anymore.
-    (void)object.release();
-    return;
-  }
-  py::gil_scoped_acquire gil;
-  object = py::object();
 }
 
 }  // namespace
@@ -293,9 +273,7 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                                  const torch::Tensor& seleted_idxes) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
-  py::object selected = seleted_idxes.defined()
-                            ? py::object(py::cast(seleted_idxes))
-                            : py::object(py::none());
+  py::object selected = optional_tensor(seleted_idxes);
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
 }
@@ -339,9 +317,7 @@ torch::Tensor PyCausalLM::dspark_confidence_probs(
     const torch::Tensor& prev_matrix) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
-  py::object previous = prev_matrix.defined()
-                            ? py::object(py::cast(prev_matrix))
-                            : py::object(py::none());
+  py::object previous = optional_tensor(prev_matrix);
   return py_model_.attr("dspark_confidence_probs")(hidden_all, previous)
       .cast<torch::Tensor>();
 }

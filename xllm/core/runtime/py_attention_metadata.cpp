@@ -16,12 +16,13 @@ limitations under the License.
 #include "core/runtime/py_attention_metadata.h"
 
 #include <pybind11/stl.h>
-#include <torch/extension.h>
+#include <torch/python.h>
 
 #include <utility>
 
 #include "core/framework/model/model_input_params.h"
 #include "core/layers/common/attention_metadata.h"
+#include "core/util/pybind_helper.h"
 
 namespace py = pybind11;
 
@@ -31,14 +32,7 @@ namespace {
 struct PythonObjectHolder final {
   explicit PythonObjectHolder(py::object value) : value(std::move(value)) {}
 
-  ~PythonObjectHolder() {
-    if (!Py_IsInitialized()) {
-      (void)value.release();
-      return;
-    }
-    py::gil_scoped_acquire gil;
-    value = py::object();
-  }
+  ~PythonObjectHolder() { clear_python_object(value); }
 
   py::object value;
 };
@@ -144,43 +138,31 @@ bool PyExpandedDecodeMetadataView::enabled() const {
 }
 
 py::object PyExpandedDecodeMetadataView::kv_seq_lens() const {
-  return metadata().kv_seq_lens.defined() ? py::cast(metadata().kv_seq_lens)
-                                          : py::none();
+  return optional_tensor(metadata().kv_seq_lens);
 }
 
 py::object PyExpandedDecodeMetadataView::block_table() const {
-  return metadata().block_table.defined() ? py::cast(metadata().block_table)
-                                          : py::none();
+  return optional_tensor(metadata().block_table);
 }
 
 py::object PyExpandedDecodeMetadataView::paged_kv_indptr() const {
-  return metadata().paged_kv_indptr.defined()
-             ? py::cast(metadata().paged_kv_indptr)
-             : py::none();
+  return optional_tensor(metadata().paged_kv_indptr);
 }
 
 py::object PyExpandedDecodeMetadataView::paged_kv_indices() const {
-  return metadata().paged_kv_indices.defined()
-             ? py::cast(metadata().paged_kv_indices)
-             : py::none();
+  return optional_tensor(metadata().paged_kv_indices);
 }
 
 py::object PyExpandedDecodeMetadataView::paged_kv_last_page_len() const {
-  return metadata().paged_kv_last_page_len.defined()
-             ? py::cast(metadata().paged_kv_last_page_len)
-             : py::none();
+  return optional_tensor(metadata().paged_kv_last_page_len);
 }
 
 py::object PyExpandedDecodeMetadataView::paged_attention_tiling_data() const {
-  return metadata().paged_attention_tiling_data.defined()
-             ? py::cast(metadata().paged_attention_tiling_data)
-             : py::none();
+  return optional_tensor(metadata().paged_attention_tiling_data);
 }
 
 py::object PyExpandedDecodeMetadataView::kv_seq_lens_host() const {
-  return metadata().kv_seq_lens_host.defined()
-             ? py::cast(metadata().kv_seq_lens_host)
-             : py::none();
+  return optional_tensor(metadata().kv_seq_lens_host);
 }
 
 const std::vector<int32_t>&
@@ -230,10 +212,7 @@ const torch::Tensor& PyAttentionMetadataView::paged_kv_last_page_len() const {
 }
 
 py::object PyAttentionMetadataView::qo_indptr() const {
-  if (!metadata_->qo_indptr.has_value() || !metadata_->qo_indptr->defined()) {
-    return py::none();
-  }
-  return py::cast(*metadata_->qo_indptr);
+  return optional_tensor(metadata_->qo_indptr);
 }
 
 py::object PyAttentionMetadataView::q_cu_seq_lens() const {
@@ -327,8 +306,7 @@ py::object PyAttentionMetadataView::dsa_positions() const {
 }
 
 void PyAttentionMetadataView::set_dsa_positions(py::object value) {
-  dsa_positions_ =
-      value.is_none() ? torch::Tensor() : value.cast<torch::Tensor>();
+  dsa_positions_ = tensor_from_python(value);
 }
 
 py::object PyAttentionMetadataView::dsa_cos_sin() const {
@@ -336,8 +314,7 @@ py::object PyAttentionMetadataView::dsa_cos_sin() const {
 }
 
 void PyAttentionMetadataView::set_dsa_cos_sin(py::object value) {
-  dsa_cos_sin_ =
-      value.is_none() ? torch::Tensor() : value.cast<torch::Tensor>();
+  dsa_cos_sin_ = tensor_from_python(value);
 }
 
 py::object PyAttentionMetadataView::dsa_c4_cos_sin() const {
@@ -345,8 +322,7 @@ py::object PyAttentionMetadataView::dsa_c4_cos_sin() const {
 }
 
 void PyAttentionMetadataView::set_dsa_c4_cos_sin(py::object value) {
-  dsa_c4_cos_sin_ =
-      value.is_none() ? torch::Tensor() : value.cast<torch::Tensor>();
+  dsa_c4_cos_sin_ = tensor_from_python(value);
 }
 
 py::object PyAttentionMetadataView::dsa_c128_cos_sin() const {
@@ -354,8 +330,7 @@ py::object PyAttentionMetadataView::dsa_c128_cos_sin() const {
 }
 
 void PyAttentionMetadataView::set_dsa_c128_cos_sin(py::object value) {
-  dsa_c128_cos_sin_ =
-      value.is_none() ? torch::Tensor() : value.cast<torch::Tensor>();
+  dsa_c128_cos_sin_ = tensor_from_python(value);
 }
 
 int64_t PyAttentionMetadataView::dsa_graph_block_table_cols() const {
@@ -393,11 +368,6 @@ torch::Tensor PyAttentionMetadataView::make_host_int32_view(
       {static_cast<int64_t>(host_vec.size())},
       [owner = std::move(owner)](void*) mutable { owner.reset(); },
       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
-}
-
-py::object PyAttentionMetadataView::optional_tensor(
-    const torch::Tensor& tensor) {
-  return tensor.defined() ? py::cast(tensor) : py::none();
 }
 
 }  // namespace xllm

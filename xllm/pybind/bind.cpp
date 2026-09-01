@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
 #include "core/framework/request/sample_slot.h"
+#include "core/util/pybind_helper.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -356,11 +357,7 @@ PYBIND11_MODULE(xllm_export, m) {
       .def(py::init<int, const MMDict&>(), py::arg("ty"), py::arg("data"))
       .def("get",
            [](const MMData& self, const MMKey& key) -> py::object {
-             auto value = self.get<torch::Tensor>(key);
-             if (value.has_value()) {
-               return py::cast(value.value());
-             }
-             return py::none();
+             return optional_tensor(self.get<torch::Tensor>(key));
            })
       .def("get_list",
            [](const MMData& self, const MMKey& key) -> py::object {
