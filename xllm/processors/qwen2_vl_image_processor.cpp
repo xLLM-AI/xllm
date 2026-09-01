@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <torch/extension.h>  // registers the torch::Tensor pybind caster
+#include <torch/python.h>  // registers the torch::Tensor pybind caster
 // (without it, passing torch::Tensor / vector<Tensor>
 //  to Python compiles but fails at runtime:
 //  "Unable to convert call argument to Python object")
@@ -26,6 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/model_config.h"
+#include "core/util/pybind_helper.h"
 #include "processors/transforms.h"
 
 namespace py = pybind11;
@@ -36,9 +37,8 @@ namespace {
 
 // Delegates image preprocessing to Python (HF AutoImageProcessor via
 // pybind.multimodal.preprocess_tensors) for the Python model-executor path,
-// so no per-model C++ image processor is needed. Mirrors the GIL/import
-// pattern in processors/pywarpper_input_processor.cpp. Lazily initialized on
-// first use (under the GIL acquired by run()).
+// so no per-model C++ image processor is needed. Lazily initialized on first
+// use (under the GIL acquired by run()).
 class PyImagePreprocess final {
  public:
   static PyImagePreprocess& instance() {
@@ -98,6 +98,8 @@ class PyImagePreprocess final {
     py::module_ mm = py::module_::import("xllm.pybind.multimodal");
     preprocess_fn_ = mm.attr("preprocess_tensors");
   }
+
+  ~PyImagePreprocess() { clear_python_object(preprocess_fn_); }
 
   std::string model_path_;
   py::object preprocess_fn_;
