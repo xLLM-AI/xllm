@@ -130,11 +130,13 @@ START_PORT=18013
 START_DEVICE=8
 LOG_DIR="log"
 NNODES=8
+LAST_DEVICE=$((START_DEVICE + NNODES - 1))
+# Make START_DEVICE through LAST_DEVICE visible to every rank.
+export ASCEND_RT_VISIBLE_DEVICES="$(seq -s, "$START_DEVICE" "$LAST_DEVICE")"
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
 
   ${XLLM_PATH} \
@@ -146,7 +148,6 @@ do
     --sp_size=4 \
     --vae_size=4 \
     --output_shm_size=1024 \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --port $PORT \
@@ -177,7 +178,7 @@ When "Brpc Server Started" appears in the log, the service has started successfu
 | `--vae_size` | VAE Spatial Parallel degree | `1` | Positive integer, e.g. `1`, `2`, `4`; can be set to the same value as `sp_size` |
 | `--tp_size` | Tensor Parallel degree | `1` | Positive integer, e.g. `2`, `4`; it is recommended not to enable this and use dynamic weight loading instead |
 | `--enable_rolling_load` | Enable dynamic weight loading | `false` | Bool, `true` or `false` |
-| `--rolling_load_num_rolling_slot` | Number of slots for dynamic weight loading | `2` | Positive integer, e.g. `2`, `3` |
+| `--rolling_load_num_rolling_slots` | Number of slots for dynamic weight loading | `2` | Positive integer, e.g. `2`, `3` |
 | `--dit_laser_attention_enable` | Enable Laser Attention | `false` | Bool, `true` or `false` |
 | `--dit_distill_enable` | Enable distilled model | `false` | Bool, `true` or `false` |
 | `--dit_sparse_attention_enabled` | Enable sparse attention | `false` | Bool, `true` or `false`; mutually exclusive with `laser_attention` |

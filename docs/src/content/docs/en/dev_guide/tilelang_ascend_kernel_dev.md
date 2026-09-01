@@ -209,7 +209,7 @@ So these three fields must appear in both:
 - `DISPATCH_SCHEMA`
 - every `SPECIALIZATIONS` item
 
-At build time, Ascend build resolves the actual `bisheng_arch` from the `--device a2|a3` value passed by the main build path.
+The xLLM `setup.py` build and test commands use `--device npu` to select the NPU backend. In contrast, TileLang's `compile-kernels` command uses `--device a2` or `a3` to select the Ascend architecture and resolve `bisheng_arch`.
 
 ### 3.4 Inspect the Generated Ascend-C Source
 
@@ -399,7 +399,7 @@ python xllm/compiler/tilelang_launcher.py compile-kernels \
   --output-root build/cmake.linux-aarch64-cpython-311/xllm/compiler/tilelang \
   --kernels rope
 
-python setup.py test --test-name rope_wrapper_test --device a3
+python setup.py test --test-name rope_wrapper_test --device npu
 ```
 
 The first command generates `manifest.json`, `registry.inc`, and the object files. The second command validates the full integration path.

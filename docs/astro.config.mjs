@@ -197,12 +197,12 @@ export default defineConfig({
 										{
 											label: 'GLM-5.2',
 											translations: { 'zh-CN': 'GLM-5.2' },
-											slug: 'cookbook/autoregressive_models/glm/glm_5',
+											slug: 'cookbook/autoregressive_models/glm/glm_5_2',
 										},
 										{
 											label: 'GLM-5.1',
 											translations: { 'zh-CN': 'GLM-5.1' },
-											slug: 'cookbook/autoregressive_models/glm/glm_5',
+											slug: 'cookbook/autoregressive_models/glm/glm_5_1',
 										},
 										{
 											label: 'GLM-5',
@@ -303,6 +303,11 @@ export default defineConfig({
 											label: 'Wan2.1',
 											translations: { 'zh-CN': 'Wan2.1' },
 											slug: 'cookbook/diffusion_models/wan/wan2_1',
+										},
+										{
+											label: 'Wan2.2',
+											translations: { 'zh-CN': 'Wan2.2' },
+											slug: 'cookbook/diffusion_models/wan/wan2_2',
 										},
 									],
 								},

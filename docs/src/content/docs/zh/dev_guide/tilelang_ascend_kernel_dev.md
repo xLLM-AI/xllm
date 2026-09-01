@@ -209,7 +209,7 @@ class RopeKernel(TilelangKernel):
 - `DISPATCH_SCHEMA`
 - 每一项 `SPECIALIZATIONS`
 
-构建时，Ascend build 会根据主构建路径传入的 `--device a2|a3` 解析实际使用的 `bisheng_arch`。
+xLLM 的 `setup.py` 构建和测试命令使用 `--device npu` 选择 NPU 后端。与之不同，TileLang 的 `compile-kernels` 命令使用 `--device a2` 或 `a3` 选择 Ascend 架构并解析 `bisheng_arch`。
 
 ### 3.4 查看生成的 Ascend-C 源码
 
@@ -399,7 +399,7 @@ python xllm/compiler/tilelang_launcher.py compile-kernels \
   --output-root build/cmake.linux-aarch64-cpython-311/xllm/compiler/tilelang \
   --kernels rope
 
-python setup.py test --test-name rope_wrapper_test --device a3
+python setup.py test --test-name rope_wrapper_test --device npu
 ```
 
 第一条命令用于生成 `manifest.json`、`registry.inc` 和 object；第二条命令用于验证完整接入路径。

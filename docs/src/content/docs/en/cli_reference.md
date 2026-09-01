@@ -4,7 +4,7 @@ sidebar:
   order: 100
 ---
 
-xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. When `--config_json_file` is used, values in the JSON file override command-line flag values. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
+xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. For native configuration, explicitly supplied command-line flags override JSON configuration values, which override compiled defaults. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
 
 > **Device selection**: xLLM no longer provides `--devices` / `--device_id` / `--draft_devices`. The available devices are determined by the visible-device mask environment variables (`ASCEND_RT_VISIBLE_DEVICES` for NPU, `CUDA_VISIBLE_DEVICES` for NVIDIA, `MLU_VISIBLE_DEVICES` for Cambricon, `HIP_VISIBLE_DEVICES` for DCU, `MUSA_VISIBLE_DEVICES` for Moore Threads). Each service process selects one runtime logical device from its visible devices according to its global `node_rank`; visible-device subsetting and reordering are resolved by the hardware runtime. The draft model always shares the selected device with the target model.
 
@@ -12,7 +12,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `config_json_file` | `string` | `""` | Path to a JSON config file. Values in the file override command-line flag values. |
+| `config_json_file` | `string` | `""` | Path to a JSON config file. For native configuration, explicit command-line flags take precedence over file values. |
 | `enable_dump_config_json` | `bool` | `false` | Whether to dump the resolved startup config as JSON. |
 | `dump_config_json_file` | `string` | `"xllm_config.json"` | Path to write the resolved startup config as JSON. Used only when `enable_dump_config_json=true`. |
 
@@ -97,7 +97,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `enable_beam_search_kernel` | `bool` | `false` | Whether to enable the beam search kernel. |
 | `beam_width` | `int32` | `1` | Beam width for beam search. |
-| `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
+| `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA/MUSA/DCU); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
 | `enable_topk_sorted` | `bool` | `true` | Whether to enable sorted top-k output. |
 
 ## SchedulerConfig
@@ -105,7 +105,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `max_tokens_per_batch` | `int32` | `10240` | Maximum number of tokens per batch. |
-| `max_seqs_per_batch` | `int32` | `1024` | Maximum number of sequences per batch. |
+| `max_seqs_per_batch` | `int32` | `200` | Maximum number of sequences per batch. |
 | `enable_schedule_overlap` | `bool` | `false` | Whether to enable schedule overlap, also known as asynchronous scheduling. See [Async Scheduling](/en/features/async_schedule/). |
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | Memory usage threshold during prefill scheduling. |
 | `enable_chunked_prefill` | `bool` | `true` | Whether to enable chunked prefill. |
@@ -114,7 +114,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `use_zero_evict` | `bool` | `false` | Whether to use ZeroEvictionScheduler. See [Zero Evict Scheduler](/en/features/zero_evict_scheduler/). |
 | `max_decode_token_per_sequence` | `int32` | `256` | Maximum decode tokens per sequence for ZeroEvictionScheduler. |
 | `priority_strategy` | `string` | `"fcfs"` | Request priority strategy, for example `fcfs`, `priority`, or `deadline`. |
-| `use_mix_scheduler` | `bool` | `false` | Whether to use MixScheduler to handle prefill and decode uniformly. |
+| `enable_mix_batch` | `bool` | `true` | Whether to run prefill and decode in the same batch. Forced to `false` when CP or MTP is active. |
 | `enable_online_preempt_offline` | `bool` | `true` | Whether online requests can preempt offline requests. |
 | `aggressive_coeff` | `double` | `1.0` | Aggressive coefficient for MixScheduler urgency judgment. |
 | `starve_threshold` | `double` | `1.0` | Starvation threshold coefficient for MixScheduler. |

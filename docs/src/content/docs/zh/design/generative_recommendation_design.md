@@ -281,7 +281,7 @@ xLLM 在 `backend=rec` 场景下提供了生成式推荐推理能力。其目标
 外部接入：
 - `xllm/c_api/rec.h`
 - `xllm/c_api/internal/rec.cpp`
-- `xllm/c_api/examples/simple_rec_completions.cpp`
+- `xllm/c_api/examples/test_query_rec_completions.cpp`
 
 服务入口：
 - `xllm/api_service/rec_completion_service_impl.cpp`
@@ -407,11 +407,11 @@ kernel / 算子热路径：
 - `xllm/c_api/internal/rec.cpp`
   - 这是真正的 CAPI 实现
   - 适合看 `.so` 模式下，request 参数是怎样被封装和转发的
-- `xllm/c_api/examples/simple_rec_completions.cpp`
-  - 是最短的调用示例
-  - 如果要给新人解释“动态库接入长什么样”，这里最直观
+- `xllm/c_api/examples/test_query_rec_completions.cpp`
+  - 是当前用于推荐 token-completion 请求的 C API 使用示例
+  - 适合跟踪动态库接入中的初始化与请求构造过程
 
-如果技术分享里想给一段“最小调用样例”，这一层最适合出现在开头。
+如果技术分享里需要给出一段 C API 使用示例，这一层最适合出现在开头。
 
 ### 8.2 从服务入口看统一分发
 

@@ -132,11 +132,13 @@ START_PORT=18013
 START_DEVICE=8
 LOG_DIR="log"
 NNODES=8
+LAST_DEVICE=$((START_DEVICE + NNODES - 1))
+# 向每个 rank 暴露从 START_DEVICE 到 LAST_DEVICE 的设备。
+export ASCEND_RT_VISIBLE_DEVICES="$(seq -s, "$START_DEVICE" "$LAST_DEVICE")"
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
 
   ${XLLM_PATH} \
@@ -148,7 +150,6 @@ do
     --sp_size=4 \
     --vae_size=4 \
     --output_shm_size=1024 \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --port $PORT \
@@ -182,7 +183,7 @@ done
 | `--vae_size` | Vae Sparital Parallel 并行度 | `1` | 正整数, 如 `1`、`2`、`4`,  可以与sp_size保持一致|
 | `--tp_size` | Tensor Parallel 并行度 | `1` | 正整数, 如 `2`、`4`,  建议不开启，使用动态权重加载|
 | `--enable_rolling_load` | 是否启动动态权重加载 | `false` | bool值, true 或者 false|
-| `--rolling_load_num_rolling_slot` | 动态权重加载分配槽数 | `2` | 正整数, , 如 `2`、`3`|
+| `--rolling_load_num_rolling_slots` | 动态权重加载分配槽数 | `2` | 正整数, , 如 `2`、`3`|
 | `--dit_laser_attention_enable` | 是否使能laser_attention | `false` | bool值, 如 true，false|
 | `--dit_distill_enable` | 是否使能蒸馏模型| `false` | bool值, 如 true，false|
 | `--dit_sparse_attention_enabled` | 是否使能稀疏attention| `false` | bool值, 如 true，false；与laser_attention互斥|

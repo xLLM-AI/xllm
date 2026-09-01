@@ -1,6 +1,6 @@
 # xLLM Documentation
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README_zh.md)
 
 This repository contains the Astro + Starlight documentation site for
 [xLLM](https://github.com/xLLM-AI/xllm), an LLM inference framework for

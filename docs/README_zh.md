@@ -1,6 +1,6 @@
 # xLLM 文档站
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README_zh.md)
 
 本仓库是 [xLLM](https://github.com/xLLM-AI/xllm) 的 Astro + Starlight
 文档站。xLLM 是面向国产 AI 加速器的高性能大语言模型推理框架。

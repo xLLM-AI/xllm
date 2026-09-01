@@ -4,7 +4,7 @@ sidebar:
   order: 100
 ---
 
-xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。使用 `--config_json_file` 时，JSON 文件中的值会覆盖命令行 flag 值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
+xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。对于原生配置，显式指定的命令行 flag 优先于 JSON 配置值，后者优先于编译时默认值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
 
 > **设备选择**：xLLM 不再提供 `--devices` / `--device_id` / `--draft_devices` 参数。可用设备由可见设备掩码环境变量决定（NPU 用 `ASCEND_RT_VISIBLE_DEVICES`，NVIDIA 用 `CUDA_VISIBLE_DEVICES`，寒武纪用 `MLU_VISIBLE_DEVICES`，DCU 用 `HIP_VISIBLE_DEVICES`，摩尔线程用 `MUSA_VISIBLE_DEVICES`）。每个服务进程根据全局 `node_rank` 从其可见设备中选择一个运行时逻辑设备；可见设备的子集化与重排由硬件运行时解析。draft 模型始终与 target 模型共享所选设备。
 
@@ -12,7 +12,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `config_json_file` | `string` | `""` | JSON 配置文件路径；文件中的值会覆盖命令行 flag 值。 |
+| `config_json_file` | `string` | `""` | JSON 配置文件路径；对于原生配置，显式指定的命令行 flag 优先于文件中的值。 |
 | `enable_dump_config_json` | `bool` | `false` | 是否将最终生效的启动配置导出为 JSON。 |
 | `dump_config_json_file` | `string` | `"xllm_config.json"` | 导出启动配置 JSON 的路径，仅在 `enable_dump_config_json=true` 时使用。 |
 
@@ -97,7 +97,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `enable_beam_search_kernel` | `bool` | `false` | 是否启用 beam search kernel。 |
 | `beam_width` | `int32` | `1` | Beam search 的 beam width。 |
-| `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
+| `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA/MUSA/DCU）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
 | `enable_topk_sorted` | `bool` | `true` | 是否启用 top-k 结果排序输出。 |
 
 ## SchedulerConfig
@@ -105,7 +105,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `max_tokens_per_batch` | `int32` | `10240` | 每个 batch 可处理的最大 token 数。 |
-| `max_seqs_per_batch` | `int32` | `1024` | 每个 batch 可处理的最大 sequence 数。 |
+| `max_seqs_per_batch` | `int32` | `200` | 每个 batch 可处理的最大 sequence 数。 |
 | `enable_schedule_overlap` | `bool` | `false` | 是否启用 schedule overlap（异步调度）；详见 [异步调度](/zh/features/async_schedule/)。 |
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | prefill 调度时的内存使用阈值。 |
 | `enable_chunked_prefill` | `bool` | `true` | 是否启用 chunked prefill。 |
@@ -114,7 +114,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `use_zero_evict` | `bool` | `false` | 是否使用 ZeroEvictionScheduler；详见 [Zero Evict Scheduler](/zh/features/zero_evict_scheduler/)。 |
 | `max_decode_token_per_sequence` | `int32` | `256` | ZeroEvictionScheduler 中每个 sequence 的最大 decode token 数。 |
 | `priority_strategy` | `string` | `"fcfs"` | 请求优先级策略，例如 `fcfs`、`priority`、`deadline`。 |
-| `use_mix_scheduler` | `bool` | `false` | 是否使用 MixScheduler 统一处理 prefill 和 decode。 |
+| `enable_mix_batch` | `bool` | `true` | 是否在同一 batch 中运行 prefill 和 decode。启用 CP 或 MTP 时会被强制设为 `false`。 |
 | `enable_online_preempt_offline` | `bool` | `true` | 是否允许在线请求抢占离线请求。 |
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |
 | `starve_threshold` | `double` | `1.0` | MixScheduler 的饥饿阈值系数。 |
