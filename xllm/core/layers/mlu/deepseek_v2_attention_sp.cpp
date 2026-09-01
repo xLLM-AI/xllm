@@ -30,12 +30,12 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     bool is_prefill_or_chunked_prefill,
     DsaTopkTransfer* topk_transfer) {
   CHECK(can_use_sp(topk_transfer))
-      << "deepseek_v32 sequence parallel requires replicated attention "
-         "weights plus either a lighting indexer or reused top-k state.";
+      << "deepseek_v32 sequence parallel requires either a lighting indexer "
+         "or reused top-k state.";
   CHECK(is_prefill_or_chunked_prefill)
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();
-  auto query_prep = prep_query(hidden_states, full_heads());
+  auto query_prep = prep_query(hidden_states, active_heads());
 
   std::optional<DsaTopkState> topk_state;
   v32_cp::PaddedGatherHandle mla_handle;
@@ -80,10 +80,26 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
   if (compute_topk) {
     torch::Tensor index_cache = kv_cache.get_index_cache();
     auto index_cache_scale = kv_cache.get_indexer_cache_scale();
+    AttentionMetadata indexer_metadata = attn_metadata;
+    if (enable_mla_cache_sharding_ && attn_metadata.is_chunked_prefill) {
+      CHECK(dcp_decode_context_ != nullptr);
+      const std::shared_ptr<const KVShardBatchMetadata>& shard_metadata =
+          attn_metadata.kv_shard_batch_metadata;
+      if (shard_metadata != nullptr) {
+        CHECK(shard_metadata->expanded_indexer_block_table.defined())
+            << "cache-shard batch metadata requires expanded indexer blocks";
+        indexer_metadata.block_table =
+            shard_metadata->expanded_indexer_block_table;
+      } else {
+        indexer_metadata.block_table =
+            dcp_decode_context_->expand_indexer_block_table(
+                attn_metadata.block_table);
+      }
+    }
     auto index_out = indexer_->sp_post(index_pre,
                                        k_gathered,
                                        index_cache,
-                                       attn_metadata,
+                                       indexer_metadata,
                                        sp_ctx.gathered_slot_mapping,
                                        sp_ctx,
                                        index_cache_scale);
@@ -101,12 +117,18 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
         << "DSA sequence-parallel attention requires top-k state.";
   }
 
+  torch::Tensor mla_slot_mapping = sp_ctx.gathered_slot_mapping;
+  if (enable_mla_cache_sharding_) {
+    CHECK(sp_ctx.local_dcp_gathered_slot_mapping.defined())
+        << "cache-sharded CP requires localized gathered slot mapping";
+    mla_slot_mapping = sp_ctx.local_dcp_gathered_slot_mapping;
+  }
   update_mla_k_cache(mla_inputs.k_input,
                      attn_metadata,
                      kv_cache,
                      k_cache_scale,
                      is_prefill_or_chunked_prefill,
-                     sp_ctx.gathered_slot_mapping);
+                     mla_slot_mapping);
   if (topk_transfer != nullptr) {
     topk_transfer->complete(topk_state);
   }
@@ -115,12 +137,57 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
       build_mla_attention_metadata(attn_metadata, topk_state);
   kernel_metadata.q_cu_seq_lens = sp_ctx.local_attn_metadata.q_cu_seq_lens;
   kernel_metadata.max_query_len = sp_ctx.local_attn_metadata.max_query_len;
+  if (enable_mla_cache_sharding_ && attn_metadata.is_chunked_prefill) {
+    torch::Tensor gathered_q = v32_cp::restore_gathered_to_global_order(
+        v32_cp::all_gather_across_ranks(mla_inputs.q_input, sp_ctx), sp_ctx);
+    DsaTopkState gathered_topk(
+        v32_cp::restore_gathered_to_global_order(
+            v32_cp::all_gather_across_ranks(topk_state->block_tables(), sp_ctx),
+            sp_ctx),
+        v32_cp::restore_gathered_to_global_order(
+            v32_cp::all_gather_across_ranks(topk_state->context_lens(), sp_ctx),
+            sp_ctx));
+    const DcpAttentionResult merged = run_dcp_chunked_prefill_attention(
+        gathered_q, gathered_topk, kv_cache, attn_metadata);
+    torch::Tensor global_output = merged.output.reshape(
+        {sp_ctx.total_tokens, full_heads().attn * kv_lora_rank_});
+    torch::Tensor local_output =
+        v32_cp::reorder_to_local_shard(global_output, sp_ctx);
+    return project_output(local_output, full_heads());
+  }
+
+  KVCache* attention_cache = &kv_cache;
+  std::optional<KVCache> scratch_cache;
+  if (enable_mla_cache_sharding_) {
+    CHECK(sp_ctx.sorted_gathered_slot_mapping_int64.defined());
+    CHECK(sp_ctx.sorted_gathered_slot_rows.defined());
+    auto [scratch_metadata, built_scratch_cache] =
+        build_sharded_prefill_attention_cache(
+            mla_inputs.k_input,
+            sp_ctx.gathered_slot_mapping,
+            sp_ctx.sorted_gathered_slot_mapping_int64,
+            sp_ctx.sorted_gathered_slot_rows,
+            kernel_metadata);
+    kernel_metadata = std::move(scratch_metadata);
+    scratch_cache.emplace(std::move(built_scratch_cache));
+    attention_cache = &scratch_cache.value();
+  }
   auto [attn_output_local, output_lse] = attn_(kernel_metadata,
                                                mla_inputs.q_input,
                                                mla_inputs.k_input,
                                                mla_inputs.v_input,
-                                               kv_cache);
-  return project_output(attn_output_local, full_heads());
+                                               *attention_cache);
+  torch::Tensor output = project_output(attn_output_local, active_heads());
+  if (!use_replicated_attn_weights()) {
+    // TP-sharded sequence-parallel attention: each rank computes its head
+    // shard on the local sequence shard, so merge the head shards across the
+    // TP group to recover the full hidden state before returning the packed
+    // local layout. No-op when tp_size == 1 (replicated path never enters).
+    CHECK(!enable_mla_cache_sharding_)
+        << "TP-sharded sequence-parallel attention requires kv_split_size == 1";
+    output = parallel_state::reduce(output, tp_group_);
+  }
+  return output;
 }
 
 DeepseekV2AttentionImpl::MlaInputs DeepseekV2AttentionImpl::build_sp_mla_inputs(
@@ -130,7 +197,7 @@ DeepseekV2AttentionImpl::MlaInputs DeepseekV2AttentionImpl::build_sp_mla_inputs(
     const v32_cp::DeepseekV32CPContext& sp_ctx) {
   MlaInputs out;
   out.q_input = torch::empty({hidden_states.size(0),
-                              full_heads().attn,
+                              active_heads().attn,
                               kv_lora_rank_ + qk_rope_head_dim_},
                              hidden_states.options());
   out.q_norm = query_prep.q_norm;

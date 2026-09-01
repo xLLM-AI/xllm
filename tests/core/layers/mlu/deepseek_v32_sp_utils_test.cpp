@@ -487,6 +487,49 @@ TEST(DeepseekV32SPUtilsTest, BuildCPContextTracksSegmentRuntimeView) {
       torch::equal(context.seg_ctx_lens_1col,
                    torch::tensor({10, 8, 12, 15, 25, 31},
                                  torch::TensorOptions().dtype(torch::kInt32))));
+  EXPECT_TRUE(torch::equal(context.local_attn_metadata.block_table,
+                           make_block_table({{10, 11, 12},
+                                             {10, 11, 12},
+                                             {20, 21, 22},
+                                             {20, 21, 22},
+                                             {30, 31, 32},
+                                             {30, 31, 32}})));
+}
+
+TEST(DeepseekV32SPUtilsTest, BuildCPContextDerivesSegmentRowsForDcpMetadata) {
+  AttentionMetadata attn_metadata =
+      make_prefill_metadata({8}, {8}, make_block_table({{5, 6}}));
+  attn_metadata.slot_mapping =
+      torch::arange(8, torch::TensorOptions().dtype(torch::kInt32));
+  torch::Tensor tokens =
+      torch::arange(8, torch::TensorOptions().dtype(torch::kInt32));
+
+  auto maybe_context = build_deepseek_v32_cp_context(
+      /*cp_size=*/2,
+      attn_metadata,
+      BatchForwardType::PREFILL,
+      tokens,
+      reinterpret_cast<ProcessGroup*>(0x1),
+      /*curr_rank=*/0,
+      /*world_size=*/2,
+      KVShardLayout(/*physical_block_size=*/2,
+                    /*dcp_size=*/4,
+                    /*dcp_rank=*/0));
+
+  ASSERT_TRUE(maybe_context.has_value());
+  const DeepseekV32CPContext& context = maybe_context.value();
+  EXPECT_TRUE(torch::equal(context.local_attn_metadata.block_table,
+                           make_block_table({{5, 6}, {5, 6}})));
+  ASSERT_NE(context.local_attn_metadata.kv_shard_batch_metadata, nullptr);
+  EXPECT_TRUE(torch::equal(
+      context.local_attn_metadata.kv_shard_batch_metadata->local_slot_mapping,
+      torch::tensor({0, 1, -1, -1},
+                    torch::TensorOptions().dtype(torch::kInt32))));
+  EXPECT_TRUE(
+      torch::equal(context.local_attn_metadata.kv_shard_batch_metadata
+                       ->expanded_indexer_block_table,
+                   make_block_table({{20, 21, 22, 23, 24, 25, 26, 27},
+                                     {20, 21, 22, 23, 24, 25, 26, 27}})));
 }
 
 TEST(DeepseekV32SPUtilsTest, BuildSegmentTensorCacheTracksPartialPrefixHit) {

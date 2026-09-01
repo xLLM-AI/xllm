@@ -424,6 +424,15 @@ TEST(SpecDecodeInputBuilderTest, CalcSlotIdOutOfRangeDeath) {
                "block table index out of range");
 }
 
+TEST(SpecDecodeInputBuilderTest, CalcSlotIdUsesDcpLogicalBlockSize) {
+  std::vector<int32_t> block_table = {7};
+
+  EXPECT_EQ(calc_slot_id(/*position=*/22,
+                         to_slice(block_table),
+                         /*block_size=*/16 * 8),
+            7 * 128 + 22);
+}
+
 TEST(SpecDecodeInputBuilderTest, CalcRingSlotIdWrapsSlidingWindowBlocks) {
   std::vector<int32_t> block_table = {7, 9};
 

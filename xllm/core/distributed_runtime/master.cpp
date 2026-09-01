@@ -129,10 +129,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
-  if (Platform::is_mlu() &&
-      ParallelConfig::get_instance().kv_split_size() > 1) {
-    return "MLU only support DCP  for now when kv split size > 1";
-  }
+
   if (options.cp_size() == 1) {
     return std::nullopt;
   }
@@ -144,30 +141,23 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.task_type() != "generate") {
       return "MLU CP supports only the generate task";
     }
-    if (engine_type == EngineType::SSM &&
-        options.speculative_algorithm() != "Suffix") {
-      return "Current MLU model-side CP does not support MTPWorkerImpl-based "
-             "speculative algorithms such as MTP or Eagle3; disable CP, "
-             "disable the speculative algorithm, or wait for MLU worker-side "
-             "CP";
-    }
     if (!is_mlu_model_cp_capable(model_type)) {
       return "MLU CP does not support model_type=" + model_type;
     }
-    if (options.instance_role() != InstanceRole::DEFAULT &&
-        options.instance_role() != InstanceRole::PREFILL) {
-      return "MLU CP supports only DEFAULT or PREFILL roles";
+
+    if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+      return "MLU CP requires world_size divisible by dp_size * cp_size "
+             "(orthogonal PCP x TP layout)";
     }
+
     if (options.dp_size() != 1) {
       return "MLU CP requires dp_size == 1";
     }
-    if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
-      return "MLU CP requires world_size divisible by dp_size * cp_size "
-             "(orthogonal CP x TP layout)";
-    }
+
     if (ParallelConfig::get_instance().kv_split_size() != 1) {
       return "MLU CP requires kv_split_size == 1";
     }
+
     if (options.ep_size() != global_world_size) {
       return "MLU CP requires ep_size == global world size";
     }

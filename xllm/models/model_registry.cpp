@@ -207,6 +207,7 @@ bool is_npu_model_cp_capable(const std::string& resolved_name) {
 bool is_mlu_model_cp_capable(const std::string& resolved_name) {
   static const std::unordered_set<std::string> kCpCapableModels = {
       "deepseek_v4",
+      "glm_moe_dsa",
   };
   static std::once_flag once;
   std::call_once(once, []() {

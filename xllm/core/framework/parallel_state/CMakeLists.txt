@@ -20,6 +20,7 @@ cc_library(
     $<$<BOOL:${USE_ILU}>:ilu_process_group.h>
     collective_communicator_base.h
     collective_communicator.h
+    context_parallel_topology.h
     dit_collective_communicator.h
     $<$<BOOL:${USE_NPU}>:mega_moe_comm_resource.h>
   SRCS
@@ -34,6 +35,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:npu_process_group.cpp>
     $<$<BOOL:${USE_NPU}>:mega_moe_comm_resource.cpp>
     collective_communicator.cpp
+    context_parallel_topology.cpp
     dit_collective_communicator.cpp
   DEPS
     :common

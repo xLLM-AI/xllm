@@ -41,6 +41,18 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+struct ShardedPrefillScratchCachePlan {
+  bool use_compact = false;
+  torch::Tensor source_rows;
+  torch::Tensor remapped_slots;
+};
+
+ShardedPrefillScratchCachePlan plan_sharded_prefill_scratch_cache(
+    const torch::Tensor& sorted_gathered_slots,
+    const torch::Tensor& sorted_gathered_rows,
+    const torch::Tensor& sparse_slots,
+    int64_t token_count);
+
 class DeepseekV2AttentionImpl : public torch::nn::Module {
  public:
   enum class PostAttnLayout {
@@ -195,13 +207,23 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
       KVCache& kv_cache,
       const AttentionMetadata& base_metadata);
 
+  std::pair<AttentionMetadata, KVCache> build_sharded_prefill_attention_cache(
+      const torch::Tensor& gathered_k,
+      const torch::Tensor& gathered_slot_mapping,
+      const torch::Tensor& sorted_gathered_slots,
+      const torch::Tensor& sorted_gathered_rows,
+      const AttentionMetadata& kernel_metadata) const;
+
   torch::Tensor project_output(const torch::Tensor& attn_output,
                                const HeadInfo& heads);
 
   bool can_use_sp(const DsaTopkTransfer* topk_transfer) const {
     const bool reuses_topk =
         topk_transfer != nullptr && topk_transfer->input() != nullptr;
-    return use_replicated_attn_weights() && (has_indexer_ || reuses_topk);
+    // Sequence-parallel attention works with both replicated (all heads per
+    // rank) and TP-sharded (heads / tp_size per rank) attention weights; the
+    // top-k metadata (indexer or reused state) is the only hard requirement.
+    return has_indexer_ || reuses_topk;
   }
 
   const HeadInfo& tp_heads() const { return tp_heads_; }

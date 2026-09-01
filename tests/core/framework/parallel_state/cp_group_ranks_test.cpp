@@ -18,11 +18,23 @@ limitations under the License.
 #include <set>
 #include <vector>
 
-#include "framework/parallel_state/parallel_state.h"
+#include "core/framework/parallel_state/context_parallel_topology.h"
 
 namespace xllm {
 namespace parallel_state {
 namespace {
+
+std::vector<int32_t> pcp_group_ranks_for(int32_t global_rank,
+                                         int32_t world_size,
+                                         int32_t dp_size,
+                                         int32_t pcp_size) {
+  return ContextParallelTopology(global_rank,
+                                 world_size,
+                                 dp_size,
+                                 pcp_size,
+                                 /*dcp_size=*/1)
+      .pcp_group_ranks();
+}
 
 // Re-derive the CP rank of a global rank from the documented layout:
 //   rank = dp_rank * (cp_size * attn_tp_size) + cp_rank * attn_tp_size +
@@ -36,13 +48,13 @@ int32_t expected_cp_rank(int32_t global_rank,
   return (global_rank % (cp_size * attn_tp_size)) / attn_tp_size;
 }
 
-TEST(ComputeCpGroupRanks, CpSizeTwoTpFourDpOne) {
+TEST(ContextParallelTopologyTest, PcpSizeTwoTpFourDpOne) {
   const int32_t world_size = 8;
   const int32_t dp_size = 1;
   const int32_t cp_size = 2;
   for (int32_t rank = 0; rank < world_size; ++rank) {
     const std::vector<int32_t> ranks =
-        compute_cp_group_ranks(rank, world_size, dp_size, cp_size);
+        pcp_group_ranks_for(rank, world_size, dp_size, cp_size);
     ASSERT_EQ(ranks.size(), cp_size);
     // CP group spans ranks that differ only in the CP dimension: same dp_rank
     // and tp_rank, varying cp_rank.
@@ -60,13 +72,13 @@ TEST(ComputeCpGroupRanks, CpSizeTwoTpFourDpOne) {
   }
 }
 
-TEST(ComputeCpGroupRanks, CpSizeFourTpTwoDpTwo) {
+TEST(ContextParallelTopologyTest, PcpSizeFourTpTwoDpTwo) {
   const int32_t world_size = 16;
   const int32_t dp_size = 2;
   const int32_t cp_size = 4;
   for (int32_t rank = 0; rank < world_size; ++rank) {
     const std::vector<int32_t> ranks =
-        compute_cp_group_ranks(rank, world_size, dp_size, cp_size);
+        pcp_group_ranks_for(rank, world_size, dp_size, cp_size);
     ASSERT_EQ(ranks.size(), cp_size);
     EXPECT_EQ(ranks[expected_cp_rank(rank, world_size, dp_size, cp_size)],
               rank);
@@ -81,7 +93,7 @@ TEST(ComputeCpGroupRanks, CpSizeFourTpTwoDpTwo) {
   }
 }
 
-TEST(ComputeCpGroupRanks, GroupsPartitionWorldAndAreOrthogonalToTp) {
+TEST(ContextParallelTopologyTest, GroupsPartitionWorldAndAreOrthogonalToTp) {
   const int32_t world_size = 16;
   const int32_t dp_size = 2;
   const int32_t cp_size = 4;
@@ -91,8 +103,8 @@ TEST(ComputeCpGroupRanks, GroupsPartitionWorldAndAreOrthogonalToTp) {
   // via rank 0's perspective is insufficient, so iterate all ranks and verify
   // that two ranks share a CP group iff they share (dp_rank, tp_rank).
   auto same_cp_group = [&](int32_t a, int32_t b) {
-    return compute_cp_group_ranks(a, world_size, dp_size, cp_size) ==
-           compute_cp_group_ranks(b, world_size, dp_size, cp_size);
+    return pcp_group_ranks_for(a, world_size, dp_size, cp_size) ==
+           pcp_group_ranks_for(b, world_size, dp_size, cp_size);
   };
 
   for (int32_t a = 0; a < world_size; ++a) {
@@ -100,7 +112,7 @@ TEST(ComputeCpGroupRanks, GroupsPartitionWorldAndAreOrthogonalToTp) {
     // temporaries would yield iterators into different containers (undefined
     // behavior).
     const std::vector<int32_t> a_group =
-        compute_cp_group_ranks(a, world_size, dp_size, cp_size);
+        pcp_group_ranks_for(a, world_size, dp_size, cp_size);
     std::set<int32_t> group_members(a_group.begin(), a_group.end());
     EXPECT_EQ(group_members.size(), cp_size);
     for (int32_t b = 0; b < world_size; ++b) {
@@ -115,7 +127,7 @@ TEST(ComputeCpGroupRanks, GroupsPartitionWorldAndAreOrthogonalToTp) {
   // tp_rank) must intersect its CP group only at the rank itself.
   for (int32_t rank = 0; rank < world_size; ++rank) {
     const std::vector<int32_t> cp_ranks =
-        compute_cp_group_ranks(rank, world_size, dp_size, cp_size);
+        pcp_group_ranks_for(rank, world_size, dp_size, cp_size);
     const int32_t dp_rank = rank / (cp_size * attn_tp_size);
     const int32_t cp_rank =
         expected_cp_rank(rank, world_size, dp_size, cp_size);
@@ -132,11 +144,14 @@ TEST(ComputeCpGroupRanks, GroupsPartitionWorldAndAreOrthogonalToTp) {
   }
 }
 
-TEST(ComputeCpGroupRanks, RejectsNonIntegralAttnTpSize) {
+TEST(ContextParallelTopologyTest, RejectsNonIntegralAttnTpSize) {
   // world_size=8, dp_size=2, cp_size=3 => 8 not divisible by 6.
-  EXPECT_DEATH(
-      compute_cp_group_ranks(0, /*world_size=*/8, /*dp_size=*/2, /*cp_size=*/3),
-      "");
+  EXPECT_DEATH(ContextParallelTopology(/*global_rank=*/0,
+                                       /*world_size=*/8,
+                                       /*dp_size=*/2,
+                                       /*pcp_size=*/3,
+                                       /*dcp_size=*/1),
+               "");
 }
 
 }  // namespace

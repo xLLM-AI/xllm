@@ -66,6 +66,7 @@ bool try_get_pd_topo(const InstanceInfo& info,
   }
 
   topo->dp_size = info.dp_size;
+  // PD routing only needs the aggregate worker width per DP partition.
   topo->tp_size = static_cast<int32_t>(cluster_num / dp_size);
   if (reason != nullptr) {
     reason->clear();

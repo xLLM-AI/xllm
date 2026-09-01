@@ -70,6 +70,18 @@ TEST(PdTopologyGuardTest, RegistrationOmitsCpAndKeepsTopologyCompatible) {
   EXPECT_TRUE(result.reason.empty());
 }
 
+TEST(PdTopologyGuardTest, KvSplitDoesNotAffectAggregateTopology) {
+  InstanceInfo info = make_info(2, {0, 1, 2, 3});
+  info.kv_split_size = 8;
+
+  PdTopo topo;
+  std::string reason;
+  EXPECT_TRUE(try_get_pd_topo(info, &topo, &reason));
+  EXPECT_EQ(topo.dp_size, 2);
+  EXPECT_EQ(topo.tp_size, 2);
+  EXPECT_TRUE(reason.empty());
+}
+
 TEST(PdTopologyGuardTest, TryGetPdTopoReturnTopo) {
   const InstanceInfo info = make_info(2, {0, 1, 2, 3});
 
