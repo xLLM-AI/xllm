@@ -116,6 +116,17 @@ void DiTRequest::log_statistic(double total_latency) {
             << "total_latency: " << total_latency * 1000 << "ms";
 }
 
+void DiTRequest::update_connection_status() {
+  if (!state_.call().has_value()) {
+    return;
+  }
+  Call* call = state_.call().value();
+  if (call == nullptr || !call->is_disconnected()) {
+    return;
+  }
+  set_cancel();
+}
+
 void DiTRequest::handle_forward_output(torch::Tensor output) {
   // Pipeline already chunks by batch size along dim 0 before calling here.
   // For image models, also split by num_images_per_prompt.
@@ -137,7 +148,7 @@ const DiTRequestOutput DiTRequest::generate_output() {
   output.service_request_id = service_request_id_;
   output.status = Status(StatusCode::OK);
   output.finished = finished();
-  output.cancelled = false;
+  output.cancelled = cancelled();
 
   // Text diffusion models (e.g., Cola-DLM) produce text output directly.
   if (!output_.text_output.empty()) {

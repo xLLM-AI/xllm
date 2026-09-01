@@ -38,22 +38,23 @@ namespace xllm {
 
 class DiTAsyncResponseProcessor final {
  public:
-  explicit DiTAsyncResponseProcessor(bool disable_log_stats = false)
-      : disable_log_stats_(disable_log_stats) {}
-  ~DiTAsyncResponseProcessor() = default;
+  explicit DiTAsyncResponseProcessor(bool disable_log_stats = false);
+  ~DiTAsyncResponseProcessor();
 
   void process_completed_request(std::shared_ptr<DiTRequest> request);
   void process_failed_request(std::shared_ptr<DiTRequest> request,
                               Status status);
 
+  // Wait for all previously scheduled response tasks to complete.
+  void wait_completion();
+
  private:
   DISALLOW_COPY_AND_ASSIGN(DiTAsyncResponseProcessor);
 
-  // the threadpool to handle responses
-  ThreadPool response_threadpool_{
-      /*num_threads=*/1,
-      /*cpu_binding=*/false,
-      /*pool_name=*/"DiTAsyncResponseProcessor.response"};
+  // The thread pool handles output generation and the corresponding callback
+  // in one task. Different requests can run concurrently, while each request
+  // keeps generate_output() -> output_func() ordering.
+  ThreadPool response_threadpool_;
 
   bool disable_log_stats_ = false;
 };
@@ -133,6 +134,9 @@ class DiTDynamicBatchScheduler : public DiTScheduler {
 
   // process the batch output
   void process_batch_output();
+
+  // Cancel queued/deferred/running requests and notify their callbacks.
+  void abort_all_requests();
 };
 
 }  // namespace xllm
