@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "priority_comparator.h"
 
+#include <utility>
+
 #include "glog/logging.h"
 
 namespace xllm {
@@ -100,6 +102,65 @@ bool SJFComparator::operator()(const std::shared_ptr<Request>& a,
   // For sorting, '<' puts smaller first; for priority_queue, '<' puts larger
   // first.
   return density_a < density_b;
+}
+
+size_t residual_sjf_cost_blocks(size_t num_prompt_tokens,
+                                size_t num_local_computed_blocks,
+                                size_t block_size) {
+  if (block_size == 0) {
+    // Cannot quantize without a KV block size: treat as zero residual so the
+    // ordering degrades to FCFS. Production always supplies a real block size.
+    return 0;
+  }
+  const size_t prompt_blocks = num_prompt_tokens / block_size;
+  return prompt_blocks > num_local_computed_blocks
+             ? prompt_blocks - num_local_computed_blocks
+             : 0;
+}
+
+ResidualSJFComparator::ResidualSJFComparator(
+    ResidualCostFn residual_cost_blocks,
+    int32_t max_wait_ms,
+    absl::Time now)
+    : residual_cost_blocks_(std::move(residual_cost_blocks)),
+      max_wait_ms_(max_wait_ms),
+      now_(now) {}
+
+ResidualSJFRequestClass ResidualSJFComparator::rank(
+    const std::shared_ptr<Request>& request) const {
+  CHECK(!request->sequences().empty());
+  Sequence* sequence = request->sequences()[0].get();
+  CHECK(sequence != nullptr);
+  if (request->preempted() ||
+      sequence->kv_state().num_cached_blocks(BlockType::KV) > 0) {
+    return ResidualSJFRequestClass::RECOVERY;
+  }
+  // Aging uses the request creation time as the arrival proxy (the same
+  // convention as the FCFS/SRF comparators). Unlike vLLM's queue-entry
+  // arrival_time this includes service-side routing latency, which is
+  // negligible in the PD path but documented for exactness.
+  if (now_ - request->created_time() >= absl::Milliseconds(max_wait_ms_)) {
+    return ResidualSJFRequestClass::AGED;
+  }
+  return ResidualSJFRequestClass::FRESH;
+}
+
+bool ResidualSJFComparator::operator()(
+    const std::shared_ptr<Request>& a,
+    const std::shared_ptr<Request>& b) const {
+  const ResidualSJFRequestClass rank_a = rank(a);
+  const ResidualSJFRequestClass rank_b = rank(b);
+  if (rank_a != rank_b) {
+    return static_cast<int8_t>(rank_a) < static_cast<int8_t>(rank_b);
+  }
+  if (rank_a == ResidualSJFRequestClass::FRESH) {
+    const size_t cost_a = residual_cost_blocks_(a);
+    const size_t cost_b = residual_cost_blocks_(b);
+    if (cost_a != cost_b) {
+      return cost_a < cost_b;
+    }
+  }
+  return a->created_time() < b->created_time();
 }
 
 // decode-first, then deadline-first

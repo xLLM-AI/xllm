@@ -133,6 +133,24 @@ class BlockManager {
                      const Slice<XXH3Key>& block_hashes = {}) = 0;
   virtual void cache(const std::vector<Block>& blocks) = 0;
 
+  // Read-only local prefix-cache hit length in full KV blocks for the caller's
+  // precomputed chained block hashes. Unlike allocate_shared(), this never
+  // creates blocks, mutates LRU order, or touches usage accounting. The
+  // scheduler uses it to estimate residual prefill work; the caller is
+  // responsible for ensuring the sequence's block hashes exist first (see
+  // CompositeBlockManager::get_num_local_computed_blocks, which memoizes them
+  // on the sequence).
+  //
+  // Thread-safety: the underlying hash walk is unsynchronized, so this must
+  // only run under the leaf's ConcurrentBlockManagerImpl lock (PD / kvcache
+  // store leaves are wrapped) or in a single-threaded context.
+  // Returns 0 when the prefix cache is disabled. Default no-op for managers
+  // without a prefix cache (e.g. xtensor / embedding leaves).
+  virtual size_t get_num_local_computed_blocks(
+      const Slice<XXH3Key>& block_hashes) const {
+    return 0;
+  }
+
   virtual size_t num_blocks_in_prefix_cache() const = 0;
   virtual size_t num_free_blocks() const = 0;
   virtual size_t num_used_blocks() const = 0;

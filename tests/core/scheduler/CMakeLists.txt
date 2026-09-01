@@ -10,6 +10,7 @@ cc_test(
     continuous_scheduler_test.cpp
     fixed_steps_scheduler_test.cpp
     scheduler_policy_test.cpp
+    residual_sjf_policy_test.cpp
   DEPS
     :config
     :scheduler

@@ -48,6 +48,9 @@ class ConcurrentBlockManagerImpl : public BlockManager {
       const MMData& mm_data = MMData(),
       const Slice<XXH3Key>& block_hashes = {}) override;
 
+  size_t get_num_local_computed_blocks(
+      const Slice<XXH3Key>& block_hashes) const override;
+
   void cache(const Slice<int32_t>& token_ids,
              std::vector<Block>& blocks,
              size_t existed_shared_blocks_num = 0,

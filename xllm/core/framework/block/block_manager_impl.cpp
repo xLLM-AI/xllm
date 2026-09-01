@@ -186,6 +186,20 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
   return {};
 }
 
+size_t BlockManagerImpl::get_num_local_computed_blocks(
+    const Slice<XXH3Key>& block_hashes) const {
+  if (!options_.enable_prefix_cache()) {
+    return 0;
+  }
+  size_t matched_blocks = 0;
+  for (; matched_blocks < block_hashes.size(); ++matched_blocks) {
+    if (!prefix_cache_->contains(block_hashes[matched_blocks])) {
+      break;
+    }
+  }
+  return matched_blocks;
+}
+
 void BlockManagerImpl::cache(const Slice<int32_t>& token_ids,
                              std::vector<Block>& blocks,
                              size_t existed_shared_blocks_num,

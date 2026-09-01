@@ -22,6 +22,7 @@ cc_library(
   SRCS
     scheduler_policy.cpp
     prefill_first_policy.cpp
+    residual_sjf_policy.cpp
     decode_first_policy.cpp
     unified_policy.cpp
     zero_eviction_scheduler.cpp

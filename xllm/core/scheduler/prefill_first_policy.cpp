@@ -19,6 +19,7 @@ limitations under the License.
 #include <limits>
 
 #include "core/framework/config/scheduler_config.h"
+#include "core/util/verbose_trace_logger.h"
 #include "framework/request/priority_comparator.h"
 #include "scheduler/scheduler_policy.h"
 
@@ -104,6 +105,21 @@ void PrefillFirstPolicy::schedule(
   schedule_prefill_from_queue(
       &state.chunk_queue, state, budget, finished, reserved_full_footprint);
   // Then new prefill requests.
+  // Opt-in dispatch-order trace: the fresh prefill queue order this step will
+  // drain (recovery requests and chunked continuations live in chunk_queue and
+  // are not listed). Enabled only via --enable_verbose_trace_log, so the hot
+  // path carries no cost unless a validation run asks for it.
+  int32_t queue_rank = 0;
+  for (auto it = state.prefill_queue.begin(); it != state.prefill_queue.end();
+       ++it) {
+    CHECK(!(*it)->sequences().empty());
+    Sequence* sequence = (*it)->sequences()[0].get();
+    CHECK(sequence != nullptr);
+    XLLM_VERBOSE_TRACE() << "event=prefill_queue_order rank=" << queue_rank
+                         << " req=" << (*it)->request_id() << " prompt_tokens="
+                         << static_cast<int64_t>(sequence->num_prompt_tokens());
+    ++queue_rank;
+  }
   schedule_prefill_from_queue(
       &state.prefill_queue, state, budget, finished, reserved_full_footprint);
 

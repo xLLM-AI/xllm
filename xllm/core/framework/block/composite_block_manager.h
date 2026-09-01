@@ -78,6 +78,16 @@ class CompositeBlockManager : public BlockManager {
   void release_out_of_window_for_sequence(Sequence* seq);
   void deallocate_for_sequence(Sequence* seq);
   void allocate_shared_for_sequence(Sequence* seq);
+  // Read-only KV prefix-cache hit length in full KV blocks for a waiting
+  // request.
+  // Mirrors the allocate_shared_for_sequence() KV probe without creating
+  // blocks or mutating LRU/usage accounting, so the scheduler can compute
+  // residual prefill cost. Returns 0 when the composite has no prefix-capable
+  // KV leaf or the prefix cache is disabled. Note: for FLAT_KV_LINEAR
+  // composites the probe reports the raw KV hit without applying the LINEAR
+  // restore clamp, so the residual estimate can be optimistic for GDN models;
+  // SWA_COMPRESSED composites have no KV leaf and fall back to raw length.
+  size_t get_num_local_computed_blocks(Sequence* seq);
   void cache_for_sequence(Sequence* seq);
   void cache_for_sequence(Sequence* seq, size_t num_tokens);
   void cache_full_blocks_for_sequence(Sequence* seq);

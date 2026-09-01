@@ -92,6 +92,7 @@ class BlockManagerPool : public KVCacheManager {
   void deallocate_without_cache(Sequence* sequence);
 
   void allocate_shared(Sequence* sequence) override;
+  size_t get_num_local_computed_blocks(Sequence* sequence) override;
   void cache(Sequence* sequence) override;
   void cache(Sequence* sequence, size_t num_tokens) override;
 

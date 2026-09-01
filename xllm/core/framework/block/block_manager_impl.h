@@ -53,6 +53,12 @@ class BlockManagerImpl : public BlockManager {
       const MMData& mm_data = MMData(),
       const Slice<XXH3Key>& block_hashes = {}) override;
 
+  // Read-only prefix-cache probe: solid-prefix walk over precomputed chained
+  // block hashes using the LRU-neutral contains() lookup, returning the count
+  // of full hit blocks.
+  size_t get_num_local_computed_blocks(
+      const Slice<XXH3Key>& block_hashes) const override;
+
   // cache blocks when enable prefix cache
   void cache(const Slice<int32_t>& token_ids,
              std::vector<Block>& blocks,
