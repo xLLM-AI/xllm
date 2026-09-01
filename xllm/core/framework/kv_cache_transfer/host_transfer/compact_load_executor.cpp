@@ -74,7 +74,8 @@ bool CompactLoadExecutor::execute(
     const HostKVRequest& request,
     const std::shared_ptr<LayerSynchronizer>& synchronizer) {
   std::lock_guard<std::mutex> lock(mutex_);
-  const GroupedHostKVMappings mappings_by_group = group_mappings(request);
+  const GroupedHostKVMappings mappings_by_group =
+      group_mappings(request.target_mappings);
   for (size_t range_index = 0; range_index < ranges_.size(); ++range_index) {
     for (const auto& [group_id, mappings] : mappings_by_group) {
       if (!submit_range(
@@ -88,6 +89,23 @@ bool CompactLoadExecutor::execute(
       drain_or_die("layer-ready event recording failed");
       return false;
     }
+  }
+  const GroupedHostKVMappings draft_mappings_by_group =
+      group_mappings(request.draft_mappings);
+  for (size_t range_index = 0; range_index < ranges_.size(); ++range_index) {
+    for (const auto& [group_id, mappings] : draft_mappings_by_group) {
+      if (!submit_range(
+              group_id, groups_.at(group_id), range_index, mappings)) {
+        drain_or_die("draft cache H2D submission failed");
+        return false;
+      }
+    }
+  }
+  if (!request.draft_mappings.empty() &&
+      !synchronizer->record_stream(static_cast<int64_t>(ranges_.size()),
+                                   copy_stream_.get())) {
+    drain_or_die("draft cache completion event recording failed");
+    return false;
   }
   return true;
 }

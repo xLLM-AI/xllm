@@ -379,11 +379,11 @@ Master::Master(const Options& options, EngineType type)
   if (options_.host_blocks_factor() > 1.0) {
     const bool supports_host_offload =
         type == EngineType::LLM ||
-        (type == EngineType::SSM &&
-         SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()));
+        (type == EngineType::SSM && SpeculativeConfig::supports_host_kv_cache(
+                                        options_.speculative_algorithm()));
     CHECK(supports_host_offload)
-        << "Basic host KV cache offload supports the LLM engine and the MTP "
-           "speculative engine only.";
+        << "Basic host KV cache offload supports the LLM engine and "
+           "model-based speculative engines only.";
   }
   // Multi-process serving runs one worker per process. Select one runtime
   // logical device from the process-visible devices while keeping node_rank as

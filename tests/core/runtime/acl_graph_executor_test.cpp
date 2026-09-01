@@ -1494,6 +1494,16 @@ TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("unknown"));
 }
 
+TEST(SpeculativeConfigTest, HostKVCacheSupportsModelBasedAlgorithms) {
+  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("MTP"));
+  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("Eagle3"));
+  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("DFlash"));
+  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("DSpark"));
+
+  EXPECT_FALSE(SpeculativeConfig::supports_host_kv_cache("Suffix"));
+  EXPECT_FALSE(SpeculativeConfig::supports_host_kv_cache("unknown"));
+}
+
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
   ModelArgs args;
   args.hidden_size(2).layers_to_capture({0, 2});

@@ -253,7 +253,7 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
       event = input_params.parallel.layer_synchronizer->get_event(0);
       event_flag = input_params.parallel.layer_synchronizer->get_event_flag(0);
     }
-    if (!input_params.synchronize_layer(0)) {
+    if (!input_params.synchronize_draft_layer()) {
       return ModelOutput();
     }
 

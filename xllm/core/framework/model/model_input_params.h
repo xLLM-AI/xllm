@@ -877,6 +877,7 @@ struct ParallelInput {
 #endif
   uint32_t layers_per_event = std::numeric_limits<uint32_t>::max();
   std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
+  std::optional<uint32_t> draft_load_event_index;
 #if defined(USE_NPU) || defined(USE_MUSA)
   std::vector<int64_t> query_start_loc;
 #endif
@@ -895,6 +896,7 @@ struct ParallelInput {
 #endif
     out.layers_per_event = layers_per_event;
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
+    out.draft_load_event_index = draft_load_event_index;
 #if defined(USE_NPU) || defined(USE_MUSA)
     out.query_start_loc = query_start_loc;
 #endif
@@ -1121,15 +1123,27 @@ struct ModelInputParams {
 #endif
   }
 
-  bool synchronize_layer(uint32_t layer_idx) const {
-    if (parallel.layer_wise_load_synchronizer != nullptr &&
-        layer_idx % parallel.layers_per_event == 0) {
-      if (!parallel.layer_wise_load_synchronizer->synchronize_layer(
-              layer_idx / parallel.layers_per_event)) {
-        return false;
-      }
+  bool synchronize_layer(int64_t layer_idx) const {
+    if (parallel.layer_wise_load_synchronizer == nullptr) {
+      return true;
+    }
+    CHECK_GE(layer_idx, 0) << "Layer index must be non-negative.";
+    if (static_cast<uint64_t>(layer_idx) % parallel.layers_per_event == 0) {
+      return parallel.layer_wise_load_synchronizer->synchronize_layer(
+          layer_idx / parallel.layers_per_event);
     }
     return true;
+  }
+
+  bool synchronize_draft_layer() const {
+    if (parallel.layer_wise_load_synchronizer == nullptr) {
+      return true;
+    }
+    if (!parallel.draft_load_event_index.has_value()) {
+      return true;
+    }
+    return parallel.layer_wise_load_synchronizer->synchronize_layer(
+        static_cast<int64_t>(*parallel.draft_load_event_index));
   }
 
   bool record_layer(uint32_t layer_idx, const torch::Device& device) const {

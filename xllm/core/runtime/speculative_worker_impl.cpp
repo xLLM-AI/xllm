@@ -255,6 +255,16 @@ SpeculativeWorkerImpl::SpeculativeWorkerImpl(
   }
 }
 
+SpeculativeWorkerImpl::~SpeculativeWorkerImpl() {
+  if (impl_ != nullptr) {
+    impl_->clear_hierarchy_kv_cache_transfer();
+  }
+  if (draft_impl_ != nullptr) {
+    draft_impl_->clear_hierarchy_kv_cache_transfer();
+  }
+  clear_hierarchy_kv_cache_transfer();
+}
+
 bool SpeculativeWorkerImpl::init_model(const std::string& model_weights_path,
                                        int32_t random_seed,
                                        MasterStatus master_status) {
@@ -319,6 +329,65 @@ bool SpeculativeWorkerImpl::allocate_kv_cache(
   return impl_->allocate_kv_cache(kv_cache_shape);
 }
 
+void SpeculativeWorkerImpl::prepare_hierarchy_kv_cache_transfers() {
+  if (options_.host_blocks_factor() <= 1.0 || draft_impl_ == nullptr) {
+    return;
+  }
+
+  CHECK(impl_ != nullptr);
+  std::shared_ptr<HierarchyKVCacheTransfer> unified_transfer =
+      hierarchy_kv_cache_transfer_;
+  if (unified_transfer == nullptr) {
+    unified_transfer = impl_->get_hierarchy_kv_cache_transfer();
+  }
+  if (unified_transfer == nullptr) {
+    unified_transfer = draft_impl_->get_hierarchy_kv_cache_transfer();
+  }
+  if (unified_transfer == nullptr) {
+    unified_transfer = impl_->create_hierarchy_kv_cache_transfer();
+  }
+
+  if (impl_->get_hierarchy_kv_cache_transfer() == nullptr) {
+    impl_->bind_hierarchy_kv_cache_transfer(
+        unified_transfer,
+        HierarchyKVCacheTransfer::CacheRole::TARGET,
+        compute_stream_.get());
+  } else {
+    CHECK_EQ(impl_->get_hierarchy_kv_cache_transfer().get(),
+             unified_transfer.get())
+        << "Speculative target worker hierarchy KV cache transfer changed "
+           "unexpectedly.";
+  }
+
+  if (draft_impl_->get_hierarchy_kv_cache_transfer() == nullptr) {
+    draft_impl_->bind_hierarchy_kv_cache_transfer(
+        unified_transfer,
+        HierarchyKVCacheTransfer::CacheRole::DRAFT,
+        compute_stream_.get());
+  } else {
+    CHECK_EQ(draft_impl_->get_hierarchy_kv_cache_transfer().get(),
+             unified_transfer.get())
+        << "Speculative draft worker hierarchy KV cache transfer changed "
+           "unexpectedly.";
+  }
+
+  if (hierarchy_kv_cache_transfer_ == nullptr) {
+    set_hierarchy_kv_cache_transfer(std::move(unified_transfer));
+  }
+}
+
+void SpeculativeWorkerImpl::finalize_hierarchy_kv_cache_transfers() {
+  if (options_.host_blocks_factor() <= 1.0 || draft_impl_ == nullptr) {
+    return;
+  }
+
+  CHECK(hierarchy_kv_cache_transfer_ != nullptr)
+      << "Speculative hierarchy KV cache transfer is not prepared.";
+  if (!hierarchy_kv_cache_transfer_->registration_finalized()) {
+    CHECK(hierarchy_kv_cache_transfer_->finalize_registration());
+  }
+}
+
 #if defined(USE_NPU)
 bool SpeculativeWorkerImpl::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
@@ -328,6 +397,9 @@ bool SpeculativeWorkerImpl::allocate_kv_cache_with_transfer(
 
 std::optional<ForwardOutput> SpeculativeWorkerImpl::step(
     const ForwardInput& input) {
+  ModelInputParams& mutable_params =
+      const_cast<ModelInputParams&>(input.input_params);
+  set_hierarchy_layer_synchronizer(mutable_params);
   const bool run_speculative_decode =
       should_run_speculative_decode(input.input_params);
   if (input.input_params.meta.num_sequences == 0 ||

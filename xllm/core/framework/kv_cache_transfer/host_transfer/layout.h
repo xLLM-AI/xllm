@@ -45,7 +45,8 @@ struct HostKVMapping {
 };
 
 struct HostKVRequest {
-  std::vector<HostKVMapping> mappings;
+  std::vector<HostKVMapping> target_mappings;
+  std::vector<HostKVMapping> draft_mappings;
 };
 
 struct HostKVLayoutInput {

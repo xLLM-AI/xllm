@@ -51,7 +51,8 @@ HostKVTransfer::HostKVTransfer(HostKVLayout layout)
 
 bool HostKVTransfer::load(const HostKVRequest& request,
                           const HostKVLoadHandle& handle) {
-  if (!valid_request(request, /*is_load=*/true) || !valid_handle(handle)) {
+  if (!valid_request(request, /*is_load=*/true) ||
+      !valid_handle(request, handle)) {
     if (handle.synchronizer != nullptr) {
       handle.synchronizer->abort();
     }
@@ -73,40 +74,52 @@ bool HostKVTransfer::offload(const HostKVRequest& request) {
 
 bool HostKVTransfer::valid_request(const HostKVRequest& request,
                                    bool is_load) const {
-  if (request.mappings.empty()) {
+  if (request.target_mappings.empty() && request.draft_mappings.empty()) {
     LOG(ERROR) << "Host KV request must not be empty.";
     return false;
   }
 
   std::unordered_set<BlockKey, BlockKeyHash> destinations;
-  destinations.reserve(request.mappings.size());
-  for (const HostKVMapping& mapping : request.mappings) {
-    const HostKVGroupLayout* group = layout_.find_group(mapping.group_id);
-    if (group == nullptr || mapping.host_block_id < 0 ||
-        mapping.host_block_id >= layout_.host_block_count(mapping.group_id) ||
-        mapping.device_block_id < 0 ||
-        mapping.device_block_id >=
-            layout_.device_block_count(mapping.group_id)) {
-      LOG(ERROR) << "Host KV request contains an unknown group or block.";
-      return false;
-    }
+  destinations.reserve(request.target_mappings.size() +
+                       request.draft_mappings.size());
+  const auto validate_mappings =
+      [this, is_load, &destinations](
+          const std::vector<HostKVMapping>& mappings) {
+        for (const HostKVMapping& mapping : mappings) {
+          const HostKVGroupLayout* group = layout_.find_group(mapping.group_id);
+          if (group == nullptr || mapping.host_block_id < 0 ||
+              mapping.host_block_id >=
+                  layout_.host_block_count(mapping.group_id) ||
+              mapping.device_block_id < 0 ||
+              mapping.device_block_id >=
+                  layout_.device_block_count(mapping.group_id)) {
+            LOG(ERROR) << "Host KV request contains an unknown group or block.";
+            return false;
+          }
 
-    const int64_t destination =
-        is_load ? mapping.device_block_id : mapping.host_block_id;
-    if (!destinations.emplace(mapping.group_id, destination).second) {
-      LOG(ERROR) << "Host KV request contains a duplicate destination.";
-      return false;
-    }
-  }
-  return true;
+          const int64_t destination =
+              is_load ? mapping.device_block_id : mapping.host_block_id;
+          if (!destinations.emplace(mapping.group_id, destination).second) {
+            LOG(ERROR) << "Host KV request contains a duplicate destination.";
+            return false;
+          }
+        }
+        return true;
+      };
+  return validate_mappings(request.target_mappings) &&
+         validate_mappings(request.draft_mappings);
 }
 
-bool HostKVTransfer::valid_handle(const HostKVLoadHandle& handle) const {
+bool HostKVTransfer::valid_handle(const HostKVRequest& request,
+                                  const HostKVLoadHandle& handle) const {
   if (handle.synchronizer == nullptr) {
     LOG(ERROR) << "Host KV load requires a synchronizer.";
     return false;
   }
-  if (handle.synchronizer->size() != load_event_count() ||
+  const uint32_t expected_event_count =
+      load_event_count() +
+      static_cast<uint32_t>(!request.draft_mappings.empty());
+  if (handle.synchronizer->size() != expected_event_count ||
       handle.layers_per_event != layers_per_event()) {
     LOG(ERROR) << "Host KV load handle does not match the transfer strategy.";
     return false;
@@ -121,11 +134,18 @@ std::unique_ptr<HostKVTransfer> create_host_kv_transfer(
     const HostKVTransferConfig& config) {
   if (config.mode == HostKVTransferMode::AUTO &&
       Platform::supports_compact_host_kv_transfer()) {
-    return std::make_unique<CompactHostKVTransfer>(
-        std::move(layout), device, compute_stream, config.layer_copy_batches);
+    return std::make_unique<CompactHostKVTransfer>(std::move(layout),
+                                                   device,
+                                                   compute_stream,
+                                                   config.layer_copy_batches,
+                                                   /*batch_memcpy=*/nullptr,
+                                                   CompactTransferConfig{});
   }
-  return std::make_unique<BasicHostKVTransfer>(
-      std::move(layout), device, compute_stream, config.layer_copy_batches);
+  return std::make_unique<BasicHostKVTransfer>(std::move(layout),
+                                               device,
+                                               compute_stream,
+                                               config.layer_copy_batches,
+                                               /*batch_memcpy=*/nullptr);
 }
 
 }  // namespace xllm

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "framework/kv_cache_transfer/host_transfer/layout.h"
 
@@ -29,6 +30,7 @@ class Stream;
 struct HostKVLoadHandle {
   std::shared_ptr<LayerSynchronizer> synchronizer;
   uint32_t layers_per_event = 1;
+  std::optional<uint32_t> draft_event_index;
 };
 
 enum class HostKVTransferMode : uint8_t {
@@ -45,7 +47,7 @@ class HostKVTransfer {
  public:
   virtual ~HostKVTransfer() = default;
 
-  virtual HostKVLoadHandle prepare_load() = 0;
+  virtual HostKVLoadHandle prepare_load(bool draft = false) = 0;
   // Success means all layer-ready events have been recorded.
   bool load(const HostKVRequest& request, const HostKVLoadHandle& handle);
   // Success means Host data is safe for CPU and Store access.
@@ -65,7 +67,8 @@ class HostKVTransfer {
 
  private:
   bool valid_request(const HostKVRequest& request, bool is_load) const;
-  bool valid_handle(const HostKVLoadHandle& handle) const;
+  bool valid_handle(const HostKVRequest& request,
+                    const HostKVLoadHandle& handle) const;
 
   const HostKVLayout layout_;
 };

@@ -57,9 +57,15 @@ CompactHostKVTransfer::CompactHostKVTransfer(
 
 CompactHostKVTransfer::~CompactHostKVTransfer() { drain(); }
 
-HostKVLoadHandle CompactHostKVTransfer::prepare_load() {
-  return {create_layer_synchronizer(load_executor_->event_count()),
-          load_executor_->layers_per_event()};
+HostKVLoadHandle CompactHostKVTransfer::prepare_load(bool draft) {
+  const uint32_t base_event_count = load_executor_->event_count();
+  const uint32_t event_count = base_event_count + static_cast<uint32_t>(draft);
+  HostKVLoadHandle handle{create_layer_synchronizer(event_count),
+                          load_executor_->layers_per_event()};
+  if (draft) {
+    handle.draft_event_index = base_event_count;
+  }
+  return handle;
 }
 
 void CompactHostKVTransfer::drain() {

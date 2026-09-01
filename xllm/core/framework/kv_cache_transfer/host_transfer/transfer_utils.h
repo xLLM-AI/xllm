@@ -35,6 +35,7 @@ uint32_t get_layers_per_event(int64_t num_layers, uint32_t requested_batches);
 std::vector<LayerRange> build_layer_ranges(int64_t num_layers,
                                            uint32_t layers_per_event);
 
-GroupedHostKVMappings group_mappings(const HostKVRequest& request);
+GroupedHostKVMappings group_mappings(
+    const std::vector<HostKVMapping>& mappings);
 
 }  // namespace xllm

@@ -363,7 +363,7 @@ TEST(CompactOffloadTest, CopiesPaddedRolesAcrossTiles) {
   ASSERT_NE(compute_stream, nullptr);
 
   HostKVRequest request;
-  request.mappings = {
+  request.target_mappings = {
       HostKVMapping{17, 3, 2},
       HostKVMapping{17, 0, 3},
       HostKVMapping{17, 1, 3},
@@ -482,7 +482,7 @@ TEST(CompactOffloadTest, CopiesMultipleGroupsWithPartialLayerRoles) {
   ASSERT_NE(compute_stream, nullptr);
 
   HostKVRequest request;
-  request.mappings = {
+  request.target_mappings = {
       HostKVMapping{31, 1, 2},
       HostKVMapping{17, 3, 1},
       HostKVMapping{17, 0, 2},
@@ -605,7 +605,7 @@ TEST(CompactOffloadTest, FinalFlushWaitsForQueuedD2HBeforeReusingSlots) {
             std::future_status::ready);
   EXPECT_TRUE(result.get());
   EXPECT_EQ(batch_memcpy.submit_count(), 3U);
-  for (const HostKVMapping& mapping : request.mappings) {
+  for (const HostKVMapping& mapping : request.target_mappings) {
     EXPECT_TRUE(
         torch::equal(host_key[mapping.host_block_id][0],
                      key_layer_zero[mapping.device_block_id].to(torch::kCPU)));
@@ -711,9 +711,9 @@ TEST(CompactOffloadTest, UsesOneDescriptorPerMappingAndActiveRole) {
   std::unique_ptr<Stream> compute_stream = device.current_stream();
   ASSERT_NE(compute_stream, nullptr);
   HostKVRequest request;
-  request.mappings.reserve(kMappingCount);
+  request.target_mappings.reserve(kMappingCount);
   for (int64_t block_id = 0; block_id < kMappingCount; ++block_id) {
-    request.mappings.emplace_back(HostKVMapping{17, block_id, block_id});
+    request.target_mappings.emplace_back(HostKVMapping{17, block_id, block_id});
   }
 
   ASSERT_TRUE(compact_offload.execute(request, *compute_stream));
