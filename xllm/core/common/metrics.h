@@ -107,6 +107,30 @@ class AutoCounter final {
     }                                            \
   } while (false)
 
+// read a labeled counter's current value (0.0 when the label has no stats yet);
+// the multi-dimension analogue of COUNTER_VALUE
+#define MULTI_COUNTER_VALUE(name, key)                                 \
+  ([&]() -> double {                                                   \
+    bvar::Adder<double>* counter_##name =                              \
+        MULTI_COUNTER_##name.get_stats({(key)});                       \
+    return counter_##name != nullptr ? counter_##name->get_value()     \
+                                     : 0.0;                            \
+  }())
+
+// define multi gauge (using bvar::MultiDimension for labeled settable values)
+#define DEFINE_MULTI_GAUGE(name, label, desc)                          \
+  bvar::MultiDimension<bvar::Status<double>> MULTI_GAUGE_##name(#name, \
+                                                                {(label)});
+
+#define MULTI_GAUGE_SET(name, key, value)      \
+  do {                                         \
+    bvar::Status<double>* gauge_##name =       \
+        MULTI_GAUGE_##name.get_stats({(key)}); \
+    if (gauge_##name) {                        \
+      gauge_##name->set_value(value);          \
+    }                                          \
+  } while (false)
+
 // declare gauge
 #define DECLARE_GAUGE(name) extern bvar::Status<double> GAUGE_##name;
 
@@ -123,6 +147,10 @@ class AutoCounter final {
 // declare multi counter
 #define DECLARE_MULTI_COUNTER(name) \
   extern bvar::MultiDimension<bvar::Adder<double>> MULTI_COUNTER_##name;
+
+// declare multi gauge
+#define DECLARE_MULTI_GAUGE(name) \
+  extern bvar::MultiDimension<bvar::Status<double>> MULTI_GAUGE_##name;
 
 // NOLINTEND(bugprone-macro-parentheses)
 
@@ -253,7 +281,8 @@ DECLARE_COUNTER(speculative_num_accepted_tokens_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_total);
 DECLARE_COUNTER(speculative_num_committed_tokens_total);
 DECLARE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos);
-DECLARE_GAUGE(speculative_mean_tokens_per_decode_step);
+DECLARE_GAUGE(speculative_mean_acceptance_length);
+DECLARE_MULTI_GAUGE(speculative_conditional_acceptance_rate_per_pos);
 DECLARE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds);
 DECLARE_MULTI_HISTOGRAM(
     speculative_draft_token_copy_submission_latency_microseconds);

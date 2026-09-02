@@ -231,15 +231,26 @@ curl http://${HOST}:${PORT}/brpc_metrics | grep speculative_num
 ```
 
 ```text
-acceptance[position] =
-  speculative_num_accepted_tokens_per_pos{position} /
-  speculative_num_drafts_total
+# conditional per-position acceptance (isolates draft quality):
+conditional_acceptance[i] =
+  speculative_num_accepted_tokens_per_pos{i} /
+  speculative_num_accepted_tokens_per_pos{i-1}   # i = 0: use speculative_num_drafts_total
 ```
 
-The per-position value is the probability that the accepted prefix reaches
-that position. `speculative_mean_tokens_per_decode_step` is the cumulative
-mean number of committed tokens per proposal sequence, calculated from
-`speculative_num_committed_tokens_total / speculative_num_drafts_total`.
+`speculative_num_accepted_tokens_per_pos` is a raw counter (a sufficient
+statistic); prefer the *conditional* acceptance rate above -- the probability
+position `i` is accepted given the prefix reached it. The marginal form
+(`... / speculative_num_drafts_total`) decays even for a uniformly-good draft
+because of prefix survivorship, conflating draft quality with reach
+probability, whereas the conditional isolates per-position quality and is what
+to use when choosing the speculative depth. xLLM exposes it directly as the
+gauge `speculative_conditional_acceptance_rate_per_pos{position}` (computed
+from the counters above), so no manual derivation is needed.
+
+`speculative_mean_acceptance_length` is the cumulative acceptance length: the
+mean number of tokens emitted per proposal sequence (accepted drafts plus the
+one target bonus token), i.e.
+`1 + speculative_num_accepted_tokens_total / speculative_num_drafts_total`.
 
 A log message "Brpc Server Started" indicates the service has started successfully.
 

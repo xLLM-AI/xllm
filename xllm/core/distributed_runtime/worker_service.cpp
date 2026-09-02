@@ -197,8 +197,26 @@ WorkerService::record_speculative_metrics_from_output(
   const double total_drafts = COUNTER_VALUE(speculative_num_drafts_total);
   if (total_drafts > 0) {
     GAUGE_SET(
-        speculative_mean_tokens_per_decode_step,
+        speculative_mean_acceptance_length,
         COUNTER_VALUE(speculative_num_committed_tokens_total) / total_drafts);
+  }
+  // Per-position conditional acceptance rate = P(accept position i | position
+  // i-1 accepted) = accepted_per_pos[i] / accepted_per_pos[i-1]; position 0
+  // divides by the total draft count. Read from the global counters so multi-DP
+  // writers converge on one aggregate.
+  double prev_accepted = total_drafts;
+  for (int64_t position = 0; position < effective_speculative_tokens;
+       ++position) {
+    const std::string& position_label =
+        speculative_position_labels_[static_cast<size_t>(position)];
+    const double cur_accepted = MULTI_COUNTER_VALUE(
+        speculative_num_accepted_tokens_per_pos, position_label);
+    if (prev_accepted > 0) {
+      MULTI_GAUGE_SET(speculative_conditional_acceptance_rate_per_pos,
+                      position_label,
+                      cur_accepted / prev_accepted);
+    }
+    prev_accepted = cur_accepted;
   }
   if (!output_stats.empty()) {
     return output_stats;

@@ -578,7 +578,7 @@ TEST(DisaggPDSchedulerTest, SchedulerDoesNotOverwriteSpeculativeOutputGauge) {
                     /*block_size=*/2,
                     /*num_speculative_tokens=*/1);
   TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
-  GAUGE_SET(speculative_mean_tokens_per_decode_step, 4.25);
+  GAUGE_SET(speculative_mean_acceptance_length, 4.25);
 
   std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});
   Sequence* first_sequence = first_request->sequences()[0].get();
@@ -599,7 +599,7 @@ TEST(DisaggPDSchedulerTest, SchedulerDoesNotOverwriteSpeculativeOutputGauge) {
   std::vector<Sequence*> sequences = {first_sequence, second_sequence};
   scheduler.update_metrics(sequences);
 
-  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(),
                    4.25);
   EXPECT_EQ(first_sequence->generated_tokens_since_latency(), 0u);
   EXPECT_EQ(second_sequence->generated_tokens_since_latency(), 0u);
@@ -610,7 +610,7 @@ TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
   // make_options() keeps num_speculative_tokens at its default of 0.
   TestDisaggPDScheduler scheduler(&engine, make_options());
 
-  GAUGE_SET(speculative_mean_tokens_per_decode_step, -1.0);
+  GAUGE_SET(speculative_mean_acceptance_length, -1.0);
 
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
@@ -621,7 +621,7 @@ TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
 
   scheduler.update_metrics(sequences);
 
-  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(),
                    -1.0);
 }
 
