@@ -164,6 +164,20 @@ def test_native_runtime_bridge_bypasses_python_process_groups(monkeypatch):
     python_gather.assert_not_called()
 
 
+def test_dcp_group_is_strided_like_kv_split_rank(monkeypatch):
+    _, _, _, new_group = _mock_process_groups(monkeypatch, global_rank=2)
+
+    # world=8, dcp=2 → group_count=4; membership matches rank/(world/dcp).
+    collectives.init_process_group("dcp", "127.0.0.1", 46001, 0, 2, "cuda:0", 2, 8, 2)
+
+    assert [call.kwargs["ranks"] for call in new_group.call_args_list] == [
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+    ]
+
+
 def test_tcp_store_master_is_global_rank_zero_not_group_rank_zero(monkeypatch):
     _, tcp_store, _, _ = _mock_process_groups(monkeypatch, global_rank=2)
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from xllm.python import distributed
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -44,6 +45,7 @@ def _create_attention_backend(
     device: torch.device,
     dtype: torch.dtype,
     config: dict | None = None,
+    max_num_reqs: int = 1,
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
@@ -64,6 +66,26 @@ def _create_attention_backend(
             dtype=dtype,
         )
     if current_platform.is_npu():
+        dcp_group = distributed.dcp_group(device)
+        if dcp_group is not None and dcp_group.size() > 1:
+            from xllm.python.attention.sfa_dcp_backend import (
+                SfaDcpAttentionBackend,
+                dcp_layer_options,
+            )
+
+            index_topk = dcp_layer_options(first_attention)
+            return SfaDcpAttentionBackend(
+                num_heads=first_attention.num_heads,
+                num_kv_heads=first_attention.num_kv_heads,
+                head_dim=first_attention.head_dim,
+                scale=first_attention.scale,
+                sliding_window=first_attention.sliding_window,
+                device=device,
+                dtype=dtype,
+                dcp_group=dcp_group,
+                index_topk=index_topk,
+                max_num_reqs=max(max_num_reqs, 1),
+            )
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
         )
@@ -118,7 +140,13 @@ class ModelExecutor:
         first_parameter = next(model.parameters())
         device = first_parameter.device
         self._num_attention_layers = len(attention_layers)
-        self.attention_backend = _create_attention_backend(first_attention, device, first_parameter.dtype, config)
+        self.attention_backend = _create_attention_backend(
+            first_attention,
+            device,
+            first_parameter.dtype,
+            config,
+            max_seqs_per_batch,
+        )
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)

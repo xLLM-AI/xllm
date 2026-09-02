@@ -13,6 +13,7 @@ cc_test(
     npu_kernels
     GTest::gtest_main
     glog::glog
+    unified_dlog
     pybind11::embed
 )
 

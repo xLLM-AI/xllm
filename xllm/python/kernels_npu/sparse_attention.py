@@ -287,6 +287,49 @@ def sparse_flash_attention_out(
     )
 
 
+def sparse_flash_attention_lse(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sparse_indices: torch.Tensor,
+    block_table: torch.Tensor | None,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_kv: torch.Tensor | None,
+    query_rope: torch.Tensor | None,
+    key_rope: torch.Tensor | None,
+    scale_value: float,
+    sparse_block_size: int,
+    layout_query: str,
+    layout_kv: str,
+    sparse_mode: int,
+    pre_tokens: int = 9223372036854775807,
+    next_tokens: int = 9223372036854775807,
+    attention_mode: int = 2,
+    return_softmax_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Attend to selected blocks and optionally return softmax max/sum for LSE merge."""
+    return torch.ops.xllm_ops.sparse_flash_attention_lse(
+        query,
+        key,
+        value,
+        sparse_indices,
+        block_table,
+        actual_seq_lengths_query,
+        actual_seq_lengths_kv,
+        query_rope,
+        key_rope,
+        scale_value,
+        sparse_block_size,
+        layout_query,
+        layout_kv,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        attention_mode,
+        return_softmax_lse,
+    )
+
+
 __all__ = [
     "lightning_indexer",
     "lightning_indexer_out",
@@ -295,4 +338,5 @@ __all__ = [
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",
+    "sparse_flash_attention_lse",
 ]

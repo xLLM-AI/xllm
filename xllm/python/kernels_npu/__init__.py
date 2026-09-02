@@ -91,6 +91,7 @@ _EXPORTS = {
         "scatter_nd_update",
         "sparse_flash_attention",
         "sparse_flash_attention_out",
+        "sparse_flash_attention_lse",
     ),
     "dsa": (
         "compressor",
@@ -153,6 +154,7 @@ __all__ = [
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",
+    "sparse_flash_attention_lse",
     "causal_conv1d_decode",
     "compressor",
     "dequant_swiglu_quant",

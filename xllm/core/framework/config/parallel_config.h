@@ -45,6 +45,7 @@ class ParallelConfig final {
          "ep_size",
          "cp_size",
          "layerwise_split_size",
+         "kv_split_size",
          "tp_size",
          "sp_size",
          "cfg_size",

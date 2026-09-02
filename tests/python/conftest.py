@@ -28,6 +28,7 @@ def _install_python_package_stub() -> None:
     kernels_npu = types.ModuleType("xllm.python.kernels_npu")
     kernels_npu.__path__ = [str(_PYTHON_ROOT / "kernels_npu")]
     distributed = types.ModuleType("xllm.python.distributed")
+    distributed.dcp_group = lambda _device=None: None
 
     package = types.ModuleType("xllm.python")
     # Keep source submodules importable without executing the real package binding.
