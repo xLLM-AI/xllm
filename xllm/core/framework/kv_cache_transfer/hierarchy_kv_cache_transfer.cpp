@@ -176,6 +176,7 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
   registration.kv_cache_shape = kv_cache_shape;
   registration.create_options = create_options;
   registration.producer_stream = compute_stream;
+  registration.store_key_component = "main";
   register_cache(std::move(registration));
   CHECK(finalize_registration());
 }
@@ -257,12 +258,18 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
         config);
   }
 
-  if (options_.enable_kvcache_store() && cache_domains_.size() > 1) {
-    LOG(WARNING) << "Multi-domain Mooncake Store is disabled before phase "
-                    "four.";
-  } else if (options_.enable_kvcache_store()) {
+  if (options_.enable_kvcache_store()) {
     CHECK(options_.host_blocks_factor() > 1.0)
         << "Mooncake Store requires Host cache capacity.";
+    HostCacheStoreIndex store_index;
+    for (CacheDomain& domain : cache_domains_) {
+      CHECK(!domain.store_key_component.empty())
+          << "Mooncake Store requires a cache key component.";
+      for (auto& [block_type, host_cache] : domain.host_caches_by_type) {
+        store_index[block_type].emplace_back(HostCacheStoreEntry{
+            domain.handle, domain.store_key_component, host_cache.get()});
+      }
+    }
     KVCacheStoreInitConfig store_config;
     const std::string store_local_hostname = make_store_local_hostname(
         options_.store_local_hostname(), options_.store_worker_id());
@@ -278,8 +285,7 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size;
     kv_cache_store_ = std::make_unique<KVCacheStore>();
-    CHECK(kv_cache_store_->init(store_config,
-                                &cache_domains_.front().host_caches_by_type))
+    CHECK(kv_cache_store_->init(store_config, std::move(store_index)))
         << "Failed to initialize Mooncake Store.";
     LOG(INFO) << "[Mooncake][StoreEngine] ready, endpoint="
               << store_local_hostname << ", protocol=" << store_config.protocol

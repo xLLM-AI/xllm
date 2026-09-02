@@ -93,6 +93,16 @@ endif()
 if(USE_NPU OR USE_MLU)
 cc_test(
   NAME
+    kv_cache_store_test
+  SRCS
+    kv_cache_store_test.cpp
+  DEPS
+    :kv_cache_transfer
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     basic_host_kv_transfer_test
   SRCS
     host_transfer/basic_transfer_test.cpp

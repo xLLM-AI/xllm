@@ -208,7 +208,8 @@ class WorkerImpl {
   void bind_hierarchy_kv_cache_transfer(
       std::shared_ptr<HierarchyKVCacheTransfer> transfer,
       HierarchyKVCacheTransfer::CacheRole role,
-      const Stream* producer_stream);
+      const Stream* producer_stream,
+      std::string store_key_component = "");
 
   void register_hierarchy_kv_cache(HierarchyKVCacheTransfer& transfer,
                                    HierarchyKVCacheTransfer::CacheRole role,
@@ -464,6 +465,7 @@ class WorkerImpl {
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
   std::optional<HierarchyKVCacheTransfer::CacheRole> hierarchy_kv_cache_role_;
   const Stream* hierarchy_kv_cache_producer_stream_ = nullptr;
+  std::string hierarchy_kv_cache_store_key_component_;
   std::optional<HierarchyKVCacheTransferContext>
       hierarchy_kv_cache_transfer_context_;
   std::shared_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;

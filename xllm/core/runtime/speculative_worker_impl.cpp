@@ -16,6 +16,9 @@ limitations under the License.
 #include "speculative_worker_impl.h"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <system_error>
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
@@ -31,6 +34,7 @@ limitations under the License.
 #include "core/framework/speculative/spec_input_builder.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
+#include "util/hash_util.h"
 #include "util/slice.h"
 #include "util/tensor_helper.h"
 #include "util/timer.h"
@@ -78,6 +82,50 @@ namespace {
 
 Slice<int32_t> tensor_slice(const torch::Tensor& tensor) {
   return {tensor.data_ptr<int32_t>(), static_cast<size_t>(tensor.numel())};
+}
+
+std::string stable_path_digest(const std::string& path_string) {
+  const std::filesystem::path path(path_string);
+  std::error_code error;
+  const std::filesystem::path canonical_path =
+      std::filesystem::weakly_canonical(path, error);
+  const std::string normalized_path =
+      (error ? path.lexically_normal() : canonical_path).generic_string();
+  const XXH3Key path_hash = hash_string(normalized_path);
+
+  constexpr char HEX_DIGITS[] = "0123456789abcdef";
+  std::string digest;
+  digest.reserve(XXH3_128BITS_HASH_VALUE_LEN * 2);
+  for (uint8_t byte : path_hash.data) {
+    digest.push_back(HEX_DIGITS[byte >> 4]);
+    digest.push_back(HEX_DIGITS[byte & 0x0f]);
+  }
+  return digest;
+}
+
+std::string draft_store_key_component(const runtime::Options& options) {
+  std::string algorithm = options.speculative_algorithm();
+  std::transform(algorithm.begin(),
+                 algorithm.end(),
+                 algorithm.begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+
+  const std::string draft_model_path = options.draft_model_path().value_or("");
+  if (draft_model_path.empty()) {
+    return "spec_draft::" + algorithm + "::embedded";
+  }
+
+  std::string draft_model_name = std::filesystem::path(draft_model_path)
+                                     .lexically_normal()
+                                     .filename()
+                                     .generic_string();
+  if (draft_model_name.empty()) {
+    draft_model_name = "checkpoint";
+  }
+  return "spec_draft::" + algorithm + "::" + draft_model_name +
+         "::" + stable_path_digest(draft_model_path);
 }
 
 KVCacheEstimateOptions make_kv_cache_estimate_options(
@@ -378,7 +426,8 @@ void SpeculativeWorkerImpl::prepare_hierarchy_kv_cache_transfers() {
     impl_->bind_hierarchy_kv_cache_transfer(
         unified_transfer,
         HierarchyKVCacheTransfer::CacheRole::TARGET,
-        compute_stream_.get());
+        compute_stream_.get(),
+        /*store_key_component=*/"main");
   } else {
     CHECK_EQ(impl_->get_hierarchy_kv_cache_transfer().get(),
              unified_transfer.get())
@@ -390,7 +439,8 @@ void SpeculativeWorkerImpl::prepare_hierarchy_kv_cache_transfers() {
     draft_impl_->bind_hierarchy_kv_cache_transfer(
         unified_transfer,
         HierarchyKVCacheTransfer::CacheRole::DRAFT,
-        compute_stream_.get());
+        compute_stream_.get(),
+        draft_store_key_component(options_));
   } else {
     CHECK_EQ(draft_impl_->get_hierarchy_kv_cache_transfer().get(),
              unified_transfer.get())

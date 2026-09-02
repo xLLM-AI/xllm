@@ -2346,11 +2346,13 @@ WorkerImpl::create_hierarchy_kv_cache_transfer() {
 void WorkerImpl::bind_hierarchy_kv_cache_transfer(
     std::shared_ptr<HierarchyKVCacheTransfer> transfer,
     HierarchyKVCacheTransfer::CacheRole role,
-    const Stream* producer_stream) {
+    const Stream* producer_stream,
+    std::string store_key_component) {
   CHECK(producer_stream != nullptr) << "Producer stream must not be null.";
   set_hierarchy_kv_cache_transfer(std::move(transfer));
   hierarchy_kv_cache_role_ = role;
   hierarchy_kv_cache_producer_stream_ = producer_stream;
+  hierarchy_kv_cache_store_key_component_ = std::move(store_key_component);
 }
 
 void WorkerImpl::register_hierarchy_kv_cache(
@@ -2370,8 +2372,11 @@ void WorkerImpl::register_hierarchy_kv_cache(
   registration.create_options =
       hierarchy_kv_cache_transfer_context_->create_options;
   registration.producer_stream = producer_stream;
-  registration.store_key_component =
-      role == HierarchyKVCacheTransfer::CacheRole::TARGET ? "main" : "draft";
+  registration.store_key_component = hierarchy_kv_cache_store_key_component_;
+  if (registration.store_key_component.empty()) {
+    registration.store_key_component =
+        role == HierarchyKVCacheTransfer::CacheRole::TARGET ? "main" : "draft";
+  }
   transfer.register_cache(std::move(registration));
 }
 
@@ -2392,6 +2397,7 @@ void WorkerImpl::clear_hierarchy_kv_cache_transfer() {
   hierarchy_kv_cache_transfer_.reset();
   hierarchy_kv_cache_role_.reset();
   hierarchy_kv_cache_producer_stream_ = nullptr;
+  hierarchy_kv_cache_store_key_component_.clear();
 }
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(
