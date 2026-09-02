@@ -566,6 +566,15 @@ TORCH_LIBRARY(xllm_ops, m) {
       "sparse_block_size, str layout_query, str layout_kv, int sparse_mode, "
       "Tensor(a!) output) -> Tensor(a!)");
   m.def(
+      "sparse_flash_attention_lse(Tensor query, Tensor key, Tensor value, "
+      "Tensor sparse_indices, Tensor? block_table, Tensor? "
+      "actual_seq_lengths_query, Tensor? actual_seq_lengths_kv, Tensor? "
+      "query_rope, Tensor? key_rope, float scale_value, int sparse_block_size, "
+      "str layout_query, str layout_kv, int sparse_mode, int "
+      "pre_tokens=9223372036854775807, int next_tokens=9223372036854775807, "
+      "int attention_mode=2, bool return_softmax_lse=False) -> (Tensor, "
+      "Tensor, Tensor)");
+  m.def(
       "build_cp_context(int[] seq_lens, int cp_size, int cp_rank, Device "
       "device) -> (Tensor shard_index, Tensor shard_gather_index, Tensor "
       "shard_valid_mask, Tensor restore_index, Tensor query_index, Tensor "
@@ -686,6 +695,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("compressor", TORCH_FN(xllm::kernel::npu::compressor));
   m.impl("sparse_attn_sharedkv",
          TORCH_FN(xllm::kernel::npu::sparse_attn_sharedkv));
+  m.impl("sparse_flash_attention_lse",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse));
 }
 
 // build_cp_context is pure host index math with no Tensor input, so the

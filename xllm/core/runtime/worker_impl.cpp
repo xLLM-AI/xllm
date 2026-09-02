@@ -1016,47 +1016,6 @@ void WorkerImpl::sanitize_json_object_error_inputs(ForwardInput& input) {
       << error;
 }
 
-#if defined(USE_NPU)
-torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
-  auto old_cache_slots = input.input_params.attention.device.new_cache_slots;
-  int64_t numel = old_cache_slots.numel();
-  // The logical block stride that BlockManager hands out is
-  // `block_size * kv_split_size_effective` (see llm_engine init). When KV is
-  // not split (kv_split_size == 1) the stride collapses back to block_size.
-  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
-  const int32_t block_size_total = options_.block_size() * kv_split_size;
-  // KV-shard ownership predicate: block whose sub-index inside the logical
-  // block matches this rank's KV-split rank (degenerates to "this rank only"
-  // when kv_split_size == 1, since sub_block_idx is always 0 there).
-  const int32_t owner_kv_split_rank = parallel_args_.kv_split_rank();
-
-  torch::Tensor indices = torch::arange(numel, torch::kCPU);
-  torch::Tensor block_offset = indices % block_size_total;
-  torch::Tensor sub_block_idx =
-      torch::floor_divide(block_offset, options_.block_size());
-  torch::Tensor mask = (sub_block_idx == owner_kv_split_rank);
-  torch::Tensor valid_indices = torch::nonzero(mask).squeeze();
-
-  torch::Tensor new_cache_slots = torch::full_like(old_cache_slots, -1);
-  if (valid_indices.numel() > 0) {
-    const torch::Device slots_device = old_cache_slots.device();
-    torch::Tensor valid_indices_on_device =
-        valid_indices.to(slots_device, /*non_blocking=*/false);
-    torch::Tensor old_slotid =
-        old_cache_slots.index_select(0, valid_indices_on_device)
-            .to(torch::kInt);
-    torch::Tensor block_id = torch::floor_divide(old_slotid, block_size_total);
-    torch::Tensor block_offset_mod = old_slotid % options_.block_size();
-    torch::Tensor new_slotid =
-        block_id * options_.block_size() + block_offset_mod;
-    new_cache_slots.index_put_({valid_indices_on_device},
-                               new_slotid.to(new_cache_slots.scalar_type()));
-  }
-  return new_cache_slots;
-}
-
-#endif
-
 bool WorkerImpl::model_supports_model_cp() const {
   if (model_cp_capable_computed_) {
     return model_cp_capable_;

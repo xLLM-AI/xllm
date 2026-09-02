@@ -114,3 +114,25 @@ def get_execution_buffer(key: tuple[object, ...], factory: Callable[[], torch.Te
     if not isinstance(buffer, torch.Tensor):
         raise TypeError("execution buffer must be a torch.Tensor")
     return buffer
+
+
+def copy_into_execution_buffer(key: tuple[object, ...], source: torch.Tensor) -> torch.Tensor:
+    """Copy ``source`` into a graph-owned buffer with a stable address.
+
+    ACL graph replay does not re-run Python. Host-updated metadata must land in
+    the same storage the captured kernels recorded. Eager execution has no
+    ``execution_state`` and returns ``source`` unchanged.
+    """
+    state = get_forward_context().execution_state
+    if state is None:
+        return source
+    buffer = get_execution_buffer(key, lambda: torch.empty_like(source))
+    if buffer.shape != source.shape or buffer.dtype != source.dtype or buffer.device != source.device:
+        raise RuntimeError(
+            "execution buffer shape/dtype/device changed for key "
+            f"{key}: got {tuple(buffer.shape)} {buffer.dtype} {buffer.device}, "
+            f"expected {tuple(source.shape)} {source.dtype} {source.device}"
+        )
+    if buffer.data_ptr() != source.data_ptr():
+        buffer.copy_(source, non_blocking=True)
+    return buffer

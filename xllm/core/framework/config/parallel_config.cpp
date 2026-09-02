@@ -107,6 +107,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(layerwise_split_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cfg_size);
@@ -127,6 +128,8 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, layerwise_split_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, kv_split_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, sp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

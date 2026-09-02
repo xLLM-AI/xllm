@@ -793,6 +793,7 @@ class DecodeAclGraphRunner(BaseRunner):
         # Padded lanes must remain valid inputs for sparse MLA tiling.  Their
         # token and slot mapping are dummy values, so one KV token is safe.
         if padded_batch_size > batch_size:
+            static_metadata.slot_mapping[batch_size:].fill_(-1)
             entry.kv_seq_lens_delta[batch_size:].fill_(1)
 
     def _fill_host_metadata(

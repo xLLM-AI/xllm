@@ -173,6 +173,21 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          global_world_size,
                          cp_group_index);
     }
+    const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+    if (kv_split_size > 1) {
+      const int32_t dcp_rank = parallel_args.kv_split_rank();
+      const int32_t dcp_group_index =
+          global_rank % (global_world_size / kv_split_size);
+      init_process_group("dcp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         dcp_rank,
+                         kv_split_size,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         dcp_group_index);
+    }
   }
   if (layerwise_split_size_ > 1) {
     CHECK_EQ(tp_size_ % layerwise_split_size_, 0)

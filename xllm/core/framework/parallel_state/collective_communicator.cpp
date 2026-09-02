@@ -433,11 +433,13 @@ void CollectiveCommunicator::create_process_groups(
       << ") must be divisible by dp_size * cp_size (" << dp_size << " * "
       << normalized_cp_size << ")";
   const int32_t tp_size = world_size / (dp_size * normalized_cp_size);
-  const int32_t kv_split_size = parallel_args_->kv_split_size_effective();
   std::optional<parallel_state::ContextParallelTopology> cp_topology;
-  if (normalized_cp_size > 1 || kv_split_size > 1) {
-    cp_topology.emplace(
-        global_rank, world_size, dp_size, normalized_cp_size, kv_split_size);
+  if (normalized_cp_size > 1) {
+    cp_topology.emplace(global_rank,
+                        world_size,
+                        dp_size,
+                        normalized_cp_size,
+                        parallel_args_->kv_split_size_effective());
   }
   CHECK_GT(tp_size, 0) << "attention tp_size must be positive: world_size="
                        << world_size << ", dp_size=" << dp_size
