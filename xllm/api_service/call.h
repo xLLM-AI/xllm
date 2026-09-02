@@ -22,19 +22,6 @@ limitations under the License.
 
 namespace xllm {
 
-template <typename Request>
-std::string request_body_x_request_id(const Request* request) {
-  if constexpr (requires(const Request& value) {
-                  value.has_x_request_id();
-                  value.x_request_id();
-                }) {
-    if (request != nullptr && request->has_x_request_id()) {
-      return request->x_request_id();
-    }
-  }
-  return "";
-}
-
 class Call {
  public:
   Call(brpc::Controller* controller,

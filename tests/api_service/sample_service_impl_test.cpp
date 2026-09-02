@@ -225,6 +225,17 @@ TEST(SampleServiceImplTest,
   EXPECT_EQ(params.sample_slots[1].token_position, 3);
 }
 
+TEST(SampleServiceImplTest,
+     BuildRequestParamsPrefixesGeneratedIdWithXRequestId) {
+  CharTokenizer tokenizer;
+  auto request = make_valid_request();
+
+  RequestParams params;
+  ASSERT_TRUE(sample_service_internal::build_request_params(
+      request, tokenizer, &params, /*x_request_id=*/"client-id"));
+  EXPECT_EQ(params.request_id, "sample-client-id");
+}
+
 TEST(SampleServiceImplTest, BuildRequestParamsRejectsUnstableLiteralToken) {
   UnstableLiteralTokenizer tokenizer;
   auto request = make_valid_request();

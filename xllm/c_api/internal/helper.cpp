@@ -23,20 +23,15 @@ limitations under the License.
 #include "core/framework/config/rec_config.h"
 #include "core/util/env_var.h"
 #include "core/util/rec_model_utils.h"
-#include "core/util/uuid.h"
 
 namespace xllm {
 namespace helper {
 namespace {
-thread_local ShortUUID short_uuid;
 static std::atomic<bool> g_glog_inited = false;
 static pthread_mutex_t g_log_init_mutex = PTHREAD_MUTEX_INITIALIZER;
 }  // namespace
 
-std::string generate_request_id() {
-  return "xllm-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
+std::string generate_request_id() { return xllm::generate_request_id("xllm-"); }
 
 void init_log(const std::string& log_dir) {
   if (g_glog_inited.load(std::memory_order_acquire)) {

@@ -20,6 +20,7 @@ cc_library(
     flash_comm1_context.h
   SRCS
     etcd_client.cpp
+    instance_name.cpp
     metrics.cpp
     $<$<BOOL:${USE_NPU}>:mspti_helper.cpp>
     options.cpp

@@ -15,7 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 
 namespace xllm {
 
@@ -28,12 +31,15 @@ class InstanceName {
 
   void set_name(const std::string& name) {
     name_ = name;
-    name_hash_ = std::to_string(std::hash<std::string>{}(name_));
+    name_hash_value_ = static_cast<uint64_t>(std::hash<std::string>{}(name_));
+    name_hash_ = std::to_string(name_hash_value_);
   }
 
   std::string get_name() const { return name_; }
 
   std::string get_name_hash() const { return name_hash_; }
+
+  uint64_t get_name_hash_value() const { return name_hash_value_; }
 
  private:
   InstanceName() {}
@@ -43,6 +49,15 @@ class InstanceName {
  private:
   std::string name_;
   std::string name_hash_;
+  uint64_t name_hash_value_ = 0;
 };
+
+// Unique per-process request id. High 16 bits mix the instance hash so
+// concurrent instances are unlikely to collide; low 48 bits are a counter.
+int64_t next_request_id();
+
+// `{prefix}{id}`, e.g. "cmpl-123". Formats `next_request_id()` once for
+// OpenAI-compatible / HTTP string fields.
+std::string generate_request_id(std::string_view prefix);
 
 }  // namespace xllm

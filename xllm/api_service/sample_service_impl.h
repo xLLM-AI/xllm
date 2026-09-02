@@ -40,7 +40,8 @@ Status validate_runtime_config(bool enable_schedule_overlap);
 
 bool build_request_params(const proto::SampleRequest& request,
                           const Tokenizer& tokenizer,
-                          RequestParams* request_params);
+                          RequestParams* request_params,
+                          const std::string& x_request_id = "");
 
 bool build_empty_response(const proto::SampleRequest& request,
                           const Tokenizer& tokenizer,

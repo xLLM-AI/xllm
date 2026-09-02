@@ -20,7 +20,6 @@ limitations under the License.
 #include <string_view>
 
 #include "core/common/instance_name.h"
-#include "core/util/uuid.h"
 
 namespace xllm::api_service {
 
@@ -68,10 +67,27 @@ std::string get_header_x_request_id(const brpc::Controller* controller) {
   return x_request_id;
 }
 
+std::string get_header_x_request_time(const brpc::Controller* controller) {
+  if (controller == nullptr) {
+    return "";
+  }
+
+  const std::string* request_time =
+      controller->http_request().GetHeader("x-request-time");
+  if (request_time != nullptr) {
+    return *request_time;
+  }
+  const std::string* request_time_ms =
+      controller->http_request().GetHeader("x-request-timems");
+  if (request_time_ms != nullptr) {
+    return *request_time_ms;
+  }
+  return "";
+}
+
+// Bare numeric id shared by the HTTP header and OpenAI JSON id suffix.
 std::string generate_x_request_id() {
-  thread_local ShortUUID short_uuid;
-  return "req-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
+  return generate_request_id(/*prefix=*/"");
 }
 
 std::string resolve_x_request_id(const brpc::Controller* controller,
@@ -94,7 +110,12 @@ std::string ensure_http_x_request_id(brpc::Controller* controller) {
   if (controller == nullptr) {
     return generate_x_request_id();
   }
-  std::string x_request_id = resolve_x_request_id(controller);
+  std::string x_request_id =
+      get_valid_header(controller->http_response(), "x-request-id");
+  if (!x_request_id.empty()) {
+    return x_request_id;
+  }
+  x_request_id = resolve_x_request_id(controller);
   controller->http_response().SetHeader("x-request-id", x_request_id);
   return x_request_id;
 }

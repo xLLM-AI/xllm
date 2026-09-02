@@ -28,6 +28,7 @@ limitations under the License.
 #include "anthropic.pb.h"
 #include "api_service/anthropic_json.h"
 #include "api_service/call.h"
+#include "api_service/request_id.h"
 #include "core/common/types.h"
 #include "core/util/verbose_trace_logger.h"
 
@@ -45,7 +46,9 @@ class StreamCall : public Call {
              Response* response,
              bool use_arena = false,
              bool is_http_request = false)
-      : Call(controller, request_body_x_request_id(request), is_http_request),
+      : Call(controller,
+             api_service::request_body_x_request_id(request),
+             is_http_request),
         done_(done),
         request_(request),
         response_(response),

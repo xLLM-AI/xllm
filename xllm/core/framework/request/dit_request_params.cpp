@@ -22,18 +22,10 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/util/utils.h"
-#include "core/util/uuid.h"
 #include "request.h"
 
 namespace xllm {
 namespace {
-thread_local ShortUUID short_uuid;
-
-std::string generate_request_id(const std::string& prefix) {
-  return prefix + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
-
 // Decode a base64-encoded WAV/audio blob into a float32 CPU tensor of shape
 // (1, num_samples) at the given sample rate (mono).
 // Returns true on success and writes to `out`; logs ERROR and returns false

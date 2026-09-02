@@ -21,7 +21,6 @@ limitations under the License.
 #include "core/distributed_runtime/llm_master.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
-#include "core/util/uuid.h"
 #include "types.h"
 
 namespace xllm {
@@ -39,12 +38,9 @@ struct LLMCore {
 
 namespace detail {
 namespace {
-thread_local ShortUUID short_uuid;
 
-std::string generate_request_id() {
-  return "xllm-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
+std::string generate_request_id() { return xllm::generate_request_id("xllm-"); }
+
 }  // namespace
 
 enum class InterfaceType { COMPLETIONS, CHAT_COMPLETIONS };

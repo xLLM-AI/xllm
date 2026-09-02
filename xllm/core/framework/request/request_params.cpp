@@ -16,43 +16,17 @@ limitations under the License.
 
 #include "request_params.h"
 
+#include <string_view>
 #include <type_traits>
 
 #include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/service_config.h"
-#include "core/util/uuid.h"
 #include "request.h"
 
 namespace xllm {
 namespace {
-thread_local ShortUUID short_uuid;
-
-std::string generate_completion_request_id() {
-  return "cmpl-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
-
-std::string generate_embedding_request_id() {
-  return "embeddingcmpl-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
-
-std::string generate_chat_request_id() {
-  return "chatcmpl-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
-
-std::string generate_rerank_request_id() {
-  return "rerankcmpl-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
-
-std::string generate_anthropic_chat_request_id() {
-  return "anthropiccmpl-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
 
 void apply_beam_search_logprobs_default(
     RequestParams& params,
@@ -125,20 +99,65 @@ std::vector<JsonTool> handle_tools(
   return tools;
 }
 
+template <typename Request>
+void assign_x_request_identity(RequestParams& params,
+                               const Request& request,
+                               const std::string& x_rid,
+                               const std::string& x_rtime) {
+  params.x_request_id = x_rid;
+  params.x_request_time = x_rtime;
+  if constexpr (requires(const Request& value) {
+                  value.has_x_request_id();
+                  value.x_request_id();
+                }) {
+    if (params.x_request_id.empty() && request.has_x_request_id() &&
+        !request.x_request_id().empty()) {
+      params.x_request_id = request.x_request_id();
+    }
+  }
+  if constexpr (requires(const Request& value) {
+                  value.has_request_id();
+                  value.request_id();
+                }) {
+    if (params.x_request_id.empty() && request.has_request_id() &&
+        !request.request_id().empty()) {
+      params.x_request_id = request.request_id();
+    }
+  }
+  if constexpr (requires(const Request& value) {
+                  value.has_x_request_time();
+                  value.x_request_time();
+                }) {
+    if (params.x_request_time.empty() && request.has_x_request_time()) {
+      params.x_request_time = request.x_request_time();
+    }
+  }
+}
+
+// One client-facing base id (header / body / generated), then OpenAI JSON
+// id = `{prefix}{base}`, matching vLLM's chatcmpl-{X-Request-Id}.
+template <typename Request>
+void assign_openai_request_ids(RequestParams& params,
+                               const Request& request,
+                               const std::string& x_rid,
+                               const std::string& x_rtime,
+                               std::string_view prefix) {
+  assign_x_request_identity(params, request, x_rid, x_rtime);
+  if (params.x_request_id.empty()) {
+    params.x_request_id = generate_request_id(/*prefix=*/"");
+  }
+  params.request_id.clear();
+  params.request_id.reserve(prefix.size() + params.x_request_id.size());
+  params.request_id.append(prefix);
+  params.request_id.append(params.x_request_id);
+}
+
 }  // namespace
 
 RequestParams::RequestParams(const proto::CompletionRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_completion_request_id();
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
-  if (x_request_id.empty() && request.has_x_request_id()) {
-    x_request_id = request.x_request_id();
-  }
-  if (x_request_time.empty() && request.has_x_request_time()) {
-    x_request_time = request.x_request_time();
-  }
+  assign_openai_request_ids(*this, request, x_rid, x_rtime, "cmpl-");
   if (request.has_offline()) {
     offline = request.offline();
   }
@@ -337,9 +356,6 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
       }
     }
   }
-  if (request.has_request_id()) {
-    params.request_id = request.request_id();
-  }
 
   if (request.has_offline()) {
     params.offline = request.offline();
@@ -475,15 +491,7 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
 RequestParams::RequestParams(const proto::ChatRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_chat_request_id();
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
-  if (x_request_id.empty() && request.has_x_request_id()) {
-    x_request_id = request.x_request_id();
-  }
-  if (x_request_time.empty() && request.has_x_request_time()) {
-    x_request_time = request.x_request_time();
-  }
+  assign_openai_request_ids(*this, request, x_rid, x_rtime, "chatcmpl-");
 
   init_from_chat_request(*this, request);
 }
@@ -491,9 +499,7 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
 RequestParams::RequestParams(const proto::MMChatRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_chat_request_id();
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
+  assign_openai_request_ids(*this, request, x_rid, x_rtime, "chatcmpl-");
 
   init_from_chat_request(*this, request);
 }
@@ -501,7 +507,7 @@ RequestParams::RequestParams(const proto::MMChatRequest& request,
 RequestParams::RequestParams(const proto::EmbeddingRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_embedding_request_id();
+  assign_openai_request_ids(*this, request, x_rid, x_rtime, "embeddingcmpl-");
   if (request.has_service_request_id()) {
     service_request_id = request.service_request_id();
   }
@@ -510,8 +516,6 @@ RequestParams::RequestParams(const proto::EmbeddingRequest& request,
   } else {
     add_special_tokens = true;
   }
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
   is_embeddings = true;
   max_tokens = 1;
   streaming = false;
@@ -522,8 +526,7 @@ RequestParams::RequestParams(const proto::MMEmbeddingRequest& request,
   if (request.has_service_request_id()) {
     service_request_id = request.service_request_id();
   }
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
+  assign_x_request_identity(*this, request, x_rid, x_rtime);
   is_embeddings = true;
   max_tokens = 1;
   streaming = false;
@@ -532,12 +535,10 @@ RequestParams::RequestParams(const proto::MMEmbeddingRequest& request,
 RequestParams::RequestParams(const proto::RerankRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_rerank_request_id();
+  assign_openai_request_ids(*this, request, x_rid, x_rtime, "rerankcmpl-");
   if (request.has_service_request_id()) {
     service_request_id = request.service_request_id();
   }
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
   max_tokens = 1;
   streaming = false;
   if (::xllm::ModelConfig::get_instance().enable_qwen3_reranker()) {
@@ -550,15 +551,7 @@ RequestParams::RequestParams(const proto::RerankRequest& request,
 RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_anthropic_chat_request_id();
-  x_request_id = x_rid;
-  x_request_time = x_rtime;
-  if (x_request_id.empty() && request.has_x_request_id()) {
-    x_request_id = request.x_request_id();
-  }
-  if (x_request_time.empty() && request.has_x_request_time()) {
-    x_request_time = request.x_request_time();
-  }
+  assign_openai_request_ids(*this, request, x_rid, x_rtime, "anthropiccmpl-");
 
   if (request.has_service_request_id()) {
     service_request_id = request.service_request_id();

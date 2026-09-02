@@ -23,23 +23,16 @@ limitations under the License.
 #include <condition_variable>
 #include <mutex>
 
-#include "common/instance_name.h"
+#include "core/common/instance_name.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
 #include "core/framework/request/sample_slot.h"
-#include "core/util/uuid.h"
 
 namespace xllm {
 namespace {
-thread_local ShortUUID short_uuid;
 const std::string kSelectorMatchFinishReason = "selector_match";
 const std::string kEmptyLogprobsFinishReason = "empty_logprobs";
-
-std::string generate_sample_request_id() {
-  return "sample-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
 
 void initialize_response(const std::string& request_id,
                          const std::string& model,
@@ -161,14 +154,20 @@ Status validate_runtime_config(bool enable_schedule_overlap) {
 
 bool build_request_params(const proto::SampleRequest& request,
                           const Tokenizer& tokenizer,
-                          RequestParams* request_params) {
+                          RequestParams* request_params,
+                          const std::string& x_request_id) {
   if (request_params == nullptr) {
     return false;
   }
 
   RequestParams params;
-  params.request_id = request.has_request_id() ? request.request_id()
-                                               : generate_sample_request_id();
+  if (request.has_request_id() && !request.request_id().empty()) {
+    params.request_id = request.request_id();
+  } else if (!x_request_id.empty()) {
+    params.request_id = "sample-" + x_request_id;
+  } else {
+    params.request_id = generate_request_id("sample-");
+  }
   params.logprobs = true;
   params.top_logprobs =
       request.has_logprobs() ? request.logprobs() : kDefaultSampleLogprobs;
@@ -397,7 +396,10 @@ void SampleServiceImpl::process_async_impl(std::shared_ptr<SampleCall> call) {
 
   RequestParams request_params;
   if (!sample_service_internal::build_request_params(
-          request, master_->tokenizer(), &request_params)) {
+          request,
+          master_->tokenizer(),
+          &request_params,
+          call->get_x_request_id())) {
     call->finish_with_error(StatusCode::UNKNOWN,
                             "Failed to build sample selector runtime mapping");
     return;

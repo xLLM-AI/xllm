@@ -13,7 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "call.h"
+#include "api_service/call.h"
+
+#include <utility>
 
 #include "api_service/request_id.h"
 #include "core/common/constants.h"
@@ -29,13 +31,7 @@ Call::Call(brpc::Controller* controller,
 }
 
 void Call::init(std::string body_x_request_id, bool is_http_request) {
-  if (controller_->http_request().GetHeader("x-request-time")) {
-    x_request_time_ = *controller_->http_request().GetHeader("x-request-time");
-  } else if (controller_->http_request().GetHeader("x-request-timems")) {
-    x_request_time_ =
-        *controller_->http_request().GetHeader("x-request-timems");
-  }
-
+  x_request_time_ = api_service::get_header_x_request_time(controller_);
   x_request_id_ =
       api_service::resolve_x_request_id(controller_, body_x_request_id);
   if (is_http_request) {

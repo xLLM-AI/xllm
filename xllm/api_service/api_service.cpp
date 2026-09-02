@@ -200,7 +200,7 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
       google::protobuf::Arena::CreateMessage<proto::CompletionResponse>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
 
   auto [preprocess_status, processed_json] =
       preprocess_completion_prompt(ctrl->request_attachment().to_string());
@@ -279,7 +279,7 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   if (!sample_service_impl_) {
     ctrl->SetFailed(kSampleNotSupportedError);
     return;
@@ -455,7 +455,7 @@ void APIService::ChatCompletionsHttp(
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
 
   if (!chat_completions_handler_) {
     LOG(ERROR) << "No chat completions handler registered";
@@ -528,7 +528,7 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
           arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
   butil::IOBuf& buf = ctrl->request_attachment();
@@ -607,7 +607,7 @@ void APIService::ImageGenerationHttp(
           arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
   butil::IOBuf& buf = ctrl->request_attachment();
@@ -666,7 +666,7 @@ void APIService::AudioGenerationHttp(
           arena);
 
   brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
   butil::IOBuf& buf = ctrl->request_attachment();
@@ -725,7 +725,7 @@ void APIService::TextGenerationHttp(
           arena);
 
   brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
   butil::IOBuf& buf = ctrl->request_attachment();
@@ -784,7 +784,7 @@ void APIService::VideoGenerationHttp(
           arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
   butil::IOBuf& buf = ctrl->request_attachment();
@@ -835,7 +835,7 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
       google::protobuf::Arena::CreateMessage<proto::RerankResponse>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
   butil::IOBuf& buf = ctrl->request_attachment();
@@ -1000,7 +1000,7 @@ void APIService::AnthropicMessagesHttp(
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
-  api_service::ensure_http_x_request_id(ctrl);
+  api_service::HttpXRequestIdGuard x_request_id_guard(ctrl);
 
   if (anthropic_service_impl_) {
     handle_anthropic_messages(

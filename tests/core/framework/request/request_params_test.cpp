@@ -18,6 +18,8 @@ limitations under the License.
 #include <google/protobuf/util/json_util.h>
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
@@ -307,6 +309,67 @@ TEST(RequestParamsTest, AnthropicToolSchemaUsesPlainJson) {
   nlohmann::json expected_tool_choice = {
       {"type", "function"}, {"function", {{"name", "list_files"}}}};
   EXPECT_EQ(nlohmann::json::parse(params.tool_choice), expected_tool_choice);
+}
+
+TEST(RequestParamsTest, CompletionUsesXRequestIdAsOpenAiJsonIdSuffix) {
+  proto::CompletionRequest request;
+  RequestParams params(request, /*x_rid=*/"client-id", /*x_rtime=*/"");
+
+  EXPECT_EQ(params.x_request_id, "client-id");
+  EXPECT_EQ(params.request_id, "cmpl-client-id");
+}
+
+TEST(RequestParamsTest, CompletionUsesBodyRequestIdAsOpenAiJsonIdSuffix) {
+  proto::CompletionRequest request;
+  request.set_request_id("proto-id");
+  RequestParams params(request, /*x_rid=*/"", /*x_rtime=*/"");
+
+  EXPECT_EQ(params.x_request_id, "proto-id");
+  EXPECT_EQ(params.request_id, "cmpl-proto-id");
+}
+
+TEST(RequestParamsTest, CompletionGeneratesSharedNumericBaseId) {
+  proto::CompletionRequest request;
+  RequestParams params(request, /*x_rid=*/"", /*x_rtime=*/"");
+
+  EXPECT_FALSE(params.x_request_id.empty());
+  EXPECT_EQ(params.request_id, std::string("cmpl-") + params.x_request_id);
+}
+
+TEST(RequestParamsTest, ChatUsesBodyRequestIdAsOpenAiJsonIdSuffix) {
+  proto::ChatRequest request;
+  request.set_request_id("client-id");
+  RequestParams params(request, /*x_rid=*/"", /*x_rtime=*/"");
+
+  EXPECT_EQ(params.x_request_id, "client-id");
+  EXPECT_EQ(params.request_id, "chatcmpl-client-id");
+}
+
+TEST(RequestParamsTest, ChatHeaderIdWinsOverBodyRequestId) {
+  proto::ChatRequest request;
+  request.set_request_id("body-id");
+  RequestParams params(request, /*x_rid=*/"header-id", /*x_rtime=*/"");
+
+  EXPECT_EQ(params.x_request_id, "header-id");
+  EXPECT_EQ(params.request_id, "chatcmpl-header-id");
+}
+
+TEST(RequestParamsTest, ChatBodyXRequestIdWinsOverBodyRequestId) {
+  proto::ChatRequest request;
+  request.set_x_request_id("x-id");
+  request.set_request_id("body-id");
+  RequestParams params(request, /*x_rid=*/"", /*x_rtime=*/"");
+
+  EXPECT_EQ(params.x_request_id, "x-id");
+  EXPECT_EQ(params.request_id, "chatcmpl-x-id");
+}
+
+TEST(RequestParamsTest, ChatAlwaysPrefixesOpenAiJsonId) {
+  proto::ChatRequest request;
+  RequestParams params(request, /*x_rid=*/"chatcmpl-already", /*x_rtime=*/"");
+
+  EXPECT_EQ(params.x_request_id, "chatcmpl-already");
+  EXPECT_EQ(params.request_id, "chatcmpl-chatcmpl-already");
 }
 
 }  // namespace
