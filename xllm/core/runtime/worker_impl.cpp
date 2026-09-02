@@ -150,22 +150,36 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-// Draft target_layer_ids are used directly as post-layer capture ids.
 std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path) {
   JsonReader reader;
   const std::string config_path = model_weights_path + "/config.json";
   CHECK(reader.parse(config_path))
       << "Failed to parse block-diffusion draft config: " << config_path;
+
+  // Legacy xLLM/vLLM draft configs already use 0-based post-layer output
+  // indices, which match ModelArgs::layers_to_capture directly.
   std::vector<int32_t> capture_layer_ids =
       reader.value_or<std::vector<int32_t>>(
           std::vector<std::string>{"dspark_target_layer_ids",
                                    "target_layer_ids",
                                    "dflash_config.target_layer_ids"},
           std::vector<int32_t>{});
+  if (!capture_layer_ids.empty()) {
+    return capture_layer_ids;
+  }
+
+  // Speculators uses hidden-state boundary indices (0=embedding, N=after
+  // decoder N-1); shift to xLLM's 0-based post-layer capture contract.
+  capture_layer_ids = reader.value_or<std::vector<int32_t>>(
+      "aux_hidden_state_layer_ids", std::vector<int32_t>{});
+  for (int32_t& layer_id : capture_layer_ids) {
+    --layer_id;
+  }
   CHECK(!capture_layer_ids.empty())
       << "Block-diffusion draft config requires dspark_target_layer_ids, "
-         "target_layer_ids, or dflash_config.target_layer_ids: "
+         "target_layer_ids, dflash_config.target_layer_ids, or "
+         "aux_hidden_state_layer_ids: "
       << config_path;
   return capture_layer_ids;
 }

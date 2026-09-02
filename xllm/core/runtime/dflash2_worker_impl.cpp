@@ -127,25 +127,6 @@ DFlashWorkerImpl::DraftBlock DFlash2WorkerImpl::run_decode_draft(
   return draft_block;
 }
 
-KVCacheShape DFlash2WorkerImpl::draft_kv_cache_shape(
-    const KVCacheShape& target_shape) const {
-  // The draft's paged cache keeps the target's block count but resizes blocks
-  // to the draft's own geometry (KVCacheShape derives heads/dims from the
-  // draft ModelArgs and the DP-local TP width).
-  const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-  const ParallelArgs& parallel_args = parallel_args_;
-  CHECK_GT(parallel_args.dp_size(), 0);
-  CHECK_GT(parallel_args.cp_size(), 0);
-  const int64_t dp_local_tp_size =
-      parallel_args.world_size() /
-      (parallel_args.dp_size() * parallel_args.cp_size());
-  CHECK_GT(dp_local_tp_size, 0);
-  KVCacheCapacity draft_capacity;
-  draft_capacity.n_blocks(target_shape.key_cache_shape()[0])
-      .block_size(options_.block_size());
-  return KVCacheShape(draft_capacity, draft_args, dp_local_tp_size);
-}
-
 DFlash2WorkerImpl::BlockSampleOutput DFlash2WorkerImpl::sample_path(
     const DFlash2CandidateOutput& candidates,
     const SamplingParameters& sampling_params,

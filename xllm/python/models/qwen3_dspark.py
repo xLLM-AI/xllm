@@ -27,7 +27,7 @@ from xllm.python.models.qwen3_dflash import (
     DFlashQwen3Config,
     DFlashQwen3Model,
 )
-from xllm.python.models.weight_utils import WeightLoader
+from xllm.python.models.weight_utils import maybe_load_own_lm_head
 
 
 @dataclass
@@ -80,13 +80,18 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         self.model.load_weights(state_dicts, tp_rank, tp_size)
-
-        loader = WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("", "model."))
+        loader = maybe_load_own_lm_head(self, state_dicts, tp_rank, tp_size)
         loader.copy_replicated("markov_head.markov_w1.weight")
         loader.copy_replicated("markov_head.markov_w2.weight")
         if self.confidence_head is not None:
             loader.copy_replicated("confidence_head.proj.weight")
             loader.copy_replicated("confidence_head.proj.bias")
+
+    def adapt_weights_for_reference_model(
+        self,
+        reference_model_path: str,
+    ) -> None:
+        self.model.adapt_weights_for_reference_model(reference_model_path)
 
     def write_context_kv(
         self,

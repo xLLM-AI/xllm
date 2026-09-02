@@ -17,17 +17,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from xllm.python import distributed, kernels
-from xllm.python.layers import RMSNorm
+from xllm.python.layers import HiddenParallelEmbedding, RMSNorm
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.qwen3 import Qwen3Config, Qwen3Model, load_qwen3_backbone
-from xllm.python.models.weight_utils import WeightLoader, kv_replica_shard
+from xllm.python.models.weight_utils import (
+    kv_replica_shard,
+    load_own_weight,
+    maybe_load_own_lm_head,
+)
+
+
+def _load_reference_quarot_rotation(
+    reference_model_path: str,
+) -> torch.Tensor | None:
+    if not reference_model_path:
+        return None
+
+    rotation_path = Path(reference_model_path) / "optional" / "quarot.safetensors"
+    if not rotation_path.is_file():
+        return None
+
+    from safetensors import safe_open
+
+    with safe_open(str(rotation_path), framework="pt", device="cpu") as f:
+        return f.get_tensor("global_rotation")
 
 
 @dataclass
@@ -112,6 +133,22 @@ class DFlashContextProjection(nn.Module):
             )
         return output
 
+    def apply_input_rotation(self, rotation: torch.Tensor) -> None:
+        """Fuse a reference-model QuaRot basis into every FC input block."""
+        hidden_size = rotation.size(0)
+        with torch.no_grad():
+            weight = self.weight
+            # target_hidden concatenates one hidden_size-wide vector per
+            # captured layer. If the reference emits h @ Q, replacing each
+            # checkpoint block W with W @ Q preserves h @ W.T.
+            flat_weight = weight.float().reshape(-1, hidden_size)
+            rotation = rotation.to(
+                device=weight.device,
+                dtype=torch.float32,
+            )
+            rotated_weight = torch.matmul(flat_weight, rotation).reshape_as(weight)
+            self.weight.copy_(rotated_weight)
+
 
 class DFlashQwen3Model(Qwen3Model):
     def __init__(self, cfg: DFlashQwen3Config, dtype: torch.dtype, device: torch.device) -> None:
@@ -123,6 +160,8 @@ class DFlashQwen3Model(Qwen3Model):
             create_embedding=False,
         )
         self.cfg = cfg
+        self.dtype = dtype
+        self.device = device
         self.fc = DFlashContextProjection(
             cfg.hidden_size,
             cfg.tp_size,
@@ -232,7 +271,24 @@ class DFlashQwen3Model(Qwen3Model):
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         cfg = self.cfg
-        loader = WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("", "model."))
+        # Load the draft's own embed_tokens (trained mask-token row) when the
+        # checkpoint ships one; else None -> C++ bridge shares the target's.
+        loader = load_own_weight(
+            self,
+            state_dicts,
+            tp_rank,
+            tp_size,
+            "embed_tokens.weight",
+            "embed_tokens",
+            lambda: HiddenParallelEmbedding(
+                cfg.vocab_size,
+                cfg.hidden_size // tp_size,
+                tp_size,
+                dtype=self.dtype,
+                device=self.device,
+            ),
+            shard_dim=1,
+        )
         kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
 
         self.fc.load_weight(loader.load_tensor("fc.weight"), tp_rank)
@@ -250,6 +306,14 @@ class DFlashQwen3Model(Qwen3Model):
         loader.copy_replicated("norm.weight")
         self._build_context_kv_buffers()
 
+    def adapt_weights_for_reference_model(
+        self,
+        reference_model_path: str,
+    ) -> None:
+        rotation = _load_reference_quarot_rotation(reference_model_path)
+        if rotation is not None:
+            self.fc.apply_input_rotation(rotation)
+
 
 class DFlashQwen3ForCausalLM(PyModelBase):
     def __init__(self, config: dict) -> None:
@@ -263,6 +327,13 @@ class DFlashQwen3ForCausalLM(PyModelBase):
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         self.model.load_weights(state_dicts, tp_rank, tp_size)
+        maybe_load_own_lm_head(self, state_dicts, tp_rank, tp_size)
+
+    def adapt_weights_for_reference_model(
+        self,
+        reference_model_path: str,
+    ) -> None:
+        self.model.adapt_weights_for_reference_model(reference_model_path)
 
     def write_context_kv(
         self,

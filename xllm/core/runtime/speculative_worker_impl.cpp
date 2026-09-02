@@ -22,7 +22,10 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/kv_cache/kv_cache_capacity.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/framework/kv_cache/kv_cache_shape.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/speculative/spec_input_builder.h"
@@ -39,6 +42,30 @@ int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
   const int64_t dp_size = std::max<int64_t>(parallel_args.dp_size(), 1);
   const int64_t cp_size = std::max<int64_t>(parallel_args.cp_size(), 1);
   return std::max<int64_t>(parallel_args.world_size() / dp_size / cp_size, 1);
+}
+
+KVCacheShape SpeculativeWorkerImpl::draft_kv_cache_shape(
+    const KVCacheShape& target_kv_cache_shape) const {
+  if (draft_impl_ == nullptr) {
+    return target_kv_cache_shape;
+  }
+  return build_draft_kv_cache_shape(target_kv_cache_shape);
+}
+
+KVCacheShape SpeculativeWorkerImpl::build_draft_kv_cache_shape(
+    const KVCacheShape& target_kv_cache_shape,
+    int64_t draft_world_size) const {
+  CHECK(!target_kv_cache_shape.key_cache_shape().empty())
+      << "target KV cache shape must contain key cache shape";
+  if (draft_world_size <= 0) {
+    draft_world_size =
+        get_dp_local_tp_size(draft_impl_->context_.get_parallel_args());
+  }
+  KVCacheCapacity draft_capacity;
+  draft_capacity.n_blocks(target_kv_cache_shape.key_cache_shape()[0])
+      .block_size(options_.block_size());
+  return KVCacheShape(
+      draft_capacity, draft_impl_->context_.get_model_args(), draft_world_size);
 }
 
 namespace {

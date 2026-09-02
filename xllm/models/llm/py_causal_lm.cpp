@@ -40,10 +40,16 @@ namespace detail {
 
 void share_python_model_weights(py::object& draft_model,
                                 const py::object& target_model) {
-  draft_model.attr("lm_head") = target_model.attr("lm_head");
+  // Keep the draft's own head/embedding when the checkpoint ships them (DSpark
+  // carries a trained mask-token basis); borrow the target's only when None.
+  if (draft_model.attr("lm_head").is_none()) {
+    draft_model.attr("lm_head") = target_model.attr("lm_head");
+  }
   py::object draft_body = draft_model.attr("model");
   py::object target_body = target_model.attr("model");
-  draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+  if (draft_body.attr("embed_tokens").is_none()) {
+    draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+  }
 }
 
 }  // namespace detail
@@ -258,6 +264,14 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   py_model_.attr("load_weights")(py_state_dicts,
                                  static_cast<int32_t>(tp_rank_),
                                  static_cast<int32_t>(tp_size_));
+  const std::string& reference_model_path =
+      loader->reference_model_weights_path();
+  if (!reference_model_path.empty()) {
+    // Quantized reference models (e.g. QuaRot) transform the residual basis the
+    // draft trained against; fuse that transform into the draft's weights.
+    py_model_.attr("adapt_weights_for_reference_model")(
+        py::str(reference_model_path));
+  }
 }
 
 ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,

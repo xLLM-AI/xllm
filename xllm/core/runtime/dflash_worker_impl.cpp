@@ -350,11 +350,6 @@ std::vector<int64_t> build_accepted_context_rows(
 
 }  // namespace
 
-KVCacheShape DFlashWorkerImpl::draft_kv_cache_shape(
-    const KVCacheShape& target_shape) const {
-  return target_shape;
-}
-
 DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
@@ -532,7 +527,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         static_cast<int64_t>(target_args.layers_to_capture().size());
     CHECK_GT(num_target_layers, 0)
         << "Block-diffusion draft config requires dspark_target_layer_ids, "
-           "target_layer_ids, or dflash_config.target_layer_ids.";
+           "target_layer_ids, dflash_config.target_layer_ids, or "
+           "aux_hidden_state_layer_ids.";
     expected_context_hidden_size_ =
         static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
     draft_sas_mode_ = dflash_detail::classify_dspark_sas_mode(

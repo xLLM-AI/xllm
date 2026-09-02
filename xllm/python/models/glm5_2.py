@@ -53,6 +53,7 @@ from xllm.python.model_executor.cp_utils import (
     cp_shard_rows,
 )
 from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP as Glm52MLP,
@@ -136,6 +137,7 @@ class Glm52Config:
     indexer_rope_interleave: bool = True
     num_nextn_predict_layers: int = 0
     index_share_for_mtp_iteration: bool = False
+    layers_to_capture: tuple[int, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict) -> Glm52Config:
@@ -238,6 +240,7 @@ class Glm52Config:
             indexer_rope_interleave=bool(pick("indexer_rope_interleave", default=True)),
             num_nextn_predict_layers=int(pick("num_nextn_predict_layers", default=0)),
             index_share_for_mtp_iteration=bool(pick("index_share_for_mtp_iteration", default=False)),
+            layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
         )
         cfg._resolve_indexer_types()
         cfg._resolve_mlp_layer_types()
@@ -641,8 +644,11 @@ class Glm52Model(nn.Module):
             dtype=dtype,
             device=device,
         )
+        self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input_ids: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         hidden = self.embed_tokens(input_ids)
         positions = positions.to(torch.int64).contiguous()
         cp_context = get_forward_context().cp_context
@@ -652,12 +658,14 @@ class Glm52Model(nn.Module):
         cos_sin_cache = self.rotary.cos_sin_cache
         residual: torch.Tensor | None = None
         prev_topk: torch.Tensor | None = None
-        for layer in self.layers:
+        aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden)
+        for i, layer in enumerate(self.layers):
             hidden, residual, prev_topk = layer(hidden, residual, positions, cos_sin_cache, prev_topk)
-        hidden, last_hidden = self.norm(hidden, residual)
+            self.aux_hidden_capture.capture_layer(i, hidden, residual, aux_hidden_buffer)
+        hidden, _ = self.norm(hidden, residual)
         if cp_context is not None:
             hidden = cp_merge_rows(hidden, cp_context)
-        return hidden
+        return self.aux_hidden_capture.finalize(hidden, aux_hidden_buffer)
 
 
 class Glm52ForCausalLM(PyModelBase):

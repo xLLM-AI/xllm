@@ -59,11 +59,40 @@ namespace xllm {
 
 namespace {
 
+// Speculators-format draft configs (e.g. GLM-5.2 DSpark) nest the backbone
+// under transformer_layer_config; lift it (and flatten rope_parameters) so the
+// flat qwen3 loader sees the backbone fields at the top level.
+void lift_speculators_config(nlohmann::json& config) {
+  if (!config.contains("speculators_model_type") ||
+      !config.contains("transformer_layer_config")) {
+    return;
+  }
+  const auto& tlc = config["transformer_layer_config"];
+  if (tlc.is_object()) {
+    for (const auto& [k, v] : tlc.items()) {
+      if (!v.is_null() && !config.contains(k)) {
+        config[k] = v;
+      }
+    }
+  }
+  if (config.contains("rope_parameters") &&
+      config["rope_parameters"].is_object()) {
+    const auto& rope = config["rope_parameters"];
+    if (rope.contains("rope_theta") && !config.contains("rope_theta")) {
+      config["rope_theta"] = rope["rope_theta"];
+    }
+    if (rope.contains("factor") && !config.contains("rope_scaling")) {
+      config["rope_scaling"] = rope;
+    }
+  }
+}
+
 JsonReader normalize_config_torch_dtype(const JsonReader& reader) {
   auto config = reader.data();
   if (!config.contains("torch_dtype") && config.contains("dtype")) {
     config["torch_dtype"] = config["dtype"];
   }
+  lift_speculators_config(config);
 
   JsonReader normalized_reader;
   normalized_reader.parse_text(config.dump());

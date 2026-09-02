@@ -74,3 +74,10 @@ class PyModelBase(nn.Module):
         concatenation, format conversion, etc.
         """
         raise NotImplementedError
+
+    def adapt_weights_for_reference_model(
+        self,
+        reference_model_path: str,
+    ) -> None:
+        """Adapt loaded draft weights to the reference model's runtime basis."""
+        del reference_model_path

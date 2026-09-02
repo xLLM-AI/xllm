@@ -199,6 +199,18 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_hierarchy_kv_cache_transfers();
   void finalize_hierarchy_kv_cache_transfers();
 
+  // Draft KV cache geometry hook: build from the draft's own ModelArgs by
+  // default, sharing the target's shape only when there is no draft.
+  virtual KVCacheShape draft_kv_cache_shape(
+      const KVCacheShape& target_kv_cache_shape) const;
+
+  // Draft KV shape from the draft's own ModelArgs (heads/dims), borrowing only
+  // the target's block count so it never inherits an MLA target's compressed
+  // [1, kv_lora_rank] slot shape. draft_world_size <= 0 -> draft's DP-local TP.
+  KVCacheShape build_draft_kv_cache_shape(
+      const KVCacheShape& target_kv_cache_shape,
+      int64_t draft_world_size = -1) const;
+
  protected:
   // Target model worker
   std::unique_ptr<WorkerImpl> impl_;

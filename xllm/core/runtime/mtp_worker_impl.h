@@ -156,8 +156,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
   virtual int64_t get_embedding_placeholder_size();
   bool should_use_separate_draft_kv_cache_shape() const;
-  KVCacheShape get_draft_kv_cache_shape(
-      const KVCacheShape& target_kv_cache_shape) const;
+  KVCacheShape draft_kv_cache_shape(
+      const KVCacheShape& target_kv_cache_shape) const override;
 
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
