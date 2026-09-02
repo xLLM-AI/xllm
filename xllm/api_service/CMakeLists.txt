@@ -28,12 +28,14 @@ cc_library(
     serving_mode.h
     stream_call.h
     models_service_impl.h
+    rpc_request_metrics.h
     stream_output_parser.h
     mm_service_utils.h
     embedding_output_builder.h
     utils.h
   SRCS
     api_service.cpp
+    rpc_request_metrics.cpp
     chat_json_parser.cpp
     completion_json_parser.cpp
     service_impl_factory.cpp

@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "call.h"
 #include "core/common/types.h"
@@ -41,8 +42,12 @@ class NonStreamCall : public Call {
                 Request* request,
                 Response* response,
                 bool use_arena = false,
-                bool is_http_request = false)
-      : Call(controller, request_body_x_request_id(request), is_http_request),
+                bool is_http_request = false,
+                RpcRequestMetrics rpc_metrics = {})
+      : Call(controller,
+             request_body_x_request_id(request),
+             is_http_request,
+             std::move(rpc_metrics)),
         done_(done),
         request_(request),
         response_(response),
@@ -55,6 +60,7 @@ class NonStreamCall : public Call {
   }
 
   ~NonStreamCall() override {
+    finish_rpc_metrics();
     done_->Run();
 
     if (!use_arena_) {

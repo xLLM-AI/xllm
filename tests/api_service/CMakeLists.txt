@@ -108,6 +108,16 @@ cc_test(
 
 cc_test(
   NAME
+    rpc_request_metrics_test
+  SRCS
+    rpc_request_metrics_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     sample_service_impl_test
   SRCS
     sample_service_impl_test.cpp

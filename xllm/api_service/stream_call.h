@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "anthropic.pb.h"
 #include "api_service/anthropic_json.h"
@@ -44,8 +45,12 @@ class StreamCall : public Call {
              Request* request,
              Response* response,
              bool use_arena = false,
-             bool is_http_request = false)
-      : Call(controller, request_body_x_request_id(request), is_http_request),
+             bool is_http_request = false,
+             RpcRequestMetrics rpc_metrics = {})
+      : Call(controller,
+             request_body_x_request_id(request),
+             is_http_request,
+             std::move(rpc_metrics)),
         done_(done),
         request_(request),
         response_(response),
@@ -60,8 +65,11 @@ class StreamCall : public Call {
       controller_->http_response().set_status_code(200);
       controller_->http_response().SetHeader("Connection", "keep-alive");
       controller_->http_response().SetHeader("Cache-Control", "no-cache");
-      // Done Run first for steam response
+      // Done Run first for steam response. brpc may recycle the
+      // controller after the RPC method returns, so drop the pointer
+      // and record later from the snapshot / mark_failed().
       done_->Run();
+      rpc_metrics_.detach();
 
     } else {
       controller_->http_response().set_content_type("application/json");
@@ -74,6 +82,7 @@ class StreamCall : public Call {
   ~StreamCall() override {
     // For non stream response, call brpc done Run
     if (!stream_) {
+      finish_rpc_metrics();
       done_->Run();
     }
     if (!use_arena_) {
@@ -103,6 +112,7 @@ class StreamCall : public Call {
       controller_->SetFailed(error_message);
 
     } else {
+      rpc_metrics_.mark_failed();
       io_buf_.clear();
       io_buf_.append(error_message);
       pa_->Write(io_buf_);
@@ -179,14 +189,16 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                 proto::AnthropicMessagesRequest* request,
                 proto::AnthropicMessagesResponse* response,
                 bool use_arena = false,
-                bool is_http_request = false)
+                bool is_http_request = false,
+                RpcRequestMetrics rpc_metrics = {})
       : StreamCall<proto::AnthropicMessagesRequest,
                    proto::AnthropicMessagesResponse>(controller,
                                                      done,
                                                      request,
                                                      response,
                                                      use_arena,
-                                                     is_http_request) {
+                                                     is_http_request,
+                                                     std::move(rpc_metrics)) {
     // Anthropic responses require empty content arrays to remain visible.
     this->json_options_.jsonify_empty_array = true;
   }

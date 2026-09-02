@@ -21,10 +21,12 @@ limitations under the License.
 #include <json2pb/pb_to_json.h>
 
 #include <filesystem>
+#include <utility>
 
 #include "api_service/chat_json_parser.h"
 #include "api_service/completion_json_parser.h"
 #include "api_service/request_id.h"
+#include "api_service/rpc_request_metrics.h"
 #include "api_service/service_impl_factory.h"
 #include "api_service/serving_mode.h"
 #include "call.h"
@@ -32,7 +34,6 @@ limitations under the License.
 #include "common.pb.h"
 #include "completion.pb.h"
 #include "core/common/constants.h"
-#include "core/common/metrics.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/llm_master.h"
@@ -47,7 +48,7 @@ limitations under the License.
 #include "service_impl_factory.h"
 #include "text_generation.pb.h"
 #include "video_generation.pb.h"
-#include "xllm_metrics.h"
+
 namespace xllm {
 
 namespace {
@@ -78,18 +79,14 @@ void process_typed_brpc_request(std::unique_ptr<Service>& service_impl,
                                 typename CallT::ResType* response,
                                 ::google::protobuf::Closure* done,
                                 const char* service_name) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
-  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   if (!service_impl) {
     std::string msg =
         std::string(service_name) + " service is not available on this server";
@@ -98,12 +95,18 @@ void process_typed_brpc_request(std::unique_ptr<Service>& service_impl,
     return;
   }
 
-  auto arena = GetArenaWithCheck<CallT>(response);
+  google::protobuf::Arena* arena = GetArenaWithCheck<CallT>(response);
   // brpc passes the request as `const`, but downstream Call wrappers only read
   // from it.  We cast away constness so the Call can hold a non-const pointer.
   auto req_pb = const_cast<typename CallT::ReqType*>(request);
-  std::shared_ptr<Call> call = std::make_shared<CallT>(
-      ctrl, done_guard.release(), req_pb, response, arena != nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<CallT>(ctrl,
+                              done_guard.release(),
+                              req_pb,
+                              response,
+                              arena != nullptr,
+                              /*is_http_request=*/false,
+                              std::move(rpc_metrics));
   service_impl->process_async(call);
 }
 
@@ -152,28 +155,27 @@ void APIService::Completions(::google::protobuf::RpcController* controller,
                              const proto::CompletionRequest* request,
                              proto::CompletionResponse* response,
                              ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null.";
     return;
   }
-  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
 
   if (completion_service_impl_) {
     completion_service_impl_->process_async_rpc_impl(request);
   } else if (rec_completion_service_impl_) {
-    auto arena = GetArenaWithCheck<CompletionCall>(response);
+    google::protobuf::Arena* arena =
+        GetArenaWithCheck<CompletionCall>(response);
     std::shared_ptr<Call> call = std::make_shared<CompletionCall>(
         ctrl,
         done_guard.release(),
         const_cast<proto::CompletionRequest*>(request),
         response,
-        arena != nullptr);
+        arena != nullptr,
+        /*is_http_request=*/false,
+        std::move(rpc_metrics));
     rec_completion_service_impl_->process_async(call);
   }
 }
@@ -182,12 +184,7 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
                                  const proto::HttpRequest* request,
                                  proto::HttpResponse* response,
                                  ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -200,6 +197,7 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
       google::protobuf::Arena::CreateMessage<proto::CompletionResponse>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
 
   auto [preprocess_status, processed_json] =
@@ -227,7 +225,8 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
                                        req_pb,
                                        resp_pb,
                                        arena != nullptr,
-                                       /*is_http_request=*/true);
+                                       /*is_http_request=*/true,
+                                       std::move(rpc_metrics));
   if (completion_service_impl_) {
     completion_service_impl_->process_async(call);
   } else if (rec_completion_service_impl_) {
@@ -239,18 +238,14 @@ void APIService::Sample(::google::protobuf::RpcController* controller,
                         const proto::SampleRequest* request,
                         proto::SampleResponse* response,
                         ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null.";
     return;
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   if (!sample_service_impl_) {
     ctrl->SetFailed(kSampleNotSupportedError);
     return;
@@ -267,18 +262,14 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
                             const proto::HttpRequest* request,
                             proto::HttpResponse* response,
                             ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   if (!sample_service_impl_) {
     ctrl->SetFailed(kSampleNotSupportedError);
@@ -308,7 +299,8 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
                                    req_pb,
                                    resp_pb,
                                    arena != nullptr,
-                                   /*is_http_request=*/true);
+                                   /*is_http_request=*/true,
+                                   std::move(rpc_metrics));
   sample_service_impl_->process_async(call);
 }
 
@@ -341,6 +333,7 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
                                 const proto::HttpRequest* request,
                                 proto::HttpResponse* response,
                                 const ChatJsonParser& chat_json_parser) {
+  RpcRequestMetrics rpc_metrics(ctrl);
   auto arena = GetArenaWithCheck<ChatCall>(response);
   auto req_pb =
       google::protobuf::Arena::CreateMessage<typename ChatCall::ReqType>(arena);
@@ -380,7 +373,8 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
                                          req_pb,
                                          resp_pb,
                                          /*use_arena=*/arena != nullptr,
-                                         /*is_http_request=*/true);
+                                         /*is_http_request=*/true,
+                                         std::move(rpc_metrics));
   service->process_async(call);
 }
 
@@ -421,18 +415,14 @@ void APIService::ChatCompletions(::google::protobuf::RpcController* controller,
                                  proto::ChatResponse* response,
                                  ::google::protobuf::Closure* done) {
   // TODO with xllm-service
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   // Maybe need double check later
 
   chat_service_impl_->process_async_rpc_impl(request);
@@ -443,12 +433,7 @@ void APIService::ChatCompletionsHttp(
     const proto::HttpRequest* request,
     proto::HttpResponse* response,
     ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -458,6 +443,7 @@ void APIService::ChatCompletionsHttp(
   api_service::ensure_http_x_request_id(ctrl);
 
   if (!chat_completions_handler_) {
+    RpcRequestMetrics rpc_metrics(ctrl);
     LOG(ERROR) << "No chat completions handler registered";
     return;
   }
@@ -468,18 +454,14 @@ void APIService::Embeddings(::google::protobuf::RpcController* controller,
                             const proto::EmbeddingRequest* request,
                             proto::EmbeddingResponse* response,
                             ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   if (!embedding_service_impl_) {
     const char* msg =
         "Embeddings brpc API only supports the text embedding service. "
@@ -497,8 +479,14 @@ void APIService::Embeddings(::google::protobuf::RpcController* controller,
     req_pb->set_encoding_format("float");
   }
 
-  std::shared_ptr<Call> call = std::make_shared<EmbeddingCall>(
-      ctrl, done_guard.release(), req_pb, response, arena != nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<EmbeddingCall>(ctrl,
+                                      done_guard.release(),
+                                      req_pb,
+                                      response,
+                                      arena != nullptr,
+                                      /*is_http_request=*/false,
+                                      std::move(rpc_metrics));
   embedding_service_impl_->process_async(call);
 }
 
@@ -509,12 +497,7 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
                               const proto::HttpRequest* request,
                               proto::HttpResponse* response,
                               ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -528,6 +511,7 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
           arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
@@ -551,7 +535,8 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
                                       req_pb,
                                       resp_pb,
                                       arena != nullptr,
-                                      /*is_http_request=*/true);
+                                      /*is_http_request=*/true,
+                                      std::move(rpc_metrics));
   embedding_service_impl_->process_async(call);
 }
 }  // namespace
@@ -587,12 +572,7 @@ void APIService::ImageGenerationHttp(
     const proto::HttpRequest* request,
     proto::HttpResponse* response,
     ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -607,6 +587,7 @@ void APIService::ImageGenerationHttp(
           arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
@@ -624,7 +605,8 @@ void APIService::ImageGenerationHttp(
                                             req_pb,
                                             resp_pb,
                                             arena != nullptr,
-                                            /*is_http_request=*/true);
+                                            /*is_http_request=*/true,
+                                            std::move(rpc_metrics));
   image_generation_service_impl_->process_async(call);
 }
 
@@ -646,12 +628,7 @@ void APIService::AudioGenerationHttp(
     const proto::HttpRequest* request,
     proto::HttpResponse* response,
     ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -666,6 +643,7 @@ void APIService::AudioGenerationHttp(
           arena);
 
   brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
@@ -683,7 +661,8 @@ void APIService::AudioGenerationHttp(
                                             req_pb,
                                             resp_pb,
                                             arena != nullptr,
-                                            /*is_http_request=*/true);
+                                            /*is_http_request=*/true,
+                                            std::move(rpc_metrics));
   audio_generation_service_impl_->process_async(call);
 }
 
@@ -705,12 +684,7 @@ void APIService::TextGenerationHttp(
     const proto::HttpRequest* request,
     proto::HttpResponse* response,
     ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -725,6 +699,7 @@ void APIService::TextGenerationHttp(
           arena);
 
   brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
@@ -742,7 +717,8 @@ void APIService::TextGenerationHttp(
                                            req_pb,
                                            resp_pb,
                                            arena != nullptr,
-                                           /*is_http_request=*/true);
+                                           /*is_http_request=*/true,
+                                           std::move(rpc_metrics));
   text_generation_service_impl_->process_async(call);
 }
 
@@ -764,12 +740,7 @@ void APIService::VideoGenerationHttp(
     const proto::HttpRequest* request,
     proto::HttpResponse* response,
     ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -784,6 +755,7 @@ void APIService::VideoGenerationHttp(
           arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
@@ -801,7 +773,8 @@ void APIService::VideoGenerationHttp(
                                             req_pb,
                                             resp_pb,
                                             arena != nullptr,
-                                            /*is_http_request=*/true);
+                                            /*is_http_request=*/true,
+                                            std::move(rpc_metrics));
   video_generation_service_impl_->process_async(call);
 }
 
@@ -817,12 +790,7 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
                             const proto::HttpRequest* request,
                             proto::HttpResponse* response,
                             ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
@@ -835,6 +803,7 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
       google::protobuf::Arena::CreateMessage<proto::RerankResponse>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  RpcRequestMetrics rpc_metrics(ctrl);
   api_service::ensure_http_x_request_id(ctrl);
   std::string error;
   json2pb::Json2PbOptions options;
@@ -853,7 +822,8 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
                                    req_pb,
                                    resp_pb,
                                    arena != nullptr,
-                                   /*is_http_request=*/true);
+                                   /*is_http_request=*/true,
+                                   std::move(rpc_metrics));
   rerank_service_impl_->process_async(call);
 }
 
@@ -935,6 +905,7 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
                                brpc::Controller* ctrl,
                                const proto::HttpRequest* request,
                                proto::HttpResponse* response) {
+  RpcRequestMetrics rpc_metrics(ctrl);
   auto arena = GetArenaWithCheck<AnthropicCall>(response);
   auto req_pb =
       google::protobuf::Arena::CreateMessage<typename AnthropicCall::ReqType>(
@@ -975,7 +946,8 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
                                               req_pb,
                                               resp_pb,
                                               /*use_arena=*/arena != nullptr,
-                                              /*is_http_request=*/true);
+                                              /*is_http_request=*/true,
+                                              std::move(rpc_metrics));
 
   service->process_async(call);
 }
@@ -987,12 +959,7 @@ void APIService::AnthropicMessagesHttp(
     const proto::HttpRequest* request,
     proto::HttpResponse* response,
     ::google::protobuf::Closure* done) {
-  xllm::ClosureGuard done_guard(
-      done,
-      [](void* /*unused*/) { request_in_metric(nullptr); },
-      [controller](void* /*unused*/) {
-        request_out_metric(static_cast<void*>(controller));
-      });
+  xllm::ClosureGuard done_guard(done);
 
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
@@ -1006,6 +973,7 @@ void APIService::AnthropicMessagesHttp(
     handle_anthropic_messages(
         anthropic_service_impl_, done_guard, ctrl, request, response);
   } else {
+    RpcRequestMetrics rpc_metrics(ctrl);
     ctrl->SetFailed("Anthropic messages API is only supported for LLM engine");
     LOG(ERROR) << "Anthropic messages API is only supported for LLM engine";
   }

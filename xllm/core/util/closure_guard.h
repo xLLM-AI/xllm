@@ -17,61 +17,42 @@ limitations under the License.
 
 #include <google/protobuf/service.h>
 
-#include <functional>
-
 #include "butil/macros.h"
 
 namespace xllm {
 
-// RAII: Call Run() of the closure on destruction.
+// RAII: Call Run() of the closure on destruction unless release() was used.
 class ClosureGuard {
  public:
-  ClosureGuard()
-      : _done(nullptr), _before_done([](void*) {}), _after_done([](void*) {}) {}
+  ClosureGuard() : done_(nullptr) {}
 
-  // Constructed with a closure which will be Run() inside dtor.
-  explicit ClosureGuard(google::protobuf::Closure* done,
-                        std::function<void(void*)>&& before_done,
-                        std::function<void(void*)>&& after_done)
-      : _done(done), _before_done(before_done), _after_done(after_done) {
-    _before_done(nullptr);
-  }
+  explicit ClosureGuard(google::protobuf::Closure* done) : done_(done) {}
 
-  // Run internal closure if it's not nullptr.
   ~ClosureGuard() {
-    if (_done) {
-      _after_done(nullptr);
-      _done->Run();
+    if (done_) {
+      done_->Run();
     }
   }
 
-  // Run internal closure if it's not nullptr and set it to `done'.
   void reset(google::protobuf::Closure* done) {
-    if (_done) {
-      _done->Run();
+    if (done_) {
+      done_->Run();
     }
-    _done = done;
+    done_ = done;
   }
 
-  // Return and set internal closure to nullptr.
   google::protobuf::Closure* release() {
-    _after_done(nullptr);
-
-    google::protobuf::Closure* const prev_done = _done;
-    _done = nullptr;
+    google::protobuf::Closure* const prev_done = done_;
+    done_ = nullptr;
     return prev_done;
   }
 
-  // True if no closure inside.
-  bool empty() const { return _done == nullptr; }
+  bool empty() const { return done_ == nullptr; }
 
  private:
-  // Copying this object makes no sense.
   DISALLOW_COPY_AND_ASSIGN(ClosureGuard);
 
-  google::protobuf::Closure* _done;
-  std::function<void(void*)> _before_done;
-  std::function<void(void*)> _after_done;
+  google::protobuf::Closure* done_;
 };
 
 }  // namespace xllm

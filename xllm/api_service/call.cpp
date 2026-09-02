@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "call.h"
 
+#include <utility>
+
 #include "api_service/request_id.h"
 #include "core/common/constants.h"
 #include "core/util/verbose_trace_logger.h"
@@ -23,8 +25,9 @@ namespace xllm {
 
 Call::Call(brpc::Controller* controller,
            std::string body_x_request_id,
-           bool is_http_request)
-    : controller_(controller) {
+           bool is_http_request,
+           RpcRequestMetrics rpc_metrics)
+    : controller_(controller), rpc_metrics_(std::move(rpc_metrics)) {
   init(std::move(body_x_request_id), is_http_request);
 }
 
@@ -70,5 +73,7 @@ void Call::init_request_payload() {
   controller_->request_attachment().copy_to(
       &request_payload_, len - infer_len, infer_len);
 }
+
+void Call::finish_rpc_metrics() { rpc_metrics_.finish(controller_); }
 
 }  // namespace xllm

@@ -20,6 +20,8 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "api_service/rpc_request_metrics.h"
+
 namespace xllm {
 
 template <typename Request>
@@ -39,7 +41,8 @@ class Call {
  public:
   Call(brpc::Controller* controller,
        std::string body_x_request_id = "",
-       bool is_http_request = false);
+       bool is_http_request = false,
+       RpcRequestMetrics rpc_metrics = {});
   virtual ~Call() = default;
 
   const std::string& get_x_request_id() const { return x_request_id_; }
@@ -52,9 +55,13 @@ class Call {
 
  protected:
   void init(std::string body_x_request_id, bool is_http_request);
+  // Record metrics while the controller is still valid. Must run before
+  // done->Run(); after that brpc may recycle the controller.
+  void finish_rpc_metrics();
 
  protected:
   brpc::Controller* controller_;
+  RpcRequestMetrics rpc_metrics_;
 
   std::string x_request_id_;
   std::string x_request_time_;
