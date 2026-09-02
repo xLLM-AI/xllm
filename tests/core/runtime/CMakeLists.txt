@@ -100,6 +100,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    mtp_cache_ownership_test
+  SRCS
+    mtp_cache_ownership_test.cpp
+  DEPS
+    :util
+    GTest::gtest_main
+)
+
 if(USE_MLU)
   cc_test(
     NAME

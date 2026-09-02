@@ -752,6 +752,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
   CHECK_LE(actual_num_tokens, num_tokens_)
       << "num_tokens mismatch: expected <= " << num_tokens_ << ", got "
       << actual_num_tokens;
+  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
   // Update persistent parameters with new input data
   // Note: tiling_data is updated in update() if needed - for hybrid models
@@ -819,14 +820,9 @@ ModelOutput AclGraph::replay(CausalLM* model,
     }
   }
 
-  // Replay captured graph - NPUGraph mempool reuses temporary tensors
-  // Get current NPU stream from libtorch NPU API
-  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-
-  if (graph_paged_attention_tiling_data_.defined()) {
-    // The producer stream has refreshed inputs that include the final draft
-    // token. Make graph replay wait for those updates on device; a host
-    // synchronize here would recreate the bubble we remove.
+  // Persistent graph inputs may be updated on a different stream. Install a
+  // device-side dependency before replay so the host remains asynchronous.
+  if (stream != graph_stream_) {
     make_graph_wait_for_current_stream(stream);
   }
   const bool use_static_graph_tasks =

@@ -43,6 +43,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/model/mtp_utils.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
 #include "framework/block/hierarchy_block_manager_pool.h"
@@ -1298,6 +1299,17 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // and the tokens load of all experts needs to be returned to engine.
   // so we can not skip any worker.
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+    stride = 1;
+  }
+  // GLM eager MTP prelaunch writes cache after target validation. The
+  // ownership fence is local to every worker, so wait for all workers before
+  // scheduler-side batch/cache mutation.
+  if (requires_glm_mtp_cache_ownership_fence(
+          options_.enable_schedule_overlap(),
+          options_.num_speculative_tokens(),
+          options_.dp_size(),
+          args_.model_type(),
+          ::xllm::ExecutionConfig::get_instance().enable_graph())) {
     stride = 1;
   }
 

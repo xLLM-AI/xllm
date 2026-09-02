@@ -60,6 +60,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/framework/model/mtp_utils.h"
 #include "core/platform/platform.h"
 #include "core/platform/sleepable_allocator.h"
 #if defined(USE_NPU)
@@ -1559,18 +1560,39 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 
       auto output = this->step_for_schedule_overlap(input);
+      const bool defer_glm_mtp_cache_ownership_commit =
+          requires_glm_mtp_cache_ownership_fence(
+              options_.enable_schedule_overlap(),
+              options_.num_speculative_tokens(),
+              options_.dp_size(),
+              context_.get_model_args().model_type(),
+              ::xllm::ExecutionConfig::get_instance().enable_graph());
 #if defined(USE_NPU)
       if (output.has_value() && !output->sample_output.next_tokens.defined() &&
-          output->ready_event != nullptr && !output->retained_inputs.empty()) {
+          output->ready_event != nullptr && !output->retained_inputs.empty() &&
+          !output->requires_cache_ownership_fence) {
         CHECK(output->ready_event->synchronize())
             << "failed to retire asynchronous output without tokens";
       }
 #endif
+      // Only GLM eager DP has a scheduler-side ownership transaction. Preserve
+      // worker-side acknowledgment for every other combined prelaunch mode.
+      // A prelaunch completion event is carried to the output owner. Do not
+      // turn it into a host wait on the worker path.
+      if (output.has_value() && output->requires_cache_ownership_fence &&
+          !defer_glm_mtp_cache_ownership_commit &&
+          !::xllm::ExecutionConfig::get_instance().enable_graph()) {
+        CHECK(output->cache_ownership_event == nullptr ||
+              output->cache_ownership_event->synchronize())
+            << "failed to wait for MTP prelaunch cache ownership fence";
+        output->requires_cache_ownership_fence = false;
+      }
       if (output.has_value()) {
         output->json_object_errors.insert(output->json_object_errors.end(),
                                           input.json_object_errors.begin(),
                                           input.json_object_errors.end());
-        if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb() ||
+            defer_glm_mtp_cache_ownership_commit) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           update_last_step_output(output,
@@ -1602,7 +1624,8 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
                                   input.sample_sequence_ids);
         }
       } else {
-        if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb() ||
+            defer_glm_mtp_cache_ownership_commit) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           last_step_output_valid_ = false;
@@ -1628,6 +1651,15 @@ ForwardOutput WorkerImpl::get_last_step_result() {
   ForwardOutput output;
   std::unique_lock<std::mutex> lock(mtx_);
   cv_.wait(lock, [this] { return is_recorded_; });
+  const bool skip_graph_prelaunch_ownership_wait =
+      last_step_output_.requires_cache_ownership_fence &&
+      ::xllm::ExecutionConfig::get_instance().enable_graph();
+  if (last_step_output_.requires_cache_ownership_fence &&
+      !skip_graph_prelaunch_ownership_wait) {
+    CHECK(last_step_output_.cache_ownership_event == nullptr ||
+          last_step_output_.cache_ownership_event->synchronize())
+        << "failed to commit MTP prelaunch cache ownership";
+  }
   if (last_step_output_valid_ ||
       ::xllm::EPLBConfig::get_instance().enable_eplb() ||
       !last_step_output_.json_object_errors.empty()) {

@@ -32,10 +32,12 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/mtp_utils.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/model/model_args.h"
@@ -461,14 +463,32 @@ void ContinuousScheduler::step(const absl::Duration& timeout) {
 
 void ContinuousScheduler::step_with_schedule_overlap(
     const absl::Duration& timeout) {
-  // get a new batch of requests
-  std::vector<Batch> batch = schedule_request(timeout);
-  bool cur_batch_all_empty =
-      std::all_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
+  const bool last_batch_all_empty = std::all_of(
+      last_batch_.begin(), last_batch_.end(), [](const Batch& one_batch) {
         return one_batch.empty();
       });
-  bool last_batch_all_empty = std::all_of(
-      last_batch_.begin(), last_batch_.end(), [](const Batch& one_batch) {
+  const bool fence_glm_mtp_cache_ownership =
+      requires_glm_mtp_cache_ownership_fence(
+          options_.enable_schedule_overlap(),
+          options_.num_speculative_tokens(),
+          options_.dp_size(),
+          engine_->model_args().model_type(),
+          ::xllm::ExecutionConfig::get_instance().enable_graph());
+  bool last_batch_processed = false;
+  if (fence_glm_mtp_cache_ownership && !is_first_step_ &&
+      !last_batch_all_empty) {
+    // GLM eager MTP prelaunch mutates the current batch's cache after target
+    // validation. Resolve its post-prelaunch event before scheduling can
+    // finish, preempt, release, or reuse any cache resource from that batch.
+    engine_->update_last_step_result(last_batch_);
+    process_batch_output(true);
+    last_batch_processed = true;
+  }
+
+  // get a new batch of requests
+  std::vector<Batch> batch = schedule_request(timeout);
+  const bool cur_batch_all_empty =
+      std::all_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
         return one_batch.empty();
       });
   if (cur_batch_all_empty && last_batch_all_empty) {
@@ -480,7 +500,7 @@ void ContinuousScheduler::step_with_schedule_overlap(
   }
 
   // producer-consumer mode, make sure only one step is scheduled in advance
-  if (!is_first_step_ && !last_batch_all_empty) {
+  if (!last_batch_processed && !is_first_step_ && !last_batch_all_empty) {
     engine_->update_last_step_result(last_batch_);
     process_batch_output(true);
   }

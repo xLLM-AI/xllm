@@ -88,6 +88,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const KVCacheShape& kv_cache_shape) override;
 #endif
 
+  // Mixed DP fallback keeps all ranks in step_prefill() for collective-order
+  // consistency.  Only local decode shards resolve overlap placeholders;
+  // local prefill shards must retain their full prompt.
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
   ForwardInput update_input_by_last_step_output_for_schedule_overlap(
       ForwardInput& inputs) override;
@@ -198,7 +201,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // prepare inputs for draft model at Decode phase.
   void prepare_draft_inputs(const ForwardInput& inputs,
                             ForwardInput& draft_inputs,
-                            int32_t position_offset);
+                            int32_t position_offset,
+                            bool use_combined_draft);
   void update_decode_step_input(
       ForwardInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
@@ -214,6 +218,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   struct PendingTargetContext {
     std::vector<int32_t> embedding_ids;
     std::vector<std::string> request_ids;
+    std::vector<uint64_t> dp_global_batch_generations;
     // Both tensors stay on device.  A steady-state overlap step consumes them
     // by queueing gather/update ops behind rejection sampling on the same
     // stream.  They are materialized on CPU only when the batch shape/order
@@ -228,6 +233,12 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     StreamEventPtr ready_event;
   };
 
+  struct CombinedDraftSchedule {
+    // Both decisions use the same capability and block-table safety gate.
+    bool use_combined_draft = false;
+    bool prelaunch_next_first_draft = false;
+  };
+
   struct PendingDraftContext {
     std::vector<int32_t> embedding_ids;
     std::vector<std::string> request_ids;
@@ -236,6 +247,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     std::vector<uint64_t> dp_global_batch_generations;
     std::optional<ForwardOutput> output;
     ForwardInput prepared_input;
+    StreamEventPtr completion_event;
   };
 
   void stage_target_context_write(const ForwardInput& input,
@@ -245,14 +257,17 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                   StreamEventPtr ready_event,
                                   torch::Tensor accepted_tokens_host,
                                   std::vector<size_t> failed_rows);
+  void mark_dp_batch_validated_for_prelaunch(const ForwardInput& input);
   torch::Tensor acquire_accepted_tokens_host_buffer(
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
   bool device_target_context_ready_for_batch(const ForwardInput& input) const;
   void flush_pending_target_context();
   bool supports_combined_first_draft_execution() const;
-  bool can_use_combined_first_draft() const;
-  bool can_prelaunch_next_first_draft(const ForwardInput& input) const;
+  // Centralizes current-batch combined/prelaunch eligibility.
+  CombinedDraftSchedule combined_draft_schedule(
+      const ForwardInput& input) const;
+  bool prelaunch_positions_fit_block_table(const ForwardInput& input) const;
   void prepare_next_first_draft_template(const ForwardInput& input,
                                          ForwardInput& combined_input);
   void enqueue_next_first_draft(const ForwardInput& input,
@@ -262,7 +277,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                 ForwardInput combined_input);
   void submit_pending_first_draft(const ForwardInput& batch_identity_input,
                                   ForwardInput draft_input);
+  void publish_pending_first_draft_cache_fence(ForwardOutput& output) const;
+  void retire_pending_first_draft();
   bool pending_draft_context_matches(const ForwardInput& input) const;
+  bool prelaunch_metadata_batch_matches(const ForwardInput& input) const;
 
   void write_target_context_to_cache(const ForwardInput& input,
                                      const SampleOutput& validate_output,
@@ -286,6 +304,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   PendingTargetContext pending_target_context_;
   std::vector<int32_t> device_context_ready_embedding_ids_;
   std::vector<std::string> device_context_ready_request_ids_;
+  std::vector<uint64_t> device_context_ready_batch_generations_;
+  // DP prelaunch must make the same decision on every rank, including ranks
+  // with no local sequences. This globally replicated identity is published
+  // only after the current batch has completed target validation once.
+  std::vector<uint64_t> validated_dp_batch_generations_;
   // A single persistent pinned destination is sufficient for accepted-token
   // D2H: the preceding pending target context is always flushed before the
   // next validation can submit another copy. The pending context holds a view
@@ -296,6 +319,13 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.
   PendingDraftContext pending_draft_context_;
+  // GLM MoE DSA rebuilds prelaunch metadata only when this identity changes.
+  // Other MTP model paths do not consult this state.
+  std::vector<int32_t> prelaunch_metadata_embedding_ids_;
+  std::vector<std::string> prelaunch_metadata_request_ids_;
+  std::vector<int32_t> prelaunch_metadata_dp_global_token_nums_;
+  std::vector<int32_t> prelaunch_metadata_raw_dp_global_token_nums_;
+  std::vector<uint64_t> prelaunch_metadata_batch_generations_;
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;

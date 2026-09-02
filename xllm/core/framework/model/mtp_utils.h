@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 #include "core/framework/model/model_args.h"
 #include "core/util/utils.h"
@@ -27,6 +28,16 @@ inline int64_t mtp_hidden_state_width(const ModelArgs& model_args) {
     return model_args.hc_mult() * model_args.hidden_size();
   }
   return model_args.hidden_size();
+}
+
+inline bool requires_glm_mtp_cache_ownership_fence(
+    bool schedule_overlap_enabled,
+    int32_t num_speculative_tokens,
+    int32_t dp_size,
+    std::string_view model_type,
+    bool graph_enabled) {
+  return schedule_overlap_enabled && num_speculative_tokens > 0 &&
+         dp_size > 1 && model_type == "glm_moe_dsa" && !graph_enabled;
 }
 
 }  // namespace xllm

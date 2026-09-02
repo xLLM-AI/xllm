@@ -664,6 +664,16 @@ struct ForwardOutput {
   // Device-side readiness dependency for no-sync outputs. This local runtime
   // handle is intentionally not included in proto or shared-memory transport.
   StreamEventPtr ready_event;
+  // Completion dependency for a speculative prelaunch cache write. Like
+  // ready_event, this local runtime handle is not included in proto/shm.
+  // It is separate from ready_event so output consumers do not wait for
+  // prelaunch.
+  StreamEventPtr cache_ownership_event;
+  // True when cache_ownership_event covers a side-effectful speculative
+  // prelaunch. Non-graph WorkerImpl paths wait for this fence when the
+  // scheduler consumes the completed step, before it can release or reuse the
+  // batch's cache resources.
+  bool requires_cache_ownership_fence = false;
   torch::Tensor logits;
   torch::Tensor embedding;
   // Selected hidden states matching `logits` layout: [num_selected,

@@ -886,12 +886,10 @@ void WorkerService::GetLastStepResult(
                                        /*non_blocking=*/true);
 
             // [num_seq, ..., embed_dim]
-            embeddings = safe_to(sample_output.embeddings,
-                                 torch::kCPU,
-                                 /*non_blocking=*/true);
-            embeddings = safe_to(embeddings,
-                                 torch::kFloat32,
-                                 /*non_blocking=*/true);
+            embeddings =
+                safe_to(sample_output.embeddings,
+                        torch::dtype(torch::kFloat32).device(torch::kCPU),
+                        /*non_blocking=*/true);
 
             dit_images.reserve(
                 forward_output.dit_forward_output.tensors.size());
