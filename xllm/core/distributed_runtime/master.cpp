@@ -557,6 +557,7 @@ Master::Master(const Options& options, EngineType type)
               << DeviceNameUtils::to_string(draft_devices);
     runtime::Options spec_options;
     spec_options.model_path(options_.model_path())
+        .model_id(options_.model_id())
         .draft_model_path(draft_model_path)
         .devices(devices)
         .draft_devices(draft_devices)

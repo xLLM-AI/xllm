@@ -1,8 +1,4 @@
----
-title: "全局多级KV Cache"
-sidebar:
-  order: 51
----
+# 全局多级 KV Cache
 
 ## 背景
 
@@ -18,22 +14,60 @@ xLLM 将 Device Prefix Cache 扩展为三级缓存：
 
 请求首先探测 Host Prefix Cache。缺失的完整 Block 可以从 Mooncake Store 读取到预分配的 Host Block，再按层恢复到 HBM，从而跳过已命中前缀的重复计算。已完成的 HBM Block 会异步写回 Host，随后写入 Mooncake Store。
 
+当前实现由 `HierarchyBlockManagerPool` 管理 Block 的分配、挂载和生命周期，由 `HierarchyKVCacheTransfer` 统一执行 Host↔Device 传输，并由每个 Worker 内的一个 `KVCacheStore` 访问 Mooncake Store。一个 Store 客户端可以同时管理主模型、投机解码 Draft 模型以及同一模型中的多种 `BlockType`。
+
 ## 架构
 
 部署中可以包含以下组件：
 
 - **etcd**：注册计算实例并同步服务元数据。
 - **xLLM Service**：路由请求并管理 Fused 或 PD 分离实例。
-- **xLLM**：持有 Device/Host KV Cache 并执行推理。
+- **HierarchyBlockManagerPool**：探测 Device/Host Prefix Cache，生成 G2H、H2D 和 D2H2G 计划，并在异步任务完成后发布或释放 Block。
+- **HierarchyKVCacheTransfer**：统一注册主模型与 Draft 模型缓存域，创建 Host Cache，并执行 Host↔Device 拷贝。
+- **KVCacheStore**：将逻辑 Block 映射为一个或多个 Mooncake 对象，执行批量存在性检查、读取和写入。
+- **xLLM Worker**：持有 Device/Host KV Cache、`HierarchyKVCacheTransfer` 和 `KVCacheStore`，并执行推理。
 - **Mooncake Store**：提供分布式、可跨进程复用的 KV 对象存储层。
 
 服务级整体架构如下：
 
 ![xLLM 全局多级KV Cache](../../assets/globalkvcache_architecture.png)
 
+## 统一缓存域与 Store 键
+
+`HierarchyKVCacheTransfer` 支持注册多个缓存域。普通推理只注册主模型缓存域；投机解码会把主模型和 Draft 模型注册到同一个 Transfer 实例，并共享同一个 Host 传输布局与 `KVCacheStore`：
+
+| 缓存域 | `CacheRole` | Store `key_component` |
+|---|---|---|
+| 主模型 | `TARGET` | 固定为 `main` |
+| 内置 Draft | `DRAFT` | `spec_draft::<algorithm>::embedded` |
+| 独立 Draft 模型 | `DRAFT` | `spec_draft::<algorithm>::<目录名>::<规范化路径摘要>` |
+
+Store 初始化时会按 `BlockType` 构建索引。每个支持该 `BlockType` 的缓存域都会形成一个独立物理对象。例如，主模型和 Draft 模型都包含 `BlockType::KV` 时，一个逻辑 KV Block 会对应两个 Store 对象；若某个 `BlockType` 只存在于主模型，则只生成主模型对象。
+
+当前对象键使用 `xllm-kv-v3` 命名空间。概念上由以下字段组成：
+
+```text
+xllm-kv-v3
+  + model_id
+  + key_component
+  + tp_size
+  + block_type
+  + tp_rank
+  + schema_hash
+  + block_hash
+```
+
+- `model_id` 是主模型命名空间，主模型和 Draft 模型对象都会包含它。
+- `key_component` 区分主模型、投机算法和 Draft 模型来源。
+- `tp_size`、`tp_rank` 和 `block_type` 隔离不同并行拓扑、Rank 和缓存类型。
+- `schema_hash` 由单个 Block 内各 Tensor 的 role、dtype 和除 Host Block 数量之外的 shape 生成。因此只调整 `host_blocks_factor` 不会改变对象键，但缓存布局变化会自动进入新的键空间。
+- `block_hash` 是对应 Token Block 的 128 位内容哈希。
+
+Store API 以“逻辑 Block”为上层接口，以“缓存域对象”为物理请求。只有同一 Worker 内该逻辑 Block 对应的**全部物理对象**都存在且读取成功，该 Worker 才会报告命中；随后 `PrefetchResult` 还会对所有 TP Rank 的结果执行逻辑 AND。也就是说，最终可发布的 Store 命中必须同时满足“所有缓存域完整”和“所有 TP Rank 完整”。
+
 ## Block 流转
 
-Fused 实例和 PD 分离中的 Prefill 实例使用完整的 Mooncake 准入、Host 恢复和写回流程。Decode 也保持 Store 开启，用于自身的 Host/Mooncake 写回；但 Decode 的请求准入仍然只探测 Device Prefix。
+Fused 实例和 PD 分离中的 Prefill 实例使用完整的 Mooncake 准入、Host 恢复和写回流程。Decode 也保持 Store 开启，用于自身的 Host/Mooncake 写回；但 Decode 的请求准入仍然只探测 Device Prefix。启用投机解码时，下图中的一次逻辑 Block 操作会同时覆盖主模型和 Draft 模型中支持该 `BlockType` 的缓存域。
 
 ```mermaid
 sequenceDiagram
@@ -65,13 +99,15 @@ sequenceDiagram
 
         par 所有 TP Rank 并行
             Engine->>Worker: PrefetchFromStorage(G2H batch)
-            Worker->>Store: BatchIsExist(keys)
-            Store-->>Worker: key existence bitmap
-            opt 仅对存在的 keys
-                Worker->>Store: BatchGet(existing keys, Host tensors)
-                Store-->>Worker: KV 写入 Host tensors
+            Worker->>Worker: 按 BlockType 展开各缓存域物理对象
+            Worker->>Store: BatchIsExist(all physical keys)
+            Store-->>Worker: physical existence bitmap
+            opt 同一逻辑 Block 的全部物理对象都存在
+                Worker->>Store: BatchGet(all component keys, Host tensors)
+                Store-->>Worker: 各缓存域 KV 写入对应 Host tensors
             end
-            Worker-->>Result: rank-local bitmap 与完成状态
+            Worker->>Worker: 聚合为 rank-local logical bitmap
+            Worker-->>Result: logical bitmap 与完成状态
         end
 
         loop Scheduler admission poll
@@ -80,7 +116,7 @@ sequenceDiagram
         end
         BlockMgr->>Result: merged_hits()
         Result-->>BlockMgr: 所有 TP bitmap 逻辑 AND
-        Note right of Result: 只有所有 TP Rank 都命中时才能发布该 block
+        Note right of Result: 单 Rank 内要求全部缓存域命中<br/>跨 Rank 再执行逻辑 AND
 
         BlockMgr->>Host: 释放 Store miss 的目标 blocks
         BlockMgr->>Host: cache Store hit blocks
@@ -114,6 +150,7 @@ sequenceDiagram
             Worker-->>Engine: registration ACK 与 scheduled block 数
             Engine->>Worker: Forward(batch_id)，排在注册 RPC 之后
             Worker->>Worker: 挂载 LayerSynchronizer(batch_id)
+            Note right of Worker: 投机解码的 target/draft mappings<br/>共享同一批次与同步器
 
             loop 每个 layer copy range
                 Worker->>Host: 读取 Host KV tensors
@@ -145,16 +182,18 @@ sequenceDiagram
             Worker->>Worker: copy stream wait_stream(compute stream)
             Worker->>HBM: 读取 Device KV
             HBM-->>Worker: Device KV
-            Worker->>Host: D2H copy 并同步 copy stream
-            Worker->>Store: BatchIsExist(keys)
+            Worker->>Host: 各缓存域 D2H copy 并同步 copy stream
+            Worker->>Worker: 展开物理对象并按 key 去重
+            Worker->>Store: BatchIsExist(unique keys)
 
             alt Store key 不存在
-                Worker->>Store: BatchPut(keys, Host tensors)
+                Worker->>Store: BatchPut(missing keys, Host tensors)
                 Store-->>Worker: Put results
             else Store key 已存在
                 Worker->>Worker: 跳过覆盖并计为已存在
             end
 
+            Worker->>Worker: 全部物理对象成功才记为 logical put success
             Note right of Worker: BatchPut 部分失败只记录日志<br/>不会改变 D2H 成功状态
             Worker-->>Engine: D2H 成功时返回完整 block count
         end
@@ -164,15 +203,28 @@ sequenceDiagram
         Result-->>BlockMgr: future callback(copy_ok)
         BlockMgr->>HBM: 无论 copy_ok 与否都释放 offload 持有的 Device blocks
 
-        alt 所有 TP Rank 的 D2H/RPC 都成功
+        alt 所有 TP Rank 的 D2H 都成功
             BlockMgr->>Host: 发布 Host Prefix Cache
-        else 任一 TP Rank D2H/RPC 失败
+        else 任一 TP Rank D2H 失败
             BlockMgr->>Host: 不发布 Host Prefix，并释放预留 Host blocks
         end
 
         Note over Scheduler,Result: offload completion 由 BlockManager callback 处理，不回调 Scheduler
     end
 ```
+
+## 投机解码缓存
+
+启用投机解码并配置 Host Cache 时，`SpeculativeWorkerImpl` 会让 Target Worker 和 Draft Worker 复用同一个 `HierarchyKVCacheTransfer`。两个缓存域必须共享同一条 producer stream，注册完成后再统一创建 Host Cache、Host 传输器和 `KVCacheStore`。
+
+统一缓存域带来以下行为：
+
+- G2H 预取会同时读取主模型和 Draft 模型对象。任一对象缺失时，该逻辑 Block 都按 miss 处理，避免只恢复主模型而让 Draft 状态不完整。
+- H2D 和 D2H 请求会分别生成 `target_mappings` 与 `draft_mappings`，但在同一 `batch_id` 和 Layer Synchronizer 下推进。
+- D2H2G 写回会先把两个缓存域复制到各自 Host Cache，再由同一个 `KVCacheStore` 写入各自键空间。
+- Draft 键自动包含投机算法和 Draft 来源。更换 Draft 路径会产生新键；若在原路径原地替换权重，应同时更换 `model_id`。
+
+普通非投机推理仍只注册 `main` 缓存域，行为与此前单域 Store 一致。
 
 ## PD 分离
 
@@ -275,7 +327,7 @@ sequenceDiagram
     end
 ```
 
-调度路径同时支持 `PUSH` 和 `PULL`。`kv_cache_transfer_type` 默认使用 `Mooncake`；下面的示例为了清晰仍显式设置该参数。标准 PD 部署需要在 Prefill 和 Decode 都开启全局 Mooncake Store，并为两个角色设置不重叠的 `store_local_hostname` 基础端口区间。
+调度路径通过 `kv_cache_transfer_mode` 支持 `PUSH` 和 `PULL`。当前代码不再提供 `kv_cache_transfer_type` 参数。标准 PD 部署需要在 Prefill 和 Decode 都开启全局 Mooncake Store，并为两个角色设置不重叠的 `store_local_hostname` 基础端口区间。
 
 ## 部署
 
@@ -400,6 +452,8 @@ mooncake_client \
 
 使用 RDMA 时，设置 `--store_protocol=rdma`，并通过 `DEVICE_NAMES` 环境变量指定 Mooncake RDMA 设备。如果没有设置 `DEVICE_NAMES`，xLLM 会回退到 TCP。
 
+启用投机解码时不需要额外配置 Draft Store namespace。xLLM 会自动为 Draft 缓存生成独立的 `key_component`。未设置 `--model_id` 时，xLLM 会使用模型路径的末级名称；生产环境仍建议显式提供稳定且能标识模型版本的 `--model_id`。
+
 ### PD 分离示例
 
 两个角色都需要正常配置 [PD 分离](/zh/features/disagg_pd/)参数并开启 Store。Prefill 和 Decode 必须使用不同的 `store_local_hostname` 基础端口：
@@ -408,7 +462,6 @@ mooncake_client \
 /path/to/xllm \
   --enable_disagg_pd=true \
   --instance_role=PREFILL \
-  --kv_cache_transfer_type=Mooncake \
   --kv_cache_transfer_mode=PUSH \
   --enable_prefix_cache=true \
   --host_blocks_factor=4 \
@@ -425,7 +478,6 @@ Decode 使用不同的本地 endpoint 区间开启 Store：
 /path/to/xllm \
   --enable_disagg_pd=true \
   --instance_role=DECODE \
-  --kv_cache_transfer_type=Mooncake \
   --kv_cache_transfer_mode=PUSH \
   --enable_prefix_cache=true \
   --host_blocks_factor=4 \
@@ -440,9 +492,11 @@ Decode 使用不同的本地 endpoint 区间开启 Store：
 
 ## 正确性与运维说明
 
-- 只有当**所有 TP Rank**都报告命中时，从 Store 读取的 Block 才会 mount 到 Host Prefix Cache。
+- Store 命中采用两级完整性判定：单个 Worker 内必须成功读取该 `BlockType` 的全部注册缓存域，随后所有 TP Rank 还必须同时报告命中，Block 才会 mount 到 Host Prefix Cache。
 - `prefetch_timeout` 到期后会停止下发新的预取 batch，但请求准入仍会等待所有在途 TP batch 完成；`0` 表示无限等待。
 - H2D registration 不等待物理拷贝。Forward 通过 `batch_id` 挂载 `LayerSynchronizer`，并在对应计算层等待；Scheduler 不会收到 H2D-complete 回调。
-- 写回时，只有所有 TP Rank 的 D2H/RPC 都成功，Host Prefix 才会发布。Mooncake `BatchPut` 是 best-effort；Store 部分写入失败只记录日志，不会使已经成功的 Host copy 失效。
-- 已存在的 Store 对象不会被覆盖。每次权重或配置版本变化时必须使用新的 `model_id`，并按需轮换或清理 Store namespace。
+- 写回时，Host Prefix 是否发布只取决于所有 TP Rank 的 D2H 是否成功。Mooncake `BatchPut` 是 best-effort；Store 部分写入失败只记录日志，不会使已经成功的 Host copy 失效。
+- `BatchPut` 会先按对象键去重并执行 `BatchIsExist`。已存在对象不会被覆盖，同一批次内的重复对象也只写一次；一个逻辑 Block 只有在全部缓存域对象已存在或写入成功时才计入 Store 成功数。
+- 当前 Store 键版本为 `xllm-kv-v3`。Host Block 容量不参与 `schema_hash`，但 Tensor role、dtype、单 Block shape、TP 拓扑、`BlockType` 和缓存域身份都会隔离键空间。
+- 权重内容本身不会自动进入对象键。每次主模型或 Draft 模型权重、量化方式或其他可能影响 KV 数值的配置变化时，都应使用新的 `model_id`，并按需轮换或清理旧 Store namespace。
 - PD 场景中，Prefill 和 Decode 都需要开启 Store。两个角色会复用 Worker Rank，并且每个 Worker 会绑定 `base_port + worker_rank`，因此必须使用不重叠的 `store_local_hostname` 基础端口区间。
