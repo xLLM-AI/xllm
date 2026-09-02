@@ -24,10 +24,10 @@ import torch.nn as nn
 from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
 from xllm.python.layers.qwen3_5_decoder_layer import (
     PartialRotaryEmbedding,
-    Qwen3_5LoadContext,
     get_qwen3_5_decoder_layer_class,
 )
 from xllm.python.model_loader import (
+    ParallelLoadContext,
     ScopedWeightLoader,
     copy_parameter,
 )
@@ -136,14 +136,12 @@ class Qwen3_5Config:
         )
 
     def validate(self) -> None:
-        if self.hidden_size <= 0 or self.n_heads <= 0 or self.n_layers <= 0:
+        if self.hidden_size <= 0 or self.n_heads <= 0 or self.n_kv_heads <= 0 or self.n_layers <= 0:
             raise ValueError("invalid Qwen3.5 model dimensions")
         if min(self.tp_size, self.dp_size, self.moe_tp_size, self.ep_size) <= 0:
             raise ValueError("parallel sizes must be positive")
         if self.tp_size * self.dp_size != self.world_size:
             raise ValueError("world_size must equal tp_size * dp_size")
-        if self.ep_size not in (1, self.world_size):
-            raise ValueError("Qwen3.5 Python supports only ep_size=1 or world_size")
         if self.moe_tp_size * self.ep_size != self.world_size:
             raise ValueError("world_size must equal moe_tp_size * ep_size")
         if not 0 <= self.dp_rank < self.dp_size:
@@ -155,12 +153,20 @@ class Qwen3_5Config:
         if not 0 <= self.ep_rank < self.ep_size:
             raise ValueError("ep_rank must be in [0, ep_size)")
         for name, count in (
+            ("hidden size", self.hidden_size),
             ("attention heads", self.n_heads),
             ("linear key heads", self.linear_num_key_heads),
             ("linear value heads", self.linear_num_value_heads),
+            ("dense intermediate size", self.intermediate_size),
+            ("vocabulary size", self.vocab_size),
         ):
             if count % self.tp_size:
                 raise ValueError(f"{name} must be divisible by tp_size")
+        if self.n_kv_heads >= self.tp_size:
+            if self.n_kv_heads % self.tp_size:
+                raise ValueError("KV heads must be divisible by tp_size when KV heads are sharded")
+        elif self.tp_size % self.n_kv_heads:
+            raise ValueError("tp_size must be divisible by KV heads when KV heads are replicated")
         if self.decoder_sparse_step <= 0:
             raise ValueError("decoder_sparse_step must be positive")
         if self.num_experts:
@@ -174,6 +180,8 @@ class Qwen3_5Config:
                 raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
             if self.shared_expert_intermediate_size <= 0:
                 raise ValueError("shared_expert_intermediate_size must be positive for Qwen3.5 MoE")
+            if self.shared_expert_intermediate_size % self.tp_size:
+                raise ValueError("shared_expert_intermediate_size must be divisible by tp_size")
 
     def is_moe_layer(self, layer_id: int) -> bool:
         return (
@@ -247,7 +255,16 @@ class Qwen3_5ForCausalLM(PyModelBase):
             ("model.language_model.", "model.", ""),
             "embed_tokens.weight",
         )
-        context = Qwen3_5LoadContext(tp_rank=tp_rank, tp_size=tp_size)
+        context = ParallelLoadContext(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            dp_rank=self.cfg.dp_rank,
+            dp_size=self.cfg.dp_size,
+            moe_tp_rank=self.cfg.moe_tp_rank,
+            moe_tp_size=self.cfg.moe_tp_size,
+            ep_rank=self.cfg.ep_rank,
+            ep_size=self.cfg.ep_size,
+        )
         copy_parameter(
             self.model.embed_tokens.weight,
             model_weights.shard(

@@ -25,9 +25,9 @@ from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
 from xllm.python.layers.qwen3_5_decoder_layer import (
     PartialRotaryEmbedding,
     Qwen3_5LayerConfig,
-    Qwen3_5LoadContext,
 )
 from xllm.python.model_loader import (
+    ParallelLoadContext,
     ScopedWeightLoader,
     copy_parameter,
 )
@@ -93,7 +93,7 @@ class CudaQwen3_5Attention(nn.Module):
         self,
         state: ScopedWeightLoader,
         name: str,
-        context: Qwen3_5LoadContext,
+        context: ParallelLoadContext,
     ) -> torch.Tensor:
         if self.cfg.n_kv_heads >= context.tp_size:
             return state.shard(name, 0, context.tp_rank, context.tp_size)
@@ -108,7 +108,7 @@ class CudaQwen3_5Attention(nn.Module):
     def load_weights(
         self,
         state: ScopedWeightLoader,
-        context: Qwen3_5LoadContext,
+        context: ParallelLoadContext,
     ) -> None:
         q = state.shard("q_proj.weight", 0, context.tp_rank, context.tp_size)
         k = self._shard_kv(state, "k_proj.weight", context)
@@ -154,6 +154,7 @@ class CudaQwen3_5Attention(nn.Module):
             state.tensor("k_norm.weight"),
             state.prefix + "k_norm.weight",
         )
+        self.o_proj.process_weights_after_loading()
 
     def forward(
         self,

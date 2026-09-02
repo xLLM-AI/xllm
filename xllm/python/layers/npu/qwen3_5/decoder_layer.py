@@ -21,19 +21,20 @@ import torch.nn as nn
 
 from xllm.python.layers.gated_mlp import GatedMLP
 from xllm.python.layers.layernorm import GemmaRMSNorm
+from xllm.python.layers.npu.qwen3_5.attention import NpuQwen3_5Attention
+from xllm.python.layers.npu.qwen3_5.gated_delta_net import (
+    NpuQwen3_5GatedDeltaNet,
+)
+from xllm.python.layers.npu.qwen3_5.moe import NpuQwen3_5SparseMoEBlock
 from xllm.python.layers.qwen3_5_decoder_layer import (
     PartialRotaryEmbedding,
     Qwen3_5LayerConfig,
-    Qwen3_5LoadContext,
-    Qwen3_5SparseMoEBlock,
 )
 from xllm.python.model_loader import (
+    ParallelLoadContext,
     ScopedWeightLoader,
     copy_parameter,
 )
-
-from .attention import NpuQwen3_5Attention
-from .gated_delta_net import NpuQwen3_5GatedDeltaNet
 
 
 class NpuQwen3_5DecoderLayer(nn.Module):
@@ -79,7 +80,7 @@ class NpuQwen3_5DecoderLayer(nn.Module):
             device=device,
         )
         if cfg.is_moe_layer(layer_id):
-            self.mlp = Qwen3_5SparseMoEBlock(cfg, dtype, device)
+            self.mlp = NpuQwen3_5SparseMoEBlock(cfg, dtype, device)
         else:
             self.mlp = GatedMLP(
                 cfg.hidden_size,
@@ -89,108 +90,10 @@ class NpuQwen3_5DecoderLayer(nn.Module):
                 device,
             )
 
-    def _load_mlp_weights(
-        self,
-        state: ScopedWeightLoader,
-        context: Qwen3_5LoadContext,
-    ) -> None:
-        if self.cfg.is_moe_layer(self.layer_id):
-            copy_parameter(
-                self.mlp.experts.gate.weight,
-                state.tensor("gate.weight"),
-                state.prefix + "gate.weight",
-            )
-            copy_parameter(
-                self.mlp.shared_expert_gate.weight,
-                state.tensor("shared_expert_gate.weight"),
-                state.prefix + "shared_expert_gate.weight",
-            )
-
-            gate_up = state.tensor("experts.gate_up_proj")
-            local_experts = self.cfg.num_experts // self.cfg.ep_size
-            start_expert = self.cfg.ep_rank * local_experts
-            gate_up = gate_up.narrow(0, start_expert, local_experts)
-            gate, up = gate_up.chunk(2, dim=1)
-            gate = gate.chunk(self.cfg.moe_tp_size, dim=1)[self.cfg.moe_tp_rank]
-            up = up.chunk(self.cfg.moe_tp_size, dim=1)[self.cfg.moe_tp_rank]
-            copy_parameter(
-                self.mlp.experts.w13,
-                torch.cat((up, gate), dim=1),
-                state.prefix + "experts.gate_up_proj",
-            )
-
-            down = state.tensor("experts.down_proj").narrow(
-                0,
-                start_expert,
-                local_experts,
-            )
-            copy_parameter(
-                self.mlp.experts.w2,
-                down.chunk(self.cfg.moe_tp_size, dim=2)[self.cfg.moe_tp_rank],
-                state.prefix + "experts.down_proj",
-            )
-
-            shared = state.with_prefix("shared_expert.")
-            shared_gate = shared.shard(
-                "gate_proj.weight",
-                0,
-                context.tp_rank,
-                context.tp_size,
-            )
-            shared_up = shared.shard(
-                "up_proj.weight",
-                0,
-                context.tp_rank,
-                context.tp_size,
-            )
-            copy_parameter(
-                self.mlp.shared_expert.gate_up_proj.weight,
-                torch.cat((shared_gate, shared_up)),
-                shared.prefix + "{gate,up}_proj.weight",
-            )
-            copy_parameter(
-                self.mlp.shared_expert.down_proj.weight,
-                shared.shard(
-                    "down_proj.weight",
-                    1,
-                    context.tp_rank,
-                    context.tp_size,
-                ),
-                shared.prefix + "down_proj.weight",
-            )
-        else:
-            gate = state.shard(
-                "gate_proj.weight",
-                0,
-                context.tp_rank,
-                context.tp_size,
-            )
-            up = state.shard(
-                "up_proj.weight",
-                0,
-                context.tp_rank,
-                context.tp_size,
-            )
-            copy_parameter(
-                self.mlp.gate_up_proj.weight,
-                torch.cat((gate, up)),
-                state.prefix + "{gate,up}_proj.weight",
-            )
-            copy_parameter(
-                self.mlp.down_proj.weight,
-                state.shard(
-                    "down_proj.weight",
-                    1,
-                    context.tp_rank,
-                    context.tp_size,
-                ),
-                state.prefix + "down_proj.weight",
-            )
-
     def load_weights(
         self,
         state: ScopedWeightLoader,
-        context: Qwen3_5LoadContext,
+        context: ParallelLoadContext,
     ) -> None:
         copy_parameter(
             self.input_layernorm.weight,
@@ -212,7 +115,7 @@ class NpuQwen3_5DecoderLayer(nn.Module):
                 state.with_prefix("linear_attn."),
                 context,
             )
-        self._load_mlp_weights(state.with_prefix("mlp."), context)
+        self.mlp.load_weights(state.with_prefix("mlp."), context)
 
     @staticmethod
     def _prepare_tilelang_forward() -> None:

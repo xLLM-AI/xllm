@@ -22,6 +22,17 @@ rms_norm = torch.ops.xllm_ops.rms_norm
 fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
 
 
+def gemma_rms_norm(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Apply Gemma RMSNorm with the checkpoint's additive gamma."""
+    variance = value.pow(2).mean(dim=-1, keepdim=True)
+    normalized = value * torch.rsqrt(variance + eps)
+    return normalized * (weight + 1.0)
+
+
 @torch.library.custom_op("xllm_triton::l2_norm", mutates_args=())
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Run Triton L2 normalization as one graph node."""
@@ -62,4 +73,10 @@ def _rms_norm_gated_fake(
     return torch.empty_like(value)
 
 
-__all__ = ["rms_norm", "fused_add_rms_norm", "l2_norm", "rms_norm_gated"]
+__all__ = [
+    "rms_norm",
+    "gemma_rms_norm",
+    "fused_add_rms_norm",
+    "l2_norm",
+    "rms_norm_gated",
+]

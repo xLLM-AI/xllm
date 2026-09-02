@@ -12,18 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Public interfaces for Python model weight loading."""
+"""Parallel topology used while materializing checkpoint weights."""
 
-from .parallel_load_context import ParallelLoadContext
-from .scoped_weight_loader import (
-    ScopedWeightLoader,
-    StateDictLike,
-    copy_parameter,
-)
+from __future__ import annotations
 
-__all__ = [
-    "ParallelLoadContext",
-    "ScopedWeightLoader",
-    "StateDictLike",
-    "copy_parameter",
-]
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelLoadContext:
+    """Rank-local parallel topology for model-owned weight loading."""
+
+    tp_rank: int
+    tp_size: int
+    dp_rank: int = 0
+    dp_size: int = 1
+    moe_tp_rank: int = 0
+    moe_tp_size: int = 1
+    ep_rank: int = 0
+    ep_size: int = 1

@@ -78,9 +78,11 @@ class GemmaRMSNorm(nn.Module):
             normalized = normalized + residual.float()
             residual = normalized.to(original_dtype)
 
-        variance = normalized.pow(2).mean(dim=-1, keepdim=True)
-        normalized = normalized * torch.rsqrt(variance + self.eps)
-        normalized = normalized * (self.weight + 1.0)
+        normalized = kernels.gemma_rms_norm(
+            normalized,
+            self.weight,
+            self.eps,
+        )
         output = normalized.to(original_dtype)
         if residual is None:
             return output

@@ -272,6 +272,91 @@ def _group_gemm(
     return outputs[0]
 
 
+@torch.library.custom_op("xllm_python::grouped_moe_bf16", mutates_args=())
+def grouped_moe_bf16(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    num_total_experts: int,
+    start_expert_id: int,
+    num_experts_per_rank: int,
+) -> torch.Tensor:
+    """Run Qwen3.5 BF16 experts with NPU routing and grouped matmuls."""
+    active_expert_range = [
+        start_expert_id,
+        start_expert_id + num_experts_per_rank,
+    ]
+    expanded_hidden, expanded_row_idx, group_list, _ = torch_npu.npu_moe_init_routing_v2(
+        hidden_states,
+        topk_ids.to(torch.int32),
+        scale=None,
+        active_num=hidden_states.shape[0] * topk_ids.shape[1],
+        expert_num=num_total_experts,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=active_expert_range,
+        quant_mode=-1,
+    )
+    group_list = group_list[:num_experts_per_rank].to(torch.int64)
+    gate_up = _group_gemm(
+        x=expanded_hidden,
+        weight=w13,
+        scale=None,
+        per_token_scale=None,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=hidden_states.dtype,
+    )
+    from xllm.python import kernels as _kernels
+
+    activated = _kernels.silu_and_mul(gate_up)
+    expert_output = _group_gemm(
+        x=activated,
+        weight=w2,
+        scale=None,
+        per_token_scale=None,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=hidden_states.dtype,
+    )
+    local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
+    local_topk_weights = topk_weights * local_expert_mask.to(topk_weights.dtype)
+    return torch_npu.npu_moe_token_unpermute(
+        permuted_tokens=expert_output,
+        sorted_indices=expanded_row_idx.abs(),
+        probs=local_topk_weights.to(expert_output.dtype),
+    )
+
+
+@grouped_moe_bf16.register_fake
+def _grouped_moe_bf16_fake(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    num_total_experts: int,
+    start_expert_id: int,
+    num_experts_per_rank: int,
+) -> torch.Tensor:
+    del (
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        num_total_experts,
+        start_expert_id,
+        num_experts_per_rank,
+    )
+    return torch.empty_like(hidden_states)
+
+
 def _grouped_moe_with_selected_experts_impl(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -470,10 +555,16 @@ def moe_fused_topk(
     Returns:
         Routing weights and expert indices, both ``[num_tokens, topk]``.
     """
-    del gating_output, topk, renormalize, scoring_func
-    raise NotImplementedError(
-        "moe_fused_topk has no NPU kernel; NPU routes and runs experts in one step through grouped_moe"
+    if scoring_func != "softmax":
+        raise NotImplementedError("NPU moe_fused_topk currently supports softmax routing only")
+    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax_v2(
+        gating_output,
+        k=topk,
+        finished=None,
+        renorm=1 if renormalize else 0,
+        output_softmax=False,
     )
+    return topk_weights.contiguous(), topk_ids.to(torch.int32).contiguous()
 
 
 def cutlass_fused_moe(

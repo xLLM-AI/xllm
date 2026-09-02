@@ -53,6 +53,7 @@ _EXPORTS = {
         "format_cast_nz",
         "fused_moe",
         "grouped_moe",
+        "grouped_moe_bf16",
         "moe_expert_compute",
         "moe_fused_topk",
         "dequant_swiglu_quant",
@@ -68,6 +69,7 @@ _EXPORTS = {
     "normalization": (
         "fused_add_rms_norm",
         "fused_add_rms_norm_dynamic_quant",
+        "gemma_rms_norm",
         "l2_norm",
         "rms_norm",
         "rms_norm_dynamic_quant",
@@ -103,6 +105,7 @@ _EXPORTS = {
 
 __all__ = [
     "rms_norm",
+    "gemma_rms_norm",
     "fused_add_rms_norm",
     "fused_add_rms_norm_dynamic_quant",
     "rms_norm_dynamic_quant",
@@ -124,6 +127,7 @@ __all__ = [
     "format_cast_nz",
     "fused_moe",
     "grouped_moe",
+    "grouped_moe_bf16",
     "moe_gate_routing",
     "moe_expert_compute",
     "moe_token_dispatch",
