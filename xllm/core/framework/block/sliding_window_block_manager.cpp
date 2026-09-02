@@ -51,6 +51,35 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
   if (seq == nullptr) {
     return std::nullopt;
   }
+  const size_t restore_tokens = seq->kv_cache_tokens_num();
+  if (restore_tokens > kv_state.kv_cache_tokens_num()) {
+    CHECK_LE(restore_tokens, num_tokens);
+    const size_t block_size = options_.block_size();
+    CHECK_GT(block_size, 0u);
+    const size_t held = kv_state.num_blocks(block_type());
+    const size_t logical_blocks = (num_tokens + block_size - 1) / block_size;
+    if (logical_blocks <= held) {
+      return std::vector<Block>{};
+    }
+
+    const size_t sliding_window_tokens =
+        std::max<size_t>(options_.sliding_window_size(), 1);
+    const size_t restore_window_start =
+        restore_tokens - std::min(restore_tokens, sliding_window_tokens);
+    const size_t first_live_block = restore_window_start / block_size;
+    const size_t live_begin = std::max(held, first_live_block);
+    const size_t active_blocks = logical_blocks - live_begin;
+    std::vector<Block> live_blocks = allocate(active_blocks);
+    if (live_blocks.size() != active_blocks) {
+      return std::nullopt;
+    }
+
+    std::vector<Block> sparse_blocks(live_begin - held);
+    sparse_blocks.insert(sparse_blocks.end(),
+                         std::make_move_iterator(live_blocks.begin()),
+                         std::make_move_iterator(live_blocks.end()));
+    return sparse_blocks;
+  }
   if (!options_.instance_is_decode() || kv_state.num_blocks(block_type()) > 0) {
     std::optional<std::vector<Block>> blocks =
         BlockManagerImpl::allocate_for_sequence(seq, kv_state, num_tokens);
