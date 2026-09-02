@@ -23,10 +23,10 @@ from xllm.python import kernels
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
 from xllm.python.layers.qwen3_5_decoder_layer import (
     Qwen3_5LayerConfig,
-    Qwen3_5LoadContext,
 )
 from xllm.python.model_executor.forward_context import get_forward_context
 from xllm.python.model_loader import (
+    ParallelLoadContext,
     ScopedWeightLoader,
     copy_parameter,
 )
@@ -118,7 +118,7 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
     def load_weights(
         self,
         state: ScopedWeightLoader,
-        context: Qwen3_5LoadContext,
+        context: ParallelLoadContext,
     ) -> None:
         global_key = self.cfg.linear_num_key_heads * self.key_head_dim
         global_value = self.cfg.linear_num_value_heads * self.value_head_dim
@@ -186,6 +186,8 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
             ),
             state.prefix + "out_proj.weight",
         )
+        # TODO: Prepare the NPU row-parallel weight after TileLang and
+        # CANN/TBE TVM runtimes can coexist in the same process.
 
     def _prepare_ssm_state(
         self,

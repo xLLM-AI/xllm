@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -147,3 +148,111 @@ def test_selected_expert_moe_rejects_an_invalid_active_range() -> None:
             start_expert_id=14,
             num_experts_per_rank=4,
         )
+
+
+def test_qwen35_bf16_grouped_moe_uses_native_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xllm.python import kernels
+
+    moe = _load_npu_moe_module()
+
+    hidden = torch.empty(3, 16, dtype=torch.bfloat16)
+    topk_weights = torch.ones(3, 2, dtype=torch.bfloat16)
+    topk_ids = torch.tensor([[4, 0], [5, 9], [7, 6]], dtype=torch.int32)
+    w13 = torch.empty(4, 16, 32, dtype=torch.bfloat16)
+    w2 = torch.empty(4, 16, 16, dtype=torch.bfloat16)
+    expanded = torch.empty(6, 16, dtype=torch.bfloat16)
+    row_ids = torch.arange(6, dtype=torch.int32)
+    expert_tokens = torch.tensor([1, 3, 5, 6], dtype=torch.int64)
+    gate_up = torch.cat(
+        (
+            torch.zeros(6, 16, dtype=torch.bfloat16),
+            torch.ones(6, 16, dtype=torch.bfloat16),
+        ),
+        dim=-1,
+    )
+    expert_output = torch.empty(6, 16, dtype=torch.bfloat16)
+    expected = torch.empty_like(hidden)
+    init_routing = MagicMock(return_value=(expanded, row_ids, expert_tokens, torch.empty(0)))
+    group_gemm = MagicMock(side_effect=(gate_up, expert_output))
+    token_unpermute = MagicMock(return_value=expected)
+    silu_and_mul = MagicMock(return_value=torch.zeros(6, 16, dtype=torch.bfloat16))
+    monkeypatch.setattr(moe, "_group_gemm", group_gemm)
+    monkeypatch.setattr(
+        moe.torch_npu,
+        "npu_moe_init_routing_v2",
+        init_routing,
+    )
+    monkeypatch.setattr(
+        moe.torch_npu,
+        "npu_moe_token_unpermute",
+        token_unpermute,
+    )
+    monkeypatch.setattr(kernels, "silu_and_mul", silu_and_mul, raising=False)
+
+    result = moe.grouped_moe_bf16(
+        hidden,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        16,
+        4,
+        4,
+    )
+
+    assert result is expected
+    assert init_routing.call_args.kwargs["active_expert_range"] == [4, 8]
+    assert init_routing.call_args.kwargs["quant_mode"] == -1
+    assert group_gemm.call_count == 2
+    first_gemm = group_gemm.call_args_list[0].kwargs
+    second_gemm = group_gemm.call_args_list[1].kwargs
+    assert first_gemm["weight"] is w13
+    assert second_gemm["weight"] is w2
+    silu_and_mul.assert_called_once_with(gate_up)
+    assert first_gemm["group_list_type"] == 1
+    assert second_gemm["group_list_type"] == 1
+    torch.testing.assert_close(
+        second_gemm["x"],
+        torch.zeros(6, 16, dtype=torch.bfloat16),
+    )
+    torch.testing.assert_close(
+        token_unpermute.call_args.kwargs["probs"],
+        torch.tensor([[1, 0], [1, 0], [1, 1]], dtype=torch.bfloat16),
+    )
+
+
+@pytest.mark.parametrize(("renormalize", "expected_renorm"), ((False, 0), (True, 1)))
+def test_npu_softmax_topk_uses_graph_safe_native_op(
+    monkeypatch: pytest.MonkeyPatch,
+    renormalize: bool,
+    expected_renorm: int,
+) -> None:
+    moe = _load_npu_moe_module()
+    logits = torch.zeros(2, 4, dtype=torch.bfloat16)
+    weights = torch.tensor([[0.3, 0.2], [0.4, 0.1]], dtype=torch.bfloat16)
+    expert_ids = torch.tensor([[1, 3], [0, 2]], dtype=torch.int32)
+    native_topk = MagicMock(return_value=(weights, expert_ids, torch.empty_like(expert_ids)))
+    monkeypatch.setattr(
+        moe.torch_npu,
+        "npu_moe_gating_top_k_softmax_v2",
+        native_topk,
+    )
+
+    actual_weights, actual_ids = moe.moe_fused_topk(
+        logits,
+        2,
+        renormalize,
+        "softmax",
+    )
+
+    native_topk.assert_called_once_with(
+        logits,
+        k=2,
+        finished=None,
+        renorm=expected_renorm,
+        output_softmax=False,
+    )
+    torch.testing.assert_close(actual_weights, weights)
+    torch.testing.assert_close(actual_ids, expert_ids)

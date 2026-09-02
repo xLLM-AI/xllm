@@ -16,16 +16,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol
 
 import torch
 import torch.nn as nn
 
-from xllm.python import distributed
-from xllm.python.layers.fused_moe import FusedMoE
-from xllm.python.layers.gated_mlp import GatedMLP
-from xllm.python.model_loader import ScopedWeightLoader
+from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 
 
 class Qwen3_5LayerConfig(Protocol):
@@ -60,63 +56,6 @@ class Qwen3_5LayerConfig(Protocol):
     def is_moe_layer(self, layer_id: int) -> bool: ...
 
     def head_split(self) -> tuple[int, int]: ...
-
-
-@dataclass(frozen=True, slots=True)
-class Qwen3_5LoadContext:
-    tp_rank: int
-    tp_size: int
-
-
-class Qwen3_5SparseMoEBlock(nn.Module):
-    def __init__(
-        self,
-        cfg: Qwen3_5LayerConfig,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
-        super().__init__()
-        self.fuse_reductions = cfg.dp_size == 1 and cfg.tp_size > 1
-        self.experts = FusedMoE(
-            hidden_size=cfg.hidden_size,
-            intermediate_size=cfg.moe_intermediate_size,
-            num_experts=cfg.num_experts,
-            top_k=cfg.num_experts_per_tok,
-            renormalize=cfg.norm_topk_prob,
-            moe_tp_size=cfg.moe_tp_size,
-            moe_tp_rank=cfg.moe_tp_rank,
-            ep_size=cfg.ep_size,
-            ep_rank=cfg.ep_rank,
-            dp_size=cfg.dp_size,
-            dp_rank=cfg.dp_rank,
-            dtype=dtype,
-            device=device,
-            reduce_results=not self.fuse_reductions,
-        )
-        self.shared_expert = GatedMLP(
-            cfg.hidden_size,
-            cfg.shared_expert_intermediate_size,
-            cfg.tp_size,
-            dtype,
-            device,
-            reduce_results=not self.fuse_reductions,
-        )
-        self.shared_expert_gate = nn.Linear(
-            cfg.hidden_size,
-            1,
-            bias=False,
-            dtype=dtype,
-            device=device,
-        )
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        routed = self.experts(hidden)
-        shared = self.shared_expert(hidden)
-        shared_gate = torch.sigmoid(self.shared_expert_gate(hidden))
-        output = routed + shared * shared_gate
-        if self.fuse_reductions:
-            distributed.all_reduce_(output)
-        return output
 
 
 class PartialRotaryEmbedding(nn.Module):
@@ -189,7 +128,7 @@ class Qwen3_5DecoderLayerProtocol(Protocol):
     def load_weights(
         self,
         state: ScopedWeightLoader,
-        context: Qwen3_5LoadContext,
+        context: ParallelLoadContext,
     ) -> None: ...
 
 

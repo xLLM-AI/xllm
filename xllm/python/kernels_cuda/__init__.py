@@ -61,6 +61,7 @@ from .moe import (
 )
 from .normalization import (
     fused_add_rms_norm,
+    gemma_rms_norm,
     l2_norm,
     rms_norm,
     rms_norm_gated,
@@ -86,6 +87,7 @@ from .sparse_attention import (
 
 __all__ = [
     "rms_norm",
+    "gemma_rms_norm",
     "fused_add_rms_norm",
     "l2_norm",
     "rms_norm_gated",
