@@ -229,6 +229,42 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
     std::vector<RegisteredBufferDesc>& layer_buffers =
         layout.layers[static_cast<size_t>(layer_id)];
     layer_buffers.reserve(transfer_tensors.size());
+
+    // Hybrid (SSM/linear-attention) layers keep both a CONV cache (one row per
+    // logical block) and an SSM state cache (checkpoint_stride rows per block).
+    // Derive the stride so SSM row ids can be scaled on transfer, matching
+    // LlmDataDistTransfer::linear_checkpoint_stride.
+    int64_t conv_block_count = 0;
+    int64_t ssm_block_count = 0;
+    for (const KVCacheTensor& cache_tensor : transfer_tensors) {
+      const torch::Tensor& tensor = cache_tensor.tensor;
+      if (!tensor.defined() || tensor.numel() == 0 || tensor.dim() == 0) {
+        continue;
+      }
+      if (cache_tensor.role == KVCacheTensorRole::CONV) {
+        conv_block_count = tensor.size(0);
+      } else if (cache_tensor.role == KVCacheTensorRole::SSM) {
+        ssm_block_count = tensor.size(0);
+      }
+    }
+    int64_t checkpoint_stride = 1;
+    if (conv_block_count > 0 && ssm_block_count > 0) {
+      CHECK_EQ(ssm_block_count % conv_block_count, 0)
+          << "SSM block count must be a multiple of CONV block count, layer="
+          << layer_id << ", ssm=" << ssm_block_count
+          << ", conv=" << conv_block_count;
+      checkpoint_stride = ssm_block_count / conv_block_count;
+    } else if (conv_block_count > 0 || ssm_block_count > 0) {
+      // The both-present case is handled above, so reaching here means exactly
+      // one of CONV/SSM is registered: stride stays 1 and the SSM remap
+      // silently no-ops, which would reintroduce the mis-indexed-SSM bug if a
+      // future layout renames/drops a role. Flag it instead of failing quietly.
+      LOG(WARNING) << "Hybrid cache layer has only one of CONV/SSM registered; "
+                   << "SSM checkpoint stride defaults to 1, layer=" << layer_id
+                   << ", conv_block_count=" << conv_block_count
+                   << ", ssm_block_count=" << ssm_block_count;
+    }
+
     for (const KVCacheTensor& cache_tensor : transfer_tensors) {
       const torch::Tensor& tensor = cache_tensor.tensor;
       CHECK(tensor.defined() && tensor.numel() > 0)
@@ -244,7 +280,8 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
           layout.offset + layout.total_buf_cnt,
           cache_tensor.role,
           cache_tensor.group_id,
-          logical_bytes / static_cast<uint64_t>(block_count)};
+          logical_bytes / static_cast<uint64_t>(block_count),
+          cache_tensor.role == KVCacheTensorRole::SSM ? checkpoint_stride : 1};
       layer_buffers.emplace_back(std::move(desc));
       ++layout.total_buf_cnt;
     }
@@ -379,8 +416,12 @@ bool MooncakeKVCacheTransferDefault::append_buffer_mappings(
       }
       MooncakeTransferEngine::BufferTransferMapping buffer_mapping;
       buffer_mapping.buf_id = buffer.buf_id;
-      buffer_mapping.local_ids = mapping.local_ids;
-      buffer_mapping.remote_ids = mapping.remote_ids;
+      // ssm_base_row_ids is a no-op for stride <= 1, so non-SSM / non-hybrid
+      // buffers pass through unchanged.
+      const int64_t stride =
+          buffer.role == KVCacheTensorRole::SSM ? buffer.checkpoint_stride : 1;
+      buffer_mapping.local_ids = ssm_base_row_ids(mapping.local_ids, stride);
+      buffer_mapping.remote_ids = ssm_base_row_ids(mapping.remote_ids, stride);
       buffer_mappings->emplace_back(std::move(buffer_mapping));
     }
   }
@@ -639,6 +680,11 @@ bool MooncakeKVCacheTransferXTensor::pull_kv_blocks_impl(
     const std::string& src_addr,
     const std::vector<uint64_t>& src_blocks,
     const std::vector<uint64_t>& dst_blocks) {
+  // NOTE: XTensor mode transfers only K/V offsets and does NOT apply the SSM
+  // checkpoint-stride row remap that MooncakeKVCacheTransferDefault does (see
+  // ssm_base_row_ids / append_buffer_mappings). Hybrid (SSM/linear-attention)
+  // models with num_speculative_tokens >= 2 are therefore NOT correctly
+  // supported here yet; add SSM/CONV handling before enabling XTensor for them.
   if (model_id_.empty()) {
     LOG(ERROR) << "model_id not set for XTensor mode pull";
     return false;
@@ -680,8 +726,8 @@ bool MooncakeKVCacheTransferXTensor::pull_kv_blocks_impl(
       dst_offsets.push_back(dst_v_off);
     }
 
-    auto* te = static_cast<MooncakeTransferEngine*>(mooncake_te_.get());
-    auto ret = te->move_memory_by_global_offsets(
+    auto* engine = static_cast<MooncakeTransferEngine*>(mooncake_te_.get());
+    auto ret = engine->move_memory_by_global_offsets(
         src_addr,
         src_offsets,
         dst_offsets,

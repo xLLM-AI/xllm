@@ -63,19 +63,6 @@ int64_t linear_checkpoint_stride(
   CHECK_EQ(ssm_cache->tensor.size(0) % conv_cache->tensor.size(0), 0);
   return ssm_cache->tensor.size(0) / conv_cache->tensor.size(0);
 }
-
-std::vector<uint64_t> ssm_base_row_ids(const std::vector<uint64_t>& logical_ids,
-                                       int64_t checkpoint_stride) {
-  if (checkpoint_stride <= 1) {
-    return logical_ids;
-  }
-  std::vector<uint64_t> ids;
-  ids.reserve(logical_ids.size());
-  for (uint64_t logical_id : logical_ids) {
-    ids.push_back(logical_id * static_cast<uint64_t>(checkpoint_stride));
-  }
-  return ids;
-}
 }  // namespace
 
 LlmDataDistTransfer::LlmDataDistTransfer(const uint16_t listen_port,

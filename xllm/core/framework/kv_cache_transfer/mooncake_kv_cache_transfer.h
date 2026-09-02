@@ -99,6 +99,11 @@ class MooncakeKVCacheTransferDefault final
     KVCacheTensorRole role;
     int32_t group_id = 0;
     uint64_t block_bytes = 0;
+    // For hybrid (SSM/linear-attention) models the SSM state cache holds
+    // checkpoint_stride rows per logical block, so SSM row ids must be scaled
+    // by this stride on transfer (mirrors LlmDataDistTransfer). 1 for
+    // non-hybrid layers / non-SSM buffers.
+    int64_t checkpoint_stride = 1;
   };
 
   // Mooncake assigns buffer ids in registration order. Main KV cache registers

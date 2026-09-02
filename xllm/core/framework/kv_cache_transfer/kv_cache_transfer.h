@@ -171,4 +171,25 @@ class KVCacheTransferFactory {
       const std::string& model_id = "");
 };
 
+// Scale hybrid (SSM/linear-attention) logical block ids to their SSM
+// state-cache base row ids: each logical block occupies checkpoint_stride rows,
+// so the base row is logical_id * stride. Only the base row is transferred on
+// PD handoff. Returns the input unchanged for stride <= 1 (non-hybrid layers /
+// num_speculative_tokens <= 1). Shared by the LlmDataDist and Mooncake KV
+// transfer backends.
+inline std::vector<uint64_t> ssm_base_row_ids(
+    const std::vector<uint64_t>& logical_ids,
+    int64_t checkpoint_stride) {
+  if (checkpoint_stride <= 1) {
+    return logical_ids;
+  }
+  const uint64_t stride = static_cast<uint64_t>(checkpoint_stride);
+  std::vector<uint64_t> ids;
+  ids.reserve(logical_ids.size());
+  for (uint64_t logical_id : logical_ids) {
+    ids.push_back(logical_id * stride);
+  }
+  return ids;
+}
+
 }  // namespace xllm
