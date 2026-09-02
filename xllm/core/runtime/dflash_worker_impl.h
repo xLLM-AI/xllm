@@ -118,13 +118,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // stays here and a subclass flips one bit.
   virtual bool sample_from_anchor() const { return false; }
 
-  // Draft KV cache geometry hook: the base DFlash draft shares the target
-  // shape, so the default returns it unchanged. DFlash2 overrides this with
-  // its own block-size-bounded draft shape; both allocator entry points
-  // funnel through it.
-  virtual KVCacheShape draft_kv_cache_shape(
-      const KVCacheShape& target_shape) const;
-
   // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
   // the target validate input. A DSpark override of run_decode_draft calls both
   // before its draft forward.

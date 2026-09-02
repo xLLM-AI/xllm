@@ -480,15 +480,6 @@ ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
   return draft_args;
 }
 
-KVCacheShape MTPDraftKVCacheShape(const KVCacheShape& target_shape,
-                                  const ModelArgs& draft_model_args,
-                                  int64_t block_size) {
-  KVCacheCapacity draft_capacity;
-  draft_capacity.n_blocks(target_shape.key_cache_shape()[0])
-      .block_size(block_size);
-  return KVCacheShape(draft_capacity, draft_model_args, /*world_size=*/1);
-}
-
 bool is_qwen3_5_draft_model_type(const std::string& model_type) {
   return mtp_async::classify_combined_draft_execution_path(model_type) ==
          mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
@@ -910,44 +901,16 @@ bool MTPWorkerImpl::should_use_separate_draft_kv_cache_shape() const {
   return uses_embedded_eagle3_draft();
 }
 
-KVCacheShape MTPWorkerImpl::get_draft_kv_cache_shape(
+KVCacheShape MTPWorkerImpl::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
-  CHECK(should_use_separate_draft_kv_cache_shape())
-      << "separate draft KV cache shape requires an embedded Eagle3 draft";
-  CHECK(!target_kv_cache_shape.key_cache_shape().empty())
-      << "target KV cache shape must contain key cache shape";
-
-  const int64_t num_blocks = target_kv_cache_shape.key_cache_shape()[0];
-  CHECK_GT(num_blocks, 0) << "draft KV cache num_blocks must be positive";
-
-  const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-  const ParallelArgs& draft_parallel_args =
-      draft_impl_->context_.get_parallel_args();
-  const int64_t draft_tp_size = get_dp_local_tp_size(draft_parallel_args);
-  const int64_t dtype_size =
-      static_cast<int64_t>(torch::elementSize(draft_impl_->dtype()));
-  const int64_t total_kv_heads =
-      draft_args.n_kv_heads().value_or(draft_args.n_heads());
-  const int64_t local_kv_heads =
-      std::max<int64_t>(1, total_kv_heads / draft_tp_size);
-  const int64_t cache_dtype_size =
-      options_.kv_cache_dtype() == "auto" ? dtype_size : 1;
-
-  KVCacheCapacity draft_kv_cache_cap;
-  draft_kv_cache_cap.n_blocks(num_blocks)
-      .block_size(options_.block_size())
-      .slot_size(2 * cache_dtype_size * draft_args.head_dim() * local_kv_heads)
-      .index_slot_size(draft_args.index_n_heads() > 0
-                           ? dtype_size * draft_args.index_head_dim()
-                           : 0)
-      .scale_slot_size(options_.kv_cache_dtype() == "auto"
-                           ? 0
-                           : 2 * sizeof(float) * local_kv_heads)
-      .n_layers(draft_args.num_nextn_predict_layers() > 0
-                    ? draft_args.num_nextn_predict_layers()
-                    : draft_args.n_layers());
-
-  return KVCacheShape(draft_kv_cache_cap, draft_args, draft_tp_size);
+  if (should_use_separate_draft_kv_cache_shape()) {
+    return build_draft_kv_cache_shape(target_kv_cache_shape);
+  }
+  if (options_.enable_mtp_draft_body_tp1()) {
+    return build_draft_kv_cache_shape(target_kv_cache_shape,
+                                      /*draft_world_size=*/1);
+  }
+  return target_kv_cache_shape;
 }
 
 bool MTPWorkerImpl::uses_embedded_eagle3_draft() const {
@@ -1111,20 +1074,8 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    if (should_use_separate_draft_kv_cache_shape()) {
-      const KVCacheShape draft_shape = get_draft_kv_cache_shape(kv_cache_shape);
-      draft_shape.print_shapes();
-      draft_allocated = draft_impl_->allocate_kv_cache(draft_shape);
-    } else if (options_.enable_mtp_draft_body_tp1()) {
-      const KVCacheShape draft_shape =
-          MTPDraftKVCacheShape(kv_cache_shape,
-                               draft_impl_->context_.get_model_args(),
-                               options_.block_size());
-      draft_shape.print_shapes();
-      draft_allocated = draft_impl_->allocate_kv_cache(draft_shape);
-    } else {
-      draft_allocated = draft_impl_->allocate_kv_cache(kv_cache_shape);
-    }
+    draft_allocated =
+        draft_impl_->allocate_kv_cache(draft_kv_cache_shape(kv_cache_shape));
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
@@ -1167,23 +1118,8 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    if (should_use_separate_draft_kv_cache_shape()) {
-      const KVCacheShape draft_shape = get_draft_kv_cache_shape(kv_cache_shape);
-      draft_shape.print_shapes();
-      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
-          kv_cache_transfer_, draft_shape);
-    } else if (options_.enable_mtp_draft_body_tp1()) {
-      const KVCacheShape draft_shape =
-          MTPDraftKVCacheShape(kv_cache_shape,
-                               draft_impl_->context_.get_model_args(),
-                               options_.block_size());
-      draft_shape.print_shapes();
-      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
-          kv_cache_transfer_, draft_shape);
-    } else {
-      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
-          kv_cache_transfer_, kv_cache_shape);
-    }
+    draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
+        kv_cache_transfer_, draft_kv_cache_shape(kv_cache_shape));
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
@@ -3186,8 +3122,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
         row.append_kv_len = true;
         row.append_q_len_one = true;
         row.append_block_table = true;
-        specBuilder::append_decode_row(
-            row_ctx, row, logical_block_size, buf);
+        specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
       }
     }
   } else {
@@ -3200,8 +3135,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
         row.append_kv_len = !use_atb_spec_kernel;
         row.append_q_len_one = !use_atb_spec_kernel;
         row.append_block_table = !use_atb_spec_kernel;
-        specBuilder::append_decode_row(
-            row_ctx, row, logical_block_size, buf);
+        specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
       }
     }
   }

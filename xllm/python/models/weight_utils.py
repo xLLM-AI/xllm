@@ -22,13 +22,15 @@ the model-specific per-layer loop stays in each model.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Mapping, Optional, Protocol, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Optional, Protocol, Sequence
 
 import torch
 import torch.nn as nn
 
 if TYPE_CHECKING:
     from xllm_weight_loader import StateDict
+
+    from xllm.python.models.base import PyModelBase
 
 
 class MoeParallelConfig(Protocol):
@@ -128,6 +130,17 @@ class WeightLoader:
 
     def has(self, name: str) -> bool:
         return self._resolve(name) is not None
+
+    @staticmethod
+    def state_dict_has(
+        state_dicts: Sequence[StateDict],
+        name: str,
+        src_prefixes: Sequence[str] = ("",),
+    ) -> bool:
+        """True if any state dict holds ``name`` under one of ``src_prefixes``.
+        Snapshot-free presence probe (no model param walk), for deciding whether
+        to create an optional param before constructing the loader."""
+        return any(sd.has(prefix + name) for prefix in src_prefixes for sd in state_dicts)
 
     def load_tensor(self, name: str) -> torch.Tensor:
         resolved = self._resolve(name)
@@ -263,3 +276,59 @@ class W8A8WeightLoader(WeightLoader):
             prefix + "down_proj.weight_offset",
             self.load_tensor(prefix + "down_proj.weight_offset"),
         )
+
+
+def load_own_weight(
+    model: PyModelBase,
+    state_dicts: list,
+    tp_rank: int,
+    tp_size: int,
+    weight_name: str,
+    attr: str,
+    make_layer: Callable[[], nn.Module],
+    shard_dim: int,
+) -> WeightLoader:
+    """Load a draft-owned weight when the checkpoint ships one, else leave the
+    attribute None so the C++ bridge shares the target's. Returns a loader the
+    caller can keep loading from."""
+    present = WeightLoader.state_dict_has(state_dicts, weight_name, ("", "model."))
+    if present:
+        setattr(model, attr, make_layer())
+    # Built after the optional setattr so the new param is in its snapshot.
+    loader = WeightLoader(model, state_dicts, tp_size, tp_rank, src_prefixes=("", "model."))
+    if present:
+        loader.copy_shard(weight_name, dim=shard_dim)
+    return loader
+
+
+def maybe_load_own_lm_head(
+    model: PyModelBase,
+    state_dicts: list,
+    tp_rank: int,
+    tp_size: int,
+) -> WeightLoader:
+    """Load the draft's own lm_head when the checkpoint ships one; otherwise
+    leave it None so the C++ bridge shares the target's. Returns a loader the
+    caller can keep loading from."""
+    # Imported lazily so this module stays torch-only at import time (the layers
+    # package needs the C++ runtime bootstrap; load_weights runs after it).
+    from xllm.python.layers import ColumnParallelLinear
+
+    cfg = model.cfg
+    return load_own_weight(
+        model,
+        state_dicts,
+        tp_rank,
+        tp_size,
+        "lm_head.weight",
+        "lm_head",
+        lambda: ColumnParallelLinear(
+            cfg.hidden_size,
+            cfg.vocab_size // tp_size,
+            tp_size,
+            gather_output=True,
+            dtype=model.dtype,
+            device=model.device,
+        ),
+        shard_dim=0,
+    )

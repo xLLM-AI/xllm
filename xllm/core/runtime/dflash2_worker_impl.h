@@ -33,9 +33,6 @@ class DFlash2WorkerImpl final : public DFlashWorkerImpl {
   DraftBlock run_decode_draft(const ForwardInput& input,
                               ForwardInput& validate_input) override;
 
-  KVCacheShape draft_kv_cache_shape(
-      const KVCacheShape& target_shape) const override;
-
  private:
   struct BlockSampleOutput {
     torch::Tensor token_ids;
