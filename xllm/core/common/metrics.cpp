@@ -235,9 +235,14 @@ DEFINE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos,
                      "position",
                      "Accepted speculative tokens by zero-based draft "
                      "position");
-DEFINE_GAUGE(speculative_mean_tokens_per_decode_step,
-             "Cumulative mean tokens committed per speculative proposal "
-             "sequence (1.0 without accepted draft tokens)");
+DEFINE_GAUGE(speculative_mean_acceptance_length,
+             "Cumulative acceptance length: mean tokens committed per "
+             "speculative proposal sequence, including the target bonus "
+             "token (1.0 without accepted draft tokens)");
+DEFINE_MULTI_GAUGE(speculative_conditional_acceptance_rate_per_pos,
+                   "position",
+                   "Per-position conditional draft acceptance rate: P(accept "
+                   "position i | position i-1 accepted)");
 DEFINE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds,
                  "Latency of draft token host copies in microseconds");
 DEFINE_MULTI_HISTOGRAM(
