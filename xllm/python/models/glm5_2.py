@@ -20,8 +20,7 @@ GLM-5.2 structural deltas live here:
 
   * cross-layer top-k sharing -- ``indexer_types`` marks full/shared layers;
     shared layers skip the indexer and reuse the previous full layer's top-k.
-  * indexer ``wq_b`` is W8A8 (not bf16 ``nn.Linear``) and ``weights_proj``
-    stays fp32.
+  * indexer ``wq_b`` is W8A8 (not bf16 ``nn.Linear``).
   * indexer RoPE is configurable (``indexer_rope_interleave``); DSV3.2's
     indexer uses half-rotate only.
   * per-layer MLP type comes from ``mlp_layer_types`` (not a single
@@ -496,7 +495,7 @@ class Glm52MLAAttention(Attention):
 
 
 class Glm52Indexer(nn.Module):
-    """GLM-5.2 DSA lightning indexer (wq_b W8A8, weights_proj fp32, configurable RoPE)."""
+    """GLM-5.2 DSA lightning indexer (wq_b W8A8, configurable RoPE)."""
 
     def __init__(self, cfg: Glm52Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
@@ -507,7 +506,7 @@ class Glm52Indexer(nn.Module):
         self.indexer_rope_interleave = cfg.indexer_rope_interleave
         self.wq_b = W8A8StaticLinear(cfg.q_lora_rank, self.n_head * self.head_dim, device)
         self.wk = nn.Linear(cfg.hidden_size, self.head_dim, bias=False, dtype=dtype, device=device)
-        self.weights_proj = nn.Linear(cfg.hidden_size, self.n_head, bias=False, dtype=torch.float32, device=device)
+        self.weights_proj = nn.Linear(cfg.hidden_size, self.n_head, bias=False, dtype=dtype, device=device)
         self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-6, dtype=dtype, device=device)
 
     def process_weights_after_loading(self) -> None:
@@ -556,7 +555,7 @@ class Glm52Indexer(nn.Module):
         if index_cache is not None and slot_mapping is not None:
             ctx.update_index_cache(k, None)
         weight_hidden = hidden if cp_context is None else hidden.index_select(0, cp_context.query_index)
-        weights = self.weights_proj(weight_hidden.to(torch.float32)).to(torch.bfloat16)
+        weights = self.weights_proj(weight_hidden)
         topk = kernels.lightning_indexer(
             q,
             index_cache,
