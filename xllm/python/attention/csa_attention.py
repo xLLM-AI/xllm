@@ -627,21 +627,12 @@ class DsaAttentionBackend(AttentionBackend):
             num_heads_q=max(self.index_n_heads, 1),
             num_heads_k=1,
             head_dim=max(self.index_head_dim, 1),
-            query_quant_mode=0,
-            key_quant_mode=0,
             actual_seq_lengths_query=query_lens,
             actual_seq_lengths_key=key_lens,
-            batch_size=int(max(key_lens.size(0), 1)),
             max_seqlen_q=max(max_q, 1),
             max_seqlen_k=max(max_kv, 1),
-            layout_query="TND",
-            layout_key="PA_BSND",
             sparse_count=self.index_topk,
-            sparse_mode=_MASK_MODE_RIGHT_DOWN_CAUSAL,
-            pre_tokens=2**63 - 1,
-            next_tokens=2**63 - 1,
             cmp_ratio=4,
-            device=str(self.device),
         )
 
     def _move_metadata_to_device(self, compressed_metadata: DsaMetadata) -> None:
