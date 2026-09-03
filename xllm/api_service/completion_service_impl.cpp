@@ -198,7 +198,11 @@ void CompletionServiceImpl::process_async_rpc_impl(
       metrics->mark_failed();
     }
     req_output.log_request_status();
-    return master->handle_rpc_response(req_output);
+    const bool delivered = master->handle_rpc_response(req_output);
+    if (!delivered) {
+      metrics->mark_failed();
+    }
+    return delivered;
   };
 
   // Check if the request is being rate-limited.

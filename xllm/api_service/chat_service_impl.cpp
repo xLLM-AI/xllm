@@ -628,7 +628,11 @@ void ChatServiceImpl::process_async_rpc_impl(const proto::ChatRequest* request,
       metrics->mark_failed();
     }
     req_output.log_request_status();
-    return master->handle_rpc_response(req_output);
+    const bool delivered = master->handle_rpc_response(req_output);
+    if (!delivered) {
+      metrics->mark_failed();
+    }
+    return delivered;
   };
 
   // LLMMaster path (existing logic)
