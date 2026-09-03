@@ -42,7 +42,8 @@ class ChatServiceImpl final : public APIServiceImpl<ChatCall> {
   // brpc call_data needs to use shared_ptr
   void process_async_impl(std::shared_ptr<ChatCall> call);
 
-  void process_async_rpc_impl(const proto::ChatRequest* request);
+  void process_async_rpc_impl(const proto::ChatRequest* request,
+                              RpcRequestMetrics rpc_metrics = {}) override;
 
   void add_model_master(const std::string& model, LLMMaster* master);
 

@@ -164,7 +164,8 @@ void APIService::Completions(::google::protobuf::RpcController* controller,
   RpcRequestMetrics rpc_metrics(ctrl);
 
   if (completion_service_impl_) {
-    completion_service_impl_->process_async_rpc_impl(request);
+    completion_service_impl_->process_async_rpc_impl(request,
+                                                     std::move(rpc_metrics));
   } else if (rec_completion_service_impl_) {
     google::protobuf::Arena* arena =
         GetArenaWithCheck<CompletionCall>(response);
@@ -177,6 +178,9 @@ void APIService::Completions(::google::protobuf::RpcController* controller,
         /*is_http_request=*/false,
         std::move(rpc_metrics));
     rec_completion_service_impl_->process_async(call);
+  } else {
+    ctrl->SetFailed("Completion service is not available on this server");
+    LOG(ERROR) << "Completion service is not available on this server";
   }
 }
 
@@ -231,6 +235,9 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
     completion_service_impl_->process_async(call);
   } else if (rec_completion_service_impl_) {
     rec_completion_service_impl_->process_async(call);
+  } else {
+    ctrl->SetFailed("Completion service is not available on this server");
+    LOG(ERROR) << "Completion service is not available on this server";
   }
 }
 
@@ -423,9 +430,12 @@ void APIService::ChatCompletions(::google::protobuf::RpcController* controller,
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   RpcRequestMetrics rpc_metrics(ctrl);
-  // Maybe need double check later
-
-  chat_service_impl_->process_async_rpc_impl(request);
+  if (!chat_service_impl_) {
+    ctrl->SetFailed("Chat completions service is not available on this server");
+    LOG(ERROR) << "Chat completions service is not available on this server";
+    return;
+  }
+  chat_service_impl_->process_async_rpc_impl(request, std::move(rpc_metrics));
 }
 
 void APIService::ChatCompletionsHttp(
@@ -444,6 +454,7 @@ void APIService::ChatCompletionsHttp(
 
   if (!chat_completions_handler_) {
     RpcRequestMetrics rpc_metrics(ctrl);
+    ctrl->SetFailed("No chat completions handler registered");
     LOG(ERROR) << "No chat completions handler registered";
     return;
   }

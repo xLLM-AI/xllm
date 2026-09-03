@@ -119,6 +119,22 @@ TEST(RpcRequestMetricsTest, FinishThenDestroyControllerDoesNotUAF) {
   EXPECT_EQ(COUNTER_VALUE(server_request_total_fail), fail_before + 1.0);
 }
 
+TEST(RpcRequestMetricsTest, DetachBeforeControllerDeleteDoesNotUAF) {
+  brpc::Controller* controller = new brpc::Controller();
+  const double fail_before = COUNTER_VALUE(server_request_total_fail);
+  const double ok_before = COUNTER_VALUE(server_request_total_ok);
+
+  {
+    RpcRequestMetrics metrics(controller);
+    metrics.detach();
+    delete controller;
+    metrics.mark_failed();
+  }
+
+  EXPECT_EQ(COUNTER_VALUE(server_request_total_ok), ok_before);
+  EXPECT_EQ(COUNTER_VALUE(server_request_total_fail), fail_before + 1.0);
+}
+
 TEST(RpcRequestMetricsTest, DetachThenMarkFailedRecordsFail) {
   brpc::Controller controller;
   const double fail_before = COUNTER_VALUE(server_request_total_fail);
@@ -128,6 +144,30 @@ TEST(RpcRequestMetricsTest, DetachThenMarkFailedRecordsFail) {
     RpcRequestMetrics metrics(&controller);
     metrics.detach();
     metrics.mark_failed();
+  }
+
+  EXPECT_EQ(COUNTER_VALUE(server_request_total_ok), ok_before);
+  EXPECT_EQ(COUNTER_VALUE(server_request_total_fail), fail_before + 1.0);
+}
+
+TEST(RpcRequestMetricsTest, CallMarkRpcFailedRecordsFail) {
+  brpc::Controller controller;
+  proto::CompletionRequest request;
+  proto::CompletionResponse response;
+  NoopClosure done;
+  const double fail_before = COUNTER_VALUE(server_request_total_fail);
+  const double ok_before = COUNTER_VALUE(server_request_total_ok);
+
+  {
+    RpcRequestMetrics metrics(&controller);
+    CompletionCallForTest call(&controller,
+                               &done,
+                               &request,
+                               &response,
+                               /*use_arena=*/true,
+                               /*is_http_request=*/false,
+                               std::move(metrics));
+    call.mark_rpc_failed();
   }
 
   EXPECT_EQ(COUNTER_VALUE(server_request_total_ok), ok_before);

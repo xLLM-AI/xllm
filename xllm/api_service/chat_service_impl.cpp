@@ -26,6 +26,7 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_set>
 
@@ -37,6 +38,7 @@ limitations under the License.
 #include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/request/rec_type.h"
+#include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
@@ -381,7 +383,7 @@ bool send_delta_to_client_brpc(
 
   if (output.finished || output.cancelled) {
     response.Clear();
-    return call->finish();
+    return call->finish(output.cancelled);
   }
   return true;
 }
@@ -612,11 +614,19 @@ void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
 }
 
 // chat_async for brpc with xllm_serice
-void ChatServiceImpl::process_async_rpc_impl(
-    const proto::ChatRequest* request) {
+void ChatServiceImpl::process_async_rpc_impl(const proto::ChatRequest* request,
+                                             RpcRequestMetrics rpc_metrics) {
+  rpc_metrics.detach();
+  std::shared_ptr<RpcRequestMetrics> metrics =
+      std::make_shared<RpcRequestMetrics>(std::move(rpc_metrics));
   const auto& service_request_id = request->service_request_id();
   const auto& target_xservice_addr = request->source_xservice_addr();
-  auto callback = [master = master_](const RequestOutput& req_output) -> bool {
+  auto callback = [master = master_,
+                   metrics](const RequestOutput& req_output) -> bool {
+    if (req_output.cancelled ||
+        (req_output.status.has_value() && !req_output.status->ok())) {
+      metrics->mark_failed();
+    }
     req_output.log_request_status();
     return master->handle_rpc_response(req_output);
   };

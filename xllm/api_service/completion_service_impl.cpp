@@ -22,6 +22,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "common/instance_name.h"
@@ -115,7 +116,7 @@ bool send_delta_to_client_brpc(std::shared_ptr<CompletionCall> call,
 
   if (output.finished || output.cancelled) {
     response.Clear();
-    return call->finish();
+    return call->finish(output.cancelled);
   }
   return true;
 }
@@ -183,10 +184,19 @@ LLMMaster* CompletionServiceImpl::get_model_master(
 
 // complete_async for brpc from xllm_service
 void CompletionServiceImpl::process_async_rpc_impl(
-    const proto::CompletionRequest* request) {
+    const proto::CompletionRequest* request,
+    RpcRequestMetrics rpc_metrics) {
+  rpc_metrics.detach();
+  std::shared_ptr<RpcRequestMetrics> metrics =
+      std::make_shared<RpcRequestMetrics>(std::move(rpc_metrics));
   const auto& service_request_id = request->service_request_id();
   const auto& target_xservice_addr = request->source_xservice_addr();
-  auto callback = [master = master_](const RequestOutput& req_output) -> bool {
+  auto callback = [master = master_,
+                   metrics](const RequestOutput& req_output) -> bool {
+    if (req_output.cancelled ||
+        (req_output.status.has_value() && !req_output.status->ok())) {
+      metrics->mark_failed();
+    }
     req_output.log_request_status();
     return master->handle_rpc_response(req_output);
   };

@@ -26,7 +26,13 @@ RpcRequestMetrics::RpcRequestMetrics(brpc::Controller* controller)
   }
 }
 
-RpcRequestMetrics::~RpcRequestMetrics() { record_out(); }
+RpcRequestMetrics::~RpcRequestMetrics() {
+  if (controller_ != nullptr) {
+    finish(controller_);
+    return;
+  }
+  record_out();
+}
 
 RpcRequestMetrics::RpcRequestMetrics(RpcRequestMetrics&& other) noexcept
     : controller_(other.controller_),
@@ -56,8 +62,8 @@ void RpcRequestMetrics::finish(const brpc::Controller* controller) {
   if (!active_) {
     return;
   }
-  if (controller != nullptr) {
-    failed_ = controller->Failed();
+  if (controller != nullptr && controller->Failed()) {
+    failed_ = true;
     error_code_ = controller->ErrorCode();
   }
   controller_ = nullptr;
@@ -75,11 +81,7 @@ void RpcRequestMetrics::record_out() {
   if (!active_) {
     return;
   }
-  if (controller_ != nullptr) {
-    failed_ = controller_->Failed();
-    error_code_ = controller_->ErrorCode();
-    controller_ = nullptr;
-  }
+  controller_ = nullptr;
   active_ = false;
 
   if (!failed_) {

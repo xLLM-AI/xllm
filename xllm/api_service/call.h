@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <brpc/controller.h>
 
+#include <cstdint>
 #include <string>
 #include <utility>
 
@@ -53,14 +54,21 @@ class Call {
 
   virtual bool is_disconnected() const = 0;
 
+  void mark_rpc_failed(int32_t error_code = 0);
+
  protected:
   void init(std::string body_x_request_id, bool is_http_request);
   // Record metrics while the controller is still valid. Must run before
   // done->Run(); after that brpc may recycle the controller.
   void finish_rpc_metrics();
+  // Drop metrics and Call pointers to the controller. Stream handshake
+  // must call this before done->Run(); ProgressiveAttachment does not
+  // keep the controller alive.
+  void release_controller();
 
  protected:
-  brpc::Controller* controller_;
+  // Non-owning. Null after stream handshake Run() or release_controller().
+  brpc::Controller* controller_ = nullptr;
   RpcRequestMetrics rpc_metrics_;
 
   std::string x_request_id_;

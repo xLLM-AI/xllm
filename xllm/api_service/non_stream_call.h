@@ -118,7 +118,11 @@ class NonStreamCall : public Call {
     return true;
   }
 
-  bool is_disconnected() const override { return controller_->IsCanceled(); }
+  bool is_disconnected() const override {
+    CHECK(controller_ != nullptr)
+        << "non-stream is_disconnected requires a live controller";
+    return controller_->IsCanceled();
+  }
 
   const Request& request() const { return *request_; }
   Response& response() { return *response_; }

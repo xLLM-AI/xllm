@@ -76,4 +76,13 @@ void Call::init_request_payload() {
 
 void Call::finish_rpc_metrics() { rpc_metrics_.finish(controller_); }
 
+void Call::mark_rpc_failed(int32_t error_code) {
+  rpc_metrics_.mark_failed(error_code);
+}
+
+void Call::release_controller() {
+  rpc_metrics_.detach();
+  controller_ = nullptr;
+}
+
 }  // namespace xllm

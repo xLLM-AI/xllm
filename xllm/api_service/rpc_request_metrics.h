@@ -44,8 +44,9 @@ class RpcRequestMetrics final {
   // before done->Run() recycles the controller. Idempotent.
   void finish(const brpc::Controller* controller);
 
-  // Drop the controller pointer without recording. Used after stream
-  // handshake Run(), when the controller may die before Call is destroyed.
+  // Drop the controller pointer without recording. Call this before
+  // done->Run() on stream handshake so later mark_failed()/dtor only
+  // use the snapshot.
   void detach();
 
   void mark_failed(int32_t error_code = 0);

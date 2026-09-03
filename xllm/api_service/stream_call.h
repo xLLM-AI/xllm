@@ -65,11 +65,10 @@ class StreamCall : public Call {
       controller_->http_response().set_status_code(200);
       controller_->http_response().SetHeader("Connection", "keep-alive");
       controller_->http_response().SetHeader("Cache-Control", "no-cache");
-      // Done Run first for steam response. brpc may recycle the
-      // controller after the RPC method returns, so drop the pointer
-      // and record later from the snapshot / mark_failed().
+      // HTTP done deletes the controller. Drop every Call-owned pointer
+      // first; later stream I/O goes through pa_ / mark_failed().
+      release_controller();
       done_->Run();
-      rpc_metrics_.detach();
 
     } else {
       controller_->http_response().set_content_type("application/json");
@@ -84,6 +83,8 @@ class StreamCall : public Call {
     if (!stream_) {
       finish_rpc_metrics();
       done_->Run();
+    } else if (connection_status_ != 0) {
+      rpc_metrics_.mark_failed();
     }
     if (!use_arena_) {
       delete request_;
@@ -92,6 +93,8 @@ class StreamCall : public Call {
   }
 
   bool write_and_finish(Response& response) {
+    CHECK(controller_ != nullptr)
+        << "write_and_finish requires a live controller";
     butil::IOBufAsZeroCopyOutputStream json_output(
         &controller_->response_attachment());
     std::string err_msg;
@@ -109,6 +112,8 @@ class StreamCall : public Call {
     XLLM_VERBOSE_TRACE() << "event=request_error x-request-id=" << x_request_id_
                          << " message=" << error_message;
     if (!stream_) {
+      CHECK(controller_ != nullptr)
+          << "non-stream finish_with_error requires a live controller";
       controller_->SetFailed(error_message);
 
     } else {
@@ -130,16 +135,24 @@ class StreamCall : public Call {
     if (!json2pb::ProtoMessageToJson(
             response, &json_output, json_options_, &err_msg)) {
       LOG(ERROR) << "Failed to convert proto to json: " << err_msg;
+      rpc_metrics_.mark_failed();
       return false;
     }
     io_buf_.append("\n\n");
 
     connection_status_ |= pa_->Write(io_buf_);
+    if (connection_status_ != 0) {
+      rpc_metrics_.mark_failed();
+      return false;
+    }
     return true;
   }
 
   // For stream response
-  bool finish() {
+  bool finish(bool cancelled = false) {
+    if (cancelled || connection_status_ != 0) {
+      rpc_metrics_.mark_failed();
+    }
     io_buf_.clear();
     io_buf_.append("data: [DONE]\n\n");
 
@@ -212,6 +225,8 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
             response, this->json_options_, &json, &err_msg)) {
       return this->finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
+    CHECK(this->controller_ != nullptr)
+        << "write_and_finish requires a live controller";
     this->controller_->response_attachment().append(json);
     XLLM_VERBOSE_TRACE() << "event=response_serialized x-request-id="
                          << this->x_request_id_;
@@ -228,7 +243,11 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
     this->io_buf_.append("\n\n");
 
     this->connection_status_ |= this->pa_->Write(this->io_buf_);
-    return this->connection_status_ == 0;
+    if (this->connection_status_ != 0) {
+      this->rpc_metrics_.mark_failed();
+      return false;
+    }
+    return true;
   }
 
   // Write SSE event with proto message
@@ -243,12 +262,17 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
     if (!api_service::proto_to_anthropic_json(
             message, this->json_options_, &json, &err_msg)) {
       LOG(ERROR) << "Failed to convert proto to json: " << err_msg;
+      this->rpc_metrics_.mark_failed();
       return false;
     }
     this->io_buf_.append(json);
     this->io_buf_.append("\n\n");
     this->connection_status_ |= this->pa_->Write(this->io_buf_);
-    return this->connection_status_ == 0;
+    if (this->connection_status_ != 0) {
+      this->rpc_metrics_.mark_failed();
+      return false;
+    }
+    return true;
   }
 };
 

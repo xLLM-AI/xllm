@@ -620,7 +620,7 @@ bool send_delta_to_client(
       return false;
     }
 
-    return call->finish();
+    return call->finish(output.cancelled);
   }
 
   return true;

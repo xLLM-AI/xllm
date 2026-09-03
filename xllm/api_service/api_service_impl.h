@@ -45,7 +45,8 @@ class APIServiceImpl {
 
   virtual void process_async_impl(std::shared_ptr<CallType> call) = 0;
 
-  virtual void process_async_rpc_impl(const RequestType* request) {
+  virtual void process_async_rpc_impl(const RequestType* request,
+                                      RpcRequestMetrics rpc_metrics = {}) {
     NOT_IMPLEMENTED();
   }
 
