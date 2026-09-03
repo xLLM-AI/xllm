@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 #include <pybind11/pybind11.h>
-#include <signal.h>
 
 #include <atomic>
 #include <chrono>
@@ -65,6 +64,10 @@ std::vector<Message> build_user_messages_from_image_urls(
 
 VLMMaster::VLMMaster(const Options& options)
     : Master(options, EngineType::VLM) {
+  if (!is_leader()) {
+    return;
+  }
+
   CHECK(engine_->init());
 
   model_args_ = engine_->model_args();
@@ -282,6 +285,11 @@ void VLMMaster::handle_batch_request(
 }
 
 void VLMMaster::run() {
+  if (!is_leader()) {
+    Master::run();
+    return;
+  }
+
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "VLMMaster is already running.";
@@ -504,36 +512,6 @@ std::shared_ptr<Request> VLMMaster::generate_request(
                           std::move(mm_data),
                           std::move(sp),
                           std::move(callback));
-}
-
-volatile bool VLMAssistantMaster::running_ = false;
-
-VLMAssistantMaster::VLMAssistantMaster(const Options& options)
-    : Master(options, EngineType::VLM) {
-  auto master_node_addr = options_.master_node_addr().value_or("");
-  if (master_node_addr.empty()) {
-    LOG(FATAL)
-        << "MultiNodeEngine required master_node_addr, current value is empty.";
-    return;
-  }
-  running_ = true;
-}
-
-VLMAssistantMaster::~VLMAssistantMaster() {
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
-}
-
-void VLMAssistantMaster::run() {
-  signal(SIGINT, VLMAssistantMaster::handle_signal);
-  signal(SIGTERM, VLMAssistantMaster::handle_signal);
-
-  loop_thread_ = std::thread([this]() {
-    while (running_) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-    }
-  });
 }
 
 }  // namespace xllm

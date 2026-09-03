@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <folly/Function.h>
+#include <glog/logging.h>
 
 #include <functional>
 #include <future>
@@ -75,7 +76,11 @@ class LLMMaster : public Master {
   std::vector<bool> handle_rpc_responses(
       const std::vector<RequestOutput>& outputs);
 
-  const Tokenizer& tokenizer() const { return *tokenizer_; }
+  const Tokenizer& tokenizer() const {
+    CHECK(tokenizer_ != nullptr)
+        << "tokenizer() is only available on the leader rank (node_rank == 0).";
+    return *tokenizer_;
+  }
 
   // start running loop
   void run() override;
@@ -153,19 +158,6 @@ class LLMMaster : public Master {
   std::atomic_bool running_{false};
 
   std::string task_type_;
-};
-
-class LLMAssistantMaster : public Master {
- public:
-  LLMAssistantMaster(const Options& options);
-  ~LLMAssistantMaster();
-  void run() override;
-
-  static void handle_signal(int signum) { running_ = false; }
-
- private:
-  std::thread loop_thread_;
-  static volatile bool running_;
 };
 
 }  // namespace xllm

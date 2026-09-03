@@ -22,6 +22,7 @@ limitations under the License.
 #include <array>
 #include <atomic>
 #include <boost/algorithm/string.hpp>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -759,6 +760,46 @@ Master::Master(const Options& options, EngineType type)
     LOG(WARNING) << "Not supported llm engine type: "
                  << static_cast<size_t>(type);
   }
+
+  if (!is_leader()) {
+    const std::string master_node_addr =
+        options_.master_node_addr().value_or("");
+    if (master_node_addr.empty()) {
+      LOG(FATAL) << "Multi-node serving requires --master_node_addr, "
+                    "current value is empty.";
+    }
+  }
+}
+
+std::atomic<bool> Master::idle_running_{false};
+
+void Master::handle_shutdown_signal(int /*signum*/) {
+  idle_running_.store(false, std::memory_order_relaxed);
+}
+
+Master::~Master() {
+  idle_running_.store(false, std::memory_order_relaxed);
+  if (idle_thread_.joinable()) {
+    idle_thread_.join();
+  }
+}
+
+void Master::wait() {
+  if (idle_thread_.joinable()) {
+    idle_thread_.join();
+  }
+}
+
+void Master::run() {
+  idle_running_.store(true, std::memory_order_relaxed);
+  signal(SIGINT, Master::handle_shutdown_signal);
+  signal(SIGTERM, Master::handle_shutdown_signal);
+
+  idle_thread_ = std::thread([]() {
+    while (idle_running_.load(std::memory_order_relaxed)) {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+  });
 }
 
 std::unique_ptr<Master> create_master(const std::string& backend,
@@ -807,12 +848,8 @@ std::unique_ptr<Master> fork_master(Master* master, const Options& options) {
   if (options.dp_size() > 0 && new_options.dp_size() >= options.nnodes()) {
     new_options.dp_size() = options.dp_size();
   }
-  std::unique_ptr<Master> new_master;
-  if (new_options.node_rank() != 0) {
-    new_master = std::make_unique<LLMAssistantMaster>(new_options);
-  } else {
-    new_master = create_master(new_options.backend(), new_options);
-  }
+  std::unique_ptr<Master> new_master =
+      create_master(new_options.backend(), new_options);
   new_master->run();
 
   return new_master;

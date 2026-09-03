@@ -533,6 +533,16 @@ std::unique_ptr<RecMaster::RecMasterPipeline> RecMaster::create_pipeline(
 
 RecMaster::RecMaster(const Options& options)
     : Master(options, EngineType::REC) {
+  if (!is_leader()) {
+    // RecEngine does not create DistManager in its constructor. LlmRec
+    // starts workers in init(); skip that on non-leaders but still host
+    // the local WorkerServer so rank 0 can collect the cluster.
+    auto* rec_engine = dynamic_cast<RecEngine*>(engine_.get());
+    CHECK(rec_engine != nullptr);
+    rec_engine->setup_distributed_workers();
+    return;
+  }
+
   // Initialize with Rec engine type
   // The rest of the initialization follows the same pattern as LLMMaster
   CHECK(engine_->init());
@@ -600,6 +610,11 @@ RecMaster::RecMaster(const Options& options)
 }
 
 void RecMaster::run() {
+  if (!is_leader()) {
+    Master::run();
+    return;
+  }
+
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "RecMaster is already running.";

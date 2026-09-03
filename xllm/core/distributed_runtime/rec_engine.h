@@ -49,6 +49,11 @@ class RecEngine : public Engine {
 
   bool init() override;
 
+  // Start local WorkerServers without loading weights. Non-leader ranks
+  // call this so rank 0's DistManager can collect the cluster; LlmRec
+  // otherwise creates DistManager only inside init().
+  void setup_distributed_workers();
+
   void update_last_step_result(std::vector<Batch>& batch) override;
 
   std::vector<int64_t> get_active_activation_memory() const override;
@@ -183,6 +188,12 @@ class RecEngine : public Engine {
   // Private methods
   // ============================================================
   bool init_model();
+  // Reject REC configurations that cannot run across multiple nodes. Only the
+  // single-round LlmRec pipeline coordinates workers through DistManager;
+  // OneRec and LlmRec multi-round pipelines are local-only. This runs in
+  // common initialization (before pipeline selection) so the leader rejects
+  // the configuration too, not just secondary ranks. No-op when nnodes <= 1.
+  void validate_multi_node_support() const;
   KVCacheCapacity estimate_kv_cache_capacity();
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap);
 

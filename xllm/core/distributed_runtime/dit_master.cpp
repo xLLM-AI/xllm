@@ -20,7 +20,6 @@ limitations under the License.
 
 #include <atomic>
 #include <boost/algorithm/string.hpp>
-#include <csignal>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -37,10 +36,12 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
-volatile bool DiTAssistantMaster::running_ = false;
-
 DiTMaster::DiTMaster(const Options& options)
     : Master(options, EngineType::DIT) {
+  if (!is_leader()) {
+    return;
+  }
+
   CHECK(engine_->init());
 
   DiTScheduler::Options scheduler_options;
@@ -132,6 +133,11 @@ void DiTMaster::handle_batch_request(std::vector<DiTRequestParams> params_vec,
 }
 
 void DiTMaster::run() {
+  if (!is_leader()) {
+    Master::run();
+    return;
+  }
+
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "DiTMaster is already running.";
@@ -161,38 +167,6 @@ void DiTMaster::generate() {
   running_.store(true, std::memory_order_relaxed);
   scheduler_->generate();
   running_.store(false, std::memory_order_relaxed);
-}
-
-DiTAssistantMaster::DiTAssistantMaster(const Options& options)
-    : Master(options, EngineType::DIT) {
-  // setup process workers
-  auto master_node_addr = options_.master_node_addr().value_or("");
-  // TODO: support local unix domain socket later.
-  if (master_node_addr.empty()) {
-    LOG(FATAL)
-        << "MultiNodeEngine required master_node_addr, current value is empty.";
-    return;
-  }
-
-  running_ = true;
-}
-
-DiTAssistantMaster::~DiTAssistantMaster() {
-  // wait for the loop thread to finish
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
-}
-
-void DiTAssistantMaster::run() {
-  signal(SIGINT, DiTAssistantMaster::handle_signal);
-  signal(SIGTERM, DiTAssistantMaster::handle_signal);
-
-  loop_thread_ = std::thread([this]() {
-    while (running_) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-    }
-  });
 }
 
 }  // namespace xllm

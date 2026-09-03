@@ -124,17 +124,4 @@ class VLMMaster : public Master {
   std::atomic_bool running_{false};
 };
 
-class VLMAssistantMaster : public Master {
- public:
-  explicit VLMAssistantMaster(const Options& options);
-  ~VLMAssistantMaster();
-  void run() override;
-
-  static void handle_signal(int signum) { running_ = false; }
-
- private:
-  std::thread loop_thread_;
-  static volatile bool running_;
-};
-
 }  // namespace xllm

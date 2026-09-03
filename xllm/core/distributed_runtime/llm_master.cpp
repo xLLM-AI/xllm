@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <atomic>
 #include <boost/algorithm/string.hpp>
-#include <csignal>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -91,12 +90,14 @@ std::shared_ptr<const JsonObjectGrammar> LLMMaster::get_json_object_grammar(
   return grammar;
 }
 
-volatile bool LLMAssistantMaster::running_ = false;
-
 LLMMaster::LLMMaster(const Options& options)
     : Master(
           options,
           should_use_ssm_engine(options) ? EngineType::SSM : EngineType::LLM) {
+  if (!is_leader()) {
+    return;
+  }
+
   CHECK(engine_->init(master_status_));
   task_type_ = options_.task_type();
 
@@ -303,6 +304,11 @@ void LLMMaster::handle_request(std::vector<Message> messages,
 }
 
 void LLMMaster::run() {
+  if (!is_leader()) {
+    Master::run();
+    return;
+  }
+
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "LLMMaster is already running.";
@@ -686,40 +692,6 @@ bool LLMMaster::link_p2p(const std::vector<std::string>& remote_addrs) {
 
 bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
   return engine_->unlink_p2p(remote_addrs);
-}
-
-LLMAssistantMaster::LLMAssistantMaster(const Options& options)
-    : Master(
-          options,
-          should_use_ssm_engine(options) ? EngineType::SSM : EngineType::LLM) {
-  // setup process workers
-  auto master_node_addr = options_.master_node_addr().value_or("");
-  // TODO: support local unix domain socket later.
-  if (master_node_addr.empty()) {
-    LOG(FATAL)
-        << "MultiNodeEngine required master_node_addr, current value is empty.";
-    return;
-  }
-
-  running_ = true;
-}
-
-LLMAssistantMaster::~LLMAssistantMaster() {
-  // wait for the loop thread to finish
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
-}
-
-void LLMAssistantMaster::run() {
-  signal(SIGINT, LLMAssistantMaster::handle_signal);
-  signal(SIGTERM, LLMAssistantMaster::handle_signal);
-
-  loop_thread_ = std::thread([this]() {
-    while (running_) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-    }
-  });
 }
 
 // ============== Async RL training support: Pause/Resume ==============

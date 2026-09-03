@@ -34,6 +34,7 @@ limitations under the License.
 #include "master.h"  // For MasterStatus::WAKEUP constant
 #include "runtime/params_utils.h"
 #include "util/env_var.h"
+#include "util/model_config_utils.h"
 #include "util/net.h"
 #include "util/pretty_print.h"
 #include "util/rec_model_utils.h"
@@ -62,6 +63,42 @@ RecEngine::RecEngine(const runtime::Options& options,
   for (const auto device : devices) {
     CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
+  }
+}
+
+void RecEngine::validate_multi_node_support() const {
+  // Single-node runs are always local; every REC pipeline is supported.
+  if (options_.nnodes() <= 1) {
+    return;
+  }
+
+  // Only the single-round LlmRec pipeline drives workers through DistManager.
+  // OneRec runs on local workers, and LlmRec multi-round mode selects
+  // RecMultiRoundEnginePipeline whose setup_workers() is local-only. For those
+  // kinds secondary ranks would spawn workers that rank 0 never collects, so
+  // fail fast instead of serving from an incomplete cluster.
+  const std::string model_type =
+      util::get_model_type(options_.model_path(), options_.backend());
+  const RecModelKind rec_model_kind = get_rec_model_kind(model_type);
+  CHECK(rec_model_kind == RecModelKind::kLlmRec)
+      << "Multi-node REC serving is only supported for LlmRec models, "
+         "got model_type: "
+      << model_type;
+  CHECK(!is_rec_multi_round_mode())
+      << "Multi-node REC serving is not supported in multi-round mode "
+         "(--max_decode_rounds > 0); RecMultiRoundEnginePipeline runs on "
+         "local workers only.";
+}
+
+void RecEngine::setup_distributed_workers() {
+  validate_multi_node_support();
+
+#if defined(USE_NPU)
+  FLAGS_enable_atb_comm_multiprocess =
+      options_.enable_offline_inference() || (options_.nnodes() > 1);
+#endif
+  if (!dist_manager_) {
+    dist_manager_ = std::make_shared<DistManager>(options_);
   }
 }
 
@@ -95,6 +132,9 @@ bool RecEngine::init_model() {
   rec_model_kind_ = get_rec_model_kind(args_.model_type());
   CHECK(rec_model_kind_ != RecModelKind::kNone)
       << "Unsupported rec model_type: " << args_.model_type();
+  // Reject unsupported multi-node REC configurations before selecting a
+  // pipeline, so the leader fails fast too (not only secondary ranks).
+  validate_multi_node_support();
   auto pipeline_type = get_rec_pipeline_type(rec_model_kind_);
   pipeline_ = create_pipeline(pipeline_type, *this);
   // LlmRec-specific initialization
@@ -250,9 +290,7 @@ RecEngine::LlmRecEnginePipeline::LlmRecEnginePipeline(RecEngine& engine)
     : RecEnginePipeline(engine) {}
 
 void RecEngine::LlmRecEnginePipeline::setup_workers() {
-  if (!engine_.dist_manager_) {
-    engine_.dist_manager_ = std::make_shared<DistManager>(engine_.options_);
-  }
+  engine_.setup_distributed_workers();
   engine_.worker_clients_ = engine_.dist_manager_->get_worker_clients();
   engine_.dp_size_ = engine_.options_.dp_size();
   engine_.worker_clients_num_ = engine_.worker_clients_.size();

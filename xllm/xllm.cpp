@@ -35,9 +35,7 @@ namespace py = pybind11;
 #include "core/common/metrics.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/master.h"
-#include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -544,20 +542,8 @@ int run() {
     LOG(INFO) << "XTensor initialized with " << num_pages << " physical pages";
   }
 
-  std::unique_ptr<Master> master;
-  // working node
-  if (options.node_rank() != 0) {
-    if (model_config.backend() == "dit") {
-      master = std::make_unique<DiTAssistantMaster>(options);
-    } else if (model_config.backend() == "vlm") {
-      master = std::make_unique<VLMAssistantMaster>(options);
-    } else {
-      master = std::make_unique<LLMAssistantMaster>(options);
-    }
-  } else {
-    // master node
-    master = create_master(model_config.backend(), options);
-  }
+  std::unique_ptr<Master> master =
+      create_master(model_config.backend(), options);
   master->run();
 
   // supported models
@@ -578,6 +564,10 @@ int run() {
                  << service_config.port();
       return -1;
     }
+  } else {
+    // No HTTP server on this rank. Stay alive until SIGINT/SIGTERM so
+    // the destructor can stop the idle thread instead of hanging on it.
+    master->wait();
   }
 
   return 0;
