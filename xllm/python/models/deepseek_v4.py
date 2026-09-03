@@ -972,26 +972,18 @@ class DeepseekV4Indexer(nn.Module):
                 raise RuntimeError(f"QLI {name} must be defined and non-empty")
             if tensor.device != device:
                 raise RuntimeError(f"QLI {name} must be on {device}, got {tensor.device}")
-        topk, _ = kernels.quant_lightning_indexer(
-            query=q_quant,
-            key=index_cache,
-            weights=weights.to(torch.float16),
-            query_dequant_scale=q_scale,
-            key_dequant_scale=key_dequant_scale.to(torch.float16),
-            query_quant_mode=0,
-            key_quant_mode=0,
-            actual_seq_lengths_query=query_seq_lens,
-            actual_seq_lengths_key=key_seq_lens,
-            block_table=block_table,
-            metadata=qli_metadata,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=self.topk,
-            sparse_mode=3,
-            pre_tokens=2**63 - 1,
-            next_tokens=2**63 - 1,
+        topk = kernels.quant_lightning_indexer(
+            q_quant,
+            index_cache,
+            weights.to(torch.float16),
+            q_scale,
+            key_dequant_scale,
+            qli_metadata,
+            query_seq_lens,
+            key_seq_lens,
+            block_table,
+            self.topk,
             cmp_ratio=4,
-            return_value=False,
         )
         return topk
 
