@@ -645,6 +645,8 @@ struct ForwardInput {
 
 // output after forward execution
 struct ForwardOutput {
+  // Local runtime handle, not in proto/shm; metrics recording skips warmup.
+  bool is_graph_warmup = false;
   // sample parameters for speculative decoding
   torch::Tensor do_sample;
   // whether to return logprobs
