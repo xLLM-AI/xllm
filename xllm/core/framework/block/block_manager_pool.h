@@ -112,6 +112,8 @@ class BlockManagerPool : public KVCacheManager {
   std::vector<size_t> num_used_blocks() const override;
   double kv_cache_utilization() const override;
 
+  int32_t select_dp_rank() const override;
+
   // get the options for the block manager
   const Options& options() const { return options_; }
 

@@ -26,7 +26,7 @@ namespace xllm {
 class BlockManagerPoolTestPeer final {
  public:
   static int32_t select_dp_rank(BlockManagerPool& pool) {
-    return pool.get_manager_with_max_available_blocks();
+    return pool.select_dp_rank();
   }
 
   static LinearStateBlockManager* linear_leaf(BlockManagerPool& pool,

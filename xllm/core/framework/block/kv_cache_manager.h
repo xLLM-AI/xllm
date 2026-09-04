@@ -89,6 +89,13 @@ class KVCacheManager {
   virtual std::vector<size_t> num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
 
+  // Predict which DP rank a fresh sequence would be assigned to during
+  // allocation. Uses the same effective-headroom metric and round-robin
+  // tie-break as the real allocation path so callers can perform accurate
+  // per-rank admission checks before allocation happens.
+  // Returns 0 for single-rank or non-pool managers.
+  virtual int32_t select_dp_rank() const { return 0; }
+
   // Reserve XTensor padding blocks after KV tensors are created.
   virtual void reserve_xtensor_padding_blocks() {}
 

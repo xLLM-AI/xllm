@@ -133,6 +133,10 @@ int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
   return static_cast<int32_t>(candidate_indices[candidate_offset]);
 }
 
+int32_t BlockManagerPool::select_dp_rank() const {
+  return get_manager_with_max_available_blocks();
+}
+
 int32_t BlockManagerPool::get_dp_rank(Sequence* sequence) const {
   int32_t dp_rank;
   if (sequence->dp_rank() >= 0) {
