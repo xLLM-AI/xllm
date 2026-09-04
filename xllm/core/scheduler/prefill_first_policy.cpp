@@ -50,7 +50,7 @@ void PrefillFirstPolicy::schedule(
         handle_running_requests(req, state);
         if (batch_mode_.enable_chunked_prefill &&
             req->sequences()[0]->is_chunked_prefill_stage()) {
-          state.chunk_queue.push(req, /*if_back=*/false);
+          state.chunk_queue.push(req, /*if_back=*/true);
         } else {
           state.decode_queue.push(req, /*if_back=*/true);
         }
@@ -80,13 +80,25 @@ void PrefillFirstPolicy::schedule(
       handle_running_requests(req, state);
       if (batch_mode_.enable_chunked_prefill &&
           req->sequences()[0]->is_chunked_prefill_stage()) {
-        state.chunk_queue.push(req, /*if_back=*/false);
+        state.chunk_queue.push(req);
       } else {
         state.decode_queue.push(req);
       }
     }
   }
   reset_batch_state(state);
+
+  // Requeue / MPMC drain can shuffle FCFS order. Sort waiting prefill
+  // queues by created_time so earlier requests stay at the front.
+  if (batch_mode_.priority_strategy == "fcfs") {
+    auto fcfs_cmp = create_comparator("fcfs", /*is_reversed=*/true);
+    if (!state.prefill_queue.empty() && state.prefill_queue.supports_sort()) {
+      state.prefill_queue.sort(fcfs_cmp);
+    }
+    if (!state.chunk_queue.empty() && state.chunk_queue.supports_sort()) {
+      state.chunk_queue.sort(fcfs_cmp);
+    }
+  }
 
   // A completed D2H release must first be available to the decode request
   // that triggered preemption. Do not let the restore waiter reclaim the
@@ -121,7 +133,8 @@ void PrefillFirstPolicy::schedule(
 
   // Schedule chunked prefill continuations first (they already have partial
   // KV).
-  size_t reserved_full_footprint = 0;
+  std::vector<size_t> reserved_full_footprint(
+      static_cast<size_t>(state.options.dp_size()), 0);
   schedule_prefill_from_queue(
       &state.chunk_queue, state, budget, finished, reserved_full_footprint);
   // Then new prefill requests.

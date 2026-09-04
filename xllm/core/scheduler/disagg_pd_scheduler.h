@@ -179,7 +179,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
                                  /*cpu_binding=*/false,
                                  /*pool_name=*/"DisaggPDScheduler.prefill"};
 
-  // related decode instance name(ID) list
+  // related decode instance name(ID) list (used by PDOOCScheduler override)
   std::vector<std::string> decode_inst_names_;
   // TODO later
   // std::vector<std::string> updated_decode_inst_names;

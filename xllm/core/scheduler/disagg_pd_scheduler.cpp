@@ -21,8 +21,11 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <iomanip>
 #include <limits>
+#include <queue>
 #include <random>
+#include <vector>
 
 #include "common/global_flags.h"
 #include "common/macros.h"
@@ -48,6 +51,50 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+
+namespace {
+
+using RequestPtr = std::shared_ptr<Request>;
+
+// Returns true when |a| has lower scheduling priority than |b| (i.e. |a|
+// should be dispatched after |b|).  std::priority_queue is a max-heap, so the
+// comparator that returns true for "lower priority" places the highest-priority
+// request on top.  Ordering mirrors the original
+// wait_dequeue_timed(online) / try_dequeue(offline) loop:
+//   1. online requests always come before offline ones, and
+//   2. within each group the earliest created_time wins.
+struct RequestPriorityComparator {
+  bool operator()(const RequestPtr& a, const RequestPtr& b) const {
+    const bool a_online = !a->offline();
+    const bool b_online = !b->offline();
+    if (a_online != b_online) {
+      return !a_online;
+    }
+    return a->created_time() > b->created_time();
+  }
+};
+
+using PendingQueue = std::priority_queue<RequestPtr,
+                                         std::vector<RequestPtr>,
+                                         RequestPriorityComparator>;
+
+// ConcurrentQueue is not FIFO across the HTTP handling threads. Drain what is
+// currently queued so dispatch can restore created_time order.
+void drain_dispatch_queue(
+    moodycamel::BlockingConcurrentQueue<RequestPtr>& queue,
+    PendingQueue* pending,
+    bool* exit_requested) {
+  RequestPtr incoming;
+  while (queue.try_dequeue(incoming)) {
+    if (incoming == nullptr) {
+      *exit_requested = true;
+      return;
+    }
+    pending->push(std::move(incoming));
+  }
+}
+
+}  // namespace
 
 bool is_permanent_rejection(int32_t status_code) {
   return status_code == kDecodeAddNewPromptTooLongStatusCode;
@@ -325,27 +372,41 @@ bool DisaggPDScheduler::enqueue_ready_request(
 
 // prefill send new request to remote instance
 void DisaggPDScheduler::dispatch_requests() {
+  PendingQueue pending;
   while (true) {
-    const auto timeout = std::chrono::milliseconds(100);
-    // Wait for online request until timeout.
-    // If timeout, try to get offline request once. If no offline request,
-    // continue to wait for online request. This can avoid offline request
-    // blocking online request for too long time.
-    std::shared_ptr<Request> request;
-    if (!prefill_request_queue_.wait_dequeue_timed(request, timeout)) {
-      if (!prefill_request_queue_offline_.try_dequeue(request)) {
-        continue;
-      }
-    }
-
-    if (request == nullptr) {
-      // nullptr is a signal to exit
+    bool exit_requested = false;
+    drain_dispatch_queue(prefill_request_queue_, &pending, &exit_requested);
+    if (exit_requested) {
       break;
     }
 
-    if (request->state().decode_address.empty()) {
-      // No decode address provided to the prefill instance, just finish the
-      // request.
+    if (pending.empty()) {
+      const auto timeout = std::chrono::milliseconds(100);
+      // Wait for online request until timeout.
+      // If timeout, try to get offline request once. If no offline request,
+      // continue to wait for online request. This can avoid offline request
+      // blocking online request for too long time.
+      std::shared_ptr<Request> incoming;
+      if (!prefill_request_queue_.wait_dequeue_timed(incoming, timeout)) {
+        if (!prefill_request_queue_offline_.try_dequeue(incoming)) {
+          continue;
+        }
+      }
+      if (incoming == nullptr) {
+        break;
+      }
+      pending.push(std::move(incoming));
+      drain_dispatch_queue(prefill_request_queue_, &pending, &exit_requested);
+      if (exit_requested) {
+        break;
+      }
+    }
+
+    std::shared_ptr<Request> request = pending.top();
+    pending.pop();
+
+    std::string selected_instance = request->state().decode_address;
+    if (selected_instance.empty()) {
       response_processor_->process_failed_request(
           request,
           {StatusCode::INVALID_ARGUMENT,
@@ -355,7 +416,6 @@ void DisaggPDScheduler::dispatch_requests() {
 
     std::vector<std::shared_ptr<Request>> requests;
     requests.emplace_back(request);
-    std::string selected_instance = request->state().decode_address;
 
     const InstanceInfo remote_info =
         xservice_client_->get_instance_info(selected_instance);
@@ -396,7 +456,6 @@ void DisaggPDScheduler::dispatch_requests() {
           request, {StatusCode::UNKNOWN, "Fail to create rpc channel"});
       continue;
     }
-
     // NOTE: TODO: maybe we need to support batch disatch
     // later, this maybe decrease the communication cost.
     // currently we only support one request per dispatch.
@@ -531,12 +590,9 @@ void DisaggPDScheduler::dispatch_requests() {
           do_permanent_rejection(requests[i]);
           continue;
         }
-        // push back to prefill_request_queue_
-        if (requests[i]->offline()) {
-          prefill_request_queue_offline_.enqueue(requests[i]);
-        } else {
-          prefill_request_queue_.enqueue(requests[i]);
-        }
+        // Keep created_time order: retry from the local pending queue instead
+        // of the MPMC queue, which is not FIFO across HTTP threads.
+        pending.push(requests[i]);
 
       } else {
         for (auto& sequence : requests[i]->sequences()) {

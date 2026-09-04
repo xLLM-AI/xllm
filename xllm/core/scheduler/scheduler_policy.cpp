@@ -109,8 +109,8 @@ bool SchedulerPolicy::should_limit_prefill_requests(
 int32_t SchedulerPolicy::select_prefill_dp_rank(
     const Sequence* sequence,
     const SchedulerState& state) const {
-  const size_t cap = static_cast<size_t>(
-      state.model_args.max_concurrent_prefills_per_dp());
+  const size_t cap =
+      static_cast<size_t>(state.model_args.max_concurrent_prefills_per_dp());
   const int32_t dp_size = state.options.dp_size();
   std::vector<size_t> per_dp_counts(dp_size, 0);
   for (const auto& request : state.running_requests) {
@@ -166,23 +166,37 @@ void SchedulerPolicy::adjust_latency_budget_and_reorder(
 void SchedulerPolicy::drain_request_queue(
     SchedulerState& state,
     folly::MPMCQueue<std::shared_ptr<Request>>& request_queue) {
+  std::vector<std::shared_ptr<Request>> incoming;
   std::shared_ptr<Request> request;
   while (request_queue.read(request)) {
     CHECK(request);
+    incoming.emplace_back(std::move(request));
+  }
+  if (incoming.empty()) {
+    return;
+  }
+  // MPMC drain order is not arrival order across producer threads. Restore
+  // FCFS before the waiting queues see the batch.
+  if (batch_mode_.priority_strategy == "fcfs") {
+    std::stable_sort(incoming.begin(),
+                     incoming.end(),
+                     create_comparator("fcfs", /*is_reversed=*/true));
+  }
 
+  for (std::shared_ptr<Request>& queued : incoming) {
     if (!state.enable_prefix_cache &&
         !(state.options.enable_disagg_pd() &&
           state.options.instance_role().has_value() &&
           state.options.instance_role().value() != InstanceRole::DECODE)) {
-      request->expand_sequences(/*force=*/false);
+      queued->expand_sequences(/*force=*/false);
     }
 
-    if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
+    if (queued->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
       // New request goes to waiting queue (back = FIFO from MPMC).
-      state.prefill_queue.push(request, /*if_back=*/true);
+      state.prefill_queue.push(queued, /*if_back=*/true);
     } else {
       // Request from prefill instance in disagg PD mode -- already has KV.
-      state.running_requests.emplace_back(request);
+      state.running_requests.emplace_back(queued);
     }
   }
 }
@@ -226,7 +240,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     SchedulerState& state,
     ScheduleBudget& budget,
     std::vector<std::shared_ptr<Request>>& finished,
-    size_t& reserved_full_footprint) {
+    std::vector<size_t>& reserved_full_footprint) {
   if (queue == nullptr || queue->empty()) {
     return;
   }
@@ -273,7 +287,13 @@ void SchedulerPolicy::schedule_prefill_from_queue(
           static_cast<size_t>(state.kv_cache_manager->num_blocks());
       const size_t full_footprint =
           (request->sequences()[0]->num_tokens() + block_size - 1) / block_size;
-      if (reserved_full_footprint + full_footprint > total_blocks) {
+      // Predict and pre-assign the target DP rank so that the subsequent
+      // allocation reuses the same rank. This keeps the admission check
+      // consistent with the allocation path (same available-blocks metric
+      // and round-robin tie-break, see KVCacheManager::select_dp_rank).
+      const int32_t dp_rank = state.kv_cache_manager->select_dp_rank();
+      request->sequences()[0]->set_dp_rank(dp_rank);
+      if (reserved_full_footprint[dp_rank] + full_footprint > total_blocks) {
         blocks_exhausted = true;
         break;
       }
@@ -379,7 +399,12 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       const size_t block_size =
           static_cast<size_t>(state.kv_cache_manager->block_size());
       for (auto* seq : prefill_sequences) {
-        reserved_full_footprint +=
+        const int32_t dp_rank = seq->dp_rank();
+        CHECK(dp_rank >= 0 &&
+              dp_rank < static_cast<int32_t>(reserved_full_footprint.size()))
+            << "seq dp_rank=" << dp_rank << " out of range [0,"
+            << reserved_full_footprint.size() << ")";
+        reserved_full_footprint[dp_rank] +=
             (seq->num_tokens() + block_size - 1) / block_size;
       }
     }

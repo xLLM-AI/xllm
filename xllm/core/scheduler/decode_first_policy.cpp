@@ -66,16 +66,22 @@ void DecodeFirstPolicy::schedule(
     }
     // reserved_full_footprint is the full-footprint admission budget shared
     // across schedule_prefill_from_queue calls. It gates fresh prefill
-    // requests only (in-flight chunked prefills always continue). Starts with
-    // currently used blocks × 1.1 margin to reduce decode preemption, then
-    // accumulates full footprints of newly admitted prefill requests.
+    // requests only (in-flight chunked prefills always continue). Each DP
+    // rank keeps its own bucket; starts with that DP's currently used blocks
+    // × 1.1 margin to reduce decode preemption, then accumulates full
+    // footprints of newly admitted prefill requests into its own bucket.
     constexpr double kDecodeReserveMargin = 1.1;
-    size_t reserved_full_footprint = 0;
+    std::vector<size_t> reserved_full_footprint(
+        static_cast<size_t>(state.options.dp_size()), 0);
     if (has_decode) {
-      const size_t max_used =
-          util::max(state.kv_cache_manager->num_used_blocks());
-      reserved_full_footprint =
-          static_cast<size_t>(max_used * kDecodeReserveMargin);
+      const std::vector<size_t> used_blocks =
+          state.kv_cache_manager->num_used_blocks();
+      for (size_t i = 0;
+           i < reserved_full_footprint.size() && i < used_blocks.size();
+           ++i) {
+        reserved_full_footprint[i] =
+            static_cast<size_t>(used_blocks[i] * kDecodeReserveMargin);
+      }
     }
     schedule_prefill_from_queue(
         &state.chunk_queue, state, budget, finished, reserved_full_footprint);
