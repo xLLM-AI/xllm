@@ -153,7 +153,7 @@ class SchedulerPolicy {
       SchedulerState& state,
       ScheduleBudget& budget,
       std::vector<std::shared_ptr<Request>>& finished,
-      size_t& reserved_full_footprint);
+      std::vector<size_t>& reserved_full_footprint);
   int32_t select_prefill_dp_rank(const Sequence* sequence,
                                  const SchedulerState& state) const;
   bool should_limit_prefill_requests(const SchedulerState& state) const;
