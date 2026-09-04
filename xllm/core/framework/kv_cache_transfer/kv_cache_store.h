@@ -15,7 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#pragma push_macro("BLOCK_SIZE")
 #include <Mooncake/mooncake-store/include/client_service.h>
+#pragma pop_macro("BLOCK_SIZE")
 
 #include <cstdint>
 #include <map>

@@ -14,10 +14,7 @@ add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
 
 if(ENABLE_HA)
-  set(USE_ETCD ON CACHE BOOL
-      "Enable Mooncake transfer-engine etcd backend" FORCE)
-  set(STORE_USE_ETCD ON CACHE BOOL
-      "Enable Mooncake Store etcd backend" FORCE)
+  set(USE_ETCD ON)
   list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
   list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
   message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
