@@ -473,8 +473,6 @@ bool WorkerImpl::allocate_kv_cache_storage(
 
   const bool has_grouped_cache = kv_cache_shape.has_grouped_cache_layout();
   if (has_grouped_cache && options_.enable_disagg_pd()) {
-    CHECK_EQ(::xllm::ParallelConfig::get_instance().cp_size(), 1)
-        << "Grouped KV cache PD does not support context parallelism.";
     CHECK_EQ(::xllm::ParallelConfig::get_instance().kv_split_size_effective(),
              1)
         << "Grouped KV cache PD does not support KV-split.";

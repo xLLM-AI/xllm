@@ -177,9 +177,11 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.task_type() != "generate") {
       return "Model-side CP supports only the generate task";
     }
+    const bool is_dsv4_model = util::is_deepseek_v4_model_type(model_type);
     if (engine_type == EngineType::SSM &&
         SpeculativeConfig::requires_aux_hidden_capture(
-            options.speculative_algorithm())) {
+            options.speculative_algorithm()) &&
+        !is_dsv4_model) {
       return "Current model-side CP does not support aux-hidden-capture "
              "speculative algorithms (Eagle3/DFlash); disable CP or disable "
              "the speculative algorithm. MTP and Suffix are supported.";
