@@ -1533,8 +1533,11 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
 
     // run the model on the given input in working thread
     if (!enable_schedule_overlap()) {
-      const auto output = this->step(input);
-      promise.setValue(output);
+      auto output = this->step(input);
+      if (output.has_value()) {
+        output->is_graph_warmup = input.input_params.meta.is_graph_warmup;
+      }
+      promise.setValue(std::move(output));
     } else {
       if (input.token_ids.numel() > 0 &&
           input.input_params.meta.batch_forward_type.has_decode()) {
@@ -1556,6 +1559,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 #endif
       if (output.has_value()) {
+        output->is_graph_warmup = input.input_params.meta.is_graph_warmup;
         output->json_object_errors.insert(output->json_object_errors.end(),
                                           input.json_object_errors.begin(),
                                           input.json_object_errors.end());

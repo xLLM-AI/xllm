@@ -134,8 +134,11 @@ WorkerService::~WorkerService() = default;
 std::vector<SpeculativeTokenStats>
 WorkerService::record_speculative_metrics_from_output(
     const torch::Tensor& next_tokens,
-    const std::vector<SpeculativeTokenStats>& output_stats) {
-  if (!options_.enable_speculative_decode()) {
+    const std::vector<SpeculativeTokenStats>& output_stats,
+    bool is_graph_warmup) {
+  // Synthetic graph-warmup batches carry no real accept/reject signal; skip
+  // them so they do not pollute the cumulative acceptance stats.
+  if (is_graph_warmup || !options_.enable_speculative_decode()) {
     return {};
   }
   if (!output_stats.empty()) {
@@ -353,7 +356,9 @@ void WorkerService::step(
           stream_->synchronize();
         }
         speculative_token_stats = record_speculative_metrics_from_output(
-            next_tokens, sample_output.speculative_token_stats);
+            next_tokens,
+            sample_output.speculative_token_stats,
+            forward_outputs.value().is_graph_warmup);
       }
     }
   } else {
@@ -992,7 +997,9 @@ void WorkerService::GetLastStepResult(
 #endif
           }
           speculative_token_stats = record_speculative_metrics_from_output(
-              next_tokens, sample_output.speculative_token_stats);
+              next_tokens,
+              sample_output.speculative_token_stats,
+              forward_output.is_graph_warmup);
 
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||
