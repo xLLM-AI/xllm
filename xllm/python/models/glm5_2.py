@@ -742,15 +742,13 @@ class Glm52ForCausalLM(PyModelBase):
                 self.model.layers[i].mlp.process_weights_after_loading()
             else:
                 se = p + "mlp.experts."
+                moe = self.model.layers[i].mlp
+                moe.allocate_experts_w13_for_loading()
                 w13_param = self.get_parameter(p + "mlp.experts_w13")
-                w2_param = self.get_parameter(p + "mlp.experts_w2")
                 w13_scale = self.get_buffer(p + "mlp.experts_w13_scale")
                 w13_offset = self.get_buffer(p + "mlp.experts_w13_offset")
-                w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
-                w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
-                moe_layer = self.model.layers[i].mlp
-                expert_start = moe_layer.local_expert_start
-                expert_end = moe_layer.local_expert_end
+                expert_start = moe.local_expert_start
+                expert_end = moe.local_expert_end
                 shard_world = cfg.moe_tp_size if cfg.ep_size > 1 else cfg.tp_size
                 shard_rank = cfg.moe_tp_rank if cfg.ep_size > 1 else cfg.tp_rank
                 for j in range(expert_start, expert_end):
@@ -761,9 +759,6 @@ class Glm52ForCausalLM(PyModelBase):
                     uw = loader.load_tensor(se + f"{j}.up_proj.weight")
                     us = loader.load_tensor(se + f"{j}.up_proj.weight_scale")
                     uo = loader.load_tensor(se + f"{j}.up_proj.weight_offset")
-                    dw = loader.load_tensor(se + f"{j}.down_proj.weight")
-                    ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
-                    do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
                     w13_param.data[local_idx].copy_(
                         torch.cat(
                             [
@@ -791,9 +786,22 @@ class Glm52ForCausalLM(PyModelBase):
                             dim=0,
                         ).contiguous()
                     )
+
+                moe.process_experts_w13_after_loading()
+                moe.allocate_experts_w2_for_loading()
+                w2_param = self.get_parameter(p + "mlp.experts_w2")
+                w2_scale = self.get_buffer(p + "mlp.experts_w2_scale")
+                w2_offset = self.get_buffer(p + "mlp.experts_w2_offset")
+                for j in range(expert_start, expert_end):
+                    local_idx = j - expert_start
+                    dw = loader.load_tensor(se + f"{j}.down_proj.weight")
+                    ds = loader.load_tensor(se + f"{j}.down_proj.weight_scale")
+                    do = loader.load_tensor(se + f"{j}.down_proj.weight_offset")
                     w2_param.data[local_idx].copy_(loader.shard(dw, 1, shard_world, shard_rank).contiguous())
                     w2_scale.data[local_idx].copy_(ds.contiguous())
                     w2_offset.data[local_idx].copy_(do.contiguous())
+
+                moe.process_experts_w2_after_loading()
                 loader.copy_in(p + "mlp.gate.weight", loader.load_tensor(p + "mlp.gate.weight"))
                 loader.copy_in(
                     p + "mlp.e_score_correction_bias", loader.load_tensor(p + "mlp.gate.e_score_correction_bias")
@@ -803,7 +811,7 @@ class Glm52ForCausalLM(PyModelBase):
                 loader.tp_rank = shard_rank
                 loader.load_w8a8_b(p + "mlp.shared_experts.")
                 loader.tp_size, loader.tp_rank = saved_tp
-                self.model.layers[i].mlp.process_weights_after_loading()
+                moe.process_weights_after_loading(skip_expert_format=True)
 
         loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))
         loader.copy_in("lm_head.weight", loader.shard(loader.load_tensor("lm_head.weight"), dim=0))

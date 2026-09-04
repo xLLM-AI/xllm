@@ -26,6 +26,19 @@ DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
 
 DEFINE_int32(cp_size, 1, "Context parallel size for DSA attention.");
 
+DEFINE_int32(decode_context_parallel_size,
+             1,
+             "Decode context parallel size. DCP shards decode attention KV "
+             "cache along sequence within a TP group and does not expand "
+             "world size.");
+
+DEFINE_bool(enable_experimental_dcp_chunked_prefill,
+            false,
+            "Opt-in for the experimental DCP chunked prefill path. Required "
+            "when decode_context_parallel_size > 1 is combined with chunked "
+            "prefill. The path is not bitwise-equivalent to "
+            "decode_context_parallel_size=1 and closes mixed batching.");
+
 DEFINE_int32(
     layerwise_split_size,
     1,
@@ -88,6 +101,8 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(decode_context_parallel_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_experimental_dcp_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(layerwise_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tp_size);
@@ -106,6 +121,8 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(decode_context_parallel_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_experimental_dcp_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_JSON(layerwise_split_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
@@ -125,6 +142,10 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, dp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, ep_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, decode_context_parallel_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_experimental_dcp_chunked_prefill);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, layerwise_split_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);

@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #if defined(__GNUC__)
@@ -60,17 +61,51 @@ struct CausalConv1dGraphTask {
   std::shared_ptr<c10_npu::NPUEvent> event;
 };
 
+// Graph-capture record for a DCP fused-infer-attention (FIA) call. The tensors
+// (query/key/value/output/softmax_lse) keep stable device addresses across
+// replays; the per-step varying host scalar actual_seq_lengths_kv (the
+// DCP-local KV lengths) is recomputed at replay from the step's global
+// kv_seq_lens via compute_dcp_local_kv_seq_lens(dcp_size, dcp_rank,
+// block_size), so only these static DCP params are stored here. `workspace` is
+// a caller-owned buffer sized for the largest local-KV envelope at capture and
+// reused (same address) on every replay, because aclnn's default workspace is
+// function-local and would leave a dangling address in the captured graph. See
+// update_graph_tasks in acl_graph_executor_impl.cpp.
+struct FiaGraphTask {
+  torch::Tensor output;
+  torch::Tensor softmax_lse;
+  torch::Tensor query;
+  torch::Tensor key;
+  torch::Tensor value;
+  std::optional<torch::Tensor> atten_mask;
+  std::optional<torch::Tensor> block_table;
+  torch::Tensor workspace;
+  int64_t num_heads = 0;
+  int64_t num_key_value_heads = 0;
+  double scale = 1.0;
+  int64_t block_size = 0;
+  int64_t sparse_mode = 0;
+  int32_t dcp_size = 1;
+  int32_t dcp_rank = 0;
+  std::string input_layout;
+  bool softmax_lse_flag = false;
+  c10_npu::NPUTaskGroupHandle handle{};
+  std::shared_ptr<c10_npu::NPUEvent> event;
+};
+
 class AclGraphTaskUpdateContext final {
  public:
   void begin_capture() {
     capturing = true;
     causal_conv1d_tasks.clear();
+    fia_tasks.clear();
   }
 
   void end_capture() { capturing = false; }
 
   bool capturing = false;
   std::vector<CausalConv1dGraphTask> causal_conv1d_tasks;
+  std::vector<FiaGraphTask> fia_tasks;
 };
 
 }  // namespace xllm::npu

@@ -31,6 +31,7 @@ TEST(OptionsTest, ContextParallelDefaultsToOneAcrossPublicApis) {
   const XLLM_InitLLMOptions cc_options;
 
   EXPECT_EQ(options.cp_size(), 1);
+  EXPECT_EQ(options.decode_context_parallel_size(), 1);
   EXPECT_EQ(cc_options.cp_size, 1);
   EXPECT_EQ(XLLM_INIT_LLM_OPTIONS_DEFAULT.cp_size, 1U);
   EXPECT_EQ(XLLM_C_ABI_VERSION_MAJOR, 1);
@@ -40,12 +41,14 @@ TEST(OptionsTest, ContextParallelDefaultsToOneAcrossPublicApis) {
 TEST(OptionsTest, ContextParallelAcceptsExplicitValuesAcrossPublicApis) {
   Options options;
   options.cp_size(4);
+  options.decode_context_parallel_size(2);
   XLLM_InitLLMOptions cc_options;
   cc_options.cp_size = 4;
   XLLM_InitOptions c_options = XLLM_INIT_LLM_OPTIONS_DEFAULT;
   c_options.cp_size = 4;
 
   EXPECT_EQ(options.cp_size(), 4);
+  EXPECT_EQ(options.decode_context_parallel_size(), 2);
   EXPECT_EQ(cc_options.cp_size, 4);
   EXPECT_EQ(c_options.cp_size, 4U);
 }

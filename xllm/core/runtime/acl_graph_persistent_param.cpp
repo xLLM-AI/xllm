@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "core/runtime/acl_graph_persistent_param.h"
 
+#include <ATen/ops/index_select.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
@@ -278,6 +279,24 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   persistent_expanded_block_tables_ =
       torch::zeros({max_graph_tokens, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
+  dcp_size_ = options.decode_context_parallel_size();
+  if (dcp_size_ > 1) {
+    CHECK_GT(options.world_size(), 0);
+    CHECK_GT(options.dp_size(), 0);
+    CHECK_EQ(options.world_size() % options.dp_size(), 0);
+    const int32_t tp_size = options.world_size() / options.dp_size();
+    CHECK_EQ(tp_size % dcp_size_, 0);
+    CHECK_GE(options.node_rank(), 0);
+    CHECK_LT(options.node_rank(), options.world_size());
+    dcp_rank_ = (options.node_rank() % tp_size) % dcp_size_;
+    const torch::TensorOptions index_options =
+        torch::TensorOptions().dtype(torch::kLong).device(device);
+    persistent_dcp_local_block_indices_ =
+        torch::arange(dcp_rank_, max_block_table_len, dcp_size_, index_options);
+    persistent_dcp_local_block_tables_ = torch::zeros(
+        {metadata_capacity, persistent_dcp_local_block_indices_.numel()},
+        torch::dtype(torch::kInt).device(device));
+  }
 
   torch::Dtype dtype = util::parse_dtype(args.dtype(), device);
   if (args.dtype() == "float" || args.dtype() == "float32") {
@@ -542,6 +561,28 @@ GraphPersistentParam::~GraphPersistentParam() {
     atb::DestroyContext(context_for_plan_);
     context_for_plan_ = nullptr;
   }
+}
+
+void GraphPersistentParam::update_dcp_local_block_tables(
+    int64_t padded_batch_size) {
+  CHECK_GT(dcp_size_, 1);
+  CHECK(persistent_dcp_local_block_indices_.defined());
+  CHECK(persistent_dcp_local_block_tables_.defined());
+  CHECK_GE(padded_batch_size, 0);
+  CHECK_LE(padded_batch_size, persistent_block_tables_.size(0));
+  CHECK_LE(padded_batch_size, persistent_dcp_local_block_tables_.size(0));
+  if (padded_batch_size == 0) {
+    return;
+  }
+
+  torch::Tensor global_block_tables = persistent_block_tables_.slice(
+      /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
+  torch::Tensor local_block_tables = persistent_dcp_local_block_tables_.slice(
+      /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
+  at::index_select_out(local_block_tables,
+                       global_block_tables,
+                       /*dim=*/1,
+                       persistent_dcp_local_block_indices_);
 }
 
 void GraphPersistentParam::set_aux_hidden_states(const torch::Tensor& value) {
@@ -1061,6 +1102,11 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     zero_tensor_tail(
         persistent_block_tables_, actual_seq_len_rows, padded_batch_size);
   }
+  const bool use_dcp_local_block_tables =
+      dcp_size_ > 1 && is_decode && !params.is_spec_verify;
+  if (use_dcp_local_block_tables) {
+    update_dcp_local_block_tables(padded_batch_size);
+  }
 
   // Update persistent embedding from input_embedding if available
   const auto& embedding = params.embedding.input_embedding;
@@ -1326,6 +1372,17 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       graph_params->attention.host.kv_seq_lens = padded_kv_seq_lens_vec;
       graph_params->attention.host.q_seq_lens = padded_q_seq_lens_vec;
     }
+    if (use_dcp_local_block_tables) {
+      std::vector<int32_t>& padded_q_cu_seq_lens =
+          graph_params->attention.host.q_cu_seq_lens;
+      padded_q_cu_seq_lens.clear();
+      padded_q_cu_seq_lens.reserve(static_cast<size_t>(padded_batch_size));
+      int32_t q_running_total = 0;
+      for (const int32_t q_seq_len : graph_params->attention.host.q_seq_lens) {
+        q_running_total += q_seq_len;
+        padded_q_cu_seq_lens.emplace_back(q_running_total);
+      }
+    }
     graph_params->meta.num_sequences = static_cast<int32_t>(padded_batch_size);
     graph_params->meta.batch_forward_type = params.meta.batch_forward_type;
     graph_params->enable_graph = true;
@@ -1350,6 +1407,13 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         persistent_new_cache_slots(padded_num_tokens);
     graph_params->attention.device.block_tables =
         persistent_block_tables(static_cast<uint32_t>(padded_batch_size));
+    if (use_dcp_local_block_tables) {
+      graph_params->graph.dcp_local_block_tables =
+          persistent_dcp_local_block_tables(
+              static_cast<uint32_t>(padded_batch_size));
+    } else {
+      graph_params->graph.dcp_local_block_tables = torch::Tensor();
+    }
     if (!params.embedding.linear_state_ids.empty()) {
       graph_params->embedding.linear_state_ids =
           params.embedding.linear_state_ids;

@@ -104,6 +104,10 @@ class ContinuousScheduler : public Scheduler {
 
     PROPERTY(int32_t, cp_size) = 1;
 
+    // decode context parallel size; reuses TP cards, so it can coexist with
+    // cp_size == 1. When > 1, prefill cannot mix with decode in the same batch.
+    PROPERTY(int32_t, decode_context_parallel_size) = 1;
+
     // enable disaggregated PD mode.
     PROPERTY(bool, enable_disagg_pd) = false;
 

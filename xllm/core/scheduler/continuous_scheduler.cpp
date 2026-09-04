@@ -42,6 +42,7 @@ limitations under the License.
 #include "framework/request/priority_comparator.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
+#include "scheduler/chunked_prefill_policy.h"
 #include "scheduler/request_priority_queue.h"
 #include "scheduler/scheduler_policy.h"
 #include "util/timer.h"
@@ -64,17 +65,16 @@ std::vector<std::shared_ptr<Request>> CancelRequestQueue::take_all() {
 BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options) {
   BatchMode mode;
   mode.priority_strategy = options.priority_strategy();
-  mode.enable_chunked_prefill = options.enable_chunked_prefill();
+  mode.enable_chunked_prefill = resolve_effective_chunked_prefill(
+      options.enable_chunked_prefill(), options.priority_strategy());
   mode.enable_mix_batch =
       ::xllm::SchedulerConfig::get_instance().enable_mix_batch();
 
-  // multi_slo_and_prio requires chunked prefill.
-  if (mode.priority_strategy == "multi_slo_and_prio") {
-    mode.enable_chunked_prefill = true;
-  }
-
-  // CP/MTP: prefill cannot mix with decode in the same batch.
-  if (options.cp_size() > 1 || options.num_speculative_tokens() > 0) {
+  // CP/DCP/MTP: prefill cannot mix with decode in the same batch.
+  // DCP reuses TP cards, so cp_size may be 1 while decode_context_parallel_size
+  // is > 1; the worker asserts a non-mixed batch under DCP, so close mix here.
+  if (options.cp_size() > 1 || options.decode_context_parallel_size() > 1 ||
+      options.num_speculative_tokens() > 0) {
     mode.enable_mix_batch = false;
   }
 
@@ -692,7 +692,7 @@ void ContinuousScheduler::update_memory_metrics(
         std::to_string(dp_rank),
         static_cast<int64_t>(active_kv_cache_size_in_kilobytes));
 
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    if (batch_mode_.enable_chunked_prefill) {
       MULTI_HISTOGRAM_OBSERVE(decode_active_activation_size_in_kilobytes,
                               std::to_string(dp_rank),
                               active_activation_size_in_kilobytes);

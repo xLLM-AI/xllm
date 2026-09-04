@@ -142,6 +142,14 @@ class GraphPersistentParam final {
     }
     return persistent_block_tables_;
   }
+  torch::Tensor persistent_dcp_local_block_tables(
+      uint32_t actual_batch_size = 0) const {
+    if (actual_batch_size > 0) {
+      return persistent_dcp_local_block_tables_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
+    }
+    return persistent_dcp_local_block_tables_;
+  }
   torch::Tensor persistent_mask(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
       return persistent_mask_.slice(
@@ -248,6 +256,7 @@ class GraphPersistentParam final {
   // Update attention mask efficiently from input parameters
   void update_attention_mask(const ModelInputParams& input_params);
 
+  void update_dcp_local_block_tables(int64_t padded_batch_size);
   void update_eplb_decode_token_mask(const ModelInputParams& input_params,
                                      uint32_t padded_num_tokens);
 
@@ -275,6 +284,8 @@ class GraphPersistentParam final {
   torch::Tensor persistent_new_cache_slots_;
   torch::Tensor persistent_eplb_decode_token_mask_;
   torch::Tensor persistent_block_tables_;
+  torch::Tensor persistent_dcp_local_block_indices_;
+  torch::Tensor persistent_dcp_local_block_tables_;
   torch::Tensor persistent_new_cache_slots_default_;
   torch::Tensor persistent_block_tables_default_;
   torch::Tensor persistent_expanded_block_tables_;
@@ -330,6 +341,8 @@ class GraphPersistentParam final {
   // Flag indicating whether the model uses hybrid linear attention
   // (e.g., Qwen3.5/Next with gated delta net layers)
   bool is_hybrid_linear_attention_;
+  int32_t dcp_size_ = 1;
+  int32_t dcp_rank_ = 0;
   // Flag indicating whether MLA graph capture uses KV length bucketing.
   bool supports_mla_graph_kv_bucketing_;
   // Flag indicating whether attention plan needs to be updated based on model

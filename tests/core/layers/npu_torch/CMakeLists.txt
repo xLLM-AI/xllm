@@ -2,6 +2,22 @@ include(cc_test)
 
 cc_test(
   NAME
+    npu_dcp_attention_utils_test
+  SRCS
+    dcp_attention_utils_test.cpp
+  DEPS
+    :dcp_attention_utils
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+  target_link_options(npu_dcp_attention_utils_test PRIVATE
+    "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+endif()
+
+cc_test(
+  NAME
     deepseek_v4_eplb_load_utils_test
   SRCS
     deepseek_v4_eplb_load_utils_test.cpp
@@ -90,6 +106,32 @@ target_link_libraries(npu_linear_w8a8_dynamic_test
                       atb)
 
 target_link_options(npu_linear_w8a8_dynamic_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")
+
+cc_test(
+  NAME
+    npu_dcp_attention_test
+  SRCS
+    dcp_attention_test.cpp
+  DEPS
+    :npu_torch_layers
+    :parallel_state
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+
+target_link_libraries(npu_dcp_attention_test
+                      PRIVATE
+                      ascendcl
+                      hccl
+                      c_sec
+                      nnopbase
+                      atb)
+
+target_link_options(npu_dcp_attention_test PRIVATE
   "-Wl,--whole-archive"
   "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
   "-Wl,--no-whole-archive")

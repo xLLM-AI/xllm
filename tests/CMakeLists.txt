@@ -16,6 +16,15 @@ if(USE_NPU)
   )
 endif()
 
+add_test(
+  NAME xllm_export_import_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/python/import_xllm_export.py"
+    "$<TARGET_FILE:xllm_export>"
+)
+add_dependencies(all_tests xllm_export)
+
 add_subdirectory(api_service)
 add_subdirectory(core)
 add_subdirectory(function_call)

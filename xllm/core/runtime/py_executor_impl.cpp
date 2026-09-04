@@ -60,12 +60,25 @@ void clear_python_object(py::object& object) {
 
 }  // namespace
 
-PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
-  register_attention_metadata_views(m);
+void ensure_xllm_runtime_module() {
+  py::module_ sys = py::module_::import("sys");
+  py::dict modules = py::reinterpret_borrow<py::dict>(sys.attr("modules"));
+  const py::str module_name("xllm_runtime");
+  if (modules.contains(module_name)) {
+    return;
+  }
+
+  PyObject* module_object = PyModule_New("xllm_runtime");
+  if (module_object == nullptr) {
+    throw py::error_already_set();
+  }
+  py::module_ module = py::reinterpret_steal<py::module_>(module_object);
+  register_attention_metadata_views(module);
 
 #if defined(USE_NPU)
   py::class_<NPULayerSynchronizerImpl,
-             std::shared_ptr<NPULayerSynchronizerImpl>>(m, "LayerSynchronizer")
+             std::shared_ptr<NPULayerSynchronizerImpl>>(module,
+                                                        "LayerSynchronizer")
       .def("record_event",
            [](NPULayerSynchronizerImpl& self, int64_t layer_id) {
              int32_t device_id = static_cast<int32_t>(
@@ -73,6 +86,8 @@ PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
              return self.record_event(layer_id, device_id);
            });
 #endif
+
+  modules[module_name] = module;
 }
 
 PyExecutorImpl::PyExecutorImpl(CausalLM* model,
@@ -87,6 +102,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
 
   py::gil_scoped_acquire gil;
+  ensure_xllm_runtime_module();
   py::module_::import("xllm_runtime");
   py::module_ executor_module =
       py::module_::import("xllm.python.model_executor.executor");

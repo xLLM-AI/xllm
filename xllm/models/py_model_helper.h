@@ -30,6 +30,10 @@ namespace xllm {
 // Initializes the embedded CPython interpreter (idempotent, process-wide).
 void ensure_python_interpreter();
 
+// Registers the internal weight-loader module in the active interpreter. The
+// caller must hold the GIL.
+void __attribute__((visibility("hidden"))) ensure_xllm_weight_loader_module();
+
 // Convert torch dtype to the string form used by Python model config.
 std::string dtype_to_string(const torch::TensorOptions& options);
 

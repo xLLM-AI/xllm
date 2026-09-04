@@ -31,6 +31,9 @@ namespace xllm {
 
 struct ModelInputParams;
 
+// Registers the internal runtime module in the active interpreter. The caller
+// must hold the GIL.
+void __attribute__((visibility("hidden"))) ensure_xllm_runtime_module();
 void register_attention_metadata_views(pybind11::module_& module);
 
 class PyExpandedDecodeMetadataView final {

@@ -74,6 +74,12 @@ def test_full_world_ep_partitions_glm_experts() -> None:
 
     assert moe.local_expert_start == 6
     assert moe.local_expert_end == 8
+    assert moe.experts_w13.numel() == 0
+    assert moe.experts_w2.numel() == 0
+
+    moe.allocate_experts_w13_for_loading()
+    moe.allocate_experts_w2_for_loading()
+
     assert moe.experts_w13.shape == (2, 16, 16)
     assert moe.experts_w2.shape == (2, 16, 8)
 
@@ -194,7 +200,10 @@ class _RecordingLoader:
 def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch) -> None:
     model = Glm52ForCausalLM(_config(ep_rank=2))
     model.model.layers[0].self_attn.process_weights_after_loading = MagicMock()
-    model.model.layers[0].mlp.process_weights_after_loading = MagicMock()
+    moe = model.model.layers[0].mlp
+    moe.process_experts_w13_after_loading = MagicMock()
+    moe.process_experts_w2_after_loading = MagicMock()
+    moe.process_weights_after_loading = MagicMock()
     monkeypatch.setattr(glm5_2, "W8A8WeightLoader", _RecordingLoader)
 
     model.load_weights([], tp_rank=0, tp_size=2)
@@ -207,3 +216,6 @@ def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch) -> None:
     assert loader.tp_size == 2
     assert loader.tp_rank == 0
     assert loader.shared_shards == [("model.layers.0.mlp.shared_experts.", 1, 0)]
+    moe.process_experts_w13_after_loading.assert_called_once_with()
+    moe.process_experts_w2_after_loading.assert_called_once_with()
+    moe.process_weights_after_loading.assert_called_once_with(skip_expert_format=True)

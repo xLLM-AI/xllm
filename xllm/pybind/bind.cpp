@@ -29,13 +29,18 @@ limitations under the License.
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
 #include "core/framework/request/sample_slot.h"
+#include "core/runtime/py_attention_metadata.h"
 #include "models/model_registry.h"
+#include "models/py_model_helper.h"
 
 namespace xllm {
 namespace py = pybind11;
 using namespace pybind11::literals;
 
 PYBIND11_MODULE(xllm_export, m) {
+  ensure_xllm_runtime_module();
+  ensure_xllm_weight_loader_module();
+
   // 1. export Options
   py::class_<Options>(m, "Options")
       .def(py::init())

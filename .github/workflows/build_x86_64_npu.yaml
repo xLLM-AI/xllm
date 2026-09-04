@@ -130,4 +130,4 @@ jobs:
       timeout-minutes: 60
       run: |
         chmod +x ./cibuild/build_npu.sh
-        bash cibuild/build_npu.sh 'pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple; python setup.py bdist_wheel; pip install dist/* --force-reinstall; cd /tmp && python /export/home/actions-runner/_work/xllm/xllm/examples/generate.py --model="/export/home/models/Qwen2-7B-Instruct" --devices="npu:7"'
+        bash cibuild/build_npu.sh 'pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple; python setup.py bdist_wheel; pip install dist/* --force-reinstall; cd /tmp && ASCEND_RT_VISIBLE_DEVICES=7 python /export/home/actions-runner/_work/xllm/xllm/examples/generate.py --model="/export/home/models/Qwen2-7B-Instruct"'

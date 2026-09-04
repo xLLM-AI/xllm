@@ -15,7 +15,7 @@ limitations under the License.
 
 // Infrastructure for the embedded Python model executor:
 // - Interpreter lifecycle (ensure_python_interpreter)
-// - Weight loading (PyStateDict + PYBIND11_EMBEDDED_MODULE)
+// - Weight loading (PyStateDict + xllm_weight_loader module)
 // - Config serialization (dtype_to_string, PyDictVisitor)
 
 #include "models/py_model_helper.h"
@@ -56,6 +56,26 @@ void prepend_sys_path(const std::string& dir) {
 
 }  // namespace
 
+void ensure_xllm_weight_loader_module() {
+  py::module_ sys = py::module_::import("sys");
+  py::dict modules = py::reinterpret_borrow<py::dict>(sys.attr("modules"));
+  const py::str module_name("xllm_weight_loader");
+  if (modules.contains(module_name)) {
+    return;
+  }
+
+  PyObject* module_object = PyModule_New("xllm_weight_loader");
+  if (module_object == nullptr) {
+    throw py::error_already_set();
+  }
+  py::module_ module = py::reinterpret_steal<py::module_>(module_object);
+  py::class_<PyStateDict>(module, "StateDict")
+      .def("get_tensor", &PyStateDict::get_tensor, py::arg("name"))
+      .def("has", &PyStateDict::has, py::arg("name"))
+      .def("keys", &PyStateDict::keys);
+  modules[module_name] = module;
+}
+
 // ---------------------------------------------------------------------------
 // dtype_to_string
 // ---------------------------------------------------------------------------
@@ -94,6 +114,7 @@ void ensure_python_interpreter() {
 
     {
       py::gil_scoped_acquire gil;
+      ensure_xllm_weight_loader_module();
       std::string model_path = ModelConfig::get_instance().python_model_path();
       if (model_path.empty()) {
         const char* env = std::getenv("XLLM_PYTHON_MODEL_PATH");
@@ -145,13 +166,6 @@ py::list PyStateDict::keys() const {
     result.append(py::str(key));
   }
   return result;
-}
-
-PYBIND11_EMBEDDED_MODULE(xllm_weight_loader, m) {
-  py::class_<PyStateDict>(m, "StateDict")
-      .def("get_tensor", &PyStateDict::get_tensor, py::arg("name"))
-      .def("has", &PyStateDict::has, py::arg("name"))
-      .def("keys", &PyStateDict::keys);
 }
 
 }  // namespace xllm

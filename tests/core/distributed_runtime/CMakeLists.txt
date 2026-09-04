@@ -11,3 +11,13 @@ cc_test(
   DEPS
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    dcp_compat_test
+  SRCS
+    dcp_compat_test.cpp
+  DEPS
+    common
+    GTest::gtest_main
+)

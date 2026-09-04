@@ -954,6 +954,7 @@ struct GraphInput {
   torch::Tensor expanded_tiling_data;
   std::vector<int32_t> expanded_kv_seq_lens_vec;
 #if defined(USE_NPU)
+  torch::Tensor dcp_local_block_tables;
   std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
 #endif
   torch::Tensor input_tokens_override;
@@ -990,6 +991,8 @@ struct GraphInput {
     out.expanded_tiling_data = safe_to(expanded_tiling_data, device, true);
     out.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
 #if defined(USE_NPU)
+    out.dcp_local_block_tables =
+        safe_to(dcp_local_block_tables, device, /*non_blocking=*/true);
     out.acl_graph_task_update_context = acl_graph_task_update_context;
 #endif
     out.input_tokens_override =
