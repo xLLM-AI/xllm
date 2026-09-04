@@ -1046,8 +1046,41 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     COUNTER_INC(num_model_execution_total_eager);
     return run_eager();
   }
-  if (in_decoding_phase &&
-      params_single.parallel.dp_global_token_nums.size() > 1) {
+
+  const std::vector<int32_t>& dp_token_nums =
+      params_single.parallel.dp_global_token_nums;
+  if (is_qwen3_5_target_model_type(args_.model_type()) &&
+      dp_token_nums.size() > 1) {
+    const std::vector<int32_t>& raw_dp_token_nums =
+        params_single.parallel.raw_dp_global_token_nums;
+    const bool raw_dp_metadata_complete =
+        raw_dp_token_nums.empty() ||
+        raw_dp_token_nums.size() == dp_token_nums.size();
+    const std::vector<int32_t>& graph_dp_token_nums =
+        raw_dp_token_nums.empty() ? dp_token_nums : raw_dp_token_nums;
+    const int32_t min_dp_token_num = util::min(graph_dp_token_nums);
+    const int32_t max_dp_token_num = util::max(graph_dp_token_nums);
+    const bool balanced_nonempty_dp = raw_dp_metadata_complete &&
+                                      min_dp_token_num > 0 &&
+                                      min_dp_token_num == max_dp_token_num;
+    // Qwen3.5 DP graph is currently validated only with decode padding.
+    // No-padding changes graph bucketing and MTP input updates, so a locally
+    // prewarmed graph does not establish cross-rank replay compatibility.
+    const bool decode_no_padding =
+        options_.enable_graph_mode_decode_no_padding();
+    if (!balanced_nonempty_dp || decode_no_padding) {
+      LOG_FIRST_N(WARNING, 1)
+          << "Falling back to eager mode because DP ACL graph requires a "
+             "balanced, non-empty token distribution with decode padding. "
+             "dp_global_token_nums="
+          << dp_token_nums << ", raw_dp_global_token_nums=" << raw_dp_token_nums
+          << ", decode_no_padding=" << decode_no_padding;
+      COUNTER_INC(num_model_execution_total_eager);
+      return run_eager();
+    }
+  }
+
+  if (in_decoding_phase && dp_token_nums.size() > 1) {
     if (params_single.parallel.dp_is_decode.size() !=
         params_single.parallel.dp_global_token_nums.size()) {
       LOG_FIRST_N(WARNING, 1)
