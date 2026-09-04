@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <list>
@@ -27,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "continuous_scheduler.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
@@ -345,6 +347,193 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
       EXPECT_TRUE(allowed_max_tokens[i] == validate_allowed_max_tokens[idx]);
     }
   }
+}
+
+TEST(SchedulerPolicyTest, KvSplitAlignsChunkToLogicalBlockSize) {
+  // Manager block_size is already physical * kv_split. 300 must align to 256.
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 2);
+  constexpr int32_t kLogicalBlockSize = 256;
+  constexpr int32_t kMaxChunkTokens = 300;
+  constexpr int32_t kPromptTokens = 1000;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/10000,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/kMaxChunkTokens,
+      /*dp_size=*/1);
+  opt.cp_size(2);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(/*num_blocks=*/64,
+                                             kLogicalBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests = generate_request(
+      {kPromptTokens}, {10}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0],
+            static_cast<uint32_t>(kLogicalBlockSize));
+}
+
+TEST(SchedulerPolicyTest, KvSplitDoesNotMultiplyLogicalBlockSizeAgain) {
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 2);
+  constexpr int32_t kLogicalBlockSize = 256;
+  constexpr int32_t kMaxChunkTokens = 768;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/10000,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/kMaxChunkTokens,
+      /*dp_size=*/1);
+  opt.cp_size(2);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(/*num_blocks=*/64,
+                                             kLogicalBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests =
+      generate_request({1000}, {10}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0],
+            static_cast<uint32_t>(kMaxChunkTokens));
+}
+
+TEST(SchedulerPolicyTest, KvSplit4KeepsChunkAtLogicalMultipleNotSquared) {
+  // physical 128, kv_split 4 => logical 512. 2560 must stay 2560, not 2048.
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 4);
+  constexpr int32_t kLogicalBlockSize = 512;
+  constexpr int32_t kMaxChunkTokens = 2560;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/10000,
+      /*max_seqs_per_batch=*/1,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/kMaxChunkTokens,
+      /*dp_size=*/1);
+  opt.cp_size(4);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(/*num_blocks=*/64,
+                                             kLogicalBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests =
+      generate_request({10000}, {10}, std::nullopt, std::nullopt, 20000);
+  scheduler->add_request(requests[0]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0],
+            static_cast<uint32_t>(kMaxChunkTokens));
+}
+
+TEST(SchedulerPolicyTest, KvSplitDefersTinyNonFinalChunkToNextStep) {
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 2);
+  constexpr int32_t kLogicalBlockSize = 256;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/1000,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/2048,
+      /*dp_size=*/1);
+  opt.cp_size(2);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(/*num_blocks=*/64,
+                                             kLogicalBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests = generate_request(
+      {800, 2000}, {10, 10}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+  scheduler->add_request(requests[1]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0], 800u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+}
+
+TEST(SchedulerPolicyTest, KvSplitSchedulesShortTailAfterSkippedLongChunk) {
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 2);
+  constexpr int32_t kLogicalBlockSize = 256;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/1000,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/2048,
+      /*dp_size=*/1);
+  opt.cp_size(2);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(/*num_blocks=*/64,
+                                             kLogicalBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests = generate_request(
+      {800, 2000, 150}, {10, 10, 10}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+  scheduler->add_request(requests[1]);
+  scheduler->add_request(requests[2]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 2u);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0], 800u);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[1], 150u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+}
+
+TEST(SchedulerPolicyTest, KvSplitDoesNotFailWhenStepBudgetBelowLogicalBlock) {
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 2);
+  constexpr int32_t kLogicalBlockSize = 256;
+  constexpr int32_t kMaxTokensPerBatch = 200;
+  constexpr int32_t kPromptTokens = 1000;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/kMaxTokensPerBatch,
+      /*max_seqs_per_batch=*/1,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/2048,
+      /*dp_size=*/1);
+  opt.cp_size(2);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(/*num_blocks=*/64,
+                                             kLogicalBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests = generate_request(
+      {kPromptTokens}, {10}, std::nullopt, std::nullopt, 10000);
+  bool failed = false;
+  requests[0]->state().output_func = [&failed](const RequestOutput&) {
+    failed = true;
+    return true;
+  };
+  scheduler->add_request(requests[0]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  const bool empty_batch =
+      batches.empty() ||
+      std::all_of(batches.begin(), batches.end(), [](const Batch& batch) {
+        return batch.size() == 0;
+      });
+  EXPECT_TRUE(empty_batch);
+  EXPECT_FALSE(failed);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+
+  batches = scheduler->prepare_batch_test();
+  EXPECT_FALSE(failed);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
 }
 
 TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {

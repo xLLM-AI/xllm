@@ -84,6 +84,13 @@ inline bool budget_exhausted(const ScheduleBudget& budget) {
          budget.latency_budget <= budget.estimate_latency;
 }
 
+enum class UnschedulableReason : int8_t {
+  NONE = 0,
+  SKIPPED,
+  BUDGET_EXHAUSTED,
+  BLOCKS_EXHAUSTED,
+};
+
 // Selects which concrete policy to instantiate.
 // Determined by BatchMode: enable_mix_batch × priority_strategy.
 enum class SchedulerPolicyKind {
@@ -170,8 +177,7 @@ class SchedulerPolicy {
       RequestPriorityQueue* queue,
       SchedulerState& state,
       std::vector<std::shared_ptr<Request>>& finished,
-      bool budget_exhausted,
-      bool blocks_exhausted);
+      UnschedulableReason reason);
   void handle_abnormal_decode_request(
       RequestPriorityQueue* queue,
       SchedulerState& state,

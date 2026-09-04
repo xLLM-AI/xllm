@@ -20,6 +20,8 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <vector>
 
 #include "async_response_processor.h"
 #include "common/metrics.h"
@@ -36,8 +38,8 @@ namespace xllm {
 
 namespace {
 
-// Align chunk down to kv_split_size*block_size.
-// TODO: refactor kv-split block mapping to remove this limitation.
+// Non-final chunks must be a multiple of the KV-split logical block
+// (physical * kv_split). Prefix AllGather only covers complete blocks.
 inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
                                           int32_t kv_split_size,
                                           int32_t block_size,
@@ -51,10 +53,9 @@ inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
   if (num_tokens >= remaining_in_seq) {
     return num_tokens;
   }
-  const size_t kv_term =
-      static_cast<size_t>(kv_split_size) * static_cast<size_t>(block_size);
+  const size_t kv_term = static_cast<size_t>(block_size);
   if (num_tokens < kv_term) {
-    return num_tokens;
+    return 0;
   }
   return (num_tokens / kv_term) * kv_term;
 }
@@ -87,6 +88,18 @@ size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
     return free_blocks[dp_rank];
   }
   return util::max(free_blocks);
+}
+
+void restore_skipped_requests(
+    RequestPriorityQueue* queue,
+    const std::vector<std::shared_ptr<Request>>& skipped) {
+  for (auto it = skipped.rbegin(); it != skipped.rend(); ++it) {
+    if (queue->supports_sort()) {
+      queue->push(*it, /*if_back=*/false);
+    } else {
+      queue->push(*it);
+    }
+  }
 }
 
 }  // namespace
@@ -178,8 +191,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     return;
   }
 
-  bool budget_exhausted = false;
-  bool blocks_exhausted = false;
+  UnschedulableReason reason = UnschedulableReason::NONE;
+  std::vector<std::shared_ptr<Request>> skipped;
 
   while (!queue->empty() && budget.remaining_seq_budget > 0 &&
          budget.remaining_token_budget > 0 &&
@@ -189,7 +202,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
         state.kv_cache_manager->kv_cache_utilization() >=
             SchedulerConfig::get_instance()
                 .prefill_scheduling_memory_usage_threshold()) {
-      blocks_exhausted = true;
+      reason = UnschedulableReason::BLOCKS_EXHAUSTED;
       break;
     }
 
@@ -221,7 +234,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       const size_t full_footprint =
           (request->sequences()[0]->num_tokens() + block_size - 1) / block_size;
       if (reserved_full_footprint + full_footprint > total_blocks) {
-        blocks_exhausted = true;
+        reason = UnschedulableReason::BLOCKS_EXHAUSTED;
         break;
       }
     }
@@ -244,11 +257,14 @@ void SchedulerPolicy::schedule_prefill_from_queue(
           prefill_sequence.get(),
           budget.remaining_token_budget - allocated_tokens,
           state);
+      if (num_tokens == 0) {
+        continue;
+      }
 
       if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
           budget.remaining_seq_budget < allocated_seqs + 1) {
         can_schedule = false;
-        budget_exhausted = true;
+        reason = UnschedulableReason::BUDGET_EXHAUSTED;
         break;
       }
 
@@ -263,7 +279,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
                 seq_estimate_latency >
             budget.latency_budget) {
           can_schedule = false;
-          budget_exhausted = true;
+          reason = UnschedulableReason::BUDGET_EXHAUSTED;
           break;
         }
       }
@@ -277,7 +293,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       if (!allocate_for_prefill(
               prefill_sequence.get(), num_tokens, &actual_tokens, state)) {
         can_schedule = false;
-        blocks_exhausted = true;
+        reason = UnschedulableReason::BLOCKS_EXHAUSTED;
         break;
       }
 
@@ -290,6 +306,12 @@ void SchedulerPolicy::schedule_prefill_from_queue(
 
     if (!can_schedule) {
       break;
+    }
+    if (prefill_sequences.empty()) {
+      reason = UnschedulableReason::SKIPPED;
+      skipped.emplace_back(request);
+      queue->pop_top();
+      continue;
     }
 
     budget.remaining_token_budget -= allocated_tokens;
@@ -318,9 +340,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     }
   }
 
-  // Handle unschedulable head request.
-  handle_unschedulable_head(
-      queue, state, finished, budget_exhausted, blocks_exhausted);
+  handle_unschedulable_head(queue, state, finished, reason);
+  restore_skipped_requests(queue, skipped);
 }
 
 size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
@@ -738,22 +759,25 @@ void SchedulerPolicy::handle_unschedulable_head(
     RequestPriorityQueue* queue,
     SchedulerState& state,
     std::vector<std::shared_ptr<Request>>& finished,
-    bool budget_exhausted,
-    bool blocks_exhausted) {
+    UnschedulableReason reason) {
+  if (reason == UnschedulableReason::SKIPPED ||
+      reason == UnschedulableReason::NONE) {
+    return;
+  }
   if (state.running_sequences.empty() && !queue->empty() &&
       state.decode_queue.empty()) {
     std::shared_ptr<Request> request(queue->top());
     queue->pop_top();
     clear_mtp_bootstrap(request.get(), state);
     state.kv_cache_manager->deallocate(request.get());
-    if (blocks_exhausted) {
+    if (reason == UnschedulableReason::BLOCKS_EXHAUSTED) {
       LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
                     "a single sequence.";
       state.response_processor->process_failed_request(
           request,
           {StatusCode::RESOURCE_EXHAUSTED,
            "No enough memory to schedule single sequence"});
-    } else if (budget_exhausted) {
+    } else if (reason == UnschedulableReason::BUDGET_EXHAUSTED) {
       LOG(ERROR) << "Request prompt is too long, no enough budget to schedule "
                     "a single sequence. Please set a larger budget.";
       state.response_processor->process_failed_request(
