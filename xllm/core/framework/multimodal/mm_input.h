@@ -42,6 +42,7 @@ struct MMInputItem {
     type = MMType::NONE;
     raw_data.clear();
     hash_key.reset();
+    uuid.reset();
   }
 
   std::optional<torch::Tensor> get_decode_data(MMType type_) const {
@@ -64,6 +65,7 @@ struct MMInputItem {
 
   std::string raw_data;  // binary
   std::optional<XXH3Key> hash_key;
+  std::optional<std::string> uuid;
 
   torch::Tensor decode_image;  // image: rgb, [c,h,w], uint8
   torch::Tensor decode_video;  // video: rgb, [t,c,h,w], uint8
@@ -109,10 +111,13 @@ class MMInput {
   size_t size() const { return items_.size(); }
 
   const std::vector<MMInputItem>& items() const { return items_; }
+  std::vector<MMInputItem>& mutable_items() { return items_; }
 
   void insert(const std::vector<MMInputItem>& inputs) {
     items_.insert(items_.end(), inputs.begin(), inputs.end());
   }
+
+  void insert(MMInputItem input) { items_.push_back(std::move(input)); }
 
   std::vector<torch::Tensor> get_decode_data(MMType type) const {
     std::vector<torch::Tensor> vec;
@@ -176,6 +181,17 @@ inline const char* MMErrToString(MMErrCode code) {
 
 class MMHandlerSet;
 class ThreadPool;
+
+// Download source for one item, produced by collect() and consumed by
+// materialize(). `content` points into the caller's `messages`. Scoped to a
+// single request; never stored on MMInputItem.
+struct MMSourceRef {
+  const MMContent* content = nullptr;
+  MMPayload payload;
+  bool needs_materialize =
+      false;  // false for embedding items (done in collect)
+};
+
 class MMInputTransfer {
  public:
   MMInputTransfer();
@@ -183,7 +199,18 @@ class MMInputTransfer {
 
   MMErrCode trans(const std::vector<Message>& messages, MMInput& inputs);
 
+  MMErrCode collect(const std::vector<Message>& messages,
+                    MMInput& inputs,
+                    std::vector<MMSourceRef>& refs);
+  MMErrCode materialize(const std::vector<MMSourceRef>& refs,
+                        const std::vector<int32_t>& target_indices,
+                        MMInput& inputs);
+
  private:
+  MMErrCode collect_content(const MMContent& content,
+                            MMInput& inputs,
+                            std::vector<MMSourceRef>& refs);
+
   MMErrCode trans_parallel(const MMContentVec& mmc,
                            std::vector<MMInputItem>& inputs,
                            MMPayload& payload);

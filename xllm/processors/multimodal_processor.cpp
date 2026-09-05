@@ -34,6 +34,29 @@ MultimodalProcessorBase::MultimodalProcessorBase(
 
 MultimodalProcessorBase::~MultimodalProcessorBase() = default;
 
+bool MultimodalProcessorBase::process_mm_input(
+    const std::vector<Message>& messages,
+    std::string payload,
+    MMData& out) {
+  MMInput inputs(std::move(payload));
+  std::vector<MMSourceRef> refs;
+  if (transfer_.collect(messages, inputs, refs) != MMErrCode::SUCCESS) {
+    return false;
+  }
+  if (inputs.empty()) {
+    return true;
+  }
+  std::vector<int32_t> all;
+  all.reserve(inputs.size());
+  for (int32_t i = 0; i < static_cast<int32_t>(inputs.size()); ++i) {
+    all.push_back(i);
+  }
+  if (transfer_.materialize(refs, all, inputs) != MMErrCode::SUCCESS) {
+    return false;
+  }
+  return process_multimodal(inputs, out);
+}
+
 bool MultimodalProcessorBase::tokenize(const std::string& prompt,
                                        std::vector<int32_t>& token_ids) const {
   Timer timer;

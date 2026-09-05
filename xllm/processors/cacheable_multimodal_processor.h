@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/multimodal/mm_visitor.h"
 #include "processors/multimodal_processor.h"
 #include "processors/processor_cache.h"
 
@@ -37,12 +38,20 @@ class CacheableMultimodalProcessor final : public MultimodalProcessorBase {
                       std::vector<int32_t>& token_ids) override;
   bool process_multimodal(const MMInput& inputs, MMData& data) const override;
 
+  // UUID pre-filter path: collect (no download) -> uuid pre-filter ->
+  // materialize only misses -> raw-hash lookup -> preprocess -> insert ->
+  // scatter by index.
+  bool process_mm_input(const std::vector<Message>& messages,
+                        std::string payload,
+                        MMData& out) override;
+
  private:
-  bool process_misses(const std::vector<MMInputItem>& miss_inputs,
-                      MMItemVec& miss_items) const;
-  void assemble(std::vector<std::optional<MMDataItem>>& cache_hits,
-                MMItemVec miss_items,
-                MMData& data) const;
+  // Scatters uuid hits, raw-hash hits and freshly-processed items back to their
+  // original request positions.
+  void assemble(UuidPrefilterVisitor& prefilter,
+                ProcessorCacheLookupVisitor& raw_hash_lookup,
+                MMItemVec& fresh_items,
+                MMData& out) const;
 
   std::unique_ptr<MultimodalProcessorBase> inner_;
   std::unique_ptr<ProcessorCache> cache_;

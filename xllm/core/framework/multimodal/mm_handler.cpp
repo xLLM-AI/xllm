@@ -40,7 +40,7 @@ MMErrCode MMHandlerBase::process(const MMContent& content,
   code = this->decode(input);
   if (code != MMErrCode::SUCCESS) return code;
 
-  if (!input.raw_data.empty()) {
+  if (!input.raw_data.empty() && !input.hash_key.has_value()) {
     input.hash_key = hash_string(input.raw_data);
   }
 
@@ -117,8 +117,6 @@ MMErrCode MMHandlerBase::load_from_http(
 MMErrCode ImageHandler::load(const MMContent& content,
                              MMInputItem& input,
                              MMPayload& payload) {
-  input.clear();
-
   const auto& image_url = content.image_url;
   const auto& url = image_url.url;
 
@@ -154,8 +152,6 @@ MMErrCode ImageHandler::decode(MMInputItem& input) {
 MMErrCode VideoHandler::load(const MMContent& content,
                              MMInputItem& input,
                              MMPayload& payload) {
-  input.clear();
-
   const auto& video_url = content.video_url;
   const auto& url = video_url.url;
 
@@ -202,8 +198,6 @@ MMErrCode VideoHandler::decode(MMInputItem& input) {
 MMErrCode AudioHandler::load(const MMContent& content,
                              MMInputItem& input,
                              MMPayload& payload) {
-  input.clear();
-
   const auto& audio_url = content.audio_url;
   const auto& url = audio_url.url;
 

@@ -61,6 +61,7 @@ class MMData {
  public:
   MMData() = default;
   MMData(uint32_t type, const MMItemVec& items);
+  MMData(uint32_t type, MMItemVec&& items);
   MMData(uint32_t type, const MMDict& items);
 
   bool has(uint32_t type) const { return type & type_ != 0; }

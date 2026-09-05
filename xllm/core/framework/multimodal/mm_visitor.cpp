@@ -420,9 +420,41 @@ bool ProcessorCacheLookupVisitor::visit(const MMInputItem& input) {
   return true;
 }
 
+namespace {
+// True when exactly one of IMAGE/VIDEO/AUDIO is set. Multimodal-bit items
+// (audio-in-video) expand to multiple outputs and can't be keyed by one uuid,
+// so the pre-filter never treats them as hits.
+bool is_single_modality(uint32_t type) {
+  const uint32_t modality =
+      type & (MMType::IMAGE | MMType::VIDEO | MMType::AUDIO);
+  return modality != 0 && (modality & (modality - 1)) == 0;
+}
+}  // namespace
+
+UuidPrefilterVisitor::UuidPrefilterVisitor(ProcessorCache& cache,
+                                           size_t item_count)
+    : cache_(cache) {
+  hit_items_.reserve(item_count);
+  hit_indices_.reserve(item_count);
+  miss_indices_.reserve(item_count);
+}
+
+bool UuidPrefilterVisitor::visit(const MMInputItem& input) {
+  const int32_t current = index_++;
+  if (input.uuid.has_value() && is_single_modality(input.type)) {
+    std::optional<MMDataItem> hit = cache_.lookup(input.hash_key.value());
+    if (hit.has_value()) {
+      hit_items_.emplace_back(std::move(hit.value()));
+      hit_indices_.push_back(current);
+      return true;
+    }
+  }
+  miss_indices_.push_back(current);
+  return true;
+}
+
 ProcessorCacheInsertVisitor::ProcessorCacheInsertVisitor(ProcessorCache& cache)
     : cache_(cache) {}
-
 bool ProcessorCacheInsertVisitor::visit(MMDataItem& item) {
   if (!item.is_embedded()) {
     cache_.insert(item.state().schedule_data().key, item);

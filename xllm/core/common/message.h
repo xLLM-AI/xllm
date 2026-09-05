@@ -64,6 +64,8 @@ struct MMContent {
   AudioURL audio_url;
 
   Embedding embedding;
+
+  std::optional<std::string> uuid;
 };
 using MMContentVec = std::vector<MMContent>;
 

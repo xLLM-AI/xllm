@@ -42,63 +42,88 @@ bool CacheableMultimodalProcessor::process_prompt(
 
 bool CacheableMultimodalProcessor::process_multimodal(const MMInput& inputs,
                                                       MMData& data) const {
-  ProcessorCacheLookupVisitor cache_lookup_visitor(*cache_, inputs.size());
-  CHECK(inputs.foreach (cache_lookup_visitor));
-
-  MMItemVec miss_items;
-  if (!process_misses(cache_lookup_visitor.miss_inputs_, miss_items)) {
-    return false;
-  }
-
-  assemble(cache_lookup_visitor.cache_hits_, std::move(miss_items), data);
-  return true;
+  return inner_->process_multimodal(inputs, data);
 }
 
-bool CacheableMultimodalProcessor::process_misses(
-    const std::vector<MMInputItem>& miss_inputs,
-    MMItemVec& miss_items) const {
-  if (miss_inputs.empty()) {
+bool CacheableMultimodalProcessor::process_mm_input(
+    const std::vector<Message>& messages,
+    std::string payload,
+    MMData& out) {
+  MMInput mm_inputs(std::move(payload));
+  std::vector<MMSourceRef> refs;
+  if (transfer_.collect(messages, mm_inputs, refs) != MMErrCode::SUCCESS) {
+    return false;
+  }
+  if (mm_inputs.empty()) {
     return true;
   }
 
-  MMInput inputs;
-  inputs.insert(miss_inputs);
-  MMData miss_data;
-  if (!inner_->process_multimodal(inputs, miss_data)) {
+  UuidPrefilterVisitor prefilter(*cache_, mm_inputs.size());
+  CHECK(mm_inputs.foreach (prefilter));
+
+  if (transfer_.materialize(refs, prefilter.miss_indices_, mm_inputs) !=
+      MMErrCode::SUCCESS) {
     return false;
   }
-  CHECK_EQ(miss_data.items<MMItemVec>().size(), miss_inputs.size())
-      << "Multimodal processor returned mismatched item count.";
-  ProcessorCacheInsertVisitor insert(*cache_);
-  CHECK(miss_data.foreach (insert));
-  miss_items = std::move(miss_data.items<MMItemVec>());
+
+  const std::vector<MMInputItem>& items = mm_inputs.items();
+  MMInput uuid_misses;
+  for (int32_t index : prefilter.miss_indices_) {
+    uuid_misses.insert(items[index]);
+  }
+  ProcessorCacheLookupVisitor raw_hash_lookup(*cache_, uuid_misses.size());
+  CHECK(uuid_misses.foreach (raw_hash_lookup));
+  CHECK_EQ(raw_hash_lookup.cache_hits_.size(), prefilter.miss_indices_.size());
+
+  MMData produced_data;
+  if (!raw_hash_lookup.miss_inputs_.empty()) {
+    MMInput preprocess_inputs;
+    preprocess_inputs.insert(raw_hash_lookup.miss_inputs_);
+    if (!inner_->process_multimodal(preprocess_inputs, produced_data)) {
+      return false;
+    }
+    CHECK_EQ(produced_data.items<MMItemVec>().size(),
+             raw_hash_lookup.miss_inputs_.size());
+    ProcessorCacheInsertVisitor insert(*cache_);
+    CHECK(produced_data.foreach (insert));
+  }
+
+  MMItemVec fresh_items;
+  if (produced_data.hold<MMItemVec>()) {
+    fresh_items = std::move(produced_data.items<MMItemVec>());
+  }
+  assemble(prefilter, raw_hash_lookup, fresh_items, out);
   return true;
 }
 
 void CacheableMultimodalProcessor::assemble(
-    std::vector<std::optional<MMDataItem>>& cache_hits,
-    MMItemVec miss_items,
-    MMData& data) const {
+    UuidPrefilterVisitor& prefilter,
+    ProcessorCacheLookupVisitor& raw_hash_lookup,
+    MMItemVec& fresh_items,
+    MMData& out) const {
+  const int32_t total = static_cast<int32_t>(prefilter.hit_indices_.size() +
+                                             prefilter.miss_indices_.size());
+  MMItemVec slots(total, MMDataItem(MMType::NONE));
   uint32_t full_type = MMType::NONE;
-  MMItemVec full_items;
-  full_items.reserve(cache_hits.size());
 
-  size_t miss_index = 0;
-  for (std::optional<MMDataItem>& cache_hit : cache_hits) {
-    if (cache_hit.has_value()) {
-      MMDataItem& item = cache_hit.value();
-      full_type |= item.type();
-      full_items.emplace_back(std::move(item));
-      continue;
-    }
-
-    MMDataItem& produced = miss_items[miss_index++];
-    full_type |= produced.type();
-    full_items.emplace_back(std::move(produced));
+  for (size_t i = 0; i < prefilter.hit_indices_.size(); ++i) {
+    MMDataItem& item = prefilter.hit_items_[i];
+    full_type |= item.type();
+    slots[prefilter.hit_indices_[i]] = std::move(item);
   }
-  CHECK_EQ(miss_index, miss_items.size());
 
-  data.set(full_type, std::move(full_items));
+  size_t fresh_index = 0;
+  for (size_t j = 0; j < prefilter.miss_indices_.size(); ++j) {
+    const int32_t global_index = prefilter.miss_indices_[j];
+    std::optional<MMDataItem>& cache_hit = raw_hash_lookup.cache_hits_[j];
+    MMDataItem& item =
+        cache_hit.has_value() ? cache_hit.value() : fresh_items[fresh_index++];
+    full_type |= item.type();
+    slots[global_index] = std::move(item);
+  }
+  CHECK_EQ(fresh_index, fresh_items.size());
+
+  out = MMData(full_type, std::move(slots));
 }
 
 }  // namespace xllm

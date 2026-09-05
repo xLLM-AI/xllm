@@ -180,6 +180,23 @@ class ProcessorCacheLookupVisitor final : public MMInputItem::IVisitor {
   ProcessorCache& cache_;
 };
 
+// Looks up each uuid-carrying item in the processor cache before download.
+// Hits are collected with their original index; misses only record the index
+// so they can be materialized and processed afterwards.
+class UuidPrefilterVisitor final : public MMInputItem::IVisitor {
+ public:
+  UuidPrefilterVisitor(ProcessorCache& cache, size_t item_count);
+  bool visit(const MMInputItem& input) override;
+
+  MMItemVec hit_items_;
+  std::vector<int32_t> hit_indices_;
+  std::vector<int32_t> miss_indices_;
+
+ private:
+  ProcessorCache& cache_;
+  int32_t index_ = 0;
+};
+
 class ProcessorCacheInsertVisitor final : public MMDataItem::IVisitor {
  public:
   explicit ProcessorCacheInsertVisitor(ProcessorCache& cache);
