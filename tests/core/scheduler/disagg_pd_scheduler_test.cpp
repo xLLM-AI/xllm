@@ -196,7 +196,7 @@ std::shared_ptr<Request> make_request(
                      /*service_request_id=*/nullptr);
 
   return std::make_shared<Request>(
-      "req", "x-request-id", "x-request-time", state, "service-req");
+      "req", "x-request-id", "x-request-time", std::move(state), "service-req");
 }
 
 void finish_prefill(Sequence* sequence) {

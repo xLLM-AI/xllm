@@ -153,7 +153,20 @@ void Sequence::init_onerec_sequence(
   volatile_num_prompt_tokens_ = num_prompt_tokens_;
   input_embedding_ = std::move(input_embedding);
   cur_generated_token_idx_ = num_prompt_tokens_;
-  logprob_state_ = std::make_unique<LogprobState>(num_prompt_tokens_, capacity);
+  // OneRec can also emit per-token logprobs via enable_output_sku_logprobs
+  // (see generate_onerec_streaming_output), independent of the sampling flag,
+  // so allocate the logprob buffer when either path needs it. Beam search reads
+  // both buffers unconditionally (see the main constructor), so force them on
+  // for beam requests too.
+  const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
+  const bool enable_logprobs =
+      sequence_params_.sampling_param->logprobs ||
+      ::xllm::RecConfig::get_instance().enable_output_sku_logprobs() ||
+      is_beam_search;
+  const bool enable_top_logprobs =
+      sequence_params_.sampling_param->top_logprobs > 0 || is_beam_search;
+  logprob_state_ = std::make_unique<LogprobState>(
+      num_prompt_tokens_, capacity, enable_logprobs, enable_top_logprobs);
 }
 
 void Sequence::generate_onerec_streaming_output(const Slice<int32_t>& ids,
@@ -259,8 +272,21 @@ Sequence::Sequence(size_t index,
   volatile_num_prompt_tokens_ = num_prompt_tokens_;
   tokens_.resize(capacity);
 
-  // init logprob state
-  logprob_state_ = std::make_unique<LogprobState>(num_prompt_tokens_, capacity);
+  // init logprob state. Only allocate the per-position buffers when they will
+  // actually be read. Beam search (SequencesGroup::process_beam_search) indexes
+  // both the logprob and top-k buffers on every expansion regardless of the
+  // request's logprobs flags, so beam requests must allocate them even when
+  // logprobs are disabled -- otherwise the reader would be out of bounds. The
+  // LLM factory normalizes these flags for beam, but the REC factory copies
+  // beam_width without doing so, so gate on beam_width here to stay safe for
+  // both. best_of>n forces logprobs on upstream, so it is already covered.
+  const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
+  const bool enable_logprobs =
+      sequence_params_.sampling_param->logprobs || is_beam_search;
+  const bool enable_top_logprobs =
+      sequence_params_.sampling_param->top_logprobs > 0 || is_beam_search;
+  logprob_state_ = std::make_unique<LogprobState>(
+      num_prompt_tokens_, capacity, enable_logprobs, enable_top_logprobs);
 
   if (sequence_params_.sampling_param->frequency_penalty != 0 ||
       sequence_params_.sampling_param->presence_penalty != 0 ||

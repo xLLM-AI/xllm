@@ -225,8 +225,11 @@ std::shared_ptr<Request> make_test_request(
                              /*enable_schedule_overlap=*/false,
                              /*output_func=*/nullptr,
                              /*outputs_func=*/nullptr);
-  return std::make_shared<Request>(
-      "request", "x-request", "time", request_state, "service-request");
+  return std::make_shared<Request>("request",
+                                   "x-request",
+                                   "time",
+                                   std::move(request_state),
+                                   "service-request");
 }
 
 void seed_host_prefix(BlockManager* leaf, const std::vector<int32_t>& tokens) {

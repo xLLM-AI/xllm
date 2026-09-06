@@ -195,7 +195,7 @@ TEST(SampleSlotTest, RequestPropagatesSampleSlotsToSequenceRuntime) {
 
   request_state.sample_slots = {first_slot, second_slot};
 
-  Request request("sample-req", "", "", request_state);
+  Request request("sample-req", "", "", std::move(request_state));
 
   ASSERT_EQ(request.sequences().size(), 1);
   const auto& runtime_sample_slots = request.sequences()[0]->sample_slots();
@@ -224,7 +224,7 @@ TEST(RequestTest, GenerateOutputReturnsSequenceFailureStatus) {
       /*enable_schedule_overlap=*/true,
       [](const RequestOutput&) { return true; },
       OutputsFunc{});
-  Request request("req-error", "", "", request_state);
+  Request request("req-error", "", "", std::move(request_state));
   Status failure(StatusCode::UNKNOWN,
                  "json_object constrained decoding failed");
   request.sequences()[0]->fail(failure);
@@ -290,7 +290,7 @@ TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
 
   request_state.sample_slots = {first_slot, second_slot};
 
-  Request request("sample-req", "", "", request_state);
+  Request request("sample-req", "", "", std::move(request_state));
   auto* seq = request.sequences()[0].get();
   seq->add_blocks(BlockType::KV, manager.allocate(1));
   seq->kv_state().set_kv_cache_tokens_num(seq->num_prompt_tokens());
@@ -375,7 +375,7 @@ TEST(SampleSlotTest, RequestOutputStableSortsOutOfOrderSampleIds) {
 
   request_state.sample_slots = {slot2, slot0, slot1};
 
-  Request request("sample-req", "", "", request_state);
+  Request request("sample-req", "", "", std::move(request_state));
   auto* seq = request.sequences()[0].get();
   seq->add_blocks(BlockType::KV, manager.allocate(1));
   seq->kv_state().set_kv_cache_tokens_num(seq->num_prompt_tokens());
@@ -437,7 +437,7 @@ TEST(SampleSlotTest, OneRecOutputCarriesTokenLogprobsWhenEnabled) {
   Request request("onerec-score",
                   /*x_request_id=*/"",
                   /*x_request_time=*/"",
-                  request_state);
+                  std::move(request_state));
   auto* seq = request.sequences()[0].get();
 
   Token first_token(101);

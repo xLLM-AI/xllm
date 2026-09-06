@@ -36,7 +36,7 @@ namespace xllm {
 Request::Request(const std::string& request_id,
                  const std::string& x_request_id,
                  const std::string& x_request_time,
-                 const RequestState& state,
+                 RequestState state,
                  const std::string& service_request_id,
                  const std::string& source_xservice_addr,
                  RateLimiter* rate_limiter)
@@ -73,11 +73,12 @@ void Request::create_sequences_group() {
   sequence_params.json_reasoning_enabled = state_.json_reasoning_enabled;
   sequence_params.request_failure_state = failure_state_;
   sequence_params.speculative_token_stats = speculative_token_stats_;
-  sequences_group_ = std::make_unique<SequencesGroup>(state_.prompt,
-                                                      state_.prompt_tokens,
-                                                      state_.input_embedding,
-                                                      state_.mm_data,
-                                                      sequence_params);
+  sequences_group_ =
+      std::make_unique<SequencesGroup>(state_.prompt,
+                                       state_.prompt_tokens,
+                                       state_.input_embedding,
+                                       state_.mm_data,
+                                       std::move(sequence_params));
 }
 
 bool Request::finished() const {

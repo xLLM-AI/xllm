@@ -827,7 +827,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
       /*request_id=*/next_warmup_request_id(),
       /*x_request_id=*/"",
       /*x_request_time=*/"",
-      req_state);
+      std::move(req_state));
 
   // TODO: better disable prefix cache
   if (prefix_length > 0) {
@@ -904,7 +904,7 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
       /*request_id=*/next_warmup_request_id(),
       /*x_request_id=*/"",
       /*x_request_time=*/"",
-      req_state);
+      std::move(req_state));
 
   auto* sequence = request->sequences()[0].get();
   if (dp_rank.has_value()) {

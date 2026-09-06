@@ -98,7 +98,8 @@ std::shared_ptr<Request> MakeRequest(
       [](const RequestOutput&) { return true; },
       OutputsFunc{});
 
-  return std::make_shared<Request>("cached-tokens-test", "", "", state);
+  return std::make_shared<Request>(
+      "cached-tokens-test", "", "", std::move(state));
 }
 
 void EvictPrefixCache(BlockManagerPool& pool,

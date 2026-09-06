@@ -55,7 +55,7 @@ struct SchedulerParam {
   RequestPriority priority = RequestPriority::NORMAL;
 };
 
-struct RequestState final {
+class RequestState final {
  public:
   RequestState() {}
 
@@ -113,6 +113,24 @@ struct RequestState final {
 
   // for profiling run, only provide prompt tokens
   RequestState(const std::vector<int32_t>& prompt_tokens);
+
+  // RequestState owns the heavy request payload (prompt, prompt_tokens,
+  // mm_data, sample_slots, callbacks). An implicit copy is almost always an
+  // accidental deep copy, so the type is move-only. Use clone() for the rare
+  // intentional copy (e.g. a benchmark/test that reuses a template state). This
+  // also makes the std::move(const&) foot-gun a compile error rather than a
+  // silent copy.
+  RequestState(RequestState&&) = default;
+  RequestState& operator=(RequestState&&) = default;
+
+  // Explicit deep copy. Prefer moving; only clone when a genuine second owner
+  // is required.
+  RequestState clone() const { return RequestState(*this); }
+
+ private:
+  // Non-public so external code cannot copy implicitly; clone() uses it.
+  RequestState(const RequestState&) = default;
+  RequestState& operator=(const RequestState&) = delete;
 
  public:
   // sampling parameters

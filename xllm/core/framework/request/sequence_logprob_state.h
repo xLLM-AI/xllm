@@ -29,7 +29,16 @@ namespace xllm {
 
 class LogprobState {
  public:
-  LogprobState(int64_t num_prompt_tokens, size_t capacity);
+  // `enable_logprobs` / `enable_top_logprobs` gate the per-position buffers:
+  // when a request does not produce logprobs they stay empty (size 0) and cost
+  // nothing, instead of eagerly allocating + zero-initializing capacity-sized
+  // vectors. All readers are gated on the same logprobs flag (or bounds-check),
+  // so an empty buffer is safe. See Sequence::Sequence for how the flags are
+  // derived.
+  LogprobState(int64_t num_prompt_tokens,
+               size_t capacity,
+               bool enable_logprobs,
+               bool enable_top_logprobs);
   ~LogprobState() = default;
 
   // for generated tokens

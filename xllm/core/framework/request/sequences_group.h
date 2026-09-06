@@ -38,7 +38,7 @@ class SequencesGroup {
                  const std::vector<int32_t>& prompt_tokens,
                  const torch::Tensor& input_embedding,
                  const MMData& mm_data,
-                 const SequenceParams& sequence_params);
+                 SequenceParams sequence_params);
 
   bool finished() const;
 

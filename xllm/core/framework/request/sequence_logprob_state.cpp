@@ -20,12 +20,26 @@ limitations under the License.
 
 namespace xllm {
 
-LogprobState::LogprobState(int64_t num_prompt_tokens, size_t capacity)
+LogprobState::LogprobState(int64_t num_prompt_tokens,
+                           size_t capacity,
+                           bool enable_logprobs,
+                           bool enable_top_logprobs)
     : num_prompt_tokens_(num_prompt_tokens), acc_logprob_(0.0) {
   last_acc_token_idx_ = num_prompt_tokens_;
-  logprobs_.resize(capacity);
-  top_tokens_.resize(capacity);
-  top_logprobs_.resize(capacity);
+  // Only pre-size the buffers that will actually be written/read. When the
+  // request produces no logprobs these stay empty, avoiding an O(capacity)
+  // allocation + zero-init per sequence (the dominant cost of Request build for
+  // long prompts). update_logprob() and the logprob readers are all gated on
+  // the same logprobs flag, so leaving these empty is safe.
+  if (enable_logprobs) {
+    logprobs_.resize(capacity);
+    // Top-k candidate buffers are only needed when top_logprobs are requested
+    // (e.g. beam search, which forces top_logprobs > 0).
+    if (enable_top_logprobs) {
+      top_tokens_.resize(capacity);
+      top_logprobs_.resize(capacity);
+    }
+  }
 }
 
 float LogprobState::get_acc_logprob(int64_t num_tokens) {
@@ -129,8 +143,9 @@ void LogprobState::generate_output_tokens_logprobs(
     tmp_logprob.token_id = token_id;
     tmp_logprob.logprob = logprobs_[i].value();
 
-    // add top logprobs
-    if (top_tokens_[i].empty()) {
+    // add top logprobs. top_tokens_ is empty when top_logprobs were not
+    // requested (the buffer isn't allocated in that case), so guard the index.
+    if (top_tokens_.empty() || top_tokens_[i].empty()) {
       out_logprobs->emplace_back(std::move(tmp_logprob));
       continue;
     }

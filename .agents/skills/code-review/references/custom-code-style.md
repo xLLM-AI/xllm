@@ -174,6 +174,26 @@ virtual ModelOutput forward(torch::Tensor tokens, ...);
   - Use `std::shared_ptr` only when shared ownership is genuinely needed.
   - Raw pointers are acceptable only for non-owning references where the lifetime is clearly managed elsewhere.
 
+### Move & Copy Semantics
+
+- **Never write `std::move()` on a `const&` (or otherwise const) value.** `std::move(x)` where `x` is `const T&` produces a `const T&&`, which binds to the **copy** constructor, not the move constructor. It compiles, looks like a move, and silently deep-copies. This is the exact bug that made `Request`/`RequestState` construction copy their whole payload. `clang-tidy`'s `performance-move-const-arg` flags it.
+
+```cpp
+// Bad – silently copies: the parameter is const&, so std::move binds to the
+//       copy constructor.
+Request(const RequestState& state) : state_(std::move(state)) {}
+
+// Good – sink parameter: take by value, then std::move into the member. The
+//        CALLER decides copy vs move (pass an lvalue to copy, std::move to move).
+Request(RequestState state) : state_(std::move(state)) {}
+```
+
+- **Sink parameters go by value.** If a constructor/setter/function stores (retains) its argument, take it **by value** and `std::move` it into the member. Do not take it by `const&` and copy, and do not take it by `const&` and `std::move` (see above). Reserve `const&` for parameters you only read and do not retain.
+
+- **Make callers move.** When you hand an owned local to a sink parameter and do not use it afterwards, pass `std::move(local)`. Leaving it as an lvalue silently deep-copies.
+
+- **Prefer making expensive-to-copy domain types move-only.** For heavy aggregates where a copy is almost always a bug, `= delete` the copy constructor/assignment and expose an explicit `clone()` for the rare intentional copy. An accidental copy then becomes a compile error instead of a silent performance cliff.
+
 ---
 
 ## 6. Scoping & Visibility

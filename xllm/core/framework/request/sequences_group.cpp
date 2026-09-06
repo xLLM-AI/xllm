@@ -32,7 +32,7 @@ SequencesGroup::SequencesGroup(const std::string& prompt,
                                const std::vector<int32_t>& prompt_tokens,
                                const torch::Tensor& input_embedding,
                                const MMData& mm_data,
-                               const SequenceParams& sequence_params)
+                               SequenceParams sequence_params)
     : prompt_(prompt),
       prompt_tokens_(prompt_tokens),
       input_embedding_(input_embedding),

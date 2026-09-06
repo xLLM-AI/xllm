@@ -1,0 +1,36 @@
+# Focused clang-tidy configuration for xLLM.
+#
+# Primary goal: catch the std::move(const&) silent-copy foot-gun and related
+# move/copy performance mistakes automatically, instead of relying on reviewers.
+# `std::move` on a const (or const-ref) argument yields a `const T&&`, which
+# binds to the COPY constructor rather than the move constructor -- so it
+# compiles, looks like a move, and silently deep-copies. performance-move-const-arg
+# flags exactly this.
+#
+# Run over a single file (needs a compile_commands.json under build/):
+#   clang-tidy -p build path/to/file.cpp
+Checks: >
+  -*,
+  performance-move-const-arg,
+  performance-move-constructor-init,
+  performance-noexcept-move-constructor,
+  performance-unnecessary-value-param,
+  performance-unnecessary-copy-initialization,
+  performance-for-range-copy,
+  performance-implicit-conversion-in-loop,
+  bugprone-use-after-move,
+  bugprone-move-forwarding-reference
+
+# Treat the two genuine correctness/foot-gun checks as errors so a silent copy
+# or a use-after-move fails the run instead of scrolling by as a warning.
+WarningsAsErrors: >
+  performance-move-const-arg,
+  bugprone-use-after-move
+
+CheckOptions:
+  # Also flag std::move of trivially-copyable types (pessimizing / misleading).
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: 'true'
+
+# Only report on first-party headers; skip third-party/generated code.
+HeaderFilterRegex: 'xllm/.*'

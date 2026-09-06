@@ -3040,7 +3040,7 @@ TEST(BatchTest, JsonObjectErrorFailsUnscheduledSiblingSequence) {
       /*enable_schedule_overlap=*/true,
       [](const RequestOutput&) { return true; },
       OutputsFunc{});
-  Request request("req-shared", "", "", request_state);
+  Request request("req-shared", "", "", std::move(request_state));
   ASSERT_TRUE(request.expand_sequences(/*share_prefix=*/false));
   ASSERT_EQ(request.sequences().size(), 2u);
   for (const auto& sequence : request.sequences()) {
