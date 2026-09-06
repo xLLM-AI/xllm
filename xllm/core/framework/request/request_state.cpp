@@ -25,11 +25,11 @@ limitations under the License.
 
 namespace xllm {
 
-RequestState::RequestState(const std::string& prompt,
-                           const std::vector<int32_t>& prompt_tokens,
-                           const RequestSamplingParam& sampling_param,
-                           const SchedulerParam& scheduler_param,
-                           const StoppingChecker& stopping_checker,
+RequestState::RequestState(std::string prompt,
+                           std::vector<int32_t> prompt_tokens,
+                           RequestSamplingParam sampling_param,
+                           SchedulerParam scheduler_param,
+                           StoppingChecker stopping_checker,
                            size_t seq_capacity,
                            size_t n,
                            size_t best_of,
@@ -64,11 +64,11 @@ RequestState::RequestState(const std::string& prompt,
   }
 }
 
-RequestState::RequestState(const std::string& prompt,
-                           const std::vector<int32_t>& prompt_tokens,
+RequestState::RequestState(std::string prompt,
+                           std::vector<int32_t> prompt_tokens,
                            torch::Tensor input_embedding,
-                           const RequestSamplingParam& sampling_param,
-                           const StoppingChecker& stopping_checker,
+                           RequestSamplingParam sampling_param,
+                           StoppingChecker stopping_checker,
                            size_t seq_capacity,
                            size_t n,
                            size_t best_of,
@@ -82,7 +82,7 @@ RequestState::RequestState(const std::string& prompt,
                            const std::string& decode_address)
     : prompt(std::move(prompt)),
       prompt_tokens(std::move(prompt_tokens)),
-      input_embedding(input_embedding),
+      input_embedding(std::move(input_embedding)),
       sampling_param(std::move(sampling_param)),
       stopping_checker(std::move(stopping_checker)),
       seq_capacity(seq_capacity),
@@ -101,11 +101,11 @@ RequestState::RequestState(const std::string& prompt,
   }
 }
 
-RequestState::RequestState(const std::string& prompt,
-                           const std::vector<int32_t>& prompt_tokens,
-                           const MMData& mm_data,
-                           const RequestSamplingParam& sampling_param,
-                           const StoppingChecker& stopping_checker,
+RequestState::RequestState(std::string prompt,
+                           std::vector<int32_t> prompt_tokens,
+                           MMData mm_data,
+                           RequestSamplingParam sampling_param,
+                           StoppingChecker stopping_checker,
                            size_t seq_capacity,
                            size_t n,
                            size_t best_of,

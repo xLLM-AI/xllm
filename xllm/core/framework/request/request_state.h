@@ -59,11 +59,11 @@ struct RequestState final {
  public:
   RequestState() {}
 
-  RequestState(const std::string& prompt,
-               const std::vector<int32_t>& prompt_tokens,
-               const RequestSamplingParam& sampling_param,
-               const SchedulerParam& scheduler_param,
-               const StoppingChecker& stopping_checker,
+  RequestState(std::string prompt,
+               std::vector<int32_t> prompt_tokens,
+               RequestSamplingParam sampling_param,
+               SchedulerParam scheduler_param,
+               StoppingChecker stopping_checker,
                size_t seq_capacity,
                size_t n,
                size_t best_of,
@@ -77,11 +77,11 @@ struct RequestState final {
                const std::string& decode_address = "",
                std::optional<Call*> call = std::nullopt);
 
-  RequestState(const std::string& prompt,
-               const std::vector<int32_t>& prompt_tokens,
+  RequestState(std::string prompt,
+               std::vector<int32_t> prompt_tokens,
                torch::Tensor input_embedding,
-               const RequestSamplingParam& sampling_param,
-               const StoppingChecker& stopping_checker,
+               RequestSamplingParam sampling_param,
+               StoppingChecker stopping_checker,
                size_t seq_capacity,
                size_t n,
                size_t best_of,
@@ -94,11 +94,11 @@ struct RequestState final {
                const OutputsFunc& outputs_func,
                const std::string& decode_address = "");
 
-  RequestState(const std::string& prompt,
-               const std::vector<int32_t>& prompt_tokens,
-               const MMData& mm_data,
-               const RequestSamplingParam& sampling_param,
-               const StoppingChecker& stopping_checker,
+  RequestState(std::string prompt,
+               std::vector<int32_t> prompt_tokens,
+               MMData mm_data,
+               RequestSamplingParam sampling_param,
+               StoppingChecker stopping_checker,
                size_t seq_capacity,
                size_t n,
                size_t best_of,

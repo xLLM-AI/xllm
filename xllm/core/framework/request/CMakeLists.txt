@@ -1,4 +1,5 @@
 include(cc_library)
+include(cc_binary)
 
 cc_library(
   NAME 
@@ -66,3 +67,25 @@ cc_library(
     proto::xllm_proto
     torch
 )
+
+cc_binary(
+  NAME
+    request_state_benchmark
+  SRCS
+    request_state_benchmark.cpp
+  DEPS
+    :request
+    torch
+    benchmark::benchmark
+    benchmark::benchmark_main
+)
+target_link_libraries(request_state_benchmark
+                      PUBLIC
+                      Python::Python
+                      $<$<BOOL:${USE_NPU}>:ascendcl>
+                      $<$<BOOL:${USE_NPU}>:hccl>
+                      $<$<BOOL:${USE_NPU}>:c_sec>
+                      $<$<BOOL:${USE_NPU}>:nnopbase>)
+target_link_options(request_state_benchmark
+                    PRIVATE
+                    $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)
