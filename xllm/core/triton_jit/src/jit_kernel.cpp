@@ -92,9 +92,9 @@ JITKernel& JITKernel::get(std::string py_path, std::string fn_name) {
   std::lock_guard<std::mutex> lock(registry_mutex);
   auto it = registry.find(key);
   if (it == registry.end()) {
-    std::unique_ptr<JITKernel> p(
-        new JITKernel(std::move(py_path), std::move(fn_name)));
-    auto [ins, ok] = registry.emplace(key, std::move(p));
+    auto [ins, ok] = registry.emplace(
+        key,
+        std::make_unique<JITKernel>(std::move(py_path), std::move(fn_name)));
     it = ins;
   }
   return *it->second;
