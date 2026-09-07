@@ -41,7 +41,7 @@ Project-specific coding style for xllm. The reviewer **MUST** enforce these styl
 - **Copyright header required** on all new files. Use the correct year matching the file creation date.
 
 ```cpp
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2025 The xLLM Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 ...
