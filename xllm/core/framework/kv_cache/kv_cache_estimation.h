@@ -52,6 +52,11 @@ struct KVCacheEstimateOptions {
   bool enable_schedule_overlap = true;
   bool enable_disagg_pd = false;
   InstanceRole instance_role = InstanceRole::DEFAULT;
+  // DP size used to bound the per-group prefill burst when
+  // enable_dp_fair_token_budget caps each DP group at
+  // max_tokens_per_batch / dp_size tokens per scheduling round.
+  int64_t dp_size = 1;
+  bool enable_dp_fair_token_budget = false;
   const ModelArgs* draft_model_args = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };

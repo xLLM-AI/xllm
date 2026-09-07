@@ -80,6 +80,12 @@ struct ScheduleBudget {
   double latency_budget;
   double estimate_latency;
   size_t num_preempted_requests;
+  // Per-DP-group fair budget (enable_dp_fair_token_budget on disagg PD
+  // PREFILL instances). Empty when disabled; otherwise sized dp_size, holding
+  // the per-group token cap and the tokens charged to each group in the
+  // current scheduling round.
+  std::vector<size_t> dp_group_token_caps;
+  std::vector<size_t> dp_group_token_used;
 };
 
 inline bool budget_exhausted(const ScheduleBudget& budget) {

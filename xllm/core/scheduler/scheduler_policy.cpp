@@ -331,6 +331,19 @@ void SchedulerPolicy::schedule_prefill_from_queue(
           prefill_sequence.get(),
           budget.remaining_token_budget - allocated_tokens,
           state);
+      if (!budget.dp_group_token_caps.empty()) {
+        const int32_t dp_rank = prefill_sequence->dp_rank();
+        CHECK(dp_rank >= 0 &&
+              dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+            << "seq dp_rank=" << dp_rank << " out of range [0,"
+            << budget.dp_group_token_caps.size() << ")";
+        const size_t group_remaining = budget.dp_group_token_caps[dp_rank] -
+                                       budget.dp_group_token_used[dp_rank];
+        num_tokens = std::min(num_tokens, group_remaining);
+      }
+      if (num_tokens == 0) {
+        continue;
+      }
 
       if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
           budget.remaining_seq_budget < allocated_seqs + 1) {
@@ -373,6 +386,10 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       allocated_tokens += actual_tokens;
       allocated_seqs += 1;
       allocated_estimate_latency += seq_estimate_latency;
+      if (!budget.dp_group_token_used.empty()) {
+        budget.dp_group_token_used[prefill_sequence->dp_rank()] +=
+            actual_tokens;
+      }
     }
 
     if (!can_schedule) {

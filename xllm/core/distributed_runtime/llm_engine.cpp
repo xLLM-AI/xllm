@@ -526,6 +526,9 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       !kv_cache_config.enable_xtensor();
   estimate_options.enable_disagg_pd = options_.enable_disagg_pd();
   estimate_options.instance_role = options_.instance_role();
+  estimate_options.dp_size = options_.dp_size();
+  estimate_options.enable_dp_fair_token_budget =
+      ::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget();
   if (options_.enable_mtp_draft_body_tp1() && options_.is_draft_engine()) {
     estimate_options.world_size = 1;
     estimate_options.n_local_kv_heads =

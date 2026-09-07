@@ -1238,6 +1238,28 @@ void ProfileManager::warmup_prefill_for_graph() {
 
   int32_t prefill_tokens =
       std::min(options_.max_tokens_per_batch(), max_context_len);
+  if (::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget() &&
+      options_.dp_size() > 1 &&
+      options_.instance_role() == InstanceRole::PREFILL) {
+    // The fair per-group budget caps any single sequence's prefill at
+    // max_tokens_per_batch / dp_size tokens per scheduling round (floored
+    // at one prefill chunk), so warming up at the per-group cap covers the
+    // largest real prefill shape.
+    const int32_t dp_size = options_.dp_size();
+    int32_t per_group_cap =
+        (options_.max_tokens_per_batch() + dp_size - 1) / dp_size;
+    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+      const int32_t max_chunk_tokens =
+          ::xllm::SchedulerConfig::get_instance()
+              .max_tokens_per_chunk_for_prefill();
+      per_group_cap = std::max(
+          per_group_cap,
+          std::min(max_chunk_tokens, options_.max_tokens_per_batch()));
+    } else {
+      per_group_cap = options_.max_tokens_per_batch();
+    }
+    prefill_tokens = std::min(prefill_tokens, per_group_cap);
+  }
   double prefill_latency = run_request(prefill_tokens,
                                        /*prefix_length=*/0,
                                        /*batch_size=*/1,
