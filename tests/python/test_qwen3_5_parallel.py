@@ -47,12 +47,11 @@ def test_scoped_loader_resolves_supported_model_roots() -> None:
     value = torch.arange(8).view(2, 4)
     for prefix in ("model.language_model.", "model.", ""):
         state = _StateDict({prefix + "embed_tokens.weight": value})
-        root = ScopedWeightLoader([state]).find_root(
-            ("model.language_model.", "model.", ""),
-            "embed_tokens.weight",
+        loader = ScopedWeightLoader(
+            [state],
+            src_prefixes=("model.language_model.", "model.", ""),
         )
-        assert root.prefix == prefix
-        assert root.tensor("embed_tokens.weight") is value
+        assert loader.get_tensor("embed_tokens.weight") is value
 
 
 def test_partial_world_ep_and_moe_tp_form_a_valid_topology():

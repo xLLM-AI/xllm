@@ -16,132 +16,25 @@
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
-
-from xllm.python.layers.gated_mlp import GatedMLP
-from xllm.python.layers.layernorm import GemmaRMSNorm
-from xllm.python.layers.npu.qwen3_5.attention import NpuQwen3_5Attention
-from xllm.python.layers.npu.qwen3_5.gated_delta_net import (
-    NpuQwen3_5GatedDeltaNet,
-)
+from xllm.python.layers.npu.qwen3_5.gated_delta_net import NpuQwen3_5GatedDeltaNet
 from xllm.python.layers.npu.qwen3_5.moe import NpuQwen3_5SparseMoEBlock
-from xllm.python.layers.qwen3_5_decoder_layer import (
-    PartialRotaryEmbedding,
-    Qwen3_5LayerConfig,
-)
-from xllm.python.model_loader import (
-    ParallelLoadContext,
-    ScopedWeightLoader,
-    copy_parameter,
-)
+from xllm.python.layers.qwen3_5_attention import Qwen3_5Attention
+from xllm.python.layers.qwen3_5_decoder_layer import Qwen3_5DecoderLayer
 
 
-class NpuQwen3_5DecoderLayer(nn.Module):
-    def __init__(
-        self,
-        cfg: Qwen3_5LayerConfig,
-        layer_id: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        rotary: PartialRotaryEmbedding,
-    ) -> None:
-        super().__init__()
-        self.cfg = cfg
-        self.layer_id = layer_id
-        self.layer_type = cfg.layer_types[layer_id]
-        self.input_layernorm = GemmaRMSNorm(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            dtype=dtype,
-            device=device,
-        )
-        if self.layer_type == "full_attention":
-            self.self_attn = NpuQwen3_5Attention(
-                cfg,
-                layer_id,
-                dtype,
-                device,
-                rotary,
-            )
-        elif self.layer_type == "linear_attention":
-            self.linear_attn = NpuQwen3_5GatedDeltaNet(
-                cfg,
-                layer_id,
-                dtype,
-                device,
-            )
-        else:
-            raise ValueError(f"unsupported Qwen3.5 layer type: {self.layer_type}")
-        self.post_attention_layernorm = GemmaRMSNorm(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            dtype=dtype,
-            device=device,
-        )
-        if cfg.is_moe_layer(layer_id):
-            self.mlp = NpuQwen3_5SparseMoEBlock(cfg, dtype, device)
-        else:
-            self.mlp = GatedMLP(
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                cfg.tp_size,
-                dtype,
-                device,
-            )
+class NpuQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
+    # NPU inherits the base ``Qwen3_5Attention``: row-parallel weights stay
+    # unfinalized for TileLang/CANN coexistence via the base's no-op
+    # ``_finish_loading``, unlike the CUDA backend which finalizes ``o_proj``.
+    attention_cls = Qwen3_5Attention
+    gated_delta_net_cls = NpuQwen3_5GatedDeltaNet
+    sparse_moe_cls = NpuQwen3_5SparseMoEBlock
 
-    def load_weights(
-        self,
-        state: ScopedWeightLoader,
-        context: ParallelLoadContext,
-    ) -> None:
-        copy_parameter(
-            self.input_layernorm.weight,
-            state.tensor("input_layernorm.weight"),
-            state.prefix + "input_layernorm.weight",
-        )
-        copy_parameter(
-            self.post_attention_layernorm.weight,
-            state.tensor("post_attention_layernorm.weight"),
-            state.prefix + "post_attention_layernorm.weight",
-        )
-        if self.layer_type == "full_attention":
-            self.self_attn.load_weights(
-                state.with_prefix("self_attn."),
-                context,
-            )
-        else:
-            self.linear_attn.load_weights(
-                state.with_prefix("linear_attn."),
-                context,
-            )
-        self.mlp.load_weights(state.with_prefix("mlp."), context)
-
-    @staticmethod
-    def _prepare_tilelang_forward() -> None:
-        # TODO: Remove this backend-local workaround once TileLang's dynamic
-        # symbol cache can safely persist between service forwards.
-        import tilelang
-
-        tilelang.disable_cache()
-        tilelang.cache.clear_cache()
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        residual: torch.Tensor | None,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _prepare_forward(self) -> None:
         if self.layer_id == 0:
-            self._prepare_tilelang_forward()
-        if residual is None:
-            residual = hidden
-            hidden = self.input_layernorm(hidden)
-        else:
-            hidden, residual = self.input_layernorm(hidden, residual)
-        if self.layer_type == "full_attention":
-            hidden = self.self_attn(positions, hidden)
-        else:
-            hidden = self.linear_attn(hidden)
-        hidden, residual = self.post_attention_layernorm(hidden, residual)
-        return self.mlp(hidden), residual
+            # TODO: Remove this backend-local workaround once TileLang's dynamic
+            # symbol cache can safely persist between service forwards.
+            import tilelang
+
+            tilelang.disable_cache()
+            tilelang.cache.clear_cache()

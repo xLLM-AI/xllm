@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,16 +14,26 @@
 
 """Public interfaces for Python model weight loading."""
 
+from .module_loaders import (
+    load_causal_lm_weights,
+    load_gqa_fused_attention,
+)
 from .parallel_load_context import ParallelLoadContext
 from .scoped_weight_loader import (
     ScopedWeightLoader,
     StateDictLike,
-    copy_parameter,
+)
+from .sharding import (
+    gqa_head_split,
+    gqa_qkv_shards,
 )
 
 __all__ = [
     "ParallelLoadContext",
     "ScopedWeightLoader",
     "StateDictLike",
-    "copy_parameter",
+    "gqa_head_split",
+    "gqa_qkv_shards",
+    "load_causal_lm_weights",
+    "load_gqa_fused_attention",
 ]

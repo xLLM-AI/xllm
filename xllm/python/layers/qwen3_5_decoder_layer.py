@@ -12,129 +12,146 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared semantics and construction-time dispatch for Qwen3.5 decoders."""
+"""Shared decoder orchestration and backend dispatch for Qwen3.5."""
 
 from __future__ import annotations
-
-from typing import Protocol
 
 import torch
 import torch.nn as nn
 
+from xllm.python.layers.gated_mlp import GatedMLP
+from xllm.python.layers.layernorm import GemmaRMSNorm
+from xllm.python.layers.qwen3_5_attention import Qwen3_5Attention
+from xllm.python.layers.qwen3_5_common import (
+    PartialRotaryEmbedding,
+    Qwen3_5DecoderConfig,
+)
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 
 
-class Qwen3_5LayerConfig(Protocol):
-    hidden_size: int
-    n_heads: int
-    n_kv_heads: int
-    head_dim: int
-    intermediate_size: int
-    rms_norm_eps: float
-    layer_types: list[str]
-    linear_conv_kernel_dim: int
-    linear_key_head_dim: int
-    linear_value_head_dim: int
-    linear_num_key_heads: int
-    linear_num_value_heads: int
-    attention_bias: bool
-    attn_output_gate: bool
-    num_experts: int
-    num_experts_per_tok: int
-    norm_topk_prob: bool
-    moe_intermediate_size: int
-    shared_expert_intermediate_size: int
-    tp_size: int
-    dp_size: int
-    dp_rank: int
-    world_size: int
-    moe_tp_size: int
-    moe_tp_rank: int
-    ep_size: int
-    ep_rank: int
+class Qwen3_5DecoderLayer(nn.Module):
+    """Backend-neutral Qwen3.5 decoder orchestration.
 
-    def is_moe_layer(self, layer_id: int) -> bool: ...
+    Concrete backend layers supply the attention, gated-delta-net, and sparse
+    MoE implementations. Runtime sequencing and checkpoint traversal remain
+    shared.
+    """
 
-    def head_split(self) -> tuple[int, int]: ...
+    attention_cls: type[Qwen3_5Attention]
+    gated_delta_net_cls: type[nn.Module]
+    sparse_moe_cls: type[nn.Module]
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        missing = [
+            name for name in ("attention_cls", "gated_delta_net_cls", "sparse_moe_cls") if not hasattr(cls, name)
+        ]
+        if missing:
+            raise TypeError(f"{cls.__name__} must set backend class vars: {', '.join(missing)}")
 
-class PartialRotaryEmbedding(nn.Module):
     def __init__(
         self,
-        head_dim: int,
-        rotary_dim: int,
-        max_position: int,
-        rope_theta: float,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
-        super().__init__()
-        if rotary_dim <= 0 or rotary_dim % 2:
-            raise ValueError("partial rotary dimension must be positive and even")
-        self.head_dim = head_dim
-        self.rotary_dim = rotary_dim
-        inv_freq = 1.0 / (
-            rope_theta
-            ** (
-                torch.arange(
-                    0,
-                    rotary_dim,
-                    2,
-                    dtype=torch.float32,
-                    device=device,
-                )
-                / rotary_dim
-            )
-        )
-        positions = torch.arange(max_position, dtype=torch.float32, device=device)
-        freqs = torch.outer(positions, inv_freq)
-        self.register_buffer("cos", freqs.cos().to(dtype), persistent=False)
-        self.register_buffer("sin", freqs.sin().to(dtype), persistent=False)
-
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        first, second = x.chunk(2, dim=-1)
-        return torch.cat((-second, first), dim=-1)
-
-    def forward(self, positions: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        rotary, passthrough = x.split(
-            [self.rotary_dim, self.head_dim - self.rotary_dim],
-            dim=-1,
-        )
-        pos = positions.to(torch.long)
-        cos = torch.cat((self.cos[pos], self.cos[pos]), dim=-1).unsqueeze(1)
-        sin = torch.cat((self.sin[pos], self.sin[pos]), dim=-1).unsqueeze(1)
-        rotary = rotary * cos + self._rotate_half(rotary) * sin
-        return torch.cat((rotary, passthrough), dim=-1)
-
-
-class Qwen3_5DecoderLayerProtocol(Protocol):
-    def __init__(
-        self,
-        cfg: Qwen3_5LayerConfig,
+        cfg: Qwen3_5DecoderConfig,
         layer_id: int,
         dtype: torch.dtype,
         device: torch.device,
         rotary: PartialRotaryEmbedding,
-    ) -> None: ...
+    ) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.layer_id = layer_id
+        self.layer_type = cfg.layer_types[layer_id]
+        self.input_layernorm = GemmaRMSNorm(
+            cfg.hidden_size,
+            cfg.rms_norm_eps,
+            dtype=dtype,
+            device=device,
+        )
+        if self.layer_type == "full_attention":
+            self.self_attn = self.attention_cls(
+                cfg,
+                layer_id,
+                dtype,
+                device,
+                rotary,
+            )
+        elif self.layer_type == "linear_attention":
+            self.linear_attn = self.gated_delta_net_cls(
+                cfg,
+                layer_id,
+                dtype,
+                device,
+            )
+        else:
+            raise ValueError(f"unsupported Qwen3.5 layer type: {self.layer_type}")
+        self.post_attention_layernorm = GemmaRMSNorm(
+            cfg.hidden_size,
+            cfg.rms_norm_eps,
+            dtype=dtype,
+            device=device,
+        )
+        if cfg.is_moe_layer(layer_id):
+            self.mlp = self.sparse_moe_cls(cfg, dtype, device)
+        else:
+            self.mlp = GatedMLP(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                cfg.tp_size,
+                dtype,
+                device,
+            )
+
+    def _prepare_forward(self) -> None:
+        """Run the backend-specific pre-forward hook, if any."""
+
+    def load_weights(
+        self,
+        state: ScopedWeightLoader,
+        context: ParallelLoadContext,
+    ) -> None:
+        state.load_tensor(
+            self.input_layernorm.weight,
+            "input_layernorm.weight",
+        )
+        state.load_tensor(
+            self.post_attention_layernorm.weight,
+            "post_attention_layernorm.weight",
+        )
+        if self.layer_type == "full_attention":
+            self.self_attn.load_weights(
+                state.with_prefix("self_attn."),
+                context,
+            )
+        else:
+            self.linear_attn.load_weights(
+                state.with_prefix("linear_attn."),
+                context,
+            )
+        self.mlp.load_weights(state.with_prefix("mlp."), context)
 
     def forward(
         self,
         hidden: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-    def load_weights(
-        self,
-        state: ScopedWeightLoader,
-        context: ParallelLoadContext,
-    ) -> None: ...
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self._prepare_forward()
+        if residual is None:
+            residual = hidden
+            hidden = self.input_layernorm(hidden)
+        else:
+            hidden, residual = self.input_layernorm(hidden, residual)
+        if self.layer_type == "full_attention":
+            hidden = self.self_attn(positions, hidden)
+        else:
+            hidden = self.linear_attn(hidden)
+        hidden, residual = self.post_attention_layernorm(hidden, residual)
+        return self.mlp(hidden), residual
 
 
 def get_qwen3_5_decoder_layer_class(
     device: torch.device | str,
-) -> type[nn.Module]:
+) -> type[Qwen3_5DecoderLayer]:
     device_type = torch.device(device).type
     if device_type == "cuda":
         from xllm.python.layers.cuda.qwen3_5.decoder_layer import (

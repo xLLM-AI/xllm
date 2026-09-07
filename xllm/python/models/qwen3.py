@@ -43,9 +43,10 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
     record_layer_event,
 )  # noqa: F401
+from xllm.python.model_loader import gqa_head_split
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.weight_utils import WeightLoader, gqa_head_split, kv_replica_shard
+from xllm.python.models.weight_utils import WeightLoader, kv_replica_shard
 
 
 @dataclass

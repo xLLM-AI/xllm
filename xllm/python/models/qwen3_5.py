@@ -22,17 +22,15 @@ import torch
 import torch.nn as nn
 
 from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
-from xllm.python.layers.qwen3_5_decoder_layer import (
-    PartialRotaryEmbedding,
-    get_qwen3_5_decoder_layer_class,
-)
+from xllm.python.layers.qwen3_5_common import PartialRotaryEmbedding
+from xllm.python.layers.qwen3_5_decoder_layer import get_qwen3_5_decoder_layer_class
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,
-    copy_parameter,
+    gqa_head_split,
+    load_causal_lm_weights,
 )
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.weight_utils import gqa_head_split
 
 
 @dataclass
@@ -250,49 +248,16 @@ class Qwen3_5ForCausalLM(PyModelBase):
         )
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        all_weights = ScopedWeightLoader(state_dicts)
-        model_weights = all_weights.find_root(
-            ("model.language_model.", "model.", ""),
-            "embed_tokens.weight",
+        all_weights = ScopedWeightLoader(
+            state_dicts,
+            src_prefixes=("model.language_model.", "model.", ""),
         )
-        context = ParallelLoadContext(
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            dp_rank=self.cfg.dp_rank,
-            dp_size=self.cfg.dp_size,
-            moe_tp_rank=self.cfg.moe_tp_rank,
-            moe_tp_size=self.cfg.moe_tp_size,
-            ep_rank=self.cfg.ep_rank,
-            ep_size=self.cfg.ep_size,
-        )
-        copy_parameter(
-            self.model.embed_tokens.weight,
-            model_weights.shard(
-                "embed_tokens.weight",
-                1,
-                tp_rank,
-                tp_size,
-            ),
-            model_weights.prefix + "embed_tokens.weight",
-        )
-        for layer_id, layer in enumerate(self.model.layers):
-            layer.load_weights(
-                model_weights.with_prefix(f"layers.{layer_id}."),
-                context,
-            )
-        copy_parameter(
-            self.model.norm.weight,
-            model_weights.tensor("norm.weight"),
-            model_weights.prefix + "norm.weight",
-        )
-        if self.cfg.tie_word_embeddings or not all_weights.has("lm_head.weight"):
-            lm_head_weights = model_weights
-            lm_head_name = "embed_tokens.weight"
-        else:
-            lm_head_weights = all_weights
-            lm_head_name = "lm_head.weight"
-        copy_parameter(
+        context = ParallelLoadContext.from_config(self.cfg, tp_rank, tp_size)
+        load_causal_lm_weights(
+            self.model,
             self.lm_head.weight,
-            lm_head_weights.shard(lm_head_name, 0, tp_rank, tp_size),
-            lm_head_weights.prefix + lm_head_name,
+            all_weights,
+            context,
+            tie_word_embeddings=self.cfg.tie_word_embeddings,
+            embed_fallback=True,
         )

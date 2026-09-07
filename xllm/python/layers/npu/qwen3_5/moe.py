@@ -19,15 +19,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import distributed, kernels
-from xllm.python.layers.gated_mlp import GatedMLP
-from xllm.python.layers.qwen3_5_decoder_layer import Qwen3_5LayerConfig
-from xllm.python.model_executor.forward_context import get_forward_context
-from xllm.python.model_loader import (
-    ParallelLoadContext,
-    ScopedWeightLoader,
-    copy_parameter,
-)
+from xllm.python import kernels
+from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
+from xllm.python.layers.qwen3_5_common import Qwen3_5MoEConfig
+from xllm.python.layers.qwen3_5_moe import Qwen3_5SparseMoEBlockBase
 
 
 class _NpuQwen3_5Experts(nn.Module):
@@ -35,7 +30,7 @@ class _NpuQwen3_5Experts(nn.Module):
 
     def __init__(
         self,
-        cfg: Qwen3_5LayerConfig,
+        cfg: Qwen3_5MoEConfig,
         dtype: torch.dtype,
         device: torch.device,
         reduce_results: bool,
@@ -82,46 +77,6 @@ class _NpuQwen3_5Experts(nn.Module):
             )
         )
 
-    def _gather_dp_inputs(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, list[int], int, int, bool]:
-        if self.dp_size == 1:
-            return hidden_states, [], 0, 0, False
-
-        context = get_forward_context()
-        token_counts = list(context.metadata.dp_token_counts)
-        if len(token_counts) != self.dp_size:
-            raise RuntimeError(f"expected {self.dp_size} DP token counts, got {token_counts}")
-        local_tokens = hidden_states.shape[0]
-        is_graph = context.execution_state is not None
-        is_prefill = context.metadata.is_prefill or context.metadata.is_chunked_prefill
-        dp_is_decode = getattr(context.metadata, "dp_is_decode", None)
-        all_decode = dp_is_decode is not None and all(dp_is_decode)
-        if not is_graph and not is_prefill and all_decode:
-            gathered = distributed.all_gather_variable(
-                hidden_states,
-                token_counts,
-                self.dp_rank,
-                "dp",
-            )
-            return gathered, token_counts, local_tokens, 0, True
-
-        padded_tokens = max(token_counts)
-        pad_size = padded_tokens - local_tokens
-        if pad_size > 0:
-            hidden_states = torch.nn.functional.pad(
-                hidden_states,
-                (0, 0, 0, pad_size),
-            )
-        gathered = distributed.all_gather(
-            hidden_states,
-            dim=0,
-            world_size=self.dp_size,
-            group_name="dp",
-        )
-        return gathered, token_counts, local_tokens, padded_tokens, False
-
     def _route(
         self,
         router_logits: torch.Tensor,
@@ -134,13 +89,7 @@ class _NpuQwen3_5Experts(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        (
-            gathered_states,
-            token_counts,
-            local_tokens,
-            padded_tokens,
-            compact_gather,
-        ) = self._gather_dp_inputs(hidden_states)
+        gathered_states, scatter_state = dp_gather_tokens(hidden_states, self.dp_size, self.dp_rank)
         topk_weights, topk_ids = self._route(self.gate(gathered_states))
         output = kernels.grouped_moe_bf16(
             gathered_states,
@@ -152,104 +101,38 @@ class _NpuQwen3_5Experts(nn.Module):
             self.start_expert,
             self.local_experts,
         )
-        if self.reduce_results:
-            if self.moe_tp_size > 1:
-                distributed.moe_tp_all_reduce(output)
-            if self.ep_size > 1:
-                distributed.moe_ep_all_reduce(output)
-
-        if compact_gather:
-            offset = sum(token_counts[: self.dp_rank])
-            return output.narrow(0, offset, local_tokens)
-        if padded_tokens > 0:
-            start = self.dp_rank * padded_tokens
-            return output.narrow(0, start, local_tokens)
-        return output
+        return reduce_and_scatter(
+            output,
+            scatter_state,
+            reduce_results=self.reduce_results,
+            moe_tp_size=self.moe_tp_size,
+            ep_size=self.ep_size,
+        )
 
 
-class NpuQwen3_5SparseMoEBlock(nn.Module):
+class NpuQwen3_5SparseMoEBlock(Qwen3_5SparseMoEBlockBase):
     """NPU Qwen3.5 routed and shared experts with topology-safe reductions."""
 
     def __init__(
         self,
-        cfg: Qwen3_5LayerConfig,
+        cfg: Qwen3_5MoEConfig,
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
-        super().__init__()
-        self.fuse_reductions = (
-            cfg.dp_size == 1 and cfg.ep_size == 1 and cfg.tp_size == cfg.moe_tp_size and cfg.tp_size > 1
-        )
+        super().__init__(cfg, dtype, device)
         self.experts = _NpuQwen3_5Experts(
             cfg,
             dtype,
             device,
             reduce_results=not self.fuse_reductions,
         )
-        self.shared_expert = GatedMLP(
-            cfg.hidden_size,
-            cfg.shared_expert_intermediate_size,
-            cfg.tp_size,
-            dtype,
-            device,
-            reduce_results=not self.fuse_reductions,
-        )
-        self.shared_expert_gate = nn.Linear(
-            cfg.hidden_size,
-            1,
-            bias=False,
-            dtype=dtype,
-            device=device,
-        )
 
-    def load_weights(
+    def _pack_gate_up(
         self,
-        state: ScopedWeightLoader,
-        context: ParallelLoadContext,
-    ) -> None:
-        copy_parameter(
-            self.experts.gate.weight,
-            state.tensor("gate.weight"),
-            state.prefix + "gate.weight",
-        )
-        copy_parameter(
-            self.shared_expert_gate.weight,
-            state.tensor("shared_expert_gate.weight"),
-            state.prefix + "shared_expert_gate.weight",
-        )
+        gate: torch.Tensor,
+        up: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.cat((gate, up), dim=1).transpose(1, 2).contiguous()
 
-        gate_up = state.tensor("experts.gate_up_proj")
-        local_experts = gate_up.size(0) // context.ep_size
-        start_expert = context.ep_rank * local_experts
-        gate_up = gate_up.narrow(0, start_expert, local_experts)
-        gate, up = gate_up.chunk(2, dim=1)
-        gate = gate.chunk(context.moe_tp_size, dim=1)[context.moe_tp_rank]
-        up = up.chunk(context.moe_tp_size, dim=1)[context.moe_tp_rank]
-        copy_parameter(
-            self.experts.w13,
-            torch.cat((gate, up), dim=1).transpose(1, 2).contiguous(),
-            state.prefix + "experts.gate_up_proj",
-        )
-
-        down = state.tensor("experts.down_proj").narrow(
-            0,
-            start_expert,
-            local_experts,
-        )
-        copy_parameter(
-            self.experts.w2,
-            down.chunk(context.moe_tp_size, dim=2)[context.moe_tp_rank].transpose(1, 2).contiguous(),
-            state.prefix + "experts.down_proj",
-        )
-        self.shared_expert.load_weights(
-            state.with_prefix("shared_expert."),
-            context,
-        )
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        routed = self.experts(hidden)
-        shared = self.shared_expert(hidden)
-        output = routed + shared * torch.sigmoid(self.shared_expert_gate(hidden))
-        if self.fuse_reductions:
-            distributed.tp_all_reduce(output)
-        return output
+    def _pack_down(self, down: torch.Tensor) -> torch.Tensor:
+        return down.transpose(1, 2).contiguous()

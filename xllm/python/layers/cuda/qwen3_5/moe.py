@@ -17,32 +17,22 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
-from xllm.python import distributed
 from xllm.python.layers.fused_moe import FusedMoE
-from xllm.python.layers.gated_mlp import GatedMLP
-from xllm.python.layers.qwen3_5_decoder_layer import Qwen3_5LayerConfig
-from xllm.python.model_loader import (
-    ParallelLoadContext,
-    ScopedWeightLoader,
-    copy_parameter,
-)
+from xllm.python.layers.qwen3_5_common import Qwen3_5MoEConfig
+from xllm.python.layers.qwen3_5_moe import Qwen3_5SparseMoEBlockBase
 
 
-class CudaQwen3_5SparseMoEBlock(nn.Module):
+class CudaQwen3_5SparseMoEBlock(Qwen3_5SparseMoEBlockBase):
     """CUDA expert graph with CUTLASS/Triton-native weight ordering."""
 
     def __init__(
         self,
-        cfg: Qwen3_5LayerConfig,
+        cfg: Qwen3_5MoEConfig,
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
-        super().__init__()
-        self.fuse_reductions = (
-            cfg.dp_size == 1 and cfg.ep_size == 1 and cfg.tp_size == cfg.moe_tp_size and cfg.tp_size > 1
-        )
+        super().__init__(cfg, dtype, device)
         self.experts = FusedMoE(
             hidden_size=cfg.hidden_size,
             intermediate_size=cfg.moe_intermediate_size,
@@ -59,70 +49,10 @@ class CudaQwen3_5SparseMoEBlock(nn.Module):
             device=device,
             reduce_results=not self.fuse_reductions,
         )
-        self.shared_expert = GatedMLP(
-            cfg.hidden_size,
-            cfg.shared_expert_intermediate_size,
-            cfg.tp_size,
-            dtype,
-            device,
-            reduce_results=not self.fuse_reductions,
-        )
-        self.shared_expert_gate = nn.Linear(
-            cfg.hidden_size,
-            1,
-            bias=False,
-            dtype=dtype,
-            device=device,
-        )
 
-    def load_weights(
+    def _pack_gate_up(
         self,
-        state: ScopedWeightLoader,
-        context: ParallelLoadContext,
-    ) -> None:
-        copy_parameter(
-            self.experts.gate.weight,
-            state.tensor("gate.weight"),
-            state.prefix + "gate.weight",
-        )
-        copy_parameter(
-            self.shared_expert_gate.weight,
-            state.tensor("shared_expert_gate.weight"),
-            state.prefix + "shared_expert_gate.weight",
-        )
-
-        gate_up = state.tensor("experts.gate_up_proj")
-        local_experts = gate_up.size(0) // context.ep_size
-        start_expert = context.ep_rank * local_experts
-        gate_up = gate_up.narrow(0, start_expert, local_experts)
-        gate, up = gate_up.chunk(2, dim=1)
-        gate = gate.chunk(context.moe_tp_size, dim=1)[context.moe_tp_rank]
-        up = up.chunk(context.moe_tp_size, dim=1)[context.moe_tp_rank]
-        copy_parameter(
-            self.experts.w13,
-            torch.cat((up, gate), dim=1),
-            state.prefix + "experts.gate_up_proj",
-        )
-
-        down = state.tensor("experts.down_proj").narrow(
-            0,
-            start_expert,
-            local_experts,
-        )
-        copy_parameter(
-            self.experts.w2,
-            down.chunk(context.moe_tp_size, dim=2)[context.moe_tp_rank],
-            state.prefix + "experts.down_proj",
-        )
-        self.shared_expert.load_weights(
-            state.with_prefix("shared_expert."),
-            context,
-        )
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        routed = self.experts(hidden)
-        shared = self.shared_expert(hidden)
-        output = routed + shared * torch.sigmoid(self.shared_expert_gate(hidden))
-        if self.fuse_reductions:
-            distributed.tp_all_reduce(output)
-        return output
+        gate: torch.Tensor,
+        up: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.cat((up, gate), dim=1)
