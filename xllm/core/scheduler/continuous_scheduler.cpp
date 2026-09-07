@@ -32,7 +32,6 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/rec_config.h"
@@ -463,6 +462,7 @@ void ContinuousScheduler::step(const absl::Duration& timeout) {
 
 void ContinuousScheduler::step_with_schedule_overlap(
     const absl::Duration& timeout) {
+  apply_cancel_requests();
   const bool last_batch_all_empty = std::all_of(
       last_batch_.begin(), last_batch_.end(), [](const Batch& one_batch) {
         return one_batch.empty();
@@ -472,19 +472,17 @@ void ContinuousScheduler::step_with_schedule_overlap(
           options_.enable_schedule_overlap(),
           options_.num_speculative_tokens(),
           options_.dp_size(),
-          engine_->model_args().model_type(),
-          ::xllm::ExecutionConfig::get_instance().enable_graph());
+          engine_->model_args().model_type());
   bool last_batch_processed = false;
   if (fence_glm_mtp_cache_ownership && !is_first_step_ &&
       !last_batch_all_empty) {
-    // GLM eager MTP prelaunch mutates the current batch's cache after target
-    // validation. Resolve its post-prelaunch event before scheduling can
-    // finish, preempt, release, or reuse any cache resource from that batch.
+    // The scheduler requeues the previous batch before allocating the next
+    // one. Finish the prelaunch fence before that mutation so a block cannot
+    // be preempted and reused while the draft stream still owns it.
     engine_->update_last_step_result(last_batch_);
     process_batch_output(true);
     last_batch_processed = true;
   }
-
   // get a new batch of requests
   std::vector<Batch> batch = schedule_request(timeout);
   const bool cur_batch_all_empty =

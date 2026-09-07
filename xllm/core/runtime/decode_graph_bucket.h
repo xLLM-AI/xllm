@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace xllm::runtime {
 
@@ -32,5 +33,15 @@ struct DecodeGraphExecutionShape {
 // no-padding mode is enabled each exact token count is its own graph shape.
 int64_t get_decode_graph_token_bucket(int64_t num_tokens,
                                       bool enable_no_padding);
+
+// Returns the per-DP token rows used to build graph-mode DP metadata. Active
+// shards use the graph execution width, while empty shards retain their
+// single fake row; raw token counts remain separate for lm-head indices.
+std::vector<int32_t> get_decode_graph_dp_token_counts(
+    const std::vector<int32_t>& token_counts, int32_t graph_token_count);
+
+// Returns the dense token layout consumed after DP padding.
+int64_t get_decode_graph_dp_layout_token_count(int32_t dp_size,
+                                               int32_t graph_token_count);
 
 }  // namespace xllm::runtime

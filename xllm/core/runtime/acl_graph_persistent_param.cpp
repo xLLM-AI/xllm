@@ -416,11 +416,32 @@ torch::Tensor slice_like_source(const torch::Tensor& persistent,
   }
   return persistent.slice(/*dim=*/0, /*start=*/0, /*end=*/src.size(0));
 }
+
+int64_t get_graph_lm_head_index_length(
+    const torch::Tensor& src,
+    uint32_t padded_tokens,
+    int32_t dp_size) {
+  CHECK(src.defined());
+  CHECK_GT(src.numel(), 0);
+  if (dp_size > 1) {
+    // DP padding lays out every shard at the graph width. Keep the lm-head
+    // index view at that dense length even when the raw valid rows shrink.
+    const int64_t graph_length =
+        runtime::get_decode_graph_dp_layout_token_count(
+            dp_size, static_cast<int32_t>(padded_tokens));
+    CHECK_GE(graph_length, src.size(0))
+        << "lm-head graph layout is smaller than raw index tensor";
+    return graph_length;
+  }
+  return runtime::get_decode_graph_token_bucket(
+      src.size(0), graph_mode_decode_no_padding_enabled());
+}
 }  // namespace
 
 void GraphPersistentParam::update_persistent_dp_ep_padding(
     const DpEpPaddingData& src,
-    uint32_t /*padded_tokens*/) {
+    uint32_t padded_tokens,
+    int32_t dp_layout_size) {
   // Skip when dp ep padding is not enabled. When enabled, build() always
   // populates attn_padding_idx first, so it is a reliable signal.
   if (!src.attn_padding_idx().defined() ||
@@ -435,9 +456,31 @@ void GraphPersistentParam::update_persistent_dp_ep_padding(
                        src.ffn_padding_idx());
   copy_into_persistent(persistent_dp_ep_padding_.ffn_unpadding_idx(),
                        src.ffn_unpadding_idx());
-  copy_into_persistent(
-      persistent_dp_ep_padding_.lm_head_skip_padding_token_indices(),
-      src.lm_head_skip_padding_token_indices());
+  const torch::Tensor& src_lm_head_indices =
+      src.lm_head_skip_padding_token_indices();
+  if (src_lm_head_indices.defined() && src_lm_head_indices.numel() > 0) {
+    torch::Tensor& persistent_lm_head_indices =
+        persistent_dp_ep_padding_.lm_head_skip_padding_token_indices();
+    const int64_t graph_length =
+        get_graph_lm_head_index_length(src_lm_head_indices,
+                                       padded_tokens,
+                                       dp_layout_size);
+    CHECK_LE(graph_length, persistent_lm_head_indices.size(0))
+        << "lm-head index graph bucket exceeds persistent capacity";
+    persistent_lm_head_indices.slice(/*dim=*/0,
+                                     /*start=*/0,
+                                     /*end=*/src_lm_head_indices.size(0))
+        .copy_(src_lm_head_indices, /*non_blocking=*/true);
+    if (graph_length > src_lm_head_indices.size(0)) {
+      // The graph consumes the bucket-sized index tensor. Clear only the
+      // newly exposed rows so a shorter request cannot reuse a prior index.
+      persistent_lm_head_indices
+          .slice(/*dim=*/0,
+                 /*start=*/src_lm_head_indices.size(0),
+                 /*end=*/graph_length)
+          .zero_();
+    }
+  }
   copy_into_persistent(persistent_dp_ep_padding_.gather_prenorm_idx(),
                        src.gather_prenorm_idx());
   copy_into_persistent(persistent_dp_ep_padding_.padding_idx(),
@@ -484,6 +527,8 @@ void GraphPersistentParam::update_persistent_cp_ep_meta(
 
 void GraphPersistentParam::replace_capture_dp_ep_padding(
     const DpEpPaddingData& src,
+    uint32_t padded_tokens,
+    int32_t dp_layout_size,
     DpEpPaddingData& dst) const {
   if (!src.attn_padding_idx().defined() ||
       src.attn_padding_idx().numel() == 0) {
@@ -498,9 +543,17 @@ void GraphPersistentParam::replace_capture_dp_ep_padding(
       persistent_dp_ep_padding_.ffn_padding_idx(), src.ffn_padding_idx()));
   dst.ffn_unpadding_idx(slice_like_source(
       persistent_dp_ep_padding_.ffn_unpadding_idx(), src.ffn_unpadding_idx()));
-  dst.lm_head_skip_padding_token_indices(slice_like_source(
-      persistent_dp_ep_padding_.lm_head_skip_padding_token_indices(),
-      src.lm_head_skip_padding_token_indices()));
+  const torch::Tensor& src_lm_head_indices =
+      src.lm_head_skip_padding_token_indices();
+  if (src_lm_head_indices.defined() && src_lm_head_indices.numel() > 0) {
+    dst.lm_head_skip_padding_token_indices(
+        persistent_dp_ep_padding_.lm_head_skip_padding_token_indices().slice(
+            /*dim=*/0,
+            /*start=*/0,
+            /*end=*/get_graph_lm_head_index_length(src_lm_head_indices,
+                                                    padded_tokens,
+                                                    dp_layout_size)));
+  }
   dst.gather_prenorm_idx(
       slice_like_source(persistent_dp_ep_padding_.gather_prenorm_idx(),
                         src.gather_prenorm_idx()));
@@ -1231,8 +1284,13 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   // Update persistent dp/cp ep padding buffers. For capture this ensures
   // stable device addresses are recorded by the graph; for replay this
   // refreshes the data at those same addresses before graph_.replay().
+  const int32_t dp_layout_size =
+      is_decode && params.parallel.dp_global_token_nums.size() > 1
+          ? std::max<int32_t>(options_.dp_size(), 1)
+          : 1;
   update_persistent_dp_ep_padding(params.parallel.dp_ep_padding_data,
-                                  padded_num_tokens);
+                                  padded_num_tokens,
+                                  dp_layout_size);
   update_persistent_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
                                padded_num_tokens);
 
@@ -1373,8 +1431,11 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     // dp ep and cp ep are mutually exclusive; when neither is enabled the
     // src fields are all undefined and we leave dst untouched so that the
     // captured graph behaves identically to eager mode.
-    replace_capture_dp_ep_padding(params.parallel.dp_ep_padding_data,
-                                  graph_params->parallel.dp_ep_padding_data);
+    replace_capture_dp_ep_padding(
+        params.parallel.dp_ep_padding_data,
+        padded_num_tokens,
+        dp_layout_size,
+        graph_params->parallel.dp_ep_padding_data);
     CpEpMeta capture_cp_ep_meta = params.parallel.cp_plan.cp_ep_meta();
     replace_capture_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
                                capture_cp_ep_meta);

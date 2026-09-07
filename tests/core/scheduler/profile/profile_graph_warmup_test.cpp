@@ -126,6 +126,27 @@ TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {
           1, 2, 3, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61}));
 }
 
+TEST(DecodeGraphBucketTest, UsesSharedWidthForActiveDpShards) {
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/4, /*enable_no_padding=*/false),
+            4);
+  EXPECT_EQ(runtime::get_decode_graph_token_bucket(
+                /*num_tokens=*/20, /*enable_no_padding=*/false),
+            32);
+  EXPECT_EQ(runtime::get_decode_graph_dp_token_counts(
+                {4, 0, 0, 0, 0, 0, 0, 0}, 4),
+            (std::vector<int32_t>{4, 1, 1, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(runtime::get_decode_graph_dp_token_counts(
+                {16, 16, 20, 12, 16, 16, 12, 20}, 32),
+            (std::vector<int32_t>{32, 32, 32, 32, 32, 32, 32, 32}));
+  EXPECT_EQ(runtime::get_decode_graph_dp_layout_token_count(
+                /*dp_size=*/8, /*graph_token_count=*/32),
+            256);
+  EXPECT_EQ(runtime::get_decode_graph_dp_layout_token_count(
+                /*dp_size=*/8, /*graph_token_count=*/4),
+            32);
+}
+
 TEST(DecodeGraphWarmupPlanTest, UsesLocalDpBatchesAndKeepsPartialBatch) {
   if (!Platform::supports_mtp_decode_graph_warmup()) {
     GTEST_SKIP() << "MTP decode graph warmup is not supported.";

@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <vector>
 
@@ -31,12 +30,17 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
+#include "scheduler/decode_allocation_utils.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
 namespace xllm {
 
 namespace {
+
+using scheduler::estimate_decode_extra_blocks;
+using scheduler::get_decode_allocation_tokens;
+using scheduler::get_sequence_free_blocks_for_rank;
 
 // Non-final chunks must be a multiple of the KV-split logical block
 // (physical * kv_split). Prefix AllGather only covers complete blocks.
@@ -58,36 +62,6 @@ inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
     return 0;
   }
   return (num_tokens / kv_term) * kv_term;
-}
-
-// Estimate extra blocks needed for a decode step with speculative tokens.
-size_t estimate_decode_extra_blocks(Sequence* sequence,
-                                    size_t updated_num_tokens,
-                                    size_t block_size) {
-  const size_t num_blocks = sequence->kv_state().num_blocks(BlockType::KV);
-  const size_t num_blocks_needed =
-      (updated_num_tokens + block_size - 1) / block_size;
-  if (num_blocks_needed > num_blocks) {
-    return num_blocks_needed - num_blocks;
-  }
-  if (sequence->check_beam_search() &&
-      !sequence->kv_state().src_blocks().empty() &&
-      sequence->kv_state().need_swap()) {
-    return 1;
-  }
-  return 0;
-}
-
-size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
-                                         int32_t dp_rank) {
-  const auto free_blocks = kv_cache_manager->num_free_blocks();
-  if (free_blocks.empty()) {
-    return 0;
-  }
-  if (dp_rank >= 0 && static_cast<size_t>(dp_rank) < free_blocks.size()) {
-    return free_blocks[dp_rank];
-  }
-  return util::max(free_blocks);
 }
 
 void restore_skipped_requests(
@@ -566,8 +540,12 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
         const size_t block_size = state.kv_cache_manager->block_size();
         size_t needed_blocks = 0;
         for (auto* sequence : active_sequences) {
-          const size_t updated_num_tokens =
-              sequence->num_tokens() + state.min_speculative_tokens_required;
+          const size_t updated_num_tokens = get_decode_allocation_tokens(
+              sequence,
+              sequence->num_tokens() + state.min_speculative_tokens_required,
+              state.options.num_speculative_tokens(),
+              state.min_speculative_tokens_required,
+              state.options.enable_schedule_overlap());
           needed_blocks += estimate_decode_extra_blocks(
               sequence, updated_num_tokens, block_size);
         }
@@ -582,8 +560,12 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       if (has_enough_budget && has_enough_blocks) {
         bool allocate_failed = false;
         for (auto* sequence : active_sequences) {
-          const size_t updated_num_tokens =
-              sequence->num_tokens() + state.min_speculative_tokens_required;
+          const size_t updated_num_tokens = get_decode_allocation_tokens(
+              sequence,
+              sequence->num_tokens() + state.min_speculative_tokens_required,
+              state.options.num_speculative_tokens(),
+              state.min_speculative_tokens_required,
+              state.options.enable_schedule_overlap());
           if (!state.kv_cache_manager->allocate(sequence, updated_num_tokens)) {
             allocate_failed = true;
             break;
@@ -642,8 +624,12 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
           has_enough_budget = false;
           break;
         }
-        size_t updated_num_tokens =
-            sequence->num_tokens() + state.min_speculative_tokens_required;
+        const size_t updated_num_tokens = get_decode_allocation_tokens(
+            sequence.get(),
+            sequence->num_tokens() + state.min_speculative_tokens_required,
+            state.options.num_speculative_tokens(),
+            state.min_speculative_tokens_required,
+            state.options.enable_schedule_overlap());
         if (!state.kv_cache_manager->allocate(sequence.get(),
                                               updated_num_tokens)) {
           has_enough_blocks = false;

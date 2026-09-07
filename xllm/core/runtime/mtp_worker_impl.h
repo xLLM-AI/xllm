@@ -240,13 +240,19 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   };
 
   struct PendingDraftContext {
+    struct PreparedDraft {
+      ForwardInput prepared_input;
+      ForwardOutput output;
+    };
+
     std::vector<int32_t> embedding_ids;
     std::vector<std::string> request_ids;
     std::vector<int32_t> dp_global_token_nums;
     std::vector<int32_t> raw_dp_global_token_nums;
     std::vector<uint64_t> dp_global_batch_generations;
-    std::optional<ForwardOutput> output;
-    ForwardInput prepared_input;
+    // Pre-issued next-first-draft output and its prepared input. Keeping both
+    // alive protects the device buffers until the next step consumes them.
+    std::vector<PreparedDraft> drafts;
     StreamEventPtr completion_event;
   };
 
@@ -267,6 +273,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Centralizes current-batch combined/prelaunch eligibility.
   CombinedDraftSchedule combined_draft_schedule(
       const ForwardInput& input) const;
+  int32_t prelaunch_followup_draft_count(const ForwardInput& input) const;
   bool prelaunch_positions_fit_block_table(const ForwardInput& input) const;
   void prepare_next_first_draft_template(const ForwardInput& input,
                                          ForwardInput& combined_input);
@@ -277,8 +284,20 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                 ForwardInput combined_input);
   void submit_pending_first_draft(const ForwardInput& batch_identity_input,
                                   ForwardInput draft_input);
-  void publish_pending_first_draft_cache_fence(ForwardOutput& output) const;
-  void retire_pending_first_draft();
+  void submit_pending_followup_drafts(const ForwardInput& batch_identity_input,
+                                      const torch::Tensor& base_positions,
+                                      const torch::Tensor& base_kv_seq_lens,
+                                      int32_t num_drafts);
+  void submit_pending_empty_followup_drafts(const ForwardInput& input,
+                                            int32_t num_drafts);
+  void broadcast_and_process_draft_sample(SampleOutput& sample_output,
+                                           bool all_greedy_sample);
+  void finalize_pending_draft_submission();
+  torch::Tensor stop_token_ids_for(const torch::Tensor& tokens);
+  torch::Tensor stop_token_column_indices_for(const torch::Tensor& tokens,
+                                              int64_t width);
+  void publish_pending_draft_cache_fence(ForwardOutput& output) const;
+  void retire_pending_first_draft(const char* reason);
   bool pending_draft_context_matches(const ForwardInput& input) const;
   bool prelaunch_metadata_batch_matches(const ForwardInput& input) const;
 
@@ -315,10 +334,12 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // into this storage until the copy event is synchronized and CPU consumers
   // have finished reading it.
   torch::Tensor accepted_tokens_host_buffer_;
-  // Draft step 0 is submitted at the tail of the preceding target validation,
-  // before control returns to the scheduler.  The following scheduler turn
-  // consumes this output and only submits draft steps 1..N-1.
+  // All prelaunched draft outputs are submitted at the tail of the preceding
+  // target validation, before control returns to the scheduler. The following
+  // scheduler turn only consumes these outputs.
   PendingDraftContext pending_draft_context_;
+  torch::Tensor stop_token_ids_device_;
+  torch::Tensor stop_token_column_indices_device_;
   // GLM MoE DSA rebuilds prelaunch metadata only when this identity changes.
   // Other MTP model paths do not consult this state.
   std::vector<int32_t> prelaunch_metadata_embedding_ids_;

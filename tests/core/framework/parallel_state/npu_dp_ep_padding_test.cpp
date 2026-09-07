@@ -18,6 +18,8 @@ limitations under the License.
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <numeric>
+
 #include "framework/parallel_state/mapping_npu.h"
 
 namespace xllm {
@@ -126,6 +128,60 @@ TEST(DpEpPaddingTest, BuildAttnUnpaddingWithTrailingEmptyDpGroup) {
 
   EXPECT_TRUE(torch::equal(dp_ep_padding_data.attn_unpadding_idx(),
                            torch::tensor({0, 1}, torch::kInt32)));
+}
+
+TEST(DpEpPaddingTest, GraphPaddingKeepsDpPaddingAndRawIndexContracts) {
+  MappingNPU::Options options;
+  // Match the failing deployment: dp=8, attention tp=2, MoE ep=16.
+  options.dp_size(8)
+      .tp_size(2)
+      .moe_tp_size(1)
+      .moe_ep_size(16)
+      .pp_size(1)
+      .sp_size(1);
+  MappingNPU mapping(/*rank_table_file=*/"", /*world_size=*/16,
+                    /*rank=*/0, options);
+  const nlohmann::json mapping_data = mapping.to_json();
+
+  const auto check_layout = [&](const std::vector<int32_t>& padded_counts,
+                                const std::vector<int32_t>& raw_counts,
+                                int32_t expected_aligned_width,
+                                int32_t expected_local_width) {
+    DpEpPadding padding(
+        torch::tensor(padded_counts), torch::tensor(raw_counts), 8,
+        mapping_data, torch::Device(torch::kCPU), torch::Dtype(torch::kInt32),
+        /*is_prefill=*/false);
+    const DpEpPaddingData data = padding.build();
+
+    EXPECT_EQ(data.attn_padding_idx().size(0), expected_aligned_width);
+    EXPECT_EQ(data.ffn_padding_idx().size(0), expected_aligned_width * 8);
+    EXPECT_EQ(data.ffn_unpadding_idx().size(0), expected_local_width);
+    EXPECT_EQ(data.lm_head_skip_padding_token_indices().size(0),
+              std::accumulate(raw_counts.begin(), raw_counts.end(), 0));
+    return data;
+  };
+
+  const auto sparse_data = check_layout(
+      {4, 1, 1, 1, 1, 1, 1, 1},
+      {4, 0, 0, 0, 0, 0, 0, 0}, /*expected_aligned_width=*/4,
+      /*expected_local_width=*/4);
+  EXPECT_TRUE(torch::equal(sparse_data.lm_head_skip_padding_token_indices(),
+                           torch::tensor({0, 1, 2, 3}, torch::kInt32)));
+
+  const std::vector<int32_t> mixed_raw_counts =
+      {16, 16, 20, 12, 16, 16, 12, 20};
+  const auto mixed_data = check_layout(
+      {32, 32, 32, 32, 32, 32, 32, 32}, mixed_raw_counts,
+      /*expected_aligned_width=*/32, /*expected_local_width=*/32);
+  std::vector<int32_t> expected_lm_head_indices;
+  for (int32_t dp_rank = 0; dp_rank < 8; ++dp_rank) {
+    for (int32_t token = 0; token < mixed_raw_counts[dp_rank]; ++token) {
+      expected_lm_head_indices.push_back(dp_rank * 32 + token);
+    }
+  }
+  EXPECT_TRUE(torch::equal(
+      mixed_data.lm_head_skip_padding_token_indices(),
+      torch::tensor(expected_lm_head_indices, torch::kInt32)));
 }
 
 TEST(DpEpPaddingCacheTest, ReusesBAndTwoBLayouts) {

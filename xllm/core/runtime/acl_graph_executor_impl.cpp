@@ -85,6 +85,58 @@ uint64_t mix_graph_key(uint64_t hash, uint64_t value) {
   return hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2));
 }
 
+bool has_non_uniform_positive_dp_token_counts(
+    const std::vector<int32_t>& dp_token_counts) {
+  if (dp_token_counts.size() <= 1) {
+    return false;
+  }
+
+  const int32_t first_token_count = dp_token_counts.front();
+  bool non_uniform = false;
+  for (int32_t token_count : dp_token_counts) {
+    if (token_count <= 0) {
+      return false;
+    }
+    non_uniform = non_uniform || token_count != first_token_count;
+  }
+  return non_uniform;
+}
+
+uint64_t specialize_dp_ep_graph_key(uint64_t graph_key,
+                                    const ModelInputParams& params) {
+  const auto& dp_token_counts = params.parallel.dp_global_token_nums;
+  const bool uses_dense_decode_layout =
+      params.meta.batch_forward_type.is_decode() && dp_token_counts.size() > 1 &&
+      params.parallel.dp_ep_padding_data.attn_padding_idx().defined() &&
+      params.parallel.dp_ep_padding_data.attn_padding_idx().numel() > 0;
+  if (uses_dense_decode_layout ||
+      !has_non_uniform_positive_dp_token_counts(dp_token_counts) ||
+      !params.parallel.dp_ep_padding_data.attn_padding_idx().defined() ||
+      params.parallel.dp_ep_padding_data.attn_padding_idx().numel() == 0) {
+    return graph_key;
+  }
+
+  const uint64_t graph_namespace = graph_key & ~kMlaGraphKeyPayloadMask;
+  graph_key &= kMlaGraphKeyPayloadMask;
+  graph_key = mix_graph_key(graph_key, 0x445045505f534841ull);
+
+  const auto& raw_token_counts =
+      params.parallel.raw_dp_global_token_nums.empty()
+          ? dp_token_counts
+          : params.parallel.raw_dp_global_token_nums;
+  int64_t raw_token_count = 0;
+  for (int32_t token_count : raw_token_counts) {
+    raw_token_count += token_count;
+  }
+  const int64_t raw_token_bucket = runtime::get_decode_graph_token_bucket(
+      raw_token_count,
+      ::xllm::ExecutionConfig::get_instance()
+          .enable_graph_mode_decode_no_padding());
+  graph_key = mix_graph_key(graph_key,
+                            static_cast<uint64_t>(raw_token_bucket));
+  return graph_namespace | graph_key;
+}
+
 constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
                                                          int64_t block_size) {
   const uint64_t block =
@@ -1475,9 +1527,12 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
   if (model_->supports_mla_graph_kv_bucketing()) {
     const int32_t capture_kv_seq_len_bucket =
         get_mla_capture_kv_seq_len_bucket(params, options_);
-    return get_mla_graph_key(bucket_num_tokens, capture_kv_seq_len_bucket);
+    return specialize_dp_ep_graph_key(
+        get_mla_graph_key(bucket_num_tokens, capture_kv_seq_len_bucket),
+        params);
   }
-  return static_cast<uint64_t>(bucket_num_tokens);
+  return specialize_dp_ep_graph_key(
+      static_cast<uint64_t>(bucket_num_tokens), params);
 }
 
 }  // namespace xllm::npu

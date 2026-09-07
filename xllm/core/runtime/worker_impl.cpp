@@ -77,6 +77,7 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/layerwise_split_layout.h"
@@ -1139,19 +1140,55 @@ void WorkerImpl::prepare_dp_ep_padding(ModelInputParams& input_params) {
     }
   }
 
+  const bool graph_decode =
+      input_params.meta.batch_forward_type.is_decode() &&
+      ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+      options_.enable_speculative_decode() && !options_.is_draft_engine() &&
+      token_sizes.size() > 1 &&
+      input_params.parallel.dp_is_decode.size() == token_sizes.size() &&
+      std::all_of(input_params.parallel.dp_is_decode.begin(),
+                  input_params.parallel.dp_is_decode.end(),
+                  [](int32_t is_decode) { return is_decode != 0; });
+  bool use_graph_padding = false;
+  int32_t graph_token_size = 0;
+  if (graph_decode) {
+    const int32_t max_token_size =
+        *std::max_element(token_sizes.begin(), token_sizes.end());
+    graph_token_size = static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
+        max_token_size,
+        ::xllm::ExecutionConfig::get_instance()
+            .enable_graph_mode_decode_no_padding()));
+    use_graph_padding = std::any_of(
+        token_sizes.begin(), token_sizes.end(),
+        [graph_token_size](int32_t token_count) {
+          return token_count != graph_token_size;
+        });
+  }
+  std::vector<int32_t> graph_padded_token_sizes;
+  const std::vector<int32_t>* padded_token_sizes = &token_sizes;
+  if (use_graph_padding) {
+    graph_padded_token_sizes = runtime::get_decode_graph_dp_token_counts(
+        token_sizes, graph_token_size);
+    padded_token_sizes = &graph_padded_token_sizes;
+  }
+
+  const std::vector<int32_t>& effective_raw_token_sizes =
+      raw_token_sizes.empty() ? token_sizes : raw_token_sizes;
+
   torch::Tensor token_size_per_dp_group =
-      torch::tensor(token_sizes,
+      torch::tensor(*padded_token_sizes,
                     torch::TensorOptions()
                         .device(torch::kCPU)
                         .dtype(torch::kInt32)
                         .pinned_memory(true));
   torch::Tensor raw_token_size_per_dp_group =
-      raw_token_sizes.empty() ? torch::Tensor()
-                              : torch::tensor(raw_token_sizes,
-                                              torch::TensorOptions()
-                                                  .device(torch::kCPU)
-                                                  .dtype(torch::kInt32)
-                                                  .pinned_memory(true));
+      raw_token_sizes.empty() && !use_graph_padding
+          ? torch::Tensor()
+          : torch::tensor(effective_raw_token_sizes,
+                          torch::TensorOptions()
+                              .device(torch::kCPU)
+                              .dtype(torch::kInt32)
+                              .pinned_memory(true));
   DpEpPadding dp_ep_padding(token_size_per_dp_group,
                             raw_token_size_per_dp_group,
                             context_.get_model_args().num_experts_per_tok(),
@@ -1558,13 +1595,6 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 
       auto output = this->step_for_schedule_overlap(input);
-      const bool defer_glm_mtp_cache_ownership_commit =
-          requires_glm_mtp_cache_ownership_fence(
-              options_.enable_schedule_overlap(),
-              options_.num_speculative_tokens(),
-              options_.dp_size(),
-              context_.get_model_args().model_type(),
-              ::xllm::ExecutionConfig::get_instance().enable_graph());
 #if defined(USE_NPU)
       if (output.has_value() && !output->sample_output.next_tokens.defined() &&
           output->ready_event != nullptr && !output->retained_inputs.empty() &&
@@ -1573,10 +1603,12 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
             << "failed to retire asynchronous output without tokens";
       }
 #endif
-      // Only GLM eager DP has a scheduler-side ownership transaction. Preserve
-      // worker-side acknowledgment for every other combined prelaunch mode.
-      // A prelaunch completion event is carried to the output owner. Do not
-      // turn it into a host wait on the worker path.
+      const bool defer_glm_mtp_cache_ownership_commit =
+          requires_glm_mtp_cache_ownership_fence(
+              options_.enable_schedule_overlap(),
+              options_.num_speculative_tokens(),
+              options_.dp_size(),
+              context_.get_model_args().model_type());
       if (output.has_value() && output->requires_cache_ownership_fence &&
           !defer_glm_mtp_cache_ownership_commit &&
           !::xllm::ExecutionConfig::get_instance().enable_graph()) {
@@ -1649,14 +1681,14 @@ ForwardOutput WorkerImpl::get_last_step_result() {
   ForwardOutput output;
   std::unique_lock<std::mutex> lock(mtx_);
   cv_.wait(lock, [this] { return is_recorded_; });
-  const bool skip_graph_prelaunch_ownership_wait =
-      last_step_output_.requires_cache_ownership_fence &&
-      ::xllm::ExecutionConfig::get_instance().enable_graph();
-  if (last_step_output_.requires_cache_ownership_fence &&
-      !skip_graph_prelaunch_ownership_wait) {
+  if (last_step_output_.requires_cache_ownership_fence) {
     CHECK(last_step_output_.cache_ownership_event == nullptr ||
           last_step_output_.cache_ownership_event->synchronize())
         << "failed to commit MTP prelaunch cache ownership";
+    // The ownership event is shared with the pending-draft retirement path.
+    // Mark it consumed while holding mtx_ so the two host-side consumers never
+    // synchronize the same event concurrently.
+    last_step_output_.requires_cache_ownership_fence = false;
   }
   if (last_step_output_valid_ ||
       ::xllm::EPLBConfig::get_instance().enable_eplb() ||

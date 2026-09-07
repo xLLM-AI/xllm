@@ -21,6 +21,7 @@ limitations under the License.
 #include <brpc/server.h>
 
 #include <chrono>
+#include <limits>
 #include <random>
 
 #include "common/global_flags.h"
@@ -39,6 +40,7 @@ limitations under the License.
 #include "pd_ooc_scheduler.h"
 #include "runtime/xservice_client.h"
 #include "scheduler/continuous_scheduler.h"
+#include "scheduler/decode_allocation_utils.h"
 #include "util/env_var.h"
 #include "util/utils.h"
 
@@ -46,36 +48,9 @@ namespace xllm {
 
 namespace {
 
-size_t estimate_decode_extra_blocks(Sequence* sequence,
-                                    size_t updated_num_tokens,
-                                    size_t block_size) {
-  const size_t num_blocks = sequence->kv_state().num_blocks(BlockType::KV);
-  const size_t num_blocks_needed =
-      (updated_num_tokens + block_size - 1) / block_size;
-  if (num_blocks_needed > num_blocks) {
-    return num_blocks_needed - num_blocks;
-  }
-
-  // Beam swap may still require one extra block when reusing source blocks.
-  if (sequence->check_beam_search() &&
-      !sequence->kv_state().src_blocks().empty() &&
-      sequence->kv_state().need_swap()) {
-    return 1;
-  }
-  return 0;
-}
-
-size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
-                                         int32_t dp_rank) {
-  const auto free_blocks = kv_cache_manager->num_free_blocks();
-  if (free_blocks.empty()) {
-    return 0;
-  }
-  if (dp_rank >= 0 && static_cast<size_t>(dp_rank) < free_blocks.size()) {
-    return free_blocks[dp_rank];
-  }
-  return util::max(free_blocks);
-}
+using scheduler::estimate_decode_extra_blocks;
+using scheduler::get_decode_allocation_tokens;
+using scheduler::get_sequence_free_blocks_for_rank;
 
 inline size_t maybe_align_cp_prefill_tokens(const Sequence* sequence,
                                             size_t num_tokens,
@@ -899,8 +874,12 @@ void PDOOCScheduler::handle_decode_requests_impl(
         const size_t block_size = kv_cache_manager_->block_size();
         size_t needed_blocks = 0;
         for (auto* sequence : active_sequences) {
-          const size_t updated_num_tokens =
-              sequence->num_tokens() + min_speculative_tokens_required_;
+          const size_t updated_num_tokens = get_decode_allocation_tokens(
+              sequence,
+              sequence->num_tokens() + min_speculative_tokens_required_,
+              options_.num_speculative_tokens(),
+              min_speculative_tokens_required_,
+              options_.enable_schedule_overlap());
           needed_blocks += estimate_decode_extra_blocks(
               sequence, updated_num_tokens, block_size);
         }
@@ -916,8 +895,12 @@ void PDOOCScheduler::handle_decode_requests_impl(
       if (has_enough_budget && has_enough_blocks) {
         bool allocate_failed = false;
         for (auto* sequence : active_sequences) {
-          const size_t updated_num_tokens =
-              sequence->num_tokens() + min_speculative_tokens_required_;
+          const size_t updated_num_tokens = get_decode_allocation_tokens(
+              sequence,
+              sequence->num_tokens() + min_speculative_tokens_required_,
+              options_.num_speculative_tokens(),
+              min_speculative_tokens_required_,
+              options_.enable_schedule_overlap());
           if (!kv_cache_manager_->allocate(sequence, updated_num_tokens)) {
             allocate_failed = true;
             break;
@@ -985,8 +968,12 @@ void PDOOCScheduler::handle_decode_requests_impl(
           break;
         }
         // sequence token already appended
-        size_t updated_num_tokens =
-            sequence->num_tokens() + min_speculative_tokens_required_;
+        const size_t updated_num_tokens = get_decode_allocation_tokens(
+            sequence.get(),
+            sequence->num_tokens() + min_speculative_tokens_required_,
+            options_.num_speculative_tokens(),
+            min_speculative_tokens_required_,
+            options_.enable_schedule_overlap());
         // no blocks left
         if (!kv_cache_manager_->allocate(sequence.get(), updated_num_tokens)) {
           has_enough_blocks = false;
@@ -1203,8 +1190,12 @@ void PDOOCScheduler::handle_decode_requests(
         break;
       }
       // sequence token already appended
-      size_t updated_num_tokens =
-          sequence->num_tokens() + options_.num_speculative_tokens();
+      const size_t updated_num_tokens = get_decode_allocation_tokens(
+          sequence.get(),
+          sequence->num_tokens() + options_.num_speculative_tokens(),
+          options_.num_speculative_tokens(),
+          min_speculative_tokens_required_,
+          options_.enable_schedule_overlap());
       // no blocks left
       if (!kv_cache_manager_->allocate(sequence.get(), updated_num_tokens)) {
         has_enough_blocks = false;

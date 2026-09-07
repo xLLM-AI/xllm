@@ -34,10 +34,9 @@ inline bool requires_glm_mtp_cache_ownership_fence(
     bool schedule_overlap_enabled,
     int32_t num_speculative_tokens,
     int32_t dp_size,
-    std::string_view model_type,
-    bool graph_enabled) {
+    std::string_view model_type) {
   return schedule_overlap_enabled && num_speculative_tokens > 0 &&
-         dp_size > 1 && model_type == "glm_moe_dsa" && !graph_enabled;
+         dp_size > 1 && model_type == "glm_moe_dsa";
 }
 
 }  // namespace xllm

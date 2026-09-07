@@ -1044,6 +1044,38 @@ TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
       original_enable_graph_double_buffer);
 }
 
+TEST_F(AclGraphExecutorTest, DpDecodeGraphKeyIgnoresRawTokenDistribution) {
+  options_.world_size(16).dp_size(8);
+  ::xllm::npu::AclGraphExecutorImpl graph_executor(
+      model_.get(), model_args_, *device_, options_);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.parallel.dp_ep_padding_data.attn_padding_idx(
+      torch::zeros({32}, torch::kInt32));
+
+  const std::vector<std::vector<int32_t>> dp_token_distributions = {
+      {20, 20, 20, 20, 20, 20, 20, 20},
+      {8, 16, 16, 16, 12, 20, 20, 20},
+      {8, 12, 12, 8, 12, 20, 20, 20},
+      {8, 8, 12, 8, 12, 16, 12, 20},
+      {4, 8, 12, 4, 12, 16, 4, 20},
+      {4, 8, 12, 0, 12, 12, 4, 20},
+  };
+
+  std::optional<uint64_t> expected_graph_key;
+  for (const std::vector<int32_t>& distribution : dp_token_distributions) {
+    params.parallel.dp_global_token_nums = distribution;
+    params.parallel.raw_dp_global_token_nums = distribution;
+    const uint64_t graph_key =
+        graph_executor.graph_key_for_test(/*bucket_num_tokens=*/32, params);
+    if (!expected_graph_key.has_value()) {
+      expected_graph_key = graph_key;
+    }
+    EXPECT_EQ(graph_key, expected_graph_key.value());
+  }
+}
+
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
   SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
   const bool original_enable_atb_spec_kernel =

@@ -44,4 +44,21 @@ int64_t get_decode_graph_token_bucket(int64_t num_tokens,
          kGraphTokenStep;
 }
 
+std::vector<int32_t> get_decode_graph_dp_token_counts(
+    const std::vector<int32_t>& token_counts, int32_t graph_token_count) {
+  if (token_counts.empty()) {
+    return {};
+  }
+  std::vector<int32_t> padded_counts = token_counts;
+  for (int32_t& token_count : padded_counts) {
+    token_count = token_count > 0 ? graph_token_count : 1;
+  }
+  return padded_counts;
+}
+
+int64_t get_decode_graph_dp_layout_token_count(int32_t dp_size,
+                                               int32_t graph_token_count) {
+  return static_cast<int64_t>(dp_size) * graph_token_count;
+}
+
 }  // namespace xllm::runtime
