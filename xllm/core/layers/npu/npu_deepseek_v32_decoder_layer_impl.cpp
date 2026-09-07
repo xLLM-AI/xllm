@@ -1473,8 +1473,12 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
     node.variantPack.inTensors.at(i) = *node.inTensors.at(i);
   }
 
+  const torch::Tensor index_cache = kv_cache.get_index_cache();
+  CHECK(index_cache.defined() || skip_topk)
+      << "DSA full indexer layer requires an allocated indexer cache.";
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 30) =
-      atb_speed::Utils::AtTensor2Tensor(kv_cache.get_index_cache());
+      atb_speed::Utils::AtTensor2Tensor(
+          index_cache.defined() ? index_cache : tensor_placeholder_);
 
   const bool empty_eager_batch =
       !input_params.enable_graph && input_params.meta.num_sequences == 0;

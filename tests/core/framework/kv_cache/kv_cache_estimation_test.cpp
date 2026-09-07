@@ -106,7 +106,7 @@ TEST(KVCacheEstimationTest, IndexerScaleUsesLogicalCacheCapacity) {
   EXPECT_EQ(capacity.n_blocks(), 1107);
 }
 
-#if defined(USE_MLU)
+#if defined(USE_MLU) || defined(USE_NPU)
 TEST(KVCacheEstimationTest, SharedDsaLayersDoNotConsumeIndexerCacheBudget) {
   ModelArgs model_args = make_standard_args();
   model_args.model_type("glm_moe_dsa")
@@ -122,6 +122,23 @@ TEST(KVCacheEstimationTest, SharedDsaLayersDoNotConsumeIndexerCacheBudget) {
   EXPECT_EQ(capacity.num_full_attention_layers(), 4);
   EXPECT_EQ(capacity.num_indexer_layers(), 2);
   EXPECT_EQ(capacity.n_blocks(), 113);
+}
+
+TEST(KVCacheEstimationTest, GlmSharedIndexerFreqAllocatesOnlyFullLayers) {
+  ModelArgs model_args = make_standard_args();
+  model_args.model_type("glm_moe_dsa")
+      .n_layers(78)
+      .index_n_heads(1)
+      .index_head_dim(16)
+      .index_topk(8)
+      .index_topk_freq(4)
+      .index_skip_topk_offset(3);
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, make_estimate_options());
+
+  EXPECT_EQ(capacity.num_full_attention_layers(), 78);
+  EXPECT_EQ(capacity.num_indexer_layers(), 21);
 }
 
 #endif

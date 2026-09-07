@@ -67,11 +67,10 @@ class Platform final {
     return is_mlu() || is_npu();
   }
 
-  // MLU can reuse DSA top-k results across layers without keeping an indexer
-  // cache for every layer. Other backends retain the legacy all-layer cache
-  // allocation until they implement the same cache-elision contract.
+  // Shared DSA layers reuse the previous full layer's top-k and never write
+  // indexer cache, so those layers skip indexer-page allocation.
   static constexpr bool supports_dsa_indexer_cache_elision() {
-    return is_mlu();
+    return is_mlu() || is_npu();
   }
 
   // Host KV offload requires a batch memcpy provider with stream
