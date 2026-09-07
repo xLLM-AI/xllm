@@ -1,6 +1,8 @@
 # pre-commit install
 # pre-commit run --all-files
 
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -27,3 +29,11 @@ repos:
   - id: clang-format
     types_or: [c++, c, cuda]
     exclude: ^(cibuild/|tools/|third_party/|cmake/|build/|.*\.ptx\.h$)
+
+- repo: local
+  hooks:
+  - id: commit-msg-format
+    name: commit-msg format check
+    language: script
+    entry: scripts/lint/check-commit-msg.sh
+    stages: [commit-msg]
