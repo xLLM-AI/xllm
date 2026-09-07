@@ -24,7 +24,6 @@ from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,
-    copy_parameter,
 )
 
 
@@ -63,35 +62,20 @@ class GatedMLP(nn.Module):
         state: ScopedWeightLoader,
         context: ParallelLoadContext,
     ) -> None:
-        gate = state.shard(
-            "gate_proj.weight",
-            0,
-            context.tp_rank,
-            context.tp_size,
-        )
-        up = state.shard(
-            "up_proj.weight",
-            0,
-            context.tp_rank,
-            context.tp_size,
-        )
-        copy_parameter(
+        state.load_fused(
             self.gate_up_proj.weight,
-            torch.cat((gate, up)),
-            state.prefix + "{gate,up}_proj.weight",
+            ["gate_proj.weight", "up_proj.weight"],
+            "{gate,up}_proj.weight",
+            context.tp_rank,
+            context.tp_size,
         )
-        copy_parameter(
+        state.load_tensor(
             self.down_proj.weight,
-            state.shard(
-                "down_proj.weight",
-                1,
-                context.tp_rank,
-                context.tp_size,
-            ),
-            state.prefix + "down_proj.weight",
+            "down_proj.weight",
+            dim=1,
+            rank=context.tp_rank,
+            world_size=context.tp_size,
         )
-        # TODO: Prepare the NPU row-parallel weight after TileLang and
-        # CANN/TBE TVM runtimes can coexist in the same process.
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.down_proj(kernels.silu_and_mul(self.gate_up_proj(hidden_states)))

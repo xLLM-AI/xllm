@@ -52,23 +52,6 @@ def kv_replica_shard(n_kv_heads: int, tp_rank: int, tp_size: int) -> tuple[int, 
     return n_kv_heads, tp_rank // (tp_size // n_kv_heads)
 
 
-def gqa_head_split(n_heads: int, n_kv_heads: int, tp_size: int) -> tuple[int, int]:
-    """Per-rank ``(num_heads, num_kv_heads)`` for GQA under tensor parallelism.
-
-    ``n_kv_heads < tp_size`` -> K/V heads replicated (one KV head per rank).
-    """
-    if n_heads % tp_size:
-        raise ValueError(f"n_heads {n_heads} not divisible by tp_size {tp_size}")
-    num_heads = n_heads // tp_size
-    if n_kv_heads >= tp_size:
-        if n_kv_heads % tp_size:
-            raise ValueError(f"n_kv_heads {n_kv_heads} not divisible by tp_size {tp_size}")
-        return num_heads, n_kv_heads // tp_size
-    if tp_size % n_kv_heads:
-        raise ValueError(f"tp_size {tp_size} not divisible by n_kv_heads {n_kv_heads}")
-    return num_heads, 1
-
-
 def mla_head_split(n_heads: int, tp_size: int) -> tuple[int, int]:
     """Per-rank ``(num_heads, 1)`` for MLA attention (single latent KV head per rank)."""
     if n_heads % tp_size:

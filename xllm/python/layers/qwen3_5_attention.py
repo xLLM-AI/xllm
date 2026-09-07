@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NPU-owned Qwen3.5 full-attention composition."""
+"""Backend-neutral Qwen3.5 full-attention composition.
+
+Shared by the CUDA and NPU attention adapters. Backend-specific post-load
+preparation is expressed through a hook instead of a platform flag.
+"""
 
 from __future__ import annotations
 
@@ -22,21 +26,21 @@ import torch.nn as nn
 from xllm.python.layers.attention import Attention
 from xllm.python.layers.layernorm import GemmaRMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.qwen3_5_decoder_layer import (
+from xllm.python.layers.qwen3_5_common import (
     PartialRotaryEmbedding,
-    Qwen3_5LayerConfig,
+    Qwen3_5AttentionConfig,
 )
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,
-    copy_parameter,
+    load_gqa_fused_attention,
 )
 
 
-class NpuQwen3_5Attention(nn.Module):
+class Qwen3_5Attention(nn.Module):
     def __init__(
         self,
-        cfg: Qwen3_5LayerConfig,
+        cfg: Qwen3_5AttentionConfig,
         layer_id: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -89,73 +93,16 @@ class NpuQwen3_5Attention(nn.Module):
             layer_id,
         )
 
-    def _shard_kv(
-        self,
-        state: ScopedWeightLoader,
-        name: str,
-        context: ParallelLoadContext,
-    ) -> torch.Tensor:
-        if self.cfg.n_kv_heads >= context.tp_size:
-            return state.shard(name, 0, context.tp_rank, context.tp_size)
-        replicas = context.tp_size // self.cfg.n_kv_heads
-        return state.shard(
-            name,
-            0,
-            context.tp_rank // replicas,
-            self.cfg.n_kv_heads,
-        )
+    def _finish_loading(self) -> None:
+        """Run backend-specific post-load preparation, if any."""
 
     def load_weights(
         self,
         state: ScopedWeightLoader,
         context: ParallelLoadContext,
     ) -> None:
-        q = state.shard("q_proj.weight", 0, context.tp_rank, context.tp_size)
-        k = self._shard_kv(state, "k_proj.weight", context)
-        v = self._shard_kv(state, "v_proj.weight", context)
-        copy_parameter(
-            self.qkv_proj.weight,
-            torch.cat((q, k, v)),
-            state.prefix + "{q,k,v}_proj.weight",
-        )
-        copy_parameter(
-            self.o_proj.weight,
-            state.shard("o_proj.weight", 1, context.tp_rank, context.tp_size),
-            state.prefix + "o_proj.weight",
-        )
-        if self.cfg.attention_bias:
-            q_bias = state.shard(
-                "q_proj.bias",
-                0,
-                context.tp_rank,
-                context.tp_size,
-            )
-            k_bias = self._shard_kv(state, "k_proj.bias", context)
-            v_bias = self._shard_kv(state, "v_proj.bias", context)
-            assert self.qkv_proj.bias is not None
-            assert self.o_proj.bias is not None
-            copy_parameter(
-                self.qkv_proj.bias,
-                torch.cat((q_bias, k_bias, v_bias)),
-                state.prefix + "{q,k,v}_proj.bias",
-            )
-            copy_parameter(
-                self.o_proj.bias,
-                state.tensor("o_proj.bias"),
-                state.prefix + "o_proj.bias",
-            )
-        copy_parameter(
-            self.q_norm.weight,
-            state.tensor("q_norm.weight"),
-            state.prefix + "q_norm.weight",
-        )
-        copy_parameter(
-            self.k_norm.weight,
-            state.tensor("k_norm.weight"),
-            state.prefix + "k_norm.weight",
-        )
-        # TODO: Prepare the NPU row-parallel weight after TileLang and
-        # CANN/TBE TVM runtimes can coexist in the same process.
+        load_gqa_fused_attention(self, state, context, self.cfg.n_kv_heads)
+        self._finish_loading()
 
     def forward(
         self,

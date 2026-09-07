@@ -19,8 +19,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import distributed, kernels
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python import kernels
+from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
 
 
 class FusedMoE(nn.Module):
@@ -103,29 +103,7 @@ class FusedMoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        local_tokens: int = 0
-        padded_tokens: int = 0
-        use_compact_gather: bool = False
-        if self.dp_size > 1:
-            ctx = get_forward_context()
-            token_counts = list(ctx.metadata.dp_token_counts)
-            if len(token_counts) != self.dp_size:
-                raise RuntimeError(f"expected {self.dp_size} DP token counts, got {token_counts}")
-            local_tokens = hidden_states.shape[0]
-            is_graph = ctx.execution_state is not None
-            is_prefill = ctx.metadata.is_prefill or ctx.metadata.is_chunked_prefill
-            dp_is_decode = getattr(ctx.metadata, "dp_is_decode", None)
-            all_decode = dp_is_decode is not None and all(dp_is_decode)
-            if is_graph or is_prefill or not all_decode:
-                padded_tokens = max(token_counts)
-                pad_size = padded_tokens - local_tokens
-                if pad_size > 0:
-                    hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                hidden_states = distributed.all_gather(hidden_states, dim=0, world_size=self.dp_size, group_name="dp")
-            else:
-                use_compact_gather = True
-                hidden_states = distributed.all_gather_variable(hidden_states, token_counts, self.dp_rank, "dp")
-
+        hidden_states, scatter_state = dp_gather_tokens(hidden_states, self.dp_size, self.dp_rank)
         router_logits = self.gate(hidden_states)
         topk_weights, topk_ids = kernels.moe_fused_topk(
             router_logits,
@@ -155,15 +133,10 @@ class FusedMoE(nn.Module):
             )
         else:
             raise NotImplementedError("pre-SM90 Python MoE fallback does not support TP or EP")
-        if self.reduce_results:
-            if self.moe_tp_size > 1:
-                distributed.all_reduce_(output, "moe_tp")
-            if self.ep_size > 1:
-                distributed.all_reduce_(output, "moe_ep")
-        if use_compact_gather:
-            offset = sum(token_counts[: self.dp_rank])
-            output = output.narrow(0, offset, local_tokens)
-        elif padded_tokens > 0:
-            start = self.dp_rank * padded_tokens
-            output = output.narrow(0, start, local_tokens)
-        return output
+        return reduce_and_scatter(
+            output,
+            scatter_state,
+            reduce_results=self.reduce_results,
+            moe_tp_size=self.moe_tp_size,
+            ep_size=self.ep_size,
+        )
