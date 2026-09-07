@@ -22,13 +22,13 @@ _package = types.ModuleType("xllm.python.kernels_cuda")
 _package.__path__ = [str(_ROOT / "kernels_cuda")]
 sys.modules["xllm.python.kernels_cuda"] = _package
 
+from xllm.python.kernels_cuda.triton.fla.fused_recurrent import (  # noqa: E402
+    fused_recurrent_kda_packed_decode,
+)
 from xllm.python.kernels_cuda.triton.fla.kda import (  # noqa: E402
     RCP_LN2,
     chunk_kda,
     kda_gate_chunk_cumsum,
-)
-from xllm.python.kernels_cuda.triton.kda import (  # noqa: E402
-    fused_recurrent_kda_packed_decode,
 )
 
 
