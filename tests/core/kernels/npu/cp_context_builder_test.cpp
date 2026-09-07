@@ -38,7 +38,7 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// Field-named view of the op's 9-tuple return, materialized from the boxed
+// Field-named view of the op return, materialized from the boxed
 // dispatcher call so tests read like the Python CpContext.
 struct CpContext {
   torch::Tensor shard_index;
@@ -49,6 +49,8 @@ struct CpContext {
   torch::Tensor kv_gather_index;
   std::vector<int64_t> q_cu_seqlens;
   std::vector<int64_t> kv_cu_seqlens;
+  torch::Tensor segment_seq_indices;
+  std::vector<int64_t> segment_kv_seq_lens;
   int64_t total_local;
 };
 
@@ -62,13 +64,18 @@ std::vector<int64_t> to_int_vector(const c10::IValue& value) {
 
 CpContext build_cp_context(const std::vector<int64_t>& seq_lens,
                            int64_t cp_size,
-                           int64_t cp_rank) {
+                           int64_t cp_rank,
+                           const std::vector<int64_t>& kv_seq_lens = {}) {
   static const auto op = c10::Dispatcher::singleton().findSchemaOrThrow(
       "xllm_ops::build_cp_context", "");
-  std::vector<c10::IValue> stack{c10::IValue(c10::List<int64_t>(seq_lens)),
-                                 cp_size,
-                                 cp_rank,
-                                 c10::IValue(torch::Device(torch::kCPU))};
+  const std::vector<int64_t>& effective_kv_seq_lens =
+      kv_seq_lens.empty() ? seq_lens : kv_seq_lens;
+  std::vector<c10::IValue> stack{
+      c10::IValue(c10::List<int64_t>(seq_lens)),
+      c10::IValue(c10::List<int64_t>(effective_kv_seq_lens)),
+      cp_size,
+      cp_rank,
+      c10::IValue(torch::Device(torch::kCPU))};
   op.callBoxed(&stack);
 
   CpContext ctx;
@@ -80,7 +87,9 @@ CpContext build_cp_context(const std::vector<int64_t>& seq_lens,
   ctx.kv_gather_index = stack[5].toTensor();
   ctx.q_cu_seqlens = to_int_vector(stack[6]);
   ctx.kv_cu_seqlens = to_int_vector(stack[7]);
-  ctx.total_local = stack[8].toInt();
+  ctx.segment_seq_indices = stack[8].toTensor();
+  ctx.segment_kv_seq_lens = to_int_vector(stack[9]);
+  ctx.total_local = stack[10].toInt();
   return ctx;
 }
 
@@ -262,6 +271,46 @@ TEST(BuildCpContextInvariants, PackedAttentionMatchesReference) {
 TEST(BuildCpContextInvariants, CpSizeOneRejected) {
   xllm::ensure_xllm_torch_ops_registered();
   EXPECT_THROW(build_cp_context({8}, 1, 0), c10::Error);
+}
+
+TEST(BuildCpContextInvariants, LocalPagedRowsMatchRealQueries) {
+  xllm::ensure_xllm_ops_registered();
+  const std::vector<int64_t> seq_lens{1, 9, 2};
+  for (const int64_t rank : {int64_t{0}, int64_t{1}, int64_t{2}, int64_t{3}}) {
+    const auto ctx = build_cp_context(seq_lens, /*cp_size=*/4, rank);
+    EXPECT_EQ(ctx.segment_seq_indices.numel(),
+              static_cast<int64_t>(ctx.q_cu_seqlens.size()));
+    ASSERT_EQ(ctx.segment_kv_seq_lens.size(), ctx.q_cu_seqlens.size());
+    if (ctx.q_cu_seqlens.empty()) {
+      EXPECT_EQ(ctx.query_index.numel(), 0);
+    } else {
+      EXPECT_EQ(ctx.q_cu_seqlens.back(), ctx.query_index.numel());
+    }
+  }
+}
+
+TEST(BuildCpContextInvariants, SegmentRowsPreserveZigzagHalves) {
+  xllm::ensure_xllm_ops_registered();
+  const auto ctx =
+      build_cp_context(/*seq_lens=*/{8, 5}, /*cp_size=*/2, /*cp_rank=*/0);
+
+  EXPECT_TRUE(
+      torch::equal(ctx.segment_seq_indices,
+                   torch::tensor({0, 0, 1}, torch::dtype(torch::kInt64))));
+  EXPECT_EQ(ctx.q_cu_seqlens, (std::vector<int64_t>{2, 4, 6}));
+}
+
+TEST(BuildCpContextInvariants, ChunkedSegmentsIncludeCachedPrefix) {
+  xllm::ensure_xllm_ops_registered();
+  const auto ctx = build_cp_context(/*seq_lens=*/{8},
+                                    /*cp_size=*/2,
+                                    /*cp_rank=*/0,
+                                    /*kv_seq_lens=*/{108});
+
+  EXPECT_TRUE(torch::equal(ctx.segment_seq_indices,
+                           torch::tensor({0, 0}, torch::dtype(torch::kInt64))));
+  EXPECT_EQ(ctx.q_cu_seqlens, (std::vector<int64_t>{2, 4}));
+  EXPECT_EQ(ctx.segment_kv_seq_lens, (std::vector<int64_t>{102, 108}));
 }
 
 }  // namespace

@@ -15,8 +15,15 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
+#include "core/distributed_runtime/master.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/util/scope_guard.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -68,6 +75,188 @@ TEST(NpuCpCapabilityTest, RegistrationIsIdempotent) {
     EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32"));
     EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3_mtp"));
   }
+}
+
+TEST(NpuCpCapabilityTest, PythonCpAllowsAclGraphAndRejectsCompileBackends) {
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  ModelConfig& model_config = ModelConfig::get_instance();
+  ParallelConfig& parallel_config = ParallelConfig::get_instance();
+  const std::string original_python_graph_backend =
+      execution_config.python_graph_backend();
+  const std::string original_model_impl = model_config.model_impl();
+  const int32_t original_kv_split_size = parallel_config.kv_split_size();
+  ScopeGuard config_guard([&] {
+    parallel_config.kv_split_size(original_kv_split_size);
+    model_config.model_impl(original_model_impl);
+    execution_config.python_graph_backend(original_python_graph_backend);
+  });
+  execution_config.python_graph_backend("off");
+  model_config.model_impl("python");
+  parallel_config.kv_split_size(1);
+
+  Options options;
+  options.task_type("generate")
+      .cp_size(4)
+      .dp_size(1)
+      .ep_size(16)
+      .instance_role(InstanceRole::PREFILL)
+      .enable_graph(true);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/16)
+                   .has_value());
+
+  options.enable_graph(false);
+  execution_config.python_graph_backend("aclgraph");
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/16)
+                   .has_value());
+
+  execution_config.python_graph_backend("inductor");
+  const std::optional<std::string> graph_error = std::optional<std::string>(
+      "Python model-side CP requires Prefill to use EagerRunner; use "
+      "--python_graph_backend=off or decode-only aclgraph");
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::LLM,
+                              "glm_moe_dsa",
+                              /*global_world_size=*/16),
+            graph_error);
+
+  execution_config.python_graph_backend("off");
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/16)
+                   .has_value());
+}
+
+TEST(NpuCpCapabilityTest, PythonCpPreservesQwenAndRestrictsGlm) {
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  ModelConfig& model_config = ModelConfig::get_instance();
+  ParallelConfig& parallel_config = ParallelConfig::get_instance();
+  const std::string original_python_graph_backend =
+      execution_config.python_graph_backend();
+  const std::string original_model_impl = model_config.model_impl();
+  const int32_t original_kv_split_size = parallel_config.kv_split_size();
+  ScopeGuard config_guard([&] {
+    parallel_config.kv_split_size(original_kv_split_size);
+    model_config.model_impl(original_model_impl);
+    execution_config.python_graph_backend(original_python_graph_backend);
+  });
+  execution_config.python_graph_backend("off");
+  model_config.model_impl("python");
+  parallel_config.kv_split_size(1);
+
+  Options options;
+  options.task_type("generate")
+      .cp_size(4)
+      .dp_size(1)
+      .ep_size(16)
+      .instance_role(InstanceRole::PREFILL)
+      .enable_graph(false)
+      .speculative_algorithm("MTP");
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "qwen3",
+                                 /*global_world_size=*/16)
+                   .has_value());
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::SSM,
+                                 "qwen3",
+                                 /*global_world_size=*/16)
+                   .has_value());
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::SSM,
+                              "glm_moe_dsa",
+                              /*global_world_size=*/16),
+            std::optional<std::string>(
+                "Python model-side CP does not support MTP speculative "
+                "verification; run MTP on a cp_size=1 Decode instance"));
+
+  options.speculative_algorithm("DSpark");
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::SSM,
+                              "glm_moe_dsa",
+                              /*global_world_size=*/16),
+            std::optional<std::string>(
+                "Current model-side CP does not support aux-hidden-capture "
+                "speculative algorithms (Eagle3/DFlash/DSpark); run "
+                "speculative decoding on a cp_size=1 Decode instance."));
+
+  options.cp_size(1).instance_role(InstanceRole::DECODE).enable_disagg_pd(true);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/16)
+                   .has_value());
+  options.cp_size(4)
+      .instance_role(InstanceRole::PREFILL)
+      .enable_disagg_pd(false)
+      .speculative_algorithm("MTP");
+
+  // EP topology validation belongs to model construction, not this Python CP
+  // capability gate.
+  options.ep_size(2);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/16)
+                   .has_value());
+
+  parallel_config.kv_split_size(2);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "qwen3",
+                                 /*global_world_size=*/16)
+                   .has_value());
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::LLM,
+                              "glm_moe_dsa",
+                              /*global_world_size=*/16),
+            std::optional<std::string>(
+                "Python GLM CP with kv_split_size > 1 requires "
+                "disaggregated PD with the PREFILL role; set "
+                "enable_disagg_pd=true and instance_role=PREFILL"));
+
+  options.enable_disagg_pd(true);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/16)
+                   .has_value());
+
+  options.instance_role(InstanceRole::DEFAULT);
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::LLM,
+                              "glm_moe_dsa",
+                              /*global_world_size=*/16),
+            std::optional<std::string>(
+                "Python GLM CP with kv_split_size > 1 requires "
+                "disaggregated PD with the PREFILL role; set "
+                "enable_disagg_pd=true and instance_role=PREFILL"));
+  options.instance_role(InstanceRole::PREFILL);
+
+  parallel_config.kv_split_size(1);
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::LLM,
+                              "glm_moe_dsa_mtp",
+                              /*global_world_size=*/16),
+            std::optional<std::string>(
+                "Python model-side CP does not support "
+                "model_type=glm_moe_dsa_mtp; supported models are qwen3 and "
+                "glm_moe_dsa."));
+
+  parallel_config.kv_split_size(3);
+  EXPECT_EQ(validate_model_cp(options,
+                              EngineType::LLM,
+                              "glm_moe_dsa",
+                              /*global_world_size=*/16),
+            std::optional<std::string>(
+                "Python CP requires kv_split_size effective value to be a "
+                "positive divisor of cp_size"));
 }
 
 }  // namespace

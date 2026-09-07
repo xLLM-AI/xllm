@@ -67,7 +67,7 @@ def _create_attention_backend(
         )
     if current_platform.is_npu():
         dcp_group = distributed.dcp_group(device)
-        if dcp_group is not None and dcp_group.size() > 1:
+        if int(config.get("cp_size", 1)) == 1 and dcp_group is not None and dcp_group.size() > 1:
             from xllm.python.attention.sfa_dcp_backend import (
                 SfaDcpAttentionBackend,
                 dcp_layer_options,

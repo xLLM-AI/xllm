@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -256,3 +257,57 @@ def test_npu_softmax_topk_uses_graph_safe_native_op(
     )
     torch.testing.assert_close(actual_weights, weights)
     torch.testing.assert_close(actual_ids, expert_ids)
+
+
+def test_grouped_matmul_swiglu_quant_v2_requests_int8_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moe = _load_npu_moe_module()
+    expected = (
+        torch.empty(0, dtype=torch.int8),
+        torch.empty(0, dtype=torch.float32),
+    )
+    calls: list[dict[str, object]] = []
+
+    def grouped_matmul_swiglu_quant_v2(**kwargs):
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        moe.torch_npu,
+        "npu_grouped_matmul_swiglu_quant_v2",
+        grouped_matmul_swiglu_quant_v2,
+    )
+
+    result = moe._grouped_matmul_swiglu_quant_v2(
+        torch.empty(0),
+        torch.empty(0),
+        torch.empty(0),
+        torch.empty(0),
+        torch.empty(0),
+    )
+
+    assert result[0] is expected[0]
+    assert result[1] is expected[1]
+    assert calls[0]["quant_dtype"] == 1
+
+
+def test_moe_weight_format_cast_enables_internal_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moe = _load_npu_moe_module()
+    config = SimpleNamespace(allow_internal_format=False)
+    monkeypatch.setattr(moe.torch, "npu", SimpleNamespace(config=config), raising=False)
+
+    calls: list[tuple[torch.Tensor, int]] = []
+
+    def format_cast(weight: torch.Tensor, acl_format: int) -> torch.Tensor:
+        calls.append((weight, acl_format))
+        return weight
+
+    monkeypatch.setattr(moe.torch_npu, "npu_format_cast", format_cast)
+
+    weight = torch.empty(2, 4, 8, dtype=torch.int8)
+    assert moe.format_cast_nz(weight) is weight
+    assert config.allow_internal_format is True
+    assert calls == [(weight, 29)]

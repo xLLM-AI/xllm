@@ -100,6 +100,9 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   pybind11::object& python_model() { return py_model_; }
   const pybind11::object& config_dict() const { return config_dict_; }
+  int64_t cp_size() const { return cp_size_; }
+  int64_t kv_split_size() const { return kv_split_size_; }
+  int64_t kv_split_rank() const { return kv_split_rank_; }
 
  private:
   pybind11::dict build_config_dict(const ParallelArgs& parallel_args) const;
@@ -123,6 +126,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   int64_t cp_rank_ = 0;
   int64_t layerwise_split_size_ = 1;
   int64_t layerwise_split_rank_ = 0;
+  int64_t kv_split_size_ = 1;
+  int64_t kv_split_rank_ = 0;
   ProcessGroup* tp_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;

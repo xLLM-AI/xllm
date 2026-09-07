@@ -20,6 +20,14 @@ import torch
 import torch_npu
 
 _FRACTAL_NZ_FORMAT = 29
+# The installed torch_npu runtime uses 1 for int8. Keep this named instead of
+# using a magic value at the call site.
+_TORCH_INT8_DTYPE = 1
+
+
+def _enable_internal_format() -> None:
+    """Enable private NPU formats before casting grouped-MoE weights."""
+    torch.npu.config.allow_internal_format = True
 
 
 def _grouped_matmul_swiglu_quant_v2(
@@ -39,7 +47,7 @@ def _grouped_matmul_swiglu_quant_v2(
         dequant_mode=0,
         dequant_dtype=0,
         quant_mode=0,
-        quant_dtype=0,
+        quant_dtype=_TORCH_INT8_DTYPE,
         group_list_type=0,
     )
 
@@ -137,6 +145,7 @@ def prepare_grouped_moe_weights(
     Returns:
         The two weights in the fractal-NZ format the grouped kernels expect.
     """
+    _enable_internal_format()
     return (
         torch_npu.npu_format_cast(w13, _FRACTAL_NZ_FORMAT),
         torch_npu.npu_format_cast(w2, _FRACTAL_NZ_FORMAT),
@@ -145,6 +154,7 @@ def prepare_grouped_moe_weights(
 
 def format_cast_nz(weight: torch.Tensor) -> torch.Tensor:
     """Cast a single weight tensor to fractal-NZ format."""
+    _enable_internal_format()
     return torch_npu.npu_format_cast(weight, _FRACTAL_NZ_FORMAT)
 
 

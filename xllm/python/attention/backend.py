@@ -27,6 +27,7 @@ from xllm.python.attention.expanded_decode_metadata import (
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.cp_utils import CpContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +127,12 @@ class AttentionMetadata(Protocol):
     expanded_decode_metadata: ExpandedDecodeMetadataLike
     is_prefill: bool
     is_chunked_prefill: bool
+    is_mixed: bool
+    is_spec_verify: bool
+    local_slot_mapping: torch.Tensor | None
+    kv_split_size: int
+    kv_split_rank: int
+    has_kv_shard: bool
 
 
 @dataclass(frozen=True)
@@ -135,7 +142,8 @@ class MlaIndexContext:
     Replaces direct model access to ``backend._metadata`` / ``backend._kv_caches``
     for MLA layers. The backend owns the paged index cache (``LayerCache.index``)
     and prepares the paging / sequence-length metadata once per step; the indexer
-    receives this view and produces ``topk``.
+    receives this view and produces ``topk``. ``materialize_index_cache`` returns
+    the cache, optional scale, and their single matching block table together.
     """
 
     index_cache: torch.Tensor
@@ -146,8 +154,12 @@ class MlaIndexContext:
     index_cache_scale: torch.Tensor | None
     get_quant_indexer_metadata: Callable[[int, int, int, int], torch.Tensor]
     update_index_cache: Callable[[torch.Tensor, torch.Tensor | None], None]
+    materialize_index_cache: Callable[
+        [],
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor],
+    ]
     # Optional model-side CP plan for packed local query segments.
-    cp_context: object | None = None
+    cp_context: CpContext | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +194,11 @@ class AttentionBackend(ABC):
     def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
         """Reset request-owned state before a model attaches current inputs."""
         del metadata
+
+    @property
+    def is_mla(self) -> bool:
+        """Whether this backend implements MLA execution."""
+        return False
 
     @abstractmethod
     def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:

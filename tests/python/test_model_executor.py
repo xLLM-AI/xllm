@@ -44,6 +44,12 @@ from xllm.python.model_executor.executor import (  # noqa: E402
     _create_attention_backend,
     _resolve_graph_backend,
 )
+from xllm.python.model_executor.forward_context import (  # noqa: E402
+    ForwardContext,
+    forward_context,
+    get_forward_context,
+    record_layer_event,
+)
 from xllm.python.model_executor.runners.decode_acl_graph import (  # noqa: E402
     DecodeAclGraphRunner,
 )
@@ -51,6 +57,7 @@ from xllm.python.model_executor.runners.decode_cuda_graph import (  # noqa: E402
     DecodeCudaGraphRunner,
     _decode_graph_buckets,
 )
+from xllm.python.model_executor.runners.eager import EagerRunner  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,6 +94,12 @@ class _PagedStubAttentionBackend(StubAttentionBackend):
     @property
     def page_size(self) -> int:
         return 4
+
+
+class _MlaStubAttentionBackend(StubAttentionBackend):
+    @property
+    def is_mla(self) -> bool:
+        return True
 
 
 def _make_attention_layer(
@@ -138,6 +151,31 @@ class _FakeModelNoAttention(nn.Module):
         super().__init__()
         self.model = nn.Linear(1, 1)
         self._param = nn.Parameter(torch.zeros(1))
+
+
+class _FailingLayerSynchronizer:
+    def record_event(self, layer_id: int) -> bool:
+        return False
+
+
+def test_attention_backend_defaults_to_non_mla() -> None:
+    assert StubAttentionBackend().is_mla is False
+
+
+def test_record_layer_event_propagates_record_failure() -> None:
+    context = ForwardContext(
+        attention_backend=StubAttentionBackend(),
+        device=torch.device("cpu"),
+        metadata=MagicMock(),
+        layer_caches=[],
+        layer_synchronizer=_FailingLayerSynchronizer(),
+    )
+
+    with (
+        forward_context(context),
+        pytest.raises(RuntimeError, match="failed to record layer completion event for layer 3"),
+    ):
+        record_layer_event(3)
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +246,72 @@ class TestCreateAttentionBackend:
         assert backend.init_kwargs["num_kv_heads"] == 1
         assert backend.init_kwargs["head_dim"] == 256
         assert backend.init_kwargs["is_mla"] is False
+
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
+    @patch(
+        "xllm.python.attention.npu_paged_attention.NpuPagedAttentionBackend",
+        StubAttentionBackend,
+    )
+    def test_prefill_cp_uses_npu_backend_with_dcp_group(self, _mock_is_npu: MagicMock) -> None:
+        attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
+        dcp_group = MagicMock()
+        dcp_group.size.return_value = 2
+        sfa_module = types.ModuleType("xllm.python.attention.sfa_dcp_backend")
+        sfa_module.SfaDcpAttentionBackend = MagicMock()
+        sfa_module.dcp_layer_options = MagicMock(return_value=512)
+
+        with (
+            patch(
+                "xllm.python.model_executor.executor.distributed.dcp_group",
+                return_value=dcp_group,
+            ),
+            patch.dict(sys.modules, {sfa_module.__name__: sfa_module}),
+        ):
+            backend = _create_attention_backend(
+                attn,
+                torch.device("npu"),
+                torch.float16,
+                {"cp_size": 4, "enable_mla": True},
+            )
+
+        assert isinstance(backend, StubAttentionBackend)
+        assert backend.init_kwargs["is_mla"] is True
+        sfa_module.SfaDcpAttentionBackend.assert_not_called()
+
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
+    def test_decode_cp1_uses_sfa_dcp_backend(self, _mock_is_npu: MagicMock) -> None:
+        attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
+        dcp_group = MagicMock()
+        dcp_group.size.return_value = 2
+        sfa_module = types.ModuleType("xllm.python.attention.sfa_dcp_backend")
+        sfa_module.SfaDcpAttentionBackend = StubAttentionBackend
+        sfa_module.dcp_layer_options = MagicMock(return_value=512)
+
+        with (
+            patch(
+                "xllm.python.model_executor.executor.distributed.dcp_group",
+                return_value=dcp_group,
+            ),
+            patch.dict(sys.modules, {sfa_module.__name__: sfa_module}),
+        ):
+            backend = _create_attention_backend(
+                attn,
+                torch.device("npu"),
+                torch.float16,
+                {"cp_size": 1, "enable_mla": True},
+                max_num_reqs=3,
+            )
+
+        assert isinstance(backend, StubAttentionBackend)
+        assert backend.init_kwargs["dcp_group"] is dcp_group
+        assert backend.init_kwargs["index_topk"] == 512
+        assert backend.init_kwargs["max_num_reqs"] == 3
 
     @patch(
         "xllm.python.model_executor.executor.current_platform.is_npu",
@@ -875,6 +979,191 @@ class TestBindKvCaches:
 # ---------------------------------------------------------------------------
 # Tests: ModelExecutor.execute routing
 # ---------------------------------------------------------------------------
+
+
+def _make_eager_runner(*, is_mla: bool = True) -> EagerRunner:
+    runner = object.__new__(EagerRunner)
+    backend_type = _MlaStubAttentionBackend if is_mla else StubAttentionBackend
+    runner.attention_backend = backend_type()
+    runner.cp_size = 4
+    runner.cp_rank = 2
+    runner.device = torch.device("cpu")
+    runner.layer_caches = []
+    runner.model = MagicMock(return_value=torch.ones(2))
+    return runner
+
+
+def test_eager_runner_preserves_qwen_pure_prefill_cp_context_contract() -> None:
+    runner = _make_eager_runner(is_mla=False)
+    metadata = SimpleNamespace(
+        is_prefill=True,
+        is_chunked_prefill=False,
+        is_mixed=False,
+        is_spec_verify=False,
+        q_seq_lens_host=torch.tensor([3, 5], dtype=torch.int32),
+        kv_seq_lens_host=None,
+    )
+
+    with patch(
+        "xllm.python.model_executor.runners.eager.build_cp_context",
+        return_value=object(),
+    ) as build_context:
+        runner.execute(torch.zeros(8), torch.arange(8), metadata)
+
+    build_context.assert_called_once_with(
+        [3, 5],
+        [3, 5],
+        4,
+        2,
+        torch.device("cpu"),
+    )
+
+
+def test_eager_runner_preserves_qwen_missing_length_fallback() -> None:
+    runner = _make_eager_runner(is_mla=False)
+    metadata = SimpleNamespace(
+        is_prefill=True,
+        is_chunked_prefill=False,
+        is_mixed=False,
+        is_spec_verify=False,
+        q_seq_lens_host=None,
+        kv_seq_lens_host=None,
+    )
+
+    with patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context:
+        runner.execute(torch.zeros(1), torch.zeros(1), metadata)
+
+    build_context.assert_not_called()
+    assert runner.attention_backend._prepared
+    runner.model.assert_called_once()
+
+
+def test_eager_runner_builds_cp_context_for_chunked_prefill() -> None:
+    runner = _make_eager_runner()
+    metadata = SimpleNamespace(
+        is_prefill=False,
+        is_chunked_prefill=True,
+        is_mixed=False,
+        is_spec_verify=False,
+        q_seq_lens_host=torch.tensor([3, 5], dtype=torch.int32),
+        kv_seq_lens_host=torch.tensor([11, 13], dtype=torch.int32),
+    )
+
+    with patch(
+        "xllm.python.model_executor.runners.eager.build_cp_context",
+        return_value=object(),
+    ) as build_context:
+        runner.execute(torch.zeros(8), torch.arange(8), metadata)
+
+    build_context.assert_called_once_with(
+        [3, 5],
+        [11, 13],
+        4,
+        2,
+        torch.device("cpu"),
+    )
+
+
+def test_eager_runner_rejects_mixed_cp_before_collective() -> None:
+    runner = _make_eager_runner()
+    metadata = SimpleNamespace(
+        is_prefill=False,
+        is_chunked_prefill=True,
+        is_mixed=True,
+        is_spec_verify=False,
+    )
+
+    with (
+        patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context,
+        pytest.raises(NotImplementedError, match="mixed batches"),
+    ):
+        runner.execute(torch.zeros(1), torch.zeros(1), metadata)
+
+    build_context.assert_not_called()
+    assert not runner.attention_backend._prepared
+
+
+def test_eager_runner_rejects_mla_spec_verify_cp_before_collective() -> None:
+    runner = _make_eager_runner()
+    metadata = SimpleNamespace(
+        is_prefill=False,
+        is_chunked_prefill=True,
+        is_mixed=False,
+        is_spec_verify=True,
+    )
+
+    with (
+        patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context,
+        pytest.raises(NotImplementedError, match="MTP speculative verification"),
+    ):
+        runner.execute(torch.zeros(1), torch.zeros(1), metadata)
+
+    build_context.assert_not_called()
+    assert not runner.attention_backend._prepared
+
+
+@pytest.mark.parametrize(
+    ("is_mla", "is_chunked_prefill", "is_mixed", "is_spec_verify"),
+    [
+        (False, True, True, False),
+        (False, True, False, True),
+        (True, False, False, True),
+    ],
+)
+def test_eager_runner_preserves_non_cp_fallback(
+    is_mla: bool,
+    is_chunked_prefill: bool,
+    is_mixed: bool,
+    is_spec_verify: bool,
+) -> None:
+    runner = _make_eager_runner(is_mla=is_mla)
+    metadata = SimpleNamespace(
+        is_prefill=False,
+        is_chunked_prefill=is_chunked_prefill,
+        is_mixed=is_mixed,
+        is_spec_verify=is_spec_verify,
+    )
+
+    def execute_model(input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        assert get_forward_context().cp_context is None
+        return input_ids + positions
+
+    runner.model.side_effect = execute_model
+    with patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context:
+        output = runner.execute(torch.ones(1), torch.ones(1), metadata)
+
+    build_context.assert_not_called()
+    assert runner.attention_backend._prepared
+    runner.model.assert_called_once()
+    torch.testing.assert_close(output, torch.full((1,), 2.0))
+
+
+@pytest.mark.parametrize(
+    ("q_seq_lens_host", "kv_seq_lens_host"),
+    [
+        (None, None),
+        (None, torch.tensor([1], dtype=torch.int32)),
+        (torch.tensor([1], dtype=torch.int32), None),
+    ],
+)
+def test_eager_runner_rejects_missing_cp_lengths(
+    q_seq_lens_host: torch.Tensor | None,
+    kv_seq_lens_host: torch.Tensor | None,
+) -> None:
+    runner = _make_eager_runner()
+    metadata = SimpleNamespace(
+        is_prefill=True,
+        is_chunked_prefill=False,
+        is_mixed=False,
+        is_spec_verify=False,
+        q_seq_lens_host=q_seq_lens_host,
+        kv_seq_lens_host=kv_seq_lens_host,
+    )
+
+    with pytest.raises(RuntimeError, match="requires host query and KV"):
+        runner.execute(torch.zeros(1), torch.zeros(1), metadata)
+
+    assert not runner.attention_backend._prepared
 
 
 class TestExecuteRouting:

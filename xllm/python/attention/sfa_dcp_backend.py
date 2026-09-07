@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -194,17 +194,18 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
 
     def mla_index_context(self, layer: Attention) -> MlaIndexContext:
         context = super().mla_index_context(layer)
-        if self._expanded_indexer_block_table is None:
+        expanded_block_table = self._expanded_indexer_block_table
+        if expanded_block_table is None:
             return context
-        return MlaIndexContext(
-            index_cache=context.index_cache,
-            slot_mapping=context.slot_mapping,
-            block_table=self._expanded_indexer_block_table,
-            actual_seq_q=context.actual_seq_q,
-            actual_seq_kv=context.actual_seq_kv,
-            index_cache_scale=context.index_cache_scale,
-            get_quant_indexer_metadata=context.get_quant_indexer_metadata,
-            update_index_cache=context.update_index_cache,
+
+        def materialize_index_cache() -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+            index_cache, index_cache_scale, _ = context.materialize_index_cache()
+            return index_cache, index_cache_scale, expanded_block_table
+
+        return replace(
+            context,
+            block_table=expanded_block_table,
+            materialize_index_cache=materialize_index_cache,
         )
 
     def execute_mla(

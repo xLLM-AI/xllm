@@ -26,18 +26,23 @@ from xllm.python.model_executor.forward_context import (
 from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOutput
 
 
-def _per_seq_lens_from_metadata(metadata: AttentionMetadata) -> list[int] | None:
-    """Per-sequence query lengths for the packed prefill batch, or None.
+def _per_seq_lens_from_metadata(
+    metadata: AttentionMetadata,
+    *,
+    include_prefix: bool,
+) -> tuple[list[int], list[int]] | None:
+    """Per-sequence query and KV lengths for the packed prefill batch.
 
-    Read straight from ``q_seq_lens_host`` — the host-side per-sequence query
-    lengths (NPU keeps these non-cumulative, one entry per sequence), so no
-    D2H copy and no diff. Returns None when the field is absent so the caller
-    falls back to the non-CP path.
+    Read the host-side, non-cumulative lengths without a D2H copy. MLA chunked
+    prefill keeps the full KV length so its cached prefix is visible; non-MLA
+    CP preserves the existing query-only contract by using the query length for
+    both values. Returns None when a required field is absent.
     """
-    lens = metadata.q_seq_lens_host
-    if lens is None:
+    q_lens = metadata.q_seq_lens_host
+    kv_lens = metadata.kv_seq_lens_host if include_prefix else q_lens
+    if q_lens is None or kv_lens is None:
         return None
-    return lens.tolist()
+    return q_lens.tolist(), kv_lens.tolist()
 
 
 class EagerRunner(BaseRunner):
@@ -54,13 +59,36 @@ class EagerRunner(BaseRunner):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> ModelExecutionOutput:
-        self.attention_backend.prepare(metadata)
-
         cp_context = None
-        if self.cp_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
-            seq_lens = _per_seq_lens_from_metadata(metadata)
-            if seq_lens is not None:
-                cp_context = build_cp_context(seq_lens, self.cp_size, self.cp_rank, self.device)
+        is_mla = self.attention_backend.is_mla
+        is_mla_cp_prefill = self.cp_size > 1 and is_mla and (metadata.is_prefill or metadata.is_chunked_prefill)
+        if is_mla_cp_prefill and metadata.is_spec_verify:
+            raise NotImplementedError("Python Context-Parallel does not support MTP speculative verification")
+        if is_mla_cp_prefill and metadata.is_mixed:
+            raise NotImplementedError("Python Context-Parallel does not support mixed batches")
+        use_cp_context = self.cp_size > 1 and (metadata.is_prefill or (is_mla and metadata.is_chunked_prefill))
+        if use_cp_context:
+            seq_lens = _per_seq_lens_from_metadata(
+                metadata,
+                include_prefix=is_mla,
+            )
+            if seq_lens is None:
+                if is_mla:
+                    raise RuntimeError("Python Context-Parallel requires host query and KV sequence lengths")
+            else:
+                q_seq_lens, kv_seq_lens = seq_lens
+                cp_context = build_cp_context(
+                    q_seq_lens,
+                    kv_seq_lens,
+                    self.cp_size,
+                    self.cp_rank,
+                    self.device,
+                )
+
+        # Admission and context construction must finish before prepare(). A
+        # sharded MLA backend enters CP collectives during prepare, so rejecting
+        # unsupported batches afterwards could leave peer ranks deadlocked.
+        self.attention_backend.prepare(metadata)
 
         with forward_context(
             ForwardContext(
