@@ -120,6 +120,7 @@ struct SequenceParams {
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar;
   bool json_reasoning_enabled = false;
   std::shared_ptr<RequestFailureState> request_failure_state;
+  std::shared_ptr<SpeculativeTokenStats> speculative_token_stats;
 };
 
 class Sequence final {
@@ -215,6 +216,7 @@ class Sequence final {
   // update embeddings to the sequence
   void update_embeddings(const torch::Tensor& embedding);
   void update_mtp_bootstrap_embedding(const torch::Tensor& embedding);
+  void record_speculative_token_stats(const SpeculativeTokenStats& stats);
   torch::Tensor get_mtp_bootstrap_embedding() const {
     return mtp_bootstrap_embedding_;
   }

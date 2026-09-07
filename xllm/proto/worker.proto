@@ -370,9 +370,15 @@ message Token {
   Embeddings embeddings = 6;
 };
 
+message SpeculativeTokenStats {
+  int64 accepted_tokens = 1;
+  int64 proposed_tokens = 2;
+}
+
 message SquenceOutput {
   repeated Token tokens = 1;
   TensorList mm_embeddings = 2;
+  SpeculativeTokenStats speculative_token_stats = 3;
 }
 
 message JsonObjectOutputError {

@@ -46,6 +46,7 @@ void forward_output_to_proto(
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,

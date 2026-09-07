@@ -547,6 +547,8 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
     }
 
     if (output_idx < raw_output.outputs.size()) {
+      seq->record_speculative_token_stats(
+          raw_output.outputs[output_idx].speculative_token_stats);
       const auto& seq_mm_embeddings =
           raw_output.outputs[output_idx].mm_embeddings;
       if (!seq_mm_embeddings.empty()) {
@@ -703,6 +705,11 @@ void Batch::process_sample_output(const SampleOutput& sample_output,
     CHECK(seq != nullptr);
     if (seq->error_status().has_value()) {
       continue;
+    }
+
+    if (output_idx < sample_output.speculative_token_stats.size()) {
+      seq->record_speculative_token_stats(
+          sample_output.speculative_token_stats[output_idx]);
     }
 
     if (!target.from_sample_slot) {

@@ -158,6 +158,8 @@ class WorkerService : public proto::DistributeWorker {
                    ::google::protobuf::Closure* done) override;
 
  private:
+  friend class WorkerServiceTestPeer;
+
   void step(ForwardInput& fwd_input,
             torch::Tensor& next_tokens,
             torch::Tensor& logprobs,
@@ -165,6 +167,7 @@ class WorkerService : public proto::DistributeWorker {
             torch::Tensor& top_logprobs,
             torch::Tensor& embeddings,
             std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+            std::vector<SpeculativeTokenStats>& speculative_token_stats,
             std::vector<torch::Tensor>& dit_images,
             std::vector<std::string>& dit_text_output,
             torch::Tensor& expert_load_data,
@@ -173,7 +176,9 @@ class WorkerService : public proto::DistributeWorker {
             torch::Tensor& out_tokens,
             torch::Tensor& out_logprobs,
             std::vector<JsonObjectOutputError>& json_object_errors);
-  void record_speculative_metrics_from_output(const torch::Tensor& next_tokens);
+  std::vector<SpeculativeTokenStats> record_speculative_metrics_from_output(
+      const torch::Tensor& next_tokens,
+      const std::vector<SpeculativeTokenStats>& output_stats);
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
  private:

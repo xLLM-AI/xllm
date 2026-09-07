@@ -23,6 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,7 @@ void Request::create_sequences_group() {
   sequence_params.json_object_grammar = state_.json_object_grammar;
   sequence_params.json_reasoning_enabled = state_.json_reasoning_enabled;
   sequence_params.request_failure_state = failure_state_;
+  sequence_params.speculative_token_stats = speculative_token_stats_;
   sequences_group_ = std::make_unique<SequencesGroup>(state_.prompt,
                                                       state_.prompt_tokens,
                                                       state_.input_embedding,
@@ -105,6 +107,20 @@ void Request::log_statistic(double total_latency) {
       tpot = (generation_latency * 1000.0) / (gen_tokens - 1);
       gen_speed = gen_tokens / generation_latency;
     }
+    std::string speculative_stats_log;
+    if (speculative_token_stats_->proposed_tokens > 0) {
+      const double acceptance_rate =
+          static_cast<double>(speculative_token_stats_->accepted_tokens) /
+          static_cast<double>(speculative_token_stats_->proposed_tokens);
+      std::ostringstream stream;
+      stream << ", speculative_accepted_tokens: "
+             << speculative_token_stats_->accepted_tokens
+             << ", speculative_proposed_tokens: "
+             << speculative_token_stats_->proposed_tokens << std::fixed
+             << std::setprecision(4)
+             << ", speculative_token_acceptance_rate: " << acceptance_rate;
+      speculative_stats_log = stream.str();
+    }
     LOG(INFO) << "x-request-id: " << x_request_id_ << ", "
               << "x-request-time: " << x_request_time_ << ", "
               << "request_id: " << request_id_ << ", "
@@ -120,7 +136,8 @@ void Request::log_statistic(double total_latency) {
               << std::setprecision(1) << "ttft: " << ttft * 1000 << "ms, "
               << "total_latency: " << total_latency * 1000 << "ms, "
               << "avg tpot: " << tpot << "ms, "
-              << "generation speed: " << gen_speed << " tokens/s";
+              << "generation speed: " << gen_speed << " tokens/s"
+              << speculative_stats_log;
     // only log once when beam search is enabled
     if (check_beam_search()) {
       break;

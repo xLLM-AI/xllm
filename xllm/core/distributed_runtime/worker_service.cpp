@@ -131,30 +131,41 @@ WorkerService::WorkerService(runtime::Options options,
 
 WorkerService::~WorkerService() = default;
 
-void WorkerService::record_speculative_metrics_from_output(
-    const torch::Tensor& next_tokens) {
-  if (!options_.enable_speculative_decode() || !next_tokens.defined() ||
-      next_tokens.dim() != 2 || next_tokens.numel() == 0) {
-    return;
+std::vector<SpeculativeTokenStats>
+WorkerService::record_speculative_metrics_from_output(
+    const torch::Tensor& next_tokens,
+    const std::vector<SpeculativeTokenStats>& output_stats) {
+  if (!options_.enable_speculative_decode()) {
+    return {};
+  }
+  if (!output_stats.empty()) {
+    if (next_tokens.defined() && next_tokens.dim() == 2) {
+      CHECK_EQ(output_stats.size(), static_cast<size_t>(next_tokens.size(0)))
+          << "speculative token stats batch mismatch";
+    }
+  }
+  if (!next_tokens.defined() || next_tokens.dim() != 2 ||
+      next_tokens.numel() == 0) {
+    return output_stats;
   }
   // DFlash / DSpark record metrics inline in their own worker
   // (DFlashWorkerImpl::record_validate_metrics) with precise per-seq widths,
   // so this generic per-tensor count would double-count them.
   if (SpeculativeConfig::is_block_diffusion_algorithm(
           options_.speculative_algorithm())) {
-    return;
+    return output_stats;
   }
 
   const int64_t batch_size = next_tokens.size(0);
   const int64_t token_width = next_tokens.size(1);
   const int64_t num_speculative_tokens = options_.num_speculative_tokens();
   if (num_speculative_tokens <= 0 || token_width < 2) {
-    return;
+    return output_stats;
   }
   // Adaptive pruning may hand back a narrower validate block, so accept any
   // width in [2, N+1] and derive the actual draft count from token_width - 1.
   if (token_width > num_speculative_tokens + 1) {
-    return;
+    return output_stats;
   }
   const int64_t effective_speculative_tokens = token_width - 1;
 
@@ -174,8 +185,12 @@ void WorkerService::record_speculative_metrics_from_output(
         accepted);
   }
   COUNTER_ADD(speculative_num_drafts_total, batch_size);
-  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
+  // Adaptive MTP records these totals inline using the actual per-sequence
+  // proposal widths. Still publish the remaining output metrics below.
+  if (output_stats.empty()) {
+    COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
+    COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
+  }
   COUNTER_ADD(speculative_num_committed_tokens_total, stats.committed_tokens);
   // Derive from the global counters, not per-instance totals, so multi-DP
   // writers converge on one aggregate instead of overwriting the gauge.
@@ -185,6 +200,10 @@ void WorkerService::record_speculative_metrics_from_output(
         speculative_mean_tokens_per_decode_step,
         COUNTER_VALUE(speculative_num_committed_tokens_total) / total_drafts);
   }
+  if (!output_stats.empty()) {
+    return output_stats;
+  }
+  return stats.sequence_stats;
 }
 
 void WorkerService::set_worker(std::unique_ptr<Worker> worker) {
@@ -200,6 +219,7 @@ void WorkerService::step(
     torch::Tensor& top_logprobs,
     torch::Tensor& embeddings,
     std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    std::vector<SpeculativeTokenStats>& speculative_token_stats,
     std::vector<torch::Tensor>& dit_images,
     std::vector<std::string>& dit_text_output,
     torch::Tensor& expert_load_data,
@@ -208,6 +228,7 @@ void WorkerService::step(
     torch::Tensor& out_tokens,
     torch::Tensor& out_logprobs,
     std::vector<JsonObjectOutputError>& json_object_errors) {
+  speculative_token_stats.clear();
   const bool use_default_stream =
       !options_.enable_schedule_overlap() && options_.backend() == "llm";
   if (options_.enable_schedule_overlap()) {
@@ -313,7 +334,8 @@ void WorkerService::step(
         } else {
           stream_->synchronize();
         }
-        record_speculative_metrics_from_output(next_tokens);
+        speculative_token_stats = record_speculative_metrics_from_output(
+            next_tokens, sample_output.speculative_token_stats);
       }
     }
   } else {
@@ -358,6 +380,7 @@ void WorkerService::create_polling_shm_thread(
           torch::Tensor top_logprobs;
           torch::Tensor embeddings;
           std::vector<std::vector<torch::Tensor>> mm_embeddings;
+          std::vector<SpeculativeTokenStats> speculative_token_stats;
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           torch::Tensor expert_load_data;
@@ -376,6 +399,7 @@ void WorkerService::create_polling_shm_thread(
                top_logprobs,
                embeddings,
                mm_embeddings,
+               speculative_token_stats,
                dit_images,
                dit_text_output,
                expert_load_data,
@@ -392,6 +416,7 @@ void WorkerService::create_polling_shm_thread(
                                                    top_logprobs,
                                                    embeddings,
                                                    mm_embeddings,
+                                                   speculative_token_stats,
                                                    dit_images,
                                                    dit_text_output,
                                                    expert_load_data,
@@ -790,6 +815,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
         torch::Tensor top_logprobs;
         torch::Tensor embeddings;
         std::vector<std::vector<torch::Tensor>> mm_embeddings;
+        std::vector<SpeculativeTokenStats> speculative_token_stats;
         std::vector<torch::Tensor> dit_images;
         std::vector<std::string> dit_text_output;
         torch::Tensor expert_load_data;
@@ -807,6 +833,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
              top_logprobs,
              embeddings,
              mm_embeddings,
+             speculative_token_stats,
              dit_images,
              dit_text_output,
              expert_load_data,
@@ -822,6 +849,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 top_logprobs,
                                 embeddings,
                                 mm_embeddings,
+                                speculative_token_stats,
                                 expert_load_data,
                                 prepared_token,
                                 src_seq_idxes,
@@ -862,6 +890,7 @@ void WorkerService::GetLastStepResult(
           torch::Tensor src_seq_idxes;
           torch::Tensor out_tokens;
           torch::Tensor out_logprobs;
+          std::vector<SpeculativeTokenStats> speculative_token_stats;
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           auto copy_output_to_host = [&]() {
@@ -942,7 +971,8 @@ void WorkerService::GetLastStepResult(
                 device_.index());
 #endif
           }
-          record_speculative_metrics_from_output(next_tokens);
+          speculative_token_stats = record_speculative_metrics_from_output(
+              next_tokens, sample_output.speculative_token_stats);
 
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||
@@ -955,6 +985,7 @@ void WorkerService::GetLastStepResult(
                                     top_logprobs,
                                     embeddings,
                                     mm_embeddings,
+                                    speculative_token_stats,
                                     expert_load_data,
                                     prepared_token,
                                     src_seq_idxes,

@@ -2621,6 +2621,8 @@ size_t calculate_raw_sample_output_size(const RawSampleOutput& sample) {
     size += calculate_raw_token_size(token);
   }
   size += get_vector_tensor_size(sample.mm_embeddings);
+  size += type_size<int64_t>;  // accepted speculative tokens
+  size += type_size<int64_t>;  // proposed speculative tokens
   return size;
 }
 
@@ -2678,6 +2680,8 @@ void write_raw_sample_output(char*& buffer, const RawSampleOutput& sample) {
     write_raw_token(buffer, token);
   }
   write_vector_tensor(buffer, sample.mm_embeddings);
+  write_data(buffer, sample.speculative_token_stats.accepted_tokens);
+  write_data(buffer, sample.speculative_token_stats.proposed_tokens);
 }
 
 void read_raw_token(const char*& buffer, RawToken& token) {
@@ -2706,6 +2710,8 @@ void read_raw_sample_output(const char*& buffer, RawSampleOutput& sample) {
     read_raw_token(buffer, token);
   }
   read_vector_tensor(buffer, sample.mm_embeddings);
+  read_data(buffer, sample.speculative_token_stats.accepted_tokens);
+  read_data(buffer, sample.speculative_token_stats.proposed_tokens);
 }
 
 void write_json_object_errors(
@@ -3396,6 +3402,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
@@ -3419,6 +3426,13 @@ bool ForwardSharedMemoryManager::raw_output_write(
                                out_tokens,
                                out_logprobs,
                                output);
+  if (!speculative_token_stats.empty()) {
+    CHECK_EQ(output.outputs.size(), speculative_token_stats.size())
+        << "speculative token stats must match raw output rows.";
+    for (size_t i = 0; i < speculative_token_stats.size(); ++i) {
+      output.outputs[i].speculative_token_stats = speculative_token_stats[i];
+    }
+  }
   output.json_object_errors = json_object_errors;
   uint64_t total_size = sizeof(ControlMetadata);
   total_size += calculate_raw_forward_output_size(output);

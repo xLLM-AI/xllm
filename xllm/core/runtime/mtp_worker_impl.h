@@ -261,7 +261,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                      const SampleOutput& validate_output,
                                      int32_t num_speculative_tokens);
   void record_validate_metrics(
-      const SampleOutput& validate_output,
+      SampleOutput& validate_output,
       int32_t num_speculative_tokens,
       const std::vector<int32_t>* pruned_prefix_lengths = nullptr) const;
   bool adaptive_enabled() const;

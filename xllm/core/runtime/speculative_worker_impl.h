@@ -38,12 +38,21 @@ void scale_speculative_parallel_token_counts(ModelInputParams& params,
 
 struct SpeculativeOutputStats {
   std::vector<int64_t> accepted_per_position;
+  std::vector<SpeculativeTokenStats> sequence_stats;
   int64_t committed_tokens = 0;
 };
 
 SpeculativeOutputStats calculate_speculative_output_stats(
     const torch::Tensor& tokens,
     int64_t num_speculative_tokens);
+
+std::vector<SpeculativeTokenStats> calculate_mtp_speculative_token_stats(
+    const torch::Tensor& tokens,
+    const std::vector<int32_t>& proposed_tokens);
+
+std::vector<SpeculativeTokenStats> calculate_block_speculative_token_stats(
+    const torch::Tensor& tokens,
+    const std::vector<int32_t>& proposed_tokens);
 
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and

@@ -1506,7 +1506,7 @@ void DFlashWorkerImpl::apply_per_seq_varlen_prune(
 }
 
 void DFlashWorkerImpl::record_validate_metrics(
-    const SampleOutput& val_output,
+    SampleOutput& val_output,
     const std::vector<int32_t>& per_seq_val_tokens) const {
   if (!val_output.next_tokens.defined() || val_output.next_tokens.dim() != 2 ||
       val_output.next_tokens.numel() == 0) {
@@ -1528,11 +1528,7 @@ void DFlashWorkerImpl::record_validate_metrics(
         << "per_seq_val_tokens size mismatch with next_tokens batch";
   }
 
-  torch::Tensor next_tokens_cpu =
-      val_output.next_tokens.to(torch::kInt64).contiguous();
-  const int64_t* token_data = next_tokens_cpu.const_data_ptr<int64_t>();
-  int64_t num_draft_tokens = 0;
-  int64_t accepted_count = 0;
+  std::vector<int32_t> proposed_tokens(static_cast<size_t>(batch_size));
   for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
     // seq_width = target-side validate width for this seq (anchor + drafts).
     // Under adaptive per-seq varlen prune it is per_seq_val_tokens[i], else
@@ -1549,21 +1545,16 @@ void DFlashWorkerImpl::record_validate_metrics(
     }
     // Drafts attempted for this seq = seq_width - 1 (bonus column excluded).
     const int32_t prefix_len = seq_width - 1;
-    num_draft_tokens += prefix_len;
-
-    // Count accepted drafts by walking columns [0, prefix_len) — the first
-    // -1 marks the boundary where the sampler rejected. Padding tail past
-    // prefix_len is ignored so it never counts as rejection.
-    const int64_t row_offset =
-        static_cast<int64_t>(seq_id) * static_cast<int64_t>(width);
-    int32_t emitted = 0;
-    for (int32_t token_idx = 0; token_idx < prefix_len; ++token_idx) {
-      if (token_data[row_offset + token_idx] < 0) {
-        break;
-      }
-      ++emitted;
-    }
-    accepted_count += emitted;
+    proposed_tokens[static_cast<size_t>(seq_id)] = prefix_len;
+  }
+  val_output.speculative_token_stats = calculate_block_speculative_token_stats(
+      val_output.next_tokens, proposed_tokens);
+  int64_t num_draft_tokens = 0;
+  int64_t accepted_count = 0;
+  for (const SpeculativeTokenStats& stats :
+       val_output.speculative_token_stats) {
+    num_draft_tokens += stats.proposed_tokens;
+    accepted_count += stats.accepted_tokens;
   }
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total, accepted_count);

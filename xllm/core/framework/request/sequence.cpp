@@ -340,6 +340,17 @@ Sequence::Sequence(const Sequence& other, size_t index)
   host_kv_state_.erase_blocks(BlockType::LINEAR);
 }
 
+void Sequence::record_speculative_token_stats(
+    const SpeculativeTokenStats& stats) {
+  if (sequence_params_.speculative_token_stats == nullptr) {
+    return;
+  }
+  sequence_params_.speculative_token_stats->accepted_tokens +=
+      stats.accepted_tokens;
+  sequence_params_.speculative_token_stats->proposed_tokens +=
+      stats.proposed_tokens;
+}
+
 // The first token will be only used in disagg pd mode.
 void Sequence::record_first_token(const Token& token) {
   if (!::xllm::DisaggPDConfig::get_instance().enable_disagg_pd() ||

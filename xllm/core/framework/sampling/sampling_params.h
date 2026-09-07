@@ -132,6 +132,11 @@ struct SamplingParameters {
   bool use_beam_search = false;
 };
 
+struct SpeculativeTokenStats {
+  int64_t accepted_tokens = 0;
+  int64_t proposed_tokens = 0;
+};
+
 struct SampleOutput {
   // [num_seq, ...] LongTensor
   torch::Tensor next_tokens;
@@ -160,6 +165,7 @@ struct SampleOutput {
   torch::Tensor selected_embeddings;
 
   std::vector<std::vector<torch::Tensor>> mm_embeddings;
+  std::vector<SpeculativeTokenStats> speculative_token_stats;
 };
 
 }  // namespace xllm

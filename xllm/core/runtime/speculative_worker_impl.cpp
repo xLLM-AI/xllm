@@ -91,6 +91,42 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   return estimate_options;
 }
 
+std::vector<SpeculativeTokenStats> calculate_contiguous_speculative_token_stats(
+    const torch::Tensor& tokens,
+    const std::vector<int32_t>& proposed_tokens,
+    int32_t accepted_token_offset) {
+  CHECK(tokens.defined()) << "speculative output tokens are undefined";
+  CHECK_EQ(tokens.dim(), 2) << "speculative output tokens should be 2D";
+  const int64_t batch_size = tokens.size(0);
+  const int64_t token_width = tokens.size(1);
+  CHECK_EQ(proposed_tokens.size(), static_cast<size_t>(batch_size))
+      << "proposed token count batch mismatch";
+
+  torch::Tensor int_tokens = tokens.to(torch::kInt64).contiguous();
+  const int64_t* data = int_tokens.const_data_ptr<int64_t>();
+  std::vector<SpeculativeTokenStats> sequence_stats(
+      static_cast<size_t>(batch_size));
+  for (int64_t row = 0; row < batch_size; ++row) {
+    const int64_t proposed = proposed_tokens[static_cast<size_t>(row)];
+    CHECK_GE(proposed, 0) << "proposed token count should not be negative";
+    CHECK_LE(proposed + accepted_token_offset, token_width)
+        << "proposed token count exceeds output width";
+
+    SpeculativeTokenStats& stats = sequence_stats[static_cast<size_t>(row)];
+    stats.proposed_tokens = proposed;
+    const int64_t* row_ptr = data + row * token_width;
+    for (int64_t column = accepted_token_offset;
+         column < proposed + accepted_token_offset;
+         ++column) {
+      if (row_ptr[column] < 0) {
+        break;
+      }
+      ++stats.accepted_tokens;
+    }
+  }
+  return sequence_stats;
+}
+
 }  // namespace
 
 bool should_run_speculative_decode(const ModelInputParams& params) {
@@ -139,6 +175,20 @@ void scale_speculative_parallel_token_counts(ModelInputParams& params,
       params.expert.eplb_decode_token_mask, multiplier);
 }
 
+std::vector<SpeculativeTokenStats> calculate_mtp_speculative_token_stats(
+    const torch::Tensor& tokens,
+    const std::vector<int32_t>& proposed_tokens) {
+  return calculate_contiguous_speculative_token_stats(
+      tokens, proposed_tokens, /*accepted_token_offset=*/1);
+}
+
+std::vector<SpeculativeTokenStats> calculate_block_speculative_token_stats(
+    const torch::Tensor& tokens,
+    const std::vector<int32_t>& proposed_tokens) {
+  return calculate_contiguous_speculative_token_stats(
+      tokens, proposed_tokens, /*accepted_token_offset=*/0);
+}
+
 SpeculativeOutputStats calculate_speculative_output_stats(
     const torch::Tensor& tokens,
     int64_t num_speculative_tokens) {
@@ -151,8 +201,12 @@ SpeculativeOutputStats calculate_speculative_output_stats(
   SpeculativeOutputStats stats;
   stats.accepted_per_position.resize(
       static_cast<size_t>(num_speculative_tokens));
+  stats.sequence_stats.resize(static_cast<size_t>(batch_size));
   for (int64_t row = 0; row < batch_size; ++row) {
     const int64_t* row_ptr = data + row * token_width;
+    SpeculativeTokenStats& sequence_stats =
+        stats.sequence_stats[static_cast<size_t>(row)];
+    sequence_stats.proposed_tokens = token_width - 1;
     for (int64_t column = 0; column < token_width; ++column) {
       if (row_ptr[column] < 0) {
         continue;
@@ -160,6 +214,7 @@ SpeculativeOutputStats calculate_speculative_output_stats(
       ++stats.committed_tokens;
       if (column > 0) {
         ++stats.accepted_per_position[static_cast<size_t>(column - 1)];
+        ++sequence_stats.accepted_tokens;
       }
     }
   }

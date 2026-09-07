@@ -713,6 +713,7 @@ struct RawSampleOutput {
   std::vector<RawToken> tokens;  // num tokens
   // multimodal embedding output for this sequence
   std::vector<torch::Tensor> mm_embeddings;
+  SpeculativeTokenStats speculative_token_stats;
 };
 
 struct RawForwardOutput {

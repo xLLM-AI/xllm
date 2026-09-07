@@ -195,7 +195,7 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // as full width (static). Caller must ensure val_output.next_tokens is on
   // CPU (avoids a blocking device sync on the hot path).
   void record_validate_metrics(
-      const SampleOutput& val_output,
+      SampleOutput& val_output,
       const std::vector<int32_t>& per_seq_val_tokens) const;
 
   void process_draft_sample_output(SampleOutput& sample_output);

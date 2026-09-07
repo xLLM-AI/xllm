@@ -627,6 +627,49 @@ TEST(BatchTest, ProcessRawOutputStoresMtpBootstrapEmbedding) {
   EXPECT_TRUE(torch::equal(stored, torch::tensor({3.0f, 4.0f})));
 }
 
+TEST(BatchTest, ProcessRawOutputAccumulatesRequestSpeculativeStats) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(8);
+  std::shared_ptr<SpeculativeTokenStats> request_stats =
+      std::make_shared<SpeculativeTokenStats>();
+
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 16;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.speculative_token_stats = request_stats;
+
+  IncrementalDecoder decoder("", 1, false, false);
+  Sequence first(/*index=*/0,
+                 /*prompt_token_ids=*/{10},
+                 torch::Tensor(),
+                 MMData(),
+                 decoder,
+                 seq_params);
+  Sequence second(first, /*index=*/1);
+  first.add_blocks(BlockType::KV, manager.allocate(1));
+  second.add_blocks(BlockType::KV, manager.allocate(1));
+
+  Batch batch({&first, &second});
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+
+  RawForwardOutput raw_output;
+  raw_output.outputs.push_back(make_raw_sample_output(101, std::nullopt));
+  raw_output.outputs.back().speculative_token_stats = {2, 5};
+  raw_output.outputs.push_back(make_raw_sample_output(202, std::nullopt));
+  raw_output.outputs.back().speculative_token_stats = {1, 3};
+  batch.process_sample_output(raw_output, /*replace_fake_token=*/false);
+
+  EXPECT_EQ(request_stats->accepted_tokens, 3);
+  EXPECT_EQ(request_stats->proposed_tokens, 8);
+}
+
 TEST(SequenceTest, JsonObjectCommitAdvancesGrammarOnce) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(4);
@@ -1450,6 +1493,7 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
                           undefined,
                           undefined,
                           /*mm_embeddings=*/{},
+                          /*speculative_token_stats=*/{},
                           undefined,
                           /*prepared_token=*/-1,
                           undefined,
@@ -1820,15 +1864,20 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
 
 TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
   const torch::Tensor undefined;
+  const torch::Tensor next_tokens =
+      torch::tensor({{10, 11, -1}, {20, 21, 22}}, torch::kInt64);
+  const std::vector<SpeculativeTokenStats> speculative_token_stats = {{2, 5},
+                                                                      {5, 5}};
   const std::vector<JsonObjectOutputError> errors = {
       {"req-error#0", "missing prior sampled output row"}};
   proto::ForwardOutput proto_output;
-  forward_output_to_proto(undefined,
+  forward_output_to_proto(next_tokens,
                           undefined,
                           undefined,
                           undefined,
                           undefined,
                           /*mm_embeddings=*/{},
+                          speculative_token_stats,
                           undefined,
                           /*prepared_layer_id=*/-1,
                           undefined,
@@ -1841,6 +1890,12 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
 
   RawForwardOutput round_trip;
   proto_to_forward_output(proto_output, round_trip);
+
+  ASSERT_EQ(round_trip.outputs.size(), 2u);
+  EXPECT_EQ(round_trip.outputs[0].speculative_token_stats.accepted_tokens, 2);
+  EXPECT_EQ(round_trip.outputs[0].speculative_token_stats.proposed_tokens, 5);
+  EXPECT_EQ(round_trip.outputs[1].speculative_token_stats.accepted_tokens, 5);
+  EXPECT_EQ(round_trip.outputs[1].speculative_token_stats.proposed_tokens, 5);
 
   ASSERT_EQ(round_trip.json_object_errors.size(), 1u);
   EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
@@ -1861,15 +1916,20 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
   ForwardSharedMemoryManager reader_manager(
       shm_name, 1 << 20, is_reader_creator, ForwardType::RAW_OUTPUT);
   const torch::Tensor undefined;
+  const torch::Tensor next_tokens =
+      torch::tensor({{30, 31, -1}, {40, 41, 42}}, torch::kInt64);
+  const std::vector<SpeculativeTokenStats> speculative_token_stats = {{1, 3},
+                                                                      {4, 4}};
   const std::vector<JsonObjectOutputError> errors = {
       {"req-error#0", "prior token violates json_object grammar"}};
 
-  ASSERT_TRUE(writer_manager.raw_output_write(undefined,
+  ASSERT_TRUE(writer_manager.raw_output_write(next_tokens,
                                               undefined,
                                               undefined,
                                               undefined,
                                               undefined,
                                               /*mm_embeddings=*/{},
+                                              speculative_token_stats,
                                               /*dit_images=*/{},
                                               /*dit_text_output=*/{},
                                               undefined,
@@ -1881,6 +1941,12 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
 
   RawForwardOutput round_trip;
   reader_manager.raw_output_read(round_trip);
+
+  ASSERT_EQ(round_trip.outputs.size(), 2u);
+  EXPECT_EQ(round_trip.outputs[0].speculative_token_stats.accepted_tokens, 1);
+  EXPECT_EQ(round_trip.outputs[0].speculative_token_stats.proposed_tokens, 3);
+  EXPECT_EQ(round_trip.outputs[1].speculative_token_stats.accepted_tokens, 4);
+  EXPECT_EQ(round_trip.outputs[1].speculative_token_stats.proposed_tokens, 4);
 
   ASSERT_EQ(round_trip.json_object_errors.size(), 1u);
   EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");

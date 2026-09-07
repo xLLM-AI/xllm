@@ -120,6 +120,7 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
       const torch::Tensor& top_logprobs,
       const torch::Tensor& embeddings,
       const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+      const std::vector<SpeculativeTokenStats>& speculative_token_stats,
       const std::vector<torch::Tensor>& dit_images,
       const std::vector<std::string>& dit_text_output,
       const torch::Tensor& expert_load_data,

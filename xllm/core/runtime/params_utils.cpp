@@ -81,6 +81,10 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
     for (const auto& pb_tensor : pb_seq_out.mm_embeddings().tensors()) {
       s.mm_embeddings.emplace_back(util::proto_to_torch(pb_tensor));
     }
+    s.speculative_token_stats.accepted_tokens =
+        pb_seq_out.speculative_token_stats().accepted_tokens();
+    s.speculative_token_stats.proposed_tokens =
+        pb_seq_out.speculative_token_stats().proposed_tokens();
     raw_forward_output.outputs.emplace_back(s);
   }
   proto_to_dit_forward_output(pb_output.dit_forward_output(),
@@ -95,6 +99,7 @@ void forward_output_to_proto(
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
@@ -116,6 +121,9 @@ void forward_output_to_proto(
   if (!mm_embeddings.empty()) {
     num_seqs = std::max(num_seqs, static_cast<int32_t>(mm_embeddings.size()));
   }
+  CHECK(speculative_token_stats.empty() ||
+        speculative_token_stats.size() == static_cast<size_t>(num_seqs))
+      << "speculative token stats must match forward output rows.";
   pb_forward_output->mutable_outputs()->Reserve(num_seqs);
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
     if (next_tokens.defined() && next_tokens.dim() == 2) {
@@ -228,6 +236,15 @@ void forward_output_to_proto(
         }
       }
       *pb_forward_output->mutable_outputs()->Add() = pb_seq_out;
+    }
+    if (!speculative_token_stats.empty()) {
+      const SpeculativeTokenStats& stats =
+          speculative_token_stats[static_cast<size_t>(output_idx)];
+      proto::SpeculativeTokenStats* pb_stats =
+          pb_forward_output->mutable_outputs(output_idx)
+              ->mutable_speculative_token_stats();
+      pb_stats->set_accepted_tokens(stats.accepted_tokens);
+      pb_stats->set_proposed_tokens(stats.proposed_tokens);
     }
   }
 

@@ -170,6 +170,8 @@ class Request : public RequestBase {
   RequestState state_;
   std::shared_ptr<RequestFailureState> failure_state_ =
       std::make_shared<RequestFailureState>();
+  std::shared_ptr<SpeculativeTokenStats> speculative_token_stats_ =
+      std::make_shared<SpeculativeTokenStats>();
   // list of sequences to generate completions for the prompt
   // use deque instead of vector to avoid no-copy move for Sequence
   //  std::deque<Sequence> sequences;
