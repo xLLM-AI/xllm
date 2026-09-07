@@ -353,6 +353,38 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   budget.remaining_seq_budget = std::max(options_.max_seqs_per_batch(), 1);
   budget.latency_budget = options_.max_global_tpot_ms();
   budget.num_preempted_requests = 0;
+  if (::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget() &&
+      options_.dp_size() > 1 && options_.instance_role().has_value() &&
+      options_.instance_role().value() == InstanceRole::PREFILL) {
+    // Fair per-group token budget: each DP group can receive at most
+    // max_tokens_per_batch / dp_size tokens per scheduling round, which also
+    // bounds the DSV4 SWA burst on any single rank to the per-group share.
+    // Anchor the cap to max_tokens_per_batch (not the profile token budget,
+    // which may exceed it) so it matches the KV cache estimation burst.
+    const int64_t dp_size = options_.dp_size();
+    const int64_t max_batch_tokens = options_.max_tokens_per_batch();
+    int64_t per_group_cap = (max_batch_tokens + dp_size - 1) / dp_size;
+    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+      // Floor the share at one prefill chunk so a single long sequence
+      // still advances at full chunk speed even when the budget is below
+      // dp_size * chunk.
+      per_group_cap = std::max(
+          per_group_cap,
+          std::min<int64_t>(options_.max_tokens_per_chunk_for_prefill(),
+                            max_batch_tokens));
+    } else {
+      // Non-chunked prefill computes a whole sequence in one round; a share
+      // below the sequence length could never accumulate, so fall back to
+      // the full budget (fair sharing requires chunked prefill).
+      per_group_cap = max_batch_tokens;
+    }
+    per_group_cap =
+        std::min(std::max<int64_t>(1, per_group_cap),
+                 static_cast<int64_t>(budget.remaining_token_budget));
+    budget.dp_group_token_caps.assign(static_cast<size_t>(dp_size),
+                                      static_cast<size_t>(per_group_cap));
+    budget.dp_group_token_used.assign(static_cast<size_t>(dp_size), 0);
+  }
 
   // Strategy-driven scheduling
   policy_->schedule(state, budget, finished);

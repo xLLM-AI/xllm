@@ -122,8 +122,28 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
     Sequence* sequence = state.running_sequences[i];
     size_t& token_budget = state.running_sequences_budgets[i];
 
+    // Fair per-group budget: when the group's cap is exhausted even after
+    // returning this sequence's tokens, keep its current allocation and skip
+    // redistribution for it (other groups may still have room).
+    if (!budget.dp_group_token_caps.empty()) {
+      const int32_t dp_rank = sequence->dp_rank();
+      CHECK(dp_rank >= 0 &&
+            dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+          << "seq dp_rank=" << dp_rank << " out of range [0,"
+          << budget.dp_group_token_caps.size() << ")";
+      const size_t group_room_after_return =
+          budget.dp_group_token_caps[dp_rank] -
+          budget.dp_group_token_used[dp_rank] + token_budget;
+      if (group_room_after_return == 0) {
+        continue;
+      }
+    }
+
     // Return previously allocated tokens to the pool.
     budget.remaining_token_budget += token_budget;
+    if (!budget.dp_group_token_used.empty()) {
+      budget.dp_group_token_used[sequence->dp_rank()] -= token_budget;
+    }
 
     if (options_.enable_latency_aware_schedule()) {
       double origin_latency =
@@ -140,9 +160,20 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
       budget.estimate_latency += cur_latency;
     }
 
+    size_t alloc_budget = budget.remaining_token_budget;
+    if (!budget.dp_group_token_caps.empty()) {
+      const int32_t dp_rank = sequence->dp_rank();
+      CHECK(dp_rank >= 0 &&
+            dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+          << "seq dp_rank=" << dp_rank << " out of range [0,"
+          << budget.dp_group_token_caps.size() << ")";
+      alloc_budget = std::min(alloc_budget,
+                              budget.dp_group_token_caps[dp_rank] -
+                                  budget.dp_group_token_used[dp_rank]);
+    }
     size_t actual_tokens = 0;
     if (!allocate_for_prefill(sequence,
-                              budget.remaining_token_budget,
+                              alloc_budget,
                               &actual_tokens,
                               state,
                               /*skip_shared=*/true)) {
@@ -152,6 +183,9 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
     token_budget = actual_tokens;
     CHECK(budget.remaining_token_budget >= actual_tokens);
     budget.remaining_token_budget -= actual_tokens;
+    if (!budget.dp_group_token_used.empty()) {
+      budget.dp_group_token_used[sequence->dp_rank()] += actual_tokens;
+    }
 
     if (budget.remaining_token_budget == 0) {
       break;

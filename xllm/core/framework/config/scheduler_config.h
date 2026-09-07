@@ -55,7 +55,8 @@ class SchedulerConfig final {
          "enable_online_preempt_offline",
          "aggressive_coeff",
          "starve_threshold",
-         "enable_starve_prevent"}};
+         "enable_starve_prevent",
+         "enable_dp_fair_token_budget"}};
     return kOptionCategory;
   }
 
@@ -88,6 +89,13 @@ class SchedulerConfig final {
   PROPERTY(double, starve_threshold) = 1.0;
 
   PROPERTY(bool, enable_starve_prevent) = true;
+
+  // Fair per-DP-group token budget for prefill scheduling on disagg PD
+  // PREFILL instances. Each DP group can receive at most
+  // max_tokens_per_batch / dp_size tokens per scheduling round (floored at
+  // one prefill chunk), which also bounds the DSV4 SWA burst on any single
+  // rank to the per-group share.
+  PROPERTY(bool, enable_dp_fair_token_budget) = true;
 };
 
 }  // namespace xllm

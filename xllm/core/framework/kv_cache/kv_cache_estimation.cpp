@@ -349,9 +349,28 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       get_swa_blocks_per_seq(model_args.window_size(), block_size);
   const int64_t max_seqs =
       std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
-  const int64_t burst_blocks = util::ceil_div(
-      std::max(options.max_tokens_per_batch, static_cast<int64_t>(0)),
-      block_size);
+  int64_t burst_budget =
+      std::max(options.max_tokens_per_batch, static_cast<int64_t>(0));
+  if (options.enable_dp_fair_token_budget && options.dp_size > 1 &&
+      options.instance_role == InstanceRole::PREFILL) {
+    // The scheduler caps each DP group at max_tokens_per_batch / dp_size
+    // tokens per scheduling round, floored at one prefill chunk, so the
+    // prefill burst landing on any single rank is bounded by the same
+    // expression. Keep this identical to the scheduler-side cap or the ring
+    // under-reserves.
+    int64_t per_group_cap =
+        (burst_budget + options.dp_size - 1) / options.dp_size;
+    if (options.enable_chunked_prefill) {
+      per_group_cap =
+          std::max(per_group_cap,
+                   std::min<int64_t>(options.max_tokens_per_chunk_for_prefill,
+                                     burst_budget));
+    } else {
+      per_group_cap = burst_budget;
+    }
+    burst_budget = per_group_cap;
+  }
+  const int64_t burst_blocks = util::ceil_div(burst_budget, block_size);
   cache_cost.swa_count =
       swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
 
