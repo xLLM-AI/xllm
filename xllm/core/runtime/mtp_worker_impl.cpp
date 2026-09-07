@@ -436,7 +436,7 @@ void set_positions_tensor(ForwardInput& input,
   input.device_tensors_ready = true;
 }
 
-runtime::Options MTPTargetOptions(const runtime::Options& options) {
+runtime::Options mtp_target_options(const runtime::Options& options) {
   auto opts = options;
   opts.enable_schedule_overlap(false)
       .is_draft_engine(false)
@@ -454,8 +454,8 @@ runtime::Options mtp_draft_options(const runtime::Options& options) {
   return draft_options;
 }
 
-ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
-                                  const runtime::Options& options) {
+ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
+                                     const runtime::Options& options) {
   if (!options.enable_mtp_draft_body_tp1()) {
     return parallel_args;
   }
@@ -770,7 +770,7 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
     : MTPWorkerImpl(parallel_args,
                     device,
                     options,
-                    MTPTargetOptions(options),
+                    mtp_target_options(options),
                     mtp_draft_options(options),
                     worker_type,
                     /*enable_adaptive_speculative_decode=*/true) {}
@@ -788,7 +788,7 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                             target_options,
                             worker_type) {
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
-      MTPDraftParallelArgs(parallel_args, options),
+      mtp_draft_parallel_args(parallel_args, options),
       device,
       mtp_draft_options(draft_options));
   if (enable_adaptive_speculative_decode) {
@@ -883,7 +883,7 @@ std::tuple<int64_t, int64_t> MTPWorkerImpl::estimate_kv_cache_capacity() {
   CHECK(impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
   return estimate_kv_cache_capacity_with_draft(
-      *draft_impl_, MTPTargetOptions(options_), mtp_draft_options(options_));
+      *draft_impl_, mtp_target_options(options_), mtp_draft_options(options_));
 }
 
 int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
