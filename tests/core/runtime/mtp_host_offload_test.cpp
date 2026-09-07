@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/mtp_worker_impl.h"
 #include "core/runtime/options.h"
+#include "core/runtime/speculative_worker_impl.h"
 #include "core/util/slice.h"
 
 namespace xllm {
@@ -344,6 +345,26 @@ class MTPHostOffloadTest : public ::testing::Test {
     }
   }
 };
+
+TEST(SpeculativeDraftKVCacheShapeTest, ReusesGroupedTargetPoolCounts) {
+  ModelArgs target_model_args =
+      make_model_args("deepseek_v4", /*layer_count=*/3, /*head_dim=*/8);
+  target_model_args.compress_ratios({1, 4, 128});
+  ModelArgs draft_model_args =
+      make_model_args("deepseek_v4_mtp", /*layer_count=*/3, /*head_dim=*/8);
+  draft_model_args.compress_ratios({1, 4, 128});
+
+  KVCacheCapacity target_capacity;
+  target_capacity.block_size(kBlockSize).swa_count(2).c4_count(3).c128_count(5);
+  const KVCacheShape target_shape(
+      target_capacity, target_model_args, /*world_size=*/8);
+
+  const KVCacheShape draft_shape = build_speculative_draft_kv_cache_shape(
+      target_shape, draft_model_args, kBlockSize, /*draft_world_size=*/1);
+
+  EXPECT_TRUE(draft_shape.has_grouped_cache_layout());
+  EXPECT_EQ(draft_shape.key_cache_shape(), (std::vector<int64_t>{2, 3, 5}));
+}
 
 TEST_F(MTPHostOffloadTest, VectorTransferWithoutHierarchyIsNoop) {
   constexpr uint64_t kBatchId = 42;

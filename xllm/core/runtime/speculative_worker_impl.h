@@ -33,6 +33,13 @@ class LLMWorkerImpl;
 
 int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args);
 
+// Builds draft cache geometry while preserving grouped target pool capacities.
+KVCacheShape build_speculative_draft_kv_cache_shape(
+    const KVCacheShape& target_kv_cache_shape,
+    const ModelArgs& draft_model_args,
+    int64_t block_size,
+    int64_t draft_world_size);
+
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.
 bool should_run_speculative_decode(const ModelInputParams& params);
@@ -199,14 +206,15 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_hierarchy_kv_cache_transfers();
   void finalize_hierarchy_kv_cache_transfers();
 
-  // Draft KV cache geometry hook: build from the draft's own ModelArgs by
-  // default, sharing the target's shape only when there is no draft.
+  // Draft KV cache geometry hook: reuse grouped target pool counts, otherwise
+  // build from the draft's own ModelArgs. Without a draft, share the target.
   virtual KVCacheShape draft_kv_cache_shape(
       const KVCacheShape& target_kv_cache_shape) const;
 
-  // Draft KV shape from the draft's own ModelArgs (heads/dims), borrowing only
-  // the target's block count so it never inherits an MLA target's compressed
-  // [1, kv_lora_rank] slot shape. draft_world_size <= 0 -> draft's DP-local TP.
+  // Reuse grouped target pool counts; otherwise build from the draft's own
+  // ModelArgs (heads/dims), borrowing only the target's block count so it never
+  // inherits an MLA target's compressed [1, kv_lora_rank] slot shape.
+  // draft_world_size <= 0 -> draft's DP-local TP.
   KVCacheShape build_draft_kv_cache_shape(
       const KVCacheShape& target_kv_cache_shape,
       int64_t draft_world_size = -1) const;
