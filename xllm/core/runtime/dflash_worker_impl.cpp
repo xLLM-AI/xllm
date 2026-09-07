@@ -45,9 +45,12 @@ limitations under the License.
 #endif
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
+#include "core/platform/platform.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/json_reader.h"
+#include "util/model_config_utils.h"
 #include "util/timer.h"
+#include "util/utils.h"
 
 namespace xllm {
 namespace {
@@ -358,14 +361,16 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                             options,
                             target_options(options),
                             WorkerType::LLM) {
-  // DFlash feeds the target's captured intermediate-layer aux hidden states
-  // into the draft's context K/V. Under context parallelism the worker only
-  // exposes the lm_head-gathered final hidden (see llm_worker_impl.cpp), not
-  // the aux hidden, so the draft would silently receive the wrong tensor.
-  // Reject cp_size > 1 until aux-hidden plumbing under CP is implemented.
-  CHECK_LE(parallel_args.cp_size(), 1)
-      << "Block-diffusion speculative decoding does not support context "
-         "parallelism (cp_size > 1).";
+  bool allow_cp = false;
+  if (parallel_args.cp_size() > 1 && Platform::is_npu()) {
+    allow_cp = util::is_deepseek_v4_model_type(
+        util::get_model_type(options.model_path(), options.backend()));
+  }
+  if (!allow_cp) {
+    CHECK_LE(parallel_args.cp_size(), 1)
+        << "Block-diffusion speculative decoding does not support context "
+           "parallelism (cp_size > 1).";
+  }
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       parallel_args, device, draft_options(options));
   speculative_position_labels_.reserve(
@@ -432,8 +437,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     const bool uses_own_head_and_embedding =
         util::is_deepseek_v4_dspark_model_type(draft_args.model_type());
     if (uses_own_head_and_embedding) {
-      CHECK_EQ(parallel_args_.cp_size(), 1)
-          << "DeepSeek-V4 DSpark does not support context parallelism yet.";
       LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
                 << draft_args.dspark_block_size();
       LOG(INFO) << "Configured DeepSeek-V4 DSpark SAS mode: "
