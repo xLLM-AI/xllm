@@ -466,11 +466,13 @@ class TestDecodeCudaGraphDataParallelKeys:
         return runner
 
     @staticmethod
-    def _metadata(token_counts: list[int]) -> SimpleNamespace:
+    def _metadata(
+        token_counts: list[int] | tuple[int, ...] = (),
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             is_prefill=False,
             is_chunked_prefill=False,
-            dp_token_counts=token_counts,
+            dp_execution_token_counts=tuple(1 if count == 0 else count for count in token_counts),
         )
 
     def test_graph_key_uses_global_max_data_parallel_bucket(self):
@@ -498,7 +500,7 @@ class TestDecodeCudaGraphDataParallelKeys:
         assert first == (4, (4,))
         assert second == first
 
-    def test_graph_key_accepts_empty_data_parallel_rank(self):
+    def test_graph_key_accepts_dummy_execution_row_for_empty_data_parallel_rank(self):
         runner = self._runner(dp_rank=1)
         input_ids = torch.zeros(1, dtype=torch.int32)
 
@@ -647,7 +649,9 @@ class TestDecodeAclGraphSpeculativeMetadata:
             decode_batch_size_limit=16,
             num_decoding_tokens=4,
         )
-        metadata = SimpleNamespace(dp_token_counts=(32, 64))
+        metadata = SimpleNamespace(
+            dp_execution_token_counts=(32, 64),
+        )
 
         assert runner._decode_batch_sizes(
             torch.zeros(32, dtype=torch.int32),
@@ -667,7 +671,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
         metadata = SimpleNamespace(
             is_prefill=False,
             is_chunked_prefill=False,
-            dp_token_counts=(),
+            dp_execution_token_counts=(),
         )
 
         with patch.object(

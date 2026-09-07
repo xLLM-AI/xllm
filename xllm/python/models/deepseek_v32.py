@@ -1400,21 +1400,26 @@ class DeepseekV3MoE(nn.Module):
         use_compact_gather: bool = False
         if self.dp_size > 1:
             ctx = get_forward_context()
-            token_counts = list(ctx.metadata.dp_token_counts)
+            execution_token_counts = list(ctx.metadata.dp_execution_token_counts)
             local_tokens = hidden.shape[0]
             is_graph = ctx.execution_state is not None
             is_prefill = ctx.metadata.is_prefill or ctx.metadata.is_chunked_prefill
             dp_is_decode = getattr(ctx.metadata, "dp_is_decode", None)
             all_decode = dp_is_decode is not None and all(dp_is_decode)
             if is_graph or is_prefill or not all_decode:
-                padded_tokens = max(token_counts)
+                padded_tokens = max(execution_token_counts)
                 pad_size = padded_tokens - local_tokens
                 if pad_size > 0:
                     hidden = torch.nn.functional.pad(hidden, (0, 0, 0, pad_size))
                 hidden = distributed.all_gather(hidden, dim=0, world_size=self.dp_size, group_name="dp")
             else:
                 use_compact_gather = True
-                hidden = distributed.all_gather_variable(hidden, token_counts, self.dp_rank, "dp")
+                hidden = distributed.all_gather_variable(
+                    hidden,
+                    execution_token_counts,
+                    self.dp_rank,
+                    "dp",
+                )
 
         if self._fine_overlap_enabled:
             final = self._forward_fine_grained_parallel(hidden)
@@ -1426,7 +1431,7 @@ class DeepseekV3MoE(nn.Module):
             final = self._combine_expert_outputs(routed, shared)
 
         if use_compact_gather:
-            offset = sum(token_counts[: self.dp_rank])
+            offset = sum(execution_token_counts[: self.dp_rank])
             final = final.narrow(0, offset, local_tokens)
         elif padded_tokens > 0:
             start = self.dp_rank * padded_tokens

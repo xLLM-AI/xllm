@@ -24,6 +24,7 @@ from xllm.python.distributed.collectives import (
     cp_rank,
     cp_world_size,
     dcp_group,
+    gather_dp_execution_tokens,
     init_process_group,
     init_tp_group,
     layerwise_rank,
@@ -50,4 +51,5 @@ __all__ = [
     "all_reduce_",
     "all_gather",
     "all_gather_variable",
+    "gather_dp_execution_tokens",
 ]

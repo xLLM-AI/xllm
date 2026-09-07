@@ -17,6 +17,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -97,3 +98,86 @@ def test_linear_state_indices_use_stable_graph_buffer() -> None:
 
     assert static_indices.data_ptr() == data_ptr
     assert static_indices.tolist() == [4, 8, 12, 16, 0, 0, 0, 0]
+
+
+def _dp_metadata(
+    token_counts: tuple[int, int],
+    dp_is_decode: tuple[int, int] = (1, 1),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        is_prefill=False,
+        is_chunked_prefill=False,
+        dp_execution_token_counts=tuple(1 if count == 0 else count for count in token_counts),
+        dp_is_decode=dp_is_decode,
+    )
+
+
+def test_dp_empty_rank_uses_group_wide_acl_graph_bucket() -> None:
+    attention_backend = SimpleNamespace(page_size=4, is_mla=False)
+    runner = DecodeAclGraphRunner(
+        nn.Identity(),
+        attention_backend,
+        torch.device("cpu"),
+        max_batch=16,
+        max_model_len=8,
+        dp_size=2,
+        dp_rank=1,
+    )
+
+    with patch.object(
+        runner,
+        "_has_compatible_decode_metadata",
+        return_value=True,
+    ):
+        assert runner.can_execute(
+            torch.zeros(1, dtype=torch.int32),
+            _dp_metadata((5, 0)),
+        )
+
+
+def test_dp_mixed_step_does_not_enter_acl_decode_graph() -> None:
+    attention_backend = SimpleNamespace(page_size=4, is_mla=False)
+    runner = DecodeAclGraphRunner(
+        nn.Identity(),
+        attention_backend,
+        torch.device("cpu"),
+        max_batch=16,
+        max_model_len=8,
+        dp_size=2,
+        dp_rank=0,
+    )
+
+    with patch.object(
+        runner,
+        "_has_compatible_decode_metadata",
+        return_value=True,
+    ):
+        assert not runner.can_execute(
+            torch.zeros(3, dtype=torch.int32),
+            _dp_metadata((3, 2), dp_is_decode=(0, 1)),
+        )
+
+
+def test_dp_acl_graph_requires_group_wide_token_counts() -> None:
+    attention_backend = SimpleNamespace(page_size=4, is_mla=False)
+    runner = DecodeAclGraphRunner(
+        nn.Identity(),
+        attention_backend,
+        torch.device("cpu"),
+        max_batch=16,
+        max_model_len=8,
+        dp_size=2,
+        dp_rank=0,
+    )
+    metadata = _dp_metadata((3, 2))
+    metadata.dp_execution_token_counts = (3,)
+
+    with (
+        patch.object(
+            runner,
+            "_has_compatible_decode_metadata",
+            return_value=True,
+        ),
+        pytest.raises(RuntimeError, match="valid dp_execution_token_counts"),
+    ):
+        runner.can_execute(torch.zeros(3, dtype=torch.int32), metadata)

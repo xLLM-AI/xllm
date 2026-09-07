@@ -66,7 +66,7 @@ class _StaticAttentionMetadata:
     is_chunked_prefill: bool = False
     linear_state_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
-    dp_token_counts: tuple[int, ...] = ()
+    dp_execution_token_counts: tuple[int, ...] = ()
     dp_is_decode: tuple[int, ...] = ()
 
 
@@ -144,7 +144,7 @@ class DecodeCudaGraphRunner(BaseRunner):
                 paged_kv_last_page_len=torch.ones(batch_size, dtype=torch.int32, device=device),
                 kv_seq_lens_host=torch.arange(batch_size + 1, dtype=torch.int32, device="cpu"),
                 kv_cu_seq_lens=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
-                dp_token_counts=(batch_size,) * self.dp_size,
+                dp_execution_token_counts=(batch_size,) * self.dp_size,
                 dp_is_decode=(1,) * self.dp_size,
             )
             input_ids = torch.zeros(batch_size, dtype=torch.int32, device=device)
@@ -226,23 +226,25 @@ class DecodeCudaGraphRunner(BaseRunner):
                 return None
             return padded_batch_size, (padded_batch_size,)
 
-        dp_token_counts = tuple(int(count) for count in metadata.dp_token_counts)
-        if len(dp_token_counts) != self.dp_size:
+        execution_counts = tuple(metadata.dp_execution_token_counts)
+        if len(execution_counts) != self.dp_size:
             raise RuntimeError(
-                f"DP decode step requires valid dp_token_counts (got length {len(dp_token_counts)}, "
+                "DP decode step requires valid dp_execution_token_counts "
+                f"(got length {len(execution_counts)}, "
                 f"expected {self.dp_size}). All DP ranks must use the same graph shape."
             )
+        if any(count <= 0 for count in execution_counts):
+            raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
         dp_is_decode = getattr(metadata, "dp_is_decode", None)
         if dp_is_decode is not None and not all(dp_is_decode):
             return None
-        if any(count < 0 for count in dp_token_counts):
-            raise RuntimeError(f"DP dp_token_counts contains negative value: {dp_token_counts}")
-        if dp_token_counts[self.dp_rank] > input_ids.shape[0]:
+        if execution_counts[self.dp_rank] != input_ids.shape[0]:
             raise RuntimeError(
-                f"dp_token_counts[{self.dp_rank}]={dp_token_counts[self.dp_rank]} exceeds "
-                f"local input_ids size {input_ids.shape[0]}"
+                "DP execution token count does not match the local input: "
+                f"rank={self.dp_rank}, rows={input_ids.shape[0]}, "
+                f"counts={execution_counts}"
             )
-        global_batch_size = max(max(dp_token_counts, default=0), input_ids.shape[0])
+        global_batch_size = max(execution_counts)
         padded_batch_size = _decode_bucket(global_batch_size)
         if padded_batch_size > max_graph_batch:
             return None
@@ -254,7 +256,7 @@ class DecodeCudaGraphRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
-        dp_token_counts: tuple[int, ...],
+        dp_execution_token_counts: tuple[int, ...],
     ) -> _DecodeGraphEntry:
         device = input_ids.device
         if self._paged_kv_indices_buffer is None:
@@ -295,7 +297,7 @@ class DecodeCudaGraphRunner(BaseRunner):
                 device=device,
             ),
             linear_state_indices=torch.zeros(padded_batch_size, dtype=torch.int32, device=device),
-            dp_token_counts=dp_token_counts,
+            dp_execution_token_counts=dp_execution_token_counts,
             dp_is_decode=(1,) * self.dp_size if self.dp_size > 1 else (),
             paged_kv_indptr_host=torch.zeros(padded_batch_size + 1, dtype=torch.int32, device="cpu"),
             paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
