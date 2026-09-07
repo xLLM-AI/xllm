@@ -74,6 +74,7 @@ kernels.grouped_moe_bf16 = MagicMock()
 kernels.prepare_row_parallel_weight = MagicMock(side_effect=lambda weight: (weight, False))
 distributed.all_gather_variable = MagicMock()
 distributed.all_gather = MagicMock()
+distributed.gather_dp_execution_tokens = MagicMock()
 distributed.all_reduce_ = MagicMock()
 distributed.tp_all_reduce = MagicMock()
 distributed.moe_tp_all_reduce = MagicMock()
@@ -544,22 +545,22 @@ def test_npu_moe_graph_dp_gather_uses_fixed_shape(monkeypatch) -> None:
         torch.bfloat16,
         torch.device("cpu"),
     )
-    gathered = torch.zeros(6, cfg.hidden_size)
+    gathered = torch.zeros(8, cfg.hidden_size)
     grouped_output = torch.arange(
-        6 * cfg.hidden_size,
+        8 * cfg.hidden_size,
         dtype=torch.float32,
-    ).view(6, cfg.hidden_size)
-    block.experts.gate = _ConstantModule(torch.zeros(6, cfg.num_experts, dtype=torch.float32))
-    distributed.all_gather.reset_mock()
-    distributed.all_gather.return_value = gathered
+    ).view(8, cfg.hidden_size)
+    block.experts.gate = _ConstantModule(torch.zeros(8, cfg.num_experts, dtype=torch.float32))
+    distributed.gather_dp_execution_tokens.reset_mock()
+    distributed.gather_dp_execution_tokens.return_value = gathered, 0
     monkeypatch.setattr(
         kernels,
         "moe_fused_topk",
         MagicMock(
             return_value=(
-                torch.ones(6, cfg.num_experts_per_tok),
+                torch.ones(8, cfg.num_experts_per_tok),
                 torch.zeros(
-                    6,
+                    8,
                     cfg.num_experts_per_tok,
                     dtype=torch.int32,
                 ),
@@ -573,7 +574,7 @@ def test_npu_moe_graph_dp_gather_uses_fixed_shape(monkeypatch) -> None:
         raising=False,
     )
     metadata = SimpleNamespace(
-        dp_token_counts=(2, 3),
+        dp_execution_token_counts=(4, 4),
         dp_is_decode=(1, 1),
         is_prefill=False,
         is_chunked_prefill=False,
@@ -587,15 +588,237 @@ def test_npu_moe_graph_dp_gather_uses_fixed_shape(monkeypatch) -> None:
     )
 
     with forward_context(context):
-        output = block.experts(torch.zeros(2, cfg.hidden_size))
+        local_input = torch.zeros(4, cfg.hidden_size)
+        output = block.experts(local_input)
+
+    assert output.shape == (4, cfg.hidden_size)
+    torch.testing.assert_close(output, grouped_output[:4])
+    distributed.gather_dp_execution_tokens.assert_called_once_with(
+        local_input,
+        (4, 4),
+        0,
+    )
+
+
+def test_npu_moe_uses_uneven_execution_counts(monkeypatch) -> None:
+    cfg = _config(
+        tp_size=1,
+        dp_size=2,
+        dp_rank=1,
+        world_size=2,
+        moe_tp_size=2,
+        ep_size=1,
+    )
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    gathered = torch.zeros(7, cfg.hidden_size)
+    grouped_output = torch.arange(
+        7 * cfg.hidden_size,
+        dtype=torch.float32,
+    ).view(7, cfg.hidden_size)
+    block.experts.gate = _ConstantModule(torch.zeros(7, cfg.num_experts, dtype=torch.float32))
+    distributed.gather_dp_execution_tokens.reset_mock()
+    distributed.gather_dp_execution_tokens.return_value = gathered, 3
+    monkeypatch.setattr(
+        kernels,
+        "moe_fused_topk",
+        MagicMock(
+            return_value=(
+                torch.ones(7, cfg.num_experts_per_tok),
+                torch.zeros(
+                    7,
+                    cfg.num_experts_per_tok,
+                    dtype=torch.int32,
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        kernels,
+        "grouped_moe_bf16",
+        MagicMock(return_value=grouped_output),
+        raising=False,
+    )
+    metadata = SimpleNamespace(
+        dp_execution_token_counts=(3, 4),
+        dp_is_decode=(1, 1),
+        is_prefill=False,
+        is_chunked_prefill=False,
+    )
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=metadata,
+        layer_caches=[],
+    )
+
+    with forward_context(context):
+        local_input = torch.zeros(4, cfg.hidden_size)
+        output = block.experts(local_input)
+
+    torch.testing.assert_close(output, grouped_output[3:7])
+    distributed.gather_dp_execution_tokens.assert_called_once_with(
+        local_input,
+        (3, 4),
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dp_rank", "token_counts", "expected_start"),
+    (
+        (1, (3, 0), 3),
+        (0, (0, 5), 0),
+    ),
+)
+def test_npu_moe_empty_dp_rank_uses_execution_counts(
+    monkeypatch,
+    dp_rank: int,
+    token_counts: tuple[int, int],
+    expected_start: int,
+) -> None:
+    cfg = _config(
+        tp_size=1,
+        dp_size=2,
+        dp_rank=dp_rank,
+        world_size=2,
+        moe_tp_size=2,
+        ep_size=1,
+    )
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    execution_counts = tuple(max(count, 1) for count in token_counts)
+    gathered_rows = sum(execution_counts)
+    gathered = torch.zeros(gathered_rows, cfg.hidden_size)
+    grouped_output = torch.arange(
+        gathered_rows * cfg.hidden_size,
+        dtype=torch.float32,
+    ).view(gathered_rows, cfg.hidden_size)
+    block.experts.gate = _ConstantModule(
+        torch.zeros(
+            gathered_rows,
+            cfg.num_experts,
+            dtype=torch.float32,
+        )
+    )
+    distributed.gather_dp_execution_tokens.reset_mock()
+    distributed.gather_dp_execution_tokens.return_value = gathered, expected_start
+    monkeypatch.setattr(
+        kernels,
+        "moe_fused_topk",
+        MagicMock(
+            return_value=(
+                torch.ones(
+                    gathered_rows,
+                    cfg.num_experts_per_tok,
+                ),
+                torch.zeros(
+                    gathered_rows,
+                    cfg.num_experts_per_tok,
+                    dtype=torch.int32,
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        kernels,
+        "grouped_moe_bf16",
+        MagicMock(return_value=grouped_output),
+        raising=False,
+    )
+    metadata = SimpleNamespace(
+        dp_execution_token_counts=execution_counts,
+        dp_is_decode=(1, 1),
+        is_prefill=False,
+        is_chunked_prefill=False,
+    )
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=metadata,
+        layer_caches=[],
+    )
+
+    local_input = torch.zeros(execution_counts[dp_rank], cfg.hidden_size)
+    with forward_context(context):
+        output = block.experts(local_input)
+
+    assert output.shape == (execution_counts[dp_rank], cfg.hidden_size)
+    torch.testing.assert_close(
+        output,
+        grouped_output[expected_start : expected_start + execution_counts[dp_rank]],
+    )
+    distributed.gather_dp_execution_tokens.assert_called_once_with(
+        local_input,
+        execution_counts,
+        dp_rank,
+    )
+
+
+def test_npu_moe_does_not_branch_on_dp_execution_phase(monkeypatch) -> None:
+    cfg = _config(
+        tp_size=1,
+        dp_size=2,
+        world_size=2,
+        moe_tp_size=2,
+        ep_size=1,
+    )
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    gathered = torch.zeros(5, cfg.hidden_size)
+    grouped_output = torch.zeros(5, cfg.hidden_size)
+    block.experts.gate = _ConstantModule(torch.zeros(5, cfg.num_experts, dtype=torch.float32))
+    distributed.gather_dp_execution_tokens.reset_mock()
+    distributed.gather_dp_execution_tokens.return_value = gathered, 0
+    monkeypatch.setattr(
+        kernels,
+        "moe_fused_topk",
+        MagicMock(
+            return_value=(
+                torch.ones(5, cfg.num_experts_per_tok),
+                torch.zeros(
+                    5,
+                    cfg.num_experts_per_tok,
+                    dtype=torch.int32,
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        kernels,
+        "grouped_moe_bf16",
+        MagicMock(return_value=grouped_output),
+        raising=False,
+    )
+    metadata = SimpleNamespace(
+        dp_execution_token_counts=(2, 3),
+        dp_is_decode=(0, 1),
+        is_prefill=True,
+        is_chunked_prefill=False,
+    )
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=metadata,
+        layer_caches=[],
+    )
+
+    with forward_context(context):
+        local_input = torch.zeros(2, cfg.hidden_size)
+        output = block.experts(local_input)
 
     assert output.shape == (2, cfg.hidden_size)
-    torch.testing.assert_close(output, grouped_output[:2])
-    gathered_input = distributed.all_gather.call_args.args[0]
-    assert gathered_input.shape == (3, cfg.hidden_size)
-    distributed.all_gather.assert_called_once_with(
-        gathered_input,
-        dim=0,
-        world_size=2,
-        group_name="dp",
+    distributed.gather_dp_execution_tokens.assert_called_once_with(
+        local_input,
+        (2, 3),
+        0,
     )

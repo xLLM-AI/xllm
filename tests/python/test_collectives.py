@@ -268,6 +268,69 @@ def test_dcp_group_is_strided_like_kv_split_rank(monkeypatch):
     ]
 
 
+def test_dp_execution_gather_uses_fixed_collective_for_equal_counts(monkeypatch):
+    value = torch.zeros(4, 8)
+    gathered = torch.zeros(8, 8)
+    fixed_gather = MagicMock(return_value=gathered)
+    variable_gather = MagicMock()
+    monkeypatch.setattr(collectives, "all_gather", fixed_gather)
+    monkeypatch.setattr(collectives, "all_gather_variable", variable_gather)
+
+    output, offset = collectives.gather_dp_execution_tokens(
+        value,
+        (4, 4),
+        rank=1,
+    )
+
+    assert output is gathered
+    assert offset == 4
+    fixed_gather.assert_called_once_with(
+        value,
+        dim=0,
+        world_size=2,
+        group_name="dp",
+    )
+    variable_gather.assert_not_called()
+
+
+def test_dp_execution_gather_uses_variable_collective_for_uneven_counts(monkeypatch):
+    value = torch.zeros(1, 8)
+    gathered = torch.zeros(4, 8)
+    fixed_gather = MagicMock()
+    variable_gather = MagicMock(return_value=gathered)
+    monkeypatch.setattr(collectives, "all_gather", fixed_gather)
+    monkeypatch.setattr(collectives, "all_gather_variable", variable_gather)
+
+    output, offset = collectives.gather_dp_execution_tokens(
+        value,
+        (3, 1),
+        rank=1,
+    )
+
+    assert output is gathered
+    assert offset == 3
+    variable_gather.assert_called_once_with(value, [3, 1], 1, "dp")
+    fixed_gather.assert_not_called()
+
+
+def test_dp_execution_gather_rejects_local_shape_mismatch() -> None:
+    with pytest.raises(RuntimeError, match="does not match the local tensor"):
+        collectives.gather_dp_execution_tokens(
+            torch.zeros(1, 8),
+            (3, 2),
+            rank=1,
+        )
+
+
+def test_dp_execution_gather_rejects_zero_execution_count() -> None:
+    with pytest.raises(RuntimeError, match="must be positive"):
+        collectives.gather_dp_execution_tokens(
+            torch.zeros(1, 8),
+            (3, 0),
+            rank=1,
+        )
+
+
 def test_tcp_store_master_is_global_rank_zero_not_group_rank_zero(monkeypatch):
     _, tcp_store, _, _ = _mock_process_groups(monkeypatch, global_rank=2)
 

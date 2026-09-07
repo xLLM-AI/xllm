@@ -149,6 +149,21 @@ TEST(AttentionMetadataBuilderTest, MaterializesColdMaskForDummyShard) {
                                       torch::Device(torch::kCPU));
 
   ASSERT_TRUE(metadata.is_dummy);
+#if defined(USE_NPU)
+  EXPECT_EQ(metadata.q_seq_lens_vec, std::vector<int32_t>({1}));
+  EXPECT_EQ(metadata.kv_seq_lens_vec, std::vector<int32_t>({1}));
+#else
+  EXPECT_EQ(metadata.q_seq_lens_vec, std::vector<int32_t>({0, 1}));
+  EXPECT_EQ(metadata.kv_seq_lens_vec, std::vector<int32_t>({0, 1}));
+#endif
+  EXPECT_TRUE(
+      torch::equal(metadata.q_seq_lens, torch::tensor({1}, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(metadata.kv_seq_lens, torch::tensor({1}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(metadata.q_cu_seq_lens,
+                           torch::tensor({0, 1}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(metadata.kv_cu_seq_lens,
+                           torch::tensor({0, 1}, torch::kInt32)));
   ASSERT_TRUE(metadata.has_initial_states.defined());
   EXPECT_TRUE(
       torch::equal(metadata.has_initial_states, torch::tensor({false})));

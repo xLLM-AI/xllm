@@ -22,7 +22,6 @@ backends; only the expert compute between them differs.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -35,56 +34,48 @@ from xllm.python.model_executor.forward_context import get_forward_context
 class DpScatterState:
     """Slices a DP-gathered MoE output back to this rank's local tokens."""
 
-    dp_rank: int
+    output_offset: int
     local_tokens: int
-    padded_tokens: int
-    token_counts: Sequence[int]
-    compact: bool
+    enabled: bool
 
     def scatter(self, output: torch.Tensor) -> torch.Tensor:
-        if self.compact:
-            offset = sum(self.token_counts[: self.dp_rank])
-            return output.narrow(0, offset, self.local_tokens)
-        if self.padded_tokens > 0:
-            start = self.dp_rank * self.padded_tokens
-            return output.narrow(0, start, self.local_tokens)
+        if self.enabled:
+            return output.narrow(0, self.output_offset, self.local_tokens)
         return output
 
 
 # Shared no-op state for the single-DP path: its scatter returns the output
 # unchanged, so one frozen instance is reused instead of allocating per forward.
-_NO_SCATTER = DpScatterState(0, 0, 0, (), False)
+_NO_SCATTER = DpScatterState(0, 0, False)
 
 
-def dp_gather_tokens(hidden: torch.Tensor, dp_size: int, dp_rank: int) -> tuple[torch.Tensor, DpScatterState]:
+def dp_gather_tokens(
+    hidden: torch.Tensor,
+    dp_size: int,
+    dp_rank: int,
+) -> tuple[torch.Tensor, DpScatterState]:
     """All-gather this rank's tokens across the DP group for expert compute.
 
-    Returns the gathered hidden states and the :class:`DpScatterState` that slices
-    the computed output back to the local rows. Graph, prefill, or mixed
-    prefill/decode batches pad to the max count and gather a dense ``[dp_size * pad]``
-    tensor; an all-decode eager batch gathers the compact variable-length layout.
-    ``dp_size <= 1`` is a no-op whose ``scatter`` returns the output unchanged.
+    Returns the gathered hidden states and the :class:`DpScatterState` that
+    slices the computed output back to the local execution rows. Metadata
+    already accounts for the dummy row materialized by an empty DP rank. The
+    collective is fixed exactly when every rank executes the same row count;
+    otherwise it is variable. ``dp_size <= 1`` is a no-op whose ``scatter``
+    returns the output unchanged.
     """
     if dp_size <= 1:
         return hidden, _NO_SCATTER
     ctx = get_forward_context()
-    token_counts = list(ctx.metadata.dp_token_counts)
-    if len(token_counts) != dp_size:
-        raise RuntimeError(f"expected {dp_size} DP token counts, got {token_counts}")
+    execution_token_counts = tuple(ctx.metadata.dp_execution_token_counts)
+    if len(execution_token_counts) != dp_size:
+        raise RuntimeError(f"expected {dp_size} DP execution token counts, got {execution_token_counts}")
     local_tokens = hidden.shape[0]
-    is_graph = ctx.execution_state is not None
-    is_prefill = ctx.metadata.is_prefill or ctx.metadata.is_chunked_prefill
-    dp_is_decode = getattr(ctx.metadata, "dp_is_decode", None)
-    all_decode = dp_is_decode is not None and all(dp_is_decode)
-    if is_graph or is_prefill or not all_decode:
-        padded_tokens = max(token_counts)
-        pad_size = padded_tokens - local_tokens
-        if pad_size > 0:
-            hidden = torch.nn.functional.pad(hidden, (0, 0, 0, pad_size))
-        gathered = distributed.all_gather(hidden, dim=0, world_size=dp_size, group_name="dp")
-        return gathered, DpScatterState(dp_rank, local_tokens, padded_tokens, token_counts, False)
-    gathered = distributed.all_gather_variable(hidden, token_counts, dp_rank, "dp")
-    return gathered, DpScatterState(dp_rank, local_tokens, 0, token_counts, True)
+    gathered, output_offset = distributed.gather_dp_execution_tokens(
+        hidden,
+        execution_token_counts,
+        dp_rank,
+    )
+    return gathered, DpScatterState(output_offset, local_tokens, True)
 
 
 def reduce_and_scatter(

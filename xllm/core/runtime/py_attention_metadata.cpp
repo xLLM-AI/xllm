@@ -100,8 +100,9 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::linear_state_indices)
       .def_property_readonly("has_initial_state",
                              &PyAttentionMetadataView::has_initial_state)
-      .def_property_readonly("dp_token_counts",
-                             &PyAttentionMetadataView::dp_token_counts)
+      .def_property_readonly(
+          "dp_execution_token_counts",
+          &PyAttentionMetadataView::dp_execution_token_counts)
       .def_property_readonly("dp_is_decode",
                              &PyAttentionMetadataView::dp_is_decode)
       .def_property_readonly("q_seq_lens", &PyAttentionMetadataView::q_seq_lens)
@@ -200,9 +201,14 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     : PyAttentionMetadataView(std::move(metadata)) {
   multi_block_tables_ = params.multi_block_tables;
   linear_state_indices_ = params.embedding.linear_state_indices;
-  dp_token_counts_ = params.parallel.raw_dp_global_token_nums.empty()
-                         ? params.parallel.dp_global_token_nums
-                         : params.parallel.raw_dp_global_token_nums;
+  // Python model kernels consume materialized execution rows. Empty DP ranks
+  // therefore contribute the worker-created dummy row instead of zero rows.
+  dp_execution_token_counts_ = params.parallel.dp_global_token_nums;
+  for (int32_t& count : dp_execution_token_counts_) {
+    if (count == 0) {
+      count = 1;
+    }
+  }
   dp_is_decode_ = params.parallel.dp_is_decode;
 }
 
@@ -285,8 +291,9 @@ py::object PyAttentionMetadataView::has_initial_state() const {
   return optional_tensor(metadata_->has_initial_states);
 }
 
-const std::vector<int32_t>& PyAttentionMetadataView::dp_token_counts() const {
-  return dp_token_counts_;
+const std::vector<int32_t>& PyAttentionMetadataView::dp_execution_token_counts()
+    const {
+  return dp_execution_token_counts_;
 }
 
 const std::vector<int32_t>& PyAttentionMetadataView::dp_is_decode() const {

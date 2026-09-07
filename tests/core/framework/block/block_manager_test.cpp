@@ -308,6 +308,53 @@ TEST(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
   EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 0);
 }
 
+TEST(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
+  ScopedValue<int32_t> chunk_guard(
+      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
+  BlockManagerPool::Options options;
+  options.num_blocks(8)
+      .host_num_blocks(0)
+      .block_size(4)
+      .enable_prefix_cache(true)
+      .enable_linear_state(true)
+      .linear_state_num_slots(4);
+  BlockManagerPool pool(options, /*dp_size=*/2);
+
+  Sequence first = make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4});
+  Sequence second = make_sequence(1, /*prompt_tokens=*/{5, 6, 7, 8});
+  first.set_dp_rank(0);
+  second.set_dp_rank(1);
+
+  ASSERT_TRUE(pool.allocate(&first));
+  ASSERT_TRUE(pool.allocate(&second));
+  EXPECT_EQ(first.dp_rank(), 0);
+  EXPECT_EQ(second.dp_rank(), 1);
+  // Slot 0 is reserved independently in each DP-local slot namespace, so both
+  // replicas may validly assign the same positive slot id.
+  EXPECT_EQ(first.get_linear_state_slot_id(), 1);
+  EXPECT_EQ(second.get_linear_state_slot_id(), 1);
+
+  LinearStateBlockManager* first_linear =
+      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
+  LinearStateBlockManager* second_linear =
+      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/1);
+  ASSERT_NE(first_linear, nullptr);
+  ASSERT_NE(second_linear, nullptr);
+  ASSERT_NE(first_linear, second_linear);
+
+  const LinearStatePrefixHash first_only_hash = make_prefix_hash(42);
+  ASSERT_GE(insert_linear_state_checkpoint(first_linear, first_only_hash), 1);
+  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(
+      first_linear, XXH3Key(first_only_hash.data())));
+  EXPECT_FALSE(BlockManagerPoolTestPeer::contains(
+      second_linear, XXH3Key(first_only_hash.data())));
+
+  pool.deallocate_without_cache(&first);
+  EXPECT_EQ(second.dp_rank(), 1);
+  EXPECT_EQ(second.get_linear_state_slot_id(), 1);
+  pool.deallocate_without_cache(&second);
+}
+
 TEST(BlockManagerPoolTest, DpSelectionCountsEvictablePrefixBlocksAsAvailable) {
   BlockManagerPool::Options options;
   options.num_blocks(4).block_size(1).enable_prefix_cache(true);

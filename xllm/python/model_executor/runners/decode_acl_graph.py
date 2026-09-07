@@ -73,7 +73,7 @@ class _StaticAttentionMetadata:
     kv_seq_lens: torch.Tensor | None = None
     linear_state_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
-    dp_token_counts: tuple[int, ...] = ()
+    dp_execution_token_counts: tuple[int, ...] = ()
     dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None
@@ -178,18 +178,31 @@ class DecodeAclGraphRunner(BaseRunner):
 
         if self.dp_size > 1:
             # DP ranks share one graph shape, so a missing or malformed
-            # dp_token_counts cannot silently fall back to eager: divergent
+            # Execution counts cannot silently fall back to eager: divergent
             # execution paths across ranks would deadlock HCCL collectives.
-            dp_token_counts = getattr(metadata, "dp_token_counts", None)
-            if dp_token_counts is None or len(dp_token_counts) != self.dp_size:
+            execution_counts = getattr(
+                metadata,
+                "dp_execution_token_counts",
+                None,
+            )
+            if execution_counts is None or len(execution_counts) != self.dp_size:
                 raise RuntimeError(
-                    f"DP decode step requires valid dp_token_counts (got {dp_token_counts!r}, "
+                    "DP decode step requires valid dp_execution_token_counts "
+                    f"(got {execution_counts!r}, "
                     f"expected length {self.dp_size}). All DP ranks must use the same graph shape."
                 )
+            if any(count <= 0 for count in execution_counts):
+                raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
             dp_is_decode = getattr(metadata, "dp_is_decode", None)
             if dp_is_decode is not None and not all(dp_is_decode):
                 return False
-            global_batch = max(max(int(c) for c in dp_token_counts), batch_size)
+            if execution_counts[self.dp_rank] != input_ids.shape[0]:
+                raise RuntimeError(
+                    "DP execution token count does not match the local input: "
+                    f"rank={self.dp_rank}, rows={input_ids.shape[0]}, "
+                    f"counts={execution_counts}"
+                )
+            global_batch = max(execution_counts)
             return _decode_bucket(global_batch) <= self.max_batch
         return _decode_bucket(batch_size) <= self.max_batch
 
@@ -200,9 +213,15 @@ class DecodeAclGraphRunner(BaseRunner):
     ) -> tuple[int, int]:
         local_num_tokens = input_ids.numel()
         global_num_tokens = local_num_tokens
-        dp_token_counts = getattr(metadata, "dp_token_counts", ())
-        if isinstance(dp_token_counts, (list, tuple)) and len(dp_token_counts) > 1:
-            global_num_tokens = max(int(count) for count in dp_token_counts)
+        execution_counts = getattr(
+            metadata,
+            "dp_execution_token_counts",
+            (),
+        )
+        if isinstance(execution_counts, (list, tuple)) and len(execution_counts) > 1:
+            if any(count <= 0 for count in execution_counts):
+                raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
+            global_num_tokens = max(execution_counts)
         return (
             local_num_tokens // self.num_decoding_tokens,
             global_num_tokens // self.num_decoding_tokens,
@@ -529,10 +548,12 @@ class DecodeAclGraphRunner(BaseRunner):
         batch_size = input_ids.shape[0]
         # DP ranks all_gather MoE tokens into one fixed shape, so every rank
         # must capture the same graph. Bucket by the group-wide max token count
-        # (dp_token_counts) rather than the local batch, keeping shapes uniform.
+        # rather than the local batch, keeping shapes uniform.
         if self.dp_size > 1:
-            dp_token_counts = tuple(int(c) for c in metadata.dp_token_counts)
-            global_batch = max(max(dp_token_counts, default=0), batch_size)
+            execution_counts = metadata.dp_execution_token_counts
+            if any(count <= 0 for count in execution_counts):
+                raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
+            global_batch = max(execution_counts)
             padded_batch_size = _decode_bucket(global_batch)
         else:
             padded_batch_size = _decode_bucket(batch_size)
@@ -680,7 +701,7 @@ class DecodeAclGraphRunner(BaseRunner):
             paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
             kv_seq_lens_host_values=[1] * padded_batch_size,
             block_table=static_block_table,
-            dp_token_counts=tuple([padded_batch_size] * self.dp_size) if self.dp_size > 1 else (),
+            dp_execution_token_counts=(padded_batch_size,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
         )
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None

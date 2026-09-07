@@ -198,9 +198,13 @@ class TestDeepseekV3MoEConstruction:
 # ---------------------------------------------------------------------------
 
 
-def _mock_forward_context(dp_token_counts=(4,), is_graph=False, dp_is_decode=None):
+def _mock_forward_context(
+    dp_execution_token_counts=(4,),
+    is_graph=False,
+    dp_is_decode=None,
+):
     metadata = SimpleNamespace(
-        dp_token_counts=dp_token_counts,
+        dp_execution_token_counts=dp_execution_token_counts,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -235,7 +239,7 @@ class TestDeepseekV3MoEForward:
         kernels.grouped_moe.return_value = torch.zeros(4, 64)
         self._patch_shared_experts(moe, 4)
 
-        ctx = _mock_forward_context(dp_token_counts=(4,))
+        ctx = _mock_forward_context(dp_execution_token_counts=(4,))
         with forward_context(ctx):
             moe.forward(hidden)
 
@@ -244,11 +248,15 @@ class TestDeepseekV3MoEForward:
     def test_dp2_calls_gather(self):
         moe = _make_moe(dp_size=2, dp_rank=0)
         hidden = torch.randn(3, 64)
-        # dp_token_counts=(3,4), padded_tokens=4, pad to [4,64], all_gather → [8,64]
+        # Execution counts=(3,4), padded_tokens=4, pad to [4,64],
+        # all_gather → [8,64].
         kernels.grouped_moe.return_value = torch.zeros(8, 64)
         self._patch_shared_experts(moe, 8)
 
-        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=True)
+        ctx = _mock_forward_context(
+            dp_execution_token_counts=(3, 4),
+            is_graph=True,
+        )
         with forward_context(ctx):
             moe.forward(hidden)
 
@@ -317,13 +325,17 @@ class TestDeepseekV3MoEForward:
     def test_dp2_output_sliced_to_local(self):
         moe = _make_moe(dp_size=2, dp_rank=1)
         hidden = torch.randn(4, 64)
-        # dp_token_counts=(3,4), padded_tokens=4, pad_size=0, all_gather → [8,64]
+        # Execution counts=(3,4), padded_tokens=4, pad_size=0,
+        # all_gather → [8,64].
         # dp_rank=1: narrow(0, 4, 4) → [4, 64]
         moe_output = torch.randn(8, 64)
         kernels.grouped_moe.return_value = moe_output
         self._patch_shared_experts(moe, 8)
 
-        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=True)
+        ctx = _mock_forward_context(
+            dp_execution_token_counts=(3, 4),
+            is_graph=True,
+        )
         with forward_context(ctx):
             result = moe.forward(hidden)
 
@@ -339,7 +351,11 @@ class TestDeepseekV3MoEForward:
         kernels.grouped_moe.return_value = torch.zeros(7, 64)
         self._patch_shared_experts(moe, 7)
 
-        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=False, dp_is_decode=(1, 1))
+        ctx = _mock_forward_context(
+            dp_execution_token_counts=(3, 4),
+            is_graph=False,
+            dp_is_decode=(1, 1),
+        )
         with forward_context(ctx):
             result = moe.forward(hidden)
 
@@ -359,7 +375,11 @@ class TestDeepseekV3MoEForward:
         kernels.grouped_moe.return_value = moe_output
         self._patch_shared_experts(moe, 7)
 
-        ctx = _mock_forward_context(dp_token_counts=(3, 4), is_graph=False, dp_is_decode=(1, 1))
+        ctx = _mock_forward_context(
+            dp_execution_token_counts=(3, 4),
+            is_graph=False,
+            dp_is_decode=(1, 1),
+        )
         with forward_context(ctx):
             result = moe.forward(hidden)
 

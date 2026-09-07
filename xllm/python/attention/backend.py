@@ -121,7 +121,7 @@ class AttentionMetadata(Protocol):
     dsa_graph_mode: bool
     linear_state_indices: torch.Tensor | None
     has_initial_state: torch.Tensor | None
-    dp_token_counts: Sequence[int]
+    dp_execution_token_counts: Sequence[int]
     dp_is_decode: Sequence[int]
     q_seq_lens: torch.Tensor | None
     expanded_decode_metadata: ExpandedDecodeMetadataLike

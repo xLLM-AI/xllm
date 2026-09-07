@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Sequence
 from datetime import timedelta
 
 import torch
@@ -451,6 +452,38 @@ def _(
     return x.new_empty(shape)
 
 
+def gather_dp_execution_tokens(
+    x: torch.Tensor,
+    execution_token_counts: Sequence[int],
+    rank: int,
+) -> tuple[torch.Tensor, int]:
+    """Gather the execution rows materialized by every DP rank."""
+    counts = [int(count) for count in execution_token_counts]
+    if not counts:
+        return x, 0
+    if any(count <= 0 for count in counts):
+        raise RuntimeError(f"DP execution token counts must be positive, got {counts}")
+    if not 0 <= rank < len(counts):
+        raise RuntimeError(f"invalid DP rank {rank} for token counts {counts}")
+    if counts[rank] != x.shape[0]:
+        raise RuntimeError(
+            "DP execution token count does not match the local tensor: "
+            f"rank={rank}, rows={x.shape[0]}, token_counts={counts}"
+        )
+
+    if all(count == counts[0] for count in counts):
+        gathered = all_gather(
+            x,
+            dim=0,
+            world_size=len(counts),
+            group_name="dp",
+        )
+        return gathered, rank * counts[0]
+
+    gathered = all_gather_variable(x, counts, rank, "dp")
+    return gathered, sum(counts[:rank])
+
+
 __all__ = [
     "init_process_group",
     "init_tp_group",
@@ -463,4 +496,5 @@ __all__ = [
     "broadcast_",
     "all_gather",
     "all_gather_variable",
+    "gather_dp_execution_tokens",
 ]
