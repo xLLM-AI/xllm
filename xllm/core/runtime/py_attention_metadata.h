@@ -62,6 +62,10 @@ class PyAttentionMetadataView final {
                           const ModelInputParams& params);
 
   const torch::Tensor& slot_mapping() const;
+  pybind11::object local_slot_mapping() const;
+  int32_t kv_split_size() const;
+  int32_t kv_split_rank() const;
+  bool has_kv_shard() const;
   const torch::Tensor& paged_kv_indptr() const;
   const torch::Tensor& paged_kv_indices() const;
   const torch::Tensor& paged_kv_last_page_len() const;
@@ -98,6 +102,8 @@ class PyAttentionMetadataView final {
   void set_dsa_graph_mode(bool value);
   bool is_prefill() const;
   bool is_chunked_prefill() const;
+  bool is_mixed() const;
+  bool is_spec_verify() const;
 
  private:
   static torch::Tensor make_host_int32_view(

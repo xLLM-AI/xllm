@@ -65,6 +65,14 @@ void register_attention_metadata_views(py::module_& module) {
   py::class_<PyAttentionMetadataView>(module, "AttentionMetadataView")
       .def_property_readonly("slot_mapping",
                              &PyAttentionMetadataView::slot_mapping)
+      .def_property_readonly("local_slot_mapping",
+                             &PyAttentionMetadataView::local_slot_mapping)
+      .def_property_readonly("kv_split_size",
+                             &PyAttentionMetadataView::kv_split_size)
+      .def_property_readonly("kv_split_rank",
+                             &PyAttentionMetadataView::kv_split_rank)
+      .def_property_readonly("has_kv_shard",
+                             &PyAttentionMetadataView::has_kv_shard)
       .def_property_readonly("paged_kv_indptr",
                              &PyAttentionMetadataView::paged_kv_indptr)
       .def_property_readonly("paged_kv_indices",
@@ -126,7 +134,10 @@ void register_attention_metadata_views(py::module_& module) {
                     &PyAttentionMetadataView::set_dsa_graph_mode)
       .def_property_readonly("is_prefill", &PyAttentionMetadataView::is_prefill)
       .def_property_readonly("is_chunked_prefill",
-                             &PyAttentionMetadataView::is_chunked_prefill);
+                             &PyAttentionMetadataView::is_chunked_prefill)
+      .def_property_readonly("is_mixed", &PyAttentionMetadataView::is_mixed)
+      .def_property_readonly("is_spec_verify",
+                             &PyAttentionMetadataView::is_spec_verify);
 }
 
 PyExpandedDecodeMetadataView::PyExpandedDecodeMetadataView(
@@ -197,6 +208,32 @@ PyAttentionMetadataView::PyAttentionMetadataView(
 
 const torch::Tensor& PyAttentionMetadataView::slot_mapping() const {
   return metadata_->slot_mapping;
+}
+
+py::object PyAttentionMetadataView::local_slot_mapping() const {
+  if (metadata_->kv_shard_batch_metadata == nullptr) {
+    return py::none();
+  }
+  return optional_tensor(
+      metadata_->kv_shard_batch_metadata->local_slot_mapping);
+}
+
+int32_t PyAttentionMetadataView::kv_split_size() const {
+  if (metadata_->kv_shard_batch_metadata == nullptr) {
+    return 1;
+  }
+  return metadata_->kv_shard_batch_metadata->kv_split_size;
+}
+
+int32_t PyAttentionMetadataView::kv_split_rank() const {
+  if (metadata_->kv_shard_batch_metadata == nullptr) {
+    return 0;
+  }
+  return metadata_->kv_shard_batch_metadata->kv_split_rank;
+}
+
+bool PyAttentionMetadataView::has_kv_shard() const {
+  return metadata_->kv_shard_batch_metadata != nullptr;
 }
 
 const torch::Tensor& PyAttentionMetadataView::paged_kv_indptr() const {
@@ -353,6 +390,12 @@ bool PyAttentionMetadataView::is_prefill() const {
 
 bool PyAttentionMetadataView::is_chunked_prefill() const {
   return metadata_->is_chunked_prefill;
+}
+
+bool PyAttentionMetadataView::is_mixed() const { return metadata_->is_mixed; }
+
+bool PyAttentionMetadataView::is_spec_verify() const {
+  return metadata_->is_spec_verify;
 }
 
 torch::Tensor PyAttentionMetadataView::make_host_int32_view(

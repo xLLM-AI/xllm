@@ -20,12 +20,13 @@ Prefill uses FIA TND with causal mask; decode uses FIA TND with block_table.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
 
-from xllm.python import kernels
+from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -62,6 +63,14 @@ _HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and h
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _SfaPageLayout:
+    source_page_ids: torch.Tensor
+    target_page_ids: torch.Tensor
+    block_table: torch.Tensor
+    page_count: int
+
+
 def _mla_graph_max_seqlen_k(
     block_table: torch.Tensor,
     page_size: int,
@@ -71,6 +80,52 @@ def _mla_graph_max_seqlen_k(
     if max_seqlen_k <= 0:
         raise RuntimeError("MLA graph block-table capacity must be positive")
     return max_seqlen_k
+
+
+def _build_stable_sfa_page_layout(
+    materialized_block_table: torch.Tensor,
+) -> _SfaPageLayout:
+    """Build a deterministic, legacy-compatible SFA-only page layout."""
+    if materialized_block_table.ndim != 2:
+        raise RuntimeError("materialized SFA block table must be two-dimensional")
+
+    valid_pages = materialized_block_table >= 0
+    stable_block_table = torch.arange(
+        materialized_block_table.numel(),
+        dtype=torch.int32,
+        device=materialized_block_table.device,
+    ).view_as(materialized_block_table)
+    # The existing KV1 allocator presents the first two pages in [1, 0] order
+    # after dense renumbering. Sparse SFA is numerically sensitive to this page
+    # order, so preserve it per sequence while deriving every page id and table
+    # width from the live materialized metadata.
+    if materialized_block_table.shape[1] > 1:
+        swap_rows = valid_pages[:, 1]
+        first_pages = stable_block_table[:, 0].clone()
+        second_pages = stable_block_table[:, 1].clone()
+        stable_block_table[:, 0] = torch.where(
+            swap_rows,
+            second_pages,
+            first_pages,
+        )
+        stable_block_table[:, 1] = torch.where(
+            swap_rows,
+            first_pages,
+            second_pages,
+        )
+    stable_block_table = torch.where(
+        valid_pages,
+        stable_block_table,
+        torch.full_like(stable_block_table, -1),
+    ).contiguous()
+    source_page_ids = materialized_block_table.masked_select(valid_pages).to(torch.int64)
+    target_page_ids = stable_block_table.masked_select(valid_pages).to(torch.int64)
+    return _SfaPageLayout(
+        source_page_ids=source_page_ids,
+        target_page_ids=target_page_ids,
+        block_table=stable_block_table,
+        page_count=materialized_block_table.numel(),
+    )
 
 
 class NpuPagedAttentionBackend(AttentionBackend):
@@ -122,6 +177,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._mla_quant_indexer_metadata: dict[tuple[int, int, int, int], torch.Tensor] = {}
         self._mla_max_seqlen_q = 0
         self._mla_max_seqlen_k = 0
+        self._kv_owner_representatives: torch.Tensor | None = None
+        self._materialized_block_table: torch.Tensor | None = None
+        self._sfa_page_layout: _SfaPageLayout | None = None
         self._causal_mask = (
             torch.triu(torch.ones(2048, 2048, dtype=torch.float32), 1).to(torch.int8).contiguous().to(device)
         )
@@ -377,6 +435,48 @@ class NpuPagedAttentionBackend(AttentionBackend):
             self._mla_max_seqlen_q = 0
             self._mla_max_seqlen_k = 0
 
+        self._prepare_kv_shard_materialization(metadata)
+
+    def _prepare_kv_shard_materialization(self, metadata: AttentionMetadata) -> None:
+        self._kv_owner_representatives = None
+        self._materialized_block_table = None
+        self._sfa_page_layout = None
+        if not self._is_mla or not (metadata.is_prefill or metadata.is_chunked_prefill):
+            return
+        if not metadata.has_kv_shard or metadata.kv_split_size <= 1:
+            return
+        if self._block_table_i32 is None:
+            raise RuntimeError("sharded MLA prefill requires a block table")
+        cp_size = distributed.cp_world_size(self.device)
+        if cp_size <= 1 or cp_size % metadata.kv_split_size:
+            raise RuntimeError("KV split must be a positive divisor of the active CP group")
+
+        local_owner = torch.tensor([metadata.kv_split_rank], dtype=torch.int64, device=self.device)
+        owner_by_cp_rank = distributed.all_gather(local_owner, 0, cp_size, "cp")
+        if torch.any((owner_by_cp_rank < 0) | (owner_by_cp_rank >= metadata.kv_split_size)).item():
+            raise RuntimeError("KV split rank must be within the active KV split")
+        expected_replicas = cp_size // metadata.kv_split_size
+        owner_counts = torch.bincount(owner_by_cp_rank, minlength=metadata.kv_split_size)
+        expected_counts = torch.full_like(owner_counts, expected_replicas)
+        if owner_counts.numel() != metadata.kv_split_size or not torch.equal(owner_counts, expected_counts):
+            raise RuntimeError("KV owner distribution does not match the active CP/KV topology")
+        representatives = [
+            torch.argmax((owner_by_cp_rank == owner).to(torch.int64)) for owner in range(metadata.kv_split_size)
+        ]
+        self._kv_owner_representatives = torch.stack(representatives)
+
+        block_table = self._block_table_i32
+        entry_ids = torch.arange(
+            block_table.numel(),
+            dtype=block_table.dtype,
+            device=block_table.device,
+        ).view_as(block_table)
+        owner_offsets = torch.arange(metadata.kv_split_size, dtype=block_table.dtype, device=block_table.device)
+        expanded = entry_ids.unsqueeze(-1) * metadata.kv_split_size + owner_offsets
+        expanded = torch.where(block_table.unsqueeze(-1) >= 0, expanded, torch.full_like(expanded, -1))
+        self._materialized_block_table = expanded.flatten(1).contiguous()
+        self._sfa_page_layout = _build_stable_sfa_page_layout(self._materialized_block_table)
+
     def execute(
         self,
         q: torch.Tensor,
@@ -407,6 +507,10 @@ class NpuPagedAttentionBackend(AttentionBackend):
         if cp_context is not None:
             if not layer.causal:
                 raise NotImplementedError("non-causal draft attention does not support context parallelism")
+            if cp_context.has_prefix:
+                raise NotImplementedError(
+                    "non-MLA Python CP does not support chunked prefill with an existing KV prefix"
+                )
             return self._prefill_cp(q_3d, k_3d, v_3d, metadata, cp_context, k_cache, v_cache)
 
         # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
@@ -448,103 +552,90 @@ class NpuPagedAttentionBackend(AttentionBackend):
             raise RuntimeError(f"MLA latent cache is missing for layer {layer_id}")
         if self._block_table_i32 is None:
             raise RuntimeError("MLA requires a block table")
+        if self._mla_actual_seq_q is None or self._mla_actual_seq_kv is None:
+            raise RuntimeError("MLA requires query and KV sequence lengths")
 
         cp_context = get_forward_context().cp_context
-        if cp_context is not None:
-            return self._execute_mla_cp(
+        if cp_context is None:
+            if not cache_is_preprocessed:
+                if k_latent_3d is None or k_pe_3d is None:
+                    raise RuntimeError("MLA cache inputs are required")
+                torch.ops.xllm_ops.reshape_paged_cache(
+                    metadata.slot_mapping,
+                    k_latent_3d,
+                    k_pe_3d,
+                    nope_cache,
+                    rope_cache,
+                )
+            if topk is None:
+                return self._mla_dense_fia_v2(
+                    q_latent,
+                    q_pe,
+                    nope_cache,
+                    rope_cache,
+                    self._block_table_i32,
+                    layer_id,
+                )
+            return self._mla_sparse(
                 q_latent,
                 q_pe,
-                k_latent_3d,
-                k_pe_3d,
+                nope_cache,
+                rope_cache,
                 topk,
-                layer,
-                cp_context,
-                nope_cache,
-                rope_cache,
-            )
-
-        if not cache_is_preprocessed:
-            if k_latent_3d is None or k_pe_3d is None:
-                raise RuntimeError("MLA cache inputs are required")
-            torch.ops.xllm_ops.reshape_paged_cache(
-                metadata.slot_mapping,
-                k_latent_3d,
-                k_pe_3d,
-                nope_cache,
-                rope_cache,
-            )
-        if topk is None:
-            return self._mla_dense_fia_v2(
-                q_latent,
-                q_pe,
-                nope_cache,
-                rope_cache,
                 self._block_table_i32,
+                self._mla_actual_seq_q,
+                self._mla_actual_seq_kv,
                 layer_id,
             )
-        return self._mla_sparse(
-            q_latent,
-            q_pe,
-            nope_cache,
-            rope_cache,
-            topk,
-            self._block_table_i32,
-            layer_id,
-        )
 
-    def _execute_mla_cp(
-        self,
-        q_latent: torch.Tensor,
-        q_pe: torch.Tensor,
-        k_latent: torch.Tensor | None,
-        k_pe: torch.Tensor | None,
-        topk: torch.Tensor | None,
-        layer: Attention,
-        cp_context: object,
-        nope_cache: torch.Tensor,
-        rope_cache: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run MLA for CP-owned query segments and keep a full KV cache."""
-        if k_latent is None or k_pe is None:
-            raise RuntimeError("CP MLA prefill requires local KV inputs")
-        from xllm.python.model_executor.cp_utils import cp_gather_kv
-
-        # Fuse latent and RoPE payloads into one CP collective; both tensors
-        # have identical token layout and a second all-gather only adds HCCL
-        # launch latency on every MLA layer.
-        local_kv = torch.cat((k_latent, k_pe), dim=-1)
-        global_kv = cp_gather_kv(local_kv, cp_context).contiguous()
-        latent_width = k_latent.shape[-1]
-        global_k = global_kv[..., :latent_width]
-        global_rope = global_kv[..., latent_width:]
+        if cache_is_preprocessed:
+            raise RuntimeError("CP prefill does not support preprocessed MLA cache inputs")
+        if topk is None:
+            raise RuntimeError("CP prefill requires sparse MLA index output")
+        if k_latent_3d is None or k_pe_3d is None:
+            raise RuntimeError("CP prefill requires MLA cache inputs")
+        global_latent = cp_gather_kv(k_latent_3d, cp_context).contiguous()
+        global_rope = cp_gather_kv(k_pe_3d, cp_context).contiguous()
+        cache_slots = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
+        assert cache_slots is not None
         torch.ops.xllm_ops.reshape_paged_cache(
-            self._metadata.slot_mapping,
-            global_k,
+            cache_slots,
+            global_latent,
             global_rope,
             nope_cache,
             rope_cache,
         )
-        local_tokens = q_latent.shape[0]
+
+        attention_nope, block_table = self._materialize_cp_cache(nope_cache, metadata, cp_context)
+        attention_rope, _ = self._materialize_cp_cache(rope_cache, metadata, cp_context)
+        if cp_context.query_index.numel() == 0:
+            return q_latent.new_zeros(q_latent.shape)
+        if metadata.has_kv_shard and metadata.kv_split_size > 1:
+            attention_nope, attention_rope, block_table = self._materialize_sfa_layout(
+                attention_nope,
+                attention_rope,
+            )
+
         query_index = cp_context.query_index
-        if query_index.numel() == 0:
-            return q_latent.new_zeros(local_tokens, self.num_heads, self.head_dim)
+        segment_sequences = cp_context.segment_seq_indices
         q_real = q_latent.index_select(0, query_index).contiguous()
         q_pe_real = q_pe.index_select(0, query_index).contiguous()
-        block_table = self._block_table_i32.index_select(0, cp_context.segment_seq_indices)
+        topk_real = topk.index_select(0, query_index).contiguous()
+        local_block_table = block_table.index_select(0, segment_sequences).contiguous()
         output = self._mla_sparse(
             q_real,
             q_pe_real,
-            nope_cache,
-            rope_cache,
-            topk,
-            block_table,
-            layer.layer_id,
-            actual_seq_q=cp_context.q_cu_seqlens,
-            actual_seq_kv=cp_context.kv_cu_seqlens,
+            attention_nope,
+            attention_rope,
+            topk_real,
+            local_block_table,
+            cp_context.q_cu_seqlens_tensor,
+            cp_context.segment_kv_seq_lens_tensor,
+            layer_id,
         )
-        out_local = q_latent.new_zeros(local_tokens, self.num_heads, self.head_dim)
-        out_local.index_copy_(0, query_index, output)
-        return out_local
+        local_output = q_latent.new_zeros(q_latent.shape)
+        local_output.index_copy_(0, query_index, output)
+        return local_output
 
     def mla_preprocess_context(
         self,
@@ -574,9 +665,12 @@ class NpuPagedAttentionBackend(AttentionBackend):
         if index_cache is None:
             raise RuntimeError(f"MLA index cache is missing for layer {layer.layer_id}")
         index_cache_scale = layer_cache.index_scale
+        slot_mapping = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
+        if slot_mapping is None:
+            raise RuntimeError("MLA index cache requires a slot mapping")
         return MlaIndexContext(
             index_cache=index_cache,
-            slot_mapping=metadata.slot_mapping,
+            slot_mapping=slot_mapping,
             block_table=self._block_table_i32,
             actual_seq_q=self._mla_actual_seq_q,
             actual_seq_kv=self._mla_actual_seq_kv,
@@ -594,9 +688,15 @@ class NpuPagedAttentionBackend(AttentionBackend):
             update_index_cache=lambda values, scales: self._update_mla_index_cache(
                 index_cache,
                 index_cache_scale,
-                metadata.slot_mapping,
+                slot_mapping,
                 values,
                 scales,
+            ),
+            materialize_index_cache=lambda: self._materialize_mla_index_cache(
+                index_cache,
+                index_cache_scale,
+                metadata,
+                get_forward_context().cp_context,
             ),
             cp_context=get_forward_context().cp_context,
         )
@@ -636,16 +736,91 @@ class NpuPagedAttentionBackend(AttentionBackend):
         values: torch.Tensor,
         scales: torch.Tensor | None,
     ) -> None:
+        valid_rows = torch.nonzero(slot_mapping >= 0, as_tuple=False).flatten()
+        if valid_rows.numel() == 0:
+            return
         cache_view = index_cache.view(-1, index_cache.size(-1))
-        scatter_indices = slot_mapping.reshape(-1, 1).clamp_min(0)
+        scatter_indices = slot_mapping.index_select(0, valid_rows).reshape(-1, 1)
         kernels.scatter_nd_update(
             cache_view,
             scatter_indices,
-            values,
+            values.index_select(0, valid_rows),
         )
         if index_cache_scale is not None and scales is not None:
             scale_view = index_cache_scale.view(-1, index_cache_scale.size(-1))
-            kernels.scatter_nd_update(scale_view, scatter_indices, scales)
+            kernels.scatter_nd_update(
+                scale_view,
+                scatter_indices,
+                scales.index_select(0, valid_rows),
+            )
+
+    def _materialize_cp_cache(
+        self,
+        cache: torch.Tensor,
+        metadata: AttentionMetadata,
+        cp_context: CpContext | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if cp_context is None or not metadata.has_kv_shard or metadata.kv_split_size <= 1:
+            assert self._block_table_i32 is not None
+            return cache, self._block_table_i32
+        if self._kv_owner_representatives is None or self._materialized_block_table is None:
+            raise RuntimeError("KV shard materialization was not prepared")
+        assert self._block_table_i32 is not None
+        flat_blocks = self._block_table_i32.reshape(-1)
+        safe_blocks = flat_blocks.clamp_min(0).to(torch.int64)
+        local_blocks = cache.index_select(0, safe_blocks)
+        gathered = distributed.all_gather(local_blocks, 0, cp_context.cp_size, "cp")
+        gathered = gathered.view(cp_context.cp_size, flat_blocks.numel(), *cache.shape[1:])
+        owner_blocks = gathered.index_select(0, self._kv_owner_representatives)
+        order = [1, 0, *range(2, owner_blocks.dim())]
+        materialized = owner_blocks.permute(order).reshape(
+            flat_blocks.numel() * metadata.kv_split_size,
+            *cache.shape[1:],
+        )
+        return materialized.contiguous(), self._materialized_block_table
+
+    def _materialize_mla_index_cache(
+        self,
+        index_cache: torch.Tensor,
+        index_cache_scale: torch.Tensor | None,
+        metadata: AttentionMetadata,
+        cp_context: CpContext | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        materialized_cache, block_table = self._materialize_cp_cache(
+            index_cache,
+            metadata,
+            cp_context,
+        )
+        materialized_scale = None
+        if index_cache_scale is not None:
+            materialized_scale, _ = self._materialize_cp_cache(
+                index_cache_scale,
+                metadata,
+                cp_context,
+            )
+        return materialized_cache, materialized_scale, block_table
+
+    def _materialize_sfa_layout(
+        self,
+        nope_cache: torch.Tensor,
+        rope_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        layout = self._sfa_page_layout
+        if layout is None:
+            raise RuntimeError("SFA cache layout was not prepared")
+        target_nope = nope_cache.new_zeros((layout.page_count, *nope_cache.shape[1:]))
+        target_rope = rope_cache.new_zeros((layout.page_count, *rope_cache.shape[1:]))
+        target_nope.index_copy_(
+            0,
+            layout.target_page_ids,
+            nope_cache.index_select(0, layout.source_page_ids),
+        )
+        target_rope.index_copy_(
+            0,
+            layout.target_page_ids,
+            rope_cache.index_select(0, layout.source_page_ids),
+        )
+        return target_nope, target_rope, layout.block_table
 
     def _mla_sparse(
         self,
@@ -655,6 +830,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         rope_cache: torch.Tensor,
         topk: torch.Tensor,
         block_table: torch.Tensor,
+        actual_seq_q: torch.Tensor,
+        actual_seq_kv: torch.Tensor,
         layer_id: int,
         actual_seq_q: torch.Tensor | list[int] | None = None,
         actual_seq_kv: torch.Tensor | list[int] | None = None,

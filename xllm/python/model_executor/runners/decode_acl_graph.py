@@ -79,6 +79,12 @@ class _StaticAttentionMetadata:
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None
     is_prefill: bool = False
     is_chunked_prefill: bool = False
+    is_mixed: bool = False
+    is_spec_verify: bool = False
+    local_slot_mapping: torch.Tensor | None = None
+    kv_split_size: int = 1
+    kv_split_rank: int = 0
+    has_kv_shard: bool = False
 
 
 class _DecodeGraphEntry:

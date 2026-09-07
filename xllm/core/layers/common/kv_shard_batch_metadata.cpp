@@ -67,6 +67,8 @@ std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
   CHECK(attention_metadata.slot_mapping.defined())
       << "cache-shard batch metadata requires slot mapping";
   auto metadata = std::make_shared<KVShardBatchMetadata>();
+  metadata->kv_split_size = layout.dcp_size();
+  metadata->kv_split_rank = layout.dcp_rank();
   metadata->local_slot_mapping =
       localize_kv_shard_slots(attention_metadata.slot_mapping, layout);
   if (attention_metadata.block_table.defined()) {

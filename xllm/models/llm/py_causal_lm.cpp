@@ -83,6 +83,8 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   cp_size_ = parallel_args.cp_size();
   cp_rank_ = parallel_args.cp_rank();
   layerwise_split_size_ = parallel_args.layerwise_split_size();
+  kv_split_size_ = parallel_args.kv_split_size_effective();
+  kv_split_rank_ = parallel_args.kv_split_rank();
   // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
   // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
   // separate cp_group_ over the cp-strided ranks. Read each dimension from its
@@ -174,7 +176,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          cp_group_index);
     }
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
-    if (kv_split_size > 1) {
+    if (cp_size_ == 1 && kv_split_size > 1) {
       const int32_t dcp_rank = parallel_args.kv_split_rank();
       const int32_t dcp_group_index =
           global_rank % (global_world_size / kv_split_size);

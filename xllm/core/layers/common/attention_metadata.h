@@ -119,6 +119,7 @@ struct AttentionMetadata {
   std::string compute_dtype;
   bool is_prefill;
   bool is_chunked_prefill;
+  bool is_mixed = false;
   // Run prefill attention without writing key/value tensors to paged cache.
   bool prefill_without_cache = false;
   bool is_dummy;

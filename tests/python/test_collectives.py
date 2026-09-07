@@ -19,13 +19,17 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
+
+from xllm.python.models import glm5_2
 
 _MODULE_PATH = Path(__file__).parents[2] / "xllm" / "python" / "distributed" / "collectives.py"
 _SPEC = importlib.util.spec_from_file_location("_xllm_collectives_under_test", _MODULE_PATH)
@@ -104,6 +108,60 @@ def _mock_process_groups(
     return base_store, tcp_store, init_world, new_group
 
 
+def _run_glm_ep1_tp_collective(global_rank: int, rendezvous_path: str) -> None:
+    world_size = 4
+    try:
+        dist.init_process_group(
+            "gloo",
+            init_method=f"file://{rendezvous_path}",
+            rank=global_rank,
+            world_size=world_size,
+            timeout=timedelta(seconds=20),
+        )
+        tp_groups = [
+            dist.new_group(
+                ranks=[0, 1],
+                backend="gloo",
+                timeout=timedelta(seconds=20),
+            ),
+            dist.new_group(
+                ranks=[2, 3],
+                backend="gloo",
+                timeout=timedelta(seconds=20),
+            ),
+        ]
+        collectives._groups[("tp", "cpu")] = tp_groups[global_rank // 2]
+        # This is the topology that exposed the bug: with EP1, moe_tp spans
+        # both CP cohorts and must not be used to combine expert partials.
+        collectives._groups[("moe_tp", "cpu")] = dist.group.WORLD
+
+        cp_rank = global_rank // 2
+        tp_rank = global_rank % 2
+        local_value = float(cp_rank * 10 + tp_rank + 1)
+        routed = torch.tensor([[local_value]])
+        shared = torch.tensor([[local_value * 10]])
+        moe = SimpleNamespace(
+            ep_size=1,
+            moe_tp_size=world_size,
+            cfg=SimpleNamespace(tp_size=2),
+        )
+
+        with patch.object(
+            glm5_2.distributed,
+            "all_reduce_",
+            collectives.all_reduce_,
+            create=True,
+        ):
+            output = glm5_2.Glm52MoE._combine_expert_outputs(moe, routed, shared)
+
+        expected = torch.tensor([[33.0 if cp_rank == 0 else 253.0]])
+        torch.testing.assert_close(output, expected)
+    finally:
+        collectives._groups.clear()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
 def test_parallel_groups_share_one_multitenant_tcp_store(monkeypatch):
     base_store, tcp_store, init_world, new_group = _mock_process_groups(monkeypatch, global_rank=0)
 
@@ -162,6 +220,38 @@ def test_native_runtime_bridge_bypasses_python_process_groups(monkeypatch):
     assert value.tolist() == [[8.0]]
     python_reduce.assert_not_called()
     python_gather.assert_not_called()
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="Gloo backend is unavailable")
+def test_glm_ep1_tp_reduce_does_not_mix_cp_cohorts(tmp_path: Path) -> None:
+    rendezvous_path = tmp_path / "glm-ep1-tp-reduce"
+
+    process_context = torch.multiprocessing.start_processes(
+        _run_glm_ep1_tp_collective,
+        args=(str(rendezvous_path),),
+        nprocs=4,
+        join=False,
+        start_method="fork",
+    )
+    deadline = time.monotonic() + 30.0
+    try:
+        while not process_context.join(
+            timeout=max(0.0, deadline - time.monotonic()),
+            grace_period=5.0,
+        ):
+            if time.monotonic() >= deadline:
+                pytest.fail("Gloo CP2 x TP2 collective test timed out")
+    finally:
+        for process in process_context.processes:
+            if process.is_alive():
+                process.terminate()
+        cleanup_deadline = time.monotonic() + 5.0
+        for process in process_context.processes:
+            process.join(timeout=max(0.0, cleanup_deadline - time.monotonic()))
+        for process in process_context.processes:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5.0)
 
 
 def test_dcp_group_is_strided_like_kv_split_rank(monkeypatch):
