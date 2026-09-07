@@ -270,7 +270,17 @@ Sequence::Sequence(size_t index,
 
   num_prompt_tokens_ = prompt_token_ids.size();
   volatile_num_prompt_tokens_ = num_prompt_tokens_;
+
+  // Build the token buffer in a single allocation: memcpy the prompt in, then
+  // zero-fill only the generation tail (capacity - n). The previous
+  // resize(capacity) + per-token store loop zero-initialized every slot and
+  // then overwrote the first n one at a time -- two O(n) passes where one
+  // memcpy suffices. The resulting state is identical: size() == capacity, the
+  // first n slots hold the prompt, the rest are 0.
+  tokens_.reserve(capacity);
+  tokens_.assign(prompt_token_ids.begin(), prompt_token_ids.end());
   tokens_.resize(capacity);
+  num_tokens_ = num_prompt_tokens_;
 
   // init logprob state. Only allocate the per-position buffers when they will
   // actually be read. Beam search (SequencesGroup::process_beam_search) indexes
@@ -294,10 +304,10 @@ Sequence::Sequence(size_t index,
     need_unique_tokens_ = true;
   }
 
-  // add the prompt tokens
-  for (const auto token_id : prompt_token_ids) {
-    tokens_[num_tokens_++] = token_id;
-    if (need_unique_tokens_) {
+  // The prompt tokens were already copied into tokens_ above; only walk them
+  // again to seed the unique-token map when a penalty actually needs it.
+  if (need_unique_tokens_) {
+    for (const auto token_id : prompt_token_ids) {
       token_to_count_map_[token_id] = 0;
     }
   }
