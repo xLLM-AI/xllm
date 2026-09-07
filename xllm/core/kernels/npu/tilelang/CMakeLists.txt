@@ -172,6 +172,11 @@ tilelang_register_runtime_kernel(
   WRAPPER_SRCS fused_sigmoid_gating_delta_rule_wrapper.cpp
 )
 
+tilelang_register_runtime_kernel(
+  NAME sfa_dcp_remap
+  WRAPPER_SRCS sfa_dcp_remap_wrapper.cpp
+)
+
 cc_library(
   NAME
     tilelang_kernels
@@ -200,6 +205,7 @@ target_link_libraries(tilelang_kernels
     "$ENV{NPU_HOME_PATH}/lib64/libascend_dump.so"
     "$ENV{NPU_HOME_PATH}/lib64/libprofapi.so"
     "$ENV{NPU_HOME_PATH}/lib64/libmmpa.so"
+    unified_dlog
     m
     dl
 )

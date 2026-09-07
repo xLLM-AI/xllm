@@ -23,6 +23,78 @@ import torch.distributed as dist
 
 from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.layers.sfa_dcp_ref import merge_dcp_outputs, remap_sparse_indices
+from xllm.python.model_executor.forward_context import get_execution_buffer
+
+# Must match xllm/python/kernels_npu/tilelang/sfa_dcp_remap.py AOT specializations.
+_REMAP_TOPK = 2048
+_REMAP_MAX_TOKENS = 256
+# npu_attention_update rejects an LSE list longer than 16.
+_ATTENTION_UPDATE_MAX_SHARDS = 16
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
+def _is_npu_tensor(tensor: torch.Tensor) -> bool:
+    return tensor.device.type == "npu"
+
+
+def _fused_remap_available() -> bool:
+    ops = getattr(torch.ops, "xllm_ops", None)
+    return ops is not None and hasattr(ops, "sfa_dcp_remap_out")
+
+
+def _can_use_fused_remap(
+    topk_indices: torch.Tensor,
+    *,
+    index_topk: int,
+    physical_block_size: int,
+    dcp_size: int,
+) -> bool:
+    last_dim = int(topk_indices.shape[-1]) if topk_indices.ndim > 0 else 0
+    num_tokens = int(topk_indices.numel() // last_dim) if last_dim > 0 else 0
+    return (
+        index_topk == _REMAP_TOPK
+        and last_dim == _REMAP_TOPK
+        and 0 < num_tokens <= _REMAP_MAX_TOKENS
+        and _is_power_of_two(physical_block_size)
+        and _is_power_of_two(dcp_size)
+        and topk_indices.dtype == torch.int32
+        and topk_indices.is_contiguous()
+        and _is_npu_tensor(topk_indices)
+        and _fused_remap_available()
+    )
+
+
+def _can_use_attention_update(output_recv: torch.Tensor, lse_recv: torch.Tensor) -> bool:
+    dcp_size = int(output_recv.shape[0])
+    return 1 <= dcp_size <= _ATTENTION_UPDATE_MAX_SHARDS and _is_npu_tensor(output_recv) and _is_npu_tensor(lse_recv)
+
+
+def merge_dcp_outputs_with_attention_update(
+    output_recv: torch.Tensor,
+    lse_recv: torch.Tensor,
+    merged: torch.Tensor,
+) -> torch.Tensor:
+    """Merge DCP shards into caller-owned ``[T, H, D]``.
+
+    Uses ``npu_attention_update`` when the shard count is in the supported
+    range; otherwise copies the naive torch merge.
+    """
+    if not _can_use_attention_update(output_recv, lse_recv):
+        merged.copy_(merge_dcp_outputs(output_recv, lse_recv))
+        return merged
+
+    import torch_npu
+
+    dcp_size, num_heads, num_tokens, head_dim = output_recv.shape
+    row_count = num_heads * num_tokens
+    lse_list = [lse_recv[rank].reshape(row_count) for rank in range(dcp_size)]
+    local_out_list = [output_recv[rank].reshape(row_count, head_dim) for rank in range(dcp_size)]
+    updated, _lse_out = torch_npu.npu_attention_update(lse_list, local_out_list, 0)
+    merged.copy_(updated.view(num_heads, num_tokens, head_dim).permute(1, 0, 2))
+    return merged
 
 
 class GroupCoordinator(Protocol):
@@ -231,7 +303,39 @@ class AscendSFADCPImpl:
         return gathered, handle, restore_perm
 
     def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
-        return remap_sparse_indices(topk_indices, self.layout, self._dcp_index_topk)
+        out = get_execution_buffer(
+            ("SFA_DCP_REMAP_OUT", tuple(topk_indices.shape)),
+            lambda: torch.empty_like(topk_indices),
+        )
+        if not _can_use_fused_remap(
+            topk_indices,
+            index_topk=self._dcp_index_topk,
+            physical_block_size=int(self.layout.physical_block_size),
+            dcp_size=int(self.layout.dcp_size),
+        ):
+            out.copy_(
+                remap_sparse_indices(
+                    topk_indices,
+                    self.layout,
+                    index_topk=self._dcp_index_topk,
+                )
+            )
+            return out
+
+        num_tokens = int(topk_indices.numel() // self._dcp_index_topk)
+        scratch_n = num_tokens * self._dcp_index_topk
+        idx_scratch = get_execution_buffer(
+            ("SFA_DCP_REMAP_SCRATCH", scratch_n),
+            lambda: torch.empty(scratch_n, dtype=torch.int32, device=topk_indices.device),
+        )
+        return torch.ops.xllm_ops.sfa_dcp_remap_out(
+            topk_indices,
+            int(self.layout.physical_block_size),
+            int(self.layout.dcp_size),
+            int(self.layout.dcp_rank),
+            out,
+            idx_scratch,
+        )
 
     def _all_to_all_dcp_tensor(
         self,
@@ -253,6 +357,22 @@ class AscendSFADCPImpl:
         recv = recv.view(self.dcp_size, local_scatter_size, *send.shape[1:])
         return recv
 
+    def _merge_sharded_outputs(
+        self,
+        output_recv: torch.Tensor,
+        lse_recv: torch.Tensor,
+    ) -> torch.Tensor:
+        _, num_heads, num_tokens, head_dim = output_recv.shape
+        merged = get_execution_buffer(
+            ("SFA_DCP_MERGE_OUT", num_tokens, num_heads, head_dim, str(output_recv.dtype)),
+            lambda: torch.empty(
+                (num_tokens, num_heads, head_dim),
+                dtype=output_recv.dtype,
+                device=output_recv.device,
+            ),
+        )
+        return merge_dcp_outputs_with_attention_update(output_recv, lse_recv, merged)
+
     def _merge_dcp_outputs(
         self,
         sfa_output: torch.Tensor,
@@ -260,7 +380,7 @@ class AscendSFADCPImpl:
     ) -> torch.Tensor:
         output_recv = self._all_to_all_dcp_tensor(sfa_output, 1)
         lse_recv = self._all_to_all_dcp_tensor(softmax_lse, 1).squeeze(-1)
-        return merge_dcp_outputs(output_recv, lse_recv)
+        return self._merge_sharded_outputs(output_recv, lse_recv)
 
     def _start_dcp_query_gather(
         self,
@@ -391,6 +511,4 @@ class AscendSFADCPImpl:
         )
         softmax_lse = softmax_max + torch.log(softmax_sum)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
-        output_dtype = sfa_output.dtype
-        output = self._merge_dcp_outputs(sfa_output, softmax_lse)
-        return output.to(output_dtype)
+        return self._merge_dcp_outputs(sfa_output, softmax_lse)

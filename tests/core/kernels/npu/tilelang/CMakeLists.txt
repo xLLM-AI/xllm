@@ -104,3 +104,16 @@ cc_test(
     glog::glog
     unified_dlog
 )
+
+cc_test(
+  NAME
+    sfa_dcp_remap_wrapper_test
+  SRCS
+    sfa_dcp_remap_wrapper_test.cpp
+  DEPS
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+    unified_dlog
+)

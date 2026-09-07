@@ -62,3 +62,19 @@ def test_indexer_reads_expanded_logical_block_table() -> None:
         layout.expand_indexer_block_table(logical_blocks),
         torch.tensor([[6, 7, 14, 15, -1, -1], [0, 1, 4, 5, 8, 9]], dtype=torch.int32),
     )
+
+
+def test_graph_padded_zero_block_expands_to_valid_indexer_pages() -> None:
+    layout = KVShardLayout(
+        physical_block_size=128,
+        dcp_size=4,
+        dcp_rank=0,
+    )
+    padded_row = torch.zeros((1, 2), dtype=torch.int32)
+
+    expanded = layout.expand_indexer_block_table(padded_row)
+
+    assert torch.equal(
+        expanded,
+        torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]], dtype=torch.int32),
+    )
