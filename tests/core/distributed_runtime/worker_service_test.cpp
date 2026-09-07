@@ -21,9 +21,11 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "core/common/metrics.h"
+#include "core/framework/sampling/rejection_sampler.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
@@ -80,12 +82,110 @@ TEST(SpeculativeTokenStatsTest, CountsAdaptiveTokensPerSequence) {
   const std::vector<SpeculativeTokenStats> block_stats =
       calculate_block_speculative_token_stats(tokens, proposed_tokens);
   ASSERT_EQ(block_stats.size(), 3);
-  EXPECT_EQ(block_stats[0].accepted_tokens, 3);
+  EXPECT_EQ(block_stats[0].accepted_tokens, 2);
   EXPECT_EQ(block_stats[0].proposed_tokens, 4);
   EXPECT_EQ(block_stats[1].accepted_tokens, 2);
   EXPECT_EQ(block_stats[1].proposed_tokens, 2);
   EXPECT_EQ(block_stats[2].accepted_tokens, 0);
   EXPECT_EQ(block_stats[2].proposed_tokens, 0);
+}
+
+TEST(SpeculativeTokenStatsTest, BlockGreedyExcludesTargetTokens) {
+  const torch::Tensor draft_tokens = torch::tensor(
+      {{1, 2, 3}, {1, 2, 3}, {1, 2, 3}, {1, 2, 3}}, torch::kInt64);
+  // Reject at each possible position, then accept the entire final row.
+  const torch::Tensor target_tokens = torch::tensor(
+      {{9, 2, 3}, {1, 9, 3}, {1, 2, 9}, {1, 2, 3}}, torch::kInt64);
+  const torch::Tensor bonus_tokens = torch::full({4, 1}, 8, torch::kInt64);
+  const auto sampled = RejectionSampler::greedy_sample_from_token_ids(
+      draft_tokens,
+      target_tokens,
+      bonus_tokens,
+      /*mask_out_rejected_tokens=*/true);
+  const torch::Tensor& masked_tokens = std::get<1>(sampled);
+  ASSERT_TRUE(torch::equal(
+      masked_tokens,
+      torch::tensor(
+          {{9, -1, -1, -1}, {1, 9, -1, -1}, {1, 2, 9, -1}, {1, 2, 3, 8}},
+          torch::kInt64)));
+
+  const auto stats =
+      calculate_block_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
+  ASSERT_EQ(stats.size(), 4);
+  for (size_t row = 0; row < stats.size(); ++row) {
+    EXPECT_EQ(stats[row].accepted_tokens, static_cast<int64_t>(row));
+    EXPECT_EQ(stats[row].proposed_tokens, 3);
+  }
+}
+
+TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
+  const torch::Tensor draft_tokens = torch::zeros({4, 3}, torch::kInt64);
+  const torch::Tensor draft_probs =
+      torch::tensor({0.9f, 0.1f}).view({1, 1, 2}).repeat({4, 3, 1});
+  const torch::Tensor target_probs =
+      torch::tensor({0.8f, 0.2f}).view({1, 1, 2}).repeat({4, 3, 1});
+  // The fixed draws reject at positions 0, 1, 2, then accept all drafts.
+  // Residual probability exists only for token 1, so recovery is deterministic.
+  const torch::Tensor uniform_rand = torch::tensor({{0.95f, 0.1f, 0.1f},
+                                                    {0.1f, 0.95f, 0.1f},
+                                                    {0.1f, 0.1f, 0.95f},
+                                                    {0.1f, 0.1f, 0.1f}});
+  const torch::Tensor bonus_tokens = torch::ones({4, 1}, torch::kInt64);
+  const DraftProposal proposal(draft_tokens, draft_probs);
+  const auto sampled =
+      RejectionSampler::random_sample(proposal,
+                                      target_probs,
+                                      uniform_rand,
+                                      bonus_tokens,
+                                      /*mask_out_rejected_tokens=*/true);
+  const torch::Tensor& masked_tokens = std::get<1>(sampled);
+  ASSERT_TRUE(torch::equal(
+      masked_tokens,
+      torch::tensor(
+          {{1, -1, -1, -1}, {0, 1, -1, -1}, {0, 0, 1, -1}, {0, 0, 0, 1}},
+          torch::kInt64)));
+
+  const auto stats =
+      calculate_block_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
+  ASSERT_EQ(stats.size(), 4);
+  for (size_t row = 0; row < stats.size(); ++row) {
+    EXPECT_EQ(stats[row].accepted_tokens, static_cast<int64_t>(row));
+    EXPECT_EQ(stats[row].proposed_tokens, 3);
+  }
+}
+
+TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
+  const torch::Tensor draft_tokens = torch::tensor({{1}, {1}}, torch::kInt64);
+  const torch::Tensor target_tokens = torch::tensor({{9}, {1}}, torch::kInt64);
+  const torch::Tensor bonus_tokens = torch::full({2, 1}, 8, torch::kInt64);
+  const auto sampled = RejectionSampler::greedy_sample_from_token_ids(
+      draft_tokens,
+      target_tokens,
+      bonus_tokens,
+      /*mask_out_rejected_tokens=*/true);
+  const auto stats =
+      calculate_block_speculative_token_stats(std::get<1>(sampled), {1, 1});
+  ASSERT_EQ(stats.size(), 2);
+  EXPECT_EQ(stats[0].accepted_tokens, 0);
+  EXPECT_EQ(stats[0].proposed_tokens, 1);
+  EXPECT_EQ(stats[1].accepted_tokens, 1);
+  EXPECT_EQ(stats[1].proposed_tokens, 1);
+
+  // A fully pruned row emits only the target bonus and proposes no drafts.
+  const torch::Tensor empty_drafts = torch::empty({2, 0}, torch::kInt64);
+  const auto bonus_only = RejectionSampler::greedy_sample_from_token_ids(
+      empty_drafts,
+      empty_drafts,
+      bonus_tokens,
+      /*mask_out_rejected_tokens=*/true);
+  ASSERT_TRUE(torch::equal(std::get<1>(bonus_only), bonus_tokens));
+  const auto zero_stats =
+      calculate_block_speculative_token_stats(std::get<1>(bonus_only), {0, 0});
+  ASSERT_EQ(zero_stats.size(), 2);
+  for (const SpeculativeTokenStats& row_stats : zero_stats) {
+    EXPECT_EQ(row_stats.accepted_tokens, 0);
+    EXPECT_EQ(row_stats.proposed_tokens, 0);
+  }
 }
 
 TEST(WorkerServiceMetricsTest, AdaptiveMtpUpdatesMetricsOnce) {
@@ -179,7 +279,8 @@ TEST(WorkerServiceMetricsTest, StaticMtpRecordsTokenTotals) {
 
 TEST(WorkerServiceMetricsTest, BlockDiffusionPreservesInlineMetrics) {
   const torch::Tensor tokens = torch::tensor({{10, 11, -1, -1}}, torch::kInt32);
-  const std::vector<SpeculativeTokenStats> output_stats = {{2, 3}};
+  const std::vector<SpeculativeTokenStats> output_stats =
+      calculate_block_speculative_token_stats(tokens, {3});
   const double drafts_before = COUNTER_VALUE(speculative_num_drafts_total);
   const double proposed_before =
       COUNTER_VALUE(speculative_num_draft_tokens_total);
@@ -198,7 +299,7 @@ TEST(WorkerServiceMetricsTest, BlockDiffusionPreservesInlineMetrics) {
     const auto result = WorkerServiceTestPeer::record_speculative_metrics(
         service, tokens, output_stats);
     ASSERT_EQ(result.size(), 1);
-    EXPECT_EQ(result[0].accepted_tokens, 2);
+    EXPECT_EQ(result[0].accepted_tokens, 1);
     EXPECT_EQ(result[0].proposed_tokens, 3);
   }
   EXPECT_DOUBLE_EQ(COUNTER_VALUE(speculative_num_drafts_total), drafts_before);

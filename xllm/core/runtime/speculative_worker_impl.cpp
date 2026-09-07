@@ -185,8 +185,11 @@ std::vector<SpeculativeTokenStats> calculate_mtp_speculative_token_stats(
 std::vector<SpeculativeTokenStats> calculate_block_speculative_token_stats(
     const torch::Tensor& tokens,
     const std::vector<int32_t>& proposed_tokens) {
+  // The contiguous output includes one target-model token: the replacement
+  // at the first rejection, or the bonus after all drafts are accepted.
+  // Count one fewer valid token, capped by each row's actual proposal width.
   return calculate_contiguous_speculative_token_stats(
-      tokens, proposed_tokens, /*accepted_token_offset=*/0);
+      tokens, proposed_tokens, /*accepted_token_offset=*/1);
 }
 
 SpeculativeOutputStats calculate_speculative_output_stats(
