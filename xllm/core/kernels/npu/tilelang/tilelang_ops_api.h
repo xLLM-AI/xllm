@@ -190,6 +190,16 @@ torch::Tensor causal_conv1d(torch::Tensor& conv_state,
                             const torch::Tensor& initial_state_mode,
                             bool has_silu);
 
+// Remap logical DCP sparse indices onto this rank's local KV slots and
+// compact owned entries to the front. ``out`` and ``idx_scratch`` must be
+// caller-owned, contiguous NPU storage so ACL graph replay can reuse them.
+void sfa_dcp_remap_out(const torch::Tensor& topk_indices,
+                       int64_t physical_block_size,
+                       int64_t shard_size,
+                       int64_t shard_rank,
+                       torch::Tensor& out,
+                       torch::Tensor& idx_scratch);
+
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
 // Returns (out, final_state).
 //   out: [T_padded, nv, dv] (padded token dim; caller strips padding)

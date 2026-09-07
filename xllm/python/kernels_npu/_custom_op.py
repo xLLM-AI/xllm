@@ -1020,6 +1020,18 @@ def _sparse_flash_attention_lse_fake(
     return query.new_empty(query.shape, dtype=query.dtype), softmax_max, softmax_sum
 
 
+def _sfa_dcp_remap_out_fake(
+    topk_indices: torch.Tensor,
+    physical_block_size: int,
+    shard_size: int,
+    shard_rank: int,
+    out: torch.Tensor,
+    idx_scratch: torch.Tensor,
+) -> torch.Tensor:
+    del physical_block_size, shard_size, shard_rank, topk_indices, idx_scratch
+    return out
+
+
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
 register_fake("xllm_ops::l2_norm", _l2_norm_fake)
@@ -1067,3 +1079,4 @@ register_fake("xllm_ops::hc_post", _hc_post_fake)
 register_fake("xllm_ops::sparse_attn_sharedkv", _sparse_attn_sharedkv_fake)
 register_fake("xllm_ops::sparse_attn_sharedkv_metadata", _sparse_attn_sharedkv_metadata_fake)
 register_fake("xllm_ops::sparse_flash_attention_lse", _sparse_flash_attention_lse_fake)
+register_fake("xllm_ops::sfa_dcp_remap_out", _sfa_dcp_remap_out_fake)

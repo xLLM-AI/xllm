@@ -77,6 +77,7 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             head_dim=head_dim,
             scale=scale,
             sliding_window=sliding_window,
+            is_mla=True,
             device=device,
             dtype=dtype,
         )
@@ -145,15 +146,16 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         self._local_slot_mapping = local_slots
 
         if self._block_table_i32 is not None:
+            # ACL graph padded lanes keep logical block 0 and kv_seq_len=1 so
+            # sparse MLA tiling stays valid. Expanding that row yields pages
+            # 0..dcp_size-1. Do not rewrite those pages to -1: LightningIndexer
+            # treats -1 as a huge page id and MTE-OOB.
             expanded = self._kv_layout.expand_indexer_block_table(self._block_table_i32)
             if graph_mode:
                 expanded = copy_into_execution_buffer(
                     ("DCP_INDEXER_BT", tuple(expanded.shape)),
                     expanded,
                 )
-                padded_rows = metadata.slot_mapping < 0
-                if padded_rows.numel() == expanded.shape[0]:
-                    expanded[padded_rows] = -1
             self._expanded_indexer_block_table = expanded
         else:
             self._expanded_indexer_block_table = None

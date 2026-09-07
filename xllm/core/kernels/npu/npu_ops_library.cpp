@@ -30,6 +30,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"
@@ -436,6 +437,21 @@ build_cp_context_npu(const std::vector<int64_t>& seq_lens,
 
 }  // namespace
 
+torch::Tensor sfa_dcp_remap_out_npu(const torch::Tensor& topk_indices,
+                                    int64_t physical_block_size,
+                                    int64_t shard_size,
+                                    int64_t shard_rank,
+                                    torch::Tensor& out,
+                                    torch::Tensor& idx_scratch) {
+  xllm::kernel::npu::tilelang::sfa_dcp_remap_out(topk_indices,
+                                                 physical_block_size,
+                                                 shard_size,
+                                                 shard_rank,
+                                                 out,
+                                                 idx_scratch);
+  return out;
+}
+
 void ensure_xllm_ops_registered() {
   // Intentionally empty — referencing this symbol prevents the linker from
   // stripping the TORCH_LIBRARY static initializers below.
@@ -645,6 +661,10 @@ TORCH_LIBRARY(xllm_ops, m) {
       "cmp_topk, int cmp_ratio, int ori_mask_mode, int cmp_mask_mode, int "
       "ori_win_left, int ori_win_right, str layout_q, str layout_kv, bool "
       "has_ori_kv, bool has_cmp_kv) -> Tensor");
+  m.def(
+      "sfa_dcp_remap_out(Tensor topk_indices, int physical_block_size, int "
+      "shard_size, int shard_rank, Tensor(a!) out, Tensor(b!) idx_scratch) -> "
+      "Tensor(a!)");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
@@ -697,6 +717,7 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
          TORCH_FN(xllm::kernel::npu::sparse_attn_sharedkv));
   m.impl("sparse_flash_attention_lse",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse));
+  m.impl("sfa_dcp_remap_out", TORCH_FN(xllm::sfa_dcp_remap_out_npu));
 }
 
 // build_cp_context is pure host index math with no Tensor input, so the
