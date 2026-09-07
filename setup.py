@@ -238,7 +238,7 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
     shutil.copy2(source_script, os.path.join(dest_dir, "triton_compile.py"))
 
     pkg_init = (
-        "# Copyright 2026 The xLLM Authors. All Rights Reserved.\n"
+        "# Copyright 2026 The xLLM Authors.\n"
         '# Licensed under the Apache License, Version 2.0 (the "License").\n'
         "# See LICENSE for details.\n"
         '"""xllm internal package marker."""\n'

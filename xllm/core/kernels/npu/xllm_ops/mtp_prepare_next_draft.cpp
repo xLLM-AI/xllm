@@ -1,4 +1,4 @@
-/* Copyright 2026 The xLLM Authors. All Rights Reserved. */
+/* Copyright 2026 The xLLM Authors. */
 
 #include <glog/logging.h>
 #include <torch/torch.h>
