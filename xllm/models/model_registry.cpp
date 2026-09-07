@@ -122,6 +122,7 @@ bool resolve_model_registration(const std::string& model_type,
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
   } else if (backend == kXliteBackend) {
+#if defined(USE_XLITE)
     // Reject torch-only model types
     if (is_torch_only_model_type(model_type)) {
       if (error_message != nullptr) {
@@ -130,6 +131,22 @@ bool resolve_model_registration(const std::string& model_type,
       }
       return false;
     }
+    // Reject non-xlite model types
+    if (!xllm::xlite::is_xlite_model_type(model_type)) {
+      if (error_message != nullptr) {
+        *error_message = "Model type " + model_type +
+                         " has no XLITE implementation; use ATB or TORCH"
+                         " backend instead.";
+      }
+      return false;
+    }
+#else
+    if (error_message != nullptr) {
+      *error_message =
+          "XLITE backend is not compiled; please build with USE_XLITE=ON.";
+    }
+    return false;
+#endif
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
              model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
              model_type == "qwen3_vl" || model_type == "deepseek_v32_mtp") {

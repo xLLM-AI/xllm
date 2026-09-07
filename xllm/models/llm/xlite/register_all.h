@@ -17,6 +17,9 @@ limitations under the License.
 
 #pragma once
 
+#include <string>
+#include <unordered_set>
+
 #include "core/layers/xlite/xlite_register_macros.h"
 #include "models/llm/xlite/adapters/deepseek_v3_adapter.h"
 #include "models/llm/xlite/adapters/glm4_moe_adapter.h"
@@ -317,5 +320,12 @@ XLITE_REGISTER_MODEL(glm4_moe, Glm4MoeAdapter, [&] {
   SET_ARG(enable_mla, false);
   SET_ARG(use_moe, true);
 });
+
+// Returns true if the model_type has an xlite implementation.
+inline bool is_xlite_model_type(const std::string& model_type) {
+  static const std::unordered_set<std::string> kXliteModelTypes = {
+      "qwen3", "qwen3_moe", "deepseek_v3", "glm4_moe", "glm_moe_dsa"};
+  return kXliteModelTypes.count(model_type) > 0;
+}
 
 }  // namespace xllm::xlite
