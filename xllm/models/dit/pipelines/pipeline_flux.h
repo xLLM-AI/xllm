@@ -46,7 +46,8 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
         "pos_embed",
         FluxPosEmbed(ROPE_SCALE_BASE,
                      context.get_model_args("transformer").axes_dims_rope()));
-    transformer_ = FluxDiTModel(context.get_model_context("transformer"));
+    transformer_ = FluxDiTModel(context.get_model_context("transformer"),
+                                context.get_parallel_args());
     t5_ = T5EncoderModel(context.get_model_context("text_encoder_2"));
     clip_text_model_ = CLIPTextModel(context.get_model_context("text_encoder"));
     scheduler_ =
@@ -275,6 +276,10 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
     torch::Tensor image_rotary_emb =
         torch::stack({rot_emb1, rot_emb2}, 0).to(options_.dtype());
 
+    DiTCache::get_instance().set_context(
+        {/*infer_steps=*/static_cast<int64_t>(timesteps.numel()),
+         /*num_blocks=*/transformer_->num_blocks()});
+
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i].unsqueeze(0);
       timestep.fill_(t.item<float>())
@@ -287,7 +292,8 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
                                                        timestep,
                                                        image_rotary_emb,
                                                        guidance,
-                                                       step_id);
+                                                       step_id,
+                                                       /*use_cfg=*/false);
       if (do_true_cfg) {
         torch::Tensor negative_noise_pred =
             transformer_->forward(prepared_latents,
@@ -296,7 +302,8 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
                                   timestep,
                                   image_rotary_emb,
                                   guidance,
-                                  step_id);
+                                  step_id,
+                                  /*use_cfg=*/true);
         noise_pred =
             noise_pred + (noise_pred - negative_noise_pred) * true_cfg_scale;
         negative_noise_pred.reset();

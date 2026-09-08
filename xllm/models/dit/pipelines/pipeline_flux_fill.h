@@ -54,7 +54,8 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
         "pos_embed",
         FluxPosEmbed(ROPE_SCALE_BASE,
                      context.get_model_args("transformer").axes_dims_rope()));
-    transformer_ = FluxDiTModel(context.get_model_context("transformer"));
+    transformer_ = FluxDiTModel(context.get_model_context("transformer"),
+                                context.get_parallel_args());
     t5_ = T5EncoderModel(context.get_model_context("text_encoder_2"));
     clip_text_model_ = CLIPTextModel(context.get_model_context("text_encoder"));
     scheduler_ =
@@ -377,6 +378,10 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
 
     torch::Tensor image_rotary_emb =
         torch::stack({rot_emb1, rot_emb2}, 0).to(options_.dtype());
+
+    DiTCache::get_instance().set_context(
+        {/*infer_steps=*/static_cast<int64_t>(timesteps.size(0)),
+         /*num_blocks=*/transformer_->num_blocks()});
 
     for (int64_t i = 0; i < timesteps.size(0); ++i) {
       torch::Tensor t = timesteps[i];
