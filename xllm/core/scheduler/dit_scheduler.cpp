@@ -129,7 +129,13 @@ void DiTAsyncResponseProcessor::process_completed_request(
 
 void DiTAsyncResponseProcessor::process_failed_request(
     std::shared_ptr<DiTRequest> request,
-    Status status) {}
+    Status status) {
+  response_threadpool_.schedule(
+      [request = std::move(request), status = std::move(status)]() mutable {
+        request->handle_error(std::move(status));
+        request->state().output_func()(request->generate_output());
+      });
+}
 
 DiTDynamicBatchScheduler::DiTDynamicBatchScheduler(Engine* engine,
                                                    const Options& options)

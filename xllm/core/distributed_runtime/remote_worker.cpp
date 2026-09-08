@@ -329,7 +329,9 @@ folly::SemiFuture<int64_t> RemoteWorker::get_active_activation_memory_async() {
   return future;
 }
 
-bool RemoteWorker::check_health() { return channel_->check_health(); }
+bool RemoteWorker::check_health(int32_t timeout_ms) {
+  return channel_->check_health(timeout_ms);
+}
 
 folly::SemiFuture<bool> RemoteWorker::sleep_async(MasterStatus master_status) {
   folly::Promise<bool> promise;

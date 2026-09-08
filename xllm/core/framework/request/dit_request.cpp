@@ -24,6 +24,7 @@ limitations under the License.
 #include <cstring>
 #include <opencv2/opencv.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "api_service/call.h"
@@ -127,6 +128,8 @@ void DiTRequest::handle_forward_output(torch::Tensor output) {
   output_.tensors = torch::chunk(output, count);
 }
 
+void DiTRequest::handle_error(Status status) { status_ = std::move(status); }
+
 void DiTRequest::handle_forward_text_output(const std::string& text) {
   output_.text_output.push_back(text);
 }
@@ -135,9 +138,13 @@ const DiTRequestOutput DiTRequest::generate_output() {
   DiTRequestOutput output;
   output.request_id = request_id_;
   output.service_request_id = service_request_id_;
-  output.status = Status(StatusCode::OK);
+  output.status = status_.value_or(Status(StatusCode::OK));
   output.finished = finished();
   output.cancelled = false;
+
+  if (!output.status->ok()) {
+    return output;
+  }
 
   // Text diffusion models (e.g., Cola-DLM) produce text output directly.
   if (!output_.text_output.empty()) {

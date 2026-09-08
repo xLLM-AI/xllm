@@ -51,6 +51,12 @@ class DiTConfig final {
          "dit_cache_end_steps",
          "dit_cache_start_blocks",
          "dit_cache_end_blocks",
+         "dit_instance_role",
+         "dit_vae_service_addresses",
+         "dit_vae_request_timeout_ms",
+         "dit_vae_health_check_timeout_ms",
+         "dit_vae_health_check_interval_ms",
+         "dit_worker_port",
          "dit_sp_communication_overlap",
          "dit_debug_print",
          "dit_laser_attention_enabled",
@@ -86,6 +92,18 @@ class DiTConfig final {
   PROPERTY(int64_t, dit_cache_start_blocks) = 5;
 
   PROPERTY(int64_t, dit_cache_end_blocks) = 5;
+
+  PROPERTY(std::string, dit_instance_role) = "all";
+
+  PROPERTY(std::string, dit_vae_service_addresses);
+
+  PROPERTY(int32_t, dit_vae_request_timeout_ms) = 600000;
+
+  PROPERTY(int32_t, dit_vae_health_check_timeout_ms) = 1000;
+
+  PROPERTY(int32_t, dit_vae_health_check_interval_ms) = 1000;
+
+  PROPERTY(int32_t, dit_worker_port) = 0;
 
   PROPERTY(bool, dit_sp_communication_overlap) = true;
 

@@ -27,9 +27,10 @@ limitations under the License.
 
 namespace xllm {
 
-bool CommChannel::init_brpc(const std::string& server_address) {
+bool CommChannel::init_brpc(const std::string& server_address,
+                            int32_t timeout_ms) {
   options_.connection_type = "pooled";
-  options_.timeout_ms = -1;
+  options_.timeout_ms = timeout_ms;
   options_.connect_timeout_ms = -1;
   options_.max_retry = 3;
 
@@ -56,14 +57,12 @@ bool CommChannel::hello() {
   return true;
 }
 
-bool CommChannel::check_health() {
+bool CommChannel::check_health(int32_t timeout_ms) {
   proto::Status req;
   proto::Status resp;
   brpc::Controller cntl;
 
-  // Set a timeout for health check
-  // check hang status: 10min(magic num)
-  cntl.set_timeout_ms(600000);
+  cntl.set_timeout_ms(timeout_ms);
   stub_->Hello(&cntl, &req, &resp, nullptr);
   if (cntl.Failed()) {
     LOG(WARNING) << "Health check failed: " << cntl.ErrorText();

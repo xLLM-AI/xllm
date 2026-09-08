@@ -40,6 +40,8 @@ struct DiTBatch {
 
   void process_forward_output(const DiTForwardOutput& output);
 
+  void process_forward_error(const Status& status);
+
  private:
   std::vector<std::shared_ptr<DiTRequest>> request_vec_;
 };

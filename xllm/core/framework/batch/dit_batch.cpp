@@ -256,4 +256,10 @@ void DiTBatch::process_forward_output(const DiTForwardOutput& output) {
   }
 }
 
+void DiTBatch::process_forward_error(const Status& status) {
+  for (const auto& request : request_vec_) {
+    request->handle_error(status);
+  }
+}
+
 }  // namespace xllm

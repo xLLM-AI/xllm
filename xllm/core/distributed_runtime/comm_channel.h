@@ -19,6 +19,7 @@ limitations under the License.
 #include <brpc/controller.h>
 #include <folly/futures/Future.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,7 +40,7 @@ class CommChannel {
   CommChannel() = default;
   virtual ~CommChannel() = default;
 
-  bool init_brpc(const std::string& server_address);
+  bool init_brpc(const std::string& server_address, int32_t timeout_ms = -1);
 
   virtual bool hello();
 
@@ -111,7 +112,7 @@ class CommChannel {
       folly::Promise<int64_t>& promise);
 
   // Check if the connection to worker is healthy
-  virtual bool check_health();
+  virtual bool check_health(int32_t timeout_ms = 600000);
 
   virtual bool sleep(MasterStatus master_status);
 

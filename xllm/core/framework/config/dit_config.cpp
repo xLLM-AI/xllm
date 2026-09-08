@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "core/framework/config/dit_config.h"
 
+#include <glog/logging.h>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -52,6 +54,30 @@ DEFINE_int64(dit_cache_start_blocks,
 DEFINE_int64(dit_cache_end_blocks,
              5,
              "The number of blocks to skip at the end.");
+
+DEFINE_string(dit_instance_role, "all", "DiT instance role: all, dit, or vae.");
+
+DEFINE_string(dit_vae_service_addresses,
+              "",
+              "Comma-separated VAE service addresses used by DiT instances.");
+
+DEFINE_int32(dit_vae_request_timeout_ms,
+             600000,
+             "Timeout for DiT to VAE decode requests in milliseconds.");
+
+DEFINE_int32(dit_vae_health_check_timeout_ms,
+             1000,
+             "Timeout for DiT to VAE health checks in milliseconds.");
+
+DEFINE_int32(dit_vae_health_check_interval_ms,
+             1000,
+             "Minimum interval between health checks for an unavailable VAE "
+             "worker in milliseconds.");
+
+DEFINE_int32(dit_worker_port,
+             0,
+             "Base worker RPC port for DiT instances; 0 selects random "
+             "available ports. Global rank is added when nonzero.");
 
 DEFINE_bool(dit_sp_communication_overlap,
             true,
@@ -131,6 +157,12 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_start_blocks);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_instance_role);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_service_addresses);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_request_timeout_ms);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_health_check_timeout_ms);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_health_check_interval_ms);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_worker_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
@@ -157,6 +189,12 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_start_blocks);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_instance_role);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_service_addresses);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_request_timeout_ms);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_health_check_timeout_ms);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_health_check_interval_ms);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_worker_port);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
@@ -195,6 +233,18 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_cache_end_blocks);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_instance_role);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_vae_service_addresses);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_vae_request_timeout_ms);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_vae_health_check_timeout_ms);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_vae_health_check_interval_ms);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_worker_port);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_sp_communication_overlap);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_debug_print);
@@ -232,6 +282,22 @@ void DiTConfig::initialize() {
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
   }
+  CHECK(dit_instance_role() == "all" || dit_instance_role() == "dit" ||
+        dit_instance_role() == "vae")
+      << "Unsupported dit_instance_role: " << dit_instance_role();
+  CHECK(dit_vae_request_timeout_ms() == -1 || dit_vae_request_timeout_ms() > 0)
+      << "dit_vae_request_timeout_ms must be -1 or positive, got "
+      << dit_vae_request_timeout_ms();
+  CHECK_GT(dit_vae_health_check_timeout_ms(), 0)
+      << "dit_vae_health_check_timeout_ms must be positive, got "
+      << dit_vae_health_check_timeout_ms();
+  CHECK_GT(dit_vae_health_check_interval_ms(), 0)
+      << "dit_vae_health_check_interval_ms must be positive, got "
+      << dit_vae_health_check_interval_ms();
+  CHECK_GE(dit_worker_port(), 0)
+      << "dit_worker_port must be non-negative, got " << dit_worker_port();
+  CHECK_LE(dit_worker_port(), 65535)
+      << "dit_worker_port exceeds the valid port range: " << dit_worker_port();
 }
 
 }  // namespace xllm
