@@ -24,6 +24,7 @@ cc_library(
     prefill_first_policy.cpp
     decode_first_policy.cpp
     unified_policy.cpp
+    short_request_first_policy.cpp
     zero_eviction_scheduler.cpp
     continuous_scheduler.cpp
     disagg_pd_scheduler.cpp
