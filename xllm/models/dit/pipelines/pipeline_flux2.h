@@ -48,6 +48,7 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
 
     transformer_ = Flux2DiTModel(context.get_model_context("transformer"),
                                  context.get_parallel_args());
+    num_layers_ = context.get_model_args("transformer").num_layers();
     num_single_layers_ =
         context.get_model_args("transformer").num_single_layers();
     scheduler_ =
@@ -285,9 +286,9 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
     torch::Tensor image_rotary_emb =
         torch::stack({rot_emb1, rot_emb2}, 0).to(options_.dtype());
 
-    // denosing loop
-    DiTCache::get_instance().set_context({/*infer_steps=*/num_inference_steps,
-                                          /*num_blocks=*/num_single_layers_});
+    DiTCache::get_instance().set_context(
+        {/*infer_steps=*/num_inference_steps,
+         /*num_blocks=*/num_layers_ + num_single_layers_});
     scheduler_->set_begin_index(0);
     torch::Tensor timestep =
         torch::empty({prepared_latents.size(0)}, prepared_latents.options());
@@ -370,6 +371,7 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
   int32_t tokenizer_max_length_;
   int32_t default_sample_size_;
   int32_t vae_scale_factor_;
+  int64_t num_layers_;
   int64_t num_single_layers_;
   Flux2PosEmbed pos_embed_{nullptr};
   // std::unique_ptr<JinjaChatTemplate> chat_template_;

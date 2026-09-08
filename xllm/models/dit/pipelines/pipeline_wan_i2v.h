@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
 #include "core/framework/request/dit_request_state.h"
@@ -80,6 +81,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
         context.get_model_context("transformer"), sparse_attn_config_);
     transformer_2_ = WanTransformer3DModel(
         context.get_model_context("transformer_2"), sparse_attn_config_);
+    num_layers_ = context.get_model_args("transformer").num_layers();
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     // Pick the scheduler from the class name in scheduler_config.json.
     // Distilled Wan2.2 weights ship FlowMatch; raw_sigmas makes it end the
@@ -467,6 +469,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                               /*mu*/ std::nullopt);
     torch::Tensor timesteps = scheduler_->timesteps();
 
+    DiTCache::get_instance().set_context(
+        {/*infer_steps=*/num_inference_steps, /*num_blocks=*/num_layers_});
+
     int64_t num_channels_latents = zdim_;
     torch::Tensor input_image;
 
@@ -560,7 +565,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
       auto& rolling = (current_model.get() == transformer_.get())
                           ? rolling_transformer_
                           : rolling_transformer_2_;
-      auto rolling_forward = [&](const torch::Tensor& embeds) {
+      auto rolling_forward = [&](const torch::Tensor& embeds, bool use_cfg) {
         return current_model->forward(
             latent_model_input,
             timestep_input,
@@ -568,10 +573,13 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
             torch::Tensor(),
             sparse_attn_state,
             [&rolling](int32_t i) { rolling.wait_h2d(i); },
-            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); });
+            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); },
+            /*step_idx=*/i + 1,
+            use_cfg);
       };
 #else
-      auto rolling_forward = [&](const torch::Tensor& /*embeds*/) {
+      auto rolling_forward = [&](const torch::Tensor& /*embeds*/,
+                                 bool /*use_cfg*/) {
         LOG(FATAL) << "Rolling load requires USE_NPU";
         return torch::Tensor{};
       };
@@ -581,12 +589,17 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
         auto [pos_noise, neg_noise] = exec_with_cfg([&](bool is_positive) {
           auto& embeds =
               is_positive ? encoded_prompt_embeds : encoded_negative_embeds;
-          return use_rolling_load_ ? rolling_forward(embeds)
-                                   : current_model->forward(latent_model_input,
-                                                            timestep_input,
-                                                            embeds,
-                                                            torch::Tensor(),
-                                                            sparse_attn_state);
+          return use_rolling_load_
+                     ? rolling_forward(embeds, is_positive)
+                     : current_model->forward(latent_model_input,
+                                              timestep_input,
+                                              embeds,
+                                              torch::Tensor(),
+                                              sparse_attn_state,
+                                              nullptr,
+                                              nullptr,
+                                              /*step_idx=*/i + 1,
+                                              /*use_cfg=*/is_positive);
         });
 
         noise_pred =
@@ -595,12 +608,17 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                 (pos_noise.to(torch::kFloat32) - neg_noise.to(torch::kFloat32));
       } else {
         noise_pred = use_rolling_load_
-                         ? rolling_forward(encoded_prompt_embeds)
+                         ? rolling_forward(encoded_prompt_embeds,
+                                           /*use_cfg=*/false)
                          : current_model->forward(latent_model_input,
                                                   timestep_input,
                                                   encoded_prompt_embeds,
                                                   torch::Tensor(),
-                                                  sparse_attn_state);
+                                                  sparse_attn_state,
+                                                  nullptr,
+                                                  nullptr,
+                                                  /*step_idx=*/i + 1,
+                                                  /*use_cfg=*/false);
       }
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
@@ -739,6 +757,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
   float boundary_ratio_ = 0.9f;
   bool expand_timesteps_ = false;
   int64_t zdim_ = 16;
+  int64_t num_layers_ = 0;
   float num_train_timesteps_ = 1000.0f;
   std::vector<double> latents_mean_;
   std::vector<double> latents_std_;
