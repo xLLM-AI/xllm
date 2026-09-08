@@ -593,8 +593,21 @@ std::shared_ptr<Request> RecRequestFactory::build_request_common(
   const size_t best_of = sp.best_of.value_or(sp.n);
 
   RequestSamplingParam sampling_param = sp.to_sampling_param(best_of);
-  sampling_param.beam_width = sp.beam_width;
+  // REC drives the same BeamSearcher kernel as LLM, which selects beams from
+  // the sampler's top-k, so it needs the same logprob requirements. Previously
+  // beam_width was copied raw: a client that explicitly sent logprobs=false or
+  // top_logprobs=0 with beam_width > 1 got no candidates and the beams silently
+  // collapsed to identical sequences. (The RequestParams-level default only
+  // kicks in when the client leaves those fields unset.)
+  sampling_param.enable_beam_search(sp.beam_width);
   sampling_param.num_return_sequences = sp.num_return_sequences;
+  // Model-aware complement to verify_params' 2000 cap: an oversized top-k
+  // would throw inside the sampler and take the whole batch down with it.
+  if (const auto error =
+          sampling_param.top_logprobs_vocab_error(model_args_->vocab_size())) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    return nullptr;
+  }
 
   bool stream = sp.streaming;
   if (best_of != sp.n) {

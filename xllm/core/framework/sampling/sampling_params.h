@@ -17,7 +17,10 @@ limitations under the License.
 #pragma once
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace xllm {
@@ -36,6 +39,55 @@ struct RequestSamplingParam {
   bool json_object = false;
   int32_t beam_width = 0;
   int32_t num_return_sequences = 0;
+
+  // Turns on beam search with the given width and enforces what the beam
+  // machinery needs. Both the on-device BeamSearcher kernel and the host-side
+  // SequencesGroup::process_beam_search() pick the next beams from the
+  // sampler's top-k candidates, and the sampler produces exactly top_logprobs
+  // of them per sequence (the batch takes max(top_logprobs) as its top-k). So
+  // logprobs must be on, and top_logprobs must be at least beam_width: the
+  // search starts from a single sequence, so with fewer candidates the first
+  // step can only fan out to top_logprobs beams and the lower-ranked initial
+  // candidates are discarded for good, yielding a narrower search than asked
+  // for. A smaller explicit value is therefore raised to the width (the client
+  // still receives at least the logprob count it requested); an unset one is
+  // derived from it, matching the RequestParams-level default. Every factory
+  // that enables beam search goes through here so the invariant lives in one
+  // place. Out-of-range counts are rejected up front by
+  // RequestParams::verify_params. A width <= 1 just records the value (no beam
+  // search).
+  void enable_beam_search(int32_t width) {
+    beam_width = width;
+    if (beam_width > 1) {
+      logprobs = true;
+      top_logprobs =
+          std::max<int64_t>(top_logprobs, static_cast<int64_t>(beam_width));
+    }
+  }
+
+  // Whenever logprobs are on, the sampler runs topk(top_logprobs) over the
+  // vocabulary, and torch::topk throws for k > vocab. The batch uses
+  // max(top_logprobs) across its requests, so a single oversized request would
+  // take down every request in the batch. RequestParams::verify_params only
+  // knows the model-agnostic 2000 cap; this is the model-aware check for the
+  // factories, which know the vocabulary. Returns an error message when the
+  // effective top-k exceeds it, std::nullopt when it fits or the vocabulary is
+  // unknown (vocab_size <= 0). Call after enable_beam_search so the beam-raised
+  // value is what gets checked.
+  std::optional<std::string> top_logprobs_vocab_error(
+      int64_t vocab_size) const {
+    if (!logprobs || vocab_size <= 0 || top_logprobs <= vocab_size) {
+      return std::nullopt;
+    }
+    std::string error = "top_logprobs (" + std::to_string(top_logprobs) + ")";
+    if (beam_width > 1 && top_logprobs == static_cast<int64_t>(beam_width)) {
+      // The value came from beam_width (unset or smaller top_logprobs was
+      // raised to the width), so point the client at the field it actually set.
+      error = "beam_width (" + std::to_string(beam_width) + ")";
+    }
+    return error + " must not exceed the model vocabulary size (" +
+           std::to_string(vocab_size) + ")";
+  }
 };
 
 struct SamplingParameters {

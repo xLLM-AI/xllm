@@ -119,6 +119,13 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
   const size_t best_of = sp.best_of.value_or(sp.n);
 
   RequestSamplingParam sampling_param = sp.to_sampling_param(best_of);
+  // Model-aware complement to verify_params' 2000 cap: an oversized top-k
+  // would throw inside the sampler and take the whole batch down with it.
+  if (const auto error =
+          sampling_param.top_logprobs_vocab_error(model_args_->vocab_size())) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    return nullptr;
+  }
 
   std::optional<StoppingChecker> stopping_checker =
       build_stopping_checker(sp, max_tokens, max_context_len, callback);

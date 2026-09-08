@@ -172,16 +172,9 @@ RequestSamplingParam LLMRequestFactory::build_sampling_param(
   sampling_param.json_object =
       ServiceConfig::get_instance().enable_json_object_output() &&
       sp.response_format == ResponseFormatType::JSON_OBJECT;
-  sampling_param.beam_width = sp.beam_width;
-  if (sampling_param.beam_width > 1) {
-    // beam search requires logprobs, and needs at least one top_logprob
-    // candidate for beam expansion.
-    sampling_param.logprobs = true;
-    if (sampling_param.top_logprobs == 0) {
-      sampling_param.top_logprobs =
-          static_cast<int64_t>(sampling_param.beam_width);
-    }
-  }
+  // Enforces the beam-search logprob requirements; see
+  // RequestSamplingParam::enable_beam_search.
+  sampling_param.enable_beam_search(sp.beam_width);
   // sampling_param.do_sample = sp.do_sample;
   return sampling_param;
 }
@@ -327,6 +320,13 @@ std::shared_ptr<Request> LLMRequestFactory::create(
 
   const size_t best_of = sp.best_of.value_or(sp.n);
   RequestSamplingParam sampling_param = build_sampling_param(sp, best_of);
+  // Model-aware complement to verify_params' 2000 cap: an oversized top-k
+  // would throw inside the sampler and take the whole batch down with it.
+  if (const auto error =
+          sampling_param.top_logprobs_vocab_error(model_args_->vocab_size())) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    return nullptr;
+  }
   const bool json_object = sampling_param.json_object;
   SchedulerParam scheduler_param = sp.to_scheduler_param();
 

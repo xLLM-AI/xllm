@@ -264,6 +264,33 @@ TEST_F(LLMRequestFactoryTest,
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
+// verify_params only knows the model-agnostic 2000 cap; the factory knows the
+// vocabulary. A top-k above it would throw inside the sampler and, since the
+// batch uses max(top_logprobs), take every request in the batch down with it.
+TEST_F(LLMRequestFactoryTest, RejectsTopLogprobsAboveVocabulary) {
+  auto factory = make_factory(/*vocab_size=*/1000);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 16;
+  sp.beam_width = 4;
+  sp.logprobs = false;
+  // Under the 2000 cap, so it passes verify_params, but above the vocabulary.
+  sp.top_logprobs = 1500;
+
+  auto request = factory->create(/*prompt=*/"hello world",
+                                 /*prompt_tokens=*/std::nullopt,
+                                 sp,
+                                 /*call=*/std::nullopt,
+                                 make_capture_callback(&capture));
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(capture.status->message().find("top_logprobs (1500)"),
+            std::string::npos);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
 TEST_F(LLMRequestFactoryTest, MessageOverloadFailsWhenTemplateRejects) {
   auto factory = make_factory();
   chat_template_->set_succeed(false);

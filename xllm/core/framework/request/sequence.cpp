@@ -155,9 +155,9 @@ void Sequence::init_onerec_sequence(
   cur_generated_token_idx_ = num_prompt_tokens_;
   // OneRec can also emit per-token logprobs via enable_output_sku_logprobs
   // (see generate_onerec_streaming_output), independent of the sampling flag,
-  // so allocate the logprob buffer when either path needs it. Beam search reads
-  // both buffers unconditionally (see the main constructor), so force them on
-  // for beam requests too.
+  // so allocate the logprob buffer when either path needs it. The beam readers
+  // index both buffers by token position (see the main constructor), so keep
+  // them allocated for beam requests too.
   const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
   const bool enable_logprobs =
       sequence_params_.sampling_param->logprobs ||
@@ -280,13 +280,14 @@ Sequence::Sequence(size_t index,
   num_tokens_ = num_prompt_tokens_;
 
   // init logprob state. Only allocate the per-position buffers when they will
-  // actually be read. Beam search (SequencesGroup::process_beam_search) indexes
-  // both the logprob and top-k buffers on every expansion regardless of the
-  // request's logprobs flags, so beam requests must allocate them even when
-  // logprobs are disabled -- otherwise the reader would be out of bounds. The
-  // LLM factory normalizes these flags for beam, but the REC factory copies
-  // beam_width without doing so, so gate on beam_width here to stay safe for
-  // both. best_of>n forces logprobs on upstream, so it is already covered.
+  // actually be read. The beam readers (SequencesGroup::process_beam_search and
+  // Batch::process_beam_search_output) index both the logprob and top-k buffers
+  // by token position, so a beam request must have them allocated. The request
+  // factories already force logprobs/top_logprobs on for beam
+  // (RequestSamplingParam::enable_beam_search); tying the allocation to
+  // beam_width itself as well keeps the readers' requirement enforced where the
+  // buffers are created, independent of any upstream normalization. best_of>n
+  // forces logprobs on upstream, so it is already covered.
   const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
   const bool enable_logprobs =
       sequence_params_.sampling_param->logprobs || is_beam_search;

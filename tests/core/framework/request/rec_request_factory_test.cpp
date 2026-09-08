@@ -231,6 +231,178 @@ TEST_F(RecRequestFactoryTest, LlmRecCreatesRequestForValidPromptTokens) {
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
+// Beam search selects beams from the sampler's top-k, so a beam request must
+// end up with logprobs on and top_logprobs > 0 even when the client explicitly
+// disabled them (the RequestParams-level default only applies when they are
+// left unset). Previously REC copied beam_width raw and the beams silently
+// collapsed to identical sequences.
+TEST_F(RecRequestFactoryTest, LlmRecBeamSearchForcesLogprobRequirements) {
+  auto factory = make_llmrec_factory();
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.request_id = "req-beam";
+  sp.max_tokens = 16;
+  sp.beam_width = 4;
+  // Explicitly disabled by the client.
+  sp.logprobs = false;
+  sp.top_logprobs = 0;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  const auto& sampling_param = request->state().sampling_param;
+  EXPECT_EQ(sampling_param.beam_width, 4);
+  EXPECT_TRUE(sampling_param.logprobs);
+  EXPECT_EQ(sampling_param.top_logprobs, 4);
+}
+
+// The search fans out from a single sequence, so fewer than beam_width
+// candidates per step would permanently drop the lower-ranked initial
+// candidates and narrow the search. A smaller explicit value is raised.
+TEST_F(RecRequestFactoryTest, LlmRecBeamSearchRaisesTopLogprobsToBeamWidth) {
+  auto factory = make_llmrec_factory();
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.request_id = "req-beam-top";
+  sp.max_tokens = 16;
+  sp.beam_width = 4;
+  sp.logprobs = false;
+  sp.top_logprobs = 2;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  const auto& sampling_param = request->state().sampling_param;
+  EXPECT_TRUE(sampling_param.logprobs);
+  EXPECT_EQ(sampling_param.top_logprobs, 4);
+}
+
+TEST_F(RecRequestFactoryTest,
+       LlmRecBeamSearchKeepsTopLogprobsAtOrAboveBeamWidth) {
+  auto factory = make_llmrec_factory();
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.request_id = "req-beam-top-wide";
+  sp.max_tokens = 16;
+  sp.beam_width = 4;
+  sp.logprobs = true;
+  // Already wide enough for the beam; the client's value is respected.
+  sp.top_logprobs = 8;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  const auto& sampling_param = request->state().sampling_param;
+  EXPECT_TRUE(sampling_param.logprobs);
+  EXPECT_EQ(sampling_param.top_logprobs, 8);
+}
+
+// verify_params only knows the model-agnostic 2000 cap; the factory knows the
+// vocabulary. A top-k above it would throw inside the sampler and, since the
+// batch uses max(top_logprobs), take every request in the batch down with it.
+TEST_F(RecRequestFactoryTest, LlmRecRejectsTopLogprobsAboveVocabulary) {
+  auto factory = make_llmrec_factory(/*vocab_size=*/1000);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 16;
+  sp.beam_width = 4;
+  sp.logprobs = false;
+  // Under the 2000 cap, so it passes verify_params, but above the vocabulary.
+  sp.top_logprobs = 1500;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(capture.status->message().find("top_logprobs (1500)"),
+            std::string::npos);
+  EXPECT_NE(capture.status->message().find("1000"), std::string::npos);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+// When the oversized top-k was derived from beam_width, the error names the
+// field the client actually set.
+TEST_F(RecRequestFactoryTest, LlmRecRejectsBeamWidthAboveVocabulary) {
+  auto factory = make_llmrec_factory(/*vocab_size=*/100);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 16;
+  sp.beam_width = 128;
+  sp.logprobs = false;
+  sp.top_logprobs = 0;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(capture.status->message().find("beam_width (128)"),
+            std::string::npos);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(RecRequestFactoryTest, LlmRecAcceptsTopLogprobsEqualToVocabulary) {
+  auto factory = make_llmrec_factory(/*vocab_size=*/1000);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 16;
+  sp.logprobs = true;
+  sp.top_logprobs = 1000;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+}
+
+TEST_F(RecRequestFactoryTest, LlmRecNoBeamSearchLeavesLogprobsAlone) {
+  auto factory = make_llmrec_factory();
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.request_id = "req-no-beam";
+  sp.max_tokens = 16;
+  sp.beam_width = 1;
+  sp.logprobs = false;
+  sp.top_logprobs = 0;
+
+  auto request = factory->create(/*prompt=*/"",
+                                 /*prompt_tokens=*/std::vector<int>{1, 2, 3},
+                                 /*input_tensors=*/std::nullopt,
+                                 sp,
+                                 make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  const auto& sampling_param = request->state().sampling_param;
+  EXPECT_EQ(sampling_param.beam_width, 1);
+  EXPECT_FALSE(sampling_param.logprobs);
+  EXPECT_EQ(sampling_param.top_logprobs, 0);
+}
+
 TEST_F(RecRequestFactoryTest, LlmRecCreatesRequestForValidPromptString) {
   auto factory = make_llmrec_factory();
   CallbackCapture capture;

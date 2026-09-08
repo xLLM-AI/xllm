@@ -663,17 +663,40 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     }
   }
 
-  if (logprobs) {
-    if (echo) {
+  if (logprobs && echo) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "logprobs is not supported with echo",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  // top_logprobs becomes the k of torch::topk() whenever logprobs are in
+  // effect. Beam search forces logprobs on downstream
+  // (RequestSamplingParam::enable_beam_search), so a beam request with
+  // logprobs=false must be validated too; otherwise an oversized count would
+  // only surface as a throw inside the sampler at execution time. The raw field
+  // is checked first so that a negative count is reported as a client error
+  // rather than silently repaired by the beam normalization.
+  if (logprobs || beam_width > 1) {
+    if (top_logprobs < 0 || top_logprobs > 2000) {
       CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "logprobs is not supported with echo",
+                          "logprobs must be between 0 and 2000",
                           service_request_id,
                           source_xservice_addr);
       return false;
     }
-    if (top_logprobs < 0 || top_logprobs > 2000) {
+    // Beam search raises top_logprobs to at least beam_width, so also validate
+    // the value that will actually be used. Derive it through the same helper
+    // so the rule is not duplicated here.
+    RequestSamplingParam effective;
+    effective.logprobs = logprobs;
+    effective.top_logprobs = top_logprobs;
+    effective.enable_beam_search(beam_width);
+    if (effective.top_logprobs > 2000) {
       CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "logprobs must be between 0 and 2000",
+                          "beam_width must be at most 2000 (it sets the "
+                          "top_logprobs used for beam expansion)",
                           service_request_id,
                           source_xservice_addr);
       return false;

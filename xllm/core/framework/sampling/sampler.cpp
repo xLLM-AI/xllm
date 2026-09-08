@@ -19,6 +19,8 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+
 #include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/sampling/json_object_grammar.h"
@@ -164,8 +166,16 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     output.logprobs = selected_logprobs.view({-1});
 
     if (params.max_top_logprobs > 0) {
-      auto [values, indices] =
-          logprobs.topk(params.max_top_logprobs, /*dim=*/-1);
+      // max_top_logprobs is the batch-wide max, so one request asking for more
+      // than the vocabulary would make topk throw and fail every request in the
+      // batch. The factories reject such requests up front
+      // (RequestSamplingParam::top_logprobs_vocab_error); clamp here as the
+      // last line of defense so the sampler can never be the failure point.
+      // Every consumer sizes by the returned row width, so a shorter row is
+      // safe.
+      const int64_t k =
+          std::min<int64_t>(params.max_top_logprobs, logprobs.size(-1));
+      auto [values, indices] = logprobs.topk(k, /*dim=*/-1);
       output.top_logprobs = values;
       output.top_tokens = indices;
     }
