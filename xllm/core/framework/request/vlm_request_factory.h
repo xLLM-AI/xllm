@@ -68,7 +68,8 @@ class VLMRequestFactory final {
   std::shared_ptr<Request> create(std::vector<Message> messages,
                                   const RequestParams& sp,
                                   std::string payload,
-                                  OutputCallback callback);
+                                  OutputCallback callback,
+                                  bool use_prompt_as_is = false);
 
  private:
   std::shared_ptr<Request> build_request(std::string prompt,

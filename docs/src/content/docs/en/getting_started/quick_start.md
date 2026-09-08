@@ -12,11 +12,11 @@ All images are stored [here](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags
 Below are our pre-built dev image.
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 Container startup command:

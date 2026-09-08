@@ -21,18 +21,18 @@ First, download the image provided by xLLM:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 
 Then create the corresponding container:
 
 ```bash
-IMAGE=quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+IMAGE=quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 CONTAINER=mydocker
 
 docker run \

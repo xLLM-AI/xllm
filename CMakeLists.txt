@@ -13,10 +13,14 @@ add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
 
+# Resolve runtime shared libraries (e.g. the mooncake libasio.so shipped in
+# the wheel) relative to the binaries themselves, so installed packages stay
+# relocatable instead of depending on the build tree.
+list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
+list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
+
 if(ENABLE_HA)
   set(USE_ETCD ON)
-  list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
-  list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
   message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
 endif()
 

@@ -16,14 +16,9 @@ def _bootstrap_import_paths() -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Source-tree launcher for xLLM TileLang prepare/compile flows.")
+    parser = argparse.ArgumentParser(description="Source-tree launcher for xLLM TileLang compile flows.")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
-    subparsers.add_parser(
-        "prepare-ascend",
-        add_help=False,
-        help="Prepare third_party/tilelang-ascend for Ascend TileLang builds.",
-    )
     subparsers.add_parser(
         "compile-kernels",
         add_help=False,
@@ -40,9 +35,7 @@ def main(argv: list[str] | None = None) -> None:
 
     _bootstrap_import_paths()
 
-    if args.command == "prepare-ascend":
-        from compiler.tilelang.cli.prepare_ascend import main as entrypoint
-    elif args.command == "compile-kernels":
+    if args.command == "compile-kernels":
         from compiler.tilelang.cli.compile_kernels import main as entrypoint
     else:  # pragma: no cover - argparse enforces choices
         raise ValueError(f"Unsupported TileLang launcher command: {args.command}")

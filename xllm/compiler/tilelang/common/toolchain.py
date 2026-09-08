@@ -37,9 +37,7 @@ def resolve_tilelang_root() -> Path:
     if installed_root is not None:
         return installed_root
 
-    raise RuntimeError(
-        "TileLang is not installed. Run `python xllm/compiler/tilelang_launcher.py prepare-ascend` first."
-    )
+    raise RuntimeError("TileLang is not installed. Use an NPU build image with TileLang preinstalled or set TL_ROOT.")
 
 
 def require_env(name: str) -> str:
