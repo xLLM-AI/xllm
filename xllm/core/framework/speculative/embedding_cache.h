@@ -55,6 +55,13 @@ class EmbeddingCache final {
 
     int32_t correction_token_id = 0;  // accepted token for step correction
     int32_t correction_position_offset = 0;
+
+    // Previous decode step's per-draft confidence [num_speculative_tokens],
+    // fp32 on CPU. Consumed one step later by the adaptive controller under lag
+    // confidence (enable_lag_confidence) so the pruning decision does not
+    // data-depend on this step's draft forward. Undefined when lag confidence
+    // is off or no confidence has been written for this slot yet.
+    torch::Tensor confidence;
   };
 
   EmbeddingCache(int32_t total_nums);
@@ -82,11 +89,15 @@ class EmbeddingCache final {
   // Writes target validate output after rejection sampling. accepted_tokens is
   // a contiguous accepted prefix padded by -1; accepted_embeddings keeps the
   // corresponding target hidden states for the next draft extend input.
+  // confidence, when defined, is this step's per-draft confidence
+  // [batch, num_speculative_tokens] stored per slot for lag-confidence pruning
+  // one step later; pass an undefined tensor when lag confidence is off.
   void write_target_context(const std::vector<int32_t>& embedding_ids,
                             const std::vector<std::string>& request_ids,
                             const torch::Tensor& accepted_tokens,
                             const torch::Tensor& accepted_embeddings,
-                            int32_t num_speculative_tokens);
+                            int32_t num_speculative_tokens,
+                            const torch::Tensor& confidence = torch::Tensor());
 
   // Algorithm-specific placeholder embedding for missing target context, e.g.
   // PD first decode. MTP uses hidden_size; Eagle3 uses 3 * hidden_size.
@@ -101,6 +112,20 @@ class EmbeddingCache final {
   std::vector<int32_t> read_accepted_prefix_lengths(
       const std::vector<int32_t>& embedding_ids,
       const std::vector<std::string>& request_ids) const;
+
+  // Lagged (previous-step) confidence per request, for adaptive lag-confidence
+  // pruning. confidence is [batch, num_speculative_tokens] fp32 on CPU (rows
+  // for invalid slots are zero-filled); valid[i] is false when slot i carries
+  // no usable lagged confidence (never written, request_id mismatch on reuse,
+  // or undefined) so the caller must fall back to full-width (no prune) for it.
+  struct LaggedConfidence {
+    torch::Tensor confidence;
+    std::vector<bool> valid;
+  };
+  LaggedConfidence read_lagged_confidence(
+      const std::vector<int32_t>& embedding_ids,
+      const std::vector<std::string>& request_ids,
+      int32_t num_speculative_tokens) const;
 
   void clear(const std::vector<int32_t>& embedding_ids);
 

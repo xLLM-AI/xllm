@@ -85,6 +85,8 @@ DECLARE_bool(enable_adaptive_speculative_decode);
 
 DECLARE_double(adaptive_speculative_min_gain);
 
+DECLARE_bool(enable_lag_confidence);
+
 DECLARE_int32(speculative_suffix_cache_max_depth);
 
 DECLARE_double(speculative_suffix_max_spec_factor);
