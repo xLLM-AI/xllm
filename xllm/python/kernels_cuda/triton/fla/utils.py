@@ -28,7 +28,7 @@ autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUN
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     cache_entries: list[tuple[tuple[Any, ...], dict[str, Any], Any]] = []
-    cache_size = 4
+    cache_size = 8
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
