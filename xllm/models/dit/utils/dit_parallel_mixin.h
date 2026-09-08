@@ -119,37 +119,6 @@ class SequenceParallelMixin {
                         input.size(normalized_dim) - padding);
   }
 
- protected:
-  explicit SequenceParallelMixin(ProcessGroup* process_group)
-      : process_group_(process_group) {}
-
-  template <typename ForwardFn>
-  SequenceParallelTensorMap sequence_parallel_forward(
-      const SequenceParallelTensorMap& inputs,
-      ForwardFn&& forward_fn) {
-    padding_lengths_.clear();
-    SequenceParallelTensorMap local_inputs = inputs;
-    for (auto& [tensor_name, tensor_and_dim] : local_inputs) {
-      tensor_and_dim.first = scatter_sequence(
-          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
-    }
-
-    SequenceParallelTensorMap outputs =
-        std::forward<ForwardFn>(forward_fn)(local_inputs);
-    for (auto& [tensor_name, tensor_and_dim] : outputs) {
-      tensor_and_dim.first = gather_sequence(
-          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
-    }
-    return outputs;
-  }
-
- private:
-  int32_t world_size() const {
-    return process_group_ == nullptr ? 1 : process_group_->world_size();
-  }
-
-  bool sequence_parallel_enabled() const { return world_size() > 1; }
-
   torch::Tensor scatter_sequence(const torch::Tensor& input,
                                  const std::string& tensor_name,
                                  int64_t sequence_dim) {
@@ -181,6 +150,37 @@ class SequenceParallelMixin {
         input.contiguous(), process_group_, static_cast<int32_t>(sequence_dim));
     return unpad_tensor(output, tensor_name, sequence_dim);
   }
+
+ protected:
+  explicit SequenceParallelMixin(ProcessGroup* process_group)
+      : process_group_(process_group) {}
+
+  template <typename ForwardFn>
+  SequenceParallelTensorMap sequence_parallel_forward(
+      const SequenceParallelTensorMap& inputs,
+      ForwardFn&& forward_fn) {
+    padding_lengths_.clear();
+    SequenceParallelTensorMap local_inputs = inputs;
+    for (auto& [tensor_name, tensor_and_dim] : local_inputs) {
+      tensor_and_dim.first = scatter_sequence(
+          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
+    }
+
+    SequenceParallelTensorMap outputs =
+        std::forward<ForwardFn>(forward_fn)(local_inputs);
+    for (auto& [tensor_name, tensor_and_dim] : outputs) {
+      tensor_and_dim.first = gather_sequence(
+          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
+    }
+    return outputs;
+  }
+
+ private:
+  int32_t world_size() const {
+    return process_group_ == nullptr ? 1 : process_group_->world_size();
+  }
+
+  bool sequence_parallel_enabled() const { return world_size() > 1; }
 
   int64_t normalize_dim(const torch::Tensor& input, int64_t dim) const {
     const int64_t normalized_dim = dim < 0 ? input.dim() + dim : dim;
