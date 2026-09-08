@@ -2558,6 +2558,7 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
 
   TransferKVInfo transfer_info;
   transfer_info.request_id = "dsv4-round-trip";
+  transfer_info.rank_local_mapping = true;
   KVTransferMapping transfer_mapping;
   transfer_mapping.group_id = cache_group_id(BlockType::C128);
   transfer_mapping.local_ids = {11, 12};
@@ -2584,6 +2585,7 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
             std::vector<int32_t>({4, 6}));
   ASSERT_EQ(from_shm.transfer_kv_infos.size(), 1u);
   EXPECT_EQ(from_shm.transfer_kv_infos[0].request_id, "dsv4-round-trip");
+  EXPECT_TRUE(from_shm.transfer_kv_infos[0].rank_local_mapping);
   ASSERT_EQ(from_shm.transfer_kv_infos[0].mappings.size(), 1u);
   const KVTransferMapping& from_shm_mapping =
       from_shm.transfer_kv_infos[0].mappings[0];

@@ -91,17 +91,36 @@ bool same_partition_sizes(const ParallelCoordinates& source,
          source.kv_split_size == destination.kv_split_size;
 }
 
-bool collapses_prefill_partition(const ParallelCoordinates& source,
-                                 const ParallelCoordinates& destination) {
-  return !same_partition_sizes(source, destination) &&
-         destination.cp_size == 1 && destination.cp_rank == 0 &&
-         destination.kv_split_size == 1 && destination.kv_split_rank == 0;
+bool kv_split_spans_cp_and_tp(const ParallelCoordinates& coordinates) {
+  return static_cast<int64_t>(coordinates.kv_split_size) ==
+         static_cast<int64_t>(coordinates.cp_size) * coordinates.tp_size;
+}
+
+bool supports_kv_split_topology(const ParallelCoordinates& coordinates) {
+  return coordinates.cp_size % coordinates.kv_split_size == 0 ||
+         kv_split_spans_cp_and_tp(coordinates);
+}
+
+bool supports_partition_layout(const ParallelCoordinates& source,
+                               const ParallelCoordinates& destination) {
+  if (same_partition_sizes(source, destination)) {
+    return true;
+  }
+  return destination.cp_size == 1 && destination.cp_rank == 0 &&
+         (destination.kv_split_size == 1 ||
+          (supports_kv_split_topology(source) &&
+           source.kv_split_size == destination.kv_split_size));
 }
 
 bool supports_partition_pair(const ParallelCoordinates& source,
                              const ParallelCoordinates& destination) {
-  return same_partition(source, destination) ||
-         collapses_prefill_partition(source, destination);
+  if (same_partition_sizes(source, destination)) {
+    return same_partition(source, destination);
+  }
+  // D can collapse P's CP ranks into TP while retaining the same DCP shard.
+  return supports_partition_layout(source, destination) &&
+         (destination.kv_split_size == 1 ||
+          source.kv_split_rank == destination.kv_split_rank);
 }
 
 Status validate_compatibility(const WorkerCacheLayoutManifest& source,
@@ -332,17 +351,18 @@ Status validate_source_instance(
       reference.layout_family != destination.layout_family) {
     return invalid("source and destination instance layouts are incompatible");
   }
-  if (!same_partition_sizes(reference.coordinates, destination.coordinates) &&
-      !collapses_prefill_partition(reference.coordinates,
-                                   destination.coordinates)) {
+  if (!supports_partition_layout(reference.coordinates,
+                                 destination.coordinates)) {
     return invalid(
-        "source CP/KV-split partitions can only collapse into a "
-        "CP1/KV-split1 destination");
+        "source CP/KV-split partitions can only collapse into a CP1 "
+        "destination with either KV-split1 or the matching KV-split size");
   }
 
   const ParallelCoordinates& expected = reference.coordinates;
-  if (expected.cp_size % expected.kv_split_size != 0) {
-    return invalid("source cp_size must be divisible by kv_split_size");
+  if (!supports_kv_split_topology(expected)) {
+    return invalid(
+        "source cp_size must be divisible by kv_split_size, or "
+        "kv_split_size must equal cp_size * tp_size");
   }
   if (multiply_overflows(static_cast<uint64_t>(expected.dp_size),
                          static_cast<uint64_t>(expected.cp_size)) ||
@@ -387,10 +407,11 @@ Status validate_source_instance(
   return Status();
 }
 
-bool has_static_overlap(const WorkerCacheLayoutManifest& source,
-                        const RegionGroups& destination_groups) {
+bool has_logical_overlap(const WorkerCacheLayoutManifest& source,
+                         const RegionGroups& destination_groups,
+                         bool only_static_owner) {
   std::vector<AtomicLogicalRegion> source_regions;
-  expand_manifest(source, /*only_static_owner=*/true, &source_regions);
+  expand_manifest(source, only_static_owner, &source_regions);
   const RegionGroups source_groups = group_regions(source_regions);
   for (const auto& [key, sources] : source_groups) {
     const auto destination_it = destination_groups.find(key);
@@ -412,20 +433,25 @@ bool has_static_overlap(const WorkerCacheLayoutManifest& source,
 
 Status select_collapsed_writers(
     const std::vector<WorkerCacheLayoutManifest>& sources,
+    const WorkerCacheLayoutManifest& destination,
     const RegionGroups& destination_groups,
     std::vector<size_t>* writers,
     std::set<CoverageKey>* required_groups) {
   using CpWorkers = std::map<int32_t, std::vector<size_t>>;
   std::map<CoverageKey, CpWorkers> cp_groups;
   std::map<std::pair<int32_t, int32_t>, int32_t> cp_kv_ranks;
+  const bool spans_cp_and_tp =
+      kv_split_spans_cp_and_tp(sources.front().coordinates);
   for (size_t index = 0; index < sources.size(); ++index) {
     const ParallelCoordinates& coordinates = sources[index].coordinates;
-    const std::pair<int32_t, int32_t> cp_key = {coordinates.dp_rank,
-                                                coordinates.cp_rank};
-    const auto [kv_it, inserted] =
-        cp_kv_ranks.emplace(cp_key, coordinates.kv_split_rank);
-    if (!inserted && kv_it->second != coordinates.kv_split_rank) {
-      return invalid("source CP partition disagrees on KV-split rank");
+    if (!spans_cp_and_tp) {
+      const std::pair<int32_t, int32_t> cp_key = {coordinates.dp_rank,
+                                                  coordinates.cp_rank};
+      const auto [kv_it, inserted] =
+          cp_kv_ranks.emplace(cp_key, coordinates.kv_split_rank);
+      if (!inserted && kv_it->second != coordinates.kv_split_rank) {
+        return invalid("source CP partition disagrees on KV-split rank");
+      }
     }
     cp_groups[{coordinates.dp_rank, coordinates.kv_split_rank}]
              [coordinates.cp_rank]
@@ -433,16 +459,24 @@ Status select_collapsed_writers(
   }
 
   const size_t expected_cp_count =
-      static_cast<size_t>(sources.front().coordinates.cp_size /
-                          sources.front().coordinates.kv_split_size);
+      spans_cp_and_tp
+          ? 1
+          : static_cast<size_t>(sources.front().coordinates.cp_size /
+                                sources.front().coordinates.kv_split_size);
   for (const auto& [group, cp_workers] : cp_groups) {
+    if (destination.coordinates.kv_split_size > 1 &&
+        group.second != destination.coordinates.kv_split_rank) {
+      continue;
+    }
     if (cp_workers.size() != expected_cp_count) {
       return invalid("CP replica group has an unexpected partition count");
     }
     required_groups->emplace(group);
     // Lowest CP rank is the deterministic writer; replicas are PLAN_ONLY.
     for (size_t index : cp_workers.begin()->second) {
-      if (has_static_overlap(sources[index], destination_groups)) {
+      if (has_logical_overlap(sources[index],
+                              destination_groups,
+                              /*only_static_owner=*/!spans_cp_and_tp)) {
         writers->emplace_back(index);
       }
     }
@@ -804,7 +838,7 @@ Status ReshardPlanner::select_sources(
   std::set<CoverageKey> required_groups;
   if (collapse_partitions) {
     const Status selection = select_collapsed_writers(
-        sources, destination_groups, &writers, &required_groups);
+        sources, destination, destination_groups, &writers, &required_groups);
     if (!selection.ok()) {
       return selection;
     }
@@ -815,7 +849,9 @@ Status ReshardPlanner::select_sources(
         continue;
       }
       required_groups.emplace(coordinates.dp_rank, 0);
-      if (has_static_overlap(sources[index], destination_groups)) {
+      if (has_logical_overlap(sources[index],
+                              destination_groups,
+                              /*only_static_owner=*/true)) {
         writers.emplace_back(index);
       }
     }
@@ -830,9 +866,11 @@ Status ReshardPlanner::select_sources(
     }
     const int32_t kv_partition =
         collapse_partitions ? source.coordinates.kv_split_rank : 0;
+    const bool only_static_owner =
+        !kv_split_spans_cp_and_tp(source.coordinates);
     expand_manifest(
         source,
-        /*only_static_owner=*/true,
+        only_static_owner,
         &writer_regions[{source.coordinates.dp_rank, kv_partition}]);
   }
 
@@ -875,7 +913,8 @@ Status ReshardPlanner::build_outgoing_plan(
 
   std::vector<AtomicLogicalRegion> source_regions;
   std::vector<AtomicLogicalRegion> destination_regions;
-  expand_manifest(source, /*only_static_owner=*/true, &source_regions);
+  const bool only_static_owner = !kv_split_spans_cp_and_tp(source.coordinates);
+  expand_manifest(source, only_static_owner, &source_regions);
   expand_manifest(
       destination, /*only_static_owner=*/false, &destination_regions);
   const RegionGroups source_groups = group_regions(source_regions);

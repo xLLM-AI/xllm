@@ -145,7 +145,8 @@ class KVCacheTransfer {
   static bool validate_transfer_mappings(
       const std::vector<KVTransferMapping>& mappings,
       const std::string& request_id,
-      int32_t kv_split_size);
+      int32_t kv_split_size,
+      bool rank_local_mapping = false);
 
   static bool validate_transfer_mappings(
       const std::vector<TransferKVInfo>& transfer_kv_infos,

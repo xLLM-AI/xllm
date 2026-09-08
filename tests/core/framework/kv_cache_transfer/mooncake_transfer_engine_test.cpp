@@ -361,6 +361,24 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   EXPECT_EQ(merged_kv_infos.size(), 4U);
 }
 
+TEST(MooncakeKVCacheTransferDefaultTest,
+     LogicalDcpMappingsPreserveOneToOneRemoteBlocks) {
+  TransferKVInfo info = make_info(/*dst_dp_size=*/1,
+                                  /*dst_tp_size=*/1,
+                                  /*dst_dp_rank=*/0);
+  info.rank_local_mapping = true;
+  info.mappings[0].local_ids = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  info.mappings[0].remote_ids = {21, 22, 23, 24, 25, 26, 27, 28, 29, 30};
+
+  const std::vector<TransferKVInfo> filtered = filter_kv_split_infos(
+      /*kv_split_rank=*/3, /*kv_split_size=*/4, {info});
+
+  ASSERT_EQ(filtered.size(), 1U);
+  ASSERT_EQ(filtered[0].mappings.size(), 1U);
+  EXPECT_EQ(filtered[0].mappings[0].local_ids, info.mappings[0].local_ids);
+  EXPECT_EQ(filtered[0].mappings[0].remote_ids, info.mappings[0].remote_ids);
+}
+
 #if defined(USE_NPU)
 constexpr int32_t kValidatePushCommand = 1;
 constexpr int32_t kPreparePullCommand = 2;

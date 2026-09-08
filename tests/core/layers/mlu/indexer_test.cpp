@@ -27,6 +27,7 @@ limitations under the License.
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
+#include "layers/common/kv_shard_batch_metadata.h"
 #include "layers/mlu/attention.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
@@ -367,6 +368,60 @@ class IndexerTest : public ::testing::Test {
     return indexer;
   }
 
+  void expect_dcp_local_prefill_candidates(TestInputs& inputs) {
+    parallel_args_.world_size() = 2;
+    parallel_args_.kv_split_size() = 2;
+    constexpr int32_t kDcpRank = 0;
+    const KVShardLayout layout(
+        static_cast<int32_t>(KVCacheConfig::get_instance().block_size()),
+        /*dcp_size=*/2,
+        kDcpRank);
+    const KVShardCausalSelectorMetadata causal_selector =
+        build_kv_shard_causal_selector_metadata(inputs.metadata, layout);
+
+    AttentionMetadata prefill_metadata = inputs.metadata;
+    prefill_metadata.slot_mapping =
+        localize_kv_shard_slots(inputs.metadata.slot_mapping, layout);
+    AttentionMetadata selector_metadata = prefill_metadata;
+    selector_metadata.q_cu_seq_lens = causal_selector.q_cu_seq_lens;
+    selector_metadata.kv_cu_seq_lens = causal_selector.q_cu_seq_lens;
+    selector_metadata.kv_seq_lens = causal_selector.local_context_lens;
+    selector_metadata.block_table = causal_selector.block_table;
+    selector_metadata.max_query_len = 1;
+    selector_metadata.max_seq_len = test_config_.index_topk;
+    selector_metadata.total_kv_len = 0;
+    selector_metadata.is_prefill = false;
+    selector_metadata.is_chunked_prefill = false;
+
+    Indexer indexer = create_indexer(inputs, /*enable_fused_qk=*/true);
+    const DcpIndexerLocalCandidates candidates =
+        indexer->forward_dcp_local_prefill(inputs.x,
+                                           inputs.q_norm,
+                                           inputs.positions,
+                                           inputs.k_cache,
+                                           prefill_metadata,
+                                           selector_metadata,
+                                           inputs.k_cache_scale);
+
+    const int64_t token_count = inputs.x.size(0);
+    EXPECT_EQ(candidates.scores.sizes(),
+              (torch::IntArrayRef{token_count, test_config_.index_topk}));
+    EXPECT_EQ(candidates.global_slots.sizes(), candidates.scores.sizes());
+
+    torch::Tensor columns =
+        torch::arange(test_config_.index_topk, options_.dtype(torch::kInt32));
+    torch::Tensor invalid_columns =
+        columns.unsqueeze(0) >= causal_selector.local_context_lens.unsqueeze(1);
+    EXPECT_TRUE(candidates.global_slots.masked_select(invalid_columns)
+                    .eq(KVShardLayout::kInvalidSlot)
+                    .all()
+                    .item<bool>());
+    EXPECT_TRUE(candidates.scores.masked_select(invalid_columns)
+                    .isneginf()
+                    .all()
+                    .item<bool>());
+  }
+
   std::tuple<torch::Tensor, torch::Tensor> run_indexer(TestInputs& inputs,
                                                        bool is_prefill,
                                                        bool enable_fused_qk) {
@@ -510,6 +565,45 @@ TEST_F(IndexerTest, ChunkedPrefillBatch) {
       << "top-1 block index sum does not match ground truth";
   EXPECT_EQ(top1_max, expected_max)
       << "top-1 block index max does not match ground truth";
+}
+
+TEST_F(IndexerTest, DcpLocalCausalPrefillSelectsRankLocalCandidates) {
+  TestInputs inputs = create_inputs(
+      /*batch_size=*/1,
+      /*max_query_len=*/24,
+      /*is_prefill=*/true,
+      /*chunked_prefill=*/false,
+      /*history_len=*/0,
+      /*use_default_rope=*/false,
+      /*quantized_cache=*/false,
+      /*cache_block_size=*/16);
+  expect_dcp_local_prefill_candidates(inputs);
+}
+
+TEST_F(IndexerTest, DcpLocalCausalChunkedPrefillSelectsRankLocalCandidates) {
+  TestInputs inputs = create_inputs(
+      /*batch_size=*/1,
+      /*max_query_len=*/24,
+      /*is_prefill=*/true,
+      /*chunked_prefill=*/true,
+      /*history_len=*/24,
+      /*use_default_rope=*/false,
+      /*quantized_cache=*/false,
+      /*cache_block_size=*/16);
+  expect_dcp_local_prefill_candidates(inputs);
+}
+
+TEST_F(IndexerTest, DcpLocalCandidateScoreBoundsGlm52PrefillWorkspace) {
+  constexpr int64_t kTokenCount = 8192;
+  constexpr int64_t kTopk = 2048;
+  constexpr int64_t kIndexHeads = 32;
+  constexpr int64_t kHeadDim = 128;
+
+  const int64_t rows_per_chunk = dcp_indexer_score_rows_per_chunk(
+      kTokenCount, kTopk, kIndexHeads, kHeadDim);
+
+  // 128 MiB / (2 * 2048 * (128 + 32) * sizeof(float)) = 51 rows.
+  EXPECT_EQ(rows_per_chunk, 51);
 }
 
 TEST_F(IndexerTest, CompareFusedVsNonFusedDecode) {

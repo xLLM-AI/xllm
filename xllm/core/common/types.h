@@ -311,6 +311,10 @@ struct KVTransferMapping {
 
 struct TransferKVInfo {
   std::string request_id;
+  // True when mappings are scoped to the current KV rank and remote_ids maps
+  // one-to-one to local_ids. False means remote_ids is expanded across all
+  // KV-split ranks and must be filtered before transfer.
+  bool rank_local_mapping = false;
   int32_t dp_rank = 0;
   InstanceInfo remote_instance_info;
 

@@ -225,8 +225,10 @@ inline size_t get_kv_transfer_mappings_size(
 }
 
 inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
-  return get_string_size(info.request_id) + type_size<int32_t>  // dp_rank
-         + get_instance_info_size(info.remote_instance_info) +
+  return get_string_size(info.request_id) +
+         type_size<bool> +     // rank_local_mapping
+         type_size<int32_t> +  // dp_rank
+         get_instance_info_size(info.remote_instance_info) +
          get_xtensor_layer_offsets_size(info.dst_xtensor_layer_offsets) +
          get_kv_transfer_mappings_size(info.mappings);
 }
@@ -823,6 +825,7 @@ inline void write_xtensor_layer_offsets(
 
 inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
   write_string(buffer, info.request_id);
+  write_data(buffer, info.rank_local_mapping);
   write_data(buffer, info.dp_rank);
   write_instance_info(buffer, info.remote_instance_info);
   write_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
@@ -832,6 +835,7 @@ inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
 inline void write_transfer_kv_info(RawInputSerializeContext& context,
                                    const TransferKVInfo& info) {
   write_string(context.descriptor, info.request_id);
+  write_data(context.descriptor, info.rank_local_mapping);
   write_data(context.descriptor, info.dp_rank);
   write_instance_info(context, info.remote_instance_info);
   write_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
@@ -1768,6 +1772,7 @@ inline void read_xtensor_layer_offsets(
 
 inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
   read_string(buffer, info.request_id);
+  read_data(buffer, info.rank_local_mapping);
   read_data(buffer, info.dp_rank);
   read_instance_info(buffer, info.remote_instance_info);
   read_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
@@ -1776,6 +1781,7 @@ inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
 
 inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
   read_string(context, info.request_id);
+  read_data(context, info.rank_local_mapping);
   read_data(context, info.dp_rank);
   read_instance_info(context, info.remote_instance_info);
   read_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
