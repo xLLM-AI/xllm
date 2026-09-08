@@ -249,8 +249,7 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
 
     HostKVTransferConfig config;
     config.layer_copy_batches = options_.layers_wise_copy_batchs();
-    config.mode = options_.enable_kvcache_store() ? HostKVTransferMode::BASIC
-                                                  : HostKVTransferMode::AUTO;
+    config.mode = HostKVTransferMode::AUTO;
     host_kv_transfer_ = create_host_kv_transfer(
         HostKVLayout(max_layer_count, std::move(combined_groups), device_),
         device_,
@@ -275,21 +274,28 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
         options_.store_local_hostname(), options_.store_worker_id());
     store_config.localhost_name = store_local_hostname;
     store_config.protocol = options_.store_protocol();
+    store_config.rdma_devices = options_.store_rdma_devices();
     store_config.metadata_server = options_.store_metadata_server();
     store_config.master_server_address = options_.store_master_server_address();
     store_config.model_id = options_.store_namespace();
     store_config.tp_rank = options_.tp_rank();
     store_config.tp_size = options_.tp_size();
+    store_config.enable_mla = options_.enable_mla();
     LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
               << store_local_hostname << ", protocol=" << store_config.protocol
+              << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
-              << ", tp_size=" << store_config.tp_size;
+              << ", tp_size=" << store_config.tp_size
+              << ", enable_mla=" << store_config.enable_mla;
     kv_cache_store_ = std::make_unique<KVCacheStore>();
     CHECK(kv_cache_store_->init(store_config, std::move(store_index)))
         << "Failed to initialize Mooncake Store.";
     LOG(INFO) << "[Mooncake][StoreEngine] ready, endpoint="
               << store_local_hostname << ", protocol=" << store_config.protocol
-              << ", tp_rank=" << store_config.tp_rank;
+              << ", worker_rank=" << options_.store_worker_id()
+              << ", tp_rank=" << store_config.tp_rank
+              << ", tp_size=" << store_config.tp_size
+              << ", enable_mla=" << store_config.enable_mla;
   }
   registration_finalized_ = true;
   return true;
@@ -560,7 +566,13 @@ uint32_t HierarchyKVCacheTransfer::offload(
       LOG(WARNING) << "Mooncake BatchPut partially failed: " << put_count << "/"
                    << block_transfer_info.size();
     }
-    VLOG(1) << "[Mooncake][OffloadPut] blocks=" << block_transfer_info.size()
+    VLOG(1) << "[Mooncake][OffloadPut] worker_rank="
+            << options_.store_worker_id() << ", tp_rank=" << options_.tp_rank()
+            << ", tp_size=" << options_.tp_size()
+            << ", enable_mla=" << options_.enable_mla()
+            << ", skipped_mla_nonzero_rank="
+            << (options_.enable_mla() && options_.tp_rank() != 0U)
+            << ", blocks=" << block_transfer_info.size()
             << ", success=" << put_count;
   }
   return static_cast<uint32_t>(block_transfer_info.size());

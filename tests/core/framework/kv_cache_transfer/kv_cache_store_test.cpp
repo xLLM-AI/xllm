@@ -20,9 +20,13 @@ limitations under the License.
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "framework/kv_cache_transfer/mooncake_store_backend.h"
 
 namespace xllm {
 
@@ -75,9 +79,76 @@ class KVCacheStoreTestPeer final {
         store.build_requests(slice);
     return KVCacheStore::group_requests(requests).size();
   }
+
+  static void mark_initialized(KVCacheStore* store) {
+    store->is_initialized_ = true;
+  }
+
+  static std::optional<std::string> store_device_names(
+      const KVCacheStoreInitConfig& config) {
+    return KVCacheStore::get_store_device_names(config);
+  }
+
+  static std::optional<MooncakeMultiBuffer> multi_buffer(
+      const KVCacheStore& store,
+      std::vector<BlockTransferInfo> block_transfer_info) {
+    Slice<BlockTransferInfo> slice(block_transfer_info);
+    const std::vector<KVCacheStore::PhysicalRequest> requests =
+        store.build_requests(slice);
+    if (requests.empty()) {
+      return std::nullopt;
+    }
+    const KVCacheStore::PhysicalRequest& request = requests.front();
+    return store.build_multi_buffer(
+        *request.entry,
+        block_transfer_info[request.logical_index].dst_block_id);
+  }
+};
+
+class MooncakeStoreBackendTestPeer final {
+ public:
+  static std::optional<std::vector<MooncakeRegisteredRange>> unique_ranges(
+      const std::vector<MooncakeRegisteredRange>& ranges) {
+    return MooncakeStoreBackend::unique_ranges(ranges);
+  }
+
+  static bool get_succeeded(int64_t expected_bytes,
+                            const std::vector<int>& results) {
+    return MooncakeStoreBackend::get_succeeded(expected_bytes, results);
+  }
+
+  static bool put_succeeded(int result) {
+    return MooncakeStoreBackend::put_succeeded(result);
+  }
 };
 
 namespace {
+
+class ScopedEnvVar final {
+ public:
+  explicit ScopedEnvVar(const std::string& name) : name_(name) {
+    const char* value = std::getenv(name_.c_str());
+    if (value != nullptr) {
+      old_value_ = value;
+    }
+  }
+
+  ~ScopedEnvVar() {
+    if (old_value_.has_value()) {
+      setenv(name_.c_str(), old_value_->c_str(), /*overwrite=*/1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+  bool set(const std::string& value) {
+    return setenv(name_.c_str(), value.c_str(), /*overwrite=*/1) == 0;
+  }
+
+ private:
+  std::string name_;
+  std::optional<std::string> old_value_;
+};
 
 KVCache make_attention_cache(int64_t host_blocks, int64_t width) {
   const torch::TensorOptions options =
@@ -108,11 +179,15 @@ BlockTransferInfo make_block_info(uint8_t hash_value,
 }
 
 KVCacheStoreInitConfig make_store_config(
-    const std::string& model_id = "target-model") {
+    const std::string& model_id = "target-model",
+    uint32_t tp_rank = 1,
+    uint32_t tp_size = 2,
+    bool enable_mla = false) {
   KVCacheStoreInitConfig config;
   config.model_id = model_id;
-  config.tp_size = 2;
-  config.tp_rank = 1;
+  config.tp_rank = tp_rank;
+  config.tp_size = tp_size;
+  config.enable_mla = enable_mla;
   return config;
 }
 
@@ -208,6 +283,86 @@ TEST(KVCacheStoreTest, SchemaExcludesHostCapacity) {
   EXPECT_NE(build_target_key(&small_cache), build_target_key(&different_cache));
 }
 
+TEST(KVCacheStoreTest, MlaKeyExcludesTensorParallelTopology) {
+  KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
+  const std::vector<BlockTransferInfo> block_info = {make_block_info(8)};
+
+  const auto build_key = [&cache, &block_info](uint32_t tp_rank,
+                                               uint32_t tp_size,
+                                               bool enable_mla) {
+    KVCacheStore store;
+    HostCacheStoreIndex index;
+    index[BlockType::KV].emplace_back(
+        HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
+    KVCacheStoreTestPeer::initialize_index(
+        &store,
+        make_store_config("target-model", tp_rank, tp_size, enable_mla),
+        std::move(index));
+    return KVCacheStoreTestPeer::build_keys(store, block_info).front().second;
+  };
+
+  const std::string mla_key = build_key(/*tp_rank=*/0,
+                                        /*tp_size=*/1,
+                                        /*enable_mla=*/true);
+  EXPECT_EQ(mla_key,
+            build_key(/*tp_rank=*/7,
+                      /*tp_size=*/8,
+                      /*enable_mla=*/true));
+  EXPECT_NE(mla_key,
+            build_key(/*tp_rank=*/0,
+                      /*tp_size=*/1,
+                      /*enable_mla=*/false));
+  EXPECT_NE(build_key(/*tp_rank=*/0,
+                      /*tp_size=*/8,
+                      /*enable_mla=*/false),
+            build_key(/*tp_rank=*/7,
+                      /*tp_size=*/8,
+                      /*enable_mla=*/false));
+}
+
+TEST(KVCacheStoreTest, MlaNonzeroRankSkipsRemotePut) {
+  KVCacheStore store;
+  HostCacheStoreIndex index;
+  KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
+  index[BlockType::KV].emplace_back(
+      HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
+  KVCacheStoreTestPeer::initialize_index(&store,
+                                         make_store_config("target-model",
+                                                           /*tp_rank=*/3,
+                                                           /*tp_size=*/8,
+                                                           /*enable_mla=*/true),
+                                         std::move(index));
+  KVCacheStoreTestPeer::mark_initialized(&store);
+  const std::vector<BlockTransferInfo> block_info = {
+      make_block_info(10, BlockType::KV, /*destination_block_id=*/0),
+      make_block_info(11, BlockType::KV, /*destination_block_id=*/1)};
+
+  // A null client makes any accidental remote Store access fail loudly.
+  EXPECT_EQ(store.batch_put(block_info), block_info.size());
+}
+
+TEST(KVCacheStoreTest, SelectsOnlyExplicitRdmaDevices) {
+  KVCacheStoreInitConfig config;
+  config.protocol = "rdma";
+  config.rdma_devices = "mlx5_0,mlx5_1";
+  EXPECT_EQ(KVCacheStoreTestPeer::store_device_names(config),
+            std::optional<std::string>("mlx5_0,mlx5_1"));
+
+  config.rdma_devices.clear();
+  ScopedEnvVar device_names("DEVICE_NAMES");
+  ASSERT_TRUE(device_names.set("legacy_hca"));
+  EXPECT_EQ(KVCacheStoreTestPeer::store_device_names(config), std::nullopt);
+  EXPECT_EQ(config.protocol, "rdma");
+}
+
+TEST(KVCacheStoreTest, TcpIgnoresRdmaDevices) {
+  KVCacheStoreInitConfig config;
+  config.protocol = "tcp";
+  config.rdma_devices = "mlx5_0";
+
+  EXPECT_EQ(KVCacheStoreTestPeer::store_device_names(config), std::nullopt);
+}
+
 TEST(KVCacheStoreDeathTest, RejectsDuplicateKeyComponentsPerBlockType) {
   KVCache target_cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
   KVCache draft_cache = make_attention_cache(/*host_blocks=*/2, /*width=*/4);
@@ -273,6 +428,98 @@ TEST(KVCacheStoreTest, DeduplicatesPhysicalKeysAndRespectsBlockTypeEntries) {
   const std::vector<BlockTransferInfo> linear = {
       make_block_info(12, BlockType::LINEAR)};
   EXPECT_EQ(KVCacheStoreTestPeer::physical_request_count(store, linear), 1U);
+}
+
+TEST(KVCacheStoreTest, BuildsMultiBufferForRequestedHostBlock) {
+  KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/3);
+  KVCacheStore store;
+  HostCacheStoreIndex index;
+  index[BlockType::KV].emplace_back(
+      HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
+  KVCacheStoreTestPeer::initialize_index(
+      &store, make_store_config(), std::move(index));
+
+  const std::vector<BlockTransferInfo> block_info = {
+      make_block_info(12, BlockType::KV, /*destination_block_id=*/1)};
+  const std::optional<MooncakeMultiBuffer> buffer =
+      KVCacheStoreTestPeer::multi_buffer(store, block_info);
+  ASSERT_TRUE(buffer.has_value());
+  ASSERT_EQ(buffer->addresses.size(), 2U);
+  ASSERT_EQ(buffer->sizes.size(), 2U);
+  EXPECT_EQ(buffer->sizes[0], 6U * sizeof(float));
+  EXPECT_EQ(buffer->sizes[1], 6U * sizeof(float));
+
+  const BlockTypeTensorMap tensors =
+      cache.get_block_type_tensors(BlockType::KV);
+  auto tensor_it = tensors.begin();
+  EXPECT_EQ(buffer->addresses[0], tensor_it->second[1].data_ptr());
+  ++tensor_it;
+  EXPECT_EQ(buffer->addresses[1], tensor_it->second[1].data_ptr());
+}
+
+TEST(KVCacheStoreTest, FailsDuplicateGetKeysWithoutStoreAccess) {
+  KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
+  KVCacheStore store;
+  HostCacheStoreIndex index;
+  index[BlockType::KV].emplace_back(
+      HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
+  KVCacheStoreTestPeer::initialize_index(
+      &store, make_store_config(), std::move(index));
+  KVCacheStoreTestPeer::mark_initialized(&store);
+  std::vector<BlockTransferInfo> block_info = {
+      make_block_info(13, BlockType::KV, /*destination_block_id=*/0),
+      make_block_info(13, BlockType::KV, /*destination_block_id=*/1)};
+  Slice<BlockTransferInfo> slice(block_info);
+
+  EXPECT_EQ(store.batch_get_with_status(slice), std::vector<uint8_t>({0, 0}));
+}
+
+TEST(MooncakeStoreBackendTest, AcceptsOnlyExactSingleGetResult) {
+  EXPECT_TRUE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/32, std::vector<int>{32}));
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/32, std::vector<int>{}));
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/32, std::vector<int>{-1}));
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/32, std::vector<int>{31}));
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/32, std::vector<int>{33}));
+  EXPECT_TRUE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/32, std::vector<int>{32, 32}));
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::get_succeeded(
+      /*expected_bytes=*/static_cast<int64_t>(INT32_MAX) + 1,
+      std::vector<int>{INT32_MAX}));
+}
+
+TEST(MooncakeStoreBackendTest, TreatsObjectAlreadyExistsAsPutSuccess) {
+  EXPECT_TRUE(MooncakeStoreBackendTestPeer::put_succeeded(/*result=*/0));
+  EXPECT_TRUE(MooncakeStoreBackendTestPeer::put_succeeded(
+      static_cast<int>(mooncake::ErrorCode::OBJECT_ALREADY_EXISTS)));
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::put_succeeded(/*result=*/-1));
+}
+
+TEST(MooncakeStoreBackendTest, ValidatesRegistrationRangesBeforeSetup) {
+  const auto valid_ranges = MooncakeStoreBackendTestPeer::unique_ranges(
+      {{reinterpret_cast<void*>(0x1000), 64},
+       {reinterpret_cast<void*>(0x1000), 64},
+       {reinterpret_cast<void*>(0x2000), 32}});
+  ASSERT_TRUE(valid_ranges.has_value());
+  ASSERT_EQ(valid_ranges->size(), 2U);
+  EXPECT_EQ((*valid_ranges)[0].address, reinterpret_cast<void*>(0x1000));
+  EXPECT_EQ((*valid_ranges)[1].address, reinterpret_cast<void*>(0x2000));
+
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::unique_ranges(
+                   {{reinterpret_cast<void*>(0x1000), 64},
+                    {reinterpret_cast<void*>(0x1000), 32}})
+                   .has_value());
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::unique_ranges(
+                   {{reinterpret_cast<void*>(0x1000), 64},
+                    {reinterpret_cast<void*>(0x1020), 64}})
+                   .has_value());
+  EXPECT_FALSE(MooncakeStoreBackendTestPeer::unique_ranges(
+                   {{reinterpret_cast<void*>(UINTPTR_MAX - 7), 8}})
+                   .has_value());
 }
 
 }  // namespace

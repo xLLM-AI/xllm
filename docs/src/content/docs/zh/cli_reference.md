@@ -86,6 +86,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `host_blocks_factor` | `double` | `0.0` | host block 系数，例如 `host block num = host_blocks_factor * hbm block num`。 |
 | `enable_kvcache_store` | `bool` | `false` | 是否启用 KV Cache Store。 |
 | `store_protocol` | `string` | `"tcp"` | KV Cache Store 协议，例如 `tcp`、`rdma`。 |
+| `store_rdma_devices` | `string` | `""` | xLLM Worker 内嵌 Store client 使用的 RDMA HCA 列表，多个设备以逗号分隔；空值表示由 Mooncake 自动发现。 |
 | `store_master_server_address` | `string` | `""` | Store master 地址。单机模式使用 `IP:Port`；etcd 高可用模式使用 `etcd://IP:Port;IP:Port;...`。 |
 | `store_metadata_server` | `string` | `""` | KV Cache Store metadata service 的地址。 |
 | `store_local_hostname` | `string` | `""` | KV Cache Store client 的本地主机名。 |

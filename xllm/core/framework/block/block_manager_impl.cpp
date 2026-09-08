@@ -171,7 +171,6 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
 
     const size_t prefix_length =
         shared_blocks.size() * static_cast<size_t>(block_size_);
-    COUNTER_ADD(prefix_cache_match_length_total, prefix_length);
     VLOG(1) << "Prefix cache matched " << shared_blocks.size()
             << " blocks, prefix_length=" << prefix_length;
 

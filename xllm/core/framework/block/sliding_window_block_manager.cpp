@@ -235,9 +235,6 @@ std::vector<Block> SlidingWindowBlockManager::allocate_shared(
   }
   num_used_blocks_.fetch_add(added, std::memory_order_relaxed);
 
-  const size_t reach_tokens =
-      result.size() * static_cast<size_t>(options_.block_size());
-  COUNTER_ADD(prefix_cache_match_length_total, reach_tokens);
   return result;
 }
 

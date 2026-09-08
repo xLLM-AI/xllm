@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
+#include "common/metrics.h"
 #include "sequence.h"
 #include "util/timer.h"
 
@@ -240,6 +241,13 @@ void Request::record_num_prefix_cache_tokens() {
     current_max = std::max(current_max, seq->num_prefix_cache_tokens());
   }
   record_num_prefix_cache_tokens(current_max);
+  if (prefix_cache_hit_metrics_recorded_) {
+    return;
+  }
+
+  record_prefix_cache_hit_metrics(state_.prompt_tokens.size(),
+                                  num_prefix_cache_tokens_);
+  prefix_cache_hit_metrics_recorded_ = true;
 }
 
 void Request::record_num_prefix_cache_tokens(size_t num_prefix_cache_tokens) {

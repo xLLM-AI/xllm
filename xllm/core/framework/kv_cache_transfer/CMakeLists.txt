@@ -66,6 +66,7 @@ cc_library(
   HDRS
     kv_cache_transfer.h
     kv_cache_store.h
+    mooncake_store_backend.h
     host_transfer/layout.h
     host_transfer/transfer.h
     host_transfer/basic_transfer.h
@@ -78,6 +79,7 @@ cc_library(
   SRCS
     kv_cache_transfer.cpp
     kv_cache_store.cpp
+    mooncake_store_backend.cpp
     host_transfer/layout.cpp
     host_transfer/transfer.cpp
     host_transfer/transfer_utils.cpp

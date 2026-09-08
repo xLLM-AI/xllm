@@ -194,6 +194,8 @@ class Request : public RequestBase {
 
   size_t num_prefix_cache_tokens_ = 0;
 
+  bool prefix_cache_hit_metrics_recorded_ = false;
+
   double end_to_end_latency_offset_seconds_ = 0.0;
 
   void create_sequences_group();

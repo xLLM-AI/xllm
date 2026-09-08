@@ -250,6 +250,8 @@ DECLARE_bool(enable_kvcache_store);
 
 DECLARE_string(store_protocol);
 
+DECLARE_string(store_rdma_devices);
+
 DECLARE_string(store_master_server_address);
 
 DECLARE_string(store_metadata_server);

@@ -677,7 +677,12 @@ void WorkerService::PrefetchFromStorage(
         CHECK(result_chunk.SerializeToString(&payload));
         butil::IOBuf buffer;
         buffer.append(payload);
-        brpc::StreamWrite(stream_id, buffer);
+        const int32_t write_result =
+            static_cast<int32_t>(brpc::StreamWrite(stream_id, buffer));
+        if (write_result != 0) {
+          LOG(ERROR) << "Failed to write Mooncake prefetch result: error="
+                     << write_result;
+        }
       });
 }
 

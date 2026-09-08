@@ -19,7 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <cstdlib>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,97 +44,53 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
   CHECK(!is_initialized_) << "KVCacheStore is already initialized.";
   CHECK(!config.model_id.empty())
       << "KVCacheStore requires a target model identity.";
+  CHECK_GT(config.tp_size, 0U);
+  CHECK_LT(config.tp_rank, config.tp_size);
   config_ = config;
   initialize_store_index(std::move(store_index));
 
-  std::optional<std::string> device_names = std::nullopt;
+  const std::optional<std::string> device_names =
+      get_store_device_names(config_);
   if (config_.protocol == "rdma") {
-    const char* configured_devices = std::getenv("DEVICE_NAMES");
-    if (configured_devices != nullptr) {
-      device_names = configured_devices;
-      LOG(INFO) << "Mooncake RDMA device_names: " << device_names.value();
-    } else {
-      LOG(WARNING) << "DEVICE_NAMES is not set; falling back to TCP.";
-      config_.protocol = "tcp";
-    }
+    LOG(INFO) << "Mooncake RDMA device_names: "
+              << device_names.value_or("auto-discover");
+  } else if (!config_.rdma_devices.empty()) {
+    LOG(WARNING) << "Ignoring store_rdma_devices for Store protocol "
+                 << config_.protocol << ".";
   }
 
-  auto client = mooncake::Client::Create(config_.localhost_name,
-                                         config_.metadata_server,
-                                         config_.protocol,
-                                         device_names,
-                                         config_.master_server_address);
-  if (!client.has_value()) {
-    LOG(ERROR) << "Failed to create Mooncake Store client for "
-               << config_.localhost_name;
+  const std::optional<std::vector<MooncakeRegisteredRange>> ranges =
+      collect_ranges();
+  if (!ranges.has_value()) {
+    LOG(ERROR) << "Failed to collect Mooncake Host tensor ranges.";
     return false;
   }
-  client_ptr_ = client.value();
-  rep_config_.replica_num = config_.replica_num;
-
-  std::unordered_set<void*> registered_addresses;
-  for (const auto& [block_type, entries] : store_index_) {
-    for (const StoreEntry& entry : entries) {
-      const BlockTypeTensorMap tensors =
-          entry.cache->get_block_type_tensors(block_type);
-      int64_t host_blocks = -1;
-      size_t slot_bytes = 0;
-      for (const auto& tensor_entry : tensors) {
-        const torch::Tensor& tensor = tensor_entry.second;
-        if (host_blocks < 0) {
-          host_blocks = tensor.size(0);
-        }
-        slot_bytes += static_cast<size_t>(tensor[0].numel()) *
-                      static_cast<size_t>(tensor.element_size());
-        if (config_.protocol != "rdma") {
-          continue;
-        }
-        void* address = tensor.data_ptr();
-        if (!registered_addresses.emplace(address).second) {
-          continue;
-        }
-        const size_t bytes = static_cast<size_t>(tensor.numel()) *
-                             static_cast<size_t>(tensor.element_size());
-        auto result =
-            client_ptr_->RegisterLocalMemory(address,
-                                             bytes,
-                                             /*location=*/"cpu:0",
-                                             /*remote_accessible=*/false,
-                                             /*update_metadata=*/false);
-        if (!result.has_value()) {
-          LOG(ERROR) << "Failed to register Mooncake Host tensor: "
-                     << toString(result.error());
-          return false;
-        }
-        registered_addresses_.emplace_back(address);
-      }
-      LOG(INFO) << "KVCacheStore init OK: type="
-                << static_cast<int32_t>(block_type)
-                << ", cache_handle=" << entry.cache_handle
-                << ", key_component=" << entry.key_component
-                << ", host_blocks=" << host_blocks
-                << ", slot_bytes=" << slot_bytes
-                << ", protocol=" << config_.protocol;
-    }
+  MooncakeStoreBackendConfig backend_config;
+  backend_config.localhost_name = config_.localhost_name;
+  backend_config.protocol = config_.protocol;
+  backend_config.rdma_devices = device_names.value_or("");
+  backend_config.metadata_server = config_.metadata_server;
+  backend_config.master_server_address = config_.master_server_address;
+  backend_config.replica_num = config_.replica_num;
+  backend_ = std::make_unique<MooncakeStoreBackend>();
+  if (!backend_->init(backend_config, *ranges)) {
+    backend_.reset();
+    return false;
   }
 
   is_initialized_ = true;
   return true;
 }
 
-KVCacheStore::~KVCacheStore() {
-  if (client_ptr_ != nullptr) {
-    for (void* address : registered_addresses_) {
-      auto result = client_ptr_->unregisterLocalMemory(
-          address, /*update_metadata=*/false);
-      if (!result.has_value()) {
-        LOG(WARNING) << "Failed to unregister Mooncake Host tensor: "
-                     << toString(result.error());
-      }
-    }
-    client_ptr_.reset();
+std::optional<std::string> KVCacheStore::get_store_device_names(
+    const KVCacheStoreInitConfig& config) {
+  if (config.protocol != "rdma" || config.rdma_devices.empty()) {
+    return std::nullopt;
   }
+  return config.rdma_devices;
 }
+
+KVCacheStore::~KVCacheStore() { backend_.reset(); }
 
 void KVCacheStore::initialize_store_index(HostCacheStoreIndex store_index) {
   CHECK(store_index_.empty()) << "KVCacheStore index is already initialized.";
@@ -183,7 +139,9 @@ std::string KVCacheStore::build_schema_hash(BlockType block_type,
   CHECK(!tensors.empty()) << "Host cache has no tensors for BlockType "
                           << static_cast<int32_t>(block_type);
 
-  std::string cache_schema = "tp=" + std::to_string(config_.tp_size);
+  std::string cache_schema = config_.enable_mla
+                                 ? "parallel=mla"
+                                 : "tp=" + std::to_string(config_.tp_size);
   cache_schema.append("|type=");
   cache_schema.append(std::to_string(static_cast<int32_t>(block_type)));
   int64_t host_blocks = -1;
@@ -217,12 +175,18 @@ std::string KVCacheStore::build_key_prefix(
   std::string prefix = "xllm-kv-v3:";
   append_key_field(prefix, config_.model_id);
   append_key_field(prefix, key_component);
-  prefix.append(std::to_string(config_.tp_size));
-  prefix.push_back(':');
+  if (config_.enable_mla) {
+    prefix.append("mla:");
+  } else {
+    prefix.append(std::to_string(config_.tp_size));
+    prefix.push_back(':');
+  }
   prefix.append(std::to_string(static_cast<int32_t>(block_type)));
   prefix.push_back(':');
-  prefix.append(std::to_string(config_.tp_rank));
-  prefix.push_back(':');
+  if (!config_.enable_mla) {
+    prefix.append(std::to_string(config_.tp_rank));
+    prefix.push_back(':');
+  }
   prefix.append(schema_hash);
   return prefix;
 }
@@ -317,6 +281,11 @@ uint32_t KVCacheStore::batch_put(
   if (!is_initialized_ || block_transfer_info.empty()) {
     return 0;
   }
+  if (config_.enable_mla && config_.tp_rank != 0U) {
+    VLOG(1) << "KVCacheStore skips MLA remote put on non-zero rank: tp_rank="
+            << config_.tp_rank;
+    return static_cast<uint32_t>(block_transfer_info.size());
+  }
 
   const GroupedRequests grouped = build_grouped_requests(block_transfer_info);
   const std::vector<PhysicalRequest>& requests = grouped.requests;
@@ -325,46 +294,34 @@ uint32_t KVCacheStore::batch_put(
     return 0;
   }
 
-  std::vector<std::string> group_keys;
-  group_keys.reserve(groups.size());
-  for (const RequestGroup& group : groups) {
-    group_keys.emplace_back(group.key);
-  }
-  const auto exists = client_ptr_->BatchIsExist(group_keys);
-
   std::vector<uint8_t> physical_results(requests.size(), /*value=*/0);
   std::vector<std::string> put_keys;
-  std::vector<std::vector<mooncake::Slice>> put_slices;
+  std::vector<MooncakeMultiBuffer> put_buffers;
   std::vector<size_t> put_group_indices;
   put_keys.reserve(groups.size());
-  put_slices.reserve(groups.size());
+  put_buffers.reserve(groups.size());
   put_group_indices.reserve(groups.size());
   for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
     const RequestGroup& group = groups[group_index];
-    const bool already_exists = group_index < exists.size() &&
-                                exists[group_index].has_value() &&
-                                exists[group_index].value();
-    if (already_exists) {
-      for (size_t request_index : group.request_indices) {
-        physical_results[request_index] = 1;
-      }
+    const PhysicalRequest& request = requests[group.request_indices.front()];
+    const std::optional<MooncakeMultiBuffer> buffer = build_multi_buffer(
+        *request.entry,
+        block_transfer_info[request.logical_index].dst_block_id);
+    if (!buffer.has_value()) {
       continue;
     }
-    const PhysicalRequest& request = requests[group.request_indices.front()];
     put_keys.emplace_back(group.key);
-    put_slices.emplace_back(generate_mooncake_slices(
-        *request.entry,
-        block_transfer_info[request.logical_index].dst_block_id));
+    put_buffers.emplace_back(*buffer);
     put_group_indices.emplace_back(group_index);
   }
 
-  if (!put_keys.empty()) {
-    const auto results =
-        client_ptr_->BatchPut(put_keys, put_slices, rep_config_);
+  if (!put_keys.empty() && backend_ != nullptr) {
+    const std::vector<uint8_t> results =
+        backend_->batch_put(put_keys, put_buffers);
     for (size_t result_index = 0; result_index < put_group_indices.size() &&
                                   result_index < results.size();
          ++result_index) {
-      if (!results[result_index].has_value()) {
+      if (results[result_index] == 0) {
         continue;
       }
       for (size_t request_index :
@@ -401,94 +358,89 @@ std::vector<uint8_t> KVCacheStore::batch_get_with_status(
     return statuses;
   }
 
-  std::vector<std::string> all_keys;
   std::unordered_set<std::string> unique_keys;
-  all_keys.reserve(requests.size());
   unique_keys.reserve(requests.size());
   for (const PhysicalRequest& request : requests) {
-    CHECK(unique_keys.emplace(request.key).second)
-        << "Duplicate KVCacheStore BatchGet key in one request.";
-    all_keys.emplace_back(request.key);
+    if (!unique_keys.emplace(request.key).second) {
+      LOG(ERROR) << "Duplicate KVCacheStore BatchGet key in one request.";
+      return statuses;
+    }
   }
-  const auto exists = client_ptr_->BatchIsExist(all_keys);
 
-  std::vector<uint8_t> physical_exists(requests.size(), /*value=*/0);
-  for (size_t request_index = 0;
-       request_index < requests.size() && request_index < exists.size();
-       ++request_index) {
-    physical_exists[request_index] =
-        exists[request_index].has_value() && exists[request_index].value();
-  }
-  const std::vector<uint8_t> logical_exists =
-      aggregate_results(block_transfer_info.size(), requests, physical_exists);
-
-  std::vector<std::string> get_keys;
-  std::unordered_map<std::string, std::vector<mooncake::Slice>> get_slices;
-  std::vector<size_t> get_request_indices;
-  get_keys.reserve(requests.size());
-  get_slices.reserve(requests.size());
-  get_request_indices.reserve(requests.size());
+  std::vector<uint8_t> physical_results(requests.size(), /*value=*/0);
   for (size_t request_index = 0; request_index < requests.size();
        ++request_index) {
     const PhysicalRequest& request = requests[request_index];
-    if (logical_exists[request.logical_index] == 0) {
+    const std::optional<MooncakeMultiBuffer> buffer = build_multi_buffer(
+        *request.entry,
+        block_transfer_info[request.logical_index].dst_block_id);
+    if (!buffer.has_value() || backend_ == nullptr) {
       continue;
     }
-    get_keys.emplace_back(request.key);
-    get_slices.emplace(
-        request.key,
-        generate_mooncake_slices(
-            *request.entry,
-            block_transfer_info[request.logical_index].dst_block_id));
-    get_request_indices.emplace_back(request_index);
-  }
-  if (get_keys.empty()) {
-    return statuses;
-  }
-
-  const auto results = client_ptr_->BatchGet(get_keys, get_slices);
-  std::vector<uint8_t> physical_results(requests.size(), /*value=*/0);
-  for (size_t result_index = 0; result_index < get_request_indices.size() &&
-                                result_index < results.size();
-       ++result_index) {
-    if (results[result_index].has_value()) {
-      physical_results[get_request_indices[result_index]] = 1;
-    }
+    physical_results[request_index] =
+        backend_->get(request.key, *buffer) ? 1 : 0;
   }
   return aggregate_results(
       block_transfer_info.size(), requests, physical_results);
 }
 
-uint32_t KVCacheStore::batch_exist(std::vector<std::string>&& keys) {
-  if (!is_initialized_) {
-    return 0;
-  }
-  const auto exists = client_ptr_->BatchIsExist(keys);
-  return static_cast<uint32_t>(
-      std::count_if(exists.begin(), exists.end(), [](const auto& result) {
-        return result.has_value() && result.value();
-      }));
-}
-
-std::vector<mooncake::Slice> KVCacheStore::generate_mooncake_slices(
+std::optional<MooncakeMultiBuffer> KVCacheStore::build_multi_buffer(
     const StoreEntry& entry,
     int32_t block_id) const {
-  CHECK(!entry.block_tensors.empty()) << "Missing Host cache for BlockType "
-                                      << static_cast<int32_t>(entry.block_type);
-
-  std::vector<mooncake::Slice> slices;
-  slices.reserve(entry.block_tensors.size());
-  for (const torch::Tensor& tensor : entry.block_tensors) {
-    CHECK_GE(block_id, 0);
-    CHECK_LT(block_id, tensor.size(0));
-    torch::Tensor block = tensor[block_id];
-    CHECK(block.is_contiguous());
-    slices.emplace_back(
-        mooncake::Slice{block.data_ptr(),
-                        static_cast<size_t>(block.numel()) *
-                            static_cast<size_t>(block.element_size())});
+  if (entry.block_tensors.empty()) {
+    LOG(ERROR) << "Missing Host cache for BlockType "
+               << static_cast<int32_t>(entry.block_type);
+    return std::nullopt;
   }
-  return slices;
+
+  MooncakeMultiBuffer buffer;
+  buffer.addresses.reserve(entry.block_tensors.size());
+  buffer.sizes.reserve(entry.block_tensors.size());
+  for (const torch::Tensor& tensor : entry.block_tensors) {
+    if (block_id < 0 || block_id >= tensor.size(0)) {
+      LOG(ERROR) << "Invalid Host cache block id=" << block_id;
+      return std::nullopt;
+    }
+    torch::Tensor block = tensor[block_id];
+    if (!block.is_contiguous() || block.numel() <= 0 ||
+        static_cast<uint64_t>(block.numel()) >
+            std::numeric_limits<size_t>::max() /
+                static_cast<size_t>(block.element_size())) {
+      LOG(ERROR) << "Invalid Host cache tensor for BlockType "
+                 << static_cast<int32_t>(entry.block_type);
+      return std::nullopt;
+    }
+    buffer.addresses.emplace_back(block.data_ptr());
+    buffer.sizes.emplace_back(static_cast<size_t>(block.numel()) *
+                              static_cast<size_t>(block.element_size()));
+  }
+  return buffer;
+}
+
+std::optional<std::vector<MooncakeRegisteredRange>>
+KVCacheStore::collect_ranges() const {
+  std::vector<MooncakeRegisteredRange> ranges;
+  for (const auto& [block_type, entries] : store_index_) {
+    for (const StoreEntry& entry : entries) {
+      const BlockTypeTensorMap tensors =
+          entry.cache->get_block_type_tensors(block_type);
+      for (const auto& tensor_entry : tensors) {
+        const torch::Tensor& tensor = tensor_entry.second;
+        if (!tensor.defined() || tensor.numel() <= 0 ||
+            static_cast<uint64_t>(tensor.numel()) >
+                std::numeric_limits<size_t>::max() /
+                    static_cast<size_t>(tensor.element_size())) {
+          LOG(ERROR) << "Invalid Host tensor registration range.";
+          return std::nullopt;
+        }
+        ranges.emplace_back(MooncakeRegisteredRange{
+            tensor.data_ptr(),
+            static_cast<size_t>(tensor.numel()) *
+                static_cast<size_t>(tensor.element_size())});
+      }
+    }
+  }
+  return ranges;
 }
 
 }  // namespace xllm

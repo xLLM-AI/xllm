@@ -50,6 +50,7 @@ configure_xllm_mooncake_ha_args() {
     "--host_blocks_factor=${XLLM_HOST_BLOCKS_FACTOR:-4}"
     "--enable_kvcache_store=true"
     "--store_protocol=${XLLM_STORE_PROTOCOL:-tcp}"
+    "--store_rdma_devices=${XLLM_STORE_RDMA_DEVICES:-}"
     "--store_master_server_address=$MOONCAKE_HA_ENTRY"
     "--store_metadata_server=${XLLM_STORE_METADATA_SERVER:-P2PHANDSHAKE}"
     "--store_local_hostname=$XLLM_STORE_LOCAL_HOSTNAME"

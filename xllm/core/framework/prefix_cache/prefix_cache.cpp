@@ -21,7 +21,6 @@ limitations under the License.
 #include <iostream>
 #include <thread>
 
-#include "common/metrics.h"
 #include "core/framework/multimodal/mm_data.h"
 
 namespace xllm {
@@ -94,11 +93,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
   }
 
   matched_blocks_.fetch_add(blocks.size());
-
-  int64_t int_rate_percent = static_cast<int64_t>(
-      static_cast<double>(blocks.size()) * 100.0 / n_blocks);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_num, blocks.size());
 
   return blocks;
 }

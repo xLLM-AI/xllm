@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "common/metrics.h"
 
+#include <algorithm>
+#include <mutex>
+
 // llm server impl metrics
 DEFINE_COUNTER(request_status_total_ok, "Total number of request status OK");
 DEFINE_COUNTER(request_status_total_cancelled,
@@ -62,17 +65,39 @@ DEFINE_COUNTER(prefix_cache_latency_seconds_match,
 DEFINE_COUNTER(prefix_cache_latency_seconds_evict,
                "Latency of prefix cache evict in seconds");
 
-DEFINE_COUNTER(prefix_cache_match_length_total,
-               "Length of matched prefix in tokens");
+DEFINE_COUNTER(prefix_cache_prompt_tokens_total,
+               "Process-cumulative prompt tokens for admitted requests");
+DEFINE_COUNTER(prefix_cache_hit_tokens_total,
+               "Process-cumulative prefix-cache hit tokens");
+DEFINE_GAUGE(prefix_cache_token_hit_rate_perc,
+             "Process-cumulative prefix-cache token hit rate in percent");
 
 DEFINE_COUNTER(allocate_blocks_latency_seconds,
                "Latency of blocks allocation in seconds");
 
-DEFINE_HISTOGRAM(prefix_cache_block_matched_rate,
-                 "Histogram of prefix cache block match rate");
+namespace {
 
-DEFINE_HISTOGRAM(prefix_cache_block_matched_num,
-                 "Histogram of prefix cache block matched number");
+std::mutex prefix_cache_hit_metrics_mutex;
+
+}  // namespace
+
+namespace xllm {
+
+void record_prefix_cache_hit_metrics(size_t prompt_tokens, size_t hit_tokens) {
+  if (prompt_tokens == 0) {
+    return;
+  }
+
+  hit_tokens = std::min(hit_tokens, prompt_tokens);
+  const std::lock_guard<std::mutex> lock(prefix_cache_hit_metrics_mutex);
+  COUNTER_ADD(prefix_cache_prompt_tokens_total, prompt_tokens);
+  COUNTER_ADD(prefix_cache_hit_tokens_total, hit_tokens);
+  const double prompt_total = COUNTER_VALUE(prefix_cache_prompt_tokens_total);
+  const double hit_total = COUNTER_VALUE(prefix_cache_hit_tokens_total);
+  GAUGE_SET(prefix_cache_token_hit_rate_perc, hit_total * 100.0 / prompt_total);
+}
+
+}  // namespace xllm
 
 // sequence metrics
 DEFINE_COUNTER(detokenization_latency_seconds_stream,

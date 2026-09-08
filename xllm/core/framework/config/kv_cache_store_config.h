@@ -47,6 +47,7 @@ class KVCacheStoreConfig final {
          "host_blocks_factor",
          "enable_kvcache_store",
          "store_protocol",
+         "store_rdma_devices",
          "store_master_server_address",
          "store_metadata_server",
          "store_local_hostname",
@@ -65,6 +66,9 @@ class KVCacheStoreConfig final {
   PROPERTY(bool, enable_kvcache_store) = false;
 
   PROPERTY(std::string, store_protocol) = "tcp";
+
+  // Comma-separated HCAs for the embedded Store client.
+  PROPERTY(std::string, store_rdma_devices) = "";
 
   PROPERTY(std::string, store_master_server_address);
 

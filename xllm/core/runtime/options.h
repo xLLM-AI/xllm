@@ -207,6 +207,8 @@ struct Options {
   // store transfer protocol.
   PROPERTY(std::string, store_protocol) = "tcp";
 
+  PROPERTY(std::string, store_rdma_devices) = "";
+
   // The address information of the Master (IP:Port for default mode and
   // etcd://IP:Port;IP:Port;...;IP:Port for high availability mode)
   PROPERTY(std::string, store_master_server_address) = "";
