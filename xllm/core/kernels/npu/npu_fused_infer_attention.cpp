@@ -13,8 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/ops/scaled_dot_product_attention.h>
 #include <glog/logging.h>
+#include <torch_npu/csrc/aten/CustomFunctions.h>
+
+#include <array>
 
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/npu_ops_api.h"
@@ -23,6 +27,61 @@ limitations under the License.
 namespace {
 
 constexpr int64_t kSwaIntMax = 2147483647;
+
+using OptionalTensorRef = const std::optional<at::Tensor>&;
+using OptionalSymIntArrayRef = c10::OptionalArrayRef<c10::SymInt>;
+using FusedInferAttentionOutSignature =
+    std::tuple<at::Tensor, at::Tensor>(const at::Tensor&,
+                                       const at::Tensor&,
+                                       const at::Tensor&,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalSymIntArrayRef,
+                                       OptionalSymIntArrayRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalSymIntArrayRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       OptionalTensorRef,
+                                       int64_t,
+                                       double,
+                                       int64_t,
+                                       int64_t,
+                                       c10::string_view,
+                                       int64_t,
+                                       int64_t,
+                                       int64_t,
+                                       int64_t,
+                                       int64_t,
+                                       int64_t,
+                                       int64_t,
+                                       bool,
+                                       OptionalTensorRef,
+                                       c10::ArrayRef<at::Tensor>);
+
+std::vector<c10::SymInt> to_sym_ints(const std::vector<int64_t>& values) {
+  std::vector<c10::SymInt> sym_ints;
+  sym_ints.reserve(values.size());
+  for (int64_t value : values) {
+    sym_ints.emplace_back(value);
+  }
+  return sym_ints;
+}
 
 torch::Tensor ascend950_packed_causal_attention(
     const torch::Tensor& query,
@@ -150,6 +209,139 @@ std::optional<torch::Tensor> to_optional_tensor(
 }  // namespace
 
 namespace xllm::kernel::npu {
+
+torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size) {
+  std::vector<c10::SymInt> actual_seq_lengths_sym =
+      to_sym_ints(actual_seq_lengths);
+  std::vector<c10::SymInt> actual_seq_lengths_kv_sym =
+      to_sym_ints(actual_seq_lengths_kv);
+  const std::optional<torch::Tensor> none_tensor = std::nullopt;
+  const at::OptionalSymIntArrayRef none_int_array = std::nullopt;
+
+  return at_npu::native::custom_ops::
+      _npu_fused_infer_attention_score_get_max_workspace(
+          query,
+          key,
+          value,
+          none_tensor,
+          none_tensor,
+          actual_seq_lengths_sym,
+          actual_seq_lengths_kv_sym,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          block_table,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_int_array,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          num_heads,
+          scale,
+          kSwaIntMax,
+          /*next_tokens=*/0,
+          "TND",
+          num_key_value_heads,
+          /*sparse_mode=*/0,
+          /*inner_precise=*/0,
+          block_size,
+          /*antiquant_mode=*/0,
+          /*key_antiquant_mode=*/0,
+          /*value_antiquant_mode=*/0,
+          /*softmax_lse_flag=*/false);
+}
+
+void npu_fused_infer_attention_decode_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    const torch::Tensor& workspace,
+    torch::Tensor& output,
+    torch::Tensor& softmax_lse) {
+  std::vector<c10::SymInt> actual_seq_lengths_sym =
+      to_sym_ints(actual_seq_lengths);
+  std::vector<c10::SymInt> actual_seq_lengths_kv_sym =
+      to_sym_ints(actual_seq_lengths_kv);
+  const std::optional<torch::Tensor> none_tensor = std::nullopt;
+  const at::OptionalSymIntArrayRef none_int_array = std::nullopt;
+  const std::optional<at::Tensor> workspace_tensor = workspace;
+  const std::array<at::Tensor, 2> outputs = {output, softmax_lse};
+  static const auto op =
+      c10::Dispatcher::singleton()
+          .findSchemaOrThrow("npu::npu_fused_infer_attention_score", "out")
+          .typed<FusedInferAttentionOutSignature>();
+
+  op.call(query,
+          key,
+          value,
+          none_tensor,
+          none_tensor,
+          actual_seq_lengths_sym,
+          actual_seq_lengths_kv_sym,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          block_table,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          none_int_array,
+          none_tensor,
+          none_tensor,
+          none_tensor,
+          num_heads,
+          scale,
+          kSwaIntMax,
+          /*next_tokens=*/0,
+          "TND",
+          num_key_value_heads,
+          /*sparse_mode=*/0,
+          /*inner_precise=*/0,
+          block_size,
+          /*antiquant_mode=*/0,
+          /*key_antiquant_mode=*/0,
+          /*value_antiquant_mode=*/0,
+          /*softmax_lse_flag=*/false,
+          workspace_tensor,
+          outputs);
+}
 
 std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     const torch::Tensor& query,
