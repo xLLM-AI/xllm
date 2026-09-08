@@ -281,7 +281,54 @@ class XliteWeightUtils {
       torch::Tensor o =
           (tp > 1) ? Shard(sd, L + "self_attn.o_proj.weight", 1, rank, tp)
                    : sd.get_tensor(L + "self_attn.o_proj.weight");
-      InitXTensor(m.attnOut[i].weight, dev(o, L + "self_attn.o_proj.weight"));
+      // W8A8 STATIC quant: I8 weight + inputScale/inputOffset/quantBias/
+      // deqScale. BF16 skips.
+      bool oQuant = IsQuant(o);
+      if (oQuant) {
+        o = o.t().contiguous();  // W8A8: [heads*headDim, hidden] = [in, out]
+      }
+      o = dev(o, L + "self_attn.o_proj.weight");
+      if (oQuant && cfg.quantAttnWeightNz) {
+        o = CastNz(o, L + "self_attn.o_proj.weight NZ", storages);
+      }
+      InitXTensor(m.attnOut[i].weight, o);
+      storages.push_back(o);
+      if (oQuant) {
+        uint32_t nLocalHeads = cfg.nHeads / tp;
+        int64_t oInputDim = static_cast<int64_t>(nLocalHeads) * cfg.headDim;
+        torch::Tensor iscale =
+            sd.get_tensor(L + "self_attn.o_proj.input_scale");
+        torch::Tensor ioffset =
+            sd.get_tensor(L + "self_attn.o_proj.input_offset");
+        if (iscale.defined()) {
+          torch::Tensor recip = (1.0f / iscale.to(torch::kFloat32))
+                                    .to(torch::kBFloat16)
+                                    .contiguous();
+          recip = recip.repeat({oInputDim});
+          InitXTensor(m.attnOut[i].inputScale,
+                      dev(recip, L + "o_proj.input_scale_reciprocal"));
+        }
+        if (ioffset.defined()) {
+          torch::Tensor off =
+              ioffset.to(torch::kBFloat16).contiguous().repeat({oInputDim});
+          InitXTensor(m.attnOut[i].inputOffset,
+                      dev(off, L + "o_proj.input_offset"));
+        }
+        // quantBias rank0 only (avoid double sum); deqScale not sharded
+        // (distributive, same as MLA path).
+        if (rank == 0) {
+          torch::Tensor qb_o = sd.get_tensor(L + "self_attn.o_proj.quant_bias");
+          if (qb_o.defined()) {
+            InitXTensor(m.attnOut[i].quantBias,
+                        dev(qb_o, L + "o_proj.quant_bias"));
+          }
+        }
+        torch::Tensor ds_o = sd.get_tensor(L + "self_attn.o_proj.deq_scale");
+        if (ds_o.defined()) {
+          torch::Tensor ds = TransformDeqScale(ds_o);
+          InitXTensor(m.attnOut[i].deqScale, dev(ds, L + "o_proj.deq_scale"));
+        }
+      }
 
       if (i == 0 && tp > 1) {
         LOG(INFO) << "[xlite] shard layer0 rank=" << rank
@@ -373,7 +420,7 @@ class XliteWeightUtils {
       down = sd.get_tensor(L + "mlp.down_proj.weight");
     }
     // Dense MLP: BF16 no transpose (expects [out,in]); W8A8 transpose to
-    // [in,out]. mlpDown is BF16 (NO_QUANT) -> no transpose.
+    // [in,out]. mlpDown transpose/NZ see the down_proj block below.
     torch::Tensor gate_up =
         torch::cat({gp, up}, /*dim=*/0).contiguous();  // host [2*inter, hidden]
     if (IsQuant(gp)) {
@@ -381,17 +428,15 @@ class XliteWeightUtils {
           gate_up.t().contiguous();  // W8A8: [hidden, 2*inter] = [in, out]
     }
     gate_up = dev(gate_up, L + "mlp.gate_proj+up_proj (mlpUpGate)");
-    // W8A8 INT8 NZ: dense MLP gate_up (quantAttnWeightNz). mlpDown BF16 no
-    // transpose.
+    // W8A8 INT8 NZ: dense MLP gate_up (quantAttnWeightNz).
     if (IsQuant(gp) && cfg.quantAttnWeightNz) {
       gate_up =
           CastNz(gate_up, L + "mlp.gate_proj+up_proj (mlpUpGate) NZ", storages);
     }
     InitXTensor(m.mlpUpGate[i].weight, gate_up);
     storages.push_back(gate_up);
-    // W8A8 DYNAMIC: gate/up has weight_scale (BF16 [out,1]), no
-    // input/quant_bias/deq_scale. deqScale = TransformDeqScale(cat(gate_scale,
-    // up_scale) shard dim0). down_proj BF16 -> NO_QUANT. weight_offset unused.
+    // W8A8 quant params: STATIC prefers the deq_scale, DYNAMIC has no
+    // deq_scale.
     if (IsQuant(gp)) {
       torch::Tensor gs, us;
       if (tp > 1) {
@@ -401,11 +446,56 @@ class XliteWeightUtils {
         gs = sd.get_tensor(L + "mlp.gate_proj.weight_scale");
         us = sd.get_tensor(L + "mlp.up_proj.weight_scale");
       }
-      if (gs.defined()) {
+      // W8A8 STATIC (e.g. Qwen3): deq_scale field present.
+      // W8A8 DYNAMIC (e.g. GLM-5.2): deq_scale absent.
+      torch::Tensor dsg = sd.get_tensor(L + "mlp.gate_proj.deq_scale");
+      if (dsg.defined()) {
+        torch::Tensor dsu = sd.get_tensor(L + "mlp.up_proj.deq_scale");
+        if (tp > 1) {
+          dsg = Shard(sd, L + "mlp.gate_proj.deq_scale", 0, rank, tp);
+          dsu = Shard(sd, L + "mlp.up_proj.deq_scale", 0, rank, tp);
+        }
+        torch::Tensor ds =
+            TransformDeqScale(torch::cat({dsg, dsu}, /*dim=*/0).contiguous());
+        InitXTensor(m.mlpUpGate[i].deqScale,
+                    dev(ds, L + "mlp.gate_proj+up_proj.deq_scale"));
+      } else if (gs.defined() && us.defined()) {
         torch::Tensor ds =
             TransformDeqScale(torch::cat({gs, us}, /*dim=*/0).contiguous());
         InitXTensor(m.mlpUpGate[i].deqScale,
                     dev(ds, L + "mlp.gate_proj+up_proj.deq_scale"));
+      }
+      // W8A8 STATIC (e.g. Qwen3): inputScale/inputOffset (per-tensor, same for
+      // gate/up). W8A8 DYNAMIC (e.g. GLM-5.2): no inputScale/inputOffset.
+      torch::Tensor iscale = sd.get_tensor(L + "mlp.gate_proj.input_scale");
+      torch::Tensor ioffset = sd.get_tensor(L + "mlp.gate_proj.input_offset");
+      if (iscale.defined()) {
+        torch::Tensor recip = (1.0f / iscale.to(torch::kFloat32))
+                                  .to(torch::kBFloat16)
+                                  .contiguous();
+        recip = recip.repeat({static_cast<int64_t>(cfg.hiddenSize)});
+        InitXTensor(m.mlpUpGate[i].inputScale,
+                    dev(recip, L + "gate_proj.input_scale_reciprocal"));
+      }
+      if (ioffset.defined()) {
+        torch::Tensor off = ioffset.to(torch::kBFloat16)
+                                .contiguous()
+                                .repeat({static_cast<int64_t>(cfg.hiddenSize)});
+        InitXTensor(m.mlpUpGate[i].inputOffset,
+                    dev(off, L + "gate_proj.input_offset"));
+      }
+      // quantBias: cat(gate,up) + TP shard dim0 (same as weight). STATIC only
+      // (e.g. Qwen3); DYNAMIC checkpoints (e.g. GLM-5.2) have none.
+      torch::Tensor qb_g = sd.get_tensor(L + "mlp.gate_proj.quant_bias");
+      if (qb_g.defined()) {
+        torch::Tensor qb_u = sd.get_tensor(L + "mlp.up_proj.quant_bias");
+        if (tp > 1) {
+          qb_g = Shard(sd, L + "mlp.gate_proj.quant_bias", 0, rank, tp);
+          qb_u = Shard(sd, L + "mlp.up_proj.quant_bias", 0, rank, tp);
+        }
+        torch::Tensor qb = torch::cat({qb_g, qb_u}, /*dim=*/0).contiguous();
+        InitXTensor(m.mlpUpGate[i].quantBias,
+                    dev(qb, L + "mlp.gate_proj+up_proj.quant_bias"));
       }
     }
     // down_proj: row-parallel (TP shard dim1, ForwardMLP AllReduce).
@@ -420,7 +510,12 @@ class XliteWeightUtils {
     InitXTensor(m.mlpDown[i].weight, down_w);
     storages.push_back(down_w);
     if (IsQuant(down)) {
-      torch::Tensor ds_down = sd.get_tensor(L + "mlp.down_proj.weight_scale");
+      // W8A8 STATIC (e.g. Qwen3): deq_scale field present.
+      // W8A8 DYNAMIC (e.g. GLM-5.2): weight_scale (no deq_scale field).
+      torch::Tensor ds_down = sd.get_tensor(L + "mlp.down_proj.deq_scale");
+      if (!ds_down.defined()) {
+        ds_down = sd.get_tensor(L + "mlp.down_proj.weight_scale");
+      }
       if (ds_down.defined()) {
         torch::Tensor ds = TransformDeqScale(ds_down);
         InitXTensor(m.mlpDown[i].deqScale,
@@ -728,6 +823,12 @@ class XliteWeightUtils {
     InitXTensor(
         m.norm,
         devBf16(sd.get_tensor("model.norm.weight"), "model.norm.weight"));
+    // W8A8 norm bias; BF16 models have none.
+    torch::Tensor normBias = sd.get_tensor("model.norm.bias");
+    if (normBias.defined()) {
+      InitXTensor(m.normBias,
+                  devBf16(normBias.contiguous(), "model.norm.bias"));
+    }
     torch::Tensor head;
     if (args.tie_word_embeddings()) {
       // tie: reuse embed's device storage (zero-copy). Avoids a second
@@ -754,6 +855,20 @@ class XliteWeightUtils {
       InitXTensor(m.mlpNorm[i],
                   devBf16(sd.get_tensor(L + "post_attention_layernorm.weight"),
                           L + "post_attention_layernorm.weight"));
+      // W8A8 norm biases (attn/mlp); BF16 models have none.
+      torch::Tensor attnNormBias = sd.get_tensor(L + "input_layernorm.bias");
+      if (attnNormBias.defined()) {
+        InitXTensor(
+            m.attnNormBias[i],
+            devBf16(attnNormBias.contiguous(), L + "input_layernorm.bias"));
+      }
+      torch::Tensor mlpNormBias =
+          sd.get_tensor(L + "post_attention_layernorm.bias");
+      if (mlpNormBias.defined()) {
+        InitXTensor(m.mlpNormBias[i],
+                    devBf16(mlpNormBias.contiguous(),
+                            L + "post_attention_layernorm.bias"));
+      }
 
       // mlaQKVA = q_a + kv_a_with_mqa concat (q first; xlite csrc expects
       // q-first). Lora compressed, not sharded.
@@ -829,13 +944,27 @@ class XliteWeightUtils {
         }
       }
 
-      // q_a/kv_a_layernorm (RMSNorm, not sharded; DeepSeek has no bias).
+      // q_a/kv_a_layernorm (RMSNorm, not sharded; BF16 models have no bias).
       InitXTensor(m.mlaQNorm[i],
                   devBf16(sd.get_tensor(L + "self_attn.q_a_layernorm.weight"),
                           L + "self_attn.q_a_layernorm.weight"));
       InitXTensor(m.mlaKVNorm[i],
                   devBf16(sd.get_tensor(L + "self_attn.kv_a_layernorm.weight"),
                           L + "self_attn.kv_a_layernorm.weight"));
+      torch::Tensor mlaQNormBias =
+          sd.get_tensor(L + "self_attn.q_a_layernorm.bias");
+      if (mlaQNormBias.defined()) {
+        InitXTensor(m.mlaQNormBias[i],
+                    devBf16(mlaQNormBias.contiguous(),
+                            L + "self_attn.q_a_layernorm.bias"));
+      }
+      torch::Tensor mlaKVNormBias =
+          sd.get_tensor(L + "self_attn.kv_a_layernorm.bias");
+      if (mlaKVNormBias.defined()) {
+        InitXTensor(m.mlaKVNormBias[i],
+                    devBf16(mlaKVNormBias.contiguous(),
+                            L + "self_attn.kv_a_layernorm.bias"));
+      }
 
       // mlaQB = q_b_proj; TP shard dim0 (by n_heads/tp).
       torch::Tensor q_b =

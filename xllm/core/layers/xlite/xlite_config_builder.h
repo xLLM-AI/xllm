@@ -104,6 +104,14 @@ class XliteConfigBuilder {
     c.blockSizes = {bs};
     c.deepstackNumLevel = 0;
     c.weightNZ = false;
+    // W8A8 quant layout flags; BF16 checkpoints must not set them. Set at
+    // the root builder so every derived builder inherits; a family with a
+    // different quant format may override after calling FromQwen3.
+    if (IsW8A8(context)) {
+      c.quantAttnWeightTrans = true;
+      c.quantAttnWeightNz = true;
+      c.expertsWeightNZ = true;
+    }
     return c;
   }
 
@@ -206,13 +214,6 @@ class XliteConfigBuilder {
       c.indexFullMask[i] = !sharePlan.decision_for(i).reuse_topk;
     }
 
-    // W8A8 flags conditional on QuantArgs (IsW8A8; BF16 mis-set flips shared
-    // expert layout).
-    if (IsW8A8(context)) {
-      c.quantAttnWeightTrans = true;
-      c.quantAttnWeightNz = true;
-      c.expertsWeightNZ = true;
-    }
     return c;
   }
 
@@ -247,13 +248,6 @@ class XliteConfigBuilder {
     c.nExpertGroups = static_cast<uint32_t>(a.n_group());
     c.nLimitedGroups = static_cast<uint32_t>(a.topk_group());
 
-    // W8A8 flags conditional on QuantArgs (IsW8A8; hardcoded true leaks to BF16
-    // GLM-4.7).
-    if (IsW8A8(context)) {
-      c.quantAttnWeightTrans = true;
-      c.quantAttnWeightNz = true;
-      c.expertsWeightNZ = true;
-    }
     // expertsWeightTrans already true from FromQwen3Moe (routed expert
     // gate_up/down transpose).
     return c;

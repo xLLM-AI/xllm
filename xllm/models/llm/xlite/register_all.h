@@ -153,9 +153,11 @@ XLITE_REGISTER_MODEL(glm_moe_dsa, Glm5MoeAdapter, [&] {
   LOAD_ARG_OR(intermediate_size, "intermediate_size", 12288);
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 202752);
   LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
-  // GLM5 eos is a list [154820,154827,154829]; use SET_ARG (macro can't parse
-  // braced list).
-  SET_ARG(eos_token_id_vec, std::vector<int32_t>({154820, 154827, 154829}));
+  // eos_token_id is a list [154820,154827,154829]; read from config with the
+  // list as fallback (same as glm5.h).
+  LOAD_ARG_OR_FUNC(eos_token_id_vec, "eos_token_id", [&] {
+    return std::vector<int32_t>({154820, 154827, 154829});
+  });
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);
   // rope_theta under rope_parameters (GLM5 has no top-level rope_theta).
   LOAD_ARG_OR(rope_theta, "rope_parameters.rope_theta", 1000000.0f);
@@ -307,10 +309,11 @@ XLITE_REGISTER_MODEL(glm4_moe, Glm4MoeAdapter, [&] {
   LOAD_ARG_OR(use_qk_norm, "use_qk_norm", true);
   LOAD_ARG_OR(qkv_bias, "attention_bias", false);
 
-  // eos_token_id is a list [151329,151336,151338] (generation_config).
-  // Multi-element vector uses SET_ARG parentheses to avoid macro comma (same as
-  // glm5).
-  SET_ARG(eos_token_id_vec, std::vector<int32_t>({151329, 151336, 151338}));
+  // eos_token_id is a list [151329,151336,151338] (generation_config); read
+  // from config with the list as fallback (same as glm5.h).
+  LOAD_ARG_OR_FUNC(eos_token_id_vec, "eos_token_id", [&] {
+    return std::vector<int32_t>({151329, 151336, 151338});
+  });
   SET_ARG(stop_token_ids,
           std::unordered_set<int32_t>(args->eos_token_id_vec().begin(),
                                       args->eos_token_id_vec().end()));
