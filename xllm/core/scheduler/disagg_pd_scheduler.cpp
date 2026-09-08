@@ -111,6 +111,19 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
   return needed_blocks > usable_blocks;
 }
 
+bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response) {
+  return std::all_of(
+      response.groups().begin(),
+      response.groups().end(),
+      [](const proto::KVTransferGroup& group) {
+        const std::optional<BlockType> block_type =
+            block_type_from_cache_group_id(group.group_id());
+        return block_type.has_value() &&
+               (block_type.value() == BlockType::KV ||
+                !is_kv_split_cache_block_type(block_type.value()));
+      });
+}
+
 DisaggPDScheduler::DisaggPDScheduler(Engine* engine, const Options& options)
     : ContinuousScheduler(engine, options), server_name_("DisaggPDServer") {
   if (!options_.instance_role().has_value()) {
@@ -599,6 +612,8 @@ void DisaggPDScheduler::dispatch_requests() {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
           const auto& resp = resps.resps()[i];
+          info.rank_local_mapping = instance_info_.kv_split_size > 1 &&
+                                    has_rank_preserving_kv_groups(resp);
           info.mappings.reserve(resp.groups_size());
           for (const proto::KVTransferGroup& proto_group : resp.groups()) {
             KVTransferMapping mapping;

@@ -26,6 +26,14 @@ namespace xllm::layer {
 
 struct AttentionMetadata;
 
+// Per-query metadata for running prefill selection through the rank-local
+// paged-cache decode kernel. Every row represents one causal query position.
+struct KVShardCausalSelectorMetadata {
+  torch::Tensor block_table;
+  torch::Tensor local_context_lens;
+  torch::Tensor q_cu_seq_lens;
+};
+
 // Derived once for a batch and reused by every cache-sharded attention layer.
 // The original logical metadata remains unchanged for consumers that need it.
 struct KVShardBatchMetadata {
@@ -38,8 +46,18 @@ struct KVShardBatchMetadata {
 torch::Tensor localize_kv_shard_slots(const torch::Tensor& logical_slots,
                                       const KVShardLayout& layout);
 
+// Returns the number of tokens owned by this rank in each global causal
+// prefix. The input and output use the same integer type and device.
+torch::Tensor localize_kv_shard_context_lens(
+    const torch::Tensor& global_context_lens,
+    const KVShardLayout& layout);
+
 torch::Tensor expand_kv_shard_indexer_block_table(
     const torch::Tensor& logical_block_table,
+    const KVShardLayout& layout);
+
+KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
+    const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout);
 
 std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(

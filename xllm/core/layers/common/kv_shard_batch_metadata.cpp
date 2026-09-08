@@ -46,6 +46,83 @@ torch::Tensor localize_kv_shard_slots(const torch::Tensor& logical_slots,
       torch::full_like(local_slots, KVShardLayout::kInvalidSlot));
 }
 
+torch::Tensor localize_kv_shard_context_lens(
+    const torch::Tensor& global_context_lens,
+    const KVShardLayout& layout) {
+  CHECK(global_context_lens.scalar_type() == torch::kInt32 ||
+        global_context_lens.scalar_type() == torch::kInt64)
+      << "cache-shard context lengths must use int32 or int64";
+  torch::Tensor nonnegative_lens = torch::clamp_min(global_context_lens, 0);
+  const int64_t logical_block_size = layout.logical_block_size();
+  const int64_t physical_block_size = layout.physical_block_size();
+  const int64_t rank_start =
+      static_cast<int64_t>(layout.dcp_rank()) * physical_block_size;
+  torch::Tensor full_logical_blocks =
+      torch::floor_divide(nonnegative_lens, logical_block_size);
+  torch::Tensor logical_block_remainder =
+      torch::remainder(nonnegative_lens, logical_block_size);
+  torch::Tensor owned_remainder =
+      torch::clamp(logical_block_remainder - rank_start,
+                   /*min=*/0,
+                   /*max=*/physical_block_size);
+  return full_logical_blocks * physical_block_size + owned_remainder;
+}
+
+KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
+    const AttentionMetadata& attention_metadata,
+    const KVShardLayout& layout) {
+  CHECK(attention_metadata.q_cu_seq_lens.defined())
+      << "cache-shard causal selector requires query cumulative lengths";
+  CHECK(attention_metadata.kv_cu_seq_lens.defined())
+      << "cache-shard causal selector requires KV cumulative lengths";
+  CHECK(attention_metadata.block_table.defined())
+      << "cache-shard causal selector requires a block table";
+  CHECK(attention_metadata.slot_mapping.defined())
+      << "cache-shard causal selector requires slot mapping";
+  CHECK_EQ(attention_metadata.q_cu_seq_lens.dim(), 1)
+      << "cache-shard causal selector query lengths must be one-dimensional";
+  CHECK_EQ(attention_metadata.kv_cu_seq_lens.dim(), 1)
+      << "cache-shard causal selector KV lengths must be one-dimensional";
+  CHECK_EQ(attention_metadata.q_cu_seq_lens.numel(),
+           attention_metadata.kv_cu_seq_lens.numel())
+      << "cache-shard causal selector query and KV batches must match";
+  CHECK_EQ(attention_metadata.block_table.size(0),
+           attention_metadata.q_cu_seq_lens.numel() - 1)
+      << "cache-shard causal selector block-table batch must match lengths";
+  CHECK_EQ(attention_metadata.q_cu_seq_lens.scalar_type(), torch::kInt32)
+      << "cache-shard causal selector query lengths must be int32";
+  CHECK_EQ(attention_metadata.kv_cu_seq_lens.scalar_type(), torch::kInt32)
+      << "cache-shard causal selector KV lengths must be int32";
+
+  torch::Tensor query_lens = torch::diff(attention_metadata.q_cu_seq_lens);
+  torch::Tensor kv_lens = torch::diff(attention_metadata.kv_cu_seq_lens);
+  torch::Tensor prefix_lens = kv_lens - query_lens;
+  const int64_t token_count = attention_metadata.slot_mapping.numel();
+
+  torch::Tensor token_prefix_lens =
+      torch::repeat_interleave(prefix_lens, query_lens, /*dim=*/0);
+  torch::Tensor token_query_starts = torch::repeat_interleave(
+      attention_metadata.q_cu_seq_lens.slice(/*dim=*/0,
+                                             /*start=*/0,
+                                             /*end=*/-1),
+      query_lens,
+      /*dim=*/0);
+  torch::Tensor token_offsets =
+      torch::arange(token_count, attention_metadata.q_cu_seq_lens.options());
+  torch::Tensor global_context_lens =
+      token_prefix_lens + token_offsets - token_query_starts + 1;
+  torch::Tensor query_block_table = attention_metadata.block_table
+                                        .repeat_interleave(query_lens,
+                                                           /*dim=*/0)
+                                        .contiguous();
+  torch::Tensor selector_q_cu_seq_lens = torch::arange(
+      token_count + 1, attention_metadata.q_cu_seq_lens.options());
+  return KVShardCausalSelectorMetadata{
+      std::move(query_block_table),
+      localize_kv_shard_context_lens(global_context_lens, layout),
+      std::move(selector_q_cu_seq_lens)};
+}
+
 torch::Tensor expand_kv_shard_indexer_block_table(
     const torch::Tensor& logical_block_table,
     const KVShardLayout& layout) {

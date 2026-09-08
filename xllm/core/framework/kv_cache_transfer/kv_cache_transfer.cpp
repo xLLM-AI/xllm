@@ -32,7 +32,8 @@ namespace xllm {
 bool KVCacheTransfer::validate_transfer_mappings(
     const std::vector<KVTransferMapping>& mappings,
     const std::string& request_id,
-    int32_t kv_split_size) {
+    int32_t kv_split_size,
+    bool rank_local_mapping) {
   if (kv_split_size < 1) {
     LOG(ERROR) << "KV cache transfer requires kv_split_size >= 1, request_id="
                << request_id << ", kv_split_size=" << kv_split_size;
@@ -51,7 +52,7 @@ bool KVCacheTransfer::validate_transfer_mappings(
     const std::optional<BlockType> block_type =
         block_type_from_cache_group_id(mapping.group_id);
     const bool validate_full_kv_split_coverage =
-        kv_split_size > 1 && block_type.has_value() &&
+        kv_split_size > 1 && !rank_local_mapping && block_type.has_value() &&
         is_kv_split_cache_block_type(block_type.value());
     if (!validate_full_kv_split_coverage) {
       if (mapping.local_ids.size() != mapping.remote_ids.size()) {
@@ -104,8 +105,10 @@ bool KVCacheTransfer::validate_transfer_mappings(
     const std::vector<TransferKVInfo>& transfer_kv_infos,
     int32_t kv_split_size) {
   for (const TransferKVInfo& info : transfer_kv_infos) {
-    if (!validate_transfer_mappings(
-            info.mappings, info.request_id, kv_split_size)) {
+    if (!validate_transfer_mappings(info.mappings,
+                                    info.request_id,
+                                    kv_split_size,
+                                    info.rank_local_mapping)) {
       return false;
     }
   }
@@ -145,6 +148,10 @@ std::vector<TransferKVInfo> filter_kv_split_infos(
     const std::vector<TransferKVInfo>& kv_infos) {
   std::vector<TransferKVInfo> filtered_kv_infos;
   for (const TransferKVInfo& kv_info : kv_infos) {
+    if (kv_info.rank_local_mapping) {
+      filtered_kv_infos.emplace_back(kv_info);
+      continue;
+    }
     TransferKVInfo filtered = kv_info;
     for (KVTransferMapping& mapping : filtered.mappings) {
       const std::optional<BlockType> block_type =

@@ -507,6 +507,21 @@ TEST(DisaggPDSchedulerTest, OnlyOversizedDecodeResponseIsTerminal) {
   EXPECT_FALSE(is_permanent_rejection(/*status_code=*/500));
 }
 
+TEST(DisaggPDSchedulerTest, DetectsRankPreservingFlatKvGroups) {
+  proto::DisaggResponse response;
+  response.add_groups()->set_group_id(cache_group_id(BlockType::KV));
+  response.add_groups()->set_group_id(cache_group_id(BlockType::LINEAR));
+
+  EXPECT_TRUE(has_rank_preserving_kv_groups(response));
+}
+
+TEST(DisaggPDSchedulerTest, KeepsExpandedGroupedCacheMappings) {
+  proto::DisaggResponse response;
+  response.add_groups()->set_group_id(cache_group_id(BlockType::C4));
+
+  EXPECT_FALSE(has_rank_preserving_kv_groups(response));
+}
+
 TEST(DisaggPDSchedulerTest, PromptBeyondDecodeBlockCapacityIsPermanent) {
   EXPECT_TRUE(exceeds_decode_capacity(
       /*num_prompt_tokens=*/7, /*block_size=*/2, /*num_blocks=*/4));

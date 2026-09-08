@@ -234,9 +234,11 @@ std::vector<WorkerCacheLayoutManifest> make_cp_instance(
   std::vector<WorkerCacheLayoutManifest> manifests;
   manifests.reserve(static_cast<size_t>(cp_size * tp_size));
   for (int32_t cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
-    const int32_t kv_split_rank = cp_rank * kv_split_size / cp_size;
     for (int32_t tp_rank = 0; tp_rank < tp_size; ++tp_rank) {
       const int32_t worker_rank = cp_rank * tp_size + tp_rank;
+      const int32_t kv_split_rank = kv_split_size == cp_size * tp_size
+                                        ? worker_rank
+                                        : cp_rank * kv_split_size / cp_size;
       WorkerCacheLayoutManifest manifest = make_head_manifest(
           tp_rank,
           tp_size,
@@ -625,6 +627,86 @@ TEST(ReshardPlannerTest, SelectsMatchingCpPartitionFromCompleteSourceSet) {
 
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(selected_indices, std::vector<size_t>({1}));
+}
+
+TEST(ReshardPlannerTest, PreservesKvSplitWhenDecodeCollapsesCp) {
+  constexpr int32_t kKvSplitSize = 4;
+  const std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/kKvSplitSize,
+      /*kv_split_size=*/kKvSplitSize,
+      /*tp_size=*/1,
+      /*global_heads=*/kKvSplitSize,
+      /*first_buffer_id=*/3,
+      "prefill");
+  ReshardPlanner planner;
+
+  for (int32_t kv_split_rank = 0; kv_split_rank < kKvSplitSize;
+       ++kv_split_rank) {
+    WorkerCacheLayoutManifest destination = make_head_manifest(
+        /*tp_rank=*/kv_split_rank,
+        /*tp_size=*/kKvSplitSize,
+        /*global_heads=*/kKvSplitSize,
+        /*buffer_id=*/17 + static_cast<uint64_t>(kv_split_rank),
+        "decode" + std::to_string(kv_split_rank));
+    destination.coordinates.cp_size = 1;
+    destination.coordinates.kv_split_size = kKvSplitSize;
+    destination.coordinates.kv_split_rank = kv_split_rank;
+
+    std::vector<size_t> selected_indices;
+    ASSERT_TRUE(
+        planner.select_sources(sources, destination, &selected_indices).ok());
+    EXPECT_EQ(selected_indices,
+              std::vector<size_t>({static_cast<size_t>(kv_split_rank)}));
+
+    ReshardPlanTemplate plan;
+    ASSERT_TRUE(
+        planner
+            .build_outgoing_plan(
+                sources[static_cast<size_t>(kv_split_rank)], destination, &plan)
+            .ok());
+    EXPECT_FALSE(plan.regions.empty());
+  }
+}
+
+TEST(ReshardPlannerTest, PreservesKvSplitWhenDecodeCollapsesCpAndTp) {
+  constexpr int32_t kCpSize = 4;
+  constexpr int32_t kTpSize = 2;
+  constexpr int32_t kKvSplitSize = kCpSize * kTpSize;
+  const std::vector<WorkerCacheLayoutManifest> sources = make_cp_instance(
+      /*cp_size=*/kCpSize,
+      /*kv_split_size=*/kKvSplitSize,
+      /*tp_size=*/kTpSize,
+      /*global_heads=*/1,
+      /*first_buffer_id=*/3,
+      "prefill");
+  ReshardPlanner planner;
+
+  for (int32_t kv_split_rank = 0; kv_split_rank < kKvSplitSize;
+       ++kv_split_rank) {
+    WorkerCacheLayoutManifest destination = make_head_manifest(
+        /*tp_rank=*/kv_split_rank,
+        /*tp_size=*/kKvSplitSize,
+        /*global_heads=*/1,
+        /*buffer_id=*/17 + static_cast<uint64_t>(kv_split_rank),
+        "decode" + std::to_string(kv_split_rank));
+    destination.coordinates.cp_size = 1;
+    destination.coordinates.kv_split_size = kKvSplitSize;
+    destination.coordinates.kv_split_rank = kv_split_rank;
+
+    std::vector<size_t> selected_indices;
+    ASSERT_TRUE(
+        planner.select_sources(sources, destination, &selected_indices).ok());
+    EXPECT_EQ(selected_indices,
+              std::vector<size_t>({static_cast<size_t>(kv_split_rank)}));
+
+    ReshardPlanTemplate plan;
+    ASSERT_TRUE(
+        planner
+            .build_outgoing_plan(
+                sources[static_cast<size_t>(kv_split_rank)], destination, &plan)
+            .ok());
+    EXPECT_FALSE(plan.regions.empty());
+  }
 }
 
 TEST(ReshardPlannerTest, SelectsLowestCpReplicaForPartitionCollapse) {

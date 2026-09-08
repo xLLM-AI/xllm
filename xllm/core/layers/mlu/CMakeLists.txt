@@ -7,6 +7,7 @@ cc_library(
     attention.h
     dcp_attention_merge.h
     dcp_decode_context.h
+    dcp_indexer_candidate.h
     dsa_topk_relay.h
     dsa_topk_state.h
     deepseek_v2_attention.h
@@ -37,6 +38,7 @@ cc_library(
     attention.cpp
     dcp_attention_merge.cpp
     dcp_decode_context.cpp
+    dcp_indexer_candidate.cpp
     deepseek_v2_attention.cpp
     deepseek_v2_attention_dcp.cpp
     deepseek_v2_attention_sp.cpp

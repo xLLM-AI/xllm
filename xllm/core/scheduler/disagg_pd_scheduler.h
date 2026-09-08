@@ -47,6 +47,8 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
                              size_t block_size,
                              size_t num_blocks);
 
+bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response);
+
 class DisaggPDScheduler : public ContinuousScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);

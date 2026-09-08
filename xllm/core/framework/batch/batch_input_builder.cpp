@@ -264,6 +264,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
 
   TransferKVInfo info;
   info.request_id = full_info.request_id;
+  info.rank_local_mapping = full_info.rank_local_mapping;
   info.dp_rank = full_info.dp_rank;
   info.remote_instance_info = full_info.remote_instance_info;
   info.dst_xtensor_layer_offsets.clear();
@@ -326,8 +327,9 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
     const size_t win_end =
         static_cast<size_t>(util::ceil_div(seq_len, block_size));
     const size_t map_end = std::min(win_end, local_ids.size());
-    const size_t remote_stride =
-        uses_kv_split ? static_cast<size_t>(kv_split_size) : 1;
+    const size_t remote_stride = uses_kv_split && !full_info.rank_local_mapping
+                                     ? static_cast<size_t>(kv_split_size)
+                                     : 1;
     CHECK_GT(remote_stride, static_cast<size_t>(0));
     const size_t remote_shared_num =
         static_cast<size_t>(full_mapping.remote_shared_num);
