@@ -42,6 +42,21 @@ class VLMWorkerImpl : public WorkerImpl {
   bool init_model(ModelContext& context) override;
 
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
+
+ protected:
+  std::optional<ForwardOutput> step_for_schedule_overlap(
+      const ForwardInput& input) override;
+  ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& input) override;
+
+ private:
+  // Execute forward + sampling on the given compute stream without a host-side
+  // synchronize, recording a ready event for cross-step dependency. Shared by
+  // the schedule-overlap decode fast path.
+  std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
+      Stream& compute_stream,
+      bool record_ready_event = true);
 };
 
 }  // namespace xllm
