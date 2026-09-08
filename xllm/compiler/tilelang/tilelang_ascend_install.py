@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import platform
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +63,55 @@ def _resolve_wheel_location(target_platform: str, arch: str) -> str | Path:
 def tilelang_artifacts_ready(tilelang_root: str | Path) -> bool:
     tl_root = Path(tilelang_root).resolve()
     return all((tl_root / path).exists() for path in REQUIRED_TILELANG_FILES)
+
+
+# Expected ELF e_machine value per host architecture, used to fail fast when
+# the installed TileLang wheel targets a different architecture.
+_ELF_MACHINE_BY_ARCH = {
+    "aarch64": 183,  # EM_AARCH64
+    "x86_64": 62,  # EM_X86_64
+}
+
+
+def _read_elf_machine(path: Path) -> int | None:
+    try:
+        with path.open("rb") as f:
+            header = f.read(20)
+    except OSError:
+        return None
+    if len(header) < 20 or not header.startswith(b"\x7fELF"):
+        return None
+    return struct.unpack_from("<H", header, 18)[0]
+
+
+def check_tilelang_artifacts(tilelang_root: str | Path) -> None:
+    """Fails fast when the TileLang installation is broken.
+
+    Guards against truncated wheels and architecture mismatch up front with
+    an actionable error, instead of letting Ascend-C compilation surface
+    obscure ``-I`` include errors deep inside the build.
+    """
+    tl_root = Path(tilelang_root).resolve()
+    missing = [name for name in REQUIRED_TILELANG_FILES if not (tl_root / name).exists()]
+    if missing:
+        raise RuntimeError(
+            f"tilelang-ascend artifacts are missing under {tl_root}: {missing}. "
+            "The TileLang wheel is truncated or incomplete; use an NPU build image "
+            "with TileLang preinstalled or point TL_ROOT to a complete installation."
+        )
+    expected_machine = _ELF_MACHINE_BY_ARCH.get(platform.machine())
+    if expected_machine is None:
+        return
+    for name in REQUIRED_TILELANG_FILES:
+        if not name.endswith(".so"):
+            continue
+        machine = _read_elf_machine(tl_root / name)
+        if machine is not None and machine != expected_machine:
+            raise RuntimeError(
+                f"tilelang-ascend artifact {tl_root / name} targets ELF machine "
+                f"{machine}, which does not match this host ({platform.machine()}). "
+                "The installed TileLang wheel has the wrong architecture."
+            )
 
 
 def ensure_ascend_ready() -> Path:

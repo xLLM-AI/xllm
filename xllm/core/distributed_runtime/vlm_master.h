@@ -55,7 +55,8 @@ class VLMMaster : public Master {
   void handle_request(std::vector<Message> messages,
                       RequestParams sp,
                       std::string payload,
-                      OutputCallback callback);
+                      OutputCallback callback,
+                      bool use_prompt_as_is = false);
 
   // batch completion
   void handle_batch_request(std::vector<std::string> prompts,

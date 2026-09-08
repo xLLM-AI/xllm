@@ -385,6 +385,9 @@ PYBIND11_MODULE(xllm_export, m) {
                              BatchOutputCallback>(
                &VLMMaster::handle_batch_request),
            py::call_guard<py::gil_scoped_release>())
+      // Offline-only entry aligned with vllm-ascend: prompts are used as-is
+      // without re-applying the chat template. The online serving path keeps
+      // applying the chat template via the messages-based request path.
       .def("handle_batch_request_with_image_urls",
            py::overload_cast<std::vector<std::string>,
                              std::vector<std::vector<std::string>>,

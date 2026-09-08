@@ -6,7 +6,7 @@ function error() {
   exit 1
 }
 
-IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605"
+IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801"
 
 TRITON_BINARY_CACHE="/export/home/npu_triton_binary_cache"
 mkdir -p "${TRITON_BINARY_CACHE}"

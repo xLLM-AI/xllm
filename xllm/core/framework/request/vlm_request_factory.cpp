@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -31,6 +34,61 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+
+namespace {
+
+// Extracts the final prompt from a single message, concatenating its text
+// contents in order and skipping non-text (image/video/audio) contents.
+//
+// The offline "prompt as-is" contract expects the caller to hand in exactly
+// one message whose text is the final prompt already assembled with the
+// chat template (images may ride along as non-text contents). Multi-turn
+// conversations must go through the chat template path instead; joining
+// their texts would silently mash the roles together, so any other message
+// shape returns std::nullopt and fails the request.
+std::optional<std::string> join_message_texts(
+    const std::vector<Message>& messages) {
+  if (messages.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& message = messages.front();
+  if (auto text = std::get_if<std::string>(&message.content)) {
+    return *text;
+  }
+  if (auto contents = std::get_if<MMContentVec>(&message.content)) {
+    std::string prompt;
+    for (const auto& content : *contents) {
+      if (content.type == "text") {
+        prompt += content.text;
+      }
+    }
+    return prompt;
+  }
+  return std::nullopt;
+}
+
+// Throws std::invalid_argument describing the violation when messages do not
+// satisfy the offline "prompt as-is" contract (see join_message_texts).
+// Offline-only: raised on the caller thread so pybind surfaces it to the
+// Python caller at the call site, instead of returning an empty prompt that
+// is hard to trace.
+[[noreturn]] void throw_prompt_as_is_error(
+    const std::vector<Message>& messages) {
+  std::string roles;
+  for (const auto& message : messages) {
+    if (!roles.empty()) {
+      roles += ", ";
+    }
+    roles += message.role;
+  }
+  throw std::invalid_argument(
+      "use_prompt_as_is expects exactly 1 message holding the final prompt "
+      "(images allowed as non-text contents), got " +
+      std::to_string(messages.size()) + " messages [" + roles +
+      "]; apply the chat template for multi-turn conversations");
+}
+
+}  // namespace
 
 VLMRequestFactory::VLMRequestFactory(MultimodalProcessorBase* processor,
                                      JinjaChatTemplate* chat_template,
@@ -209,7 +267,8 @@ std::shared_ptr<Request> VLMRequestFactory::create(
     std::vector<Message> messages,
     const RequestParams& sp,
     std::string payload,
-    OutputCallback callback) {
+    OutputCallback callback,
+    bool use_prompt_as_is) {
   // Guard the rate-limit slot acquired at the service entry. The next hop
   // (create(prompt, ...)) installs its own guard, so we dismiss ours before
   // forwarding.
@@ -245,8 +304,21 @@ std::shared_ptr<Request> VLMRequestFactory::create(
   }
 
   Timer timer;
-  std::optional<std::string> prompt =
-      chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
+  std::optional<std::string> prompt;
+  if (use_prompt_as_is) {
+    // The request hands in a final prompt that is already assembled with
+    // the chat template; reuse it as-is to avoid double assembly.
+    VLOG(1) << "Offline request: use the prompt as-is, skip chat template "
+               "application.";
+    prompt = join_message_texts(messages);
+    if (!prompt.has_value()) {
+      // Loud failure for direct callers; the request entry validates the
+      // shape earlier, so this only fires on a missed contract violation.
+      throw_prompt_as_is_error(messages);
+    }
+  } else {
+    prompt = chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
+  }
   if (!prompt.has_value()) {
     std::string error_message = "Failed to construct prompt from messages";
     LOG(ERROR) << error_message;

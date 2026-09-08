@@ -18,6 +18,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
+#include <Python.h>
 #include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUFunctions.h>
@@ -103,7 +104,20 @@ void Device::init_device_context() const {
     // aclInit + torch_npu._C._npu_init(). Only switch device here.
     c10_npu::SetDevice(index());
   } else {
-    torch_npu::init_npu(index());
+    // torch_npu lazily resolves python functions via
+    // PyImport_ImportModule(). When a live host interpreter exists
+    // (offline pybind inference), the calling worker thread must hold the
+    // GIL, otherwise the import races with the main thread and corrupts
+    // the interpreter state. The master constructors release the GIL
+    // during engine init, so acquiring it here cannot deadlock. Standalone
+    // binaries without a live interpreter keep the legacy behavior.
+    if (Py_IsInitialized()) {
+      PyGILState_STATE gil_state = PyGILState_Ensure();
+      torch_npu::init_npu(index());
+      PyGILState_Release(gil_state);
+    } else {
+      torch_npu::init_npu(index());
+    }
   }
 #endif
 }

@@ -26,11 +26,11 @@ https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 然后创建对应的容器
@@ -50,7 +50,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 ## 2. 拉取源码并编译

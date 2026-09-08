@@ -92,6 +92,15 @@ def _load_public_api() -> None:
     if _PUBLIC_API_LOADED:
         return
 
+    # torch_npu must be imported on the main thread before the C++ engine
+    # spawns worker threads: torch_npu::init_npu() lazily imports python
+    # modules there, which fails off the main thread. Importing it here,
+    # before xllm_export loads the torch_npu shared libraries, also keeps
+    # torch's accelerator registration clean. It is absent on non-NPU
+    # platforms.
+    if importlib.util.find_spec("torch_npu") is not None:
+        import torch_npu  # noqa: F401
+
     xllm_export = _load_xllm_export()
 
     from xllm.pybind.args import ArgumentParser

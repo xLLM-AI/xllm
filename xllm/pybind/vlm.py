@@ -202,6 +202,10 @@ class VLM:
         try:
             # schedule the batch requests
             if image_urls is not None:
+                # Aligned with vllm-ascend offline behavior: prompts are used
+                # as-is without re-applying the chat template. This only
+                # affects offline inference; online serving still applies the
+                # chat template.
                 self.master.handle_batch_request_with_image_urls(prompts, image_urls, request_params_list, callback)
             else:
                 self.master.handle_batch_request(prompts, mm_datas, request_params_list, callback)

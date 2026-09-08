@@ -132,7 +132,7 @@ Prefer the narrowest command first:
 - `python -m py_compile xllm/python/kernels_npu/tilelang/<kernel>.py`
 - `python -m py_compile xllm/compiler/tilelang/targets/ascend/aot/<kernel>.py`
 - `cd xllm && PYTHONPATH="$PWD:$PWD/xllm" python -m compiler.tilelang.targets.ascend.aot.<kernel> --output .tmp/<kernel>.cpp`
-- `python xllm/compiler/tilelang_launcher.py prepare-ascend`
+- `python xllm/compiler/tilelang_launcher.py compile-kernels --help`
 - `python setup.py test --test-name <wrapper_test_target> --device npu`
 
 ## References

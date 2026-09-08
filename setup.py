@@ -47,21 +47,6 @@ BUILD_TEST_FILE: bool = True
 BUILD_EXPORT: bool = True
 
 
-def _ensure_torch_npu_ready() -> None:
-    from scripts.deps.torch_npu_install import ensure_torch_npu_ready
-
-    ensure_torch_npu_ready()
-
-
-def _ensure_tilelang_ascend_ready(target_platform: str, arch: str) -> None:
-    compiler_parent = os.path.join(get_base_dir(), "xllm")
-    if compiler_parent not in sys.path:
-        sys.path.insert(0, compiler_parent)
-    from compiler.tilelang.bootstrap import prepare_ascend
-
-    prepare_ascend(target_platform, arch)
-
-
 def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) -> None:
     if device != "npu":
         return
@@ -255,6 +240,21 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
                 f.write(pkg_init)
 
     logger.info(f"Staged triton_jit compile script into {dest_dir}")
+
+
+def _stage_mooncake_runtime_binaries(cmake_dir: str, extdir: str) -> None:
+    """Stage the mooncake runtime shared library into the wheel.
+
+    The xllm binaries link against ``mooncake-common/libasio.so``, which only
+    exists in the build tree. Without staging it, the installed package
+    misses the shared object on machines without the build tree; with the
+    binaries' ``$ORIGIN`` rpath entry the copy placed next to them resolves.
+    """
+    source = os.path.join(cmake_dir, "mooncake-common", "libasio.so")
+    if not os.path.isfile(source):
+        raise RuntimeError(f"libasio.so was not built: {source}")
+    shutil.copy2(source, os.path.join(extdir, "libasio.so"))
+    logger.info("Staged mooncake runtime library libasio.so into extdir")
 
 
 def _stage_auto_tuning_config(base_dir: str, extdir: str) -> None:
@@ -559,6 +559,8 @@ class ExtBuild(build_ext):
             _stage_python_kernel_package(py_pkg_src, py_pkg_dst, self.device)
 
         _stage_triton_npu_runtime_binaries(self.base_dir, extdir, self.device)
+
+        _stage_mooncake_runtime_binaries(cmake_dir, extdir)
 
         _stage_mlu_triton_kernels(self.base_dir, extdir, self.device)
 
@@ -1019,12 +1021,8 @@ if __name__ == "__main__":
     device = config["device"]
     if device == "auto":
         device = get_device_type()
-    target_platform = get_ascend_platform() if device == "npu" else None
     enable_ha = config["enable_ha"]
     logger.info(f"🚀 Build xllm with CPU arch: {arch}, target device: {device}, enable_ha: {enable_ha}")
-    if device == "npu":
-        _ensure_torch_npu_ready()
-        _ensure_tilelang_ascend_ready(target_platform, arch)
     pre_build(device, enable_ha)
 
     generate_so = config["generate_so"]

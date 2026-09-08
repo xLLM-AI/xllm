@@ -21,6 +21,7 @@ limitations under the License.
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -62,6 +63,57 @@ std::vector<Message> build_user_messages_from_image_urls(
   std::vector<Message> messages;
   messages.emplace_back("user", std::move(contents));
   return messages;
+}
+
+// Extracts the final prompt from a single message, concatenating its text
+// contents in order and skipping non-text (image/video/audio) contents.
+//
+// The offline "prompt as-is" contract expects the caller to hand in exactly
+// one message whose text is the final prompt already assembled with the
+// chat template (images may ride along as non-text contents). Multi-turn
+// conversations must go through the chat template path instead; joining
+// their texts would silently mash the roles together, so any other message
+// shape returns std::nullopt and fails the request.
+std::optional<std::string> join_message_texts(
+    const std::vector<Message>& messages) {
+  if (messages.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& message = messages.front();
+  if (auto text = std::get_if<std::string>(&message.content)) {
+    return *text;
+  }
+  if (auto contents = std::get_if<MMContentVec>(&message.content)) {
+    std::string prompt;
+    for (const auto& content : *contents) {
+      if (content.type == "text") {
+        prompt += content.text;
+      }
+    }
+    return prompt;
+  }
+  return std::nullopt;
+}
+
+// Throws std::invalid_argument describing the violation when messages do not
+// satisfy the offline "prompt as-is" contract (see join_message_texts).
+// Offline-only: raised on the caller thread so pybind surfaces it to the
+// Python caller at the call site, instead of returning an empty prompt that
+// is hard to trace.
+[[noreturn]] void throw_prompt_as_is_error(
+    const std::vector<Message>& messages) {
+  std::string roles;
+  for (const auto& message : messages) {
+    if (!roles.empty()) {
+      roles += ", ";
+    }
+    roles += message.role;
+  }
+  throw std::invalid_argument(
+      "use_prompt_as_is expects exactly 1 message holding the final prompt "
+      "(images allowed as non-text contents), got " +
+      std::to_string(messages.size()) + " messages [" + roles +
+      "]; apply the chat template for multi-turn conversations");
 }
 
 }  // namespace
@@ -203,7 +255,14 @@ void VLMMaster::handle_request(std::string prompt,
 void VLMMaster::handle_request(std::vector<Message> messages,
                                RequestParams sp,
                                std::string payload,
-                               OutputCallback callback) {
+                               OutputCallback callback,
+                               bool use_prompt_as_is) {
+  // Offline-only guard: fail loudly on the caller thread (pybind surfaces
+  // the exception to the Python caller) before any scheduling side effect.
+  if (use_prompt_as_is && !join_message_texts(messages).has_value()) {
+    throw_prompt_as_is_error(messages);
+  }
+
   scheduler_->incr_pending_requests(1);
   auto cb = [callback = std::move(callback),
              scheduler = scheduler_.get()](const RequestOutput& output) {
@@ -215,6 +274,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
                          messages = std::move(messages),
                          sp = std::move(sp),
                          payload = std::move(payload),
+                         use_prompt_as_is,
                          callback = std::move(cb)]() mutable {
     AUTO_COUNTER(request_handling_latency_seconds_chat);
 
@@ -231,8 +291,11 @@ void VLMMaster::handle_request(std::vector<Message> messages,
     }
 
     rate_limit_guard.dismiss();
-    auto request = request_factory_->create(
-        std::move(messages), sp, std::move(payload), std::move(callback));
+    auto request = request_factory_->create(std::move(messages),
+                                            sp,
+                                            std::move(payload),
+                                            std::move(callback),
+                                            use_prompt_as_is);
     if (!request) {
       return;
     }
@@ -264,6 +327,11 @@ void VLMMaster::handle_batch_request(std::vector<std::string> prompts,
   }
 }
 
+// Offline batch entry aligned with the vllm-ascend offline behavior: each
+// prompt is handed in as the final prompt and is used as-is, without applying
+// the chat template again (double assembly duplicates the vision placeholders
+// and crashes prompt processing). This only affects offline inference; the
+// online serving path still applies the chat template.
 void VLMMaster::handle_batch_request_with_image_urls(
     std::vector<std::string> prompts,
     std::vector<std::vector<std::string>> image_urls,
@@ -274,15 +342,31 @@ void VLMMaster::handle_batch_request_with_image_urls(
   CHECK(prompts.size() == sps.size() || sps.size() == 1)
       << "Number of prompts and sampling parameters should be the same";
 
+  const size_t num_requests = prompts.size();
   std::vector<std::vector<Message>> conversations;
-  conversations.reserve(prompts.size());
-  for (size_t i = 0; i < prompts.size(); ++i) {
+  conversations.reserve(num_requests);
+  for (size_t i = 0; i < num_requests; ++i) {
     conversations.push_back(build_user_messages_from_image_urls(
         std::move(prompts[i]), image_urls[i]));
   }
 
-  handle_batch_request(
-      std::move(conversations), std::move(sps), std::move(callback));
+  std::string payload;
+  for (size_t i = 0; i < num_requests; ++i) {
+    // Offline vLLM-style requests hand in a final prompt. The text-only
+    // offline path never applies the chat template either, so use the
+    // prompt as-is instead of re-assembling it (double assembly duplicates
+    // the vision placeholders and crashes prompt processing).
+    handle_request(
+        std::move(conversations[i]),
+        // the sampling parameter may be shared
+        sps.size() == 1 ? sps[0] : std::move(sps[i]),
+        std::move(payload),
+        [i, callback](const RequestOutput& output) {
+          output.log_request_status();
+          return callback(i, output);
+        },
+        /*use_prompt_as_is=*/true);
+  }
 }
 
 void VLMMaster::handle_batch_request(
