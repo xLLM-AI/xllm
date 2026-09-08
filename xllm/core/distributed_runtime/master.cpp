@@ -79,6 +79,7 @@ void apply_runtime_kv_cache_options(const Options& source,
   destination.host_blocks_factor(source.host_blocks_factor())
       .enable_kvcache_store(source.enable_kvcache_store())
       .store_protocol(source.store_protocol())
+      .store_rdma_devices(source.store_rdma_devices())
       .store_master_server_address(source.store_master_server_address())
       .store_metadata_server(source.store_metadata_server())
       .store_local_hostname(source.store_local_hostname())

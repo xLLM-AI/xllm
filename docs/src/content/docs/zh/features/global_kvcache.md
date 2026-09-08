@@ -47,19 +47,17 @@ Store 初始化时会按 `BlockType` 构建索引。每个支持该 `BlockType` 
 当前对象键使用 `xllm-kv-v3` 命名空间。概念上由以下字段组成：
 
 ```text
-xllm-kv-v3
-  + model_id
-  + key_component
-  + tp_size
-  + block_type
-  + tp_rank
-  + schema_hash
-  + block_hash
+非 MLA：xllm-kv-v3 + model_id + key_component + tp_size
+                   + block_type + tp_rank + schema_hash + block_hash
+
+MLA：   xllm-kv-v3 + model_id + key_component + mla
+                   + block_type + schema_hash + block_hash
 ```
 
 - `model_id` 是主模型命名空间，主模型和 Draft 模型对象都会包含它。
 - `key_component` 区分主模型、投机算法和 Draft 模型来源。
-- `tp_size`、`tp_rank` 和 `block_type` 隔离不同并行拓扑、Rank 和缓存类型。
+- 非 MLA 缓存使用 `tp_size`、`tp_rank` 和 `block_type` 隔离不同并行拓扑、Rank 和缓存类型。
+- MLA KV Cache 在 Rank 间复制，因此对象键使用固定的 `mla` 标识，不包含 `tp_size` 或 `tp_rank`。所有 Rank 使用相同的对象键读取缓存，只有 TP Rank 0 写入 Mooncake Store。
 - `schema_hash` 由单个 Block 内各 Tensor 的 role、dtype 和除 Host Block 数量之外的 shape 生成。因此只调整 `host_blocks_factor` 不会改变对象键，但缓存布局变化会自动进入新的键空间。
 - `block_hash` 是对应 Token Block 的 128 位内容哈希。
 
@@ -184,15 +182,18 @@ sequenceDiagram
             HBM-->>Worker: Device KV
             Worker->>Host: 各缓存域 D2H copy 并同步 copy stream
             Worker->>Worker: 展开物理对象并按 key 去重
-            Worker->>Store: BatchIsExist(unique keys)
+            opt 非 MLA 或 MLA TP Rank 0
+                Worker->>Store: BatchIsExist(unique keys)
 
-            alt Store key 不存在
-                Worker->>Store: BatchPut(missing keys, Host tensors)
-                Store-->>Worker: Put results
-            else Store key 已存在
-                Worker->>Worker: 跳过覆盖并计为已存在
+                alt Store key 不存在
+                    Worker->>Store: BatchPut(missing keys, Host tensors)
+                    Store-->>Worker: Put results
+                else Store key 已存在
+                    Worker->>Worker: 跳过覆盖并计为已存在
+                end
             end
 
+            Note right of Worker: MLA 非 0 Rank 跳过 Store 写入
             Worker->>Worker: 全部物理对象成功才记为 logical put success
             Note right of Worker: BatchPut 部分失败只记录日志<br/>不会改变 D2H 成功状态
             Worker-->>Engine: D2H 成功时返回完整 block count
@@ -450,7 +451,7 @@ mooncake_client \
 
 `store_local_hostname` 是 Transfer Engine 基础 endpoint。每个 Worker 使用 `base_port + worker_rank`，因此整个端口区间都必须空闲且网络可达。
 
-使用 RDMA 时，设置 `--store_protocol=rdma`，并通过 `DEVICE_NAMES` 环境变量指定 Mooncake RDMA 设备。如果没有设置 `DEVICE_NAMES`，xLLM 会回退到 TCP。
+使用 RDMA 时，设置 `--store_protocol=rdma`。可通过 `--store_rdma_devices=mlx5_0,mlx5_1` 为每个 xLLM Worker 内嵌的 Store client 指定 HCA，留空则由 Mooncake 自动发现。初始化失败仍按 RDMA 失败处理，不会回退到 TCP。xLLM 不读取 `DEVICE_NAMES`；独立 `mooncake_client` 使用自身的 `--device_names` 参数。
 
 启用投机解码时不需要额外配置 Draft Store namespace。xLLM 会自动为 Draft 缓存生成独立的 `key_component`。未设置 `--model_id` 时，xLLM 会使用模型路径的末级名称；生产环境仍建议显式提供稳定且能标识模型版本的 `--model_id`。
 

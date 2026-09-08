@@ -111,6 +111,7 @@ source scripts/kvcache_store/xllm_mooncake_ha_args.sh
 --host_blocks_factor=4
 --enable_kvcache_store=true
 --store_protocol=tcp
+--store_rdma_devices=
 --store_master_server_address=etcd://10.0.0.1:2379;10.0.0.2:2379;10.0.0.3:2379
 --store_metadata_server=P2PHANDSHAKE
 --store_local_hostname=10.0.3.31:12345
@@ -124,9 +125,12 @@ source scripts/kvcache_store/xllm_mooncake_ha_args.sh
 | --- | --- | --- |
 | `XLLM_HOST_BLOCKS_FACTOR` | `4` | `host_blocks_factor` |
 | `XLLM_STORE_PROTOCOL` | `tcp` | `store_protocol` |
+| `XLLM_STORE_RDMA_DEVICES` | 空 | `store_rdma_devices` |
 | `XLLM_STORE_METADATA_SERVER` | `P2PHANDSHAKE` | `store_metadata_server` |
 | `XLLM_PREFETCH_BATCH_SIZE` | `8` | `prefetch_batch_size` |
 | `XLLM_PREFETCH_TIMEOUT` | `30000` | `prefetch_timeout` |
+
+`XLLM_STORE_RDMA_DEVICES` 只配置 xLLM Worker 内嵌 Store client 的 HCA。独立 `mooncake_client` 仍使用自身的 `--device_names` 参数。RDMA 设备留空时由 Mooncake 自动发现；初始化失败不会回退到 TCP。
 
 直接执行参数脚本可以查看经过 shell 转义的参数数组：
 

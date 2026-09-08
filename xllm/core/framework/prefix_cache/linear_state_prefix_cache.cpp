@@ -20,8 +20,6 @@ limitations under the License.
 
 #include <memory>
 
-#include "common/metrics.h"
-
 namespace xllm {
 
 std::vector<Block> LinearStatePrefixCache::match(
@@ -103,11 +101,6 @@ std::vector<Block> LinearStatePrefixCache::match(
     }
   }
   matched_blocks_.fetch_add(valid_hits);
-
-  const int64_t int_rate_percent =
-      static_cast<int64_t>(static_cast<double>(valid_hits) * 100.0 / n_blocks);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_num, valid_hits);
 
   return blocks;
 }

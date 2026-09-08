@@ -67,6 +67,7 @@ class HierarchyKVCacheTransfer final {
     PROPERTY(bool, enable_mla) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
     PROPERTY(std::string, store_protocol) = "rdma";
+    PROPERTY(std::string, store_rdma_devices) = "";
     PROPERTY(std::string, store_master_server_address) = "";
     PROPERTY(std::string, store_metadata_server) = "";
     PROPERTY(std::string, store_local_hostname) = "";

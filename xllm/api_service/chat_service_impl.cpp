@@ -42,6 +42,11 @@ limitations under the License.
 #include "core/util/uuid.h"
 #include "mm_service_utils.h"
 
+#ifdef unlikely
+#undef unlikely
+#endif
+#define unlikely(x) __builtin_expect(!!(x), 0)
+
 namespace xllm {
 namespace {
 

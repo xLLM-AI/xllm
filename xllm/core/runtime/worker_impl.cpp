@@ -2298,6 +2298,7 @@ WorkerImpl::create_hierarchy_kv_cache_transfer() {
       .enable_mla(options_.enable_mla())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .store_protocol(options_.store_protocol())
+      .store_rdma_devices(options_.store_rdma_devices())
       .store_master_server_address(options_.store_master_server_address())
       .store_metadata_server(options_.store_metadata_server())
       .store_local_hostname(options_.store_local_hostname())

@@ -18,6 +18,8 @@ limitations under the License.
 #include <bvar/bvar.h>
 #include <bvar/multi_dimension.h>
 
+#include <cstddef>
+
 #include "common/macros.h"
 #include "util/timer.h"
 
@@ -42,6 +44,9 @@ class AutoCounter final {
   Timer timer_;
 };
 
+// Records one admitted request in the process-cumulative token hit rate.
+void record_prefix_cache_hit_metrics(size_t prompt_tokens, size_t hit_tokens);
+
 }  // namespace xllm
 
 // define helpful macros to hide boilerplate code
@@ -57,7 +62,7 @@ class AutoCounter final {
 
 #define GAUGE_INC(name) GAUGE_##name.set_value(GAUGE_##name.get_value() + 1);
 
-#define GAUGE_VALUE(name) GAUGE_##name.get_value();
+#define GAUGE_VALUE(name) (GAUGE_##name.get_value())
 
 // define counter (using bvar::Adder for accumulating values)
 #define DEFINE_COUNTER(name, desc) bvar::Adder<double> COUNTER_##name(#name);
@@ -109,12 +114,11 @@ class AutoCounter final {
 
 // read a labeled counter's current value (0.0 when the label has no stats yet);
 // the multi-dimension analogue of COUNTER_VALUE
-#define MULTI_COUNTER_VALUE(name, key)                                 \
-  ([&]() -> double {                                                   \
-    bvar::Adder<double>* counter_##name =                              \
-        MULTI_COUNTER_##name.get_stats({(key)});                       \
-    return counter_##name != nullptr ? counter_##name->get_value()     \
-                                     : 0.0;                            \
+#define MULTI_COUNTER_VALUE(name, key)                                    \
+  ([&]() -> double {                                                      \
+    bvar::Adder<double>* counter_##name =                                 \
+        MULTI_COUNTER_##name.get_stats({(key)});                          \
+    return counter_##name != nullptr ? counter_##name->get_value() : 0.0; \
   }())
 
 // define multi gauge (using bvar::MultiDimension for labeled settable values)
@@ -182,15 +186,15 @@ DECLARE_HISTOGRAM(encoder_cache_hit_rate);
 DECLARE_COUNTER(prefix_cache_latency_seconds_insert);
 DECLARE_COUNTER(prefix_cache_latency_seconds_match);
 DECLARE_COUNTER(prefix_cache_latency_seconds_evict);
-DECLARE_COUNTER(prefix_cache_match_length_total);
+DECLARE_COUNTER(prefix_cache_prompt_tokens_total);
+DECLARE_COUNTER(prefix_cache_hit_tokens_total);
 DECLARE_COUNTER(allocate_blocks_latency_seconds);
 
 // latency of detokenization operations in seconds
 DECLARE_COUNTER(detokenization_latency_seconds_stream);
 DECLARE_COUNTER(detokenization_latency_seconds_non_stream);
 
-DECLARE_HISTOGRAM(prefix_cache_block_matched_rate);
-DECLARE_HISTOGRAM(prefix_cache_block_matched_num);
+DECLARE_GAUGE(prefix_cache_token_hit_rate_perc);
 
 // total number of model execution operations
 DECLARE_COUNTER(num_model_execution_total_eager);

@@ -191,6 +191,8 @@ class Options {
 
   PROPERTY(std::string, store_protocol) = "tcp";
 
+  PROPERTY(std::string, store_rdma_devices) = "";
+
   PROPERTY(std::string, store_master_server_address) = "";
 
   PROPERTY(std::string, store_metadata_server) = "";

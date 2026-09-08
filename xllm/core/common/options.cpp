@@ -81,6 +81,7 @@ std::string Options::to_string() const {
      << ", prefetch_batch_size: " << prefetch_batch_size()
      << ", layers_wise_copy_batchs: " << layers_wise_copy_batchs()
      << ", store_protocol: " << store_protocol()
+     << ", store_rdma_devices: " << store_rdma_devices()
      << ", store_master_server_address: " << store_master_server_address()
      << ", store_metadata_server: " << store_metadata_server()
      << ", store_local_hostname: " << store_local_hostname()

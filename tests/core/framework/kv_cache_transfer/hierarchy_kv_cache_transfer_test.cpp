@@ -77,9 +77,7 @@ TEST(HierarchyKVCacheTransferTest,
   ASSERT_EQ(device.synchronize_default_stream(), 0);
 
   HierarchyKVCacheTransfer::Options transfer_options;
-  transfer_options.tp_rank(0)
-      .tp_size(1)
-      .layers(kLayerCount)
+  transfer_options.layers(kLayerCount)
       .host_blocks_factor(2.0)
       .layers_wise_copy_batchs(2);
   std::unique_ptr<Stream> compute_stream = device.current_stream();
@@ -145,11 +143,7 @@ TEST(HierarchyKVCacheTransferTest, RejectsMixedOffloadBatchBeforeSubmission) {
   allocate_kv_caches(caches, cache_shape, create_options);
 
   HierarchyKVCacheTransfer::Options transfer_options;
-  transfer_options.tp_rank(0)
-      .tp_size(1)
-      .layers(1)
-      .host_blocks_factor(2.0)
-      .layers_wise_copy_batchs(1);
+  transfer_options.layers(1).host_blocks_factor(2.0).layers_wise_copy_batchs(1);
   std::unique_ptr<Stream> compute_stream = device.current_stream();
   HierarchyKVCacheTransfer transfer(transfer_options,
                                     device.unwrap(),

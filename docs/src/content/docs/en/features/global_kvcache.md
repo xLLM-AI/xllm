@@ -47,19 +47,17 @@ During initialization, the Store builds an index by `BlockType`. Every cache dom
 The current object-key namespace is `xllm-kv-v3`. Conceptually, a key contains the following fields:
 
 ```text
-xllm-kv-v3
-  + model_id
-  + key_component
-  + tp_size
-  + block_type
-  + tp_rank
-  + schema_hash
-  + block_hash
+Non-MLA: xllm-kv-v3 + model_id + key_component + tp_size
+                      + block_type + tp_rank + schema_hash + block_hash
+
+MLA:     xllm-kv-v3 + model_id + key_component + mla
+                      + block_type + schema_hash + block_hash
 ```
 
 - `model_id` is the target-model namespace and is included in both target and draft objects.
 - `key_component` separates the target model, speculative algorithm, and draft-model source.
-- `tp_size`, `tp_rank`, and `block_type` isolate different parallel topologies, ranks, and cache types.
+- Non-MLA caches use `tp_size`, `tp_rank`, and `block_type` to isolate different parallel topologies, ranks, and cache types.
+- MLA KV cache is replicated across ranks, so its object key uses a fixed `mla` marker and contains neither `tp_size` nor `tp_rank`. Every rank reads through the same object key, while only TP rank 0 writes to Mooncake Store.
 - `schema_hash` is derived from each tensor's role, dtype, and per-block shape, excluding the number of Host blocks. Changing only `host_blocks_factor` therefore does not change object keys, while a cache-layout change automatically selects a new key space.
 - `block_hash` is the 128-bit content hash of the corresponding token block.
 
@@ -184,15 +182,18 @@ sequenceDiagram
             HBM-->>Worker: Device KV
             Worker->>Host: D2H copy for each cache domain and synchronize stream
             Worker->>Worker: Expand physical objects and deduplicate by key
-            Worker->>Store: BatchIsExist(unique keys)
+            opt Non-MLA or MLA TP rank 0
+                Worker->>Store: BatchIsExist(unique keys)
 
-            alt Store key is absent
-                Worker->>Store: BatchPut(missing keys, Host tensors)
-                Store-->>Worker: Put results
-            else Store key already exists
-                Worker->>Worker: Skip overwrite and count it as present
+                alt Store key is absent
+                    Worker->>Store: BatchPut(missing keys, Host tensors)
+                    Store-->>Worker: Put results
+                else Store key already exists
+                    Worker->>Worker: Skip overwrite and count it as present
+                end
             end
 
+            Note right of Worker: Non-zero MLA ranks skip Store writes
             Worker->>Worker: Logical put succeeds only if all physical objects succeed
             Note right of Worker: Partial BatchPut failure is logged only<br/>and does not change D2H success
             Worker-->>Engine: Full block count when D2H succeeds
@@ -450,7 +451,7 @@ This step is required for service routing and disaggregated PD, but not for a st
 
 `store_local_hostname` is a base Transfer Engine endpoint. Each worker uses `base_port + worker_rank`, so the entire port range must be free and reachable.
 
-For RDMA, set `--store_protocol=rdma` and export `DEVICE_NAMES` with the Mooncake RDMA devices. If `DEVICE_NAMES` is absent, xLLM falls back to TCP.
+For RDMA, set `--store_protocol=rdma`. Use `--store_rdma_devices=mlx5_0,mlx5_1` to select HCAs for the Store client embedded in each xLLM Worker, or leave it empty for Mooncake auto-discovery. Initialization failures remain RDMA failures and never fall back to TCP. xLLM does not read `DEVICE_NAMES`; the standalone `mooncake_client` uses its own `--device_names` option.
 
 Speculative decoding does not require a separate draft Store namespace. xLLM automatically generates a distinct `key_component` for the draft cache. If `--model_id` is omitted, xLLM uses the final component of the model path; production deployments should still provide a stable `--model_id` that identifies the model version.
 

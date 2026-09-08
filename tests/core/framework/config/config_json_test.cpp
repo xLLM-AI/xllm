@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -26,6 +27,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -337,6 +339,27 @@ TEST(ConfigJsonTest, ParallelConfigReadsContextParallelSize) {
   parallel_config.from_json(json);
 
   EXPECT_EQ(parallel_config.cp_size(), 4);
+}
+
+TEST(KVCacheStoreConfigTest, ReadsAndExportsRdmaDevices) {
+  KVCacheStoreConfig default_config;
+  EXPECT_TRUE(default_config.store_rdma_devices().empty());
+  const std::vector<std::string>& option_names =
+      KVCacheStoreConfig::option_category().option_names;
+  EXPECT_NE(
+      std::find(option_names.begin(), option_names.end(), "store_rdma_devices"),
+      option_names.end());
+
+  JsonReader json_config = config::parse_json_string(
+      R"json({"store_rdma_devices":"mlx5_0,mlx5_1"})json");
+  KVCacheStoreConfig config;
+  config.from_json(json_config);
+  EXPECT_EQ(config.store_rdma_devices(), "mlx5_0,mlx5_1");
+
+  nlohmann::ordered_json exported;
+  config.append_config_json(exported);
+  EXPECT_EQ(exported.at("store_rdma_devices").get<std::string>(),
+            "mlx5_0,mlx5_1");
 }
 
 TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
