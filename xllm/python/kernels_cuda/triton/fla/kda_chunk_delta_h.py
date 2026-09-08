@@ -12,35 +12,59 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""KDA-owned chunk recurrent-state update, mirrored from SGLang."""
+# Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_delta_h.py
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from __future__ import annotations
-
-from typing import Optional
+import os
+from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
-from .index import prepare_chunk_indices, prepare_chunk_offsets
-from .op import exp, exp2
+from .index import (
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+)
+from .kda_op import exp, exp2, safe_exp
+from .utils import (
+    autotune_cache_kwargs,
+    is_nvidia_hopper,
+)
 
+NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 CHUNK_SIZE = 64
-
-
-@triton.jit
-def _safe_exp(x):
-    return exp(tl.where(x <= 0, x, float("-inf")))
+GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "32"))
+GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
+GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
 
 
 @triton.autotune(
-    # This kernel mutates the caller-owned state pool. Multiple autotune
-    # configurations would apply the recurrence during each benchmark run.
-    configs=[triton.Config({"BV": 32}, num_warps=4, num_stages=2)],
+    # Single hardcoded config. The kernel writes ht (final state) back into
+    # initial_state in-place; with multiple configs, triton's autotune benchmark
+    # phase invokes the kernel many times for timing and corrupts the cache pool,
+    # producing silently wrong output on the first user request. Restoring via
+    # `restore_value=["initial_state"]` works for unit tests but OOMs on
+    # production-scale models (e.g. Kimi-Linear-48B at default mem_fraction)
+    # because cloning the cache pool for each benchmark exceeds available memory.
+    # NT_BUCKET is kept in the autotune key for forward-compatibility (allows
+    # future per-bucket configs once the kernel is refactored to write final
+    # state to a separate output buffer). The env knobs keep this single-config
+    # property while allowing model/hardware-local validation of the selected
+    # tile without corrupting the state pool through multi-config autotune.
+    configs=[
+        triton.Config(
+            {"BV": GDN_CHUNK_H_BV},
+            num_warps=GDN_CHUNK_H_NUM_WARPS,
+            num_stages=GDN_CHUNK_H_NUM_STAGES,
+        )
+    ],
     key=["H", "K", "V", "BT", "USE_GK", "NT_BUCKET"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
+def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
     v,
     w,
@@ -72,8 +96,10 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -82,6 +108,7 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
+    # [BV, BK]
     b_h1 = tl.zeros([BV, 64], dtype=tl.float32)
     if K > 64:
         b_h2 = tl.zeros([BV, 64], dtype=tl.float32)
@@ -90,6 +117,7 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     if K > 192:
         b_h4 = tl.zeros([BV, 64], dtype=tl.float32)
 
+    # calculate offset
     h += ((boh * H + i_h) * V * K).to(tl.int64)
     v += ((bos * H + i_h) * V).to(tl.int64)
     k += ((bos * Hg + i_h // (H // Hg)) * K).to(tl.int64)
@@ -101,15 +129,22 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     stride_k = Hg * K
     stride_w = H * K
 
+    # Slot stride comes from the caller (initial_state.stride(0)): the state pool
+    # may be an envelope-strided view (page-major / unified memory), where the
+    # per-slot pitch spans ALL layers' state, not H*V*K. int64: envelope pitches
+    # overflow an int32 index product.
     index = tl.load(initial_state_indices + i_n).to(tl.int64)
+    # Padded rows carry the -1 sentinel; the decode kernel guards on it
+    # (fused_recurrent.py), the chunked extend path did not.
     valid_state = index >= 0
     h0 = initial_state + index * stride_init_state
     ht = initial_state + index * stride_init_state
     if USE_INITIAL_STATE:
-        h0 += i_h * V * K
+        h0 = h0 + i_h * V * K
     if INPLACE_UPDATE:
-        ht += i_h * V * K
+        ht = ht + i_h * V * K
 
+    # load initial state
     if USE_INITIAL_STATE and valid_state:
         p_h0_1 = tl.make_block_ptr(h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
         b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
@@ -123,6 +158,7 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             p_h0_4 = tl.make_block_ptr(h0, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0))
             b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
 
+    # main recurrence
     for i_t in range(NT):
         p_h1 = tl.make_block_ptr(h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
@@ -163,32 +199,60 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * _safe_exp(b_g_last - b_g)[:, None]
+            b_v = b_v * safe_exp(b_g_last - b_g)[:, None]
             b_g_last = exp(b_g_last)
-            b_h1 *= b_g_last
+            b_h1 = b_h1 * b_g_last
             if K > 64:
-                b_h2 *= b_g_last
+                b_h2 = b_h2 * b_g_last
             if K > 128:
-                b_h3 *= b_g_last
+                b_h3 = b_h3 * b_g_last
             if K > 192:
-                b_h4 *= b_g_last
+                b_h4 = b_h4 * b_g_last
 
         if USE_GK:
             o_k1 = tl.arange(0, 64)
-            b_gk_last1 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k1, mask=o_k1 < K, other=0.0)
-            b_h1 *= (exp2(b_gk_last1) if USE_EXP2 else exp(b_gk_last1))[None, :]
+            b_gk_last1 = tl.load(
+                gk + (bos + last_idx) * H * K + i_h * K + o_k1,
+                mask=(o_k1 < K),
+                other=0.0,
+            )
+            if USE_EXP2:
+                b_h1 *= exp2(b_gk_last1)[None, :]
+            else:
+                b_h1 *= exp(b_gk_last1)[None, :]
             if K > 64:
                 o_k2 = 64 + o_k1
-                b_gk_last2 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k2, mask=o_k2 < K, other=0.0)
-                b_h2 *= (exp2(b_gk_last2) if USE_EXP2 else exp(b_gk_last2))[None, :]
+                b_gk_last2 = tl.load(
+                    gk + (bos + last_idx) * H * K + i_h * K + o_k2,
+                    mask=(o_k2 < K),
+                    other=0.0,
+                )
+                if USE_EXP2:
+                    b_h2 *= exp2(b_gk_last2)[None, :]
+                else:
+                    b_h2 *= exp(b_gk_last2)[None, :]
             if K > 128:
                 o_k3 = 128 + o_k1
-                b_gk_last3 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k3, mask=o_k3 < K, other=0.0)
-                b_h3 *= (exp2(b_gk_last3) if USE_EXP2 else exp(b_gk_last3))[None, :]
+                b_gk_last3 = tl.load(
+                    gk + (bos + last_idx) * H * K + i_h * K + o_k3,
+                    mask=(o_k3 < K),
+                    other=0.0,
+                )
+                if USE_EXP2:
+                    b_h3 *= exp2(b_gk_last3)[None, :]
+                else:
+                    b_h3 *= exp(b_gk_last3)[None, :]
             if K > 192:
                 o_k4 = 192 + o_k1
-                b_gk_last4 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k4, mask=o_k4 < K, other=0.0)
-                b_h4 *= (exp2(b_gk_last4) if USE_EXP2 else exp(b_gk_last4))[None, :]
+                b_gk_last4 = tl.load(
+                    gk + (bos + last_idx) * H * K + i_h * K + o_k4,
+                    mask=(o_k4 < K),
+                    other=0.0,
+                )
+                if USE_EXP2:
+                    b_h4 *= exp2(b_gk_last4)[None, :]
+                else:
+                    b_h4 *= exp(b_gk_last4)[None, :]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
@@ -207,6 +271,7 @@ def _chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_h4 += tl.trans(tl.dot(b_k, b_v))
 
+    # epilogue
     if INPLACE_UPDATE and valid_state:
         p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
         tl.store(p_ht, b_h1.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
@@ -233,26 +298,33 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_indices: Optional[torch.LongTensor] = None,
     use_exp2: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert not (use_exp2 and g is not None), "use_exp2 covers only the per-channel gk path; scalar g stays natural-exp"
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
+    BT = CHUNK_SIZE
+
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
+    # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, CHUNK_SIZE), None
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
-        chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE)
+        N, NT, chunk_offsets = (
+            len(cu_seqlens) - 1,
+            len(chunk_indices),
+            prepare_chunk_offsets(cu_seqlens, BT),
+        )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, V, K)
+
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
-    _chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
         w=w,
@@ -262,6 +334,8 @@ def chunk_gated_delta_rule_fwd_h(
         h=h,
         initial_state=initial_state,
         initial_state_indices=initial_state_indices,
+        # Envelope-strided state pools (page-major / unified memory) have a
+        # per-slot pitch != H*V*K; contiguous pools pass exactly H*V*K.
         stride_init_state=(initial_state.stride(0) if initial_state is not None else 0),
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
@@ -270,14 +344,14 @@ def chunk_gated_delta_rule_fwd_h(
         Hg=Hg,
         K=K,
         V=V,
-        BT=CHUNK_SIZE,
+        BT=BT,
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_INITIAL_STATE=initial_state is not None,
         INPLACE_UPDATE=True,
         SAVE_NEW_VALUE=v_new is not None,
         IS_VARLEN=cu_seqlens is not None,
-        NT_BUCKET=0 if NT <= 32 else (1 if NT <= 128 else 2),
+        NT_BUCKET=(0 if NT <= 32 else (1 if NT <= 128 else 2)),
         USE_EXP2=use_exp2,
     )
     return h, v_new

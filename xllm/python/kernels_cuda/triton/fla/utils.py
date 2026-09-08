@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
+import os
 from collections.abc import Callable
 from enum import Enum
 from typing import Any
@@ -19,11 +21,14 @@ import torch
 import triton
 
 FLA_CHUNK_SIZE = 64
+FLA_CACHE_RESULTS = os.getenv("FLA_CACHE_RESULTS", "1") == "1"
+SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
+autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
 
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     cache_entries: list[tuple[tuple[Any, ...], dict[str, Any], Any]] = []
-    cache_size = 8
+    cache_size = 4
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -77,6 +82,8 @@ def _is_nvidia() -> bool:
         return False
 
 
+is_nvidia = _is_nvidia()
+is_tf32_supported = is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8
 is_nvidia_hopper = _is_nvidia() and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9
 use_cuda_graph = False
 is_gather_supported = hasattr(triton.language, "gather")

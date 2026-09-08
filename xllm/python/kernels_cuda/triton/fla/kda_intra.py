@@ -19,14 +19,18 @@ import torch
 import triton
 import triton.language as tl
 
-from .index import prepare_chunk_indices
-from .kda_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
-from .op import exp2, gather
-from .utils import check_shared_mem, is_gather_supported
-
-autotune_cache_kwargs = {}
-
-is_tf32_supported = not torch.version.hip and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+from .index import (
+    prepare_chunk_indices,
+)
+from .kda_intra_token_parallel import (
+    chunk_kda_fwd_intra_token_parallel,
+)
+from .kda_op import exp2, gather
+from .utils import (
+    autotune_cache_kwargs,
+    is_gather_supported,
+    is_tf32_supported,
+)
 
 if is_tf32_supported:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr("tf32")
@@ -94,8 +98,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = (
+            tl.load(chunk_indices + i_t * 2).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+        )
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -341,6 +351,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         tl.store(p_Akkd11, b_Akk_d1.to(Akkd.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akkd22, b_Akk_d2.to(Akkd.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akkd33, b_Akk_d3.to(Akkd.dtype.element_ty), boundary_check=(0, 1))
+        # Forward substitution reloads these global tiles across warps below.
+        tl.debug_barrier()
+
         b_Ai00 = b_Akk_d0
         b_Ai11 = b_Akk_d1
         b_Ai22 = b_Akk_d2
@@ -624,8 +637,14 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = (
+            tl.load(chunk_indices + i_t * 2).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+        )
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -688,14 +707,14 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
+    tl.debug_barrier()
+
     ################################################################################
     # forward substitution
     ################################################################################
 
     b_Ai = -b_Akk
     for i in range(2, min(BC, T - i_ti)):
-        # The diagonal tile is already in registers; avoid an unnecessary
-        # global-memory producer/consumer dependency.
         b_a = -tl.load(Akk + (i_ti + i) * H * BC + o_i)
         b_a = tl.where(o_i < i, b_a, 0.0)
         b_a += tl.sum(b_a[:, None] * b_Ai, 0)
@@ -834,11 +853,11 @@ def chunk_kda_fwd_intra(
         FUSE_DIAGONAL=fuse_diagonal,
     )
 
-    # Keep the KDA W/U/Kg recomputation in the KDA owning module.  Importing
-    # lazily avoids a module cycle while preserving the SGLang implementation.
-    from .kda import recompute_w_u_fwd
+    from .kda import (
+        recompute_w_u_fwd as kda_recompute_w_u_fwd,
+    )
 
-    w, u, kg = recompute_w_u_fwd(
+    w, u, kg = kda_recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,

@@ -26,19 +26,22 @@ import torch
 import triton
 import triton.language as tl
 
-from xllm.python.kernels_cuda.triton.l2_norm import l2_norm as l2norm_fwd
-
 from .cumsum import chunk_local_cumsum
-from .fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
-from .index import prepare_chunk_indices
+from .fused_recurrent import (
+    fused_recurrent_gated_delta_rule_fwd_kernel,
+)
+from .index import (
+    prepare_chunk_indices,
+)
 from .kda_chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .kda_intra import chunk_kda_fwd_intra
-from .op import exp, exp2, log
-from .utils import check_shared_mem
-
-is_nvidia = not torch.version.hip
-autotune_cache_kwargs = {}
-
+from .kda_l2norm import l2norm_fwd
+from .kda_op import exp, exp2, log
+from .utils import (
+    autotune_cache_kwargs,
+    check_shared_mem,
+    is_nvidia,
+)
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
@@ -69,6 +72,7 @@ def fused_recurrent_kda_fwd(
     initial_state: torch.Tensor,
     inplace_final_state: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
+    # ssm_state_indices: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -107,7 +111,9 @@ def fused_recurrent_kda_fwd(
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
+        # ssm_state_indices=ssm_state_indices,
         scale=scale,
+        # N=N,
         T=T,
         B=B,
         H=H,
@@ -116,12 +122,16 @@ def fused_recurrent_kda_fwd(
         V=V,
         BK=BK,
         BV=BV,
+        # stride_init_state_token=stride_init_state_token,
+        # stride_final_state_token=stride_final_state_token,
+        # stride_indices_seq=stride_indices_seq,
         # stride_indices_tok=stride_indices_tok,
         USE_INITIAL_STATE=initial_state is not None,
         STORE_FINAL_STATE=final_state is not None,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_VARLEN=cu_seqlens is not None,
+        # INPLACE_FINAL_STATE=inplace_final_state,
         IS_KDA=True,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1035,6 +1045,15 @@ def chunk_kda_fwd(
             chunk_indices=chunk_indices,
         )
 
+    # FUSE_DIAGONAL (fold diagonal-block compute into inter+solve) and
+    # FUSE_RECOMPUTE (also fold w/u/kg recompute) save kernel launches and HBM
+    # round-trips, but cost register footprint per CTA. Wins at small grid
+    # where launch overhead dominates; loses at large grid where the extra
+    # register pressure spills. Gate both on the same grid heuristic.
+    # Total CTAs in inter_solve_fused = NT * B * H_per_rank. For varlen,
+    # chunks don't cross sequence boundaries, so per-sequence ceil-divs sum to
+    # more than cdiv(total_tokens, chunk_size); use chunk_indices.shape[0] which
+    # already enumerates all (seq, chunk) pairs.
     _NT_pr = triton.cdiv(q.shape[1], chunk_size) if cu_seqlens is None else chunk_indices.shape[0]
     _H_pr = q.shape[-2]
     _B = q.shape[0]

@@ -28,6 +28,7 @@ from xllm.python.kernels_cuda.triton.fla.fused_recurrent import (  # noqa: E402
 from xllm.python.kernels_cuda.triton.fla.kda import (  # noqa: E402
     RCP_LN2,
     chunk_kda,
+    fused_recurrent_kda,
     kda_gate_chunk_cumsum,
 )
 
@@ -838,6 +839,67 @@ def test_fused_recurrent_kda_packed_decode_supports_state_pool_stride():
     )
     torch.testing.assert_close(result.float(), expected.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(returned_state, expected_state, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("varlen", [False, True])
+@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize("vector_beta", [False, True])
+def test_fused_recurrent_kda_matches_fp32_reference(
+    varlen: bool,
+    inplace: bool,
+    vector_beta: bool,
+) -> None:
+    torch.manual_seed(97)
+    lengths = [3, 5] if varlen else [4, 4]
+    batch, tokens = (1, sum(lengths)) if varlen else (2, 4)
+    heads, value_heads, key_dim, value_dim = 2, 4, 7, 9
+    q = torch.randn(batch, tokens, heads, key_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn(batch, tokens, value_heads, value_dim, device="cuda", dtype=q.dtype)
+    g = -torch.rand(q.shape, device="cuda", dtype=torch.float32)
+    beta_shape = v.shape if vector_beta else v.shape[:-1]
+    beta = torch.rand(beta_shape, device="cuda", dtype=torch.float32)
+    initial = torch.randn(len(lengths), value_heads, value_dim, key_dim, device="cuda")
+    state = initial.clone()
+    expected_state = initial.clone()
+    expected = torch.empty_like(v)
+    cu = torch.tensor([0, 3, 8], device="cuda", dtype=torch.int32) if varlen else None
+    offset = 0
+    for sequence, length in enumerate(lengths):
+        row = 0 if varlen else sequence
+        h = expected_state[sequence]
+        for token in range(length):
+            t = offset + token if varlen else token
+            query = q[row, t].float()
+            key = k[row, t].float()
+            query = query / torch.sqrt(query.square().sum(-1, keepdim=True) + 1e-6)
+            key = key / torch.sqrt(key.square().sum(-1, keepdim=True) + 1e-6)
+            query = query.repeat_interleave(value_heads // heads, dim=0)
+            key = key.repeat_interleave(value_heads // heads, dim=0)
+            gate = g[row, t].repeat_interleave(value_heads // heads, dim=0)
+            h = h * gate.exp()[:, None, :]
+            beta_value = beta[row, t] if vector_beta else beta[row, t, :, None]
+            delta = (v[row, t].float() - (h * key[:, None, :]).sum(-1)) * beta_value
+            h = h + delta[:, :, None] * key[:, None, :]
+            expected[row, t] = (h * (query * key_dim**-0.5)[:, None, :]).sum(-1)
+        expected_state[sequence].copy_(h)
+        offset += length
+
+    actual, final_state = fused_recurrent_kda(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        inplace_final_state=inplace,
+        cu_seqlens=cu,
+    )
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(final_state, expected_state, rtol=2e-5, atol=2e-5)
+    assert (final_state.data_ptr() == state.data_ptr()) is inplace
+    if not inplace:
+        torch.testing.assert_close(state, initial, rtol=0, atol=0)
 
 
 def test_kda_public_signatures_match_sglang():
