@@ -39,7 +39,16 @@ class LogprobState {
                size_t capacity,
                bool enable_logprobs,
                bool enable_top_logprobs);
+  // Empty state (no buffers). Lets Sequence hold a LogprobState by value and
+  // assign the real one once capacity/flags are known, avoiding a heap
+  // allocation + pointer indirection per sequence.
+  LogprobState() = default;
   ~LogprobState() = default;
+
+  LogprobState(const LogprobState&) = default;
+  LogprobState& operator=(const LogprobState&) = default;
+  LogprobState(LogprobState&&) = default;
+  LogprobState& operator=(LogprobState&&) = default;
 
   // for generated tokens
   float get_acc_logprob(int64_t num_tokens);
@@ -75,7 +84,7 @@ class LogprobState {
   }
 
  private:
-  int64_t num_prompt_tokens_;
+  int64_t num_prompt_tokens_ = 0;
   std::vector<std::optional<float>> logprobs_;
   // accumulated log probability of the sequence
   float acc_logprob_ = 0.0;

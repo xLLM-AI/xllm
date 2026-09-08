@@ -261,9 +261,11 @@ class Sequence final {
     return kv_state_.take_linear_restore_src_block();
   }
   Block copy_block(BlockType type) const { return kv_state_.copy_block(type); }
-  const std::string& request_id() const { return request_id_; }
+  // The request id already lives in sequence_params_; don't keep a second
+  // copy per sequence (a heap allocation each for UUID-length ids).
+  const std::string& request_id() const { return sequence_params_.request_id; }
   std::string sample_sequence_id() const {
-    return request_id_ + "#" + std::to_string(index_);
+    return sequence_params_.request_id + "#" + std::to_string(index_);
   }
 
   bool is_graph_warmup() const { return sequence_params_.is_graph_warmup; }
@@ -417,9 +419,6 @@ class Sequence final {
       const Tokenizer& tokenizer,
       std::optional<std::vector<LogProb>>& out_logprobs);
 
-  std::shared_ptr<std::atomic<int32_t>> get_termination_flag() {
-    return termination_flag_;
-  }
   std::vector<std::shared_ptr<std::atomic<uint32_t>>>* get_prefetch_results() {
     return &prefetch_results_;
   }
@@ -479,7 +478,7 @@ class Sequence final {
   int32_t beam_width_cached() const { return beam_width_cached_; }
   int32_t total_rounds_cached() const { return total_rounds_cached_; }
 
-  LogprobState* logprob_state() { return logprob_state_.get(); }
+  LogprobState* logprob_state() { return &logprob_state_; }
   void set_estimated_latency(double estimated_latency) {
     estimated_latency_ = estimated_latency;
   }
@@ -580,7 +579,10 @@ class Sequence final {
   std::optional<size_t> effective_restore_tokens_;
   size_t host_cache_copy_units_ = 0;
 
-  std::unique_ptr<LogprobState> logprob_state_;
+  // Held by value: it is always present after construction, so a unique_ptr
+  // only added a heap allocation per sequence and an indirection on the
+  // per-token update_logprob() path.
+  LogprobState logprob_state_;
 
   // latest token generate time
   absl::Time latest_generate_time_;
@@ -706,8 +708,10 @@ class Sequence final {
 
   std::atomic<bool> cancelled_{false};
 
-  // kvcache store copy async result
-  std::shared_ptr<std::atomic<int32_t>> termination_flag_;
+  // kvcache store copy async result. Only ever read/written by this sequence
+  // (nothing shares it), so it is a plain atomic rather than a heap-allocated
+  // shared_ptr<atomic>.
+  std::atomic<int32_t> termination_flag_{INT32_MAX};
   std::vector<std::shared_ptr<std::atomic<uint32_t>>> prefetch_results_;
 
   Timer timer_;
@@ -715,8 +719,6 @@ class Sequence final {
 
   // whether the last token is handled
   std::atomic<bool> last_token_handled_{false};
-
-  std::string request_id_;
 
   // Multi-round beam search result caching
   int32_t beam_width_cached_ = 0;
