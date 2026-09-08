@@ -65,6 +65,18 @@ cc_test(
 
 cc_test(
   NAME
+    rec_sequence_test
+  SRCS
+    rec_sequence_test.cpp
+  DEPS
+    :config
+    :request
+    GTest::gtest
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     request_params_test
   SRCS
     request_params_test.cpp

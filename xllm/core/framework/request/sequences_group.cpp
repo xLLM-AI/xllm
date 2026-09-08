@@ -21,6 +21,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/request/rec_sequence.h"
+#include "core/framework/request/sequence_factory.h"
 #include "core/util/rec_model_utils.h"
 #include "framework/batch/beam_search.h"
 #include "util/blocking_counter.h"
@@ -47,12 +49,12 @@ void SequencesGroup::add() {
                              prompt_tokens_.size(),
                              sequence_params_.echo,
                              sequence_params_.skip_special_tokens);
-  sequences_.emplace_back(std::make_unique<Sequence>(index,
-                                                     prompt_tokens_,
-                                                     input_embedding_,
-                                                     mm_data_,
-                                                     std::move(decoder),
-                                                     sequence_params_));
+  sequences_.emplace_back(create_sequence(index,
+                                          prompt_tokens_,
+                                          input_embedding_,
+                                          mm_data_,
+                                          std::move(decoder),
+                                          sequence_params_));
 }
 
 bool SequencesGroup::finished() const {
@@ -128,8 +130,10 @@ void SequencesGroup::generate_outputs(std::vector<SequenceOutput>& outputs,
   // Check for multi-round beam search results
   if (is_rec_multi_round_mode() && check_beam_search() &&
       sequences_.size() == 1) {
-    auto* base = sequences_[0].get();
-    if (base->has_beam_result()) {
+    // Multi-round mode is a deployment-wide flag; only REC sequences carry a
+    // device-side beam result.
+    const auto* base = dynamic_cast<const RecSequence*>(sequences_[0].get());
+    if (base != nullptr && base->beam_search_result().ready()) {
       generate_multi_round_output(outputs, tokenizer, *base);
       return;
     }
@@ -374,11 +378,11 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
     CHECK_LT(candidate.source_index, sequences_.size());
     CHECK(sequences_[candidate.source_index] != nullptr);
     if (i < existing_size) {
-      replacement_sequences[i] = std::make_unique<Sequence>(
-          *sequences_[candidate.source_index], /*index=*/i);
+      replacement_sequences[i] =
+          sequences_[candidate.source_index]->fork(/*index=*/i);
     } else {
-      tail_sequences.emplace_back(std::make_unique<Sequence>(
-          *sequences_[candidate.source_index], /*index=*/i));
+      tail_sequences.emplace_back(
+          sequences_[candidate.source_index]->fork(/*index=*/i));
     }
   }
 
@@ -455,9 +459,10 @@ void SequencesGroup::finish() {
 void SequencesGroup::generate_multi_round_output(
     std::vector<SequenceOutput>& outputs,
     const Tokenizer& tokenizer,
-    const Sequence& base) {
-  size_t bw = static_cast<size_t>(base.beam_width_cached());
-  const auto& last_lps = base.beam_last_logprobs();
+    const RecSequence& base) {
+  const RecBeamSearchResult& beam_result = base.beam_search_result();
+  size_t bw = static_cast<size_t>(beam_result.beam_width());
+  const auto& last_lps = beam_result.last_logprobs();
 
   // Rank by logprob
   std::vector<std::pair<float, size_t>> rank;
@@ -470,8 +475,7 @@ void SequencesGroup::generate_multi_round_output(
     return l.first > r.first;
   });
 
-  const auto& flat2d = base.beam_seq_group_flat();
-  size_t rounds = static_cast<size_t>(base.total_rounds_cached());
+  const auto& flat2d = beam_result.beams();
   outputs.reserve(bw);
 
   for (size_t i = 0; i < bw; ++i) {

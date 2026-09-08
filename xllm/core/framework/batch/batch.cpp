@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "batch_input_builder.h"
@@ -32,6 +33,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/request/onerec_sequence.h"
+#include "core/framework/request/rec_sequence.h"
 #include "core/util/rec_model_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -502,9 +505,12 @@ void Batch::refresh_onerec_prefill_output_targets() {
     const uint32_t n_tokens = token_ids.size();
     const uint32_t n_kv_cache_tokens =
         sequence->kv_state().kv_cache_tokens_num();
-    const bool needs_context_target = sequence->is_onerec_model() &&
-                                      n_tokens == 0 && n_kv_cache_tokens == 0 &&
-                                      sequence->num_decoder_embeddings() > 0;
+    // The prefill-only contract is not restricted to OneRec deployments; only
+    // OneRec sequences carry decoder context embeddings.
+    const auto* onerec_sequence = dynamic_cast<const OneRecSequence*>(sequence);
+    const bool needs_context_target =
+        onerec_sequence != nullptr && n_tokens == 0 && n_kv_cache_tokens == 0 &&
+        onerec_sequence->num_decoder_embeddings() > 0;
     if (needs_context_target) {
       output_targets_.push_back({sequence, /*sample_id=*/0, false});
       continue;
@@ -654,14 +660,11 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
   bool has_logprobs = output.beam_search_output.out_logprobs.defined() &&
                       output.beam_search_output.out_logprobs.numel() > 0;
 
-  std::vector<std::vector<int32_t>> group_flat2d;
-  std::vector<float> last_logprobs;
-  group_flat2d.reserve(static_cast<size_t>(result_width));
-  last_logprobs.reserve(static_cast<size_t>(result_width));
-
   for (size_t g = 0; g < num_groups; ++g) {
-    group_flat2d.clear();
-    last_logprobs.clear();
+    std::vector<std::vector<int32_t>> group_flat2d;
+    std::vector<float> last_logprobs;
+    group_flat2d.reserve(static_cast<size_t>(result_width));
+    last_logprobs.reserve(static_cast<size_t>(result_width));
 
     for (int b = 0; b < result_width; ++b) {
       std::vector<int32_t> row_tokens;
@@ -683,8 +686,11 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
     Sequence* seq = sequence_groups_.empty()
                         ? sequences[g]
                         : sequence_groups_[g]->sequences()[0].get();
-    seq->set_beam_result(
-        result_width, total_rounds, group_flat2d, last_logprobs);
+    RecSequence::from(*seq).set_beam_search_result(
+        RecBeamSearchResult(result_width,
+                            total_rounds,
+                            std::move(group_flat2d),
+                            std::move(last_logprobs)));
   }
 }
 

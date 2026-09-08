@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/request/onerec_sequence.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/utils.h"
 #include "util/tensor_helper.h"
@@ -29,8 +30,9 @@ namespace xllm {
 namespace {
 
 int32_t get_onerec_xattention_decode_position(const Sequence& sequence) {
-  return static_cast<int32_t>(sequence.num_prompt_tokens() +
-                              sequence.num_decoder_embeddings());
+  return static_cast<int32_t>(
+      sequence.num_prompt_tokens() +
+      OneRecSequence::from(sequence).num_decoder_embeddings());
 }
 
 }  // namespace
@@ -77,7 +79,8 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
       }
       ++batch_size;
       const int32_t total_seq_len = static_cast<int32_t>(
-          sequence_ptr->num_tokens() + sequence_ptr->num_decoder_embeddings());
+          sequence_ptr->num_tokens() +
+          OneRecSequence::from(*sequence_ptr).num_decoder_embeddings());
       const int32_t n_kv_cache_tokens =
           static_cast<int32_t>(sequence_ptr->kv_state().kv_cache_tokens_num());
       const auto blocks = sequence_ptr->kv_state().blocks(BlockType::KV);

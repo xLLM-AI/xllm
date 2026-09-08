@@ -32,6 +32,8 @@ limitations under the License.
 
 namespace xllm {
 
+class RecSequence;
+
 class SequencesGroup {
  public:
   SequencesGroup(const std::string& prompt,
@@ -75,7 +77,7 @@ class SequencesGroup {
   // Generate output for multi-round beam search
   void generate_multi_round_output(std::vector<SequenceOutput>& outputs,
                                    const Tokenizer& tokenizer,
-                                   const Sequence& base);
+                                   const RecSequence& base);
 
  private:
   const std::string& prompt_;                  // ref from request

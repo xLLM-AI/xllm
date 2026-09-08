@@ -26,8 +26,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/request/onerec_sequence.h"
 #include "framework/model/model_input_params.h"
-#include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
@@ -139,7 +139,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
 
   const uint32_t seq_len = first_sequence->num_tokens();
   const uint32_t num_decoder_embeddings =
-      first_sequence->num_decoder_embeddings();
+      OneRecSequence::from(*first_sequence).num_decoder_embeddings();
   const uint32_t n_prompt_tokens = first_sequence->num_prompt_tokens();
   const bool is_first_prefill = (first_sequence->num_generated_tokens() == 0);
   // const uint64_t model_version = first_sequence->get_model_version();
@@ -167,7 +167,9 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
         // Sequences within group have same length, only need to get first
         // sequence's length
         const int32_t group_encoder_seq_len =
-            group_ptr->sequences()[0]->encoder_tokens().size();
+            OneRecSequence::from(*group_ptr->sequences()[0])
+                .encoder_tokens()
+                .size();
         total_tokens += group_encoder_seq_len * group_ptr->sequences().size();
       }
     }
@@ -188,7 +190,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
       if (group_size == 0) continue;
 
       const int32_t group_encoder_seq_len =
-          group.sequences()[0]->encoder_seq_len();
+          OneRecSequence::from(*group.sequences()[0]).encoder_seq_len();
 
       // Batch set same values
       std::fill_n(&cache_data.encoder_seq_lens[global_seq_idx],
@@ -196,8 +198,9 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
                   group_encoder_seq_len);
 
       // Batch copy tokens by sequence and collect sparse_embedding
-      for (const auto& sequence : group.sequences()) {
-        const auto& encoder_tokens = sequence->encoder_tokens();
+      for (const auto& sequence_ptr : group.sequences()) {
+        const OneRecSequence& sequence = OneRecSequence::from(*sequence_ptr);
+        const auto& encoder_tokens = sequence.encoder_tokens();
         const int32_t* src_ptr = encoder_tokens.data();
         const int32_t group_encoder_seq_len = encoder_tokens.size();
 
@@ -208,16 +211,16 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
                                            src_ptr + group_encoder_seq_len);
         }
         // Collect sparse_embedding
-        auto mm_data = sequence->mm_data();
-        auto sparse_embedding_optional =
-            mm_data.get<torch::Tensor>(Sequence::ENCODER_SPARSE_EMBEDDING_NAME);
+        const MMData& mm_data = sequence.mm_data();
+        auto sparse_embedding_optional = mm_data.get<torch::Tensor>(
+            OneRecSequence::kEncoderSparseEmbeddingName);
         if (sparse_embedding_optional.has_value()) {
           cache_data.encoder_sparse_embeddings.push_back(
               sparse_embedding_optional.value());
         }
 
         auto decoder_context_embedding_optional = mm_data.get<torch::Tensor>(
-            Sequence::DECODER_CONTEXT_EMBEDDING_NAME);
+            OneRecSequence::kDecoderContextEmbeddingName);
         if (decoder_context_embedding_optional.has_value()) {
           cache_data.decoder_context_embeddings.push_back(
               decoder_context_embedding_optional.value());

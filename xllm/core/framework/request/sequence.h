@@ -123,8 +123,14 @@ struct SequenceParams {
   std::shared_ptr<SpeculativeTokenStats> speculative_token_stats;
 };
 
-class Sequence final {
+// One generation stream of a request: the token buffer, KV/logprob state,
+// stopping and timing bookkeeping, and the detokenizing output path of a plain
+// LLM / VLM request. Request kinds whose sequences behave differently derive
+// from it (see RecSequence / OneRecSequence) and override the few hooks below;
+// create_sequence() picks the concrete type.
+class Sequence {
  public:
+  // Decoder seeded by the prompt tokens (LLM / VLM).
   Sequence(size_t index,
            const std::vector<int32_t>& prompt_token_ids,
            torch::Tensor input_embedding,
@@ -134,6 +140,13 @@ class Sequence final {
 
   Sequence(const Sequence& other);
   Sequence(const Sequence& other, size_t index);
+  virtual ~Sequence() = default;
+
+  // Polymorphic copy for beam / best_of expansion: same request, new index.
+  // Derived types return their own type so no state is sliced away.
+  virtual std::unique_ptr<Sequence> fork(size_t index) const;
+
+  size_t index() const { return index_; }
 
   // get mm data
   const MMData& mm_data() const { return mm_data_; }
@@ -324,11 +337,11 @@ class Sequence final {
 
   // get the output of the sequence until the specified number of tokens,
   // returns nullopt if no delta text and not finished
-  std::optional<SequenceOutput> generate_streaming_output(
+  virtual std::optional<SequenceOutput> generate_streaming_output(
       size_t size,
       const Tokenizer& tokenizer);
   // get the full output of the sequence
-  SequenceOutput generate_output(const Tokenizer& tokenizer);
+  virtual SequenceOutput generate_output(const Tokenizer& tokenizer);
   SequenceOutput generate_output();
   void generate_sample_outputs(std::vector<SequenceOutput>& outputs,
                                const Tokenizer& tokenizer);
@@ -455,29 +468,6 @@ class Sequence final {
   // re-evaluated from current tokens.
   void reset_finish_state_for_beam_search();
 
-  // Multi-round beam search result caching
-  void set_beam_result(int32_t bw,
-                       int32_t total_rounds,
-                       const std::vector<std::vector<int32_t>>& flat,
-                       const std::vector<float>& last_logprobs) {
-    beam_width_cached_ = bw;
-    total_rounds_cached_ = total_rounds;
-    beam_seq_group_flat_ = flat;
-    beam_last_logprobs_ = last_logprobs;
-  }
-  bool has_beam_result() const {
-    return beam_width_cached_ > 0 && total_rounds_cached_ > 0 &&
-           !beam_seq_group_flat_.empty();
-  }
-  const std::vector<std::vector<int32_t>>& beam_seq_group_flat() const {
-    return beam_seq_group_flat_;
-  }
-  const std::vector<float>& beam_last_logprobs() const {
-    return beam_last_logprobs_;
-  }
-  int32_t beam_width_cached() const { return beam_width_cached_; }
-  int32_t total_rounds_cached() const { return total_rounds_cached_; }
-
   LogprobState* logprob_state() { return &logprob_state_; }
   void set_estimated_latency(double estimated_latency) {
     estimated_latency_ = estimated_latency;
@@ -491,30 +481,7 @@ class Sequence final {
   // get sequence id
   int32_t seq_id() const { return seq_id_; }
 
-  const std::vector<int32_t>& encoder_tokens() const {
-    static const std::vector<int32_t> kEmpty;
-    if (!onerec_state_.has_value()) {
-      return kEmpty;
-    }
-    return onerec_state_->encoder_tokens;
-  }
-
-  size_t encoder_seq_len() const {
-    return onerec_state_.has_value() ? onerec_state_->num_encoder_tokens : 0;
-  }
-
-  size_t num_decoder_embeddings() const {
-    return onerec_state_.has_value() ? onerec_state_->num_decoder_embeddings
-                                     : 0;
-  }
-
   RecType rec_type() const { return sequence_params_.rec_type; }
-  bool is_onerec_model() const {
-    return sequence_params_.rec_type == RecType::kOneRec;
-  }
-
-  static const std::string ENCODER_SPARSE_EMBEDDING_NAME;
-  static const std::string DECODER_CONTEXT_EMBEDDING_NAME;
 
   void set_cancel() { cancelled_.store(true, std::memory_order_relaxed); }
 
@@ -528,7 +495,42 @@ class Sequence final {
     return last_token_handled_.load(std::memory_order_relaxed);
   }
 
+ protected:
+  // How a derived type seeds the decoder instead of using the prompt tokens:
+  // `num_bos_tokens` BOS tokens in a buffer of `capacity` slots.
+  struct DecoderSeed {
+    size_t num_bos_tokens = 0;
+    size_t capacity = 0;
+  };
+
+  // Decoder seeded by BOS tokens (OneRec). `force_token_logprobs` keeps the
+  // per-token logprob buffer allocated even when the request did not ask for
+  // logprobs, for derived types that emit them in their output anyway.
+  Sequence(size_t index,
+           const DecoderSeed& seed,
+           torch::Tensor input_embedding,
+           const MMData& mm_data,
+           const IncrementalDecoder& incremental_decoder,
+           const SequenceParams& seq_params,
+           bool force_token_logprobs);
+
+  // Hooks for derived types. Defaults are the plain LLM behavior.
+  // Whether a token may be appended before any KV cache has been filled.
+  virtual bool allows_append_before_prefill() const { return false; }
+  // Whether the sequence can only be finished once it generated a token.
+  virtual bool requires_generated_token_to_finish() const { return false; }
+
+  // Read access for derived output paths.
+  const SequenceParams& sequence_params() const { return sequence_params_; }
+  const torch::Tensor& output_embedding() const { return output_embedding_; }
+  // Number of leading tokens that are real: trailing placeholder tokens (< 0,
+  // appended under schedule overlap) are excluded.
+  size_t num_valid_tokens() const;
+
  private:
+  void init_request_state();
+  void init_logprob_state(bool force_token_logprobs);
+
   void record_first_token(const Token& token);
   bool try_commit_json_object_token(int32_t token_id, int64_t token_offset);
 
@@ -549,23 +551,6 @@ class Sequence final {
   void generate_embeddings_output(SequenceOutput& output);
   void generate_mm_embeddings_output(SequenceOutput& output);
 
-  void init_onerec_sequence(const std::vector<int32_t>& prompt_token_ids,
-                            torch::Tensor input_embedding);
-
-  void generate_onerec_streaming_output(const Slice<int32_t>& ids,
-                                        size_t size,
-                                        SequenceOutput& output) const;
-
-  void generate_onerec_output(const Slice<int32_t>& ids,
-                              size_t size,
-                              const Tokenizer& tokenizer,
-                              SequenceOutput& output) const;
-
-  struct OneRecState {
-    size_t num_encoder_tokens = 0;
-    size_t num_decoder_embeddings = 0;
-    std::vector<int32_t> encoder_tokens;
-  };
   int32_t wait_time_ms_ = 0;
   double estimated_latency_ = 0.0;
 
@@ -658,8 +643,6 @@ class Sequence final {
   // computed).
   uint32_t linear_hash_stride_ = 0;
 
-  std::optional<OneRecState> onerec_state_;
-
   std::optional<JsonObjectGrammarState> json_object_state_;
 
   // NOTE: MUST FIXME Later
@@ -719,12 +702,6 @@ class Sequence final {
 
   // whether the last token is handled
   std::atomic<bool> last_token_handled_{false};
-
-  // Multi-round beam search result caching
-  int32_t beam_width_cached_ = 0;
-  int32_t total_rounds_cached_ = 0;
-  std::vector<std::vector<int32_t>> beam_seq_group_flat_;
-  std::vector<float> beam_last_logprobs_;
 
   // Mark whether the sequence has new token updates in current decode step.
   // This is only consumed by software beam search to distinguish:
