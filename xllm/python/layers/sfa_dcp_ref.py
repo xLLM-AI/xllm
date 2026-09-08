@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Torch reference ops for DCP SFA decode remap and merge."""
+"""Torch reference ops for DCP SFA decode remap."""
 
 from __future__ import annotations
 
@@ -39,21 +39,3 @@ def remap_sparse_indices(
     pack_keys = original_order + (~owned_entries).to(torch.float32) * topk_count
     _, pack_order = torch.sort(pack_keys, dim=-1)
     return torch.gather(local_table, dim=-1, index=pack_order.to(torch.int32))
-
-
-def merge_dcp_outputs(
-    output_recv: torch.Tensor,
-    lse_recv: torch.Tensor,
-) -> torch.Tensor:
-    if output_recv.ndim != 4 or lse_recv.ndim != 3 or output_recv.shape[:3] != lse_recv.shape:
-        raise RuntimeError(
-            "DCP output merge expects matching rank/token/head dimensions, "
-            f"got {tuple(output_recv.shape)} and {tuple(lse_recv.shape)}."
-        )
-    output_dtype = output_recv.dtype
-    lse_recv = lse_recv.masked_fill(~torch.isfinite(lse_recv), float("-inf"))
-    weights = torch.softmax(lse_recv, dim=0)
-    weights = torch.nan_to_num(weights, nan=0.0)
-
-    output = (output_recv.to(lse_recv.dtype) * weights.unsqueeze(-1)).sum(dim=0)
-    return output.movedim(1, 0).contiguous().to(output_dtype)
