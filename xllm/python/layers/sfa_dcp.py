@@ -22,14 +22,12 @@ import torch
 import torch.distributed as dist
 
 from xllm.python.attention.kv_shard_layout import KVShardLayout
-from xllm.python.layers.sfa_dcp_ref import merge_dcp_outputs, remap_sparse_indices
+from xllm.python.layers.sfa_dcp_ref import remap_sparse_indices
 from xllm.python.model_executor.forward_context import get_execution_buffer
 
 # Must match xllm/python/kernels_npu/tilelang/sfa_dcp_remap.py AOT specializations.
 _REMAP_TOPK = 2048
 _REMAP_MAX_TOKENS = 256
-# npu_attention_update rejects an LSE list longer than 16.
-_ATTENTION_UPDATE_MAX_SHARDS = 16
 
 
 def _is_power_of_two(value: int) -> bool:
@@ -43,6 +41,26 @@ def _is_npu_tensor(tensor: torch.Tensor) -> bool:
 def _fused_remap_available() -> bool:
     ops = getattr(torch.ops, "xllm_ops", None)
     return ops is not None and hasattr(ops, "sfa_dcp_remap_out")
+
+
+def _lse_as_token_head(
+    softmax_lse: torch.Tensor,
+    num_tokens: int,
+    num_heads: int,
+) -> torch.Tensor:
+    """Normalize SFA LSE to ``[T, H]``.
+
+    Graph capture can emit ``[1, T, H]``; eager decode may emit ``[T, H]`` or
+    ``[T, H, 1]``.
+    """
+    lse = softmax_lse
+    if lse.ndim >= 3 and lse.shape[-1] == 1:
+        lse = lse.squeeze(-1)
+    if lse.ndim >= 3 and lse.shape[0] == 1:
+        lse = lse.squeeze(0)
+    if tuple(lse.shape) != (num_tokens, num_heads):
+        raise RuntimeError(f"softmax_lse must be [T, H]=[{num_tokens}, {num_heads}], got {tuple(softmax_lse.shape)}")
+    return lse
 
 
 def _can_use_fused_remap(
@@ -65,36 +83,6 @@ def _can_use_fused_remap(
         and _is_npu_tensor(topk_indices)
         and _fused_remap_available()
     )
-
-
-def _can_use_attention_update(output_recv: torch.Tensor, lse_recv: torch.Tensor) -> bool:
-    dcp_size = int(output_recv.shape[0])
-    return 1 <= dcp_size <= _ATTENTION_UPDATE_MAX_SHARDS and _is_npu_tensor(output_recv) and _is_npu_tensor(lse_recv)
-
-
-def merge_dcp_outputs_with_attention_update(
-    output_recv: torch.Tensor,
-    lse_recv: torch.Tensor,
-    merged: torch.Tensor,
-) -> torch.Tensor:
-    """Merge DCP shards into caller-owned ``[T, H, D]``.
-
-    Uses ``npu_attention_update`` when the shard count is in the supported
-    range; otherwise copies the naive torch merge.
-    """
-    if not _can_use_attention_update(output_recv, lse_recv):
-        merged.copy_(merge_dcp_outputs(output_recv, lse_recv))
-        return merged
-
-    import torch_npu
-
-    dcp_size, num_heads, num_tokens, head_dim = output_recv.shape
-    row_count = num_heads * num_tokens
-    lse_list = [lse_recv[rank].reshape(row_count) for rank in range(dcp_size)]
-    local_out_list = [output_recv[rank].reshape(row_count, head_dim) for rank in range(dcp_size)]
-    updated, _lse_out = torch_npu.npu_attention_update(lse_list, local_out_list, 0)
-    merged.copy_(updated.view(num_heads, num_tokens, head_dim).permute(1, 0, 2))
-    return merged
 
 
 class GroupCoordinator(Protocol):
@@ -337,50 +325,58 @@ class AscendSFADCPImpl:
             idx_scratch,
         )
 
-    def _all_to_all_dcp_tensor(
-        self,
-        tensor: torch.Tensor,
-        scatter_dim: int,
-    ) -> torch.Tensor:
-        scatter_size = tensor.shape[scatter_dim]
-        if scatter_size % self.dcp_size != 0:
-            raise RuntimeError(
-                "DCP output All2All requires the scatter dimension to be divisible "
-                f"by dcp_size, got shape={tuple(tensor.shape)}, scatter_dim={scatter_dim}, "
-                f"and dcp_size={self.dcp_size}."
-            )
-
-        local_scatter_size = scatter_size // self.dcp_size
-        send = tensor.movedim(scatter_dim, 0).contiguous()
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
-        recv = recv.view(self.dcp_size, local_scatter_size, *send.shape[1:])
-        return recv
-
-    def _merge_sharded_outputs(
-        self,
-        output_recv: torch.Tensor,
-        lse_recv: torch.Tensor,
-    ) -> torch.Tensor:
-        _, num_heads, num_tokens, head_dim = output_recv.shape
-        merged = get_execution_buffer(
-            ("SFA_DCP_MERGE_OUT", num_tokens, num_heads, head_dim, str(output_recv.dtype)),
-            lambda: torch.empty(
-                (num_tokens, num_heads, head_dim),
-                dtype=output_recv.dtype,
-                device=output_recv.device,
-            ),
-        )
-        return merge_dcp_outputs_with_attention_update(output_recv, lse_recv, merged)
-
     def _merge_dcp_outputs(
         self,
-        sfa_output: torch.Tensor,
+        output: torch.Tensor,
         softmax_lse: torch.Tensor,
     ) -> torch.Tensor:
-        output_recv = self._all_to_all_dcp_tensor(sfa_output, 1)
-        lse_recv = self._all_to_all_dcp_tensor(softmax_lse, 1).squeeze(-1)
-        return self._merge_sharded_outputs(output_recv, lse_recv)
+        """Pack output+LSE, run one AllToAll, and fuse LSE combine.
+
+        Payload layout is ``[dcp, H_local, T, D+4]`` for bf16/fp16.
+        """
+        from xllm.python.kernels_npu.triton.dcp_packed_a2a import (
+            fused_dcp_lse_combine,
+            pack_dcp_output_lse,
+            packed_send_shape,
+        )
+
+        num_tokens, num_heads, head_dim = (int(x) for x in output.shape)
+        lse_th = _lse_as_token_head(softmax_lse, num_tokens, num_heads)
+        dcp_size = int(self.dcp_size)
+        send_shape = packed_send_shape(
+            num_tokens,
+            num_heads,
+            head_dim,
+            dcp_size,
+            scatter_dim=1,
+            dtype=output.dtype,
+        )
+        send = get_execution_buffer(
+            ("DCP_PACKED_A2A_SEND", *send_shape, str(output.dtype)),
+            lambda: torch.empty(send_shape, dtype=output.dtype, device=output.device),
+        )
+        recv = get_execution_buffer(
+            ("DCP_PACKED_A2A_RECV", *send_shape, str(output.dtype)),
+            lambda: torch.empty(send_shape, dtype=output.dtype, device=output.device),
+        )
+        pack_dcp_output_lse(
+            output,
+            lse_th,
+            dcp_size,
+            scatter_dim=1,
+            send=send,
+        )
+        dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
+        h_local = num_heads // dcp_size
+        merged = get_execution_buffer(
+            ("SFA_DCP_MERGE_OUT", num_tokens, h_local, head_dim, str(output.dtype)),
+            lambda: torch.empty(
+                (num_tokens, h_local, head_dim),
+                dtype=output.dtype,
+                device=output.device,
+            ),
+        )
+        return fused_dcp_lse_combine(recv, head_dim, scatter_dim=1, output=merged)
 
     def _start_dcp_query_gather(
         self,
@@ -510,5 +506,4 @@ class AscendSFADCPImpl:
             return_lse=True,
         )
         softmax_lse = softmax_max + torch.log(softmax_sum)
-        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         return self._merge_dcp_outputs(sfa_output, softmax_lse)

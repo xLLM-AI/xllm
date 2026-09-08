@@ -27,7 +27,10 @@ from xllm.python.attention.backend import MlaIndexContext
 from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
 from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
-from xllm.python.layers.sfa_dcp import AscendSFADCPMetadataBuilder
+from xllm.python.layers.sfa_dcp import (
+    AscendSFADCPMetadataBuilder,
+    _lse_as_token_head,
+)
 from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
     ForwardContext,
@@ -295,3 +298,12 @@ def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
     assert quant_lightning_indexer.call_args.args[4] is materialized_scale
     assert quant_lightning_indexer.call_args.args[8] is materialized_table
     cp_shard_rows.assert_called_once_with(global_topk, cp_context)
+
+
+def test_lse_as_token_head_squeezes_graph_leading_one() -> None:
+    num_tokens = 8
+    num_heads = 16
+    lse = torch.randn(1, num_tokens, num_heads, dtype=torch.float32)
+    out = _lse_as_token_head(lse, num_tokens, num_heads)
+    assert tuple(out.shape) == (num_tokens, num_heads)
+    torch.testing.assert_close(out, lse[0])
