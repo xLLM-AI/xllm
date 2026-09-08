@@ -74,6 +74,32 @@ bool has_active_dp_tokens(const ForwardInput& input) {
   });
 }
 
+MtpTopkStatePtr select_followup_topk_state(
+    const MtpTopkStatePtr& state,
+    int32_t num_sequences) {
+  if (state == nullptr) {
+    return nullptr;
+  }
+  const int64_t sequence_count = static_cast<int64_t>(num_sequences);
+  const int64_t row_count = state->num_rows();
+  if (row_count == sequence_count) {
+    return state;
+  }
+  CHECK_EQ(row_count, sequence_count * 2)
+      << "combined MTP top-k state row count mismatch, rows=" << row_count
+      << ", sequences=" << num_sequences;
+
+  // Combined draft rows are ordered as [repair, current] per sequence. The
+  // follow-up draft consumes only the current row, while reusing its top-k
+  // indices without rerunning the indexer.
+  torch::Tensor current_row_indices = torch::arange(
+      /*start=*/1,
+      /*end=*/row_count,
+      /*step=*/2,
+      torch::TensorOptions().dtype(torch::kLong).device(state->device()));
+  return state->index_select_rows(current_row_indices);
+}
+
 void broadcast_tokens_in_group(torch::Tensor& tokens,
                                ProcessGroup* process_group,
                                int32_t root_rank = 0) {
@@ -3111,8 +3137,16 @@ void MTPWorkerImpl::submit_pending_followup_drafts(
         pending_draft_context_.drafts.back().output.sample_output;
     if (layer::is_mtp_dsa_topk_reuse_enabled(
             draft_impl_->context_.get_model_args())) {
-      next_input.input_params.mtp_topk_state =
+      const MtpTopkStatePtr& previous_topk_state =
           pending_draft_context_.drafts.back().output.mtp_topk_state;
+      if (draft_idx == 1) {
+        next_input.input_params.mtp_topk_state =
+            select_followup_topk_state(
+                previous_topk_state,
+                batch_identity_input.input_params.meta.num_sequences);
+      } else {
+        next_input.input_params.mtp_topk_state = previous_topk_state;
+      }
     }
     set_token_ids_device_tensor(next_input,
                                  previous_output.next_tokens,
