@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -52,9 +52,11 @@ class NpuColumnParallelLinearImpl : public BaseLayer {
 
   ~NpuColumnParallelLinearImpl() override = default;
 
-  void merge_loaded_weights() override;
+  virtual void merge_loaded_weights() override;
 
-  int64_t init_layer() override;
+  void fuse_eagle3_quarot_input_rotation(torch::Tensor global_rotation);
+
+  virtual int64_t init_layer() override;
 
   virtual torch::Tensor forward(const torch::Tensor& input, int nodeId);
 

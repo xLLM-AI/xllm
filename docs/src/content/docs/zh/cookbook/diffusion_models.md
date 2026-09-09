@@ -10,5 +10,6 @@ description: "xLLM 扩散模型推理实践"
 ## 模型系列
 
 - [Flux](/zh/cookbook/diffusion_models/flux/flux/)
-- [Wan](/zh/cookbook/diffusion_models/wan/wan2_1/)
+- [Wan2.1](/zh/cookbook/diffusion_models/wan/wan2_1/)
+- [Wan2.2](/zh/cookbook/diffusion_models/wan/wan2_2/)
 - [Qwen-Image](/zh/cookbook/diffusion_models/qwen_image/qwen_image/)

@@ -88,6 +88,40 @@ Input model references:
 
 When using MTP for inference, you need to specify both the main model and the draft model (MTP model).
 
+## JSON object output
+
+The OpenAI-compatible Chat Completions API supports token-level JSON-object
+constrained decoding for models whose tokenizer can provide stable token
+pieces. Use:
+
+```json
+{
+  "response_format": {"type": "json_object"}
+}
+```
+
+This mode supports ordinary generation and MTP, including streaming and
+non-streaming responses. With PD separation enabled, the prefill instance
+forwards the format flag and reasoning mode to the decode instance. The
+decode sequence commits and validates the first token produced by prefill
+before building its next-token mask.
+
+The feature is model-independent at the runtime level. A request is rejected
+if the model tokenizer cannot provide the token pieces required to build the
+grammar. For models with reasoning enabled, the tokenizer must also encode the
+existing `</think>` boundary so the runtime can begin JSON enforcement after
+reasoning completes.
+
+When reasoning is enabled, reasoning remains unconstrained until the model's
+`</think>` boundary; JSON enforcement starts afterward. When thinking is
+disabled through the existing chat-template kwargs, enforcement starts at the
+first generated token.
+
+The current MVP supports only `json_object`. `json_schema`, regex/custom
+grammars, legacy Completion requests, C API request structs, and tool-call
+structural tags are not supported. Unsupported `response_format.type` values
+are rejected as invalid requests.
+
 #### DeepSeek-V3/V3.2/R1 Launch Example
 ```bash
 MODEL_PATH="/models/DeepSeek-V3"

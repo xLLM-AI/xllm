@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ limitations under the License.
 #include <array>
 #include <atomic>
 #include <boost/algorithm/string.hpp>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
@@ -29,12 +30,14 @@ limitations under the License.
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
@@ -45,6 +48,7 @@ limitations under the License.
 #include "framework/parallel_state/npu_rank_table_env.h"
 #endif
 #include "core/platform/device_name_utils.h"
+#include "framework/kv_cache/layerwise_split_layout.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "llm_engine.h"
@@ -75,13 +79,58 @@ void apply_runtime_kv_cache_options(const Options& source,
   destination.host_blocks_factor(source.host_blocks_factor())
       .enable_kvcache_store(source.enable_kvcache_store())
       .store_protocol(source.store_protocol())
+      .store_rdma_devices(source.store_rdma_devices())
       .store_master_server_address(source.store_master_server_address())
       .store_metadata_server(source.store_metadata_server())
       .store_local_hostname(source.store_local_hostname())
       .prefetch_batch_size(source.prefetch_batch_size())
+      .prefetch_timeout(source.prefetch_timeout())
       .layers_wise_copy_batchs(source.layers_wise_copy_batchs())
       .kv_cache_dtype(source.kv_cache_dtype());
 }
+
+void validate_layerwise_split_size_startup_config(const Options& options,
+                                                  const std::string& model_type,
+                                                  int32_t global_world_size) {
+  const ParallelConfig& parallel_config = ParallelConfig::get_instance();
+  const int32_t layerwise_split_size = parallel_config.layerwise_split_size();
+  validate_layerwise_split_size_config(layerwise_split_size);
+  if (layerwise_split_size <= 1) {
+    return;
+  }
+
+  CHECK_GE(options.dp_size(), 1) << "dp_size must be >= 1.";
+  CHECK_GT(global_world_size, 0) << "world_size must be > 0.";
+  const int32_t dp_cp_size = options.dp_size() * options.cp_size();
+  CHECK_EQ(global_world_size % dp_cp_size, 0)
+      << "world_size (" << global_world_size
+      << ") must be divisible by dp_size * cp_size (" << dp_cp_size << ").";
+  const int32_t attn_tp_size = global_world_size / dp_cp_size;
+  std::string resolved_model_type = model_type;
+  if (resolved_model_type.empty()) {
+    resolved_model_type =
+        util::get_model_type(options.model_path(), options.backend());
+  }
+  validate_layerwise_split_enablement(
+      layerwise_split_size, attn_tp_size, resolved_model_type);
+
+  CHECK_LE(options.host_blocks_factor(), 1.0)
+      << "layerwise_split_size > 1 does not support hierarchy host cache.";
+  CHECK_EQ(parallel_config.cp_size(), 1)
+      << "layerwise_split_size > 1 does not support context parallelism.";
+  CHECK_EQ(parallel_config.kv_split_size_effective(), 1)
+      << "layerwise_split_size > 1 does not support KV split.";
+}
+
+bool is_python_cp_compatible_graph_backend(std::string_view graph_backend) {
+  std::string normalized_backend(graph_backend);
+  boost::algorithm::to_lower(normalized_backend);
+  return normalized_backend.empty() || normalized_backend == "off" ||
+         normalized_backend == "none" || normalized_backend == "0" ||
+         normalized_backend == "aclgraph";
+}
+
+}  // namespace
 
 std::optional<std::string> validate_model_cp(const Options& options,
                                              EngineType engine_type,
@@ -90,10 +139,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
-  if (Platform::is_mlu() &&
-      ParallelConfig::get_instance().kv_split_size() > 1) {
-    return "MLU only support DCP  for now when kv split size > 1";
-  }
+
   if (options.cp_size() == 1) {
     return std::nullopt;
   }
@@ -105,31 +151,25 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.task_type() != "generate") {
       return "MLU CP supports only the generate task";
     }
-    if (engine_type == EngineType::SSM &&
-        options.speculative_algorithm() != "Suffix") {
-      return "Current MLU model-side CP does not support MTPWorkerImpl-based "
-             "speculative algorithms such as MTP or Eagle3; disable CP, "
-             "disable the speculative algorithm, or wait for MLU worker-side "
-             "CP";
-    }
-    if (model_type != "deepseek_v32" && model_type != "glm_moe_dsa") {
+    if (!is_mlu_model_cp_capable(model_type)) {
       return "MLU CP does not support model_type=" + model_type;
     }
-    if (options.instance_role() != InstanceRole::DEFAULT &&
-        options.instance_role() != InstanceRole::PREFILL) {
-      return "MLU CP supports only DEFAULT or PREFILL roles";
+
+    if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+      return "MLU CP requires world_size divisible by dp_size * cp_size "
+             "(orthogonal PCP x TP layout)";
     }
+
     if (options.dp_size() != 1) {
       return "MLU CP requires dp_size == 1";
     }
-    if (options.cp_size() != global_world_size) {
-      return "MLU CP requires cp_size == global world size";
-    }
+
     if (ParallelConfig::get_instance().kv_split_size() != 1) {
       return "MLU CP requires kv_split_size == 1";
     }
-    if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
-      return "MLU CP requires ep_size == 1 or global world size";
+
+    if (options.ep_size() != global_world_size) {
+      return "MLU CP requires ep_size == global world size";
     }
     return std::nullopt;
   }
@@ -141,20 +181,20 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.task_type() != "generate") {
       return "Model-side CP supports only the generate task";
     }
+    const bool is_dsv4_model = util::is_deepseek_v4_model_type(model_type);
     if (engine_type == EngineType::SSM &&
         SpeculativeConfig::requires_aux_hidden_capture(
-            options.speculative_algorithm())) {
+            options.speculative_algorithm()) &&
+        !is_dsv4_model) {
       return "Current model-side CP does not support aux-hidden-capture "
-             "speculative algorithms (Eagle3/DFlash); disable CP or disable "
-             "the speculative algorithm. MTP and Suffix are supported.";
+             "speculative algorithms (Eagle3/DFlash/DSpark); run speculative "
+             "decoding on a cp_size=1 Decode instance.";
     }
-    // enable_graph is compatible with CP because the two are phase-disjoint:
-    // CP only engages on batch_forward_type.no_decode() (both the model-owned
-    // split in deepseek_v4 and NpuCpPlan::prepare return early on decode),
-    // while ACL graph only captures/replays pure decode -- AclGraphExecutorImpl
-    // ::run() falls back to eager for anything else, and params.enable_graph is
-    // set only by the decode capture path. Graph-mode decode therefore runs
-    // with CP inactive, which is the same non-CP decode CP already relies on.
+    // Native model-side CP is compatible with graph mode because the two are
+    // phase-disjoint: CP only engages on batch_forward_type.no_decode(), while
+    // ACL graph captures/replays pure decode. The Python CP path applies the
+    // same phase split only to decode-only ACLGraph; other graph backends are
+    // rejected below.
     //
     // The one batch that satisfies both gates is spec-verify chunked prefill.
     // The graph executor only takes it for hybrid-linear-attention models, and
@@ -163,6 +203,70 @@ std::optional<std::string> validate_model_cp(const Options& options,
     if (options.instance_role() != InstanceRole::DEFAULT &&
         options.instance_role() != InstanceRole::PREFILL) {
       return "Model-side CP supports only DEFAULT or PREFILL roles";
+    }
+
+    // Python model executor runs a standalone torch CP path (all-gather KV,
+    // eager prefill only) that does not go through the ATB fused-attention op,
+    // so it bypasses the ATB-backend requirement and the ATB CP capability
+    // allowlist below. The safety constraints above (LLM/generate,
+    // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
+    // be > 1, sharing world = cp * tp); the collective communicator builds the
+    // narrowed TP group and the strided CP group as separate torch subgroups
+    // off the shared world rendezvous endpoint. DP > 1 stays unsupported: the
+    // Python executor does not implement the dp * cp * tp rank layout.
+    if (ModelConfig::is_python_model_impl(
+            ModelConfig::get_instance().model_impl())) {
+      // Only models whose Python forward actually shards the sequence (via
+      // cp_shard_rows / cp_merge_rows) may enable CP. Other Python models keep
+      // a full-sequence forward, so a cp_context would be built but never
+      // consumed: qwen3_5 would reach _prefill_cp with unsharded rows (garbled
+      // or out-of-bounds output) and unsupported MLA models would silently
+      // recompute the whole sequence on every rank. Mirror the implementations
+      // that explicitly consume cp_context rather than admitting every Python
+      // model type.
+      static const std::unordered_set<std::string> kPythonCpCapableModels = {
+          "qwen3",
+          "glm_moe_dsa",
+      };
+      if (kPythonCpCapableModels.find(model_type) ==
+          kPythonCpCapableModels.end()) {
+        return "Python model-side CP does not support model_type=" +
+               model_type + "; supported models are qwen3 and glm_moe_dsa.";
+      }
+      if (model_type == "glm_moe_dsa" && engine_type == EngineType::SSM &&
+          SpeculativeConfig::is_mtp_algorithm(
+              options.speculative_algorithm())) {
+        return "Python model-side CP does not support MTP speculative "
+               "verification; run MTP on a cp_size=1 Decode instance";
+      }
+      // On NPU, the Python executor resolves enable_graph=true with an
+      // off-like backend to ACLGraph. ACLGraph handles Decode only, so Prefill
+      // still runs through EagerRunner and receives cp_context.
+      if (!is_python_cp_compatible_graph_backend(
+              ExecutionConfig::get_instance().python_graph_backend())) {
+        return "Python model-side CP requires Prefill to use EagerRunner; use "
+               "--python_graph_backend=off or decode-only aclgraph";
+      }
+      if (options.dp_size() != 1) {
+        return "Python CP requires dp_size == 1";
+      }
+      if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+        return "Python CP requires world_size divisible by dp_size * cp_size";
+      }
+      const int32_t kv_split =
+          ParallelConfig::get_instance().kv_split_size_effective();
+      if (kv_split < 1 || options.cp_size() % kv_split != 0) {
+        return "Python CP requires kv_split_size effective value to be a "
+               "positive divisor of cp_size";
+      }
+      if (model_type == "glm_moe_dsa" && kv_split > 1 &&
+          (!options.enable_disagg_pd() ||
+           options.instance_role() != InstanceRole::PREFILL)) {
+        return "Python GLM CP with kv_split_size > 1 requires disaggregated "
+               "PD with the PREFILL role; set enable_disagg_pd=true and "
+               "instance_role=PREFILL";
+      }
+      return std::nullopt;
     }
 
     // Require registered NPU model-side CP capability. The backend is not
@@ -210,6 +314,8 @@ std::optional<std::string> validate_model_cp(const Options& options,
   return "cp_size > 1 is only supported on platforms with model-side CP "
          "(MLU/NPU); disable CP (cp_size=1) or use MLU/NPU.";
 }
+
+namespace {
 
 void print_startup_banner(const std::filesystem::path& model_path,
                           const std::string& backend,
@@ -311,11 +417,11 @@ Master::Master(const Options& options, EngineType type)
   if (options_.host_blocks_factor() > 1.0) {
     const bool supports_host_offload =
         type == EngineType::LLM ||
-        (type == EngineType::SSM &&
-         SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()));
+        (type == EngineType::SSM && SpeculativeConfig::supports_host_kv_cache(
+                                        options_.speculative_algorithm()));
     CHECK(supports_host_offload)
-        << "Basic host KV cache offload supports the LLM engine and the MTP "
-           "speculative engine only.";
+        << "Basic host KV cache offload supports the LLM engine and "
+           "model-based speculative engines only.";
   }
   // Multi-process serving runs one worker per process. Select one runtime
   // logical device from the process-visible devices while keeping node_rank as
@@ -387,11 +493,14 @@ Master::Master(const Options& options, EngineType type)
   if (options.eplb_update_interval().has_value()) {
     eplb_config.eplb_update_interval(options.eplb_update_interval().value());
   }
-  if (options.eplb_update_threshold().has_value()) {
-    eplb_config.eplb_update_threshold(options.eplb_update_threshold().value());
+  if (options.eplb_min_peak_load_improvement().has_value()) {
+    eplb_config.eplb_min_peak_load_improvement(
+        options.eplb_min_peak_load_improvement().value());
   }
   resolve_npu_kernel_backend_for_options(&options_);
 #endif
+  validate_layerwise_split_size_startup_config(
+      options_, model_type, global_world_size);
   ParallelConfig::get_instance().enable_multi_stream_parallel(
       options.enable_multi_stream_parallel() && (options.nnodes() > 1));
   if (ParallelConfig::get_instance().enable_multi_stream_parallel()) {
@@ -462,7 +571,18 @@ Master::Master(const Options& options, EngineType type)
 
     auto engine = std::make_unique<VLMEngine>(eng_options);
     engine_ = std::move(engine);
-  } else if (type == EngineType::SSM) {
+  } else if (type == EngineType::SSM || type == EngineType::VLMSSM) {
+    if (type == EngineType::VLMSSM) {
+      CHECK(!options_.enable_disagg_pd())
+          << "VLM speculative decoding does not support disaggregated PD";
+      CHECK(!options_.enable_pd_ooc())
+          << "VLM speculative decoding does not support PD OOC";
+      CHECK(!options_.enable_service_routing())
+          << "VLM speculative decoding does not support service routing";
+      CHECK(!options_.enable_adaptive_speculative_decode())
+          << "VLM speculative decoding does not support adaptive speculative "
+             "decode";
+    }
     // create a speculative engine if draft model path is provided
     const std::string draft_model_path =
         options_.draft_model_path().value_or("");
@@ -475,6 +595,7 @@ Master::Master(const Options& options, EngineType type)
               << DeviceNameUtils::to_string(draft_devices);
     runtime::Options spec_options;
     spec_options.model_path(options_.model_path())
+        .model_id(options_.model_id())
         .draft_model_path(draft_model_path)
         .devices(devices)
         .draft_devices(draft_devices)
@@ -486,6 +607,7 @@ Master::Master(const Options& options, EngineType type)
         .max_linear_state_cache_slots(options_.max_linear_state_cache_slots())
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
+        .draft_sampling_mode(options_.draft_sampling_mode())
         .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
         .speculative_suffix_cache_max_depth(
             options_.speculative_suffix_cache_max_depth())
@@ -545,7 +667,13 @@ Master::Master(const Options& options, EngineType type)
     if (use_suffix_spec) {
       engine_ = std::make_unique<SuffixSpeculativeEngine>(spec_options);
     } else {
-      engine_ = std::make_unique<SpeculativeEngine>(spec_options);
+      if (type == EngineType::VLMSSM) {
+        engine_ =
+            std::make_unique<SpeculativeEngineBase<VLMEngine>>(spec_options);
+      } else {
+        engine_ =
+            std::make_unique<SpeculativeEngineBase<LLMEngine>>(spec_options);
+      }
     }
   } else if (type == EngineType::LLM) {
     if (options_.task_type() == "embed" || options.task_type() == "mm_embed") {
@@ -683,6 +811,46 @@ Master::Master(const Options& options, EngineType type)
     LOG(WARNING) << "Not supported llm engine type: "
                  << static_cast<size_t>(type);
   }
+
+  if (!is_leader()) {
+    const std::string master_node_addr =
+        options_.master_node_addr().value_or("");
+    if (master_node_addr.empty()) {
+      LOG(FATAL) << "Multi-node serving requires --master_node_addr, "
+                    "current value is empty.";
+    }
+  }
+}
+
+std::atomic<bool> Master::idle_running_{false};
+
+void Master::handle_shutdown_signal(int /*signum*/) {
+  idle_running_.store(false, std::memory_order_relaxed);
+}
+
+Master::~Master() {
+  idle_running_.store(false, std::memory_order_relaxed);
+  if (idle_thread_.joinable()) {
+    idle_thread_.join();
+  }
+}
+
+void Master::wait() {
+  if (idle_thread_.joinable()) {
+    idle_thread_.join();
+  }
+}
+
+void Master::run() {
+  idle_running_.store(true, std::memory_order_relaxed);
+  signal(SIGINT, Master::handle_shutdown_signal);
+  signal(SIGTERM, Master::handle_shutdown_signal);
+
+  idle_thread_ = std::thread([]() {
+    while (idle_running_.load(std::memory_order_relaxed)) {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+  });
 }
 
 std::unique_ptr<Master> create_master(const std::string& backend,
@@ -731,12 +899,8 @@ std::unique_ptr<Master> fork_master(Master* master, const Options& options) {
   if (options.dp_size() > 0 && new_options.dp_size() >= options.nnodes()) {
     new_options.dp_size() = options.dp_size();
   }
-  std::unique_ptr<Master> new_master;
-  if (new_options.node_rank() != 0) {
-    new_master = std::make_unique<LLMAssistantMaster>(new_options);
-  } else {
-    new_master = create_master(new_options.backend(), new_options);
-  }
+  std::unique_ptr<Master> new_master =
+      create_master(new_options.backend(), new_options);
   new_master->run();
 
   return new_master;

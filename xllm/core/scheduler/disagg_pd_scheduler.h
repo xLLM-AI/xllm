@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -47,6 +47,8 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
                              size_t block_size,
                              size_t num_blocks);
 
+bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response);
+
 class DisaggPDScheduler : public ContinuousScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
@@ -54,12 +56,10 @@ class DisaggPDScheduler : public ContinuousScheduler {
   ~DisaggPDScheduler() override;
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size();
+    return prefill_queue_->size() + num_prefetch_pending_requests();
   };
 
   void step(const absl::Duration& timeout) override;
-
-  bool add_request(std::shared_ptr<Request>& request) override;
 
   // prefill-1: for prefill send new request to decode
   virtual void dispatch_requests();
@@ -76,6 +76,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
       bool has_logprob,
       float logprob,
       double time_to_first_token_latency_seconds,
+      double upstream_elapsed_seconds,
       std::vector<int64_t> top_tokens,
       std::vector<float> top_logprobs,
       const std::string& kv_cache_transfer_mode,
@@ -84,7 +85,6 @@ class DisaggPDScheduler : public ContinuousScheduler {
       std::vector<KVTransferMapping> source_mappings,
       int32_t src_dp_size,
       int32_t src_dp_rank,
-      bool heterogeneous_pd = false,
       torch::Tensor mtp_bootstrap_embedding = torch::Tensor(),
       int32_t num_cached_tokens = 0);
 
@@ -118,6 +118,8 @@ class DisaggPDScheduler : public ContinuousScheduler {
  protected:
   void do_permanent_rejection(const std::shared_ptr<Request>& request);
 
+  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
+
   // Pre-execute prefill requests of different lengths at startup and obtain the
   // corresponding TTFT for calculating the estimated TTFT of requests.
   void profile_ttft();
@@ -125,6 +127,10 @@ class DisaggPDScheduler : public ContinuousScheduler {
   void profile_tpot();
 
   void cache_prefill_blocks(Request* request);
+
+  void restore_disaggregated_latency(Request* request,
+                                     double time_to_first_token_latency_seconds,
+                                     double upstream_elapsed_seconds);
 
   // check remote instance info, if not exist, get from master service
   bool check_remote_instance_info(const std::string& instance_name);
@@ -175,7 +181,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
                                  /*cpu_binding=*/false,
                                  /*pool_name=*/"DisaggPDScheduler.prefill"};
 
-  // related decode instance name(ID) list
+  // related decode instance name(ID) list (used by PDOOCScheduler override)
   std::vector<std::string> decode_inst_names_;
   // TODO later
   // std::vector<std::string> updated_decode_inst_names;

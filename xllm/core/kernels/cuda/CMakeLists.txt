@@ -6,15 +6,6 @@ include_directories(${CMAKE_CURRENT_LIST_DIR})
 #
 # CUDA feature detection
 #
-if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
-  # SM90+ (Hopper/Blackwell) scaled matmul support
-  add_compile_definitions(
-    ENABLE_SCALED_MM_SM90=1
-    ENABLE_SCALED_MM_SM100=1
-    ENABLE_SCALED_MM_SM120=1
-  )
-endif()
-
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 11.8)
   add_compile_definitions(ENABLE_FP8)
 endif()
@@ -54,44 +45,73 @@ set(CUDA_HEADER_FILES
 
 set(_CUTLASS_SM_LIBS "")
 
+# Only build architecture-specific CUTLASS kernels requested by the caller.
+set(_BUILD_CUTLASS_SM90 OFF)
+set(_BUILD_CUTLASS_SM100 OFF)
+set(_BUILD_CUTLASS_SM120 OFF)
+set(_REQUESTED_CUDA_ARCHS "${TORCH_CUDA_ARCH_LIST}")
+string(REGEX REPLACE "[ \t]+" ";" _REQUESTED_CUDA_ARCHS
+                     "${_REQUESTED_CUDA_ARCHS}")
+foreach(_CUDA_ARCH IN LISTS _REQUESTED_CUDA_ARCHS)
+  string(REGEX REPLACE "\\+PTX$" "" _CUDA_ARCH "${_CUDA_ARCH}")
+  string(REGEX REPLACE "a$" "" _CUDA_ARCH "${_CUDA_ARCH}")
+  if(_CUDA_ARCH STREQUAL "9.0")
+    set(_BUILD_CUTLASS_SM90 ON)
+  elseif(_CUDA_ARCH STREQUAL "10.0")
+    set(_BUILD_CUTLASS_SM100 ON)
+  elseif(_CUDA_ARCH STREQUAL "12.0")
+    set(_BUILD_CUTLASS_SM120 ON)
+  endif()
+endforeach()
+
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
-  # --- SM90 (Hopper) ---
-  cc_library(
-    NAME cutlass_sm90
-    SRCS
-      cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu
-      cutlass_w8a8/scaled_mm_c3x_sm90.cu
-    DEPS
-      torch
-      tvm_ffi
-  )
-  set_target_properties(cutlass_sm90 PROPERTIES CUDA_ARCHITECTURES 90a)
+  if(_BUILD_CUTLASS_SM90)
+    cc_library(
+      NAME cutlass_sm90
+      SRCS
+        cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu
+        cutlass_w8a8/scaled_mm_c3x_sm90.cu
+      DEPS
+        torch
+        tvm_ffi
+      DEFINES
+        ENABLE_SCALED_MM_SM90=1
+    )
+    set_target_properties(cutlass_sm90 PROPERTIES CUDA_ARCHITECTURES 90a)
+    list(APPEND _CUTLASS_SM_LIBS :cutlass_sm90)
+  endif()
 
-  # --- SM100 (Blackwell) ---
-  cc_library(
-    NAME cutlass_sm100
-    SRCS
-      cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu
-      cutlass_w8a8/scaled_mm_c3x_sm100.cu
-    DEPS
-      torch
-      tvm_ffi
-  )
-  set_target_properties(cutlass_sm100 PROPERTIES CUDA_ARCHITECTURES 100a)
+  if(_BUILD_CUTLASS_SM100)
+    cc_library(
+      NAME cutlass_sm100
+      SRCS
+        cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu
+        cutlass_w8a8/scaled_mm_c3x_sm100.cu
+      DEPS
+        torch
+        tvm_ffi
+      DEFINES
+        ENABLE_SCALED_MM_SM100=1
+    )
+    set_target_properties(cutlass_sm100 PROPERTIES CUDA_ARCHITECTURES 100a)
+    list(APPEND _CUTLASS_SM_LIBS :cutlass_sm100)
+  endif()
 
-  # --- SM120 ---
-  cc_library(
-    NAME cutlass_sm120
-    SRCS
-      cutlass_w8a8/c3x/scaled_mm_sm120_fp8.cu
-      cutlass_w8a8/scaled_mm_c3x_sm120.cu
-    DEPS
-      torch
-      tvm_ffi
-  )
-  set_target_properties(cutlass_sm120 PROPERTIES CUDA_ARCHITECTURES 120a)
-
-  set(_CUTLASS_SM_LIBS :cutlass_sm90 :cutlass_sm100 :cutlass_sm120)
+  if(_BUILD_CUTLASS_SM120)
+    cc_library(
+      NAME cutlass_sm120
+      SRCS
+        cutlass_w8a8/c3x/scaled_mm_sm120_fp8.cu
+        cutlass_w8a8/scaled_mm_c3x_sm120.cu
+      DEPS
+        torch
+        tvm_ffi
+      DEFINES
+        ENABLE_SCALED_MM_SM120=1
+    )
+    set_target_properties(cutlass_sm120 PROPERTIES CUDA_ARCHITECTURES 120a)
+    list(APPEND _CUTLASS_SM_LIBS :cutlass_sm120)
+  endif()
 endif()
 
 # Keep source list explicit to avoid accidentally compiling test files into cuda_kernels.

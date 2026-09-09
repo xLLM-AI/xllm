@@ -1,27 +1,40 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    acl_graph_bucket_policy_test
+  SRCS
+    acl_graph_bucket_policy_test.cpp
+  DEPS
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME
-      mtp_async_input_builder_test
+      dspark_confidence_head_test
     SRCS
-      mtp_async_input_builder_test.cpp
+      dspark_confidence_head_test.cpp
     DEPS
-      :runtime
       :models
-      GTest::gtest_main
+      :state_dict
+      :xllm_ops
+      glog::glog
       torch
-      torch_npu
-      pybind11::embed
+      GTest::gtest_main
   )
-  target_link_libraries(mtp_async_input_builder_test
+  target_link_libraries(dspark_confidence_head_test
                         PRIVATE
-                        torch_python
-                        Python::Python
+                        torch_npu
                         ascendcl
                         hccl
                         c_sec
-                        nnopbase)
+                        nnopbase
+                        atb)
+  target_link_options(dspark_confidence_head_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
 
   cc_test(
     NAME
@@ -88,59 +101,27 @@ endif()
 
 cc_test(
   NAME
-    spec_input_builder_test
+    worker_json_object_overlap_test
   SRCS
-    spec_input_builder_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/spec_input_builder.cpp"
+    worker_json_object_overlap_test.cpp
   DEPS
-    :multimodal
-    :parallel_state
-    torch
-    glog::glog
-    proto::xllm_proto
+    :json_object_grammar
     GTest::gtest_main
 )
 
-cc_test(
-  NAME
-    mtp_async_state_test
-  SRCS
-    mtp_async_state_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/mtp_async_state.cpp"
-  DEPS
-    torch
-    glog::glog
-    GTest::gtest_main
-)
-if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
-  target_link_options(mtp_async_state_test PRIVATE
-    "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+if(USE_NPU OR USE_MLU)
+  cc_test(
+    NAME
+      worker_hierarchy_kv_cache_transfer_test
+    SRCS
+      worker_hierarchy_kv_cache_transfer_test.cpp
+    DEPS
+      :runtime
+      :kv_cache
+      :platform
+      GTest::gtest_main
+  )
 endif()
-
-cc_test(
-  NAME
-    adaptive_speculative_controller_test
-  SRCS
-    adaptive_speculative_controller_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/adaptive_speculative_controller.cpp"
-    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/speculative_profile_registry.cpp"
-  DEPS
-    torch
-    glog::glog
-    proto::xllm_proto
-    GTest::gtest_main
-)
-
-cc_test(
-  NAME
-    speculative_profile_registry_test
-  SRCS
-    speculative_profile_registry_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/speculative_profile_registry.cpp"
-  DEPS
-    glog::glog
-    GTest::gtest_main
-)
 
 if(USE_MLU)
   cc_test(
@@ -158,7 +139,9 @@ if(USE_MLU)
       GTest::gtest_main
       torch_mlu
   )
+endif()
 
+if(USE_NPU OR USE_MLU)
   cc_test(
     NAME
       mtp_host_offload_test
@@ -171,8 +154,10 @@ if(USE_MLU)
       :kv_cache
       :platform
       GTest::gtest_main
-      torch_mlu
   )
+  if(USE_MLU)
+    target_link_libraries(mtp_host_offload_test PRIVATE torch_mlu)
+  endif()
 endif()
 
 if(USE_CUDA)

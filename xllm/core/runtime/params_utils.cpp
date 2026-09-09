@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,6 +26,75 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+torch::Tensor choose_lm_head_selected_token_idxes(
+    const torch::Tensor& selected_token_idxes,
+    const ModelInputParams& input_params,
+    const ParallelArgs& parallel_args,
+    int64_t hidden_num_rows,
+    const torch::Device& device) {
+  const auto& mapping = parallel_args.mapping_data();
+  if (!selected_token_idxes.defined() || selected_token_idxes.numel() == 0 ||
+      mapping.empty() || !mapping.contains("attnDp") ||
+      !mapping["attnDp"].contains("rank") ||
+      input_params.parallel.dp_global_token_nums.size() <= 1 ||
+      hidden_num_rows <= 0) {
+    return selected_token_idxes;
+  }
+
+  const int64_t dp_rank = mapping["attnDp"]["rank"].get<int64_t>();
+  CHECK_GE(dp_rank, 0) << "invalid attnDp rank";
+  CHECK_LT(
+      dp_rank,
+      static_cast<int64_t>(input_params.parallel.dp_global_token_nums.size()))
+      << "attnDp rank exceeds dp_global_token_nums";
+
+  const int64_t local_selected_rows = selected_token_idxes.numel();
+  const int64_t local_token_count =
+      input_params.parallel.dp_global_token_nums.at(dp_rank);
+  if (hidden_num_rows == local_token_count ||
+      hidden_num_rows == local_selected_rows) {
+    return selected_token_idxes;
+  }
+
+  int64_t dp_offset = 0;
+  for (int64_t i = 0; i < dp_rank; ++i) {
+    dp_offset += input_params.parallel.dp_global_token_nums[i];
+  }
+
+  torch::Tensor selected_cpu =
+      selected_token_idxes.to(torch::dtype(torch::kLong).device(torch::kCPU));
+  torch::Tensor logical_selected_cpu = selected_cpu + dp_offset;
+
+  const auto& padding_idx = input_params.parallel.dp_ep_padding_data
+                                .lm_head_skip_padding_token_indices();
+  if (padding_idx.defined() && padding_idx.numel() > 0 &&
+      hidden_num_rows > padding_idx.numel()) {
+    torch::Tensor padding_cpu =
+        padding_idx.to(torch::dtype(torch::kLong).device(torch::kCPU));
+    const int64_t max_logical_selected =
+        logical_selected_cpu.max().item<int64_t>();
+    if (max_logical_selected < padding_cpu.numel()) {
+      return padding_cpu.index_select(/*dim=*/0, logical_selected_cpu)
+          .to(torch::dtype(selected_token_idxes.scalar_type()).device(device),
+              /*non_blocking=*/false)
+          .contiguous();
+    }
+  }
+
+  if (dp_offset == 0) {
+    return selected_token_idxes;
+  }
+
+  const int64_t max_selected_idx = selected_cpu.max().item<int64_t>();
+  if (max_selected_idx + dp_offset >= hidden_num_rows) {
+    return selected_token_idxes;
+  }
+
+  torch::Tensor remapped =
+      selected_token_idxes.to(device, /*non_blocking=*/false).contiguous();
+  return (remapped + dp_offset).to(remapped.scalar_type()).contiguous();
+}
+
 void proto_to_forward_output(const proto::ForwardOutput& pb_output,
                              RawForwardOutput& raw_forward_output) {
   Timer timer;
@@ -44,6 +113,13 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
   raw_forward_output.out_logprobs.reserve(pb_output.out_logprobs().size());
   raw_forward_output.out_logprobs.assign(pb_output.out_logprobs().begin(),
                                          pb_output.out_logprobs().end());
+  raw_forward_output.json_object_errors.reserve(
+      pb_output.json_object_errors_size());
+  for (const proto::JsonObjectOutputError& pb_error :
+       pb_output.json_object_errors()) {
+    raw_forward_output.json_object_errors.push_back(
+        {pb_error.sample_sequence_id(), pb_error.message()});
+  }
   raw_forward_output.prepared_token = pb_output.prepared_token();
   for (size_t i = 0; i < seq_nums; ++i) {
     proto::SquenceOutput pb_seq_out = pb_output.outputs()[i];
@@ -74,6 +150,10 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
     for (const auto& pb_tensor : pb_seq_out.mm_embeddings().tensors()) {
       s.mm_embeddings.emplace_back(util::proto_to_torch(pb_tensor));
     }
+    s.speculative_token_stats.accepted_tokens =
+        pb_seq_out.speculative_token_stats().accepted_tokens();
+    s.speculative_token_stats.proposed_tokens =
+        pb_seq_out.speculative_token_stats().proposed_tokens();
     raw_forward_output.outputs.emplace_back(s);
   }
   proto_to_dit_forward_output(pb_output.dit_forward_output(),
@@ -88,6 +168,7 @@ void forward_output_to_proto(
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
@@ -95,6 +176,7 @@ void forward_output_to_proto(
     const torch::Tensor& out_logprobs,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
+    const std::vector<JsonObjectOutputError>& json_object_errors,
     proto::ForwardOutput* pb_forward_output) {
   Timer timer;
   // LLM decode fills next_tokens; DiT text diffusion (e.g. Cola-DLM) may leave
@@ -108,6 +190,9 @@ void forward_output_to_proto(
   if (!mm_embeddings.empty()) {
     num_seqs = std::max(num_seqs, static_cast<int32_t>(mm_embeddings.size()));
   }
+  CHECK(speculative_token_stats.empty() ||
+        speculative_token_stats.size() == static_cast<size_t>(num_seqs))
+      << "speculative token stats must match forward output rows.";
   pb_forward_output->mutable_outputs()->Reserve(num_seqs);
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
     if (next_tokens.defined() && next_tokens.dim() == 2) {
@@ -221,6 +306,15 @@ void forward_output_to_proto(
       }
       *pb_forward_output->mutable_outputs()->Add() = pb_seq_out;
     }
+    if (!speculative_token_stats.empty()) {
+      const SpeculativeTokenStats& stats =
+          speculative_token_stats[static_cast<size_t>(output_idx)];
+      proto::SpeculativeTokenStats* pb_stats =
+          pb_forward_output->mutable_outputs(output_idx)
+              ->mutable_speculative_token_stats();
+      pb_stats->set_accepted_tokens(stats.accepted_tokens);
+      pb_stats->set_proposed_tokens(stats.proposed_tokens);
+    }
   }
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
@@ -268,6 +362,12 @@ void forward_output_to_proto(
     for (const auto& text : dit_text_output) {
       pb_dit_output->add_text_output(text);
     }
+  }
+  for (const JsonObjectOutputError& error : json_object_errors) {
+    proto::JsonObjectOutputError* pb_error =
+        pb_forward_output->add_json_object_errors();
+    pb_error->set_sample_sequence_id(error.sample_sequence_id);
+    pb_error->set_message(error.message);
   }
   COUNTER_ADD(proto_latency_seconds_o2proto, timer.elapsed_seconds());
   return;

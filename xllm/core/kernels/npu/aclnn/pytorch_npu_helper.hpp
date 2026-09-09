@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -390,18 +390,28 @@ inline aclTensor* convert_type(const at::Tensor& at_tensor) {
 
   const auto dim_num = at_tensor.sizes().size();
   aclFormat format = ACL_FORMAT_ND;
-  switch (dim_num) {
-    case 3:
-      format = ACL_FORMAT_NCL;
-      break;
-    case 4:
-      format = ACL_FORMAT_NCHW;
-      break;
-    case 5:
-      format = ACL_FORMAT_NCDHW;
-      break;
-    default:
-      format = ACL_FORMAT_ND;
+  // Preserve the private NPU storage format for packed weights. Inferring the
+  // ACL format from rank alone turns a 2-D FRACTAL_NZ tensor back into ND and
+  // makes format-sensitive ACLNN operators (for example MlaPreprocessV2)
+  // reject an otherwise valid input.
+  const int64_t npu_format =
+      at_npu::native::custom_ops::get_npu_format(at_tensor);
+  if (npu_format == ACL_FORMAT_FRACTAL_NZ) {
+    format = ACL_FORMAT_FRACTAL_NZ;
+  } else {
+    switch (dim_num) {
+      case 3:
+        format = ACL_FORMAT_NCL;
+        break;
+      case 4:
+        format = ACL_FORMAT_NCHW;
+        break;
+      case 5:
+        format = ACL_FORMAT_NCDHW;
+        break;
+      default:
+        format = ACL_FORMAT_ND;
+    }
   }
 
   if (at_tensor.unsafeGetTensorImpl()->is_wrapped_number()) {

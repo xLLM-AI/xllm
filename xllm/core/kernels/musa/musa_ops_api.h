@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,9 +46,10 @@ void rotary_embedding(torch::Tensor& positions,
                       torch::Tensor& cos_sin_cache,
                       bool is_neox);
 
-void act_and_mul(torch::Tensor out,
-                 torch::Tensor input,
-                 const std::string& act_mode);
+void active(torch::Tensor& output,
+            const torch::Tensor& input,
+            const std::string& act_mode,
+            bool is_gated);
 
 void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate);
 

@@ -16,12 +16,12 @@ add_subdirectory(kv_cache_transfer)
 add_subdirectory(model)
 add_subdirectory(parallel_state)
 add_subdirectory(prefix_cache)
-add_subdirectory(request)
 add_subdirectory(multimodal)
 add_subdirectory(encoder_cache)
-add_subdirectory(sampling)
 add_subdirectory(state_dict)
 add_subdirectory(tokenizer)
+add_subdirectory(sampling)
+add_subdirectory(request)
 add_subdirectory(eplb)
 add_subdirectory(dit_cache)
 add_subdirectory(speculative)
@@ -58,6 +58,7 @@ cc_library(
   SRCS
     model_context.cpp
   DEPS
+    :platform
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

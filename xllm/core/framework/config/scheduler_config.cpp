@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -74,6 +74,12 @@ DEFINE_bool(enable_starve_prevent,
             true,
             "Whether to enable anti-starvation in MixScheduler.");
 
+DEFINE_bool(enable_dp_fair_token_budget,
+            true,
+            "Fair per-DP-group token budget for prefill scheduling on disagg "
+            "PD PREFILL instances. Caps each DP group at "
+            "max_tokens_per_batch / dp_size tokens per scheduling round.");
+
 namespace xllm {
 
 void SchedulerConfig::from_flags() {
@@ -92,6 +98,7 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_starve_prevent);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_fair_token_budget);
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
@@ -110,6 +117,7 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_JSON(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_starve_prevent);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_fair_token_budget);
 }
 
 void SchedulerConfig::append_config_json(
@@ -145,6 +153,8 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, starve_threshold);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_starve_prevent);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_dp_fair_token_budget);
 }
 
 SchedulerConfig& SchedulerConfig::get_instance() {

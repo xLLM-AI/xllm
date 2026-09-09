@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,10 +29,12 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
-#include "core/runtime/mtp_async_state.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/util/utils.h"
 
 // ATB includes
@@ -58,13 +60,46 @@ int64_t get_decode_graph_capacity(const runtime::Options& options) {
 int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
       << "num_decoding_tokens must be > 0 for graph token capacity";
+  int64_t token_capacity = options.max_seqs_per_batch();
   if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
-    return options.max_seqs_per_batch();
+    return runtime::get_decode_graph_token_bucket(
+        token_capacity, options.enable_graph_mode_decode_no_padding());
   }
   if (options.enable_speculative_decode() && !options.is_draft_engine()) {
-    return options.max_seqs_per_batch() * options.num_decoding_tokens();
+    token_capacity *= options.num_decoding_tokens();
   }
-  return options.max_seqs_per_batch();
+  return runtime::get_decode_graph_token_bucket(
+      token_capacity, options.enable_graph_mode_decode_no_padding());
+}
+
+bool graph_mode_decode_no_padding_enabled() {
+  // Immutable after ExecutionConfig::initialize() in the entrypoint.
+  static const bool enabled = [] {
+    return ::xllm::ExecutionConfig::get_instance()
+        .enable_graph_mode_decode_no_padding();
+  }();
+  return enabled;
+}
+
+int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
+  const int64_t seq_capacity = get_decode_graph_capacity(options);
+  const int64_t num_decoding_tokens = options.num_decoding_tokens();
+  // Bucket padding rows still consume sequence-scoped metadata:
+  // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
+  const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
+      seq_capacity * num_decoding_tokens,
+      graph_mode_decode_no_padding_enabled());
+  const int64_t padded_seq_capacity =
+      (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
+  return std::max(seq_capacity, padded_seq_capacity);
+}
+
+int64_t get_bucketed_decode_graph_token_capacity(
+    const runtime::Options& options) {
+  // Token-scoped buffers are sliced to bucketed token counts: 20 rows -> 32.
+  return runtime::get_decode_graph_token_bucket(
+      get_decode_graph_token_capacity(options),
+      graph_mode_decode_no_padding_enabled());
 }
 
 float get_dp_ep_all2all_buffer_factor(int64_t length) {
@@ -202,21 +237,21 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // attention plan for each request.
   need_update_attention_plan_ =
       (args.model_type() != "deepseek_v32" &&
-       args.model_type() != "deepseek_v4" &&
+       !util::is_deepseek_v4_model_type(args.model_type()) &&
        args.model_type() != "glm_moe_dsa" && !supports_mla_graph_kv_bucketing_);
-
-  // Check if mRoPE is used (for VLM models like qwen2-vl)
-  use_mrope_ = !args.rope_scaling_mrope_section().empty();
 
   const int64_t max_tokens_per_batch = options.max_tokens_per_batch();
   // Graph-mode token capacity is narrower than max_tokens_per_batch: ACL graph
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
-  // Hybrid spec verify keeps sequence-scoped metadata, while non-hybrid MTP
-  // expands every proposal token into its own decode metadata row.
+  const int64_t bucketed_max_graph_tokens =
+      get_bucketed_decode_graph_token_capacity(options);
+  // Hybrid spec verify keeps sequence-scoped metadata (with bucket padding,
+  // see get_hybrid_metadata_capacity), while non-hybrid MTP expands every
+  // proposal token into its own decode metadata row.
   const int64_t metadata_capacity = is_hybrid_linear_attention
-                                        ? get_decode_graph_capacity(options)
+                                        ? get_hybrid_metadata_capacity(options)
                                         : max_graph_tokens;
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -224,18 +259,16 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Create persistent tensors with max_tokens_per_batch as first dimension
   persistent_tokens_ = torch::zeros({max_tokens_per_batch},
                                     torch::dtype(torch::kInt).device(device));
-  if (args.rope_scaling_mrope_section().empty()) {
-    persistent_positions_ = torch::zeros(
-        {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
-  } else {
-    persistent_positions_ = torch::zeros(
-        {3, max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
-    use_mrope_ = true;
-  }
+  persistent_positions_ = torch::zeros(
+      {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_default_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
+  const int64_t eplb_decode_mask_capacity =
+      max_tokens_per_batch * std::max<int32_t>(options.dp_size(), 1);
+  persistent_eplb_decode_token_mask_ = torch::zeros(
+      {eplb_decode_mask_capacity}, torch::dtype(torch::kBool).device(device));
   persistent_linear_state_indices_ = torch::zeros(
       {metadata_capacity}, torch::dtype(torch::kInt).device(device));
   persistent_num_accepted_tokens_ = torch::ones(
@@ -272,10 +305,9 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
   persistent_expanded_block_tables_ =
-      torch::zeros({max_graph_tokens, max_block_table_len},
+      torch::zeros({bucketed_max_graph_tokens, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
 
-  // Output tensor for hidden states
   torch::Dtype dtype = util::parse_dtype(args.dtype(), device);
   if (args.dtype() == "float" || args.dtype() == "float32") {
     LOG(WARNING)
@@ -292,15 +324,16 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // token capacity instead of the much larger max_tokens_per_batch prefill
   // budget.
   if (need_update_attn_mask_) {
-    persistent_mask_ = torch::zeros({max_graph_tokens, max_seq_len},
+    persistent_mask_ = torch::zeros({bucketed_max_graph_tokens, max_seq_len},
                                     torch::dtype(dtype).device(device));
-    persistent_mask_zero_template_ = torch::zeros(
-        {max_graph_tokens, max_seq_len}, torch::dtype(dtype).device(device));
+    persistent_mask_zero_template_ =
+        torch::zeros({bucketed_max_graph_tokens, max_seq_len},
+                     torch::dtype(dtype).device(device));
     const float mask_fill_value = (dtype == torch::kFloat16)
                                       ? -std::numeric_limits<float>::infinity()
                                       : -9984.0f;
     persistent_mask_fill_template_ =
-        torch::full({max_graph_tokens, max_seq_len},
+        torch::full({bucketed_max_graph_tokens, max_seq_len},
                     mask_fill_value,
                     torch::dtype(dtype).device(device));
   }
@@ -547,8 +580,6 @@ void GraphPersistentParam::set_aux_hidden_states(const torch::Tensor& value) {
   }
   const uint32_t result_tokens = value.size(0);
   if (aux_hidden_states_.numel() == 0) {
-    // Lazy initialization: create aux_hidden_states tensor if not already
-    // created
     const int64_t graph_token_capacity =
         get_decode_graph_token_capacity(options_);
     auto shape = value.sizes().vec();
@@ -562,10 +593,8 @@ void GraphPersistentParam::set_aux_hidden_states(const torch::Tensor& value) {
   }
   CHECK_LE(result_tokens, aux_hidden_states_.size(0))
       << "aux hidden state output exceeds graph token capacity";
-  // Slice to match the actual shape
   auto slice =
       aux_hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens);
-  // Reshape slice if needed to match value shape
   if (slice.sizes() == value.sizes()) {
     slice.copy_(value, /*non_blocking=*/true);
   }
@@ -583,6 +612,62 @@ void zero_tensor_tail(torch::Tensor& tensor,
 }
 
 }  // namespace
+
+void GraphPersistentParam::update_eplb_decode_token_mask(
+    const ModelInputParams& input_params,
+    uint32_t padded_num_tokens) {
+  persistent_eplb_decode_token_mask_.fill_(false);
+  if (!input_params.expert.eplb_decode_token_mask.defined()) {
+    return;
+  }
+
+  torch::Tensor source_mask =
+      input_params.expert.eplb_decode_token_mask.reshape({-1});
+  const std::vector<int32_t>& dp_token_counts =
+      input_params.parallel.dp_global_token_nums;
+  const int64_t dp_size =
+      std::max<int64_t>(static_cast<int64_t>(dp_token_counts.size()), 1);
+  const int64_t required_capacity =
+      static_cast<int64_t>(padded_num_tokens) * dp_size;
+  CHECK_LE(required_capacity, persistent_eplb_decode_token_mask_.numel())
+      << "EPLB graph decode mask exceeds persistent capacity.";
+
+  if (dp_token_counts.size() <= 1) {
+    CHECK_LE(source_mask.numel(), static_cast<int64_t>(padded_num_tokens));
+    persistent_eplb_decode_token_mask_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/source_mask.numel())
+        .copy_(source_mask, /*non_blocking=*/true);
+    return;
+  }
+
+  int64_t global_real_tokens = 0;
+  for (int32_t rank_tokens : dp_token_counts) {
+    CHECK_GE(rank_tokens, 0) << "EPLB DP token counts must be non-negative.";
+    CHECK_LE(rank_tokens, static_cast<int64_t>(padded_num_tokens))
+        << "EPLB DP rank token count exceeds graph padding capacity.";
+    global_real_tokens += rank_tokens;
+  }
+  CHECK_EQ(source_mask.numel(), global_real_tokens)
+      << "EPLB graph decode mask does not match DP token counts.";
+
+  int64_t source_begin = 0;
+  for (int32_t dp_rank = 0;
+       dp_rank < static_cast<int32_t>(dp_token_counts.size());
+       ++dp_rank) {
+    const int64_t rank_tokens = dp_token_counts[static_cast<size_t>(dp_rank)];
+    const int64_t destination_begin =
+        static_cast<int64_t>(dp_rank) * padded_num_tokens;
+    persistent_eplb_decode_token_mask_
+        .slice(/*dim=*/0,
+               /*start=*/destination_begin,
+               /*end=*/destination_begin + rank_tokens)
+        .copy_(source_mask.slice(/*dim=*/0,
+                                 /*start=*/source_begin,
+                                 /*end=*/source_begin + rank_tokens),
+               /*non_blocking=*/true);
+    source_begin += rank_tokens;
+  }
+}
 
 std::vector<int32_t>
 GraphPersistentParam::update_expanded_spec_decode_attention(
@@ -621,7 +706,6 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
       expanded_kv_seq_lens_vec.emplace_back(1);
     }
   }
-
   // The worker has already packed the real rows into a device tensor. Copy it
   // directly into the stable graph buffer instead of rebuilding the same data
   // through torch::tensor(host).to(device), which would add a synchronous H2D
@@ -748,15 +832,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
   CHECK_LE(block_table_len, persistent_block_tables_.size(1));
   CHECK_LE(expanded_block_table_len, persistent_expanded_block_tables_.size(1));
 
-  if (use_mrope_) {
-    // Hybrid mRoPE models store graph positions as [3, max_tokens]. The MTP
-    // worker supplies the compact [num_tokens] position vector, matching the
-    // normal persistent update path where copy_ broadcasts it across the mRoPE
-    // rows.
-    persistent_positions_.narrow(1, 0, total_tokens).copy_(positions, true);
-  } else {
-    persistent_positions_.narrow(0, 0, total_tokens).copy_(positions, true);
-  }
+  persistent_positions_.narrow(0, 0, total_tokens).copy_(positions, true);
   q_seq_lens_.narrow(0, 0, batch_size)
       .copy_(attention.q_seq_lens.narrow(0, 0, batch_size), true);
   kv_seq_lens_.narrow(0, 0, batch_size)
@@ -790,7 +866,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     uint32_t padded_num_tokens,
     bool return_capture_params,
     bool skip_token_update,
-    bool for_capture) {
+    bool for_capture,
+    bool update_paged_attention_plan) {
   CHECK_GT(padded_num_tokens, 0) << "padded_num_tokens must be > 0";
   const uint32_t actual_num_tokens = tokens.size(0);
   const bool is_decode = params.meta.batch_forward_type.is_decode();
@@ -835,24 +912,18 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   if (!skip_token_update) {
     update_tokens(tokens, params, actual_num_tokens, padded_num_tokens);
   }
-  // mRoPE positions have shape [3, num_tokens], slice on dim 1
   if (actual_num_tokens > 0) {
-    if (use_mrope_) {
-      persistent_positions_
-          .slice(/*dim=*/1, /*start=*/0, /*end=*/actual_num_tokens)
-          .copy_(positions, /*non_blocking=*/true);
-    } else {
-      persistent_positions_
-          .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
-          .copy_(positions, /*non_blocking=*/true);
-    }
+    persistent_positions_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
+        .copy_(positions, /*non_blocking=*/true);
   }
   if (padded_num_tokens > actual_num_tokens) {
     zero_tensor_tail(persistent_positions_,
                      actual_num_tokens,
                      static_cast<int64_t>(padded_num_tokens),
-                     use_mrope_ ? 1 : 0);
+                     /*dim=*/0);
   }
+  update_eplb_decode_token_mask(params, padded_num_tokens);
   if (q_seq_lens_default_.defined() &&
       q_seq_lens_default_.sizes() == q_seq_lens_.sizes()) {
     q_seq_lens_.copy_(q_seq_lens_default_, /*non_blocking=*/true);
@@ -1155,7 +1226,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
               persistent_host_q_seq_lens_.begin());
   }
 
-  if (uses_paged_attention_tiling()) {
+  if (uses_paged_attention_tiling() && update_paged_attention_plan) {
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
     if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
@@ -1278,6 +1349,18 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       graph_params->parallel.dp_global_token_nums = std::vector<int32_t>(
           graph_params->parallel.dp_global_token_nums.size(),
           static_cast<int32_t>(padded_num_tokens));
+    }
+    if (params.expert.eplb_decode_token_mask.defined()) {
+      const int64_t decode_mask_tokens =
+          static_cast<int64_t>(padded_num_tokens) *
+          std::max<int64_t>(
+              static_cast<int64_t>(params.parallel.dp_global_token_nums.size()),
+              1);
+      CHECK_LE(decode_mask_tokens, persistent_eplb_decode_token_mask_.numel())
+          << "EPLB graph decode mask exceeds persistent capacity.";
+      graph_params->expert.eplb_decode_token_mask =
+          persistent_eplb_decode_token_mask(
+              static_cast<uint32_t>(decode_mask_tokens));
     }
     graph_params->attention.device.new_cache_slots =
         persistent_new_cache_slots(padded_num_tokens);

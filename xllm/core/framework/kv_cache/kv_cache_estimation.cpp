@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "core/layers/common/dsa_topk_share_plan.h"
@@ -122,6 +123,68 @@ int64_t standard_full_cache_block_size_in_bytes(
   return logical_block_bytes;
 }
 
+int64_t layerwise_split_block_count(const ModelArgs& model_args,
+                                    int32_t layerwise_split_size,
+                                    const KVCacheCapacity& kv_cache_cap,
+                                    int64_t available_bytes,
+                                    int64_t additional_block_bytes) {
+  const int64_t num_layers = kv_cache_cap.n_layers();
+  const std::vector<bool> indexer_layer_mask =
+      resolve_indexer_cache_enabled_layers(model_args, num_layers);
+
+  std::vector<int64_t> layer_bytes(static_cast<size_t>(num_layers), 0);
+  bool any_indexer_layer = false;
+  for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    if (!is_full_attention_layer(model_args, layer_id)) {
+      continue;
+    }
+    const bool has_indexer =
+        kv_cache_cap.index_slot_size() > 0 &&
+        (indexer_layer_mask.empty() ||
+         indexer_layer_mask[static_cast<size_t>(layer_id)]);
+    any_indexer_layer = any_indexer_layer || has_indexer;
+    const int64_t bytes =
+        kv_cache_cap.block_size() *
+        (kv_cache_cap.slot_size() + kv_cache_cap.scale_slot_size() +
+         (has_indexer ? kv_cache_cap.index_slot_size() : 0));
+    layer_bytes[static_cast<size_t>(layer_id)] = bytes;
+  }
+
+  // Scratch matches an owned layer, including indexer when any layer has one.
+  const int64_t scratch_bytes_per_block =
+      kv_cache_cap.block_size() *
+      (kv_cache_cap.slot_size() + kv_cache_cap.scale_slot_size() +
+       (any_indexer_layer ? kv_cache_cap.index_slot_size() : 0));
+  CHECK_GT(scratch_bytes_per_block, 0);
+
+  int64_t common_block_count = std::numeric_limits<int64_t>::max();
+  for (int32_t split_rank = 0; split_rank < layerwise_split_size;
+       ++split_rank) {
+    const LayerwiseSplitLayout layout(
+        /*enabled=*/true, layerwise_split_size, split_rank);
+    const std::vector<bool> layer_cache_owned =
+        build_layer_cache_owned(model_args, layout, num_layers);
+    int64_t owned_bytes = 0;
+    for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+      if (layer_cache_owned[static_cast<size_t>(layer_id)]) {
+        owned_bytes += layer_bytes[static_cast<size_t>(layer_id)];
+      }
+    }
+    if (owned_bytes == 0) {
+      continue;
+    }
+    const int64_t per_block_bytes =
+        owned_bytes + scratch_bytes_per_block + additional_block_bytes;
+    common_block_count =
+        std::min(common_block_count, available_bytes / per_block_bytes);
+  }
+
+  CHECK_NE(common_block_count, std::numeric_limits<int64_t>::max())
+      << "No layerwise split rank owns a model layer.";
+  CHECK_GT(common_block_count, 0) << "No memory for one layerwise split block.";
+  return common_block_count;
+}
+
 bool enable_qwen3_5_spec_verify(const ModelArgs& model_args,
                                 const KVCacheEstimateOptions& options) {
   return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
@@ -187,6 +250,7 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
                                       int64_t linear_slot_size,
                                       int64_t full_cache_block_size_in_bytes,
                                       int64_t max_seqs_per_batch,
+                                      int64_t max_concurrent_requests,
                                       int64_t max_linear_state_cache_slots,
                                       bool enable_prefix_cache) {
   CHECK_GE(max_linear_state_cache_slots, 0)
@@ -210,8 +274,15 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
   }
 
   if (!enable_prefix_cache) {
+    // Slots must cover every simultaneously running sequence, bounded by
+    // both the scheduler batch limit and the service concurrency cap.
+    int64_t running_seqs_upper_bound = max_seqs_per_batch;
+    if (max_concurrent_requests > 0) {
+      running_seqs_upper_bound =
+          std::min<int64_t>(running_seqs_upper_bound, max_concurrent_requests);
+    }
     const int64_t live_slot_blocks =
-        max_seqs_per_batch + kPaddingLinearStateBlocks;
+        running_seqs_upper_bound + kPaddingLinearStateBlocks;
     return std::max<int64_t>(std::min<int64_t>(live_slot_blocks, max_blocks),
                              kPaddingLinearStateBlocks);
   }
@@ -238,22 +309,33 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
   return std::min<int64_t>(auto_blocks, max_blocks);
 }
 
+int64_t dsv4_common_unit_bytes(const Dsv4KVCacheEstimateCost& cache_cost,
+                               int64_t common_blocks_per_unit) {
+  CHECK_GT(cache_cost.manager_blocks_per_unit, 0);
+  CHECK_EQ(common_blocks_per_unit % cache_cost.manager_blocks_per_unit, 0);
+  const int64_t compressed_units =
+      common_blocks_per_unit / cache_cost.manager_blocks_per_unit;
+  return compressed_units * cache_cost.token_unit_bytes;
+}
+
+void set_dsv4_compressed_counts(const Dsv4KVCacheEstimateCost& cache_cost,
+                                int64_t token_unit_count,
+                                KVCacheCapacity* kv_cache_cap) {
+  CHECK(kv_cache_cap != nullptr);
+  if (cache_cost.n_c4_layers > 0 && cache_cost.n_c128_layers > 0) {
+    kv_cache_cap->c128_count(token_unit_count);
+    kv_cache_cap->c4_count(32 * token_unit_count);
+  } else if (cache_cost.n_c4_layers > 0) {
+    kv_cache_cap->c4_count(token_unit_count);
+  } else if (cache_cost.n_c128_layers > 0) {
+    kv_cache_cap->c128_count(token_unit_count);
+  }
+}
+
 Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options) {
-  const int64_t max_seqs =
-      std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
   const int64_t block_size = options.block_size;
-  const int64_t semantic_window = std::max(model_args.window_size(), 1);
-  const int64_t max_model_len = model_args.max_seq_len();
-  const int64_t window_size =
-      max_model_len > 0 ? std::min<int64_t>(semantic_window, max_model_len)
-                        : semantic_window;
-  const int64_t swa_blocks_per_seq =
-      get_swa_blocks_per_seq(window_size, block_size);
-  const int64_t burst_blocks = util::ceil_div(
-      std::max(options.max_tokens_per_batch, static_cast<int64_t>(1)),
-      block_size);
   const int64_t head_dim = model_args.head_dim();
   const int64_t index_head_dim =
       std::max<int64_t>(model_args.index_head_dim(), 1);
@@ -263,8 +345,35 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       static_cast<int64_t>(torch::elementSize(options.dtype));
 
   Dsv4KVCacheEstimateCost cache_cost;
+  const int64_t swa_blocks_per_seq =
+      get_swa_blocks_per_seq(model_args.window_size(), block_size);
+  const int64_t max_seqs =
+      std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
+  int64_t burst_budget =
+      std::max(options.max_tokens_per_batch, static_cast<int64_t>(0));
+  if (options.enable_dp_fair_token_budget && options.dp_size > 1 &&
+      options.instance_role == InstanceRole::PREFILL) {
+    // The scheduler caps each DP group at max_tokens_per_batch / dp_size
+    // tokens per scheduling round, floored at one prefill chunk, so the
+    // prefill burst landing on any single rank is bounded by the same
+    // expression. Keep this identical to the scheduler-side cap or the ring
+    // under-reserves.
+    int64_t per_group_cap =
+        (burst_budget + options.dp_size - 1) / options.dp_size;
+    if (options.enable_chunked_prefill) {
+      per_group_cap =
+          std::max(per_group_cap,
+                   std::min<int64_t>(options.max_tokens_per_chunk_for_prefill,
+                                     burst_budget));
+    } else {
+      per_group_cap = burst_budget;
+    }
+    burst_budget = per_group_cap;
+  }
+  const int64_t burst_blocks = util::ceil_div(burst_budget, block_size);
   cache_cost.swa_count =
       swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
+
   for (int64_t i = 0; i < model_args.n_layers(); ++i) {
     const int32_t ratio = i < static_cast<int64_t>(compress_ratios.size())
                               ? compress_ratios[static_cast<size_t>(i)]
@@ -278,21 +387,21 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
   const int64_t n_c1_layers =
       model_args.n_layers() - cache_cost.n_c4_layers - cache_cost.n_c128_layers;
 
-  const int64_t swa_bytes_per_c1_layer =
-      cache_cost.swa_count * block_size * head_dim * dtype_size;
-  const int64_t swa_bytes_per_c4_layer =
-      cache_cost.swa_count *
-      (block_size * head_dim * dtype_size +
-       block_size * (2 * head_dim * float32_size) * 2 +
-       block_size * (2 * index_head_dim * float32_size) * 2);
-  const int64_t swa_bytes_per_c128_layer =
-      cache_cost.swa_count * (block_size * head_dim * dtype_size +
-                              block_size * head_dim * float32_size * 2);
+  const int64_t swa_bytes_per_c1_block = block_size * head_dim * dtype_size;
+  const int64_t swa_bytes_per_c4_block =
+      block_size * head_dim * dtype_size +
+      block_size * (2 * head_dim * float32_size) * 2 +
+      block_size * (2 * index_head_dim * float32_size) * 2;
+  const int64_t swa_bytes_per_c128_block =
+      block_size * head_dim * dtype_size +
+      block_size * head_dim * float32_size * 2;
 
+  cache_cost.swa_bytes_per_block =
+      n_c1_layers * swa_bytes_per_c1_block +
+      cache_cost.n_c4_layers * swa_bytes_per_c4_block +
+      cache_cost.n_c128_layers * swa_bytes_per_c128_block;
   cache_cost.constant_swa_bytes =
-      n_c1_layers * swa_bytes_per_c1_layer +
-      cache_cost.n_c4_layers * swa_bytes_per_c4_layer +
-      cache_cost.n_c128_layers * swa_bytes_per_c128_layer;
+      cache_cost.swa_count * cache_cost.swa_bytes_per_block;
 
   const DeepSeekV4CachePolicy cache_policy =
       get_dsv4_cache_policy(options.dtype);
@@ -326,70 +435,87 @@ void init_dsv4_counts(const ModelArgs& model_args,
   CHECK(kv_cache_cap != nullptr);
   const Dsv4KVCacheEstimateCost cache_cost =
       estimate_dsv4_kv_cache_cost(model_args, options);
-  int64_t token_mem = std::max(
-      static_cast<int64_t>(0),
-      kv_cache_cap->cache_size_in_bytes() - cache_cost.constant_swa_bytes);
-
+  CHECK_GE(kv_cache_cap->cache_size_in_bytes(), cache_cost.constant_swa_bytes)
+      << "no memory for the minimum DSV4 SWA cache, required="
+      << readable_size(cache_cost.constant_swa_bytes)
+      << ", available=" << readable_size(kv_cache_cap->cache_size_in_bytes());
+  int64_t token_mem =
+      kv_cache_cap->cache_size_in_bytes() - cache_cost.constant_swa_bytes;
   if (options.draft_model_args != nullptr) {
     CHECK(options.draft_options != nullptr)
         << "DSV4 draft options must be provided with draft model args";
-    CHECK(util::is_target_model_type(options.draft_model_args->model_type(),
-                                     /*target_type=*/"deepseek_v4",
-                                     /*match_mtp=*/true))
-        << "DSV4 MTP kv cache estimation only supports DeepSeek V4 draft";
+    CHECK(
+        util::is_deepseek_v4_model_type(options.draft_model_args->model_type()))
+        << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
+           "draft";
     const Dsv4KVCacheEstimateCost draft_cost = estimate_dsv4_kv_cache_cost(
         *options.draft_model_args, *options.draft_options);
     const int64_t constant_bytes =
         cache_cost.constant_swa_bytes + draft_cost.constant_swa_bytes;
-    CHECK_GT(kv_cache_cap->cache_size_in_bytes(), constant_bytes)
-        << "no memory left for mtp target/draft fixed kv cache allocation";
+    CHECK_GE(kv_cache_cap->cache_size_in_bytes(), constant_bytes)
+        << "no memory left for speculative target/draft fixed kv cache "
+           "allocation";
 
-    const int64_t token_unit_bytes =
-        cache_cost.token_unit_bytes + draft_cost.token_unit_bytes;
-    CHECK_GT(token_unit_bytes, 0)
-        << "mtp target and draft token unit bytes must be positive";
+    const int64_t common_blocks_per_unit = std::max(
+        cache_cost.manager_blocks_per_unit, draft_cost.manager_blocks_per_unit);
+    const int64_t target_common_unit_bytes =
+        dsv4_common_unit_bytes(cache_cost, common_blocks_per_unit);
+    const int64_t draft_common_unit_bytes =
+        dsv4_common_unit_bytes(draft_cost, common_blocks_per_unit);
+    const int64_t combined_unit_bytes =
+        target_common_unit_bytes + draft_common_unit_bytes;
+    const int64_t remaining_bytes =
+        kv_cache_cap->cache_size_in_bytes() - constant_bytes;
+    if (combined_unit_bytes > 0) {
+      CHECK_GE(remaining_bytes, combined_unit_bytes)
+          << "minimum DSV4 target/draft SWA caches leave insufficient memory "
+             "for one compressed cache unit, swa_required="
+          << readable_size(constant_bytes)
+          << ", compressed_unit_required=" << readable_size(combined_unit_bytes)
+          << ", available="
+          << readable_size(kv_cache_cap->cache_size_in_bytes());
+    }
     const int64_t token_unit_count =
-        (kv_cache_cap->cache_size_in_bytes() - constant_bytes) /
-        token_unit_bytes;
-    CHECK_GT(token_unit_count, 0)
-        << "no memory left for mtp target/draft kv cache token blocks";
+        combined_unit_bytes > 0 ? remaining_bytes / combined_unit_bytes : 0;
 
     const int64_t adjusted_cache_size_in_bytes =
         cache_cost.constant_swa_bytes +
-        token_unit_count * cache_cost.token_unit_bytes;
+        token_unit_count * target_common_unit_bytes;
     CHECK_GT(adjusted_cache_size_in_bytes, 0)
-        << "no memory left for mtp target/draft kv cache allocation";
-    LOG(INFO) << "mtp kv cache capacity adjusted from "
+        << "no memory left for speculative target/draft kv cache allocation";
+    LOG(INFO) << "speculative kv cache capacity adjusted from "
               << readable_size(kv_cache_cap->cache_size_in_bytes()) << " to "
               << readable_size(adjusted_cache_size_in_bytes)
               << ", target_constant_bytes=" << cache_cost.constant_swa_bytes
               << ", draft_constant_bytes=" << draft_cost.constant_swa_bytes
-              << ", target_token_unit_bytes=" << cache_cost.token_unit_bytes
-              << ", draft_token_unit_bytes=" << draft_cost.token_unit_bytes
+              << ", target_common_unit_bytes=" << target_common_unit_bytes
+              << ", draft_common_unit_bytes=" << draft_common_unit_bytes
+              << ", common_blocks_per_unit=" << common_blocks_per_unit
               << ", token_unit_count=" << token_unit_count;
     kv_cache_cap->cache_size_in_bytes(adjusted_cache_size_in_bytes);
-    token_mem = token_unit_count * cache_cost.token_unit_bytes;
+    token_mem = token_unit_count * target_common_unit_bytes;
   } else {
     CHECK(options.draft_options == nullptr)
         << "DSV4 draft options require draft model args";
+    if (cache_cost.token_unit_bytes > 0) {
+      CHECK_GE(token_mem, cache_cost.token_unit_bytes)
+          << "minimum DSV4 SWA cache leaves insufficient memory for one "
+             "compressed cache unit, swa_required="
+          << readable_size(cache_cost.constant_swa_bytes)
+          << ", compressed_unit_required="
+          << readable_size(cache_cost.token_unit_bytes) << ", available="
+          << readable_size(kv_cache_cap->cache_size_in_bytes());
+    }
   }
 
   kv_cache_cap->swa_count(cache_cost.swa_count);
   kv_cache_cap->c4_count(0);
   kv_cache_cap->c128_count(0);
-  if (cache_cost.n_c4_layers > 0 && cache_cost.n_c128_layers > 0) {
-    if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
-      kv_cache_cap->c128_count(token_mem / cache_cost.token_unit_bytes);
-      kv_cache_cap->c4_count(32 * kv_cache_cap->c128_count());
-    }
-  } else if (cache_cost.n_c4_layers > 0) {
-    if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
-      kv_cache_cap->c4_count(token_mem / cache_cost.token_unit_bytes);
-    }
-  } else if (cache_cost.n_c128_layers > 0) {
-    if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
-      kv_cache_cap->c128_count(token_mem / cache_cost.token_unit_bytes);
-    }
+  // Keep SWA at the operational minimum calculated above. Prefix-cache entries
+  // share this pool; any remaining memory is reserved for compressed history.
+  if (cache_cost.token_unit_bytes > 0 && token_mem > 0) {
+    const int64_t token_unit_count = token_mem / cache_cost.token_unit_bytes;
+    set_dsv4_compressed_counts(cache_cost, token_unit_count, kv_cache_cap);
   }
 
   CHECK_GT(kv_cache_cap->swa_count(), 0) << "DSV4 swa_count must be > 0";
@@ -446,6 +572,7 @@ void init_standard_counts(const ModelArgs& model_args,
                                     kv_cache_cap->linear_slot_size(),
                                     full_cache_block_size_in_bytes,
                                     options.max_seqs_per_batch,
+                                    options.max_concurrent_requests,
                                     options.max_linear_state_cache_slots,
                                     options.enable_prefix_cache));
   kv_cache_cap->linear_cache_size_in_bytes(
@@ -470,8 +597,17 @@ void init_standard_counts(const ModelArgs& model_args,
   CHECK_GT(available_full_cache_size_in_bytes, 0)
       << "no memory left for full-attention kv cache after reserving linear "
          "state cache";
-  kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
-                         full_cache_block_size_in_bytes);
+  if (options.layerwise_split_size > 1) {
+    kv_cache_cap->n_blocks(
+        layerwise_split_block_count(model_args,
+                                    options.layerwise_split_size,
+                                    *kv_cache_cap,
+                                    available_full_cache_size_in_bytes,
+                                    /*additional_block_bytes=*/0));
+  } else {
+    kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
+                           full_cache_block_size_in_bytes);
+  }
   CHECK_GT(kv_cache_cap->n_blocks(), 0) << "no n_blocks for kv cache";
 }
 
@@ -486,6 +622,32 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
   return layer::get_dsa_indexer_layer_mask(model_args, num_cache_layers);
 }
 
+std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers) {
+  std::vector<bool> layer_cache_owned;
+  layer_cache_owned.reserve(static_cast<size_t>(num_layers));
+  for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    layer_cache_owned.emplace_back(
+        !is_full_attention_layer(model_args, layer_id) ||
+        layout.owns(layer_id));
+  }
+  return layer_cache_owned;
+}
+
+int64_t estimate_layerwise_split_block_count(
+    const ModelArgs& model_args,
+    int32_t layerwise_split_size,
+    const KVCacheCapacity& kv_cache_cap,
+    int64_t available_bytes,
+    int64_t additional_block_bytes) {
+  return layerwise_split_block_count(model_args,
+                                     layerwise_split_size,
+                                     kv_cache_cap,
+                                     available_bytes,
+                                     additional_block_bytes);
+}
+
 KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options) {
@@ -497,12 +659,11 @@ KVCacheCapacity estimate_kv_cache_capacity(
   CHECK_GT(kv_cache_cap.cache_size_in_bytes(), 0)
       << "Available kv cache size must be greater than 0";
   const bool enable_dsv4_estimation =
-      util::is_target_model_type(model_args.model_type(),
-                                 /*target_type=*/"deepseek_v4",
-                                 /*match_mtp=*/true);
+      util::is_deepseek_v4_model_type(model_args.model_type());
   if (options.draft_model_args != nullptr) {
     CHECK(enable_dsv4_estimation)
-        << "DSV4 MTP kv cache estimation only supports DeepSeek V4 target";
+        << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
+           "target";
   }
 
   const int64_t dtype_size = static_cast<int64_t>(
@@ -527,11 +688,9 @@ KVCacheCapacity estimate_kv_cache_capacity(
   kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +
                                      num_speculative_tokens);
   kv_cache_cap.linear_ssm_checkpoint_stride(num_speculative_tokens + 1);
-#if !defined(USE_NPU)
-  if (options.is_draft_engine) {
+  if (options.is_draft_engine && model_args.num_nextn_predict_layers() > 0) {
     kv_cache_cap.n_layers(model_args.num_nextn_predict_layers());
   }
-#endif
 
   if (enable_dsv4_estimation) {
     init_dsv4_counts(model_args, options, &kv_cache_cap);
@@ -539,92 +698,6 @@ KVCacheCapacity estimate_kv_cache_capacity(
     init_standard_counts(model_args, options, &kv_cache_cap);
   }
   return kv_cache_cap;
-}
-
-int64_t estimate_speculative_kv_cache_blocks(
-    const KVCacheCapacity& target_kv_cache_cap,
-    const KVCacheCapacity& draft_kv_cache_cap,
-    bool share_device,
-    bool draft_body_uses_tp1) {
-  CHECK_GT(target_kv_cache_cap.cache_size_in_bytes(), 0)
-      << "no memory for target kv cache";
-  CHECK_GT(draft_kv_cache_cap.cache_size_in_bytes(), 0)
-      << "no memory for draft kv cache";
-  CHECK_EQ(target_kv_cache_cap.block_size(), draft_kv_cache_cap.block_size())
-      << "target and draft kv cache block size must be the same";
-
-  if (target_kv_cache_cap.swa_count() > 0) {
-    CHECK_GT(target_kv_cache_cap.n_blocks(), 0)
-        << "no memory for DeepSeek V4 kv cache pools";
-    return target_kv_cache_cap.n_blocks();
-  }
-
-  if (!share_device) {
-    return std::min(target_kv_cache_cap.n_blocks(),
-                    draft_kv_cache_cap.n_blocks());
-  }
-
-  const int64_t block_size = target_kv_cache_cap.block_size();
-  CHECK_GT(block_size, 0) << "kv cache block size must be greater than 0";
-
-  const int64_t cache_size_in_bytes =
-      std::min(target_kv_cache_cap.cache_size_in_bytes(),
-               draft_kv_cache_cap.cache_size_in_bytes());
-  const int64_t linear_cache_size_in_bytes =
-      target_kv_cache_cap.linear_cache_size_in_bytes();
-  CHECK_GT(cache_size_in_bytes, linear_cache_size_in_bytes)
-      << "no memory left for speculative full-attention kv cache after "
-         "reserving target linear state cache, cache_size: "
-      << cache_size_in_bytes
-      << ", linear_cache_size: " << linear_cache_size_in_bytes;
-
-  const int64_t target_full_attention_slot_size =
-      target_kv_cache_cap.slot_size() + target_kv_cache_cap.index_slot_size() +
-      target_kv_cache_cap.scale_slot_size();
-  const int64_t draft_full_attention_slot_size =
-      draft_kv_cache_cap.slot_size() + draft_kv_cache_cap.index_slot_size() +
-      draft_kv_cache_cap.scale_slot_size();
-  if (!draft_body_uses_tp1) {
-    CHECK_LE(draft_full_attention_slot_size, target_full_attention_slot_size)
-        << "draft full-attention kv cache slot size must not exceed target "
-           "slot size because the current speculative worker allocates draft "
-           "KV tensors with the target KVCacheShape";
-  }
-  const int64_t draft_allocated_full_attention_slot_size =
-      draft_body_uses_tp1 ? draft_full_attention_slot_size
-                          : target_full_attention_slot_size;
-  CHECK_GT(target_full_attention_slot_size, 0)
-      << "target full-attention kv cache slot size must be greater than 0";
-  CHECK_GT(draft_allocated_full_attention_slot_size, 0)
-      << "draft full-attention kv cache slot size must be greater than 0";
-
-  const int64_t target_full_attention_layers =
-      std::max<int64_t>(target_kv_cache_cap.num_full_attention_layers(), 1);
-  // Draft model has no linear-attention layers in the current MTP/Eagle path.
-  const int64_t draft_full_attention_layers = draft_kv_cache_cap.n_layers();
-  const int64_t target_full_attention_block_size_in_bytes =
-      block_size *
-      (target_full_attention_layers * (target_kv_cache_cap.slot_size() +
-                                       target_kv_cache_cap.scale_slot_size()) +
-       target_kv_cache_cap.num_indexer_layers() *
-           target_kv_cache_cap.index_slot_size());
-  const int64_t draft_full_attention_block_size_in_bytes =
-      draft_body_uses_tp1
-          ? block_size * (draft_full_attention_layers *
-                              (draft_kv_cache_cap.slot_size() +
-                               draft_kv_cache_cap.scale_slot_size()) +
-                          draft_kv_cache_cap.num_indexer_layers() *
-                              draft_kv_cache_cap.index_slot_size())
-          : block_size * draft_full_attention_layers *
-                draft_allocated_full_attention_slot_size;
-  const int64_t full_attention_block_size_in_bytes =
-      target_full_attention_block_size_in_bytes +
-      draft_full_attention_block_size_in_bytes;
-  CHECK_GT(full_attention_block_size_in_bytes, 0)
-      << "speculative kv cache block size in bytes must be greater than 0";
-
-  return (cache_size_in_bytes - linear_cache_size_in_bytes) /
-         full_attention_block_size_in_bytes;
 }
 
 }  // namespace xllm

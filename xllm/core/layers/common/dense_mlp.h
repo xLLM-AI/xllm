@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -52,6 +52,8 @@ class DenseMLPImpl : public torch::nn::Module {
                        const std::vector<std::string>& gate_up_name,
                        const std::string& down_name);
 
+  void verify_loaded_weights(const std::string& prefix) const;
+
   // Get FP8 input scale from gate_up_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
 
@@ -66,6 +68,10 @@ class DenseMLPImpl : public torch::nn::Module {
   std::string hidden_act_;
   double swiglu_limit_ = 0.0;
   bool apply_fc1_sequence_parallel_ = true;
+  // gate/up are fused at runtime; retain their logical checkpoint presence so
+  // a partial fused load reports the exact missing projection.
+  bool gate_proj_weight_seen_ = false;
+  bool up_proj_weight_seen_ = false;
 };
 TORCH_MODULE(DenseMLP);
 

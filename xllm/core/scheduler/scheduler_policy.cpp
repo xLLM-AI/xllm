@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "scheduler/scheduler_policy.h"
 
+#include <absl/time/clock.h>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -27,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
 #include "util/timer.h"
@@ -99,6 +101,57 @@ SchedulerPolicy::SchedulerPolicy(const BatchMode& mode,
                                  const ContinuousScheduler::Options& options)
     : batch_mode_(mode), options_(options) {}
 
+bool SchedulerPolicy::should_limit_prefill_requests(
+    const SchedulerState& state) const {
+  return state.model_args.max_concurrent_prefills_per_dp() > 0;
+}
+
+int32_t SchedulerPolicy::select_prefill_dp_rank(
+    const Sequence* sequence,
+    const SchedulerState& state) const {
+  const size_t cap =
+      static_cast<size_t>(state.model_args.max_concurrent_prefills_per_dp());
+  const int32_t dp_size = state.options.dp_size();
+  std::vector<size_t> per_dp_counts(dp_size, 0);
+  for (const auto& request : state.running_requests) {
+    if (request == nullptr) {
+      continue;
+    }
+    std::vector<bool> counted_dp_ranks(dp_size, false);
+    for (const auto& running_sequence : request->sequences()) {
+      if (!running_sequence || !running_sequence->is_prefill_stage()) {
+        continue;
+      }
+      const int32_t dp_rank = running_sequence->dp_rank();
+      if (dp_rank >= 0 && dp_rank < dp_size && !counted_dp_ranks[dp_rank]) {
+        ++per_dp_counts[dp_rank];
+        counted_dp_ranks[dp_rank] = true;
+      }
+    }
+  }
+
+  const int32_t current_dp_rank = sequence->dp_rank();
+  if (current_dp_rank >= 0 && current_dp_rank < dp_size) {
+    return per_dp_counts[current_dp_rank] < cap ? current_dp_rank : -1;
+  }
+
+  const std::vector<size_t> free_blocks =
+      state.kv_cache_manager->num_free_blocks();
+  int32_t selected_dp_rank = -1;
+  size_t selected_free_blocks = 0;
+  for (int32_t dp_rank = 0; dp_rank < dp_size; ++dp_rank) {
+    if (static_cast<size_t>(dp_rank) >= free_blocks.size() ||
+        per_dp_counts[dp_rank] >= cap) {
+      continue;
+    }
+    if (selected_dp_rank < 0 || free_blocks[dp_rank] > selected_free_blocks) {
+      selected_dp_rank = dp_rank;
+      selected_free_blocks = free_blocks[dp_rank];
+    }
+  }
+  return selected_dp_rank;
+}
+
 void SchedulerPolicy::adjust_latency_budget_and_reorder(
     RequestPriorityQueue* /*first_queue*/,
     RequestPriorityQueue* /*second_queue*/,
@@ -113,23 +166,37 @@ void SchedulerPolicy::adjust_latency_budget_and_reorder(
 void SchedulerPolicy::drain_request_queue(
     SchedulerState& state,
     folly::MPMCQueue<std::shared_ptr<Request>>& request_queue) {
+  std::vector<std::shared_ptr<Request>> incoming;
   std::shared_ptr<Request> request;
   while (request_queue.read(request)) {
     CHECK(request);
+    incoming.emplace_back(std::move(request));
+  }
+  if (incoming.empty()) {
+    return;
+  }
+  // MPMC drain order is not arrival order across producer threads. Restore
+  // FCFS before the waiting queues see the batch.
+  if (batch_mode_.priority_strategy == "fcfs") {
+    std::stable_sort(incoming.begin(),
+                     incoming.end(),
+                     create_comparator("fcfs", /*is_reversed=*/true));
+  }
 
+  for (std::shared_ptr<Request>& queued : incoming) {
     if (!state.enable_prefix_cache &&
         !(state.options.enable_disagg_pd() &&
           state.options.instance_role().has_value() &&
           state.options.instance_role().value() != InstanceRole::DECODE)) {
-      request->expand_sequences(/*force=*/false);
+      queued->expand_sequences(/*force=*/false);
     }
 
-    if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
+    if (queued->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
       // New request goes to waiting queue (back = FIFO from MPMC).
-      state.prefill_queue.push(request, /*if_back=*/true);
+      state.prefill_queue.push(queued, /*if_back=*/true);
     } else {
       // Request from prefill instance in disagg PD mode -- already has KV.
-      state.running_requests.emplace_back(request);
+      state.running_requests.emplace_back(queued);
     }
   }
 }
@@ -173,7 +240,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     SchedulerState& state,
     ScheduleBudget& budget,
     std::vector<std::shared_ptr<Request>>& finished,
-    size_t& reserved_full_footprint) {
+    std::vector<size_t>& reserved_full_footprint) {
   if (queue == nullptr || queue->empty()) {
     return;
   }
@@ -209,13 +276,6 @@ void SchedulerPolicy::schedule_prefill_from_queue(
           << request->best_of() << ") sequences, got " << num_sequences;
     }
 
-    if (!state.kv_cache_manager->update_prefetch_result(
-            request, options_.prefetch_timeout())) {
-      queue->pop_top();
-      queue->push(request);
-      continue;
-    }
-
     // Full-footprint admission (fresh requests only): check that the system
     // has enough capacity for this request's full KV plus all already-reserved
     // blocks. In-flight chunked requests are always allowed to continue.
@@ -227,7 +287,13 @@ void SchedulerPolicy::schedule_prefill_from_queue(
           static_cast<size_t>(state.kv_cache_manager->num_blocks());
       const size_t full_footprint =
           (request->sequences()[0]->num_tokens() + block_size - 1) / block_size;
-      if (reserved_full_footprint + full_footprint > total_blocks) {
+      // Predict and pre-assign the target DP rank so that the subsequent
+      // allocation reuses the same rank. This keeps the admission check
+      // consistent with the allocation path (same available-blocks metric
+      // and round-robin tie-break, see KVCacheManager::select_dp_rank).
+      const int32_t dp_rank = state.kv_cache_manager->select_dp_rank();
+      request->sequences()[0]->set_dp_rank(dp_rank);
+      if (reserved_full_footprint[dp_rank] + full_footprint > total_blocks) {
         blocks_exhausted = true;
         break;
       }
@@ -247,10 +313,37 @@ void SchedulerPolicy::schedule_prefill_from_queue(
         continue;
       }
 
+      if (should_limit_prefill_requests(state)) {
+        const int32_t dp_rank =
+            select_prefill_dp_rank(prefill_sequence.get(), state);
+        if (dp_rank < 0) {
+          LOG_EVERY_N(INFO, 100)
+              << "[prefill_cap] no eligible DP rank is below the cap of "
+              << state.model_args.max_concurrent_prefills_per_dp()
+              << " prefill requests; deferring remaining prefills";
+          can_schedule = false;
+          break;
+        }
+        prefill_sequence->set_dp_rank(dp_rank);
+      }
+
       size_t num_tokens = compute_prefill_tokens(
           prefill_sequence.get(),
           budget.remaining_token_budget - allocated_tokens,
           state);
+      if (!budget.dp_group_token_caps.empty()) {
+        const int32_t dp_rank = prefill_sequence->dp_rank();
+        CHECK(dp_rank >= 0 &&
+              dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+            << "seq dp_rank=" << dp_rank << " out of range [0,"
+            << budget.dp_group_token_caps.size() << ")";
+        const size_t group_remaining = budget.dp_group_token_caps[dp_rank] -
+                                       budget.dp_group_token_used[dp_rank];
+        num_tokens = std::min(num_tokens, group_remaining);
+      }
+      if (num_tokens == 0) {
+        continue;
+      }
 
       if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
           budget.remaining_seq_budget < allocated_seqs + 1) {
@@ -293,6 +386,10 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       allocated_tokens += actual_tokens;
       allocated_seqs += 1;
       allocated_estimate_latency += seq_estimate_latency;
+      if (!budget.dp_group_token_used.empty()) {
+        budget.dp_group_token_used[prefill_sequence->dp_rank()] +=
+            actual_tokens;
+      }
     }
 
     if (!can_schedule) {
@@ -319,7 +416,12 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       const size_t block_size =
           static_cast<size_t>(state.kv_cache_manager->block_size());
       for (auto* seq : prefill_sequences) {
-        reserved_full_footprint +=
+        const int32_t dp_rank = seq->dp_rank();
+        CHECK(dp_rank >= 0 &&
+              dp_rank < static_cast<int32_t>(reserved_full_footprint.size()))
+            << "seq dp_rank=" << dp_rank << " out of range [0,"
+            << reserved_full_footprint.size() << ")";
+        reserved_full_footprint[dp_rank] +=
             (seq->num_tokens() + block_size - 1) / block_size;
       }
     }
@@ -419,11 +521,12 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
     state.kv_cache_manager->allocate_shared(seq);
     return;
   }
-  // DSV4 (SWA_COMPRESSED) holds SWA/C4/C128 but never a KV leaf, so a
-  // num_blocks(KV)==0 guard alone would treat an already-mounted DSV4 sequence
-  // as fresh and re-run allocate_shared -> mount_composite_shared CHECK. Skip
-  // re-match for the KV-less composite; only flat-KV shapes re-match below.
+  // DSV4 (SWA_COMPRESSED) never has a KV leaf. A failed HBM growth can retain
+  // its device prefix while releasing the Host match, so the hierarchy manager
+  // must get a chance to re-probe Host before the scheduler computes the next
+  // chunk boundary. Non-hierarchical DSV4 managers make this call idempotent.
   if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
+    state.kv_cache_manager->allocate_shared(seq);
     return;
   }
   if (seq->is_chunked_prefill_stage()) {
@@ -453,6 +556,43 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
       state.kv_cache_manager->allocate_shared(seq);
     }
   }
+}
+
+void SchedulerPolicy::schedule_decode_restore(SchedulerState& state,
+                                              ScheduleBudget& budget) {
+  if (state.decode_restore_waiting.empty() ||
+      state.kv_cache_manager->has_pending_async_block_release() ||
+      budget_exhausted(budget)) {
+    return;
+  }
+
+  DecodeRestoreEntry& entry = state.decode_restore_waiting.front();
+  const std::shared_ptr<Request>& request = entry.request;
+  CHECK(request != nullptr);
+  CHECK_EQ(request->sequences().size(), 1u);
+  Sequence* sequence = request->sequences().front().get();
+  CHECK(sequence != nullptr);
+
+  const size_t num_tokens =
+      compute_prefill_tokens(sequence, budget.remaining_token_budget, state);
+  if (num_tokens == 0 || num_tokens > budget.remaining_token_budget ||
+      budget.remaining_seq_budget == 0) {
+    return;
+  }
+
+  size_t actual_tokens = 0;
+  if (!allocate_for_prefill(sequence, num_tokens, &actual_tokens, state)) {
+    return;
+  }
+
+  CHECK_LE(actual_tokens, budget.remaining_token_budget);
+  state.running_requests.emplace_back(request);
+  state.running_sequences.emplace_back(sequence);
+  state.running_sequences_budgets.emplace_back(actual_tokens);
+  budget.remaining_token_budget -= actual_tokens;
+  --budget.remaining_seq_budget;
+  cache_in_batch_prefix({sequence}, {actual_tokens}, state);
+  state.decode_restore_waiting.pop_front();
 }
 
 // =============================================================================
@@ -654,8 +794,15 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       break;
     }
 
-    // Blocks exhausted: first try preempting from chunk_queue (has KV blocks
-    // to free), then from the decode queue's lowest priority.
+    // Blocks exhausted: wait for an in-flight async release before selecting
+    // another victim. The released blocks remain unavailable until the
+    // transfer completes.
+    if (state.kv_cache_manager->has_pending_async_block_release()) {
+      return;
+    }
+
+    // First try preempting from chunk_queue (has KV blocks to free), then
+    // from the decode queue's lowest priority.
     if (!has_enough_blocks && !state.chunk_queue.empty()) {
       std::shared_ptr<Request> request_to_preempt = state.chunk_queue.back();
       ++budget.num_preempted_requests;
@@ -663,16 +810,20 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       state.chunk_queue.pop_back();
       request_to_preempt->set_preempted();
       state.prefill_queue.push(request_to_preempt);
+      if (state.kv_cache_manager->has_pending_async_block_release()) {
+        return;
+      }
       continue;
     }
     if (!has_enough_blocks && queue->size() > 1) {
       std::shared_ptr<Request> request_to_preempt = queue->back();
       if (request_to_preempt.get() != request.get()) {
         ++budget.num_preempted_requests;
-        state.kv_cache_manager->deallocate(request_to_preempt.get());
+        enqueue_decode_restore(request_to_preempt, state);
         queue->pop_back();
-        request_to_preempt->set_preempted();
-        state.prefill_queue.push(request_to_preempt);
+        if (state.kv_cache_manager->has_pending_async_block_release()) {
+          return;
+        }
         continue;
       }
     }
@@ -690,6 +841,42 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
                                    /*budget_exhausted=*/false);
     break;
   }
+}
+
+bool SchedulerPolicy::should_wait_for_decode_restore(
+    const std::shared_ptr<Request>& request,
+    const SchedulerState& state) const {
+  if (!state.options.enable_disagg_pd() || state.options.enable_pd_ooc() ||
+      !state.options.instance_role().has_value() ||
+      state.options.instance_role().value() != InstanceRole::DECODE ||
+      !state.enable_prefix_cache || state.options.enable_schedule_overlap() ||
+      !state.kv_cache_manager->supports_host_cache_restore() ||
+      ::xllm::KVCacheStoreConfig::get_instance().host_blocks_factor() <= 1.0 ||
+      request == nullptr || request->sequences().size() != 1 ||
+      request->check_beam_search()) {
+    return false;
+  }
+
+  return state.options.num_speculative_tokens() == 0 ||
+         ::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
+             "MTP";
+}
+
+void SchedulerPolicy::enqueue_decode_restore(
+    const std::shared_ptr<Request>& request,
+    SchedulerState& state) {
+  const bool should_wait = should_wait_for_decode_restore(request, state);
+  if (should_wait) {
+    clear_mtp_bootstrap(request.get(), state);
+  }
+  state.kv_cache_manager->deallocate(request.get());
+  request->set_preempted();
+  if (should_wait) {
+    state.decode_restore_waiting.emplace_back(
+        DecodeRestoreEntry{request, absl::Now()});
+    return;
+  }
+  state.prefill_queue.push(request);
 }
 
 // =============================================================================
@@ -781,7 +968,8 @@ void SchedulerPolicy::report_metrics(const SchedulerState& state,
                                      double elapsed_seconds,
                                      size_t num_preempted_requests) {
   GAUGE_SET(num_running_requests, state.running_requests.size());
-  GAUGE_SET(num_waiting_requests, state.prefill_queue.size());
+  GAUGE_SET(num_waiting_requests,
+            state.prefill_queue.size() + state.decode_restore_waiting.size());
   GAUGE_SET(num_preempted_requests, num_preempted_requests);
   GAUGE_SET(num_running_sequences, state.running_sequences.size());
   GAUGE_SET(kv_cache_utilization_perc,

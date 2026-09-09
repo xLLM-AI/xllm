@@ -1,0 +1,15 @@
+---
+description: Always clang-format C++ edits before finishing
+globs: "**/*.{h,hpp,c,cc,cpp,cu}"
+alwaysApply: true
+---
+
+# Clang-Format
+
+After editing any C++ file, run clang-format **20.1.6** with the repo-root `.clang-format` on every touched file before you stop.
+
+```bash
+clang-format -i <edited-files>
+```
+
+Do not leave include-order, wrapping, or spacing for the user to catch. An unformatted C++ change is not finished.

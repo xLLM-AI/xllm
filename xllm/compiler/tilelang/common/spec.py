@@ -29,14 +29,10 @@ class DispatchField:
 
     def validate(self) -> None:
         if not _C_IDENTIFIER_PATTERN.match(self.name):
-            raise ValueError(
-                "DispatchField.name must be a valid C/C++ identifier"
-            )
+            raise ValueError("DispatchField.name must be a valid C/C++ identifier")
         if self.kind not in _SUPPORTED_DISPATCH_FIELD_KINDS:
             supported = ", ".join(sorted(_SUPPORTED_DISPATCH_FIELD_KINDS))
-            raise ValueError(
-                f"DispatchField.kind must be one of: {supported}"
-            )
+            raise ValueError(f"DispatchField.kind must be one of: {supported}")
 
 
 @dataclass(frozen=True)
@@ -77,24 +73,15 @@ class KernelSpec:
         if not self.variant_key:
             raise ValueError("KernelSpec.variant_key must not be empty")
         if not _SAFE_VARIANT_KEY_PATTERN.match(self.variant_key):
-            raise ValueError(
-                "KernelSpec.variant_key must contain only letters, digits, or "
-                "underscore"
-            )
+            raise ValueError("KernelSpec.variant_key must contain only letters, digits, or underscore")
 
         if not self.specialization:
             raise ValueError("KernelSpec.specialization must not be empty")
 
-        if self.kernel_name is not None and not _C_IDENTIFIER_PATTERN.match(
-            self.kernel_name
-        ):
-            raise ValueError(
-                "KernelSpec.kernel_name must be a valid C/C++ identifier"
-            )
+        if self.kernel_name is not None and not _C_IDENTIFIER_PATTERN.match(self.kernel_name):
+            raise ValueError("KernelSpec.kernel_name must be a valid C/C++ identifier")
 
-        if self.entry_name is not None and not _C_IDENTIFIER_PATTERN.match(
-            self.entry_name
-        ):
+        if self.entry_name is not None and not _C_IDENTIFIER_PATTERN.match(self.entry_name):
             raise ValueError("KernelSpec.entry_name must be a valid C/C++ identifier")
 
         context_keys = set(self.specialization)
@@ -107,22 +94,13 @@ class KernelSpec:
                     "KernelSpec.compile_definitions references unknown context "
                     f"key {context_key!r} for macro {macro_name!r}"
                 )
-            uses_entry_symbol = (
-                uses_entry_symbol or context_key == _ENTRY_SYMBOL_CONTEXT_KEY
-            )
+            uses_entry_symbol = uses_entry_symbol or context_key == _ENTRY_SYMBOL_CONTEXT_KEY
 
         if uses_entry_symbol and not self.entry_name:
-            raise ValueError(
-                "KernelSpec.entry_name is required when "
-                "compile_definitions references 'entry_symbol'"
-            )
+            raise ValueError("KernelSpec.entry_name is required when compile_definitions references 'entry_symbol'")
 
-    def to_compile_spec(
-        self, *, module_name: str, dispatch_schema: list[DispatchField]
-    ) -> KernelCompileSpec:
-        dispatch_values = {
-            field.name: self.specialization[field.name] for field in dispatch_schema
-        }
+    def to_compile_spec(self, *, module_name: str, dispatch_schema: list[DispatchField]) -> KernelCompileSpec:
+        dispatch_values = {field.name: self.specialization[field.name] for field in dispatch_schema}
         return KernelCompileSpec(
             target=self.target,
             kernel_name=self.kernel_name or module_name,
@@ -143,8 +121,7 @@ class KernelSpec:
         for macro_name, context_key in self.compile_definitions.items():
             if context_key not in context:
                 raise KeyError(
-                    "compile_definitions references unknown context key "
-                    f"{context_key!r} for macro {macro_name!r}"
+                    f"compile_definitions references unknown context key {context_key!r} for macro {macro_name!r}"
                 )
             definitions.append(f"{macro_name}={context[context_key]}")
 
@@ -165,24 +142,18 @@ class TilelangKernel:
     @classmethod
     def dispatch_schema(cls) -> list[DispatchField]:
         if not cls.DISPATCH_SCHEMA:
-            raise NotImplementedError(
-                f"{cls.__name__} must define non-empty DISPATCH_SCHEMA"
-            )
+            raise NotImplementedError(f"{cls.__name__} must define non-empty DISPATCH_SCHEMA")
 
         normalized: list[DispatchField] = []
         seen_names: set[str] = set()
         for index, field in enumerate(cls.DISPATCH_SCHEMA):
             if not isinstance(field, DispatchField):
                 raise TypeError(
-                    f"{cls.__name__}.DISPATCH_SCHEMA[{index}] must be DispatchField, "
-                    f"got {type(field).__name__}"
+                    f"{cls.__name__}.DISPATCH_SCHEMA[{index}] must be DispatchField, got {type(field).__name__}"
                 )
             field.validate()
             if field.name in seen_names:
-                raise ValueError(
-                    f"{cls.__name__}.DISPATCH_SCHEMA contains duplicate field "
-                    f"{field.name!r}"
-                )
+                raise ValueError(f"{cls.__name__}.DISPATCH_SCHEMA contains duplicate field {field.name!r}")
             seen_names.add(field.name)
             normalized.append(field)
         return normalized
@@ -190,19 +161,11 @@ class TilelangKernel:
     @classmethod
     def specs(cls) -> list[KernelSpec]:
         if not cls.SPECIALIZATIONS:
-            raise NotImplementedError(
-                f"{cls.__name__} must define non-empty SPECIALIZATIONS or override "
-                "specs()"
-            )
-        return [
-            cls._specialization_to_spec(specialization)
-            for specialization in cls.SPECIALIZATIONS
-        ]
+            raise NotImplementedError(f"{cls.__name__} must define non-empty SPECIALIZATIONS or override specs()")
+        return [cls._specialization_to_spec(specialization) for specialization in cls.SPECIALIZATIONS]
 
     @classmethod
-    def _specialization_to_spec(
-        cls, specialization: dict[str, Any] | KernelSpec
-    ) -> KernelSpec:
+    def _specialization_to_spec(cls, specialization: dict[str, Any] | KernelSpec) -> KernelSpec:
         if isinstance(specialization, KernelSpec):
             return specialization
 
@@ -216,9 +179,7 @@ class TilelangKernel:
         specialization_fields = specialization_data.pop("specialization", None)
         if specialization_fields is None:
             specialization_fields = {
-                key: value
-                for key, value in specialization_data.items()
-                if key not in _SPECIALIZATION_CONFIG_KEYS
+                key: value for key, value in specialization_data.items() if key not in _SPECIALIZATION_CONFIG_KEYS
             }
             for key in specialization_fields:
                 specialization_data.pop(key)
@@ -229,15 +190,10 @@ class TilelangKernel:
             )
 
         compile_definitions = dict(cls.COMPILE_DEFINITIONS)
-        compile_definitions.update(
-            dict(specialization_data.pop("compile_definitions", {}))
-        )
+        compile_definitions.update(dict(specialization_data.pop("compile_definitions", {})))
         variant_key = specialization_data.pop("variant_key", None)
         if not isinstance(variant_key, str) or not variant_key:
-            raise ValueError(
-                f"{cls.__name__}.SPECIALIZATIONS entries must define non-empty "
-                "'variant_key'"
-            )
+            raise ValueError(f"{cls.__name__}.SPECIALIZATIONS entries must define non-empty 'variant_key'")
 
         spec = KernelSpec(
             variant_key=variant_key,
@@ -246,16 +202,11 @@ class TilelangKernel:
             kernel_name=specialization_data.pop("kernel_name", cls.KERNEL_NAME),
             target=specialization_data.pop("target", cls.TARGET),
             entry_name=specialization_data.pop("entry_name", cls.ENTRY_NAME),
-            source_entry_symbol=specialization_data.pop(
-                "source_entry_symbol", cls.SOURCE_ENTRY_SYMBOL
-            ),
+            source_entry_symbol=specialization_data.pop("source_entry_symbol", cls.SOURCE_ENTRY_SYMBOL),
         )
         if specialization_data:
             unknown_keys = ", ".join(sorted(specialization_data))
-            raise KeyError(
-                f"{cls.__name__}.SPECIALIZATIONS contains unsupported config keys: "
-                f"{unknown_keys}"
-            )
+            raise KeyError(f"{cls.__name__}.SPECIALIZATIONS contains unsupported config keys: {unknown_keys}")
         return spec
 
 

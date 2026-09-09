@@ -5,13 +5,16 @@ description: "DeepSeek-V4 inference guide with xLLM on Ascend A3 devices"
 
 # Inference with xLLM on Ascend A3 Devices
 
-Source code: https://github.com/jd-opensource/xllm
+Source code: https://github.com/xLLM-AI/xllm
 
 China mirror: https://gitcode.com/xLLM-AI/xllm
 
 Weight Download
 Flash weights:
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp
+
+DeepSeek-V4-Flash-0731 W8A8 weights with DSpark:
+https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
 
 Pro weights:
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
@@ -23,11 +26,11 @@ First, pull the xLLM-provided image:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 Then create the container:
@@ -47,7 +50,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 ## 2. Clone Source Code and Build
@@ -55,7 +58,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
 Clone the official repository and module dependencies:
 
 ```bash
-git clone https://github.com/jd-opensource/xllm
+git clone https://github.com/xLLM-AI/xllm
 cd xllm 
 git submodule update --init --recursive
 ```
@@ -83,11 +86,25 @@ python -c "import torch_npu
 for i in range(16):torch_npu.npu.set_device(i)"
 ```
 
-### Export MTP weights
+### Choose the speculative-decoding weight layout
+
+The original DeepSeek-V4 MTP path and the DeepSeek-V4-Flash-0731 DSpark path
+use different draft models:
+
+- For the original MTP path, export the MTP weights to a separate directory:
 
 ```bash
 python tools/export_mtp.py --input-dir ${W4A8/W8A8 weights directory} --output-dir ${Exported MTP weights directory}
 ```
+
+- For DeepSeek-V4-Flash-0731 DSpark, do **not** run `export_mtp.py`. The three
+  DSpark stages, their vocabulary embedding/head, and the Markov head remain
+  under `mtp.0`, `mtp.1`, and `mtp.2` in the target checkpoint. Point both
+  `--model` and `--draft_model` to the same original or quantized 0731 weight
+  directory. Original FP checkpoints may share the top-level
+  `embed.weight/head.weight`; QuaRot checkpoints may provide dedicated
+  `mtp.0.embed.weight/mtp.2.head.weight`. xLLM supports both layouts and gives
+  the dedicated DSpark vocabulary weights priority when both are present.
 
 ### Environment variables
 
@@ -165,6 +182,11 @@ done
     # --draft_model=$DRAFT_MODEL_PATH \
     # --num_speculative_tokens=1 \
 
+    # DeepSeek-V4-Flash-0731 DSpark instead uses:
+    # --speculative_algorithm=DSpark \
+    # --draft_model=$MODEL_PATH \
+    # --num_speculative_tokens=5 \
+
 # numactl -C xxxxx          NUMA core binding (query with: npu-smi info -t topo)
 #--max_memory_utilization   Max memory usage ratio per NPU card
 #--max_tokens_per_batch     Max tokens per batch (mainly limits prefill)
@@ -177,6 +199,58 @@ done
 #--draft_model              MTP - MTP weights path
 #--num_speculative_tokens   MTP - Number of speculative tokens
 ```
+
+### DSpark usage
+
+DSpark does not require separately exported MTP weights. Set `--model` and
+`--draft_model` to the same DeepSeek-V4-Flash-0731 checkpoint directory:
+
+```bash
+--speculative_algorithm=DSpark \
+--model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--draft_model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--num_speculative_tokens=5
+```
+
+`--num_speculative_tokens=5` is recommended because the 0731 checkpoint was
+trained with `dspark_block_size=5`. A different gamma changes the diffusion
+block geometry and is out of the trained distribution; use it only after an
+acceptance/performance evaluation. Context parallelism (`cp_size > 1`) is not
+supported on this path yet.
+
+On NPU, xLLM supports two SAS modes. The default compatibility mode works with
+CANN 9.0 and needs no extra option. If the installed SAS operator accepts a
+non-empty `ori_sparse_indices`, set `--enable_dspark_native_sas=true` to use
+the complete DSpark SWA window. Older operators terminate during tiling, so
+xLLM cannot safely detect this capability automatically.
+
+Use the per-position counters to inspect DSpark acceptance:
+
+```bash
+curl http://${HOST}:${PORT}/brpc_metrics | grep speculative_num
+```
+
+```text
+# conditional per-position acceptance (isolates draft quality):
+conditional_acceptance[i] =
+  speculative_num_accepted_tokens_per_pos{i} /
+  speculative_num_accepted_tokens_per_pos{i-1}   # i = 0: use speculative_num_drafts_total
+```
+
+`speculative_num_accepted_tokens_per_pos` is a raw counter (a sufficient
+statistic); prefer the *conditional* acceptance rate above -- the probability
+position `i` is accepted given the prefix reached it. The marginal form
+(`... / speculative_num_drafts_total`) decays even for a uniformly-good draft
+because of prefix survivorship, conflating draft quality with reach
+probability, whereas the conditional isolates per-position quality and is what
+to use when choosing the speculative depth. xLLM exposes it directly as the
+gauge `speculative_conditional_acceptance_rate_per_pos{position}` (computed
+from the counters above), so no manual derivation is needed.
+
+`speculative_mean_acceptance_length` is the cumulative acceptance length: the
+mean number of tokens emitted per proposal sequence (accepted drafts plus the
+one target bonus token), i.e.
+`1 + speculative_num_accepted_tokens_total / speculative_num_drafts_total`.
 
 A log message "Brpc Server Started" indicates the service has started successfully.
 

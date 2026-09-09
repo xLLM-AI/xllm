@@ -43,9 +43,7 @@ REQUIRED_VERSION = "2.9.0.post2+gita5f47a6"
 
 def _get_cann_version() -> str:
     """Detect CANN major.minor from toolkit path."""
-    toolkit = os.environ.get(
-        "NPU_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest"
-    )
+    toolkit = os.environ.get("NPU_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest")
     version_file = os.path.join(toolkit, "version.cfg")
     try:
         with open(version_file) as f:
@@ -93,10 +91,17 @@ def _download_and_install(wheel_url: str) -> None:
         local_path = os.path.join(tmpdir, local_name)
         logger.info(f"Downloading {wheel_url} ...")
         urllib.request.urlretrieve(wheel_url, local_path)
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "--force-reinstall", "--no-deps", local_path,
-        ])
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--force-reinstall",
+                "--no-deps",
+                local_path,
+            ]
+        )
 
 
 def ensure_torch_npu_ready() -> None:
@@ -117,8 +122,5 @@ def ensure_torch_npu_ready() -> None:
 
     new_version = _installed_version()
     if new_version is None or REQUIRED_VERSION not in new_version:
-        raise RuntimeError(
-            f"torch_npu installation failed: expected {REQUIRED_VERSION}, "
-            f"got {new_version}"
-        )
+        raise RuntimeError(f"torch_npu installation failed: expected {REQUIRED_VERSION}, got {new_version}")
     logger.info(f"torch_npu {new_version} installed successfully.")

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,13 +21,7 @@ limitations under the License.
 #include <limits>
 #include <unordered_set>
 
-#include "common/global_flags.h"
-#include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
-
-#if defined(USE_NPU)
-#include "framework/kv_cache_transfer/llm_data_dist_transfer.h"
-#endif
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
@@ -38,7 +32,8 @@ namespace xllm {
 bool KVCacheTransfer::validate_transfer_mappings(
     const std::vector<KVTransferMapping>& mappings,
     const std::string& request_id,
-    int32_t kv_split_size) {
+    int32_t kv_split_size,
+    bool rank_local_mapping) {
   if (kv_split_size < 1) {
     LOG(ERROR) << "KV cache transfer requires kv_split_size >= 1, request_id="
                << request_id << ", kv_split_size=" << kv_split_size;
@@ -54,8 +49,11 @@ bool KVCacheTransfer::validate_transfer_mappings(
       return false;
     }
 
+    const std::optional<BlockType> block_type =
+        block_type_from_cache_group_id(mapping.group_id);
     const bool validate_full_kv_split_coverage =
-        kv_split_size > 1 && mapping.group_id == cache_group_id(BlockType::KV);
+        kv_split_size > 1 && !rank_local_mapping && block_type.has_value() &&
+        is_kv_split_cache_block_type(block_type.value());
     if (!validate_full_kv_split_coverage) {
       if (mapping.local_ids.size() != mapping.remote_ids.size()) {
         LOG(ERROR) << "KV cache transfer mapping size mismatch, request_id="
@@ -107,8 +105,10 @@ bool KVCacheTransfer::validate_transfer_mappings(
     const std::vector<TransferKVInfo>& transfer_kv_infos,
     int32_t kv_split_size) {
   for (const TransferKVInfo& info : transfer_kv_infos) {
-    if (!validate_transfer_mappings(
-            info.mappings, info.request_id, kv_split_size)) {
+    if (!validate_transfer_mappings(info.mappings,
+                                    info.request_id,
+                                    kv_split_size,
+                                    info.rank_local_mapping)) {
       return false;
     }
   }
@@ -137,19 +137,27 @@ folly::SemiFuture<bool> KVCacheTransfer::pull_kv_blocks_async(
   return future;
 }
 
-// In KV-split mode, the KV mapping's local_ids already contains only this
-// rank's physical blocks. remote_ids holds the full D-side block entries; this
-// rank maps local_ids[k] to remote_ids[kv_split_rank + k * kv_split_size]. The
-// function rebuilds remote_ids accordingly and drops infos with no mappings.
+// In KV-split mode, each block-scoped mapping's local_ids already contains
+// only this rank's physical blocks. remote_ids holds the full D-side block
+// entries; this rank maps local_ids[k] to
+// remote_ids[kv_split_rank + k * kv_split_size]. The function rebuilds
+// remote_ids accordingly and drops infos with no mappings.
 std::vector<TransferKVInfo> filter_kv_split_infos(
     int32_t kv_split_rank,
     int32_t kv_split_size,
     const std::vector<TransferKVInfo>& kv_infos) {
   std::vector<TransferKVInfo> filtered_kv_infos;
   for (const TransferKVInfo& kv_info : kv_infos) {
+    if (kv_info.rank_local_mapping) {
+      filtered_kv_infos.emplace_back(kv_info);
+      continue;
+    }
     TransferKVInfo filtered = kv_info;
     for (KVTransferMapping& mapping : filtered.mappings) {
-      if (mapping.group_id != cache_group_id(BlockType::KV)) {
+      const std::optional<BlockType> block_type =
+          block_type_from_cache_group_id(mapping.group_id);
+      if (!block_type.has_value() ||
+          !is_kv_split_cache_block_type(block_type.value())) {
         continue;
       }
       const std::vector<uint64_t> remote_ids = mapping.remote_ids;
@@ -211,16 +219,17 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         transfer_kv_infos,
-                        &parallel_args,
+                        parallel_args,
                         layer_synchronizer,
                         is_spec_draft,
                         promise = std::move(promise)]() mutable {
     std::unordered_map<std::string, KVCacheInfo> merged_kv_infos;
     std::vector<TransferKVInfo> filtered_kv_infos;
     const std::vector<TransferKVInfo>* kv_infos = &transfer_kv_infos;
-    // Filter when KV is actually sharded across ranks. When kv_split_size==1
-    // (each CP rank holds a full KV replica) the filter degenerates to a copy,
-    // so we skip it and let each rank consume remote_ids 1:1.
+    // Filter when KV is actually sharded across ranks. When
+    // kv_split_size==1 (each CP rank holds a full KV replica) the filter
+    // degenerates to a copy, so we skip it and let each rank consume
+    // remote_ids 1:1.
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
     if (!validate_transfer_mappings(*kv_infos, kv_split_size)) {
       promise.setValue(false);
@@ -364,11 +373,8 @@ void KVCacheTransfer::merge_kv_blocks(
 }
 
 std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
-    const std::string& transfer_type,
     uint16_t transfer_listen_port,
-    InstanceRole instance_role,
     const Device& device,
-    bool enable_lighting_indexer,
     const std::string& model_type,
     const std::string& model_id) {
   std::shared_ptr<KVCacheTransfer> transfer;
@@ -376,41 +382,27 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
   int32_t device_id = device.index();
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  LOG(INFO) << "Create KVCacheTransfer for " << transfer_type << "flag"
-            << ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
-  if (transfer_type == "LlmDataDist") {
+  LOG(INFO) << "Create Mooncake KVCacheTransfer.";
+  std::shared_ptr<MooncakeKVCacheTransferBase> mooncake_transfer;
 #if defined(USE_NPU)
-    transfer = std::make_shared<LlmDataDistTransfer>(
-        transfer_listen_port, instance_role, enable_lighting_indexer);
-#else
-    LOG(FATAL) << "LlmDataDist is not supported on this backend.";
-#endif
-  } else if (transfer_type == "Mooncake") {
-    std::shared_ptr<MooncakeKVCacheTransferBase> mooncake_transfer;
-#if defined(USE_NPU)
-    if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
-      auto xtensor_transfer = std::make_shared<MooncakeKVCacheTransferXTensor>(
-          device_id, transfer_listen_port, device);
-      if (!model_id.empty()) {
-        xtensor_transfer->set_model_id(model_id);
-        LOG(INFO)
-            << "XTensor mode enabled for MooncakeKVCacheTransfer, model_id="
-            << model_id;
-      }
-      mooncake_transfer = xtensor_transfer;
-    } else {
-      mooncake_transfer = std::make_shared<MooncakeKVCacheTransferDefault>(
-          device_id, transfer_listen_port, device, model_type);
+  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
+    auto xtensor_transfer = std::make_shared<MooncakeKVCacheTransferXTensor>(
+        device_id, transfer_listen_port, device);
+    if (!model_id.empty()) {
+      xtensor_transfer->set_model_id(model_id);
+      LOG(INFO) << "XTensor mode enabled for MooncakeKVCacheTransfer, model_id="
+                << model_id;
     }
-#else
+    mooncake_transfer = xtensor_transfer;
+  } else {
     mooncake_transfer = std::make_shared<MooncakeKVCacheTransferDefault>(
         device_id, transfer_listen_port, device, model_type);
-#endif
-
-    transfer = mooncake_transfer;
-  } else {
-    LOG(FATAL) << "Unsupported KVCacheTransfer type : " << transfer_type;
   }
+#else
+  mooncake_transfer = std::make_shared<MooncakeKVCacheTransferDefault>(
+      device_id, transfer_listen_port, device, model_type);
+#endif
+  transfer = mooncake_transfer;
 #endif
 
   return transfer;

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,6 +29,12 @@ limitations under the License.
 #include "common/macros.h"
 
 namespace xllm {
+
+inline constexpr std::string_view kDFlash2DraftModelType = "DFlash2DraftModel";
+
+inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
+  return model_type == kDFlash2DraftModelType;
+}
 
 struct ModelArgs {
   // Expose every plain-data field to the generic property reflection layer so
@@ -70,6 +76,26 @@ struct ModelArgs {
   // DSpark: low-rank dim of the Markov head. 0 = disabled (plain DFlash /
   // non-DSpark models).
   PROPERTY(int64_t, markov_rank) = 0;
+  PROPERTY(int32_t, dspark_num_layers) = 0;
+  PROPERTY(int32_t, dspark_block_size) = 0;
+  // True only when SparseAttnSharedkv accepts explicit DSpark SWA indices.
+  // False selects the CANN 9.0-compatible q_len=1 row fallback.
+  PROPERTY(bool, dspark_use_native_sas) = false;
+
+  // DSpark ConfidenceHead switches. When enabled, DSpark's ForCausalLM
+  // registers a `confidence_head.proj` layer used for adaptive-speculative
+  // pruning acceptance-probability estimation. `with_markov` toggles whether
+  // the head is applied on `concat(hidden, markov_embedding[prev])` (True in
+  // released dspark_qwen3_*b_block* checkpoints) or on `hidden` alone.
+  PROPERTY(bool, enable_confidence_head) = false;
+  PROPERTY(bool, confidence_head_with_markov) = false;
+
+  // DFlash2 local-convolution and candidate-selector geometry.
+  PROPERTY(int32_t, dflash2_block_size) = 0;
+  PROPERTY(int32_t, dflash2_conv_group_size) = 0;
+  PROPERTY(int32_t, dflash2_conv_kernel_size) = 0;
+  PROPERTY(int32_t, dflash2_selector_rank) = 0;
+  PROPERTY(int32_t, dflash2_selector_top_k) = 0;
 
   PROPERTY(bool, use_qk_norm) = false;
   PROPERTY(float, rms_norm_eps) = 0.0f;
@@ -435,6 +461,14 @@ struct ModelArgs {
 
   // number of speculative decoding tokens
   PROPERTY(int64_t, num_speculative_tokens) = 0;
+
+  // Enables the target-side runtime path for an embedded Eagle3 draft.
+  PROPERTY(bool, enable_embedded_eagle3_draft) = false;
+
+  // Workaround knob: maximum prefill requests admitted concurrently on each
+  // DP rank for models that need bounded prefill concurrency.
+  // Zero keeps the limit disabled.
+  PROPERTY(int32_t, max_concurrent_prefills_per_dp) = 0;
 
   // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};

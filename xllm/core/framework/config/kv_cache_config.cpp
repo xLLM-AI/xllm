@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,7 +27,7 @@ DEFINE_int32(block_size,
 DEFINE_int64(max_cache_size,
              0,
              "Max gpu memory size for kv cache. Default is 0, which means "
-             "cache size is caculated by available memory.");
+             "cache size is calculated by available memory.");
 
 DEFINE_double(max_memory_utilization,
               0.8,
@@ -46,7 +46,7 @@ DEFINE_string(indexer_cache_dtype,
               "Indexer cache data type for quantization. \"auto\" (default): "
               "Indexer cache dtype aligns with model dtype (no "
               "quantization). \"int8\": Enables INT8 quantization when "
-              "supported. Only supported on MLU backend.");
+              "supported. Supported on NPU and MLU backends.");
 
 DEFINE_bool(enable_prefix_cache,
             true,

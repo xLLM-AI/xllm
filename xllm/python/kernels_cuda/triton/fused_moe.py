@@ -117,10 +117,7 @@ def _fused_moe_activation_kernel(
         other=0.0,
     ).to(tl.float32)
     gate = tl.load(
-        input_ptr
-        + route * stride_input_route
-        + intermediate_size
-        + offsets,
+        input_ptr + route * stride_input_route + intermediate_size + offsets,
         mask=mask,
         other=0.0,
     ).to(tl.float32)
@@ -158,18 +155,13 @@ def _moe_sum_kernel(
     accumulator = tl.zeros((BLOCK,), dtype=tl.float32)
     for choice in range(top_k):
         values = tl.load(
-            input_ptr
-            + token * stride_input_token
-            + choice * stride_input_route
-            + features * stride_input_feature,
+            input_ptr + token * stride_input_token + choice * stride_input_route + features * stride_input_feature,
             mask=mask,
             other=0.0,
         )
         accumulator += values.to(tl.float32)
     tl.store(
-        output_ptr
-        + token * stride_output_token
-        + features * stride_output_feature,
+        output_ptr + token * stride_output_token + features * stride_output_feature,
         accumulator.to(output_ptr.dtype.element_ty),
         mask=mask,
     )
@@ -189,9 +181,7 @@ def _run_moe_gemm(
     output_size = weight.shape[1]
     block_output = 64
     block_input = 128
-    _fused_moe_gemm_kernel[
-        (num_tokens * top_k, triton.cdiv(output_size, block_output))
-    ](
+    _fused_moe_gemm_kernel[(num_tokens * top_k, triton.cdiv(output_size, block_output))](
         input,
         weight,
         output,
@@ -201,9 +191,7 @@ def _run_moe_gemm(
         top_k=top_k,
         input_size=input_size,
         output_size=output_size,
-        stride_input_token=(
-            input.stride(1) if input_is_per_route else input.stride(0)
-        ),
+        stride_input_token=(input.stride(1) if input_is_per_route else input.stride(0)),
         stride_input_feature=input.stride(-1),
         stride_weight_expert=weight.stride(0),
         stride_weight_input=weight.stride(2),

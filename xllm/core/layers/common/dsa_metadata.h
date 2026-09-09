@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -156,6 +156,12 @@ struct DSAMetadata {
   torch::Tensor c4_metadata;
   torch::Tensor c128_metadata;
   torch::Tensor qli_metadata;
+  // ori_win_left baked into c1/c4/c128_metadata. The attention operator checks
+  // this against its runtime window to catch metadata from another model.
+  int64_t sparse_metadata_ori_win_left = -1;
+  // Operator-explicit SWA indices (currently produced by DSpark native SAS).
+  // Request-level; shared across draft decoder layers.
+  torch::Tensor explicit_swa_indices;
 
   // hadamard: Hadamard transform matrix
   torch::Tensor hadamard;

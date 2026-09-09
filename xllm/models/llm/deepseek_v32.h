@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -93,7 +93,8 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
             tokens,
             cp_group_,
             cp_group_->rank(),
-            cp_group_->world_size());
+            cp_group_->world_size(),
+            cp_kv_shard_layout());
       }
     }
     if (!cp_ctx.has_value()) {
@@ -104,6 +105,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
           tokens, positions, kv_caches, modified_input_params);
     }
 
+    prepare_attention_metadata(attn_metadata);
     active_cp_context_ = &cp_ctx.value();
     torch::Tensor hidden_states = embed_mod()(tokens);
     hidden_states =

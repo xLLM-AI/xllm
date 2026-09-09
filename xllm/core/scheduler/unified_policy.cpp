@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -140,6 +140,13 @@ void UnifiedPolicy::schedule_from_unified_queue(
       if (sequence->finished()) {
         continue;
       }
+
+      // Allocation failure can release a Host match before this loop preempts a
+      // lower-priority request and retries the same candidate. Refresh the
+      // prefix tiers on every retry so chunk sizing uses the current restore
+      // boundary rather than discovering a longer Host prefix inside
+      // allocate().
+      allocate_shared_blocks_for(sequence.get(), state);
 
       const size_t unallocated_copy_units =
           remaining_copy_units_budget > allocated_copy_units
@@ -327,15 +334,22 @@ void UnifiedPolicy::schedule_from_unified_queue(
 
     // No enough memory to preempt.
     if (candidate_sequences.empty() && state.running_sequences.empty()) {
-      LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
-                 << "a single sequence.";
-      unified.pop_front();
-      clear_mtp_bootstrap(request.get(), state);
-      state.kv_cache_manager->deallocate(request.get());
-      state.response_processor->process_failed_request(
-          request,
-          {StatusCode::RESOURCE_EXHAUSTED,
-           "No enough resource to schedule a single sequence"});
+      if (state.kv_cache_manager->has_pending_async_block_release()) {
+        VLOG(1) << "[HostCache][AdmissionDeferred] request="
+                << request->request_id()
+                << " waiting for asynchronous block release";
+      } else {
+        LOG(ERROR)
+            << "Request prompt is too long, no enough memory to schedule "
+            << "a single sequence.";
+        unified.pop_front();
+        clear_mtp_bootstrap(request.get(), state);
+        state.kv_cache_manager->deallocate(request.get());
+        state.response_processor->process_failed_request(
+            request,
+            {StatusCode::RESOURCE_EXHAUSTED,
+             "No enough resource to schedule a single sequence"});
+      }
     }
     break;
   }

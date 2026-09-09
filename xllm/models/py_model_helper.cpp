@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +15,7 @@ limitations under the License.
 
 // Infrastructure for the embedded Python model executor:
 // - Interpreter lifecycle (ensure_python_interpreter)
-// - Weight loading (PyStateDict + PYBIND11_EMBEDDED_MODULE)
+// - Weight loading (PyStateDict Python binding)
 // - Config serialization (dtype_to_string, PyDictVisitor)
 
 #include "models/py_model_helper.h"
@@ -108,12 +108,12 @@ void ensure_python_interpreter() {
       }
 #endif
       try {
-        py::module_::import("xllm.python");
+        py::module_ python_package = py::module_::import("xllm.python");
+        python_package.attr("initialize_runtime")();
       } catch (const py::error_already_set& e) {
-        LOG(FATAL) << "Failed to import the 'xllm.python' model package for "
-                      "the Python model executor. Set --python_model_path (or "
-                      "XLLM_PYTHON_MODEL_PATH) to the directory containing the "
-                      "'xllm' package. Error: "
+        LOG(FATAL) << "Failed to initialize the 'xllm.python' model runtime. "
+                      "Set --python_model_path (or XLLM_PYTHON_MODEL_PATH) to "
+                      "the directory containing the 'xllm' package. Error: "
                    << e.what();
       }
     }
@@ -147,11 +147,22 @@ py::list PyStateDict::keys() const {
   return result;
 }
 
-PYBIND11_EMBEDDED_MODULE(xllm_weight_loader, m) {
-  py::class_<PyStateDict>(m, "StateDict")
+void ensure_xllm_weight_loader_module() {
+  py::module_ sys = py::module_::import("sys");
+  py::dict modules = py::reinterpret_borrow<py::dict>(sys.attr("modules"));
+  const py::str module_name("xllm_weight_loader");
+  if (modules.contains(module_name)) {
+    return;
+  }
+
+  py::object module_object =
+      py::module_::import("types").attr("ModuleType")(module_name);
+  py::module_ module = py::reinterpret_borrow<py::module_>(module_object);
+  py::class_<PyStateDict>(module, "StateDict")
       .def("get_tensor", &PyStateDict::get_tensor, py::arg("name"))
       .def("has", &PyStateDict::has, py::arg("name"))
       .def("keys", &PyStateDict::keys);
+  modules[module_name] = module;
 }
 
 }  // namespace xllm

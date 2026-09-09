@@ -271,7 +271,7 @@ The current branch organizes the generative recommendation path as follows.
 External integration:
 - `xllm/c_api/rec.h`
 - `xllm/c_api/internal/rec.cpp`
-- `xllm/c_api/examples/simple_rec_completions.cpp`
+- `xllm/c_api/examples/test_query_rec_completions.cpp`
 
 Service entry:
 - `xllm/api_service/rec_completion_service_impl.cpp`
@@ -397,11 +397,11 @@ If the goal is to understand how `predictor` or the shared-library integration e
 - `xllm/c_api/internal/rec.cpp`
   - the actual CAPI implementation
   - useful for seeing how request parameters are wrapped and forwarded in `.so` mode
-- `xllm/c_api/examples/simple_rec_completions.cpp`
-  - the smallest runnable example
-  - useful when explaining what a dynamic-library integration looks like in practice
+- `xllm/c_api/examples/test_query_rec_completions.cpp`
+  - the current C API usage example for a recommendation token-completion request
+  - useful for tracing initialization and request construction in a dynamic-library integration
 
-If the technical-sharing version needs one “minimal usage example”, this is the best layer to cite first.
+If the technical-sharing version needs a C API usage example, this is the best layer to cite first.
 
 ### 8.2 Then read the service entry layer
 

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -62,6 +62,10 @@ class PyAttentionMetadataView final {
                           const ModelInputParams& params);
 
   const torch::Tensor& slot_mapping() const;
+  pybind11::object local_slot_mapping() const;
+  int32_t kv_split_size() const;
+  int32_t kv_split_rank() const;
+  bool has_kv_shard() const;
   const torch::Tensor& paged_kv_indptr() const;
   const torch::Tensor& paged_kv_indices() const;
   const torch::Tensor& paged_kv_last_page_len() const;
@@ -70,25 +74,56 @@ class PyAttentionMetadataView final {
   pybind11::object kv_cu_seq_lens() const;
   pybind11::object kv_seq_lens_host() const;
   const std::vector<int32_t>& kv_seq_lens_host_values() const;
+  pybind11::object q_seq_lens_host() const;
+  pybind11::list multi_block_tables() const;
   pybind11::object block_table() const;
   pybind11::object kv_seq_lens() const;
   pybind11::object linear_state_indices() const;
   pybind11::object has_initial_state() const;
-  const std::vector<int32_t>& dp_token_counts() const;
+  const std::vector<int32_t>& dp_execution_token_counts() const;
+  const std::vector<int32_t>& dp_is_decode() const;
   pybind11::object q_seq_lens() const;
   PyExpandedDecodeMetadataView expanded_decode_metadata() const;
+  int64_t max_query_len() const;
+  int64_t max_seq_len() const;
+  pybind11::object dsa_metadata() const;
+  void set_dsa_metadata(pybind11::object value);
+  pybind11::object dsa_positions() const;
+  void set_dsa_positions(pybind11::object value);
+  pybind11::object dsa_cos_sin() const;
+  void set_dsa_cos_sin(pybind11::object value);
+  pybind11::object dsa_c4_cos_sin() const;
+  void set_dsa_c4_cos_sin(pybind11::object value);
+  pybind11::object dsa_c128_cos_sin() const;
+  void set_dsa_c128_cos_sin(pybind11::object value);
+  int64_t dsa_graph_block_table_cols() const;
+  void set_dsa_graph_block_table_cols(int64_t value);
+  bool dsa_graph_mode() const;
+  void set_dsa_graph_mode(bool value);
   bool is_prefill() const;
   bool is_chunked_prefill() const;
+  bool is_mixed() const;
+  bool is_spec_verify() const;
 
  private:
-  static torch::Tensor make_kv_seq_lens_host(
-      const std::shared_ptr<layer::AttentionMetadata>& metadata);
-  static pybind11::object optional_tensor(const torch::Tensor& tensor);
+  static torch::Tensor make_host_int32_view(
+      const std::shared_ptr<layer::AttentionMetadata>& metadata,
+      std::vector<int32_t>& host_vec);
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
   torch::Tensor kv_seq_lens_host_;
+  torch::Tensor q_seq_lens_host_;
+  std::vector<torch::Tensor> multi_block_tables_;
   torch::Tensor linear_state_indices_;
-  std::vector<int32_t> dp_token_counts_;
+  std::vector<int32_t> dp_execution_token_counts_;
+  std::vector<int32_t> dp_is_decode_;
+  std::shared_ptr<void> dsa_metadata_holder_;
+  torch::Tensor dsa_positions_;
+  torch::Tensor dsa_cos_sin_;
+  torch::Tensor dsa_c4_cos_sin_;
+  torch::Tensor dsa_c128_cos_sin_;
+  int64_t dsa_graph_block_table_cols_ = 0;
+  bool dsa_graph_mode_ = false;
 };
 
 }  // namespace xllm

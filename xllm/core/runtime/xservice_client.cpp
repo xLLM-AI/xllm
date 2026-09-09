@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,7 +35,7 @@ namespace xllm {
 namespace {
 static std::string ETCD_MASTER_SERVICE_KEY = "XLLM:SERVICE:MASTER";
 static std::string ETCD_XSERVICES_KEY_PREFIX =
-    "XLLM:SERVICE:";  // all xllm_service registeration prefix
+    "XLLM:SERVICE:";  // all xllm_service registration prefix
 constexpr const char* kEtcdUsernameEnvVar = "ETCD_USERNAME";
 constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 static std::unordered_map<xllm_service::proto::InstanceType, std::string>

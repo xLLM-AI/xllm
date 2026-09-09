@@ -14,18 +14,19 @@
 
 """CUDA kernels.
 
-``xllm/python/__init__.py`` binds this package as ``xllm.python.kernels`` when
-the active platform is CUDA, so layers and models import one fixed path and
-carry no hardware branch. Its peers -- ``kernels_npu`` and any package added for
-new hardware -- are bound the same way on their own platform. Exactly one of
-them is imported in a process; they share no code and never import each other.
-``setup.py`` ships only the package matching ``--device``.
+``xllm.python.initialize_runtime()`` binds this package as
+``xllm.python.kernels`` when the active platform is CUDA, so layers and models
+import one fixed path and carry no hardware branch. Its peers -- ``kernels_npu``
+and any package added for new hardware -- are bound the same way on their own
+platform. Exactly one of them is imported in a process; they share no code and
+never import each other. ``setup.py`` ships only the package matching
+``--device``.
 
-Launchers live under ``triton/`` and ``flashinfer/``; the modules here bind one
-kernel per name in ``__all__``. Peer packages export the same names, so a name
-without a CUDA kernel is still exported here, raising
-:class:`NotImplementedError` and carrying the signature an implementation has
-to meet.
+Launchers live under ``triton/`` and ``flashinfer/``; the modules here bind the
+public CUDA kernel API declared in ``__all__``. Peer packages own their APIs
+independently and need not export the same names. Existing unsupported stubs
+remain explicit CUDA failure paths, but they are not a cross-platform export
+contract.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from .activation import silu_and_mul
 from .attention import (
     reshape_paged_cache,
     update_decode_graph_metadata,
+    vision_fusion_attention,
 )
 from .causal_conv1d import (
     causal_conv1d_decode,
@@ -59,6 +61,7 @@ from .moe import (
 )
 from .normalization import (
     fused_add_rms_norm,
+    gemma_rms_norm,
     l2_norm,
     rms_norm,
     rms_norm_gated,
@@ -71,25 +74,32 @@ from .quantization import (
 from .rotary_embedding import (
     fused_qk_norm_rope,
     interleaved_rotary_embedding,
+    mrope,
+    vision_rotary_mul,
 )
 from .sparse_attention import (
     lightning_indexer,
     lightning_indexer_out,
     scatter_nd_update,
     sparse_flash_attention,
+    sparse_flash_attention_lse,
     sparse_flash_attention_out,
 )
 
 __all__ = [
     "rms_norm",
+    "gemma_rms_norm",
     "fused_add_rms_norm",
     "l2_norm",
     "rms_norm_gated",
     "silu_and_mul",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
+    "vision_fusion_attention",
     "fused_qk_norm_rope",
     "interleaved_rotary_embedding",
+    "mrope",
+    "vision_rotary_mul",
     "moe_fused_topk",
     "cutlass_fused_moe",
     "fused_moe",
@@ -105,6 +115,7 @@ __all__ = [
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",
+    "sparse_flash_attention_lse",
     "causal_conv1d_prefill",
     "causal_conv1d_decode",
     "resolve_gdn_prefill_backend",

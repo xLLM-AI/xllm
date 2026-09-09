@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,12 +31,17 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
+#if defined(USE_MUSA)
+#include "layers/common/attention_metadata.h"
+#endif
 #include "models/vlm/mposition/mposition.h"
 #include "runtime/params_utils.h"
 #include "util/blocking_counter.h"
@@ -96,7 +101,7 @@ std::vector<int32_t> build_q_cu_seq_lens_vec(
   if (q_seq_lens.empty()) {
     return q_cu_seq_lens;
   }
-#if defined(USE_NPU) || defined(USE_MUSA)
+#if defined(USE_NPU)
   q_cu_seq_lens.reserve(q_seq_lens.size());
   int32_t cum_seq_len = 0;
   for (int32_t q_len : q_seq_lens) {
@@ -216,6 +221,8 @@ BatchInputBuilder::BatchInputBuilder(
       input_embeddings_vec_(input_embeddings_vec),
       mm_data_vec_(mm_data_vec),
       args_(args),
+      enable_json_object_output_(
+          ServiceConfig::get_instance().enable_json_object_output()),
       thread_pool_(thread_pool),
       num_sequences_(sequences.size()),
       swap_block_transfer_infos_(swap_block_transfer_infos),
@@ -229,6 +236,16 @@ BatchInputBuilder::BatchInputBuilder(
   state_.block_tables_vec.reserve(sequences.size());
   state_.acc_logprob_vec.reserve(sequences.size());
   state_.mtp_shifted_token_ids.reserve(reserve_size);
+  const EPLBConfig& eplb_config = EPLBConfig::get_instance();
+  build_eplb_decode_token_mask_ = eplb_config.enable_eplb();
+  if (build_eplb_decode_token_mask_) {
+    state_.eplb_decode_token_mask.reserve(reserve_size);
+  }
+  is_graph_warmup_ =
+      !sequences_.empty() &&
+      std::all_of(sequences_.begin(), sequences_.end(), [](Sequence* sequence) {
+        return sequence != nullptr && sequence->is_graph_warmup();
+      });
   state_.mtp_bootstrap_embeddings.reserve(sequences.size());
   state_.mtp_bootstrap_row_idxes.reserve(sequences.size());
   if (args_ != nullptr) {
@@ -247,6 +264,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
 
   TransferKVInfo info;
   info.request_id = full_info.request_id;
+  info.rank_local_mapping = full_info.rank_local_mapping;
   info.dp_rank = full_info.dp_rank;
   info.remote_instance_info = full_info.remote_instance_info;
   info.dst_xtensor_layer_offsets.clear();
@@ -301,6 +319,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
     }
 
     const bool is_flat_kv = block_type.value() == BlockType::KV;
+    const bool uses_kv_split = is_kv_split_cache_block_type(block_type.value());
     const size_t next_transfer_idx =
         is_flat_kv ? sequence->kv_state().next_transfer_block_idx()
                    : sequence->kv_state().next_group_transfer_block_idx(
@@ -308,8 +327,9 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
     const size_t win_end =
         static_cast<size_t>(util::ceil_div(seq_len, block_size));
     const size_t map_end = std::min(win_end, local_ids.size());
-    const size_t remote_stride =
-        is_flat_kv ? static_cast<size_t>(kv_split_size) : 1;
+    const size_t remote_stride = uses_kv_split && !full_info.rank_local_mapping
+                                     ? static_cast<size_t>(kv_split_size)
+                                     : 1;
     CHECK_GT(remote_stride, static_cast<size_t>(0));
     const size_t remote_shared_num =
         static_cast<size_t>(full_mapping.remote_shared_num);
@@ -573,6 +593,18 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.sampling_params.insert(state_.sampling_params.end(),
                                   state.sampling_params.begin(),
                                   state.sampling_params.end());
+    if (enable_json_object_output_) {
+      state_.json_object_states.insert(state_.json_object_states.end(),
+                                       state.json_object_states.begin(),
+                                       state.json_object_states.end());
+      state_.sample_sequence_ids.insert(state_.sample_sequence_ids.end(),
+                                        state.sample_sequence_ids.begin(),
+                                        state.sample_sequence_ids.end());
+      state_.sample_prior_output_rows.insert(
+          state_.sample_prior_output_rows.end(),
+          state.sample_prior_output_rows.begin(),
+          state.sample_prior_output_rows.end());
+    }
     int32_t sample_idxes_offset =
         static_cast<int32_t>(state_.sample_idxes.size());
     for (const auto& idx : state.sample_idxes) {
@@ -589,17 +621,14 @@ void BatchInputBuilder::process_sequences_multithreaded() {
                                         state.unique_token_lens_vec.end());
     state_.max_seq_len = std::max(state_.max_seq_len, state.max_seq_len);
     state_.q_max_seq_len = std::max(state_.q_max_seq_len, state.q_max_seq_len);
-#if defined(USE_NPU) || defined(USE_MUSA)
+#if defined(USE_NPU)
     state_.seq_lens.insert(
         state_.seq_lens.end(), state.seq_lens.begin(), state.seq_lens.end());
     state_.q_seq_lens.insert(state_.q_seq_lens.end(),
                              state.q_seq_lens.begin(),
                              state.q_seq_lens.end());
-    state_.kv_cache_tokens_nums.insert(state_.kv_cache_tokens_nums.end(),
-                                       state.kv_cache_tokens_nums.begin(),
-                                       state.kv_cache_tokens_nums.end());
-#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU)
+#elif defined(USE_MUSA) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_ILU) || defined(USE_DCU)
     int32_t seq_len_offset = state_.seq_lens.back();
     // skip the first element which is 0
     for (size_t i = 1; i < state.seq_lens.size(); ++i) {
@@ -609,6 +638,12 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     for (size_t i = 1; i < state.q_seq_lens.size(); ++i) {
       state_.q_seq_lens.emplace_back(state.q_seq_lens[i] + q_seq_len_offset);
     }
+#endif
+
+#if defined(USE_NPU) || defined(USE_MUSA)
+    state_.kv_cache_tokens_nums.insert(state_.kv_cache_tokens_nums.end(),
+                                       state.kv_cache_tokens_nums.begin(),
+                                       state.kv_cache_tokens_nums.end());
 #endif
     state_.new_token_slot_ids.insert(state_.new_token_slot_ids.end(),
                                      state.new_token_slot_ids.begin(),
@@ -637,6 +672,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.mtp_shifted_token_ids.insert(state_.mtp_shifted_token_ids.end(),
                                         state.mtp_shifted_token_ids.begin(),
                                         state.mtp_shifted_token_ids.end());
+    state_.eplb_decode_token_mask.insert(state_.eplb_decode_token_mask.end(),
+                                         state.eplb_decode_token_mask.begin(),
+                                         state.eplb_decode_token_mask.end());
     for (int32_t row_idx : state.mtp_bootstrap_row_idxes) {
       state_.mtp_bootstrap_row_idxes.emplace_back(row_offset + row_idx);
     }
@@ -725,7 +763,7 @@ void BatchInputBuilder::process_single_sequence(
   state.seq_lens.push_back(seq_len);
   state.q_seq_lens.push_back(padded_q_seq_len);
 #elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU)
+    defined(USE_DCU) || defined(USE_MUSA)
   state.seq_lens.push_back(state.seq_lens.back() + seq_len);
   state.q_seq_lens.push_back(state.q_seq_lens.back() + padded_q_seq_len);
 #endif
@@ -735,6 +773,12 @@ void BatchInputBuilder::process_single_sequence(
   // Process tokens and positions
   extract_tokens_and_positions(
       sequence, n_kv_cache_tokens, logical_seq_len, state_ptr);
+  if (build_eplb_decode_token_mask_) {
+    state.eplb_decode_token_mask.insert(
+        state.eplb_decode_token_mask.end(),
+        static_cast<size_t>(padded_q_seq_len),
+        sequence->stage() == SequenceStage::DECODE);
+  }
 
   // Setup KV cache
   setup_kv_cache_info(sequence,
@@ -938,6 +982,15 @@ void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
   state.selected_token_idxes.push_back(
       static_cast<int32_t>(state.flatten_tokens_vec.size() - 1));
   state.sampling_params.push_back(sequence->sampling_param());
+  if (enable_json_object_output_) {
+    const JsonObjectGrammarState* json_state = sequence->json_object_state();
+    state.json_object_states.push_back(
+        json_state == nullptr ? JsonObjectGrammarState() : *json_state);
+    state.sample_sequence_ids.emplace_back(sequence->sample_sequence_id());
+    const int32_t sampled_input_token = state.flatten_tokens_vec.back();
+    state.sample_prior_output_rows.emplace_back(
+        sampled_input_token < 0 ? -sampled_input_token - 1 : -1);
+  }
   state.sample_idxes.push_back(
       static_cast<int32_t>(state.selected_token_idxes.size() - 1));
 
@@ -1111,12 +1164,15 @@ void BatchInputBuilder::padding_decode_batch_size(
                 torch::zeros({3, 1}, torch::kInt));
           }
           state_.new_token_slot_ids.emplace_back(0);
+          if (build_eplb_decode_token_mask_) {
+            state_.eplb_decode_token_mask.emplace_back(0);
+          }
         }
-#if defined(USE_NPU) || defined(USE_MUSA)
+#if defined(USE_NPU)
         state_.seq_lens.push_back(num_decoding_tokens);
         state_.q_seq_lens.push_back(num_decoding_tokens);
 #elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU)
+    defined(USE_MUSA) || defined(USE_DCU)
         state_.seq_lens.push_back(state_.seq_lens.back() + num_decoding_tokens);
         state_.q_seq_lens.push_back(state_.q_seq_lens.back() +
                                     num_decoding_tokens);
@@ -1160,6 +1216,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.meta.num_sequences = static_cast<int32_t>(num_sequences_);
   input_params.meta.kv_max_seq_len = state_.max_seq_len;
   input_params.meta.q_max_seq_len = state_.q_max_seq_len;
+  input_params.meta.is_graph_warmup = is_graph_warmup_;
   input_params.attention.device.kv_seq_lens =
       torch::tensor(state_.seq_lens, torch::kInt);
   input_params.attention.device.kv_cache_tokens_nums =
@@ -1178,6 +1235,24 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.attention.device.new_cache_slots =
       torch::tensor(state_.new_token_slot_ids, torch::kInt);
 
+#if defined(USE_MUSA)
+  auto paged_kv_indptr_cpu = torch::tensor(state_.paged_kv_indptr, torch::kInt);
+  auto paged_kv_indices_cpu =
+      torch::tensor(state_.paged_kv_indices, torch::kInt);
+  auto paged_kv_last_page_len_cpu =
+      torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
+  input_params.attention.device.paged_kv_indptr = paged_kv_indptr_cpu;
+  input_params.attention.device.paged_kv_indices = paged_kv_indices_cpu;
+  input_params.attention.device.paged_kv_last_page_len =
+      paged_kv_last_page_len_cpu;
+  // Seed common AttentionMetadata FA3 host mirrors for graph/plan updates.
+  auto attn_metadata = std::make_shared<layer::AttentionMetadata>();
+  attn_metadata->fa3_metadata.paged_kv_indptr_host = paged_kv_indptr_cpu;
+  attn_metadata->fa3_metadata.paged_kv_indices_host = paged_kv_indices_cpu;
+  attn_metadata->fa3_metadata.paged_kv_last_page_len_host =
+      paged_kv_last_page_len_cpu;
+  input_params.attn_metadata = std::move(attn_metadata);
+#else
   // for flashinfer
   input_params.attention.device.paged_kv_indptr =
       torch::tensor(state_.paged_kv_indptr, torch::kInt);
@@ -1185,6 +1260,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
       torch::tensor(state_.paged_kv_indices, torch::kInt);
   input_params.attention.device.paged_kv_last_page_len =
       torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
+#endif
 
   // Setup multimodal data
   std::vector<MMData> batch_mm_data_vec = mm_data_vec_;
@@ -1242,6 +1318,13 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
     }
   }
   input_params.meta.batch_id = batch_id_;
+  if (build_eplb_decode_token_mask_) {
+    CHECK_EQ(state_.eplb_decode_token_mask.size(),
+             state_.flatten_tokens_vec.size())
+        << "EPLB decode mask must align with flattened tokens.";
+    input_params.expert.eplb_decode_token_mask =
+        torch::tensor(state_.eplb_decode_token_mask, torch::kBool);
+  }
 
   forward_input.transfer_kv_infos = std::move(state_.transfer_kv_infos);
   process_swap_block_infos(forward_input);
@@ -1258,6 +1341,62 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
                                        state_.unique_token_ids_vec,
                                        state_.unique_token_counts_vec,
                                        state_.unique_token_lens_vec);
+    if (!enable_json_object_output_) {
+      return forward_input;
+    }
+    forward_input.json_object_states = std::move(state_.json_object_states);
+    std::vector<std::string> sample_sequence_ids =
+        std::move(state_.sample_sequence_ids);
+    std::vector<int32_t> sample_prior_output_rows =
+        std::move(state_.sample_prior_output_rows);
+    CHECK_EQ(sample_sequence_ids.size(),
+             forward_input.json_object_states.size());
+    CHECK_EQ(sample_prior_output_rows.size(),
+             forward_input.json_object_states.size());
+    if (state_.sample_idxes.size() != forward_input.json_object_states.size()) {
+      std::vector<JsonObjectGrammarState> sampled_states;
+      sampled_states.reserve(state_.sample_idxes.size());
+      std::vector<std::string> sampled_sequence_ids;
+      sampled_sequence_ids.reserve(state_.sample_idxes.size());
+      std::vector<int32_t> sampled_prior_output_rows;
+      sampled_prior_output_rows.reserve(state_.sample_idxes.size());
+      for (const int32_t sample_idx : state_.sample_idxes) {
+        CHECK_GE(sample_idx, 0);
+        CHECK_LT(static_cast<size_t>(sample_idx),
+                 forward_input.json_object_states.size());
+        sampled_states.push_back(forward_input.json_object_states[sample_idx]);
+        sampled_sequence_ids.emplace_back(sample_sequence_ids[sample_idx]);
+        sampled_prior_output_rows.emplace_back(
+            sample_prior_output_rows[sample_idx]);
+      }
+      forward_input.json_object_states = std::move(sampled_states);
+      sample_sequence_ids = std::move(sampled_sequence_ids);
+      sample_prior_output_rows = std::move(sampled_prior_output_rows);
+    }
+    const bool has_json_object_state =
+        std::any_of(forward_input.json_object_states.begin(),
+                    forward_input.json_object_states.end(),
+                    [](const JsonObjectGrammarState& state) {
+                      return state.initialized();
+                    });
+    if (has_json_object_state) {
+      forward_input.sampling_params.filter_bitmask =
+          build_json_object_filter_bitmask(forward_input.json_object_states);
+      // JSON rows use the compact packed mask. Keep the generic dense API
+      // available for other callers without constructing a dense JSON mask.
+      forward_input.sampling_params.filter_mask = torch::Tensor();
+      forward_input.sample_sequence_ids = std::move(sample_sequence_ids);
+      forward_input.sample_prior_output_rows =
+          std::move(sample_prior_output_rows);
+      forward_input.json_object_state_snapshots.reserve(
+          forward_input.json_object_states.size());
+      for (const auto& json_state : forward_input.json_object_states) {
+        forward_input.json_object_state_snapshots.push_back(
+            json_state.snapshot());
+      }
+    } else {
+      forward_input.json_object_states.clear();
+    }
   }
 
   return forward_input;
@@ -1277,7 +1416,7 @@ void BatchInputBuilder::process_swap_block_infos(ForwardInput& forward_input) {
               [](const BlockTransferInfo& a, const BlockTransferInfo& b) {
                 return a.src_block_id < b.src_block_id;
               });
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_MUSA)
     input_params.block_copy.swap_blocks.insert(
         input_params.block_copy.swap_blocks.end(),
         swap_blocks.begin(),

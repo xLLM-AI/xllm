@@ -7,6 +7,7 @@ cc_library(
     attention.h
     dcp_attention_merge.h
     dcp_decode_context.h
+    dcp_indexer_candidate.h
     dsa_topk_relay.h
     dsa_topk_state.h
     deepseek_v2_attention.h
@@ -17,6 +18,7 @@ cc_library(
     deepseek_v4/dsa_cache_mapping.h
     deepseek_v4/dsa_empty_dp_input.h
     deepseek_v4/dsa_metadata_builder_mlu.h
+    deepseek_v4/deepseek_v4_cp_context.h
     deepseek_v4/deepseek_v4_indexer.h
     deepseek_v4/deepseek_v4_attention.h
     deepseek_v4/deepseek_v4_decoder_layer.h
@@ -36,6 +38,7 @@ cc_library(
     attention.cpp
     dcp_attention_merge.cpp
     dcp_decode_context.cpp
+    dcp_indexer_candidate.cpp
     deepseek_v2_attention.cpp
     deepseek_v2_attention_dcp.cpp
     deepseek_v2_attention_sp.cpp
@@ -45,6 +48,7 @@ cc_library(
     deepseek_v4/compressor.cpp
     deepseek_v4/dsa_empty_dp_input.cpp
     deepseek_v4/dsa_metadata_builder_mlu.cpp
+    deepseek_v4/deepseek_v4_cp_context.cpp
     deepseek_v4/deepseek_v4_indexer.cpp
     deepseek_v4/deepseek_v4_attention.cpp
     deepseek_v4/deepseek_v4_decoder_layer.cpp

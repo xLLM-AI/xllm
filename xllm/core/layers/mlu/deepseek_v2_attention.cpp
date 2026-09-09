@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,6 +23,19 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+
+DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(const ModelContext& context,
+                                                 bool enable_indexer)
+    : DeepseekV2AttentionImpl(context.get_model_args(),
+                              context.get_quant_args(),
+                              context.get_parallel_args(),
+                              context.get_tensor_options(),
+                              context.get_optimization_config(),
+                              enable_indexer) {
+  sp_comm_stream_ =
+      context.stream_registry()->get(ExecutionStreamRole::COMMUNICATION);
+}
+
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     const ModelArgs& args,
     const QuantArgs& quant_args,
@@ -55,9 +68,16 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     dcp_spans_tp_ =
         parallel_args.dcp_group_->world_size() > parallel_args.cp_size();
   }
+  // Attention weights are replicated (each rank computes all heads) only when
+  // there is no tensor-parallel dimension to shard heads across (world == cp)
+  // or when the DCP KV-split path (which assumes full heads) is active.
+  // Otherwise, when CP x TP are orthogonal (world > cp), sequence-parallel
+  // attention TP-shards the heads: each rank computes heads / tp_size on its
+  // local sequence shard and a TP all-reduce merges the head shards.
   use_full_replicated_attention_weights_ =
       parallel_args.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
-      parallel_args.world_size() == parallel_args.cp_size();
+      (parallel_args.world_size() == parallel_args.cp_size() ||
+       parallel_args.kv_split_size_effective() > 1);
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();
@@ -495,10 +515,12 @@ DeepseekV2AttentionImpl::ForwardResult DeepseekV2AttentionImpl::forward(
         .layout = PostAttnLayout::kPackedLocal,
     };
   }
+  const AttentionMetadata& local_attn_metadata =
+      sp_ctx == nullptr ? attn_metadata : sp_ctx->local_attn_metadata;
   return {
       .output = forward_normal_tp(positions,
                                   hidden_states,
-                                  attn_metadata,
+                                  local_attn_metadata,
                                   kv_cache,
                                   is_prefill_or_chunked_prefill,
                                   topk_transfer),

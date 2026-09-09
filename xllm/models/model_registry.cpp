@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/util/dit_model_discovery.h"
 #include "llm/py_causal_lm.h"
 #include "models.h"
@@ -72,7 +73,9 @@ constexpr char kTorchBackend[] = "TORCH";
 bool is_torch_only_model_type(const std::string& model_type) {
   static const std::unordered_set<std::string> kTorchOnlyModelTypes = {
       "deepseek_v4",
+      "deepseek_v4_dspark",
       "deepseek_v4_mtp",
+      "glm5_next",
       "qwen3_5",
       "qwen3_5_text",
       "qwen3_5_moe",
@@ -81,7 +84,8 @@ bool is_torch_only_model_type(const std::string& model_type) {
       "qwen3_5_moe_mtp",
       "qwen3_next",
       "minimax_m2"};
-  return kTorchOnlyModelTypes.count(model_type) != 0;
+  return kTorchOnlyModelTypes.count(model_type) != 0 ||
+         is_dflash2_draft_model_type(model_type);
 }
 #endif
 
@@ -120,7 +124,8 @@ bool resolve_model_registration(const std::string& model_type,
              model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
              model_type == "qwen3_vl" || model_type == "deepseek_v32_mtp") {
     // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/qwen3_vl/deepseek_v32_mtp
-    // support both backends.
+    // support both backends. qwen3_vl on TORCH is used by the Python model
+    // executor (--model_impl=python implements its own ViT + deepstack).
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {
@@ -193,11 +198,24 @@ bool is_npu_model_cp_capable(const std::string& resolved_name) {
   static std::once_flag once;
   std::call_once(once, []() {
     for (const std::string& name : kCpCapableModels) {
-      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::NPU_MODEL);
+      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
     }
   });
-  return ModelRegistry::get_cp_sharding_mode(resolved_name) ==
-         CpShardingMode::NPU_MODEL;
+  return kCpCapableModels.contains(resolved_name);
+}
+
+bool is_mlu_model_cp_capable(const std::string& resolved_name) {
+  static const std::unordered_set<std::string> kCpCapableModels = {
+      "deepseek_v4",
+      "glm_moe_dsa",
+  };
+  static std::once_flag once;
+  std::call_once(once, []() {
+    for (const std::string& name : kCpCapableModels) {
+      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
+    }
+  });
+  return kCpCapableModels.contains(resolved_name);
 }
 
 ModelRegistry* ModelRegistry::get_instance() {
@@ -531,6 +549,16 @@ std::unique_ptr<CausalLM> create_rec_model(const ModelContext& context) {
 }
 
 std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
+  // Python model executor: build the graph in Python (Qwen3VLForConditional-
+  // Generation etc.). PyCausalLM is-a CausalVLM so it satisfies this factory's
+  // return type; PyExecutorImpl drives encode/get_input_embeddings via pybind.
+  // Read from the global ModelConfig (the VLM worker does not populate
+  // context.model_impl, unlike the LLM worker).
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    return std::make_unique<PyCausalLM>(context);
+  }
+
   std::string resolved_name;
   std::string error_message;
   if (!resolve_model_registration_name(context.get_model_args().model_type(),

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,6 @@ limitations under the License.
 
 #include <atomic>
 #include <boost/algorithm/string.hpp>
-#include <csignal>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -37,10 +36,12 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
-volatile bool DiTAssistantMaster::running_ = false;
-
 DiTMaster::DiTMaster(const Options& options)
     : Master(options, EngineType::DIT) {
+  if (!is_leader()) {
+    return;
+  }
+
   CHECK(engine_->init());
 
   DiTScheduler::Options scheduler_options;
@@ -120,7 +121,6 @@ void DiTMaster::handle_request(DiTRequestParams params,
 void DiTMaster::handle_batch_request(std::vector<DiTRequestParams> params_vec,
                                      BatchDiTOutputCallback callback) {
   const size_t num_requests = params_vec.size();
-  scheduler_->incr_pending_requests(num_requests);
   for (size_t i = 0; i < num_requests; ++i) {
     handle_request(std::move(params_vec[i]),
                    std::nullopt,
@@ -132,6 +132,11 @@ void DiTMaster::handle_batch_request(std::vector<DiTRequestParams> params_vec,
 }
 
 void DiTMaster::run() {
+  if (!is_leader()) {
+    Master::run();
+    return;
+  }
+
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "DiTMaster is already running.";
@@ -161,38 +166,6 @@ void DiTMaster::generate() {
   running_.store(true, std::memory_order_relaxed);
   scheduler_->generate();
   running_.store(false, std::memory_order_relaxed);
-}
-
-DiTAssistantMaster::DiTAssistantMaster(const Options& options)
-    : Master(options, EngineType::DIT) {
-  // setup process workers
-  auto master_node_addr = options_.master_node_addr().value_or("");
-  // TODO: support local unix domain socket later.
-  if (master_node_addr.empty()) {
-    LOG(FATAL)
-        << "MultiNodeEngine required master_node_addr, current value is empty.";
-    return;
-  }
-
-  running_ = true;
-}
-
-DiTAssistantMaster::~DiTAssistantMaster() {
-  // wait for the loop thread to finish
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
-}
-
-void DiTAssistantMaster::run() {
-  signal(SIGINT, DiTAssistantMaster::handle_signal);
-  signal(SIGTERM, DiTAssistantMaster::handle_signal);
-
-  loop_thread_ = std::thread([this]() {
-    while (running_) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-    }
-  });
 }
 
 }  // namespace xllm

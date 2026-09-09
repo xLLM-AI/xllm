@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
+#include "common/metrics.h"
 #include "framework/encoder_cache/encoder_cache.h"
 #include "processors/processor_cache.h"
 
@@ -439,6 +440,7 @@ bool EncoderCacheLookupVisitor::visit(MMDataItem& item) {
   }
   std::optional<torch::Tensor> cached =
       cache_->lookup(item.state().schedule_data().key);
+  HISTOGRAM_OBSERVE(encoder_cache_hit_rate, cached.has_value() ? 100 : 0);
   if (!cached.has_value()) {
     return true;
   }

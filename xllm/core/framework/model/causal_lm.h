@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -51,6 +51,14 @@ struct AttentionMetadata;
 
 struct ModelGraphMetadataState {
   virtual ~ModelGraphMetadataState() = default;
+};
+
+struct DFlash2CandidateOutput {
+  // Candidate vocabulary ids [batch, draft_steps, top_k]. Edge logits use
+  // [batch, draft_steps, predecessor_top_k, successor_top_k]; at step zero
+  // every predecessor entry represents the same anchor token.
+  torch::Tensor candidate_ids;
+  torch::Tensor edge_logits;
 };
 
 class CausalLM : public torch::nn::Module {
@@ -139,8 +147,13 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
     return nullptr;
   }
+  virtual bool has_restored_npu_word_embedding() { return false; }
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     NOT_IMPLEMENTED();
+  }
+  virtual void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) {
+    set_npu_word_embedding(embedding);
   }
 
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,
@@ -183,6 +196,14 @@ class CausalLM : public torch::nn::Module {
     return {};
   }
 
+  virtual DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
+
   // DSpark-specific low-rank Markov projection. The draft worker owns the
   // sequential sampling lifecycle; the model owns only the trained weights and
   // bias computation.
@@ -191,6 +212,19 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
     return {};
   }
+
+  // DSpark ConfidenceHead: acceptance-prob estimate for adaptive-speculative
+  // pruning over the whole draft block. hidden_all [num_reqs, num_spec, H],
+  // prev_matrix [num_reqs, num_spec]; returns [num_reqs, num_spec] fp32 in
+  // [0, 1]. When the confidence head is absent (not built or feature disabled),
+  // returns an undefined tensor; the worker falls back to the sampler-gathered
+  // draft prob.
+  virtual torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) {
+    return {};
+  }
+  virtual bool has_dspark_confidence_head() const { return false; }
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
@@ -301,12 +335,40 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
+  DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) override {
+    if constexpr (detail::has_dflash2_candidates<Model>::value) {
+      return model_->dflash2_candidates(
+          hidden_states, unary_logits, anchor_token_ids);
+    }
+    return CausalLM::dflash2_candidates(
+        hidden_states, unary_logits, anchor_token_ids);
+  }
+
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) override {
     if constexpr (detail::has_dspark_markov_bias<Model>::value) {
       return model_->dspark_markov_bias(previous_token_ids);
     }
     return CausalLM::dspark_markov_bias(previous_token_ids);
+  }
+
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden_all,
+      const torch::Tensor& prev_matrix) override {
+    if constexpr (detail::has_dspark_confidence_probs<Model>::value) {
+      return model_->dspark_confidence_probs(hidden_all, prev_matrix);
+    }
+    return CausalLM::dspark_confidence_probs(hidden_all, prev_matrix);
+  }
+
+  bool has_dspark_confidence_head() const override {
+    if constexpr (detail::has_has_dspark_confidence_head<Model>::value) {
+      return model_->has_dspark_confidence_head();
+    }
+    return false;
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
@@ -389,11 +451,28 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
+  bool has_restored_npu_word_embedding() override {
+    if constexpr (detail::has_restored_npu_word_embedding<Model>::value) {
+      return model_->has_restored_npu_word_embedding();
+    } else {
+      return CausalLM::has_restored_npu_word_embedding();
+    }
+  }
+
   void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
     if constexpr (detail::has_set_npu_word_embedding<Model>::value) {
       model_->set_npu_word_embedding(embedding);
     } else {
       CausalLM::set_npu_word_embedding(embedding);
+    }
+  }
+
+  void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) override {
+    if constexpr (detail::has_set_restored_npu_word_embedding<Model>::value) {
+      model_->set_restored_npu_word_embedding(embedding);
+    } else {
+      CausalLM::set_restored_npu_word_embedding(embedding);
     }
   }
 

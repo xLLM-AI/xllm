@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,7 +50,7 @@ void PrefillFirstPolicy::schedule(
         handle_running_requests(req, state);
         if (batch_mode_.enable_chunked_prefill &&
             req->sequences()[0]->is_chunked_prefill_stage()) {
-          state.chunk_queue.push(req, /*if_back=*/false);
+          state.chunk_queue.push(req, /*if_back=*/true);
         } else {
           state.decode_queue.push(req, /*if_back=*/true);
         }
@@ -80,13 +80,46 @@ void PrefillFirstPolicy::schedule(
       handle_running_requests(req, state);
       if (batch_mode_.enable_chunked_prefill &&
           req->sequences()[0]->is_chunked_prefill_stage()) {
-        state.chunk_queue.push(req, /*if_back=*/false);
+        state.chunk_queue.push(req);
       } else {
         state.decode_queue.push(req);
       }
     }
   }
   reset_batch_state(state);
+
+  // Requeue / MPMC drain can shuffle FCFS order. Sort waiting prefill
+  // queues by created_time so earlier requests stay at the front.
+  if (batch_mode_.priority_strategy == "fcfs") {
+    auto fcfs_cmp = create_comparator("fcfs", /*is_reversed=*/true);
+    if (!state.prefill_queue.empty() && state.prefill_queue.supports_sort()) {
+      state.prefill_queue.sort(fcfs_cmp);
+    }
+    if (!state.chunk_queue.empty() && state.chunk_queue.supports_sort()) {
+      state.chunk_queue.sort(fcfs_cmp);
+    }
+  }
+
+  // A completed D2H release must first be available to the decode request
+  // that triggered preemption. Do not let the restore waiter reclaim the
+  // released blocks before that request can retry.
+  const bool retry_decode_before_restore =
+      !state.decode_restore_waiting.empty() &&
+      !state.kv_cache_manager->has_pending_async_block_release();
+  if (retry_decode_before_restore) {
+    budget.latency_budget = options_.max_global_tpot_ms();
+    adjust_latency_budget_and_reorder(&state.decode_queue,
+                                      /*second_queue=*/nullptr,
+                                      budget.latency_budget,
+                                      /*for_prefill=*/false,
+                                      state);
+    schedule_decode_from_queue(&state.decode_queue, state, budget);
+    if (!state.running_sequences.empty() ||
+        state.kv_cache_manager->has_pending_async_block_release()) {
+      return;
+    }
+  }
+  schedule_decode_restore(state, budget);
 
   // === Schedule phase ===
   budget.latency_budget = options_.max_global_ttft_ms();
@@ -100,7 +133,8 @@ void PrefillFirstPolicy::schedule(
 
   // Schedule chunked prefill continuations first (they already have partial
   // KV).
-  size_t reserved_full_footprint = 0;
+  std::vector<size_t> reserved_full_footprint(
+      static_cast<size_t>(state.options.dp_size()), 0);
   schedule_prefill_from_queue(
       &state.chunk_queue, state, budget, finished, reserved_full_footprint);
   // Then new prefill requests.
@@ -112,7 +146,7 @@ void PrefillFirstPolicy::schedule(
   }
 
   // If no prefill sequences were scheduled, try decode.
-  if (state.running_sequences.empty()) {
+  if (!retry_decode_before_restore && state.running_sequences.empty()) {
     budget.latency_budget = options_.max_global_tpot_ms();
     adjust_latency_budget_and_reorder(&state.decode_queue,
                                       /*second_queue=*/nullptr,

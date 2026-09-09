@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,6 +32,11 @@ namespace xllm {
 
 class VLMWorkerImpl : public WorkerImpl {
  public:
+  enum class ForwardSyncPolicy : int8_t {
+    LEGACY = 0,
+    NO_SYNC,
+  };
+
   VLMWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
                 const runtime::Options& options);
@@ -42,6 +47,30 @@ class VLMWorkerImpl : public WorkerImpl {
   bool init_model(ModelContext& context) override;
 
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
+
+ protected:
+  std::optional<ForwardOutput> step_for_schedule_overlap(
+      const ForwardInput& input) override;
+  ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& input) override;
+
+ private:
+  // Execute forward + sampling on the given compute stream without a host-side
+  // synchronize, recording a ready event for cross-step dependency. Shared by
+  // the schedule-overlap decode fast path.
+  std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
+      Stream& compute_stream,
+      bool record_ready_event);
+
+  std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
+      Stream& compute_stream) override;
+
+  std::optional<ForwardOutput> step_internal(
+      const ForwardInput& input,
+      ForwardSyncPolicy sync_policy = ForwardSyncPolicy::LEGACY,
+      bool record_ready_event = true);
 };
 
 }  // namespace xllm

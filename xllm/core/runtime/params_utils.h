@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "framework/model/model_input_params.h"
+#include "framework/parallel_state/parallel_args.h"
 #include "framework/request/sequence.h"
 #include "runtime/forward_params.h"
 #include "worker.pb.h"
@@ -25,6 +26,13 @@ limitations under the License.
 namespace xllm {
 
 class Stream;
+
+torch::Tensor choose_lm_head_selected_token_idxes(
+    const torch::Tensor& selected_token_idxes,
+    const ModelInputParams& input_params,
+    const ParallelArgs& parallel_args,
+    int64_t hidden_num_rows,
+    const torch::Device& device);
 
 bool forward_input_to_packed_proto(
     const ForwardInput& input,
@@ -46,6 +54,7 @@ void forward_output_to_proto(
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
@@ -53,6 +62,7 @@ void forward_output_to_proto(
     const torch::Tensor& out_logprobs,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
+    const std::vector<JsonObjectOutputError>& json_object_errors,
     proto::ForwardOutput* pb_forward_output);
 
 Token build_token(int64_t index,

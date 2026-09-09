@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,6 +44,8 @@ class ParallelConfig final {
         {"dp_size",
          "ep_size",
          "cp_size",
+         "layerwise_split_size",
+         "kv_split_size",
          "tp_size",
          "sp_size",
          "cfg_size",
@@ -62,6 +64,8 @@ class ParallelConfig final {
   PROPERTY(int32_t, ep_size) = 1;
 
   PROPERTY(int32_t, cp_size) = 1;
+
+  PROPERTY(int32_t, layerwise_split_size) = 1;
 
   // 0 means follow cp_size (legacy KV-split width).
   PROPERTY(int32_t, kv_split_size) = 1;

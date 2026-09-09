@@ -20,7 +20,7 @@ limitations under the License. -->
 + Raise questions / Answer questions
 + Provide demos, examples or test cases
 + Give suggestions or other comments
-+ Paticipate in [issues](https://github.com/jd-opensource/xllm/issues) or [discussions](https://github.com/jd-opensource/xllm/discussions)
++ Participate in [issues](https://github.com/xLLM-AI/xllm/issues) or [discussions](https://github.com/xLLM-AI/xllm/discussions)
 + Pull requests
 + Sharing related research / application
 + Any other ways to improve xLLM

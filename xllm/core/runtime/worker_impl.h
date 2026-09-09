@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,8 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <mutex>
+#include <optional>
 
 #include "common/types.h"
 #include "executor.h"
@@ -37,6 +39,7 @@ limitations under the License.
 #include "framework/sampling/beam_searcher.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
+#include "framework/tokenizer/tokenizer.h"
 #include "framework/xtensor/xtensor.h"
 #include "options.h"
 #include "platform/device.h"
@@ -112,10 +115,12 @@ class WorkerImpl {
   // prepare work before model execution
   virtual void prepare_work_before_execute(const ForwardInput& inputs,
                                            ForwardInput& processed_inputs);
+  virtual void restore_json_object_states(ForwardInput& input);
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream,
-                                             bool record_ready_event = true);
+                                             bool record_ready_event = true,
+                                             bool restore_linear_state = true);
 #if defined(USE_NPU)
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
@@ -133,15 +138,26 @@ class WorkerImpl {
 
   // Cached: whether the loaded model advertises NPU model-side CP.
   bool model_supports_model_cp() const;
+  // Lazily create (or return) the worker-local JSON grammar. Thread-safe.
+  std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
+      bool reasoning_enabled);
 
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);
 
   virtual std::optional<ForwardOutput> step(const ForwardInput& inputs) = 0;
 
+  // Optional no-sync execution hook used by speculative LLM/VLM workers.
+  // Other worker types do not support this execution mode.
+  virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
+      Stream& compute_stream);
+
   virtual void process_group_test();
 
   virtual ForwardInput update_input_by_last_step_output(ForwardInput& inputs);
+  void update_json_object_states_by_last_step_output(ForwardInput& inputs);
+  void sanitize_json_object_error_inputs(ForwardInput& inputs);
 
   // initialize model, cache manager. async call
   virtual folly::SemiFuture<bool> init_model_async(
@@ -178,11 +194,6 @@ class WorkerImpl {
       const std::string& src_addr,
       const std::vector<KVTransferMapping>& mappings);
 
-  virtual folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<KVTransferMapping>& mappings);
-
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
@@ -191,10 +202,34 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
+  std::shared_ptr<HierarchyKVCacheTransfer>
+  create_hierarchy_kv_cache_transfer();
+
+  void bind_hierarchy_kv_cache_transfer(
+      std::shared_ptr<HierarchyKVCacheTransfer> transfer,
+      HierarchyKVCacheTransfer::CacheRole role,
+      const Stream* producer_stream,
+      std::string store_key_component = "");
+
+  void register_hierarchy_kv_cache(HierarchyKVCacheTransfer& transfer,
+                                   HierarchyKVCacheTransfer::CacheRole role,
+                                   const Stream* producer_stream);
+
+  void set_hierarchy_kv_cache_transfer(
+      std::shared_ptr<HierarchyKVCacheTransfer> transfer);
+
+  std::shared_ptr<HierarchyKVCacheTransfer> get_hierarchy_kv_cache_transfer()
+      const;
+
+  void clear_hierarchy_kv_cache_transfer();
+
   void set_hierarchy_layer_synchronizer(ModelInputParams& input_params);
 
+  virtual std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info);
+
   // Run the model on the given input. async call
-  // the future returns a successfull status with no meaningful value
+  // the future returns a successful status with no meaningful value
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs);
 
@@ -206,6 +241,49 @@ class WorkerImpl {
 
   int32_t hidden_size() const {
     return context_.get_model_args().hidden_size();
+  }
+
+#if defined(USE_NPU)
+  virtual layer::NpuLmHead get_npu_lm_head() {
+    return model_->get_npu_lm_head();
+  }
+
+  virtual void set_npu_lm_head(layer::NpuLmHead& head) {
+    model_->set_npu_lm_head(head);
+  }
+
+  virtual layer::NpuWordEmbedding get_npu_word_embedding() {
+    return model_->get_npu_word_embedding();
+  }
+
+  virtual bool has_restored_npu_word_embedding() {
+    return model_->has_restored_npu_word_embedding();
+  }
+
+  virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
+    model_->set_npu_word_embedding(embedding);
+  }
+
+  virtual void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) {
+    model_->set_restored_npu_word_embedding(embedding);
+  }
+#endif
+
+  virtual layer::LmHead get_lm_head() { return model_->get_lm_head(); }
+
+  virtual void set_lm_head(layer::LmHead& head) { model_->set_lm_head(head); }
+
+  virtual layer::WordEmbedding get_word_embedding() {
+    return model_->get_word_embedding();
+  }
+
+  virtual void set_word_embedding(layer::WordEmbedding& embedding) {
+    model_->set_word_embedding(embedding);
+  }
+
+  bool share_weights_from(WorkerImpl& source) {
+    return model_->share_weights_from(*source.model_);
   }
 
   bool enable_schedule_overlap() const {
@@ -228,7 +306,17 @@ class WorkerImpl {
   }
 
  protected:
-  void update_last_step_output(const std::optional<ForwardOutput>& output);
+  struct HierarchyKVCacheTransferContext {
+    KVCacheShape kv_cache_shape;
+    KVCacheCreateOptions create_options;
+  };
+
+  void update_last_step_output(
+      const std::optional<ForwardOutput>& output,
+      const std::vector<std::string>& request_ids,
+      const std::vector<std::string>& sample_sequence_ids);
+  bool can_use_last_step_output_for_schedule_overlap(
+      const ForwardInput& input) const;
   virtual std::optional<ForwardOutput> step_for_schedule_overlap(
       const ForwardInput& input);
   virtual ForwardInput update_input_by_last_step_output_for_schedule_overlap(
@@ -272,7 +360,7 @@ class WorkerImpl {
   // Original xtensor (PageAllocator) sleep path.
   bool xtensor_sleep(MasterStatus master_status);
 
-#if defined(USE_CUDA) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   void refresh_cuda_block_copy_runtime_state();
   bool can_use_cuda_block_copy_kernel(
       const ModelInputParams& input_params) const;
@@ -349,6 +437,11 @@ class WorkerImpl {
   // causal LM model
   std::unique_ptr<CausalLM> model_;
 
+  std::unique_ptr<Tokenizer> tokenizer_;
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
+  std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
+  mutable std::mutex json_object_grammar_mutex_;
+
   std::unique_ptr<Executor> model_executor_;
 
   std::unique_ptr<Sampler> sampler_;
@@ -358,6 +451,8 @@ class WorkerImpl {
   // params for enable_schedule_overlap case
   // an output to store the result of last step
   ForwardOutput last_step_output_;
+  std::vector<std::string> last_step_request_ids_;
+  std::vector<std::string> last_step_sample_sequence_ids_;
   bool last_step_output_valid_ = false;
   std::mutex mtx_;
   std::condition_variable cv_;
@@ -366,10 +461,15 @@ class WorkerImpl {
   InstanceRole instance_role_ = InstanceRole::DEFAULT;
 
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
-  std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
+  std::optional<HierarchyKVCacheTransfer::CacheRole> hierarchy_kv_cache_role_;
+  const Stream* hierarchy_kv_cache_producer_stream_ = nullptr;
+  std::string hierarchy_kv_cache_store_key_component_;
+  std::optional<HierarchyKVCacheTransferContext>
+      hierarchy_kv_cache_transfer_context_;
+  std::shared_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
-#if defined(USE_CUDA) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   CudaBlockCopyRuntimeState cuda_block_copy_runtime_state_;
 #endif
 

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -55,6 +55,7 @@ void PDOOCServiceImpl::decode_recv_multi_generations(
     bool success = pd_ooc_scheduler_->decode_recv_multi_generations(
         multi_gen.req_id(),
         migration_tokens,
+        multi_gen.upstream_elapsed_seconds(),
         multi_gen.kv_cache_transfer_mode(),
         std::move(cluster_ids),
         std::move(addrs),

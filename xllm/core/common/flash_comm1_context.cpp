@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,13 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <vector>
+
+#if defined(USE_NPU)
+#include <torch_npu/torch_npu.h>
+#endif
 
 #include "framework/parallel_state/parallel_state.h"
 
@@ -26,7 +33,21 @@ namespace xllm {
 namespace {
 
 constexpr int32_t kFc1LocalTokenAlignment = 16;
+constexpr size_t kQuantizedMmrsRetainedBytesLimit = 512 * 1024 * 1024;
 thread_local const FlashComm1Context* current_flash_comm1_context = nullptr;
+thread_local std::vector<torch::Tensor> quantized_mmrs_launch_tensors;
+thread_local size_t quantized_mmrs_retained_bytes = 0;
+
+void synchronize_quantized_mmrs_launches() {
+  if (quantized_mmrs_launch_tensors.empty()) {
+    return;
+  }
+#if defined(USE_NPU)
+  torch::npu::synchronize();
+#endif
+  quantized_mmrs_launch_tensors.clear();
+  quantized_mmrs_retained_bytes = 0;
+}
 
 int32_t round_up_to_multiple(int32_t value, int32_t multiple) {
   CHECK_GT(multiple, 0);
@@ -105,11 +126,30 @@ FlashComm1ContextScope::FlashComm1ContextScope(const FlashComm1Context* ctx)
 }
 
 FlashComm1ContextScope::~FlashComm1ContextScope() {
+  if (previous_ == nullptr) {
+    synchronize_quantized_mmrs_launches();
+  }
   current_flash_comm1_context = previous_;
 }
 
 const FlashComm1Context* get_current_flash_comm1_context() {
   return current_flash_comm1_context;
+}
+
+void retain_quantized_mmrs_launch_tensors(const torch::Tensor& activation,
+                                          const torch::Tensor& activation_scale,
+                                          const torch::Tensor& weight_scale) {
+  const std::array<torch::Tensor, 3> tensors = {
+      activation, activation_scale, weight_scale};
+  for (const torch::Tensor& tensor : tensors) {
+    if (tensor.defined()) {
+      quantized_mmrs_retained_bytes += tensor.nbytes();
+      quantized_mmrs_launch_tensors.emplace_back(tensor);
+    }
+  }
+  if (quantized_mmrs_retained_bytes >= kQuantizedMmrsRetainedBytesLimit) {
+    synchronize_quantized_mmrs_launches();
+  }
 }
 
 bool is_sequence_sharded(const FlashComm1Context& ctx) {

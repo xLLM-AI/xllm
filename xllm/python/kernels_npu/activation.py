@@ -17,7 +17,34 @@
 from __future__ import annotations
 
 import torch
+import torch_npu
 
 silu_and_mul = torch.ops.xllm_ops.silu_and_mul
+_DEQUANT_SWIGLU_QUANT = torch_npu.npu_dequant_swiglu_quant
 
-__all__ = ["silu_and_mul"]
+
+def dequant_swiglu_quant(
+    value: torch.Tensor,
+    weight_scale: torch.Tensor,
+    activation_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dequantize INT32 Gate-Up output, apply SwiGLU, and requantize."""
+    return _DEQUANT_SWIGLU_QUANT(
+        value,
+        weight_scale=weight_scale,
+        activation_scale=activation_scale,
+        bias=None,
+        quant_scale=None,
+        quant_offset=None,
+        group_index=None,
+        activate_left=True,
+        quant_mode=1,
+        swiglu_mode=0,
+        clamp_limit=7.0,
+    )
+
+
+__all__ = [
+    "silu_and_mul",
+    "dequant_swiglu_quant",
+]

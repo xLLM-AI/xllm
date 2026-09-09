@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -192,7 +192,7 @@ void PDOOCScheduler::handle_abnormal_request(
 
 void PDOOCScheduler::handle_running_requests(std::shared_ptr<Request> request) {
   if (request->finished() || request->cancelled()) {
-    LOG(FATAL) << "Unknow error, finished/cancelled request have be handled "
+    LOG(FATAL) << "Unknown error, finished/cancelled request have be handled "
                   "before. request_id is "
                << request->request_id();
   }
@@ -340,14 +340,15 @@ void PDOOCScheduler::prefill_step(const absl::Duration& timeout) {
     prefill_send_first_generation();
     prefill_send_multi_generations();
   } catch (const ForwardInterruptedException& e) {
-    VLOG(1) << "PDOOCScheduler catched a ForwardInterruptedException";
+    VLOG(1) << "PDOOCScheduler caught a ForwardInterruptedException";
     handle_prefill_interruption();
   }
 }
 
 std::vector<Batch> PDOOCScheduler::prepare_batch() {
   Timer timer;
-  // propogate new requests to prefill_queue_
+  drain_prefetched_requests();
+  // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   std::shared_ptr<Request> request;
   // read from request queue then push to waiting priority queue
@@ -669,7 +670,7 @@ void PDOOCScheduler::handle_prefill_requests_impl(
   // longer be scheduled to avoid frequent preemption.
   //
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
-  // they may contian many sequences, so we should check here.
+  // they may contain many sequences, so we should check here.
 
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
@@ -699,13 +700,6 @@ void PDOOCScheduler::handle_prefill_requests_impl(
       CHECK(num_sequences == 1 || num_sequences == request->best_of())
           << "Waiting request should have either 1 or best_of("
           << request->best_of() << ") sequences, got " << num_sequences;
-    }
-
-    if (!kv_cache_manager_->update_prefetch_result(
-            request, options_.prefetch_timeout())) {
-      waiting_priority_queue->pop_top();
-      waiting_priority_queue->push(request);
-      continue;
     }
 
     // TODO: FIXME later
@@ -1060,7 +1054,7 @@ void PDOOCScheduler::handle_decode_requests_impl(
       clear_mtp_bootstrap(request_to_preempt.get());
       kv_cache_manager_->deallocate(request_to_preempt.get());
       decode_queue_->pop_back();
-      // add preemptable request to waiting priority queue
+      // add preemptible request to waiting priority queue
       request_to_preempt->set_preempted();
       prefill_queue_offline_->push(request_to_preempt);
       continue;
@@ -1071,7 +1065,7 @@ void PDOOCScheduler::handle_decode_requests_impl(
         clear_mtp_bootstrap(request_to_preempt.get());
         kv_cache_manager_->deallocate(request_to_preempt.get());
         running_queue->pop_back();
-        // add preemptable request to waiting priority queue
+        // add preemptible request to waiting priority queue
         request_to_preempt->set_preempted();
         if (request_to_preempt->offline()) {
           ++num_offline_decode_preempt_offline_requests;
@@ -1281,7 +1275,7 @@ void PDOOCScheduler::handle_decode_requests(
       ++num_online_decode_preempt_offline_requests;
       kv_cache_manager_->deallocate(request_to_preempt.get());
       decode_queue_->pop_back();
-      // add preemptable request to waiting priority queue
+      // add preemptible request to waiting priority queue
       request_to_preempt->set_preempted();
       prefill_queue_offline_->push(request_to_preempt);
       continue;
@@ -1291,7 +1285,7 @@ void PDOOCScheduler::handle_decode_requests(
         // TO IMPROVE: kv cache offload to cpu
         kv_cache_manager_->deallocate(request_to_preempt.get());
         running_queue->pop_back();
-        // add preemptable request to waiting priority queue
+        // add preemptible request to waiting priority queue
         request_to_preempt->set_preempted();
         if (request_to_preempt->offline()) {
           ++num_offline_decode_preempt_offline_requests;
@@ -1658,11 +1652,12 @@ void PDOOCScheduler::prefill_send_first_generation() {
       // TODO: Async call later
       proto::Status resp;
       brpc::Controller cntl;
+      gen->set_upstream_elapsed_seconds(request->end_to_end_latency_seconds());
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
 
       if (cntl.Failed() || !resp.ok()) {
         LOG(ERROR) << "Failed to send first generation, " << cntl.ErrorText()
-                   << ", staus: " << resp.ok();
+                   << ", status: " << resp.ok();
       }
       {
         std::lock_guard<std::mutex> lock(remote_requests_map_mutex_);
@@ -1716,6 +1711,7 @@ bool PDOOCScheduler::decode_schedule(std::shared_ptr<Request>& request,
 bool PDOOCScheduler::decode_recv_multi_generations(
     const std::string& req_id,
     const std::vector<proto::RemoteToken>& migration_tokens,
+    double upstream_elapsed_seconds,
     const std::string& kv_cache_transfer_mode,
     std::vector<uint64_t> src_cluster_ids,
     std::vector<std::string> src_addrs,
@@ -1740,14 +1736,20 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     request->sequences()[0]->enable_checking_prefill_token();
   }
 
+  double time_to_first_token_latency_seconds = 0.0;
+  for (const auto& remote_token : migration_tokens) {
+    if (remote_token.time_to_first_token_latency_seconds() > 0) {
+      time_to_first_token_latency_seconds =
+          remote_token.time_to_first_token_latency_seconds();
+      break;
+    }
+  }
+  restore_disaggregated_latency(request.get(),
+                                time_to_first_token_latency_seconds,
+                                upstream_elapsed_seconds);
+
   // Add all migration tokens to the sequence
   for (const auto& remote_token : migration_tokens) {
-    if (remote_token.time_to_first_token_latency_seconds() > 0 &&
-        request->sequences()[0]->time_to_first_token_latency_seconds() <= 0) {
-      request->sequences()[0]->set_time_to_first_token_latency_seconds(
-          remote_token.time_to_first_token_latency_seconds());
-    }
-
     Token token(remote_token.token_id());
     if (remote_token.has_logprob()) {
       token.logprob = remote_token.logprob();
@@ -2174,6 +2176,8 @@ void PDOOCScheduler::prefill_send_multi_generations() {
       // TODO: Async call later
       proto::Status resp;
       brpc::Controller cntl;
+      multi_req->set_upstream_elapsed_seconds(
+          request->end_to_end_latency_seconds());
       stub->MultiGenerations(&cntl, &multi_reqs, &resp, nullptr);
       if (cntl.Failed() || !resp.ok()) {
         LOG(ERROR) << "Failed to send multi generations, " << cntl.ErrorText()
@@ -2250,6 +2254,9 @@ void PDOOCScheduler::build_disagg_requests(
     req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
     req->set_include_stop_str_in_output(
         requests[i]->state().include_stop_str_in_output);
+    req->set_json_object(requests[i]->state().sampling_param.json_object);
+    req->set_json_reasoning_enabled(
+        requests[i]->state().json_reasoning_enabled);
     req->set_offline(requests[i]->offline());
   }
 

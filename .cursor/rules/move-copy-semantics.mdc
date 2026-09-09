@@ -1,0 +1,32 @@
+---
+description: Avoid std::move(const&) silent copies; use sink-by-value + std::move
+globs: "**/*.{h,hpp,c,cc,cpp,cu}"
+alwaysApply: true
+---
+
+# Move & Copy Semantics
+
+`std::move(x)` is only a cast to `T&&`. When `x` is `const&` (or const), it yields
+a `const T&&` that binds to the **copy** constructor, not the move constructor —
+so it compiles, looks like a move, and silently deep-copies. This is the bug that
+made `Request`/`RequestState` construction copy their whole payload.
+
+- **Never `std::move` a `const&` / const value.** The two ingredients of the bug
+  are always "a const source + `std::move`". Don't combine them.
+- **Sink parameters go by value + `std::move`.** If a function/ctor retains its
+  argument, take it **by value** and `std::move` it into the member. Use `const&`
+  only for parameters you read but do not retain.
+- **Make callers move.** Pass `std::move(local)` when you hand an owned local to a
+  sink parameter and don't use it afterwards; an lvalue silently copies.
+- Consider making heavy, rarely-copied domain types move-only (`= delete` copy) with
+  an explicit `clone()`, so an accidental copy is a compile error.
+
+```cpp
+// Bad – const& + std::move => copies
+Request(const RequestState& state) : state_(std::move(state)) {}
+
+// Good – sink by value; caller chooses copy (lvalue) vs move (std::move)
+Request(RequestState state) : state_(std::move(state)) {}
+```
+
+`clang-tidy`'s `performance-move-const-arg` (see repo `.clang-tidy`) flags this.

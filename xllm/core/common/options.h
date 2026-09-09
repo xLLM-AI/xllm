@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -51,7 +51,7 @@ class Options {
   PROPERTY(int32_t, block_size) = 128;
 
   // the maximum cache size in bytes, default is 0 which means cache size is
-  // caculated by available memory * max_memory_utilization
+  // calculated by available memory * max_memory_utilization
   PROPERTY(int64_t, max_cache_size) = 0;
 
   // maximum memory utilization allowed, default 0.9
@@ -82,6 +82,8 @@ class Options {
 
   PROPERTY(std::string, speculative_algorithm) = "MTP";
 
+  PROPERTY(std::string, draft_sampling_mode) = "greedy";
+
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
   PROPERTY(double, speculative_suffix_max_spec_factor) = 1.0;
@@ -108,7 +110,7 @@ class Options {
 
   PROPERTY(std::optional<int64_t>, eplb_update_interval);
 
-  PROPERTY(std::optional<double>, eplb_update_threshold);
+  PROPERTY(std::optional<double>, eplb_min_peak_load_improvement);
 
   PROPERTY(std::optional<std::string>, communication_backend);
 
@@ -189,6 +191,8 @@ class Options {
 
   PROPERTY(std::string, store_protocol) = "tcp";
 
+  PROPERTY(std::string, store_rdma_devices) = "";
+
   PROPERTY(std::string, store_master_server_address) = "";
 
   PROPERTY(std::string, store_metadata_server) = "";
@@ -262,7 +266,7 @@ class Options {
   // Prefetch from kvcache store copy batch size
   PROPERTY(uint32_t, prefetch_batch_size) = 2;
 
-  // Layer wise H2D copy batchs
+  // Host KV layer-wise copy batches.
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
   // beam width for beam search

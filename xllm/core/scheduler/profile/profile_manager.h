@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -96,7 +96,8 @@ class ProfileManager {
   double run_request(int32_t token_length,
                      int32_t prefix_length,
                      int32_t batch_size = 1,
-                     int32_t extra_token_length = 0);
+                     int32_t extra_token_length = 0,
+                     bool is_graph_warmup = true);
   double run_request(const std::vector<int32_t>& token_length_vec,
                      const std::vector<int32_t>& prefix_length_vec);
 
@@ -139,10 +140,18 @@ class ProfileManager {
       bool is_prefill);
 
   std::shared_ptr<Request> generate_single_request(int32_t token_length,
-                                                   int32_t prefix_length);
+                                                   int32_t prefix_length,
+                                                   bool is_graph_warmup = true);
   std::shared_ptr<Request> generate_single_decode_request(
       int32_t total_length,
-      std::optional<int32_t> dp_rank = std::nullopt);
+      std::optional<int32_t> dp_rank = std::nullopt,
+      bool is_graph_warmup = true);
+  std::shared_ptr<Request> try_generate_single_decode_request(
+      int32_t total_length,
+      std::optional<int32_t> dp_rank = std::nullopt,
+      bool is_graph_warmup = true);
+  int32_t measure_graph_decode_capacity(int32_t configured_max_seqs,
+                                        int32_t total_length);
 
   std::string generate_filename(const std::string& file_suffix);
 
@@ -152,7 +161,15 @@ class ProfileManager {
 
   void profile_token_budget();
 
+  // True when the validate-time predictor should be profiled: adaptive
+  // speculative decode enabled, SL > 1, and a supported algorithm. The
+  // predictor has no consumer otherwise.
+  bool should_profile_speculative_validate() const;
+
   void profile_speculative_validate_time();
+
+  // Warm up eager NPU operators before the service becomes ready.
+  void warmup_for_eager();
 
   // Warmup ACL graph executor according to the instance role.
   void warmup_for_graph();
@@ -190,6 +207,7 @@ class ProfileManager {
 
   std::unique_ptr<TimePredictor> prefill_time_predictor_;
   std::unique_ptr<TimePredictor> decode_time_predictor_;
+  std::unique_ptr<TimePredictor> speculative_validate_time_predictor_;
 
   const Options options_;
 

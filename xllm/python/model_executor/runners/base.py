@@ -26,10 +26,15 @@ from xllm.python.attention.backend import (
 )
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 
+ModelExecutionOutput = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
 
 class BaseRunner(ABC):
     def __init__(
-        self, model: nn.Module, attention_backend: AttentionBackend, device: torch.device,
+        self,
+        model: nn.Module,
+        attention_backend: AttentionBackend,
+        device: torch.device,
     ) -> None:
         self.model = model
         self.attention_backend = attention_backend
@@ -47,5 +52,5 @@ class BaseRunner(ABC):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
-    ) -> torch.Tensor:
+    ) -> ModelExecutionOutput:
         pass

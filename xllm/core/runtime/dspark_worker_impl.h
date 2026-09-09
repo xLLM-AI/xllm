@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,15 +49,17 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
                               ForwardInput& validate_input) override;
 
  private:
-  struct BlockSampleOutput {
-    torch::Tensor token_ids;
-    torch::Tensor probs;
+  // sample_block's two outputs: the sampled draft proposal and, when a
+  // confidence head is active, its per-step confidence probs (empty otherwise).
+  struct BlockSample {
+    DraftProposal proposal;
+    torch::Tensor confidence_probs;
   };
 
-  BlockSampleOutput sample_block(
-      const torch::Tensor& base_logits,
-      const torch::Tensor& anchor_token_ids,
-      const SamplingParameters& sampling_params) const;
+  BlockSample sample_block(const torch::Tensor& base_logits,
+                           const torch::Tensor& last_hidden,
+                           const torch::Tensor& anchor_token_ids,
+                           const SamplingParameters& sampling_params) const;
 
   void synchronize_sampled_token_ids(
       torch::Tensor& sampled_token_ids,

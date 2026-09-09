@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@ limitations under the License.
 #include <folly/MPMCQueue.h>
 
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <memory>
 #include <vector>
@@ -33,6 +34,7 @@ limitations under the License.
 namespace xllm {
 
 class AsyncResponseProcessor;
+class ModelArgs;
 
 // SchedulerState provides explicit access to the scheduler's internal state.
 // The SchedulerPolicy operates solely through this boundary -- it never
@@ -41,12 +43,13 @@ struct SchedulerState {
   // Queues (unified -- no separate online/offline distinction).
   // prefill_queue: holds new prefill requests (kv_cache_tokens_num == 0)
   // chunk_queue: holds chunked prefill continuations (has partial KV,
-  // preemptable) decode_queue: holds decode requests unified_queue: used by
+  // preemptible) decode_queue: holds decode requests unified_queue: used by
   // UnifiedPolicy (all requests in one list)
   RequestPriorityQueue& prefill_queue;
   RequestPriorityQueue& chunk_queue;
   RequestPriorityQueue& decode_queue;
   std::list<std::shared_ptr<Request>>& unified_queue;
+  std::deque<DecodeRestoreEntry>& decode_restore_waiting;
 
   // Current batch state (reset each step).
   std::vector<std::shared_ptr<Request>>& running_requests;
@@ -57,6 +60,7 @@ struct SchedulerState {
   KVCacheManager* kv_cache_manager;
   ProfileManager* profile_manager;
   AsyncResponseProcessor* response_processor;
+  const ModelArgs& model_args;
 
   // Flags.
   bool& last_step_prefill;
@@ -76,6 +80,12 @@ struct ScheduleBudget {
   double latency_budget;
   double estimate_latency;
   size_t num_preempted_requests;
+  // Per-DP-group fair budget (enable_dp_fair_token_budget on disagg PD
+  // PREFILL instances). Empty when disabled; otherwise sized dp_size, holding
+  // the per-group token cap and the tokens charged to each group in the
+  // current scheduling round.
+  std::vector<size_t> dp_group_token_caps;
+  std::vector<size_t> dp_group_token_used;
 };
 
 inline bool budget_exhausted(const ScheduleBudget& budget) {
@@ -149,7 +159,10 @@ class SchedulerPolicy {
       SchedulerState& state,
       ScheduleBudget& budget,
       std::vector<std::shared_ptr<Request>>& finished,
-      size_t& reserved_full_footprint);
+      std::vector<size_t>& reserved_full_footprint);
+  int32_t select_prefill_dp_rank(const Sequence* sequence,
+                                 const SchedulerState& state) const;
+  bool should_limit_prefill_requests(const SchedulerState& state) const;
   size_t compute_prefill_tokens(Sequence* seq,
                                 size_t remaining_budget,
                                 const SchedulerState& state);
@@ -159,6 +172,7 @@ class SchedulerPolicy {
                             SchedulerState& state,
                             bool skip_shared = false);
   void allocate_shared_blocks_for(Sequence* seq, SchedulerState& state);
+  void schedule_decode_restore(SchedulerState& state, ScheduleBudget& budget);
 
   // ===== Decode scheduling =====
   void schedule_decode_from_queue(RequestPriorityQueue* queue,
@@ -183,6 +197,10 @@ class SchedulerPolicy {
       size_t allocated_seqs,
       double allocated_estimate_latency,
       bool budget_exhausted);
+  bool should_wait_for_decode_restore(const std::shared_ptr<Request>& request,
+                                      const SchedulerState& state) const;
+  void enqueue_decode_restore(const std::shared_ptr<Request>& request,
+                              SchedulerState& state);
 
   // ===== Helpers =====
   void cache_in_batch_prefix(const std::vector<Sequence*>& sequences,

@@ -52,6 +52,7 @@
 - Add MaCa and additional platform-compatibility layers, and promote `xllm_atb_layers` to main.
 
 ### Bugfix
+- Separate greedy and probabilistic speculative draft proposals for rejection sampling. **Migration:** the `enable_opt_validate_probs` flag is removed and replaced by `draft_sampling_mode` (`greedy` | `probabilistic`, default `greedy`); startups passing `--enable_opt_validate_probs` now abort as an unknown flag. The draft now defaults to greedy proposals — the emitted token distribution is unchanged, but the speculative acceptance rate differs from the previous temperature-following draft on `temperature > 0` workloads; set `draft_sampling_mode=probabilistic` (MTP / DSpark / Eagle3, including reduced-vocab `d2t` Eagle3) to restore the prior probabilistic draft.
 - Fix MTP correctness under asynchronous execution, including cross-TP-rank state divergence, TPOT latency accounting, DP synchronization, overlap input preparation, and acceptance-rate regressions.
 - Fix DeepSeek-V4 MTP hidden-state flow, schedule-overlap, and multi-device MTP input handling.
 - Fix Qwen3.5 DP empty-shard crashes, causal-conv decode, W8A8 weight loading, and quant weight loading on MLU.
@@ -225,7 +226,7 @@
 - Support dp+ep moe and all2all computation on mlu device.
 - Support parallelized shared experts in fused moe on mlu device.
 - Support qwen3 0.6B model on iluvatar device.
-- Add rec proto,serivce and utils for rec framework
+- Add rec proto,service and utils for rec framework
 - Support C api for llm inference.
 - Add constrained decoding for generative recommendation.
 - Add rec scheduler master and engine for rec framework.
@@ -234,11 +235,11 @@
 - Add qwen3/LlmRec support in rec framework.
 
 ### Bugfix
-- Reslove core dump of stream chat completion request when backend is VLM.
+- Resolve core dump of stream chat completion request when backend is VLM.
 - Resolve duplicate content in multi-turn tool call conversations.
 - Fix core dump issue triggered by client disconnection.
 - Fix the memory leak issue in the completions interface.
-- Fix wrong positons of validate input when enable MTP.
+- Fix wrong positions of validate input when enable MTP.
 - Resolve kv_cache_num mismatch in ChunkedPrefill due to H2D block copy.
 - Fix the missing index shape in the allocate kv cache transfer.
 - Fix MiMo-VL weights loading crash on NPU device.

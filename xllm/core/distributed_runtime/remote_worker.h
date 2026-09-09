@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -79,11 +79,6 @@ class RemoteWorker : public WorkerClient {
                       const std::string& src_addr,
                       const std::vector<KVTransferMapping>& mappings) override;
 
-  virtual bool pull_hetero_kv_blocks(
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<KVTransferMapping>& mappings) override;
-
   // prepare input request
   ForwardInput prepare_inputs(Batch& batch) override;
 
@@ -117,8 +112,8 @@ class RemoteWorker : public WorkerClient {
 
   void prefetch_from_storage(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<std::atomic<int32_t>> flag,
-      std::shared_ptr<std::atomic<uint32_t>> success_cnt) override;
+      std::shared_ptr<PrefetchResult> result,
+      size_t worker_index) override;
 
   // Run the model and return the output.
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(

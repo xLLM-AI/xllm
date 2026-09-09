@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -392,7 +392,7 @@ struct AttentionDeviceInput {
     AttentionDeviceInput out;
     out.q_seq_lens = safe_to(q_seq_lens, device, true);
     out.kv_seq_lens = safe_to(kv_seq_lens, device, true);
-#if !defined(USE_CUDA)
+#if !defined(USE_CUDA) && !defined(USE_MUSA)
     out.q_cu_seq_lens = safe_to(q_cu_seq_lens, device, true);
 #else
     out.q_cu_seq_lens = q_cu_seq_lens;
@@ -620,7 +620,7 @@ struct AttentionInput {
         continue;
       }
 #endif
-#if defined(USE_MLU)
+#if defined(USE_MLU) || defined(USE_MUSA)
       if (target_device.type() == torch::kPrivateUse1) {
         *entry.target = get_tensor_from_blob(
             entry.sizes, entry.dtype, ptr, attention_device_buffer);
@@ -769,6 +769,7 @@ struct BatchInputMeta {
   int32_t kv_max_seq_len = 0;
   int32_t q_max_seq_len = 0;
   uint64_t batch_id = 0;
+  bool is_graph_warmup = false;
 };
 
 struct ModelEmbeddingInput {
@@ -874,9 +875,10 @@ struct ParallelInput {
 #elif defined(USE_NPU)
   std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer = nullptr;
 #endif
-  uint32_t layers_per_bacth_copy = std::numeric_limits<uint32_t>::max();
+  uint32_t layers_per_event = std::numeric_limits<uint32_t>::max();
   std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
-#if defined(USE_NPU)
+  std::optional<uint32_t> draft_load_event_index;
+#if defined(USE_NPU) || defined(USE_MUSA)
   std::vector<int64_t> query_start_loc;
 #endif
 
@@ -892,9 +894,10 @@ struct ParallelInput {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif
-    out.layers_per_bacth_copy = layers_per_bacth_copy;
+    out.layers_per_event = layers_per_event;
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
-#if defined(USE_NPU)
+    out.draft_load_event_index = draft_load_event_index;
+#if defined(USE_NPU) || defined(USE_MUSA)
     out.query_start_loc = query_start_loc;
 #endif
     return out;
@@ -925,12 +928,15 @@ struct ExpertInput {
   torch::Tensor expert_load_data;
   torch::Tensor expert_array;
   EplbInfo eplb_info;
+  torch::Tensor eplb_decode_token_mask;
 
   ExpertInput to(const torch::Device& device) const {
     ExpertInput out;
     out.expert_load_data = expert_load_data;
     out.expert_array = expert_array;
     out.eplb_info = eplb_info;
+    out.eplb_decode_token_mask =
+        safe_to(eplb_decode_token_mask, device, /*non_blocking=*/true);
     return out;
   }
 };
@@ -1005,6 +1011,17 @@ struct GraphInput {
 };
 
 struct ModelInputParams {
+  // Drops every recurrent (linear attention) state field.  Pure full-attention
+  // drafts (DFlash2, MTP) reuse a hybrid target's ForwardInput and must call
+  // this so target-only slot ids do not classify their rows as recurrent,
+  // which would enter a stateful path the draft has no cache for.
+  void clear_linear_attention_state() {
+    embedding.linear_state_ids.clear();
+    embedding.linear_state_indices = torch::Tensor();
+    linear_state_cache_ops.clear();
+    linear_state_validity_mask.clear();
+  }
+
   ModelInputParams to(const torch::Device& device) const {
     ModelInputParams params;
     params.meta = meta;
@@ -1021,6 +1038,9 @@ struct ModelInputParams {
     params.is_spec_verify = is_spec_verify;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
+#if defined(USE_MUSA)
+    params.attn_metadata = attn_metadata;
+#endif
     params.mtp_topk_state =
         mtp_topk_state == nullptr ? nullptr : mtp_topk_state->to(device);
     for (const auto& table : multi_block_tables) {
@@ -1103,15 +1123,27 @@ struct ModelInputParams {
 #endif
   }
 
-  bool synchronize_layer(uint32_t layer_idx) const {
-    if (parallel.layer_wise_load_synchronizer != nullptr &&
-        layer_idx % parallel.layers_per_bacth_copy == 0) {
-      if (!parallel.layer_wise_load_synchronizer->synchronize_layer(
-              layer_idx / parallel.layers_per_bacth_copy)) {
-        return false;
-      }
+  bool synchronize_layer(int64_t layer_idx) const {
+    if (parallel.layer_wise_load_synchronizer == nullptr) {
+      return true;
+    }
+    CHECK_GE(layer_idx, 0) << "Layer index must be non-negative.";
+    if (static_cast<uint64_t>(layer_idx) % parallel.layers_per_event == 0) {
+      return parallel.layer_wise_load_synchronizer->synchronize_layer(
+          layer_idx / parallel.layers_per_event);
     }
     return true;
+  }
+
+  bool synchronize_draft_layer() const {
+    if (parallel.layer_wise_load_synchronizer == nullptr) {
+      return true;
+    }
+    if (!parallel.draft_load_event_index.has_value()) {
+      return true;
+    }
+    return parallel.layer_wise_load_synchronizer->synchronize_layer(
+        static_cast<int64_t>(*parallel.draft_load_event_index));
   }
 
   bool record_layer(uint32_t layer_idx, const torch::Device& device) const {

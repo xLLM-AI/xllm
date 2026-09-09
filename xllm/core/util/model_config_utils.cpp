@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,6 +35,12 @@ std::string get_model_type(const JsonReader& reader,
       reader.value<std::string>("model_type");
   if (!model_type.has_value()) {
     model_type = reader.value<std::string>("model_name");
+  }
+  if (!model_type.has_value()) {
+    // Speculators-format draft configs nest model_type under
+    // transformer_layer_config.
+    model_type =
+        reader.value<std::string>("transformer_layer_config.model_type");
   }
   if (!model_type.has_value()) {
     LOG(FATAL) << "Please check config.json file in model path: " << model_path

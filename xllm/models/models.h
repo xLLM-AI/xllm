@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,7 @@ limitations under the License.
 #include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
 #include "dit/pipelines/pipeline_wan_i2v.h"              // IWYU pragma: keep
 #include "llm/deepseek_v4.h"                             // IWYU pragma: keep
+#include "llm/deepseek_v4_dspark.h"                      // IWYU pragma: keep
 #include "llm/deepseek_v4_mtp.h"                         // IWYU pragma: keep
 #include "llm/npu/deepseek_mtp.h"                        // IWYU pragma: keep
 #include "llm/npu/deepseek_v2.h"                         // IWYU pragma: keep
@@ -38,6 +39,7 @@ limitations under the License.
 #include "llm/npu/glm5_moe_mtp.h"                        // IWYU pragma: keep
 #include "llm/npu/joyai_llm_flash.h"                     // IWYU pragma: keep
 #include "llm/npu/kimi_k2.h"                             // IWYU pragma: keep
+#include "llm/npu/kimi_k25_eagle3.h"                     // IWYU pragma: keep
 #include "llm/npu/llama.h"                               // IWYU pragma: keep
 #include "llm/npu/llama3.h"                              // IWYU pragma: keep
 #include "llm/npu/minimax_m2.h"                          // IWYU pragma: keep
@@ -46,6 +48,7 @@ limitations under the License.
 #include "llm/npu/qwen2.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3_dflash.h"                        // IWYU pragma: keep
+#include "llm/npu/qwen3_dflash2.h"                       // IWYU pragma: keep
 #include "llm/npu/qwen3_dspark.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_eagle3.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_moe.h"                           // IWYU pragma: keep

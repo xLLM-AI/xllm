@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,10 +21,12 @@ limitations under the License.
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "rec_type.h"
 #include "request_output.h"
@@ -53,15 +55,15 @@ struct SchedulerParam {
   RequestPriority priority = RequestPriority::NORMAL;
 };
 
-struct RequestState final {
+class RequestState final {
  public:
   RequestState() {}
 
-  RequestState(const std::string& prompt,
-               const std::vector<int32_t>& prompt_tokens,
-               const RequestSamplingParam& sampling_param,
-               const SchedulerParam& scheduler_param,
-               const StoppingChecker& stopping_checker,
+  RequestState(std::string prompt,
+               std::vector<int32_t> prompt_tokens,
+               RequestSamplingParam sampling_param,
+               SchedulerParam scheduler_param,
+               StoppingChecker stopping_checker,
                size_t seq_capacity,
                size_t n,
                size_t best_of,
@@ -75,11 +77,11 @@ struct RequestState final {
                const std::string& decode_address = "",
                std::optional<Call*> call = std::nullopt);
 
-  RequestState(const std::string& prompt,
-               const std::vector<int32_t>& prompt_tokens,
+  RequestState(std::string prompt,
+               std::vector<int32_t> prompt_tokens,
                torch::Tensor input_embedding,
-               const RequestSamplingParam& sampling_param,
-               const StoppingChecker& stopping_checker,
+               RequestSamplingParam sampling_param,
+               StoppingChecker stopping_checker,
                size_t seq_capacity,
                size_t n,
                size_t best_of,
@@ -92,11 +94,11 @@ struct RequestState final {
                const OutputsFunc& outputs_func,
                const std::string& decode_address = "");
 
-  RequestState(const std::string& prompt,
-               const std::vector<int32_t>& prompt_tokens,
-               const MMData& mm_data,
-               const RequestSamplingParam& sampling_param,
-               const StoppingChecker& stopping_checker,
+  RequestState(std::string prompt,
+               std::vector<int32_t> prompt_tokens,
+               MMData mm_data,
+               RequestSamplingParam sampling_param,
+               StoppingChecker stopping_checker,
                size_t seq_capacity,
                size_t n,
                size_t best_of,
@@ -111,6 +113,24 @@ struct RequestState final {
 
   // for profiling run, only provide prompt tokens
   RequestState(const std::vector<int32_t>& prompt_tokens);
+
+  // RequestState owns the heavy request payload (prompt, prompt_tokens,
+  // mm_data, sample_slots, callbacks). An implicit copy is almost always an
+  // accidental deep copy, so the type is move-only. Use clone() for the rare
+  // intentional copy (e.g. a benchmark/test that reuses a template state). This
+  // also makes the std::move(const&) foot-gun a compile error rather than a
+  // silent copy.
+  RequestState(RequestState&&) = default;
+  RequestState& operator=(RequestState&&) = default;
+
+  // Explicit deep copy. Prefer moving; only clone when a genuine second owner
+  // is required.
+  RequestState clone() const { return RequestState(*this); }
+
+ private:
+  // Non-public so external code cannot copy implicitly; clone() uses it.
+  RequestState(const RequestState&) = default;
+  RequestState& operator=(const RequestState&) = delete;
 
  public:
   // sampling parameters
@@ -150,11 +170,6 @@ struct RequestState final {
   // decode address.
   std::string decode_address;
 
-  // Set after the Prefill/Decode topology guard accepts the opt-in non-MLA
-  // heterogeneous TP path. It scopes first-generation transfer metadata to
-  // requests that actually consume it.
-  bool heterogeneous_pd = false;
-
   torch::Tensor input_embedding;
 
   // multimodal
@@ -164,6 +179,8 @@ struct RequestState final {
   bool logprobs;
 
   bool enable_schedule_overlap = false;
+
+  bool is_graph_warmup = false;
 
   RecType rec_type = RecType::kNone;
 
@@ -182,6 +199,9 @@ struct RequestState final {
   std::optional<Call*> call_;
 
   std::vector<SampleSlot> sample_slots;
+
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar;
+  bool json_reasoning_enabled = false;
 };
 
 }  // namespace xllm

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,10 +17,11 @@ limitations under the License.
 #pragma once
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
-
-#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
@@ -35,8 +36,58 @@ struct RequestSamplingParam {
   int64_t top_logprobs = 0;
   bool do_sample = false;
   bool is_embeddings = false;
+  bool json_object = false;
   int32_t beam_width = 0;
   int32_t num_return_sequences = 0;
+
+  // Turns on beam search with the given width and enforces what the beam
+  // machinery needs. Both the on-device BeamSearcher kernel and the host-side
+  // SequencesGroup::process_beam_search() pick the next beams from the
+  // sampler's top-k candidates, and the sampler produces exactly top_logprobs
+  // of them per sequence (the batch takes max(top_logprobs) as its top-k). So
+  // logprobs must be on, and top_logprobs must be at least beam_width: the
+  // search starts from a single sequence, so with fewer candidates the first
+  // step can only fan out to top_logprobs beams and the lower-ranked initial
+  // candidates are discarded for good, yielding a narrower search than asked
+  // for. A smaller explicit value is therefore raised to the width (the client
+  // still receives at least the logprob count it requested); an unset one is
+  // derived from it, matching the RequestParams-level default. Every factory
+  // that enables beam search goes through here so the invariant lives in one
+  // place. Out-of-range counts are rejected up front by
+  // RequestParams::verify_params. A width <= 1 just records the value (no beam
+  // search).
+  void enable_beam_search(int32_t width) {
+    beam_width = width;
+    if (beam_width > 1) {
+      logprobs = true;
+      top_logprobs =
+          std::max<int64_t>(top_logprobs, static_cast<int64_t>(beam_width));
+    }
+  }
+
+  // Whenever logprobs are on, the sampler runs topk(top_logprobs) over the
+  // vocabulary, and torch::topk throws for k > vocab. The batch uses
+  // max(top_logprobs) across its requests, so a single oversized request would
+  // take down every request in the batch. RequestParams::verify_params only
+  // knows the model-agnostic 2000 cap; this is the model-aware check for the
+  // factories, which know the vocabulary. Returns an error message when the
+  // effective top-k exceeds it, std::nullopt when it fits or the vocabulary is
+  // unknown (vocab_size <= 0). Call after enable_beam_search so the beam-raised
+  // value is what gets checked.
+  std::optional<std::string> top_logprobs_vocab_error(
+      int64_t vocab_size) const {
+    if (!logprobs || vocab_size <= 0 || top_logprobs <= vocab_size) {
+      return std::nullopt;
+    }
+    std::string error = "top_logprobs (" + std::to_string(top_logprobs) + ")";
+    if (beam_width > 1 && top_logprobs == static_cast<int64_t>(beam_width)) {
+      // The value came from beam_width (unset or smaller top_logprobs was
+      // raised to the width), so point the client at the field it actually set.
+      error = "beam_width (" + std::to_string(beam_width) + ")";
+    }
+    return error + " must not exceed the model vocabulary size (" +
+           std::to_string(vocab_size) + ")";
+  }
 };
 
 struct SamplingParameters {
@@ -46,49 +97,11 @@ struct SamplingParameters {
             const std::vector<int32_t>& sample_idxes,
             const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
             const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
-            const std::vector<int32_t>& unique_token_lens_vec);
+            const std::vector<int32_t>& unique_token_lens_vec,
+            const std::vector<torch::Tensor>& filter_mask_rows = {});
 
   SamplingParameters to(const torch::Device& device,
-                        torch::ScalarType dtype) const {
-    SamplingParameters params;
-
-    // selected/sample indices are tiny control tensors and
-    // correctness-critical. Use blocking H2D copies to avoid consuming
-    // partially transferred index buffers on NPU runtime paths.
-    params.selected_token_idxes =
-        selected_token_idxes.defined()
-            ? safe_to(selected_token_idxes, device).contiguous()
-            : selected_token_idxes;
-
-    auto options = torch::device(device).dtype(dtype);
-    params.frequency_penalties = safe_to(frequency_penalties, options, true);
-    params.presence_penalties = safe_to(presence_penalties, options, true);
-    params.repetition_penalties = safe_to(repetition_penalties, options, true);
-    params.temperatures = safe_to(temperatures, options, true);
-    params.top_p = safe_to(top_p, options, true);
-    params.top_k = safe_to(top_k, device, true);
-
-    params.unique_token_ids = safe_to(unique_token_ids, device, true);
-    params.unique_token_counts = safe_to(unique_token_counts, device, true);
-    params.unique_token_ids_lens = safe_to(unique_token_ids_lens, device, true);
-
-    params.sample_idxes = sample_idxes.defined()
-                              ? safe_to(sample_idxes, device).contiguous()
-                              : sample_idxes;
-    params.do_sample = safe_to(do_sample, device, true);
-    params.acc_logprob = safe_to(acc_logprob, device, true);
-    params.all_random_sample = all_random_sample;
-    params.all_greedy_sample = all_greedy_sample;
-    params.logprobs = logprobs;
-    params.return_probs = return_probs;
-    params.max_top_logprobs = max_top_logprobs;
-    params.is_embeddings = is_embeddings;
-    params.num_return_sequences = num_return_sequences;
-
-    // for beam search
-    params.use_beam_search = use_beam_search;
-    return params;
-  }
+                        torch::ScalarType dtype) const;
 
   // concat two SamplingParameters into one
   void concat(const SamplingParameters& param);
@@ -97,6 +110,14 @@ struct SamplingParameters {
   // including the generated tokens and the last prompt token
   // IntTensor
   torch::Tensor selected_token_idxes;
+
+  // Dense additive mask for token-level structured output constraints. Zero
+  // entries are allowed and negative entries are forbidden.
+  torch::Tensor filter_mask;
+
+  // Compact allowed-token bitmask [num_tokens, ceil(vocab/32)] int32. When
+  // defined, Sampler prefers this over filter_mask (smaller H2D).
+  torch::Tensor filter_bitmask;
 
   // [num_tokens] FloatTensor
   torch::Tensor frequency_penalties;
@@ -149,7 +170,7 @@ struct SamplingParameters {
   // request itself does not ask for logprobs.
   bool return_probs = false;
 
-  // wheteher to get the embeddings of the tokens. used by embeddings model.
+  // whether to get the embeddings of the tokens. used by embeddings model.
   bool is_embeddings = false;
 
   // max number of top logprobs in the batch.
@@ -161,6 +182,11 @@ struct SamplingParameters {
 
   // for beam search
   bool use_beam_search = false;
+};
+
+struct SpeculativeTokenStats {
+  int64_t accepted_tokens = 0;
+  int64_t proposed_tokens = 0;
 };
 
 struct SampleOutput {
@@ -191,6 +217,7 @@ struct SampleOutput {
   torch::Tensor selected_embeddings;
 
   std::vector<std::vector<torch::Tensor>> mm_embeddings;
+  std::vector<SpeculativeTokenStats> speculative_token_stats;
 };
 
 }  // namespace xllm

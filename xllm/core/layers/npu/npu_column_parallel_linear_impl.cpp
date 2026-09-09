@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -92,11 +92,20 @@ NpuColumnParallelLinearImpl::NpuColumnParallelLinearImpl(
 }
 
 void NpuColumnParallelLinearImpl::merge_loaded_weights() {
+  loader_->merge_loaded_weights();
   auto& at_weight_tensors = loader_->get_at_weight_tensors();
 
   atb_weight_tensors_[0] =
       atb_speed::Utils::AtTensor2Tensor(at_weight_tensors[0]);
   init_layer();
+}
+
+void NpuColumnParallelLinearImpl::fuse_eagle3_quarot_input_rotation(
+    torch::Tensor global_rotation) {
+  auto* column_loader = dynamic_cast<ColumParallelLinearLoader*>(loader_.get());
+  CHECK(column_loader != nullptr)
+      << "NpuColumnParallelLinear loader is not ColumParallelLinearLoader";
+  column_loader->fuse_eagle3_quarot_input_rotation(global_rotation);
 }
 
 int64_t NpuColumnParallelLinearImpl::init_layer() {

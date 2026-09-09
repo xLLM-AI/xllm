@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,7 +29,7 @@ limitations under the License.
 std::string model_path = "/export/home/models/Qwen3-4B";
 
 int main(int argc, char** argv) {
-  std::cout << "Start to bootup the first LLM instance." << std::endl;
+  std::cout << "Start to boot up the first LLM instance." << std::endl;
 
   std::shared_ptr<xllm::LLM> llm_instance_01 = std::make_shared<xllm::LLM>();
   xllm::XLLM_InitLLMOptions options_01;
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     std::cout << "LLM instance init failed." << std::endl;
     return -1;
   }
-  std::cout << "LLM init succefully." << std::endl;
+  std::cout << "LLM init successfully." << std::endl;
 
   const std::string model_name = "Qwen3-4B";
 
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
   xllm::cc_api_test::run_chat_completion_request(model_name,
                                                  llm_instance_01.get());
 
-  std::cout << "Start to bootup the second LLM instance." << std::endl;
+  std::cout << "Start to boot up the second LLM instance." << std::endl;
 
   std::shared_ptr<xllm::LLM> llm_instance_02 = std::make_shared<xllm::LLM>();
   xllm::XLLM_InitLLMOptions options_02;
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     std::cout << "LLM instance init failed." << std::endl;
     return -1;
   }
-  std::cout << "LLM init succefully." << std::endl;
+  std::cout << "LLM init successfully." << std::endl;
 
   xllm::cc_api_test::run_completion_request(model_name, llm_instance_02.get());
 

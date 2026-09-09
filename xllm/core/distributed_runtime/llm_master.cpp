@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <atomic>
 #include <boost/algorithm/string.hpp>
-#include <csignal>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -40,7 +39,6 @@ limitations under the License.
 #include "util/net.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
-#include "util/utils.h"
 
 namespace xllm {
 namespace {
@@ -53,12 +51,14 @@ bool should_use_ssm_engine(const Options& options) {
 
 }  // namespace
 
-volatile bool LLMAssistantMaster::running_ = false;
-
 LLMMaster::LLMMaster(const Options& options)
     : Master(
           options,
           should_use_ssm_engine(options) ? EngineType::SSM : EngineType::LLM) {
+  if (!is_leader()) {
+    return;
+  }
+
   CHECK(engine_->init(master_status_));
   task_type_ = options_.task_type();
 
@@ -123,12 +123,35 @@ LLMMaster::LLMMaster(const Options& options)
       /*num_threads=*/options_.num_request_handling_threads(),
       /*cpu_binding=*/false,
       /*pool_name=*/"LLMMaster.request");
+
+  request_factory_ = std::make_unique<LLMRequestFactory>(
+      tokenizer_.get(),
+      chat_template_.get(),
+      &model_args_,
+      &options_,
+      get_rate_limiter(),
+      task_type_,
+      [this](const std::vector<RequestOutput>& outputs) {
+        return handle_rpc_responses(outputs);
+      });
 }
 
 LLMMaster::~LLMMaster() {
   stoped_.store(true, std::memory_order_relaxed);
-  // wait for the loop thread to finish
   LOG(INFO) << "LLMMaster stopping...";
+
+  // Drain and join the request thread pool before any of the members its
+  // worker lambdas touch are destroyed. Those lambdas dereference
+  // request_factory_ (as well as scheduler_ and the rate limiter), but
+  // request_factory_ is declared after threadpool_ in the header, so member
+  // destruction would otherwise free the factory while pool workers are still
+  // in flight. ~ThreadPool only signals/joins its workers when the pool is
+  // destroyed, so reset it here explicitly while all dependencies are alive.
+  // Done before joining loop_thread_ so the scheduler keeps advancing while the
+  // pool drains.
+  threadpool_.reset();
+
+  // wait for the loop thread to finish
   if (loop_thread_.joinable()) {
     loop_thread_.join();
   }
@@ -194,7 +217,7 @@ void LLMMaster::handle_request(std::string prompt,
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
     // Guard the rate-limit slot acquired at the service entry. If we bail
-    // before generate_request has a chance to create the Request, this
+    // before the factory has a chance to create the Request, this
     // releases the slot; otherwise Request itself takes ownership.
     xllm::ScopeGuard rate_limit_guard(
         [this] { get_rate_limiter()->decrease_one_request(); });
@@ -206,7 +229,7 @@ void LLMMaster::handle_request(std::string prompt,
     }
 
     rate_limit_guard.dismiss();
-    auto request = generate_request(
+    auto request = request_factory_->create(
         std::move(prompt), std::move(prompt_token), sp, call, callback);
     if (!request) {
       return;
@@ -249,8 +272,8 @@ void LLMMaster::handle_request(std::vector<Message> messages,
     }
 
     rate_limit_guard.dismiss();
-    auto request =
-        generate_request(messages, std::move(prompt_token), sp, call, callback);
+    auto request = request_factory_->create(
+        messages, std::move(prompt_token), sp, call, callback);
     if (!request) {
       return;
     }
@@ -265,6 +288,11 @@ void LLMMaster::handle_request(std::vector<Message> messages,
 }
 
 void LLMMaster::run() {
+  if (!is_leader()) {
+    Master::run();
+    return;
+  }
+
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "LLMMaster is already running.";
@@ -293,271 +321,6 @@ void LLMMaster::generate() {
   running_.store(true, std::memory_order_relaxed);
   scheduler_->generate();
   running_.store(false, std::memory_order_relaxed);
-}
-
-std::shared_ptr<Request> LLMMaster::generate_request(
-    std::string prompt,
-    std::optional<std::vector<int>> prompt_tokens,
-    const RequestParams& sp,
-    std::optional<Call*> call,
-    OutputCallback callback) {
-  // The caller (service_impl) has already incremented the rate limiter's
-  // slot via is_limited() returning false. This guard releases it on any
-  // early return below; we dismiss it right before Request takes ownership.
-  xllm::ScopeGuard rate_limit_guard(
-      [this] { get_rate_limiter()->decrease_one_request(); });
-
-  // A request is valid as long as it carries either text or pre-tokenized
-  // prompt tokens; pure-token input (no text) is a first-class input.
-  const bool has_prompt_tokens = prompt_tokens.has_value();
-  if (prompt.empty() && !has_prompt_tokens) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Prompt is empty",
-                        sp.service_request_id,
-                        sp.source_xservice_addr);
-    return nullptr;
-  }
-
-  // encode the prompt
-  Timer timer;
-  std::vector<int> local_prompt_tokens;
-
-  if (has_prompt_tokens) {
-    local_prompt_tokens = std::move(prompt_tokens.value());
-  } else {
-    if (!tokenizer_->encode(
-            prompt, &local_prompt_tokens, sp.add_special_tokens)) {
-      LOG(ERROR) << "Failed to encode prompt: " << prompt;
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "Failed to encode prompt",
-                          sp.service_request_id,
-                          sp.source_xservice_addr);
-      return nullptr;
-    }
-  }
-
-  COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
-
-  // Validate directly-supplied prompt tokens against the vocabulary range to
-  // avoid out-of-bounds embedding lookups. Encoded tokens are trusted, so only
-  // scan when tokens were provided and the vocab range is known.
-  const int64_t vocab_size = model_args_.vocab_size();
-  if (has_prompt_tokens && vocab_size > 0) {
-    const auto invalid_token =
-        util::find_out_of_vocab_token(local_prompt_tokens, vocab_size);
-    if (invalid_token.has_value()) {
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "Prompt token id out of vocabulary range: " +
-                              std::to_string(invalid_token.value()),
-                          sp.service_request_id,
-                          sp.source_xservice_addr);
-      return nullptr;
-    }
-  }
-
-  const int32_t max_context_len = model_args_.max_position_embeddings();
-  int32_t prompt_token_limit = max_context_len;
-  if (!options_.enable_chunked_prefill()) {
-    prompt_token_limit =
-        std::min(prompt_token_limit, options_.max_tokens_per_batch());
-  }
-  if (local_prompt_tokens.size() >= prompt_token_limit) {
-    LOG(ERROR) << "Prompt is too long: " << local_prompt_tokens.size();
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Prompt is too long",
-                        sp.service_request_id,
-                        sp.source_xservice_addr);
-    return nullptr;
-  }
-
-  uint32_t max_tokens = sp.max_tokens;
-  if (max_tokens == 0) {
-    const uint32_t kDefaultMaxTokens = 5120;
-    max_tokens = kDefaultMaxTokens;
-  }
-  uint32_t effective_max_tokens = max_tokens;
-  if (sp.is_sample_request) {
-    const uint32_t sample_slot_tokens =
-        static_cast<uint32_t>(sp.sample_slots.size());
-    if (sample_slot_tokens > effective_max_tokens) {
-      effective_max_tokens = sample_slot_tokens;
-    }
-  }
-
-  // allocate enough capacity for prompt tokens, max tokens, and speculative
-  // tokens
-  size_t capacity = local_prompt_tokens.size() + effective_max_tokens +
-                    options_.num_speculative_tokens() + /*bouns_token*/ 1;
-  if (options_.enable_schedule_overlap()) {
-    capacity += options_.num_speculative_tokens() + 1;
-  }
-  const size_t best_of = sp.best_of.value_or(sp.n);
-
-  RequestSamplingParam sampling_param;
-  sampling_param.frequency_penalty = sp.frequency_penalty;
-  sampling_param.presence_penalty = sp.presence_penalty;
-  sampling_param.repetition_penalty = sp.repetition_penalty;
-  sampling_param.temperature = sp.temperature;
-  sampling_param.top_p = sp.top_p;
-  sampling_param.top_k = sp.top_k;
-  sampling_param.logprobs = sp.logprobs;
-  sampling_param.top_logprobs = sp.top_logprobs;
-  sampling_param.is_embeddings = sp.is_embeddings;
-  sampling_param.beam_width = sp.beam_width;
-  if (best_of > sp.n) {
-    // enable logprobs for best_of to generate sequence logprob
-    sampling_param.logprobs = true;
-  }
-  if (sampling_param.beam_width > 1) {
-    // beam search requires logprobs, and needs at least one top_logprob
-    // candidate for beam expansion.
-    sampling_param.logprobs = true;
-    if (sampling_param.top_logprobs == 0) {
-      sampling_param.top_logprobs =
-          static_cast<int64_t>(sampling_param.beam_width);
-    }
-  }
-  // sampling_param.do_sample = sp.do_sample;
-
-  SchedulerParam scheduler_param;
-  scheduler_param.offline = sp.offline;
-  scheduler_param.priority = sp.priority;
-  if (!sp.offline) {
-    scheduler_param.ttft_slo_ms = sp.ttft_slo_ms;
-    scheduler_param.tpot_slo_ms = sp.tpot_slo_ms;
-    scheduler_param.ttlt_slo_ms = sp.ttlt_slo_ms;
-    scheduler_param.tpot_priority_weight = sp.tpot_priority_weight;
-    scheduler_param.ttft_priority_weight = sp.ttft_priority_weight;
-    scheduler_param.ttlt_priority_weight = sp.ttlt_priority_weight;
-    scheduler_param.priority_weight = sp.priority_weight;
-  }
-
-  std::unordered_set<int32_t> stop_tokens;
-  if (sp.stop_token_ids.has_value()) {
-    const auto& stop_token_ids = sp.stop_token_ids.value();
-    stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
-  } else {
-    stop_tokens = model_args_.stop_token_ids();
-  }
-  std::vector<std::vector<int32_t>> stop_sequences;
-  if (sp.stop.has_value()) {
-    for (const auto& s : sp.stop.value()) {
-      std::vector<int> tmp_tokens;
-      if (!tokenizer_->encode(s, &tmp_tokens)) {
-        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                            "Failed to encode stop sequence",
-                            sp.service_request_id,
-                            sp.source_xservice_addr);
-        LOG(ERROR) << "Failed to encode stop sequence: " << s;
-        return nullptr;
-      }
-      stop_sequences.push_back(std::move(tmp_tokens));
-    }
-  }
-
-  StoppingChecker stopping_checker(
-      effective_max_tokens,
-      max_context_len - options_.num_speculative_tokens(),
-      model_args_.eos_token_id(),
-      sp.ignore_eos,
-      std::move(stop_tokens),
-      std::move(stop_sequences));
-
-  if (task_type_ != "embed" && task_type_ != "mm_embed") {
-    auto finish_reason =
-        stopping_checker.check(local_prompt_tokens, local_prompt_tokens.size());
-    if (finish_reason != FinishReason::NONE) {
-      LOG(INFO) << " finish_reason " << finish_reason.to_string().value();
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "Invalid Prompt",
-                          sp.service_request_id,
-                          sp.source_xservice_addr);
-      LOG(ERROR) << "Invalid Prompt EndWith Token_ID:"
-                 << local_prompt_tokens[local_prompt_tokens.size() - 1];
-      return nullptr;
-    }
-  }
-
-  bool stream = sp.streaming;
-  // results cannot be streamed when best_of != n
-  if (best_of != sp.n) {
-    stream = false;
-  }
-
-  OutputsFunc batch_callback = nullptr;
-  if (options_.enable_service_routing()) {
-    batch_callback = [this](const std::vector<RequestOutput>& req_outputs) {
-      for (const auto& req_output : req_outputs) {
-        req_output.log_request_status();
-      }
-      return handle_rpc_responses(req_outputs);
-    };
-  }
-
-  RequestState req_state(std::move(prompt),
-                         std::move(local_prompt_tokens),
-                         std::move(sampling_param),
-                         std::move(scheduler_param),
-                         std::move(stopping_checker),
-                         capacity,
-                         sp.n,
-                         best_of,
-                         sp.logprobs,
-                         stream,
-                         sp.echo,
-                         sp.skip_special_tokens,
-                         options_.enable_schedule_overlap(),
-                         callback,
-                         batch_callback,
-                         sp.decode_address,
-                         call);
-  req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
-  req_state.sample_slots = sp.sample_slots;
-
-  rate_limit_guard.dismiss();
-  auto request = std::make_shared<Request>(sp.request_id,
-                                           sp.x_request_id,
-                                           sp.x_request_time,
-                                           std::move(req_state),
-                                           sp.service_request_id,
-                                           sp.source_xservice_addr,
-                                           get_rate_limiter());
-
-  // add one sequence, rest will be added by scheduler
-  return request;
-}
-
-std::shared_ptr<Request> LLMMaster::generate_request(
-    const std::vector<Message>& messages,
-    std::optional<std::vector<int>> prompt_tokens,
-    const RequestParams& sp,
-    std::optional<Call*> call,
-    OutputCallback callback) {
-  // Guard the rate-limit slot the caller acquired via is_limited(). The
-  // string-prompt overload installs its own guard once we forward there;
-  // we dismiss ours right before that call so the slot is not released
-  // twice.
-  xllm::ScopeGuard rate_limit_guard(
-      [this] { get_rate_limiter()->decrease_one_request(); });
-
-  Timer timer;
-
-  std::optional<std::string> prompt;
-  prompt = chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
-  if (!prompt.has_value()) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Failed to construct prompt from messages",
-                        sp.service_request_id,
-                        sp.source_xservice_addr);
-    LOG(ERROR) << "Failed to construct prompt from messages";
-    return nullptr;
-  }
-
-  COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
-
-  rate_limit_guard.dismiss();
-  return generate_request(
-      std::move(prompt.value()), std::move(prompt_tokens), sp, call, callback);
 }
 
 bool LLMMaster::handle_rpc_response(const RequestOutput& output) {
@@ -608,40 +371,6 @@ bool LLMMaster::link_p2p(const std::vector<std::string>& remote_addrs) {
 
 bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
   return engine_->unlink_p2p(remote_addrs);
-}
-
-LLMAssistantMaster::LLMAssistantMaster(const Options& options)
-    : Master(
-          options,
-          should_use_ssm_engine(options) ? EngineType::SSM : EngineType::LLM) {
-  // setup process workers
-  auto master_node_addr = options_.master_node_addr().value_or("");
-  // TODO: support local unix domain socket later.
-  if (master_node_addr.empty()) {
-    LOG(FATAL)
-        << "MultiNodeEngine required master_node_addr, current value is empty.";
-    return;
-  }
-
-  running_ = true;
-}
-
-LLMAssistantMaster::~LLMAssistantMaster() {
-  // wait for the loop thread to finish
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
-}
-
-void LLMAssistantMaster::run() {
-  signal(SIGINT, LLMAssistantMaster::handle_signal);
-  signal(SIGTERM, LLMAssistantMaster::handle_signal);
-
-  loop_thread_ = std::thread([this]() {
-    while (running_) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-    }
-  });
 }
 
 // ============== Async RL training support: Pause/Resume ==============

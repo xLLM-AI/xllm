@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +36,7 @@ limitations under the License.
 #include "layers/mlu/fused_moe.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
+#include "platform/model_stream_registry.h"
 #include "platform/platform.h"
 #include "util/tensor_helper.h"
 
@@ -286,13 +287,17 @@ int32_t run_all2all_basic_test_child(All2AllTestParams params) {
     // 6. Create model args and quant args
     ModelArgs model_args = create_model_args(params);
     QuantArgs quant_args = create_quant_args(params);
+    ModelStreamRegistry stream_registry(device);
 
     // 7. Create FusedMoE
-    FusedMoE fused_moe(FusedMoEImpl(model_args,
-                                    FusedMoEArgs{.is_gated = true},
-                                    quant_args,
-                                    parallel_args,
-                                    options));
+    FusedMoE fused_moe(FusedMoEImpl(
+        model_args,
+        FusedMoEArgs{.is_gated = true},
+        quant_args,
+        parallel_args,
+        options,
+        stream_registry.get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry.get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
 
     // 8. Create and load weights using seeded tensors
     auto weight_dict = create_all2all_test_weights(params.num_experts,
@@ -403,11 +408,15 @@ int32_t run_all2all_selected_route_test_child(All2AllTestParams params) {
 
     ModelArgs model_args = create_model_args(params);
     QuantArgs quant_args = create_quant_args(params);
-    FusedMoE fused_moe(FusedMoEImpl(model_args,
-                                    FusedMoEArgs{.is_gated = true},
-                                    quant_args,
-                                    parallel_args,
-                                    options));
+    ModelStreamRegistry stream_registry(device);
+    FusedMoE fused_moe(FusedMoEImpl(
+        model_args,
+        FusedMoEArgs{.is_gated = true},
+        quant_args,
+        parallel_args,
+        options,
+        stream_registry.get(ExecutionStreamRole::COMMUNICATION),
+        stream_registry.get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
 
     auto weight_dict = create_all2all_test_weights(params.num_experts,
                                                    params.hidden_size,

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -588,7 +588,7 @@ bool OpenCVImageEncoder::encode(const torch::Tensor& t, std::string& raw_data) {
 
   std::vector<uchar> data;
   if (!cv::imencode(".png", mat_8u, data)) {
-    LOG(ERROR) << "image encode faild";
+    LOG(ERROR) << "image encode failed";
     return false;
   }
 
@@ -617,7 +617,7 @@ bool FFmpegVideoDecoder::decode(const std::string& raw_data,
                            raw_data.size());
 
   if (!reader.init(metadata) || !reader.read(t, metadata)) {
-    LOG(INFO) << "video decode faild";
+    LOG(INFO) << "video decode failed";
     return false;
   }
   return true;
@@ -632,7 +632,7 @@ bool FFmpegAudioDecoder::decode(const std::string& raw_data,
                            target_sr);
 
   if (!reader.init(metadata) || !reader.read(t, metadata)) {
-    LOG(INFO) << "audio decode faild";
+    LOG(INFO) << "audio decode failed";
     return false;
   }
   return true;

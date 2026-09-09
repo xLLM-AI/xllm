@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/quant_args.h"
+#include "core/platform/model_stream_registry.h"
 #include "framework/parallel_state/parallel_args.h"
 
 namespace xllm {
@@ -86,6 +87,10 @@ class ModelContext {
     return flash_comm1_options_;
   }
 
+  const std::shared_ptr<ModelStreamRegistry>& stream_registry() const {
+    return stream_registry_;
+  }
+
   void set_flash_comm1_options(const FlashComm1Options& options) {
     flash_comm1_options_ = options;
   }
@@ -126,6 +131,7 @@ class ModelContext {
   torch::TensorOptions tensor_options_;
   OptimizationConfig optimization_config_;
   FlashComm1Options flash_comm1_options_;
+  std::shared_ptr<ModelStreamRegistry> stream_registry_;
 
 #if defined(USE_NPU)
   // used for npu atb

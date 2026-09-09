@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -39,11 +39,6 @@ DEFINE_string(instance_role,
               "DEFAULT",
               "The role of instance(e.g. DEFAULT, PREFILL, DECODE, MIX).");
 
-DEFINE_string(
-    kv_cache_transfer_type,
-    "Mooncake",
-    "The type of kv cache transfer(e.g. LlmDataDist, Mooncake, HCCL).");
-
 DEFINE_string(kv_cache_transfer_mode,
               "PUSH",
               "The mode of kv cache transfer(e.g. PUSH, PULL).");
@@ -55,34 +50,16 @@ DEFINE_bool(kv_push_dst_rotate,
             "Rotate the dst-worker traversal order in push_kv_blocks per "
             "KV-split rank to spread incast across D workers.");
 
-DEFINE_bool(enable_heterogeneous_pd,
-            false,
-            "Enable the non-MLA heterogeneous TP PD cache-transfer path.");
-
-DEFINE_bool(enable_pd_parallel_shard_pull,
-            true,
-            "Pull heterogeneous source TP shards in parallel on Decode.");
-
 namespace xllm {
-namespace {
-
-bool supports_prefix_cache(const std::string& instance_role) {
-  return instance_role == "PREFILL" || instance_role == "MIX";
-}
-
-}  // namespace
 
 void DisaggPDConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_disagg_pd);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_pd_ooc);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disagg_pd_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(instance_role);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_transfer_type);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_transfer_mode);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(transfer_listen_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_push_dst_rotate);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_heterogeneous_pd);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_pd_parallel_shard_pull);
 }
 
 void DisaggPDConfig::from_json(const JsonReader& json) {
@@ -91,11 +68,8 @@ void DisaggPDConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(disagg_pd_port);
   // instance role is different for prefill and decode instances, so we don't
   // need to assign it from json XLLM_CONFIG_ASSIGN_FROM_JSON(instance_role);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_type);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_mode);
   XLLM_CONFIG_ASSIGN_FROM_JSON(transfer_listen_port);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_heterogeneous_pd);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_pd_parallel_shard_pull);
 }
 
 void DisaggPDConfig::append_config_json(
@@ -111,15 +85,9 @@ void DisaggPDConfig::append_config_json(
   //  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
   //      config_json, default_config, instance_role);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, kv_cache_transfer_type);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_cache_transfer_mode);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, transfer_listen_port);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_heterogeneous_pd);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_pd_parallel_shard_pull);
 }
 
 DisaggPDConfig& DisaggPDConfig::get_instance() {
@@ -136,12 +104,6 @@ void DisaggPDConfig::initialize() {
 
 void DisaggPDConfig::normalize_mlu(KVCacheConfig& kv_cache_config,
                                    SchedulerConfig& scheduler_config) {
-  if (kv_cache_transfer_type() != "Mooncake") {
-    LOG(WARNING) << "MLU disaggregated PD requires "
-                 << "kv_cache_transfer_type=Mooncake; forcing from "
-                 << kv_cache_transfer_type() << " to Mooncake.";
-    kv_cache_transfer_type("Mooncake");
-  }
   if (kv_cache_config.kv_cache_dtype() != "auto") {
     LOG(WARNING) << "MLU disaggregated PD requires kv_cache_dtype=auto; "
                  << "forcing from " << kv_cache_config.kv_cache_dtype()
@@ -153,13 +115,6 @@ void DisaggPDConfig::normalize_mlu(KVCacheConfig& kv_cache_config,
                  << "forcing enable_schedule_overlap=false.";
     scheduler_config.enable_schedule_overlap(false);
   }
-  if (kv_cache_config.enable_prefix_cache() &&
-      !supports_prefix_cache(instance_role())) {
-    LOG(WARNING) << "MLU disaggregated PD role " << instance_role()
-                 << " does not support prefix cache; "
-                 << "forcing enable_prefix_cache=false.";
-    kv_cache_config.enable_prefix_cache(false);
-  }
   if (enable_pd_ooc()) {
     LOG(WARNING) << "MLU disaggregated PD does not support pd_ooc; "
                  << "forcing enable_pd_ooc=false.";
@@ -168,12 +123,6 @@ void DisaggPDConfig::normalize_mlu(KVCacheConfig& kv_cache_config,
 }
 
 void DisaggPDConfig::normalize_dcu(SchedulerConfig& scheduler_config) {
-  if (kv_cache_transfer_type() != "Mooncake") {
-    LOG(WARNING) << "DCU disaggregated PD requires "
-                 << "kv_cache_transfer_type=Mooncake; forcing from "
-                 << kv_cache_transfer_type() << " to Mooncake.";
-    kv_cache_transfer_type("Mooncake");
-  }
   if (kv_cache_transfer_mode() != "PUSH" &&
       kv_cache_transfer_mode() != "PULL") {
     LOG(WARNING) << "DCU disaggregated PD supports "

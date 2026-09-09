@@ -2,14 +2,14 @@ include(cc_test)
 
 cc_test(
   NAME
-    embedding_cache_test
+    cache_layout_builder_test
   SRCS
-    embedding_cache_test.cpp
+    cache_layout_builder_test.cpp
   DEPS
     :kv_cache
     GTest::gtest_main
 )
-target_link_libraries(embedding_cache_test
+target_link_libraries(cache_layout_builder_test
                       PUBLIC
                       Python::Python
                       $<$<BOOL:${USE_NPU}>:ascendcl>

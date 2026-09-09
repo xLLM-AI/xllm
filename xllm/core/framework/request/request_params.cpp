@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,11 +16,17 @@ limitations under the License.
 
 #include "request_params.h"
 
+#include <type_traits>
+
 #include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/util/uuid.h"
 #include "request.h"
+// Pulls in RequestSamplingParam and SchedulerParam definitions for the
+// projection helpers below.
+#include "request_state.h"
 
 namespace xllm {
 namespace {
@@ -320,6 +326,20 @@ std::vector<xllm::JsonTool> parse_tools_from_proto(
 
 template <typename ChatRequest>
 void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
+  if constexpr (std::is_same_v<ChatRequest, proto::ChatRequest>) {
+    if (request.has_response_format()) {
+      const std::string& type = request.response_format().type();
+      if (type == "json_object") {
+        if (ServiceConfig::get_instance().enable_json_object_output()) {
+          params.response_format = ResponseFormatType::JSON_OBJECT;
+        }
+      } else {
+        params.response_format_error =
+            "Unsupported response_format.type: " + type +
+            "; only json_object is supported";
+      }
+    }
+  }
   if (request.has_request_id()) {
     params.request_id = request.request_id();
   }
@@ -574,6 +594,13 @@ RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
 }
 
 bool RequestParams::verify_params(OutputCallback callback) const {
+  if (!response_format_error.empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        response_format_error,
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
   if (n == 0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "n should be greater than 0",
@@ -636,17 +663,40 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     }
   }
 
-  if (logprobs) {
-    if (echo) {
+  if (logprobs && echo) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "logprobs is not supported with echo",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  // top_logprobs becomes the k of torch::topk() whenever logprobs are in
+  // effect. Beam search forces logprobs on downstream
+  // (RequestSamplingParam::enable_beam_search), so a beam request with
+  // logprobs=false must be validated too; otherwise an oversized count would
+  // only surface as a throw inside the sampler at execution time. The raw field
+  // is checked first so that a negative count is reported as a client error
+  // rather than silently repaired by the beam normalization.
+  if (logprobs || beam_width > 1) {
+    if (top_logprobs < 0 || top_logprobs > 2000) {
       CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "logprobs is not supported with echo",
+                          "logprobs must be between 0 and 2000",
                           service_request_id,
                           source_xservice_addr);
       return false;
     }
-    if (top_logprobs < 0 || top_logprobs > 2000) {
+    // Beam search raises top_logprobs to at least beam_width, so also validate
+    // the value that will actually be used. Derive it through the same helper
+    // so the rule is not duplicated here.
+    RequestSamplingParam effective;
+    effective.logprobs = logprobs;
+    effective.top_logprobs = top_logprobs;
+    effective.enable_beam_search(beam_width);
+    if (effective.top_logprobs > 2000) {
       CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "logprobs must be between 0 and 2000",
+                          "beam_width must be at most 2000 (it sets the "
+                          "top_logprobs used for beam expansion)",
                           service_request_id,
                           source_xservice_addr);
       return false;
@@ -671,6 +721,44 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     return false;
   }
   return true;
+}
+
+RequestSamplingParam RequestParams::to_sampling_param(size_t best_of) const {
+  RequestSamplingParam sampling_param;
+  sampling_param.frequency_penalty = frequency_penalty;
+  sampling_param.presence_penalty = presence_penalty;
+  sampling_param.repetition_penalty = repetition_penalty;
+  sampling_param.temperature = temperature;
+  sampling_param.top_p = top_p;
+  sampling_param.top_k = top_k;
+  sampling_param.logprobs = logprobs;
+  sampling_param.top_logprobs = top_logprobs;
+  sampling_param.is_embeddings = is_embeddings;
+  if (best_of > n) {
+    // enable logprobs for best_of to generate sequence logprob
+    sampling_param.logprobs = true;
+  }
+  // Beam-search fields (beam_width / num_return_sequences) are intentionally
+  // NOT mapped here: they are model-specific. LLM copies beam_width and then
+  // normalizes logprobs/top_logprobs for beam expansion, REC copies both
+  // fields, and VLM omits them entirely. Each factory layers them on as needed.
+  return sampling_param;
+}
+
+SchedulerParam RequestParams::to_scheduler_param() const {
+  SchedulerParam scheduler_param;
+  scheduler_param.offline = offline;
+  scheduler_param.priority = priority;
+  if (!offline) {
+    scheduler_param.ttft_slo_ms = ttft_slo_ms;
+    scheduler_param.tpot_slo_ms = tpot_slo_ms;
+    scheduler_param.ttlt_slo_ms = ttlt_slo_ms;
+    scheduler_param.tpot_priority_weight = tpot_priority_weight;
+    scheduler_param.ttft_priority_weight = ttft_priority_weight;
+    scheduler_param.ttlt_priority_weight = ttlt_priority_weight;
+    scheduler_param.priority_weight = priority_weight;
+  }
+  return scheduler_param;
 }
 
 }  // namespace xllm

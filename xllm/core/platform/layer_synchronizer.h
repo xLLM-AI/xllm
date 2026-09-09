@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,6 +27,8 @@ class LayerSynchronizer {
   virtual ~LayerSynchronizer() = default;
 
   virtual bool synchronize_layer(int64_t layer_index) = 0;
+  // Reports record failure without aborting pending waits. The stream owner
+  // must first make any submitted work safe, then call abort().
   virtual bool record_stream(int64_t layer_index, Stream* stream) = 0;
   // Force every layer's wait to unblock and report failure. Called when a copy
   // fails so a forward thread spinning in synchronize_layer does not hang

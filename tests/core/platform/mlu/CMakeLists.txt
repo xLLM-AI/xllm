@@ -25,6 +25,9 @@ cc_test(
     cndrv
     torch
 )
+target_link_options(mlu_batch_memcpy_test PRIVATE
+  -Wl,--wrap=cnMemcpyBatchAsync
+  -Wl,--wrap=cnQueueSync)
 
 cc_test(
   NAME

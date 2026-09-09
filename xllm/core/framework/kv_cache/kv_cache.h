@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,7 +36,8 @@ class KVCache final {
   explicit KVCache(const DeepSeekV4KVCacheTensors& tensors);
   KVCache(const KVCacheShape& kv_cache_shape,
           const KVCacheCreateOptions& create_options,
-          int64_t layer_id);
+          int64_t layer_id,
+          bool owns_layer_cache = true);
   KVCache(const KVCacheShape& kv_cache_shape,
           const KVCacheCreateOptions& create_options,
           BlockType type,
@@ -70,10 +71,21 @@ class KVCache final {
 
   bool empty() const;
 
+  [[nodiscard]] bool owns_layer_cache() const noexcept {
+    return owns_layer_cache_;
+  }
+
   void swap_blocks(torch::Tensor& src_tensor, torch::Tensor& dst_tensor);
 
  private:
-  std::unique_ptr<KVCacheImpl> impl_;
+  [[nodiscard]] KVCache create_shared_view() const;
+
+  bool owns_layer_cache_ = true;
+  std::shared_ptr<KVCacheImpl> impl_;
+
+  friend void allocate_kv_caches(std::vector<KVCache>& kv_caches,
+                                 const KVCacheShape& kv_cache_shape,
+                                 const KVCacheCreateOptions& create_options);
 };
 
 void allocate_kv_caches(std::vector<KVCache>& kv_caches,

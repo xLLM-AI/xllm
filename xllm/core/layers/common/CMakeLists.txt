@@ -15,9 +15,10 @@ cc_library(
     rms_norm.h
     rotary_embedding.h
     rotary_embedding_util.h
-    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
+    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
     dense_mlp.h
     linear.h
+    $<$<BOOL:${USE_MUSA}>:${CMAKE_CURRENT_SOURCE_DIR}/../musa/linear_block_fp8.h>
     word_embedding_impl.h
     deep_ep.h
     activation.h
@@ -30,6 +31,7 @@ cc_library(
     dsa_topk_share_plan.h
     dp_utils.h
     add_matmul.h
+    dflash2_grouped_conv.h
     moe_fused_topk.h
   SRCS
     oxygen_vision_attention.cpp
@@ -43,9 +45,10 @@ cc_library(
     rms_norm.cpp
     rotary_embedding.cpp
     rotary_embedding_util.cpp
-    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
+    $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
     dense_mlp.cpp
     linear.cpp
+    $<$<BOOL:${USE_MUSA}>:${CMAKE_CURRENT_SOURCE_DIR}/../musa/linear_block_fp8.cpp>
     word_embedding_impl.cpp
     deep_ep.cpp
     activation.cpp
@@ -55,6 +58,7 @@ cc_library(
     dsa_metadata_builder.cpp
     dp_utils.cpp
     add_matmul.cpp
+    dflash2_grouped_conv.cpp
     moe_fused_topk.cpp
   DEPS
     "-Wl,--whole-archive"

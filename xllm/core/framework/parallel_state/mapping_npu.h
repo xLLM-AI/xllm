@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -104,6 +104,7 @@ class MappingNPU final {
     PROPERTY(int32_t, sp_size) = -1;
     // cp size
     PROPERTY(int32_t, cp_size) = -1;
+    PROPERTY(int32_t, layerwise_split_size) = 1;
     // kv split size: number of ranks across which KV cache is sharded.
     // -1 means "follow cp_size" (legacy: KV split width == CP size).
     // 1 means no KV split (each CP rank holds a full KV replica, ATB prefix
@@ -135,6 +136,10 @@ class MappingNPU final {
   // == 1 each rank is its own group (no AllGather participants), matching the
   // "full-replica / skip prefix AllGather" mode.
   void get_kv_split_group(ParallelInfo& parallel_info);
+
+  // Split every attention TP group into ordered contiguous layerwise-split
+  // subgroups.
+  void get_layerwise_split_group(ParallelInfo& parallel_info);
 
   void get_domain(ParallelInfo& src,
                   ParallelInfo& dst,
@@ -173,6 +178,7 @@ class MappingNPU final {
   ParallelInfo attn_inner_sp_ = ParallelInfo();
   ParallelInfo attn_cp_ = ParallelInfo();
   ParallelInfo attn_kv_split_ = ParallelInfo();
+  ParallelInfo attn_layerwise_split_ = ParallelInfo();
 
   int32_t lccl_comm_domain_lower_bound_;
   int32_t lccl_comm_domain_upper_bound_;

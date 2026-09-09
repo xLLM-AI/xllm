@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <optional>
+
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_deepseek_v2_decoder_layer_impl.h"
 #include "llm_model_base.h"
@@ -95,7 +99,11 @@ TORCH_MODULE(DeepseekV2DecoderLayer);
 class DeepseekV2ModelImpl : public torch::nn::Module {
  public:
   DeepseekV2ModelImpl(const ModelContext& context)
-      : device_(context.get_tensor_options().device()) {
+      : aux_capture_(
+            context.get_model_args(),
+            context.get_tensor_options(),
+            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()),
+        device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
@@ -152,11 +160,9 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) {
-    if (dp_size_ > 1) {
-      if (tokens.sizes() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-        positions = torch::tensor({0}).to(torch::kInt32).to(device_);
-      }
+    if (dp_size_ > 1 && (!tokens.defined() || tokens.numel() == 0)) {
+      tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
+      positions = torch::tensor({0}).to(torch::kInt32).to(device_);
     }
 
     auto inputs_embeds = input_params.embedding.input_embedding;
@@ -175,7 +181,8 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() &&
         !input_params.meta.batch_forward_type.is_decode()) {
       attn_mask = attn_mask_.get_attn_mask(512, dtype_, device_);
-    } else if (input_params.meta.batch_forward_type.is_prefill()) {
+    } else if (input_params.meta.batch_forward_type.is_prefill() ||
+               input_params.meta.batch_forward_type.is_chunked_prefill()) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else if (num_speculative_tokens_ > 0) {
       // TODO :the judgement of gen_free_mask need more check
@@ -197,7 +204,8 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       }
 
       auto& layer = layers_[i];
-      const int32_t layer_index = i;
+      const int32_t layer_index = static_cast<int32_t>(i);
+      aux_capture_.capture_layer(layer_index, h, std::nullopt);
       rolling_guard.before_layer(layer_index);
       layer(h,
             cos_pos,
@@ -210,7 +218,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       rolling_guard.after_layer(layer_index);
     }
     auto hidden_states = norm_(h, 0);
-    return ModelOutput(hidden_states);
+    return aux_capture_.finalize(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -321,6 +329,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
   int32_t dp_local_tp_size_;
   int32_t num_experts_per_tok_;
   int32_t num_speculative_tokens_ = 0;
+  AuxHiddenCapture aux_capture_;
   at::Device device_;
   torch::Dtype dtype_;
   layer::NpuWordEmbedding npu_embed_tokens_{nullptr};

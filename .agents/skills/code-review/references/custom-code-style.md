@@ -174,6 +174,26 @@ virtual ModelOutput forward(torch::Tensor tokens, ...);
   - Use `std::shared_ptr` only when shared ownership is genuinely needed.
   - Raw pointers are acceptable only for non-owning references where the lifetime is clearly managed elsewhere.
 
+### Move & Copy Semantics
+
+- **Never write `std::move()` on a `const&` (or otherwise const) value.** `std::move(x)` where `x` is `const T&` produces a `const T&&`, which binds to the **copy** constructor, not the move constructor. It compiles, looks like a move, and silently deep-copies. This is the exact bug that made `Request`/`RequestState` construction copy their whole payload. `clang-tidy`'s `performance-move-const-arg` flags it.
+
+```cpp
+// Bad – silently copies: the parameter is const&, so std::move binds to the
+//       copy constructor.
+Request(const RequestState& state) : state_(std::move(state)) {}
+
+// Good – sink parameter: take by value, then std::move into the member. The
+//        CALLER decides copy vs move (pass an lvalue to copy, std::move to move).
+Request(RequestState state) : state_(std::move(state)) {}
+```
+
+- **Sink parameters go by value.** If a constructor/setter/function stores (retains) its argument, take it **by value** and `std::move` it into the member. Do not take it by `const&` and copy, and do not take it by `const&` and `std::move` (see above). Reserve `const&` for parameters you only read and do not retain.
+
+- **Make callers move.** When you hand an owned local to a sink parameter and do not use it afterwards, pass `std::move(local)`. Leaving it as an lvalue silently deep-copies.
+
+- **Prefer making expensive-to-copy domain types move-only.** For heavy aggregates where a copy is almost always a bug, `= delete` the copy constructor/assignment and expose an explicit `clone()` for the rare intentional copy. An accidental copy then becomes a compile error instead of a silent performance cliff.
+
 ---
 
 ## 6. Scoping & Visibility
@@ -243,9 +263,34 @@ LOG(FATAL) << "Unsupported model type: " << model_type;
 throw std::runtime_error("Unsupported model type: " + model_type);
 ```
 
+### Online Serving Failures and Fallbacks
+
+- **Prefer the let-it-crash principle for unexpected failures in online execution paths.** Model execution, graph capture/replay, device operations, and runtime state updates should normally let unexpected exceptions propagate instead of catching them and continuing the request.
+- **Do not introduce `try/catch` or `try/except` casually in online execution paths.** In particular, do not swallow an exception, retry the operation, fall back to another execution path, or keep serving from state that may already be partially modified.
+- **Do not introduce fallback code casually.** A fallback is appropriate only when it is an explicitly supported path selected before execution through observable conditions, and both paths have defined and tested semantics. It must not be used to mask a correctness issue, unsupported state, or failed operation.
+- Express expected unsupported conditions through explicit validation, `Status`, or return values before mutating execution state. Do not use exceptions as normal capability detection.
+- Exception handling remains valid at required process, RPC, C ABI, untrusted-input, or third-party API boundaries. Such handlers must catch the narrowest practical exception, preserve the failure signal, and must not pretend that a partially failed online operation succeeded.
+
+```cpp
+// Good: choose a supported path before execution starts.
+if (!graph_supported(params)) {
+  return forward_eager(model, params);
+}
+return forward_graph(model, params);
+
+// Bad: graph execution may have modified runtime state before failing.
+try {
+  return forward_graph(model, params);
+} catch (...) {
+  return forward_eager(model, params);
+}
+```
+
 ---
 
 ## 8. Code Style & Control Flow
+
+- **Always run clang-format 20.1.6** (`clang-format -i`) with the repo-root `.clang-format` on every edited C++ file (`.h`, `.hpp`, `.c`, `.cc`, `.cpp`, `.cu`) before considering the change done. Include order and wrapping are part of this step; do not wait for review to catch them.
 
 - **Always use braces `{}`** with `if`, `while`, `for`, even for single-line bodies.
 

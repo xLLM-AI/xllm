@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -345,11 +345,7 @@ void NpuDeepseekV2DecoderLayerImpl::initialize_basic_parameters(
         (is_prefill && parallel_args.world_size() > 16) || !is_prefill;
   }
   param.enableDpOut = false;  // TODO
-  if (num_speculative_tokens_ == 0) {
-    param.enableSpeculate = false;  // MTP
-  } else {
-    param.enableSpeculate = true;
-  }
+  param.enableSpeculate = num_speculative_tokens_ > 0 && !is_prefill;
   param.maskfree = true;                            // TODO
   param.enableSwiGLUQuantForSharedExperts = false;  // TODO
   num_key_value_heads_ = static_cast<int>(args.n_kv_heads().value());
@@ -944,12 +940,22 @@ void NpuDeepseekV2DecoderLayerImpl::build_node_variant_pack(
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
       atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
 
+  const bool use_prefill_q_cu_seq_lens =
+      is_prefill && input_params.attention.device.q_cu_seq_lens.defined() &&
+      input_params.attention.device.q_cu_seq_lens.storage().data() != nullptr &&
+      !input_params.attention.host.q_cu_seq_lens.empty();
   if (!input_params.attention.device.block_tables.defined() ||
       input_params.attention.device.block_tables.storage().data() == nullptr) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
         const_cast<int32_t*>(placeholder_vec_.data());
+  } else if (use_prefill_q_cu_seq_lens) {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.q_cu_seq_lens);
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+        const_cast<int32_t*>(input_params.attention.host.q_cu_seq_lens.data());
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(

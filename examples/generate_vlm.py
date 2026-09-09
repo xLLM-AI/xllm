@@ -1,10 +1,11 @@
 # ASCEND_RT_VISIBLE_DEVICES=0 python generate_vlm.py --model /path/to/Qwen2.5-VL-7B-Instruct/ --max_seqs_per_batch 4 --enable_shm
 
-from xllm import ArgumentParser, SamplingParams
-from xllm import LLM
 # from xllm import VLM
 import base64
 import os
+
+from xllm import LLM, ArgumentParser, SamplingParams
+
 
 def encode_image_from_file(file_path: str) -> str:
     if not os.path.exists(file_path):
@@ -12,6 +13,7 @@ def encode_image_from_file(file_path: str) -> str:
     with open(file_path, "rb") as image_file:
         result = base64.b64encode(image_file.read()).decode("utf-8")
     return result
+
 
 parser = ArgumentParser()
 args = parser.parse_args()
@@ -62,10 +64,7 @@ sampling_params = SamplingParams(
     max_tokens=50,
 )
 
-outputs = vlm.generate(
-    requests,
-    sampling_params=sampling_params
-)
+outputs = vlm.generate(requests, sampling_params=sampling_params)
 
 for output in outputs:
     prompt = output.prompt

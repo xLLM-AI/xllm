@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "runtime/forward_shared_memory_manager.h"
 #include "runtime/worker.h"
@@ -157,6 +158,8 @@ class WorkerService : public proto::DistributeWorker {
                    ::google::protobuf::Closure* done) override;
 
  private:
+  friend class WorkerServiceTestPeer;
+
   void step(ForwardInput& fwd_input,
             torch::Tensor& next_tokens,
             torch::Tensor& logprobs,
@@ -164,18 +167,25 @@ class WorkerService : public proto::DistributeWorker {
             torch::Tensor& top_logprobs,
             torch::Tensor& embeddings,
             std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+            std::vector<SpeculativeTokenStats>& speculative_token_stats,
             std::vector<torch::Tensor>& dit_images,
             std::vector<std::string>& dit_text_output,
             torch::Tensor& expert_load_data,
             int64_t& prepared_token,
             torch::Tensor& src_seq_idxes,
             torch::Tensor& out_tokens,
-            torch::Tensor& out_logprobs);
+            torch::Tensor& out_logprobs,
+            std::vector<JsonObjectOutputError>& json_object_errors);
+  std::vector<SpeculativeTokenStats> record_speculative_metrics_from_output(
+      const torch::Tensor& next_tokens,
+      const std::vector<SpeculativeTokenStats>& output_stats,
+      bool is_graph_warmup);
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
  private:
   // runtime options
   runtime::Options options_;
+  std::vector<std::string> speculative_position_labels_;
 
   bool initialized_;
 

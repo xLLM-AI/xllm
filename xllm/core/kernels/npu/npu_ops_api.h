@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -72,7 +72,49 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     int64_t sparse_mode,
     const std::string& input_layout,
     bool softmax_lse_flag = false,
-    bool is_causal = true);
+    bool is_causal = true,
+    int64_t pre_tokens = -1,
+    int64_t next_tokens = -1);
+
+torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size);
+
+void npu_fused_infer_attention_decode_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    const torch::Tensor& workspace,
+    torch::Tensor& output,
+    torch::Tensor& softmax_lse);
+
+void npu_fused_infer_attention_decode_out_cached(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    torch::Tensor& output);
 
 void batch_chunked_paged_prefill(const torch::Tensor& query,
                                  const torch::Tensor& k_cache,
@@ -446,4 +488,5 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     int64_t dispatch_quant_out_dtype = 0,
     int64_t topo_type = 0,
     int64_t rank_num_per_server = 2);
+
 }  // namespace xllm::kernel::npu

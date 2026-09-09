@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -66,6 +66,12 @@ inline torch::Tensor safe_to(const torch::Tensor& t,
                              const torch::TensorOptions& options,
                              bool non_blocking = false) {
   return t.defined() ? t.to(options, non_blocking) : t;
+};
+
+// Creates an independent contiguous tensor that is detached from autograd.
+inline torch::Tensor clone_contiguous_detached_tensor(
+    const torch::Tensor& tensor) {
+  return tensor.contiguous().clone().detach();
 };
 
 inline std::vector<char> get_the_bytes(std::string filename) {
@@ -379,7 +385,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
 
   tensor.set_(storage, 0, dims);
   return tensor;
-#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   auto options = torch::TensorOptions()
                      .dtype(dtype)
 #if defined(USE_CUDA) || defined(USE_DCU)
@@ -391,7 +398,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                          /*requires_grad=*/false);
   return torch::from_blob(const_cast<void*>(dev_addr), dims, options);
 #else
-  LOG(FATAL) << "get_tensor_from_blob only supports NPU, CUDA and MLU devices";
+  LOG(FATAL)
+      << "get_tensor_from_blob only supports NPU, CUDA, MUSA, MLU and DCU";
 #endif
 }
 
@@ -399,7 +407,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                                           const torch::ScalarType dtype,
                                           const void* dev_addr,
                                           const torch::Tensor& owner) {
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   CHECK(owner.defined())
       << "get_tensor_from_blob requires a valid owner tensor";
 

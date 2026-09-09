@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,6 +43,16 @@ PlatformStream get_stream_from_pool() { return c10::musa::getStreamFromPool(); }
 PlatformStream get_stream_from_pool() { return c10::hip::getStreamFromPool(); }
 #endif
 
+PlatformStream get_stream_from_pool(const c10::Device& device) {
+#if defined(USE_MLU)
+  return torch_mlu::getStreamFromPool(
+      /*isHighPriority=*/false, device.index());
+#else
+  static_cast<void>(device);
+  return get_stream_from_pool();
+#endif
+}
+
 }  // namespace
 
 bool StreamEvent::synchronize() {
@@ -68,6 +78,9 @@ bool StreamEvent::synchronize() {
 
 Stream::Stream(const int32_t timeout)
     : stream_(get_stream_from_pool()), timeout_(timeout) {}
+
+Stream::Stream(const c10::Device& device, const int32_t timeout)
+    : stream_(get_stream_from_pool(device)), timeout_(timeout) {}
 
 Stream::Stream(PlatformStream stream, const int32_t timeout)
     : stream_(stream), timeout_(timeout) {}

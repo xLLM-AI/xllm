@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,10 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 #include "core/common/global_flags.h"
@@ -44,9 +47,175 @@ torch::TensorOptions int32_options_like(const torch::Tensor& preferred,
   return torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
 }
 
+#if defined(USE_MUSA)
+torch::Tensor to_host_int32_contiguous(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return {};
+  }
+  torch::Tensor result =
+      tensor.device().is_cpu() ? tensor : tensor.to(torch::kCPU);
+  if (result.scalar_type() != torch::kInt32) {
+    result = result.to(torch::kInt32);
+  }
+  return result.contiguous();
+}
+
+torch::Tensor to_int32_contiguous(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return {};
+  }
+  torch::Tensor result = tensor;
+  if (result.scalar_type() != torch::kInt32) {
+    result = result.to(torch::kInt32);
+  }
+  return result.contiguous();
+}
+
+torch::Tensor prepend_zero(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return {};
+  }
+  torch::Tensor zero = torch::zeros({1}, tensor.options());
+  return torch::cat({zero, tensor}, 0).contiguous();
+}
+
+void convert_cumulative_lengths(std::vector<int32_t>& lengths,
+                                int64_t sequence_count) {
+  if (lengths.empty() ||
+      lengths.size() == static_cast<size_t>(sequence_count)) {
+    return;
+  }
+  CHECK_EQ(lengths.front(), 0);
+
+  std::vector<int32_t> per_sequence_lengths;
+  per_sequence_lengths.reserve(lengths.size() - 1);
+  for (size_t i = 1; i < lengths.size(); ++i) {
+    per_sequence_lengths.emplace_back(lengths[i] - lengths[i - 1]);
+  }
+  lengths = std::move(per_sequence_lengths);
+}
+
+void populate_fa3_attention_metadata(
+    AttentionMetadata& attn_metadata,
+    const ModelInputParams& params,
+    const std::optional<torch::Tensor>& attn_mask) {
+  const bool q_lengths_are_cumulative =
+      params.attention.host.q_seq_lens.size() > 1 &&
+      params.attention.host.q_seq_lens.front() == 0;
+  const bool kv_lengths_are_cumulative =
+      params.attention.host.kv_seq_lens.size() > 1 &&
+      params.attention.host.kv_seq_lens.front() == 0;
+  const int64_t q_sequence_count =
+      params.attention.host.q_seq_lens.empty()
+          ? params.meta.num_sequences
+          : static_cast<int64_t>(q_lengths_are_cumulative
+                                     ? params.attention.host.q_seq_lens.size() -
+                                           1
+                                     : params.attention.host.q_seq_lens.size());
+  const int64_t kv_sequence_count =
+      params.attention.host.kv_seq_lens.empty()
+          ? params.meta.num_sequences
+          : static_cast<int64_t>(
+                kv_lengths_are_cumulative
+                    ? params.attention.host.kv_seq_lens.size() - 1
+                    : params.attention.host.kv_seq_lens.size());
+  convert_cumulative_lengths(attn_metadata.q_seq_lens_vec, q_sequence_count);
+  convert_cumulative_lengths(attn_metadata.kv_seq_lens_vec, kv_sequence_count);
+
+  const bool q_device_lengths_are_cumulative =
+      q_lengths_are_cumulative ||
+      (params.attention.device.q_seq_lens.defined() &&
+       params.attention.device.q_seq_lens.numel() == q_sequence_count + 1);
+  const bool kv_device_lengths_are_cumulative =
+      kv_lengths_are_cumulative ||
+      (params.attention.device.kv_seq_lens.defined() &&
+       params.attention.device.kv_seq_lens.numel() == kv_sequence_count + 1);
+
+  torch::Tensor q_cu_seq_lens = attn_metadata.q_cu_seq_lens;
+  if (q_cu_seq_lens.defined() && q_cu_seq_lens.numel() == q_sequence_count) {
+    q_cu_seq_lens = prepend_zero(q_lengths_are_cumulative
+                                     ? q_cu_seq_lens
+                                     : torch::cumsum(q_cu_seq_lens, 0));
+  }
+  if (!q_cu_seq_lens.defined()) {
+    q_cu_seq_lens = params.attention.device.q_cu_seq_lens;
+    if (q_cu_seq_lens.defined() && q_cu_seq_lens.numel() == q_sequence_count) {
+      q_cu_seq_lens = prepend_zero(q_cu_seq_lens);
+    }
+  }
+  if (!q_cu_seq_lens.defined() &&
+      params.attention.device.q_seq_lens.defined()) {
+    q_cu_seq_lens = params.attention.device.q_seq_lens;
+    if (!q_device_lengths_are_cumulative) {
+      q_cu_seq_lens = prepend_zero(torch::cumsum(q_cu_seq_lens, 0));
+    }
+  }
+  attn_metadata.q_cu_seq_lens = to_int32_contiguous(q_cu_seq_lens);
+
+  torch::Tensor kv_cu_seq_lens = attn_metadata.kv_cu_seq_lens;
+  bool kv_cu_is_cumulative = kv_cu_seq_lens.defined() &&
+                             (kv_device_lengths_are_cumulative ||
+                              kv_cu_seq_lens.numel() == kv_sequence_count + 1);
+  if (!kv_cu_seq_lens.defined() &&
+      params.attention.device.kv_seq_lens.defined()) {
+    kv_cu_seq_lens = params.attention.device.kv_seq_lens;
+    if (!kv_device_lengths_are_cumulative) {
+      kv_cu_seq_lens = prepend_zero(torch::cumsum(kv_cu_seq_lens, 0));
+    }
+    kv_cu_is_cumulative = true;
+  }
+  attn_metadata.kv_cu_seq_lens = to_int32_contiguous(kv_cu_seq_lens);
+  if (attn_metadata.kv_cu_seq_lens.defined() && !kv_cu_is_cumulative) {
+    attn_metadata.kv_cu_seq_lens =
+        torch::cat({torch::zeros({1}, attn_metadata.kv_cu_seq_lens.options()),
+                    torch::cumsum(attn_metadata.kv_cu_seq_lens, 0)},
+                   0)
+            .contiguous();
+  }
+
+  if (!attn_metadata.fa3_metadata.paged_kv_indptr_host.defined()) {
+    attn_metadata.fa3_metadata.paged_kv_indptr_host =
+        to_host_int32_contiguous(params.attention.device.paged_kv_indptr);
+  }
+  if (!attn_metadata.fa3_metadata.paged_kv_indices_host.defined()) {
+    attn_metadata.fa3_metadata.paged_kv_indices_host =
+        to_host_int32_contiguous(params.attention.device.paged_kv_indices);
+  }
+  if (!attn_metadata.fa3_metadata.paged_kv_last_page_len_host.defined()) {
+    attn_metadata.fa3_metadata.paged_kv_last_page_len_host =
+        to_host_int32_contiguous(
+            params.attention.device.paged_kv_last_page_len);
+  }
+
+  if (attn_mask.has_value() && attn_mask->dim() == 1) {
+    attn_metadata.attn_mask = attn_mask.value();
+  }
+
+  if (params.attention.device.block_tables.defined()) {
+    attn_metadata.block_table =
+        to_int32_contiguous(params.attention.device.block_tables);
+  }
+  if (params.attention.device.q_seq_lens.defined()) {
+    attn_metadata.q_seq_lens =
+        q_device_lengths_are_cumulative
+            ? to_int32_contiguous(
+                  torch::diff(params.attention.device.q_seq_lens))
+            : to_int32_contiguous(params.attention.device.q_seq_lens);
+  }
+  if (params.attention.device.kv_seq_lens.defined()) {
+    attn_metadata.kv_seq_lens =
+        kv_device_lengths_are_cumulative
+            ? to_int32_contiguous(
+                  torch::diff(params.attention.device.kv_seq_lens))
+            : to_int32_contiguous(params.attention.device.kv_seq_lens);
+  }
+}
+#endif
+
 void materialize_linear_state_validity(
     const ModelInputParams& params,
     const std::optional<torch::Device>& device,
+    const AttentionMetadataBuildOptions& build_options,
     AttentionMetadata& attn_metadata) {
   const bool needs_initial_states =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
@@ -85,6 +254,10 @@ void materialize_linear_state_validity(
         << ", metadata_rows=" << metadata_rows;
   }
 
+  if (!build_options.materialize_linear_state_validity) {
+    return;
+  }
+
   torch::TensorOptions options;
   if (params.embedding.linear_state_indices.defined()) {
     options = params.embedding.linear_state_indices.options();
@@ -107,10 +280,16 @@ AttentionMetadata build_attention_metadata(
     bool enable_mla,
     const std::string& compute_dtype,
     const std::optional<torch::Device>& device,
-    const std::optional<torch::Tensor>& attn_mask) {
+    const std::optional<torch::Tensor>& attn_mask,
+    const AttentionMetadataBuildOptions& build_options) {
   // MLA mode still affects which shared tensors must be materialized for
   // attention execution, but the flag itself is no longer carried in metadata.
   AttentionMetadata attn_metadata;
+#if defined(USE_MUSA)
+  if (params.attn_metadata != nullptr) {
+    attn_metadata.fa3_metadata = params.attn_metadata->fa3_metadata;
+  }
+#endif
   attn_metadata.q_cu_seq_lens = params.attention.device.q_seq_lens;
   attn_metadata.kv_cu_seq_lens = params.attention.device.kv_seq_lens;
 #if defined(USE_NPU)
@@ -148,6 +327,7 @@ AttentionMetadata build_attention_metadata(
       params.graph.use_dense_flash_attention;
 #endif
   attn_metadata.expanded_decode = ExpandedDecodeMetadataBuilder::build(params);
+  attn_metadata.is_spec_verify = params.is_spec_verify;
 
   // for flashinfer
   attn_metadata.paged_kv_indptr = params.attention.device.paged_kv_indptr;
@@ -175,7 +355,8 @@ AttentionMetadata build_attention_metadata(
 #endif
 
 #if defined(USE_NPU)
-  attn_metadata.is_spec_verify = params.is_spec_verify;
+  attn_metadata.acl_graph_task_update_context =
+      params.graph.acl_graph_task_update_context;
   // Determine if we should use ACL graph mode:
   // - --enable_graph=true
   // - Must be decode phase or spec-verify chunked prefill
@@ -244,12 +425,13 @@ AttentionMetadata build_attention_metadata(
       params.meta.batch_forward_type.is_mixed() ||
       params.meta.batch_forward_type.is_chunked_prefill();
   attn_metadata.is_prefill = params.meta.batch_forward_type.is_prefill();
+  attn_metadata.is_mixed = params.meta.batch_forward_type.is_mixed();
   attn_metadata.prefill_without_cache = params.prefill_without_cache;
 
   // MLA-family MLU paths require per-sequence q/kv lengths during prefill.
   if (!attn_metadata.is_prefill || enable_mla) {
     attn_metadata.block_table = params.attention.device.block_tables;
-#if !defined(USE_NPU) && !defined(USE_CUDA)
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
     attn_metadata.kv_seq_lens =
         torch::diff(params.attention.device.kv_seq_lens);  // kv seqlens
     attn_metadata.q_seq_lens =
@@ -298,8 +480,16 @@ AttentionMetadata build_attention_metadata(
     attn_metadata.kv_cu_seq_lens = torch::tensor({0, 1}, options);
     attn_metadata.q_seq_lens = torch::tensor({1}, options);
     attn_metadata.kv_seq_lens = torch::tensor({1}, options);
+#if defined(USE_NPU)
+    // NPU keeps these host vectors as one length per sequence.  Keep the
+    // dummy row consistent with normal NPU batches; the *_cu_seq_lens tensors
+    // above carry the cumulative representation.
+    attn_metadata.q_seq_lens_vec = {1};
+    attn_metadata.kv_seq_lens_vec = {1};
+#else
     attn_metadata.q_seq_lens_vec = {0, 1};
     attn_metadata.kv_seq_lens_vec = {0, 1};
+#endif
     attn_metadata.paged_kv_indptr = torch::tensor({0, 1}, options);
     attn_metadata.paged_kv_indices = torch::tensor({0}, options);
     attn_metadata.paged_kv_last_page_len = torch::tensor({1}, options);
@@ -308,7 +498,8 @@ AttentionMetadata build_attention_metadata(
     attn_metadata.max_seq_len = std::max<int64_t>(attn_metadata.max_seq_len, 1);
     attn_metadata.total_kv_len = 1;
   }
-  materialize_linear_state_validity(params, device, attn_metadata);
+  materialize_linear_state_validity(
+      params, device, build_options, attn_metadata);
 
   // Set is_causal: true for prefill (causal attention), false for decode
   // (non-causal) Default to true (causal) if not explicitly set
@@ -319,9 +510,19 @@ AttentionMetadata build_attention_metadata(
   // CUDA-oriented name for CUDA/MUSA attention plan handling.
   attn_metadata.enable_cuda_graph = params.enable_graph;
 
-#if defined(USE_CUDA) || defined(USE_MUSA)
+#if defined(USE_MUSA)
+  populate_fa3_attention_metadata(attn_metadata, params, attn_mask);
+#endif
+
+#if defined(USE_CUDA)
   if (attn_metadata.is_causal && !attn_metadata.enable_cuda_graph) {
     attn_metadata.qo_indptr = attn_metadata.q_cu_seq_lens.to(torch::kCUDA);
+  }
+#elif defined(USE_MUSA)
+  if (attn_metadata.is_causal && !attn_metadata.enable_cuda_graph &&
+      attn_metadata.q_cu_seq_lens.defined()) {
+    attn_metadata.qo_indptr =
+        attn_metadata.q_cu_seq_lens.to(torch::kPrivateUse1);
   }
 #endif
 
@@ -387,9 +588,10 @@ AttentionMetadata AttentionMetadataBuilder::build(
     const ModelInputParams& params,
     bool enable_mla,
     const std::optional<torch::Tensor>& attn_mask,
-    const std::optional<torch::Device>& device) {
+    const std::optional<torch::Device>& device,
+    const AttentionMetadataBuildOptions& build_options) {
   return AttentionMetadataBuilder::build(
-      params, enable_mla, "float", attn_mask, device);
+      params, enable_mla, "float", attn_mask, device, build_options);
 }
 
 AttentionMetadata AttentionMetadataBuilder::build(
@@ -397,9 +599,10 @@ AttentionMetadata AttentionMetadataBuilder::build(
     bool enable_mla,
     const std::string& compute_dtype,
     const std::optional<torch::Tensor>& attn_mask,
-    const std::optional<torch::Device>& device) {
+    const std::optional<torch::Device>& device,
+    const AttentionMetadataBuildOptions& build_options) {
   return build_attention_metadata(
-      params, enable_mla, compute_dtype, device, attn_mask);
+      params, enable_mla, compute_dtype, device, attn_mask, build_options);
 }
 
 }  // namespace xllm::layer

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <limits>
 #include <list>
 #include <memory>
@@ -46,6 +47,11 @@ class Engine;
 class RequestPriorityQueue;
 class SchedulerPolicy;
 struct SchedulerState;
+
+struct DecodeRestoreEntry {
+  std::shared_ptr<Request> request;
+  absl::Time started_at;
+};
 
 // BatchMode captures the scheduling policy configuration.
 // The concrete SchedulerPolicy subclass is selected based on these fields:
@@ -194,11 +200,17 @@ class ContinuousScheduler : public Scheduler {
   }
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size() + chunk_queue_->size();
+    return prefill_queue_->size() + chunk_queue_->size() +
+           decode_restore_waiting_.size() + num_prefetch_pending_requests();
   }
+
+  size_t num_prefetch_pending_requests() const;
 
   // for test only
   std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+  void process_batch_output_test(bool enable_schedule_overlap) {
+    process_batch_output(enable_schedule_overlap);
+  }
   std::vector<std::shared_ptr<Request>> get_running_requests() {
     return running_requests_;
   }
@@ -216,6 +228,10 @@ class ContinuousScheduler : public Scheduler {
     while (!copied_waiting_queue->empty()) {
       result.emplace_back(copied_waiting_queue->top());
       copied_waiting_queue->pop_top();
+    }
+    result.reserve(result.size() + decode_restore_waiting_.size());
+    for (const DecodeRestoreEntry& entry : decode_restore_waiting_) {
+      result.emplace_back(entry.request);
     }
 
     return result;
@@ -280,6 +296,9 @@ class ContinuousScheduler : public Scheduler {
 
  protected:
   void clear_mtp_bootstrap(Request* request);
+  void drain_prefetched_requests();
+  void release_prefetch_admission_slot();
+  virtual bool enqueue_ready_request(std::shared_ptr<Request> request);
 
   static int64_t microseconds_to_milliseconds(int64_t microseconds);
   // i.e. round(latency / num_tokens). num_tokens must be > 0.
@@ -304,6 +323,13 @@ class ContinuousScheduler : public Scheduler {
   // owns the requests and manages their lifetimes.
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
 
+  // Requests waiting for Mooncake prefetch completion. This is an admission
+  // barrier only; SchedulerPolicy never sees these requests.
+  mutable std::mutex prefetch_admission_mutex_;
+  std::deque<std::shared_ptr<Request>> prefetch_admission_queue_;
+  size_t prefetch_admission_slots_ = 0;
+  size_t prefetch_admission_limit_ = 0;
+
   // a batch of requests in running state, sorted by priority from high to low.
   // This may include decoding requests and prefill requests in chunked prefill
   // scheudler.
@@ -315,7 +341,7 @@ class ContinuousScheduler : public Scheduler {
   // token budget for each running sequence
   std::vector<size_t> running_sequences_budgets_;
 
-  // preemptable requests that hold cache slots, sorted by priority from high to
+  // preemptible requests that hold cache slots, sorted by priority from high to
   // low.
   std::deque<std::shared_ptr<Request>> preemptable_requests_;
 
@@ -345,6 +371,10 @@ class ContinuousScheduler : public Scheduler {
   // Decode queue: holds all decode-stage requests.
   std::unique_ptr<RequestPriorityQueue> decode_queue_;
 
+  // Decode victims that wait for D2H publication and device KV capacity before
+  // re-entering the existing Prefill/H2D restore path.
+  std::deque<DecodeRestoreEntry> decode_restore_waiting_;
+
   // Unified queue: used by UnifiedPolicy only (all requests in one queue).
   std::list<std::shared_ptr<Request>> unified_queue_;
 
@@ -357,7 +387,8 @@ class ContinuousScheduler : public Scheduler {
 
   virtual bool if_queue_not_empty() {
     return !prefill_queue_->empty() || !chunk_queue_->empty() ||
-           !decode_queue_->empty() || !unified_queue_.empty();
+           !decode_queue_->empty() || !decode_restore_waiting_.empty() ||
+           !unified_queue_.empty();
   }
 
   // tokenizer
@@ -386,6 +417,9 @@ class ContinuousScheduler : public Scheduler {
   SchedulerState make_state();
 
   void apply_cancel_requests();
+
+  void drain_decode_restore_waiting(
+      std::vector<std::shared_ptr<Request>>& finished);
 
   std::vector<Batch> schedule_request(const absl::Duration& timeout);
 

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -92,7 +92,8 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t cp_size,
                                      int32_t ep_size,
                                      const InstanceRole& instance_role,
-                                     bool enable_mtp_draft_body_tp1) {
+                                     bool enable_mtp_draft_body_tp1,
+                                     const std::string& draft_sampling_mode) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -113,6 +114,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .enable_mtp_draft_body_tp1(enable_mtp_draft_body_tp1)
       .num_speculative_tokens(num_speculative_tokens)
       .speculative_algorithm(speculative_algorithm)
+      .draft_sampling_mode(draft_sampling_mode)
       .enable_schedule_overlap(/*enable_schedule_overlap=*/false)
       .enable_offline_inference(/*enable_offline_inference=*/true)
       .master_node_addr(master_node_addr)

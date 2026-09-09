@@ -29,10 +29,7 @@ def _find_export_so_path() -> str:
         if fname.startswith("xllm_export") and fname.endswith(".so"):
             return os.path.abspath(os.path.join(pkg_dir, fname))
 
-    raise ImportError(
-        f"cannot find xllm_export shared library under {pkg_dir!r}. "
-        f"Expected one of: {candidates!r}"
-    )
+    raise ImportError(f"cannot find xllm_export shared library under {pkg_dir!r}. Expected one of: {candidates!r}")
 
 
 def _load_xllm_export() -> ModuleType:
@@ -95,6 +92,15 @@ def _load_public_api() -> None:
     if _PUBLIC_API_LOADED:
         return
 
+    # torch_npu must be imported on the main thread before the C++ engine
+    # spawns worker threads: torch_npu::init_npu() lazily imports python
+    # modules there, which fails off the main thread. Importing it here,
+    # before xllm_export loads the torch_npu shared libraries, also keeps
+    # torch's accelerator registration clean. It is absent on non-NPU
+    # platforms.
+    if importlib.util.find_spec("torch_npu") is not None:
+        import torch_npu  # noqa: F401
+
     xllm_export = _load_xllm_export()
 
     from xllm.pybind.args import ArgumentParser
@@ -142,6 +148,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | _PUBLIC_NAMES)
+
 
 __all__ = [
     "ArgumentParser",

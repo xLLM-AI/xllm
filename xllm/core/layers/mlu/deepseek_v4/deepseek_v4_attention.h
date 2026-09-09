@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,7 @@ limitations under the License.
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/mlu/deepseek_v4/compressor.h"
+#include "layers/mlu/deepseek_v4/deepseek_v4_cp_context.h"
 #include "layers/mlu/deepseek_v4/deepseek_v4_indexer.h"
 #include "layers/mlu/deepseek_v4/dsa_cache_mapping.h"
 
@@ -49,7 +50,8 @@ class DeepseekV4AttentionImpl final : public torch::nn::Module {
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
       const AttentionMetadata& attn_metadata,
       torch::Tensor& hidden_states,
-      KVCache& kv_cache);
+      KVCache& kv_cache,
+      const mlu_v4_cp::DeepseekV4CpContext* cp_context = nullptr);
 
   void load_state_dict(const StateDict& state_dict);
 

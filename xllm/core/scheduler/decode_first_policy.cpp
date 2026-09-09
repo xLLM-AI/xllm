@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -55,6 +55,7 @@ void DecodeFirstPolicy::schedule(
 
   // Step 1: schedule decode requests first (decode-maximal batching).
   schedule_decode_from_queue(&state.decode_queue, state, budget);
+  schedule_decode_restore(state, budget);
   const bool has_decode = !state.running_sequences.empty();
 
   // Step 2: schedule prefill requests (continuations from chunk_queue first,
@@ -65,16 +66,22 @@ void DecodeFirstPolicy::schedule(
     }
     // reserved_full_footprint is the full-footprint admission budget shared
     // across schedule_prefill_from_queue calls. It gates fresh prefill
-    // requests only (in-flight chunked prefills always continue). Starts with
-    // currently used blocks × 1.1 margin to reduce decode preemption, then
-    // accumulates full footprints of newly admitted prefill requests.
+    // requests only (in-flight chunked prefills always continue). Each DP
+    // rank keeps its own bucket; starts with that DP's currently used blocks
+    // × 1.1 margin to reduce decode preemption, then accumulates full
+    // footprints of newly admitted prefill requests into its own bucket.
     constexpr double kDecodeReserveMargin = 1.1;
-    size_t reserved_full_footprint = 0;
+    std::vector<size_t> reserved_full_footprint(
+        static_cast<size_t>(state.options.dp_size()), 0);
     if (has_decode) {
-      const size_t max_used =
-          util::max(state.kv_cache_manager->num_used_blocks());
-      reserved_full_footprint =
-          static_cast<size_t>(max_used * kDecodeReserveMargin);
+      const std::vector<size_t> used_blocks =
+          state.kv_cache_manager->num_used_blocks();
+      for (size_t i = 0;
+           i < reserved_full_footprint.size() && i < used_blocks.size();
+           ++i) {
+        reserved_full_footprint[i] =
+            static_cast<size_t>(used_blocks[i] * kDecodeReserveMargin);
+      }
     }
     schedule_prefill_from_queue(
         &state.chunk_queue, state, budget, finished, reserved_full_footprint);
@@ -115,8 +122,28 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
     Sequence* sequence = state.running_sequences[i];
     size_t& token_budget = state.running_sequences_budgets[i];
 
+    // Fair per-group budget: when the group's cap is exhausted even after
+    // returning this sequence's tokens, keep its current allocation and skip
+    // redistribution for it (other groups may still have room).
+    if (!budget.dp_group_token_caps.empty()) {
+      const int32_t dp_rank = sequence->dp_rank();
+      CHECK(dp_rank >= 0 &&
+            dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+          << "seq dp_rank=" << dp_rank << " out of range [0,"
+          << budget.dp_group_token_caps.size() << ")";
+      const size_t group_room_after_return =
+          budget.dp_group_token_caps[dp_rank] -
+          budget.dp_group_token_used[dp_rank] + token_budget;
+      if (group_room_after_return == 0) {
+        continue;
+      }
+    }
+
     // Return previously allocated tokens to the pool.
     budget.remaining_token_budget += token_budget;
+    if (!budget.dp_group_token_used.empty()) {
+      budget.dp_group_token_used[sequence->dp_rank()] -= token_budget;
+    }
 
     if (options_.enable_latency_aware_schedule()) {
       double origin_latency =
@@ -133,9 +160,20 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
       budget.estimate_latency += cur_latency;
     }
 
+    size_t alloc_budget = budget.remaining_token_budget;
+    if (!budget.dp_group_token_caps.empty()) {
+      const int32_t dp_rank = sequence->dp_rank();
+      CHECK(dp_rank >= 0 &&
+            dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+          << "seq dp_rank=" << dp_rank << " out of range [0,"
+          << budget.dp_group_token_caps.size() << ")";
+      alloc_budget = std::min(alloc_budget,
+                              budget.dp_group_token_caps[dp_rank] -
+                                  budget.dp_group_token_used[dp_rank]);
+    }
     size_t actual_tokens = 0;
     if (!allocate_for_prefill(sequence,
-                              budget.remaining_token_budget,
+                              alloc_budget,
                               &actual_tokens,
                               state,
                               /*skip_shared=*/true)) {
@@ -145,6 +183,9 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
     token_budget = actual_tokens;
     CHECK(budget.remaining_token_budget >= actual_tokens);
     budget.remaining_token_budget -= actual_tokens;
+    if (!budget.dp_group_token_used.empty()) {
+      budget.dp_group_token_used[sequence->dp_rank()] += actual_tokens;
+    }
 
     if (budget.remaining_token_budget == 0) {
       break;

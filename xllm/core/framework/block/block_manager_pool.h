@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <queue>
 #include <vector>
@@ -55,6 +56,9 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(uint32_t, sliding_window_size) = 0;
     // Base SWA/cache-state block rows retained per sequence.
     PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
+    // Total physical SWA rows. This is computed by the KV cache estimator and
+    // shared with the device tensor shape to keep both id spaces identical.
+    PROPERTY(uint32_t, swa_num_blocks) = 0;
     // Scheduler token budget used to size the shared SWA burst pool.
     PROPERTY(uint32_t, max_tokens_per_batch) = 0;
     // For CompositeBlockManager.
@@ -108,6 +112,8 @@ class BlockManagerPool : public KVCacheManager {
   std::vector<size_t> num_used_blocks() const override;
   double kv_cache_utilization() const override;
 
+  int32_t select_dp_rank() const override;
+
   // get the options for the block manager
   const Options& options() const { return options_; }
 
@@ -116,7 +122,10 @@ class BlockManagerPool : public KVCacheManager {
   void reserve_xtensor_padding_blocks() override;
 
  protected:
-  int32_t get_manager_with_max_free_blocks() const;
+  // Select the DP rank with the most effective headroom. Prefix-cache-only
+  // blocks count as available because they can be evicted during allocation;
+  // equal candidates are selected round-robin.
+  int32_t get_manager_with_max_available_blocks() const;
   int32_t get_dp_rank(Sequence* sequence) const;
 
   bool process_beam_search(Sequence* sequence, bool need_swap = false);
@@ -124,6 +133,7 @@ class BlockManagerPool : public KVCacheManager {
  private:
   friend class BlockManagerPoolTestPeer;
 
+  mutable std::atomic<size_t> dp_selection_cursor_{0};
   std::vector<std::vector<BlockTransferInfo>> swap_block_transfer_infos_;
 
  protected:

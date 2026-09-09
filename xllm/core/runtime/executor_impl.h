@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "common/macros.h"
 #include "framework/batch/batch.h"
@@ -37,6 +38,7 @@ struct SpecVerifyGraphTaskSignal {
   int64_t num_accepted_tokens = 0;
   int64_t spec_width = 0;
   int64_t block_table_width = 0;
+  int64_t base_kv_seq_len = 0;
   int64_t max_kv_seq_len = 0;
 };
 

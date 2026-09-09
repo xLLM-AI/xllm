@@ -8,9 +8,7 @@ from ..bootstrap import PREPARE_ASCEND_COMMAND, prepare_ascend
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Install and verify the TileLang Ascend wheel for xLLM builds."
-    )
+    parser = argparse.ArgumentParser(description="Install and verify the TileLang Ascend wheel for xLLM builds.")
     parser.add_argument(
         "--target-platform",
         required=True,

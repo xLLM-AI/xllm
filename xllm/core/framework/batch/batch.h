@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -140,6 +140,7 @@ class Batch {
   // Get all sequences from either sequences_ or sequence_groups_
   // Used by RecEngine to access sequences for stopping checker evaluation
   std::vector<Sequence*> get_sequences();
+  std::vector<Sequence*> get_sequences() const;
 
  private:
   struct OutputTarget {

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -203,7 +203,8 @@ class FusedMoEImpl : public torch::nn::Module {
   int64_t global_physical_experts_num() const;
   torch::Tensor remap_expert_ids_for_eplb(const torch::Tensor& ids_2d) const;
   void record_eplb_expert_load(const torch::Tensor& ids_2d,
-                               const ModelInputParams& input_params) const;
+                               const ModelInputParams& input_params,
+                               bool routed_tokens_are_dp_gathered) const;
   void record_eplb_dispatch_expert_load(
       const torch::Tensor& expert_token_counts,
       const ModelInputParams& input_params) const;

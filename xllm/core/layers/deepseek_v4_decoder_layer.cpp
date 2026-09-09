@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -247,6 +247,15 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   x = hc_post(ffn_input, residual_ffn, post_ffn, comb_ffn);
 
   return x;
+}
+
+void DeepseekV4DecoderLayerImpl::write_context_kv(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    const torch::Tensor& slot_mapping,
+    KVCache& kv_cache) {
+  attention_->write_context_kv(hidden_states, cos, sin, slot_mapping, kv_cache);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>

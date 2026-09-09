@@ -62,16 +62,14 @@ class ColumnParallelLinear(nn.Module):
             )
         )
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features_per_partition, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features_per_partition, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.linear(x, self.weight, self.bias)
         if self.gather_output and self.tp_size > 1:
-            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
+            out = distributed.tp_all_gather(out, dim=-1, world_size=self.tp_size)
         return out
 
 
@@ -101,9 +99,7 @@ class RowParallelLinear(nn.Module):
         if bias and not reduce_results:
             # The bias is replicated and must be added exactly once, which is
             # only possible here when this layer owns the reduction.
-            raise ValueError(
-                "a deferred reduction cannot be combined with a replicated bias"
-            )
+            raise ValueError("a deferred reduction cannot be combined with a replicated bias")
         self.weight = nn.Parameter(
             torch.empty(
                 out_features,
@@ -113,9 +109,7 @@ class RowParallelLinear(nn.Module):
             )
         )
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
 
@@ -133,7 +127,7 @@ class RowParallelLinear(nn.Module):
         else:
             out = torch.nn.functional.linear(x, self.weight)
         if self.tp_size > 1 and self.reduce_results:
-            distributed.all_reduce_(out)
+            distributed.tp_all_reduce(out)
         if self.bias is not None:
             out = out + self.bias
         return out

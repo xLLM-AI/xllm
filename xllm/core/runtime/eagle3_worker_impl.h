@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,8 @@ class Eagle3WorkerImpl : public MTPWorkerImpl {
  public:
   Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                    const torch::Device& device,
-                   const runtime::Options& options);
+                   const runtime::Options& options,
+                   WorkerType worker_type);
 
   ~Eagle3WorkerImpl() override = default;
 
@@ -44,9 +45,14 @@ class Eagle3WorkerImpl : public MTPWorkerImpl {
   // selected prob extraction + draft->target token id mapping.
   void process_draft_sample_output(SampleOutput& sample_output) override;
 
+  void check_draft_input_embedding(const torch::Tensor& embedding,
+                                   const std::string& phase) const override;
+  bool share_target_lm_head_with_draft() const override { return false; }
+
   // EAGLE-3 specific: hot_token_id for draft-to-target token mapping
   // hot_token_id = d2t + arange(d2t.size(0))
   torch::Tensor hot_token_id_;
+  bool use_draft_token_mapping_ = true;
 };
 
 }  // namespace xllm

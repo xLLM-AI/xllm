@@ -8,9 +8,21 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
+option(ENABLE_HA "Enable Mooncake etcd-based high availability support" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
+
+# Resolve runtime shared libraries (e.g. the mooncake libasio.so shipped in
+# the wheel) relative to the binaries themselves, so installed packages stay
+# relocatable instead of depending on the build tree.
+list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
+list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
+
+if(ENABLE_HA)
+  set(USE_ETCD ON)
+  message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
+endif()
 
 if(DEVICE_ARCH STREQUAL "ARM")
     set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -268,11 +280,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 set(_XLLM_MUSIFY_COPTS "")
-if(USE_MUSA)
-  if(NOT USE_CUDA)
-    message(FATAL_ERROR "USE_MUSA requires USE_CUDA=ON")
-  endif()
 
+if(USE_CUDA AND USE_MUSA)
+  message(FATAL_ERROR "USE_CUDA and USE_MUSA are mutually exclusive")
+endif()
+
+if(USE_MUSA)
+  # MUSA uses CUDA language with mcc_wrapper + musamapping plugin.
+  # mcc_wrapper must be set before project().
   if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
     set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
   elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
@@ -293,6 +308,21 @@ if(USE_MUSA)
 elseif(USE_CUDA)
   project("xllm" LANGUAGES C CXX CUDA)
   find_package(CUDAToolkit REQUIRED)
+
+  # CMake has already selected the CUDA compiler at this point, so use its
+  # version to choose defaults instead of probing nvcc from setup.py.
+  if(NOT DEFINED TORCH_CUDA_ARCH_LIST OR "${TORCH_CUDA_ARCH_LIST}" STREQUAL "")
+    set(TORCH_CUDA_ARCH_LIST "8.0 8.6")
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 11.8)
+      string(APPEND TORCH_CUDA_ARCH_LIST " 8.9")
+    endif()
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+      string(APPEND TORCH_CUDA_ARCH_LIST " 9.0a")
+    endif()
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+      string(APPEND TORCH_CUDA_ARCH_LIST " 10.0a 12.0a")
+    endif()
+  endif()
 elseif(USE_DCU)
   project("xllm" LANGUAGES C CXX HIP)
   if(DEFINED ENV{DCU_PATH} AND NOT "$ENV{DCU_PATH}" STREQUAL "")
@@ -339,9 +369,10 @@ find_package(Boost REQUIRED)
 find_package(Boost REQUIRED COMPONENTS serialization)
 find_package(Threads REQUIRED)
 # find all dependencies from vcpkg
-find_package(folly CONFIG REQUIRED)
-find_package(glog CONFIG REQUIRED)
+set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
 find_package(gflags CONFIG REQUIRED)
+find_package(glog CONFIG REQUIRED)
+find_package(folly CONFIG REQUIRED)
 find_package(leveldb CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(absl CONFIG REQUIRED)
@@ -463,7 +494,7 @@ if(USE_NPU)
   add_definitions(-DTORCH_HIGHER_THAN_PTA6)
 
   # Use vcpkg header files as the first priority search directory,
-  #-> because the scope of third-party softwares managed by vcpkg is used throughout the entire xllm.
+  #-> because the scope of third-party software managed by vcpkg is used throughout the entire xllm.
   message(STATUS "VCPKG_INCLUDE_DIR = ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
   include_directories("${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
 
@@ -524,6 +555,10 @@ if(USE_NPU)
       $ENV{ATB_HOME_PATH}/lib
       $ENV{NPU_TOOLKIT_HOME}/lib64
   )
+  if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+    add_link_options(
+      "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+  endif()
   ## Adapt to the modification in DeekSeekV4 where the installation path of xllm_ops has been changed to custom_xllm_math
   if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/lib")
     link_directories(
@@ -571,7 +606,6 @@ endif()
 
 if(USE_MUSA)
   add_definitions(-DUSE_MUSA)
-  add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
   if(NOT DEFINED MUSA_PATH)
     if(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
@@ -698,10 +732,10 @@ elseif(USE_CUDA)
     " --use_fast_math"
     " -Xfatbin -compress-all")
 
-  # Parallel nvcc compilation: compile multiple GPU architectures simultaneously within each .cu
-  # file. --threads 0 = auto-detect CPU core count. Requires CUDA >= 11.2.
+  # Keep each nvcc invocation single-threaded to avoid multiplying the outer
+  # CMake/Ninja parallelism when compiling multiple GPU architectures.
   if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 11.2)
-    string(APPEND CMAKE_CUDA_FLAGS " --threads 0")
+    string(APPEND CMAKE_CUDA_FLAGS " --threads 1")
   endif()
 
   message(STATUS "CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
@@ -844,6 +878,28 @@ endif()
 # Configure third_party first so xllm can link against real CMake targets.
 
 add_subdirectory(third_party)
+if(ENABLE_HA)
+  if(NOT TARGET build_etcd_wrapper OR NOT TARGET mooncake_store)
+    message(FATAL_ERROR
+      "ENABLE_HA requires Mooncake Store and its etcd wrapper targets")
+  endif()
+
+  if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  else()
+    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_BINARY_DIR}")
+  endif()
+  set(MOONCAKE_ETCD_WRAPPER
+      "${CMAKE_BINARY_DIR}/third_party/Mooncake/mooncake-common/etcd/libetcd_wrapper.so")
+  add_custom_target(stage_mooncake_ha_runtime ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MOONCAKE_HA_RUNTIME_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MOONCAKE_ETCD_WRAPPER}"
+            "${MOONCAKE_HA_RUNTIME_DIR}/libetcd_wrapper.so"
+    DEPENDS build_etcd_wrapper
+    COMMENT "Staging Mooncake etcd HA runtime")
+  add_dependencies(mooncake_store stage_mooncake_ha_runtime)
+endif()
 if(TARGET brpc-static AND NOT TARGET brpc)
   add_library(brpc ALIAS brpc-static)
 endif()

@@ -86,18 +86,14 @@ def _split_qkv_rmsnorm_rope_kernel(
         mmask = (mblk_idx + pos_offset) < input_batch_offset_end
         mask = (mmask[:, None]) & (nmask[None, :])
         idx = (mblk_idx + pos_offset)[:, None] * total_hidden_size + nblk_idx[None, :]
-        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask).reshape(
-            qk_head_nums_per_iter_per_vec, HEAD_DIM
-        )
+        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask).reshape(qk_head_nums_per_iter_per_vec, HEAD_DIM)
 
         values_tmp3 = tl.zeros((batch_size_per_iter_per_vec, ROPE_DIM), dtype=tl.bfloat16)
         for i in tl.range(batch_size_per_iter_per_vec):
             pos = get_element(x, (i,))
             values_tmp3 = insert_slice(
                 values_tmp3.reshape(batch_size_per_iter_per_vec, ROPE_DIM),
-                tl.load(pos * ROPE_DIM + cos_sin_cache_offset[:, None]).reshape(
-                    1, ROPE_DIM
-                ),
+                tl.load(pos * ROPE_DIM + cos_sin_cache_offset[:, None]).reshape(1, ROPE_DIM),
                 offsets=(i, 0),
                 sizes=(1, ROPE_DIM),
                 strides=(1, 1),
@@ -119,25 +115,19 @@ def _split_qkv_rmsnorm_rope_kernel(
         normalized_values = values_tmp1.to(tl.float32)
         normalized_values = normalized_values * normalized_values
         normalized_values = tl.sum(normalized_values, axis=1) / HEAD_DIM
-        normalized_values = 1 / tl.sqrt(normalized_values + eps).reshape(
-            qk_head_nums_per_iter_per_vec, 1
-        )
+        normalized_values = 1 / tl.sqrt(normalized_values + eps).reshape(qk_head_nums_per_iter_per_vec, 1)
         normalized_values = values_tmp1 * normalized_values
 
         # Q: norm * weight + rope
         normalized_values_tmp = extract_slice(
-            normalized_values.reshape(
-                batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM
-            ),
+            normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, q_head_num, HEAD_DIM),
             strides=(1, 1, 1),
         )
         normalized_values_tmp = (normalized_values_tmp * q_weight_values).to(tl.bfloat16)
 
-        values_tmp = tl.zeros(
-            (batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16
-        )
+        values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16)
         x1 = extract_slice(
             normalized_values_tmp,
             offsets=(0, 0, 0),
@@ -164,9 +154,7 @@ def _split_qkv_rmsnorm_rope_kernel(
             sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        q_output_idx = output_q_nblk_idx[None, :] + (
-            mblk_idx + pos_offset
-        )[:, None] * q_hidden_size
+        q_output_idx = output_q_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * q_hidden_size
         q_mask = (mmask[:, None]) & (output_q_nmask[None, :])
         tl.store(
             q_gm_ptr + q_output_idx,
@@ -176,20 +164,14 @@ def _split_qkv_rmsnorm_rope_kernel(
 
         # K: norm * weight + rope
         normalized_values_tmp1 = extract_slice(
-            normalized_values.reshape(
-                batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM
-            ),
+            normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
             offsets=(0, q_head_num, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HEAD_DIM),
             strides=(1, 1, 1),
         )
-        normalized_values_tmp1 = (normalized_values_tmp1 * k_weight_values).to(
-            tl.bfloat16
-        )
+        normalized_values_tmp1 = (normalized_values_tmp1 * k_weight_values).to(tl.bfloat16)
 
-        values_tmp2 = tl.zeros(
-            (batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM), dtype=tl.bfloat16
-        )
+        values_tmp2 = tl.zeros((batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM), dtype=tl.bfloat16)
         x1 = extract_slice(
             normalized_values_tmp1,
             offsets=(0, 0, 0),
@@ -216,9 +198,7 @@ def _split_qkv_rmsnorm_rope_kernel(
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
             strides=(1, 1, 1),
         )
-        kv_output_idx = output_kv_nblk_idx[None, :] + (
-            mblk_idx + pos_offset
-        )[:, None] * kv_hidden_size
+        kv_output_idx = output_kv_nblk_idx[None, :] + (mblk_idx + pos_offset)[:, None] * kv_hidden_size
         kv_mask = (mmask[:, None]) & (output_kv_nmask[None, :])
         tl.store(
             k_gm_ptr + kv_output_idx,
@@ -260,29 +240,19 @@ def split_qkv_rmsnorm_rope(
     batch_size = qkv.shape[0]
     total_hidden_size = q_hidden_size + kv_hidden_size * 2
 
-    q_output = torch.empty(
-        batch_size, q_hidden_size, device=qkv.device, dtype=qkv.dtype
-    )
-    k_output = torch.empty(
-        batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype
-    )
-    v_output = torch.empty(
-        batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype
-    )
+    q_output = torch.empty(batch_size, q_hidden_size, device=qkv.device, dtype=qkv.dtype)
+    k_output = torch.empty(batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype)
+    v_output = torch.empty(batch_size, kv_hidden_size, device=qkv.device, dtype=qkv.dtype)
 
     q_head_num = q_hidden_size // head_dim
     kv_head_num = kv_hidden_size // head_dim
 
     UB_SIZE = 87040
     factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
-    batch_size_per_iter_per_vec = max(
-        1, int(UB_SIZE / qkv.element_size()) // factor
-    )
+    batch_size_per_iter_per_vec = max(1, int(UB_SIZE / qkv.element_size()) // factor)
     qk_head_num_sum = q_head_num + kv_head_num
     qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * qk_head_num_sum
-    v_batch_size_per_iter_per_vec = int(
-        UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1)
-    )
+    v_batch_size_per_iter_per_vec = int(UB_SIZE / torch.bfloat16.itemsize // (kv_hidden_size + 1))
 
     grid = (num_vectorcore, 1, 1)
     _split_qkv_rmsnorm_rope_kernel[grid](

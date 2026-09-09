@@ -16,7 +16,7 @@ sidebar:
 
 ```bash
 # A3 arm (CANN 9)
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 然后创建对应的容器
@@ -49,7 +49,7 @@ docker run -it -d \
     -v /home/:/home/ \
     -v /runtime/:/runtime/ \
     -w /home \
-    quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+    quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 ## 2.拉取源码并编译

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -149,10 +149,14 @@ struct ParallelArgs {
   // ep size
   PROPERTY(int32_t, ep_size) = 1;
 
-  // cp size
+  // Public configuration name for PCP size. See ContextParallelTopology for
+  // the configuration-to-topology mapping.
   PROPERTY(int32_t, cp_size) = 1;
 
-  // Derived: CP rank of the current process within its DP group.
+  PROPERTY(int32_t, layerwise_split_size) = 1;
+
+  // Derived PCP rank of the current process within its DP group. The public
+  // cp_rank name is retained for compatibility.
   // rank layout: dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
   [[nodiscard]] int32_t cp_rank() const noexcept {
     if (cp_size_ <= 1) {
@@ -162,7 +166,8 @@ struct ParallelArgs {
     return (rank_ % (cp_size_ * tp_sz)) / tp_sz;
   }
 
-  // 0 means follow cp_size; prefer kv_split_size_effective().
+  // Public configuration name for DCP size. 0 means follow cp_size; prefer
+  // kv_split_size_effective().
   PROPERTY(int32_t, kv_split_size) = 0;
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
@@ -170,13 +175,15 @@ struct ParallelArgs {
   }
 
   [[nodiscard]] int32_t kv_split_rank() const noexcept {
-    if (dcp_group_ != nullptr) {
-      return dcp_group_->rank();
-    }
     const int32_t kv = kv_split_size_effective();
     if (kv <= 1) {
       return 0;
     }
+
+    if (dcp_group_ != nullptr) {
+      return dcp_group_->rank();
+    }
+
     return rank_ / (world_size_ / kv);
   }
 
@@ -219,9 +226,10 @@ struct ParallelArgs {
   ProcessGroup* lm_head_group_ = nullptr;
   ProcessGroup* encoder_dp_group_ = nullptr;
   ProcessGroup* single_rank_group_ = nullptr;
-  // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
+  // PCP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
-  // DCP ProcessGroup is authoritative for KV ownership and decode merge.
+  // DCP ProcessGroup is authoritative for KV ownership, kv_split_rank, and
+  // decode merge.
   ProcessGroup* dcp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   // Dedicated group for EPLB weight migration. It has the same rank set as

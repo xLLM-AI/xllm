@@ -17,6 +17,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from xllm.python import distributed
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -25,6 +26,7 @@ from xllm.python.attention.backend import (
 )
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.platform import current_platform
 
@@ -42,22 +44,65 @@ def _create_attention_backend(
     first_attention: Attention,
     device: torch.device,
     dtype: torch.dtype,
+    config: dict | None = None,
+    max_num_reqs: int = 1,
 ) -> AttentionBackend:
+    config = config or {}
+    model_type = config.get("model_type", "")
+    if model_type == "deepseek_v4" and current_platform.is_npu():
+        from xllm.python.attention.dsa_attention import DsaAttentionBackend
+
+        return DsaAttentionBackend(
+            compress_ratios=list(config.get("compress_ratios", [])),
+            window_size=int(config.get("window_size", 128)),
+            n_layers=int(config.get("n_layers", config.get("num_hidden_layers", 0))),
+            num_heads=first_attention.num_heads,
+            attn_head_dim=first_attention.head_dim,
+            index_topk=int(config.get("index_topk", 512)),
+            index_n_heads=int(config.get("index_n_heads", 64)),
+            index_head_dim=int(config.get("index_head_dim", 128)),
+            rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
+            device=device,
+            dtype=dtype,
+        )
     if current_platform.is_npu():
+        dcp_group = distributed.dcp_group(device)
+        if int(config.get("cp_size", 1)) == 1 and dcp_group is not None and dcp_group.size() > 1:
+            from xllm.python.attention.sfa_dcp_backend import (
+                SfaDcpAttentionBackend,
+                dcp_layer_options,
+            )
+
+            index_topk = dcp_layer_options(first_attention)
+            return SfaDcpAttentionBackend(
+                num_heads=first_attention.num_heads,
+                num_kv_heads=first_attention.num_kv_heads,
+                head_dim=first_attention.head_dim,
+                scale=first_attention.scale,
+                sliding_window=first_attention.sliding_window,
+                device=device,
+                dtype=dtype,
+                dcp_group=dcp_group,
+                index_topk=index_topk,
+                max_num_reqs=max(max_num_reqs, 1),
+            )
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
         )
+
         return NpuPagedAttentionBackend(
             num_heads=first_attention.num_heads,
             num_kv_heads=first_attention.num_kv_heads,
             head_dim=first_attention.head_dim,
             scale=first_attention.scale,
             sliding_window=first_attention.sliding_window,
+            is_mla=bool(config.get("enable_mla", False)),
             device=device,
             dtype=dtype,
         )
     if current_platform.is_cuda():
         from xllm.python.attention.flashinfer import FlashInferBackend
+
         return FlashInferBackend(
             num_heads=first_attention.num_heads,
             num_kv_heads=first_attention.num_kv_heads,
@@ -67,9 +112,7 @@ def _create_attention_backend(
             device=device,
             dtype=dtype,
         )
-    raise NotImplementedError(
-        f"No attention backend available for device type '{device.type}'"
-    )
+    raise NotImplementedError(f"No attention backend available for device type '{device.type}'")
 
 
 class ModelExecutor:
@@ -78,13 +121,13 @@ class ModelExecutor:
         model: nn.Module,
         config: dict,
         max_seqs_per_batch: int,
+        num_decoding_tokens: int = 1,
+        acl_graph_decode_batch_size_limit: int | None = None,
     ) -> None:
         self.model = model
         self._kv_bound = False
 
-        attention_layers = [
-            module for module in model.modules() if isinstance(module, Attention)
-        ]
+        attention_layers = [module for module in model.modules() if isinstance(module, Attention)]
         if not attention_layers:
             raise ValueError("Python model does not contain an Attention layer")
 
@@ -92,42 +135,57 @@ class ModelExecutor:
         expected_config = self._attention_config(first_attention)
         for layer in attention_layers[1:]:
             if self._attention_config(layer) != expected_config:
-                raise ValueError(
-                    "Attention backend requires identical attention configuration "
-                    "across all layers"
-                )
+                raise ValueError("Attention backend requires identical attention configuration across all layers")
 
         first_parameter = next(model.parameters())
         device = first_parameter.device
         self._num_attention_layers = len(attention_layers)
         self.attention_backend = _create_attention_backend(
-            first_attention, device, first_parameter.dtype
+            first_attention,
+            device,
+            first_parameter.dtype,
+            config,
+            max_seqs_per_batch,
         )
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
+        # Context-Parallel: shard prefill sequences across the CP group. Decode
+        # stays on the non-CP path (CP is prefill-only, eager-only in v1).
+        self.eager_runner.cp_size = int(config.get("cp_size", 1))
+        self.eager_runner.cp_rank = int(config.get("cp_rank", 0))
+        self.layerwise_split_size = int(config.get("layerwise_split_size", 1))
+        self.layerwise_split_rank = int(config.get("layerwise_split_rank", 0))
+        if self.layerwise_split_size > 1 and config.get("model_type") != "glm_moe_dsa":
+            raise NotImplementedError("Python layerwise split is supported only for GLM5.2")
         self.decode_graph_runner = None
         self.inductor_runner = None
 
         graph_backend = _resolve_graph_backend(config)
+        if self.layerwise_split_size > 1 and graph_backend not in ("", "off", "none", "0"):
+            raise NotImplementedError(
+                "Python GLM5.2 layerwise split requires eager execution; "
+                f"graph backend '{graph_backend}' is not supported."
+            )
         dp_size = int(config.get("dp_size", 1))
         dp_rank = int(config.get("dp_rank", 0))
+        self.dp_size = dp_size
         if dp_size > 1 and graph_backend not in (
             "",
             "off",
             "none",
             "0",
             "cudagraphs",
+            "aclgraph",
         ):
-            raise NotImplementedError(
-                "Python data parallel graph execution supports cudagraphs only"
-            )
+            raise NotImplementedError("Python data parallel graph execution supports cudagraphs and aclgraph only")
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":
             from xllm.python.model_executor.runners.decode_cuda_graph import (
                 DecodeCudaGraphRunner,
             )
+
             self.decode_graph_runner = DecodeCudaGraphRunner(
                 execution_model,
                 self.attention_backend,
@@ -141,18 +199,48 @@ class ModelExecutor:
             from xllm.python.model_executor.runners.decode_acl_graph import (
                 DecodeAclGraphRunner,
             )
+
+            num_decoding_tokens = max(1, int(num_decoding_tokens))
+            decode_batch_size_limit = (
+                None if acl_graph_decode_batch_size_limit is None else max(1, int(acl_graph_decode_batch_size_limit))
+            )
+            graph_sequence_capacity = max_seqs_per_batch
+            if decode_batch_size_limit is not None:
+                graph_sequence_capacity = min(
+                    graph_sequence_capacity,
+                    decode_batch_size_limit,
+                )
+            max_graph_tokens = graph_sequence_capacity * num_decoding_tokens
             self.decode_graph_runner = DecodeAclGraphRunner(
                 execution_model,
                 self.attention_backend,
                 device,
-                max_seqs_per_batch,
+                max_graph_tokens,
                 int(config["max_position_embeddings"]),
+                dp_size,
+                dp_rank,
+                decode_batch_size_limit,
+                num_decoding_tokens,
             )
         else:
+            if self.layerwise_split_size > 1:
+                raise NotImplementedError(
+                    "Python layerwise split requires eager execution; graph "
+                    f"backend '{graph_backend}' is not supported."
+                )
+            if self.eager_runner.cp_size > 1:
+                # CP is prefill-only and lives on eager_runner; a compile
+                # backend serves prefill through InductorRunner, which carries
+                # no cp_context, so CP would silently no-op. Reject rather than
+                # run without the requested sharding.
+                raise NotImplementedError(
+                    "Context-Parallel (cp_size > 1) is not supported with the "
+                    f"'{graph_backend}' graph backend; CP is eager-only. Use "
+                    "graph_backend=off/aclgraph, or set cp_size=1."
+                )
             from xllm.python.model_executor.runners.inductor import InductorRunner
-            self.inductor_runner = InductorRunner(
-                execution_model, self.attention_backend, device, graph_backend
-            )
+
+            self.inductor_runner = InductorRunner(execution_model, self.attention_backend, device, graph_backend)
 
     @staticmethod
     def _attention_config(layer: Attention) -> tuple[int, int, int, float, int]:
@@ -166,15 +254,9 @@ class ModelExecutor:
 
     def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:
         layer_caches = normalize_layer_caches(kv_caches)
-        required_layers = max(
-            layer.layer_id
-            for layer in self.model.modules()
-            if isinstance(layer, Attention)
-        ) + 1
+        required_layers = max(layer.layer_id for layer in self.model.modules() if isinstance(layer, Attention)) + 1
         if len(layer_caches) < required_layers:
-            raise ValueError(
-                "cache layer count does not match the model layer layout"
-            )
+            raise ValueError("cache layer count does not match the model layer layout")
         if self._kv_bound:
             return
         self.attention_backend.bind_kv_caches(layer_caches)
@@ -193,20 +275,21 @@ class ModelExecutor:
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
-    ) -> torch.Tensor:
+    ) -> ModelExecutionOutput:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
+        if self.layerwise_split_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
+            raise NotImplementedError("Python GLM5.2 layerwise split is decode-only")
 
         graph_runner = self.decode_graph_runner
-        if graph_runner is not None and graph_runner.can_execute(
-            input_ids, metadata, input_embedding
-        ):
+        if graph_runner is not None and graph_runner.can_execute(input_ids, metadata, input_embedding):
             graph_runner.warmup(
-                input_ids.device, input_ids.dtype, input_embedding
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
             )
-            return graph_runner.execute(
-                input_ids, positions, metadata, input_embedding
-            )
+            return graph_runner.execute(input_ids, positions, metadata, input_embedding)
         if self.inductor_runner is not None:
             return self.inductor_runner.execute(
                 input_ids,

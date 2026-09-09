@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,6 +19,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "common/metrics.h"
 #include "core/framework/config/scheduler_config.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/incremental_decoder.h"
@@ -98,7 +99,8 @@ std::shared_ptr<Request> MakeRequest(
       [](const RequestOutput&) { return true; },
       OutputsFunc{});
 
-  return std::make_shared<Request>("cached-tokens-test", "", "", state);
+  return std::make_shared<Request>(
+      "cached-tokens-test", "", "", std::move(state));
 }
 
 void EvictPrefixCache(BlockManagerPool& pool,
@@ -224,6 +226,26 @@ TEST(RequestCachedTokensTest, RecordIsIdempotentWithMaxSemantics) {
   }
 
   EvictPrefixCache(pool, options);
+}
+
+TEST(RequestCachedTokensTest, AdmissionRecordsFinalMaximumOnlyOnce) {
+  auto request = MakeRequest({1, 2, 3, 4, 5, 6, 7, 8, 9});
+  const double prompt_before = COUNTER_VALUE(prefix_cache_prompt_tokens_total);
+  const double hit_before = COUNTER_VALUE(prefix_cache_hit_tokens_total);
+
+  request->record_num_prefix_cache_tokens(/*num_prefix_cache_tokens=*/6);
+  EXPECT_DOUBLE_EQ(COUNTER_VALUE(prefix_cache_prompt_tokens_total),
+                   prompt_before);
+  EXPECT_DOUBLE_EQ(COUNTER_VALUE(prefix_cache_hit_tokens_total), hit_before);
+
+  request->record_num_prefix_cache_tokens();
+  request->record_num_prefix_cache_tokens();
+
+  EXPECT_EQ(request->num_prefix_cache_tokens(), 6U);
+  EXPECT_DOUBLE_EQ(COUNTER_VALUE(prefix_cache_prompt_tokens_total),
+                   prompt_before + 9.0);
+  EXPECT_DOUBLE_EQ(COUNTER_VALUE(prefix_cache_hit_tokens_total),
+                   hit_before + 6.0);
 }
 
 }  // namespace

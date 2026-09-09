@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -201,7 +201,7 @@ torch::Tensor NpuMistralDecoderLayerImpl::forward(
     // mstxRangeEnd(id);
     st = execute_node(prefill_node_, node_id);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "excute prefill layer fail, error code: " << st;
+                           << "execute prefill layer fail, error code: " << st;
   } else {
     build_node_variant_pack(decode_node_,
                             x,
@@ -213,7 +213,7 @@ torch::Tensor NpuMistralDecoderLayerImpl::forward(
                             false);
     st = execute_node(decode_node_, node_id + 1000);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "excute decode layer fail, error code: " << st;
+                           << "execute decode layer fail, error code: " << st;
   }
 
   return at_placeholder_;

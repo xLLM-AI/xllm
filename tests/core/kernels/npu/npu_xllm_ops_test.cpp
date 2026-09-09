@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,7 @@ limitations under the License.
 #include <limits>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/xllm_torch_ops.h"
@@ -137,7 +138,7 @@ class NpuXllmOpsTest : public ::testing::Test {
     py::gil_scoped_acquire gil;
     prepend_python_model_path();
     py::module_::import("xllm.python._npu_bootstrap");
-    py::module_::import("xllm.python");
+    py::module_::import("xllm.python").attr("initialize_runtime")();
   }
 };
 
@@ -186,6 +187,40 @@ TEST_F(NpuXllmOpsTest, DispatcherSiluAndMulMatchesReference) {
              .item<float>();
 }
 
+TEST_F(NpuXllmOpsTest, DispatcherQuantizeMatchesStaticW8A8Reference) {
+  py::gil_scoped_acquire gil;
+  const auto input_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto scale_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto zero_point_opts = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto input_cpu = torch::tensor(
+      std::vector<float>{-40.0F, -1.0F, -0.25F, 0.0F, 0.25F, 1.0F, 40.0F},
+      input_opts);
+  const auto scale_cpu = torch::full({1}, 0.25, scale_opts);
+  const auto zero_point_cpu = torch::full({1}, 2, zero_point_opts);
+  const auto input = input_cpu.to(torch::kPrivateUse1);
+  const auto scale = scale_cpu.to(torch::kPrivateUse1);
+  const auto zero_point = zero_point_cpu.to(torch::kPrivateUse1);
+
+  auto op = c10::Dispatcher::singleton().findSchemaOrThrow(
+      "xllm_ops::quantize_per_tensor", "");
+  auto actual = op.typed<torch::Tensor(const torch::Tensor&,
+                                       const torch::Tensor&,
+                                       const torch::Tensor&,
+                                       at::ScalarType,
+                                       int64_t)>()
+                    .call(input, scale, zero_point, at::ScalarType::QInt8, -1);
+
+  const auto expected =
+      torch::clamp(torch::round(input_cpu.to(torch::kFloat32) /
+                                    scale_cpu.to(torch::kFloat32) +
+                                zero_point_cpu.to(torch::kFloat32)),
+                   -128,
+                   127)
+          .to(torch::kInt8);
+  EXPECT_EQ(actual.scalar_type(), torch::kInt8);
+  EXPECT_TRUE(torch::equal(actual.cpu(), expected));
+}
+
 TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
   py::gil_scoped_acquire gil;
 
@@ -207,6 +242,442 @@ TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
              .abs()
              .max()
              .item<float>();
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4OpsUseNpuDispatchKeys) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+
+device_ops = (
+    "moe_gating_top_k_hash",
+    "dequant_swiglu_quant",
+    "hc_pre",
+    "hc_post",
+    "compressor",
+    "sparse_attn_sharedkv",
+    "quant_lightning_indexer",
+)
+for op_name in device_ops:
+    qualname = f"xllm_ops::{op_name}"
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(
+        qualname, "PrivateUse1"
+    ), qualname
+    assert not torch._C._dispatch_has_kernel_for_dispatch_key(
+        qualname, "CompositeExplicitAutograd"
+    ), qualname
+
+for op_name in (
+    "sparse_attn_sharedkv_metadata",
+    "quant_lightning_indexer_metadata",
+):
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(
+        f"xllm_ops::{op_name}", "CompositeExplicitAutograd"
+    ), op_name
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4GroupGemmMatchesInt32Reference) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.moe import _group_gemm
+
+device = torch.device("privateuseone:0")
+torch.manual_seed(20260814)
+tokens, experts, input_dim, output_dim = 8, 2, 128, 256
+x_cpu = torch.randint(-4, 5, (tokens, input_dim), dtype=torch.int8)
+w_cpu = torch.randint(-4, 5, (experts, input_dim, output_dim), dtype=torch.int8)
+group_list_cpu = torch.tensor([4, 4], dtype=torch.int64)
+
+x = x_cpu.to(device)
+w = w_cpu.to(device)
+group_list = group_list_cpu.to(device)
+out = _group_gemm(
+    x=x,
+    weight=w,
+    scale=None,
+    per_token_scale=None,
+    group_list=group_list,
+    split_item=2,
+    group_type=0,
+    group_list_type=1,
+    output_dtype=torch.int32,
+)
+torch.npu.synchronize()
+
+expected = torch.cat((
+    x_cpu[:4].to(torch.int32) @ w_cpu[0].to(torch.int32),
+    x_cpu[4:].to(torch.int32) @ w_cpu[1].to(torch.int32),
+), dim=0)
+assert out.shape == (tokens, output_dim)
+assert out.dtype == torch.int32
+torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4GroupGemmAcceptsScaleAndPerTokenScale) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.moe import _group_gemm
+
+device = torch.device("privateuseone:0")
+tokens, experts, input_dim, output_dim = 8, 2, 128, 128
+x = torch.randint(-4, 5, (tokens, input_dim), dtype=torch.int8, device=device)
+w = torch.randint(-4, 5, (experts, input_dim, output_dim), dtype=torch.int8, device=device)
+scale = torch.ones((experts, output_dim), dtype=torch.bfloat16, device=device)
+per_token_scale = torch.ones((tokens,), dtype=torch.float32, device=device)
+group_list = torch.tensor([4, 4], dtype=torch.int64, device=device)
+
+out = _group_gemm(
+    x=x,
+    weight=w,
+    scale=scale,
+    per_token_scale=per_token_scale,
+    group_list=group_list,
+    split_item=2,
+    group_type=0,
+    group_list_type=1,
+    output_dtype=torch.bfloat16,
+)
+torch.npu.synchronize()
+assert out.shape == (tokens, output_dim)
+assert out.dtype == torch.bfloat16
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4PartialRotaryPythonWrapperRunsOnNpu) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.rotary_embedding import (
+    npu_inplace_partial_rotary_mul,
+)
+
+torch.manual_seed(2026)
+x_cpu = torch.randn((8, 2, 128), dtype=torch.float32).to(torch.bfloat16)
+cos_cpu = torch.randn((8, 64), dtype=torch.float32).to(torch.bfloat16)
+sin_cpu = torch.randn((8, 64), dtype=torch.float32).to(torch.bfloat16)
+
+expected = x_cpu.float().clone()
+segment = x_cpu[..., 64:128].float()
+swapped = torch.empty_like(segment)
+swapped[..., 0::2] = segment[..., 1::2]
+swapped[..., 1::2] = segment[..., 0::2]
+sign = torch.ones_like(cos_cpu.float())
+sign[..., 0::2] = -1
+expected[..., 64:128] = (
+    segment * cos_cpu.float().unsqueeze(1)
+    + swapped * sin_cpu.float().unsqueeze(1) * sign.unsqueeze(1)
+)
+expected = expected.to(torch.bfloat16).float()
+
+x = x_cpu.to("privateuseone:0")
+cos = cos_cpu.to(x.device)
+sin = sin_cpu.to(x.device)
+result = npu_inplace_partial_rotary_mul(x, cos, sin, 64, 64)
+torch.npu.synchronize()
+
+assert result.data_ptr() == x.data_ptr()
+torch.testing.assert_close(
+    x.cpu().float(), expected, atol=2e-2, rtol=2e-2
+)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4CompressorPythonWrapperRunsOnNpu) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.dsa import compressor
+
+device = torch.device("privateuseone:0")
+torch.manual_seed(2025)
+batch, tokens, hidden = 1, 128, 1024
+ratio, head_dim, coff, rope_dim = 128, 512, 1, 64
+compressed_tokens = tokens // ratio
+
+x_cpu = (torch.randn(batch, tokens, hidden) * 0.1).to(torch.float16)
+wkv_cpu = (torch.randn(coff * head_dim, hidden) * 0.05).to(torch.float16)
+wgate_cpu = (torch.randn(coff * head_dim, hidden) * 0.05).to(torch.float16)
+ape_cpu = (torch.randn(ratio, coff * head_dim) * 0.1).float()
+norm_cpu = (torch.randn(head_dim) * 0.1 + 1).to(torch.float16)
+rope_cos_cpu = (
+    torch.randn(batch, compressed_tokens, rope_dim) * 0.1
+).to(torch.float16)
+rope_sin_cpu = (
+    torch.randn(batch, compressed_tokens, rope_dim) * 0.1
+).to(torch.float16)
+
+projected_kv = x_cpu.float()[0] @ wkv_cpu.float().T
+scores = x_cpu.float()[0] @ wgate_cpu.float().T + ape_cpu
+pooled = (torch.softmax(scores, dim=0) * projected_kv).sum(0, keepdim=True)
+variance = pooled.square().mean(-1, keepdim=True)
+expected = pooled * torch.rsqrt(variance + 1e-6) * norm_cpu.float()
+rope_segment = expected[:, -rope_dim:].clone()
+half = rope_dim // 2
+rotated = torch.cat((-rope_segment[:, half:], rope_segment[:, :half]), dim=-1)
+expected[:, -rope_dim:] = (
+    rope_segment * rope_cos_cpu.float()[0]
+    + rotated * rope_sin_cpu.float()[0]
+)
+expected = expected.view(batch, compressed_tokens, head_dim).half().float()
+
+x = x_cpu.to(device)
+wkv = wkv_cpu.to(device)
+wgate = wgate_cpu.to(device)
+ape = ape_cpu.to(device)
+norm_weight = norm_cpu.to(device)
+rope_sin = rope_sin_cpu.to(device)
+rope_cos = rope_cos_cpu.to(device)
+kv_state = torch.zeros((1, 128, head_dim), dtype=torch.float32, device=device)
+score_state = torch.zeros_like(kv_state)
+kv_block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+score_block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+
+out, wkv_proj, softmax_res, norm_x, norm_rstd = compressor(
+    x,
+    wkv,
+    wgate,
+    kv_state,
+    score_state,
+    ape,
+    norm_weight,
+    rope_sin,
+    rope_cos,
+    kv_block_table,
+    score_block_table,
+    None,
+    None,
+    None,
+    rope_dim,
+    ratio,
+    coff,
+    1e-6,
+    1,
+    False,
+)
+torch.npu.synchronize()
+
+assert out.shape == (batch, compressed_tokens, head_dim)
+assert out.dtype == torch.float16
+assert wkv_proj.numel() == 0
+assert softmax_res.numel() == 0
+assert norm_x.numel() == 0
+assert norm_rstd.numel() == 0
+torch.testing.assert_close(
+    out.cpu().float(), expected, atol=2e-2, rtol=2e-2
+)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest,
+       FusedInferAttentionDecodeOutMatchesEagerAcrossBlockBoundary) {
+  py::gil_scoped_acquire gil;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kQueryHeads = 16;
+  constexpr int64_t kKvHeads = 4;
+  constexpr int64_t kHeadDim = 256;
+  constexpr int64_t kNumPhysicalBlocks = 4;
+  constexpr double kScale = 1.0 / 16.0;
+  const std::vector<int64_t> actual_seq_lengths = {1, 2, 3};
+  const std::vector<int64_t> actual_seq_lengths_kv = {127, 128, 129};
+
+  torch::manual_seed(20260811);
+  const torch::TensorOptions cpu_float =
+      torch::TensorOptions().dtype(torch::kFloat32);
+  torch::Tensor query = torch::randn({3, kQueryHeads, kHeadDim}, cpu_float)
+                            .to(torch::kBFloat16)
+                            .to(torch::kPrivateUse1)
+                            .contiguous();
+  torch::Tensor key =
+      torch::randn({kNumPhysicalBlocks, kBlockSize, kKvHeads * kHeadDim},
+                   cpu_float)
+          .to(torch::kBFloat16)
+          .to(torch::kPrivateUse1)
+          .contiguous();
+  torch::Tensor value =
+      torch::randn({kNumPhysicalBlocks, kBlockSize, kKvHeads * kHeadDim},
+                   cpu_float)
+          .to(torch::kBFloat16)
+          .to(torch::kPrivateUse1)
+          .contiguous();
+  torch::Tensor block_table =
+      torch::tensor({{0, 0}, {1, 0}, {2, 3}},
+                    torch::TensorOptions().dtype(torch::kInt32))
+          .to(torch::kPrivateUse1);
+
+  auto eager_result = xllm::kernel::npu::npu_fused_infer_attention(
+      query,
+      key,
+      value,
+      /*atten_mask=*/std::nullopt,
+      std::make_optional(block_table),
+      actual_seq_lengths,
+      actual_seq_lengths_kv,
+      kQueryHeads,
+      kKvHeads,
+      kScale,
+      kBlockSize,
+      /*sparse_mode=*/0,
+      /*input_layout=*/"TND");
+  torch::Tensor eager_output = std::get<0>(eager_result);
+
+  torch::Tensor workspace =
+      xllm::kernel::npu::npu_fused_infer_attention_decode_get_max_workspace(
+          query,
+          key,
+          value,
+          block_table,
+          actual_seq_lengths,
+          actual_seq_lengths_kv,
+          kQueryHeads,
+          kKvHeads,
+          kScale,
+          kBlockSize);
+  ASSERT_TRUE(workspace.defined());
+  EXPECT_EQ(workspace.device(), query.device());
+
+  torch::Tensor out = torch::zeros_like(eager_output);
+  torch::Tensor softmax_lse = torch::empty({0}, query.options());
+  const void* out_data = out.const_data_ptr();
+  xllm::kernel::npu::npu_fused_infer_attention_decode_out(query,
+                                                          key,
+                                                          value,
+                                                          block_table,
+                                                          actual_seq_lengths,
+                                                          actual_seq_lengths_kv,
+                                                          kQueryHeads,
+                                                          kKvHeads,
+                                                          kScale,
+                                                          kBlockSize,
+                                                          workspace,
+                                                          out,
+                                                          softmax_lse);
+
+  EXPECT_EQ(out.const_data_ptr(), out_data);
+  EXPECT_EQ(out.sizes(), eager_output.sizes());
+  EXPECT_EQ(out.scalar_type(), torch::kBFloat16);
+  EXPECT_EQ(softmax_lse.numel(), 0);
+  const torch::Tensor actual = out.cpu().to(torch::kFloat32);
+  const torch::Tensor expected = eager_output.cpu().to(torch::kFloat32);
+  EXPECT_TRUE(torch::allclose(actual,
+                              expected,
+                              /*rtol=*/1e-3,
+                              /*atol=*/2e-3))
+      << "max abs diff = " << (actual - expected).abs().max().item<float>();
+}
+
+TEST_F(NpuXllmOpsTest,
+       FusedInferAttentionDecodeCachedOutMatchesEagerAcrossDynamicShapes) {
+  py::gil_scoped_acquire gil;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kQueryHeads = 16;
+  constexpr int64_t kKvHeads = 4;
+  constexpr int64_t kHeadDim = 256;
+  constexpr int64_t kNumPhysicalBlocks = 64;
+  constexpr double kScale = 1.0 / 16.0;
+
+  torch::manual_seed(20260826);
+  const torch::TensorOptions cpu_float =
+      torch::TensorOptions().dtype(torch::kFloat32);
+  torch::Tensor key =
+      torch::randn({kNumPhysicalBlocks, kBlockSize, kKvHeads * kHeadDim},
+                   cpu_float)
+          .to(torch::kBFloat16)
+          .to(torch::kPrivateUse1)
+          .contiguous();
+  torch::Tensor value =
+      torch::randn({kNumPhysicalBlocks, kBlockSize, kKvHeads * kHeadDim},
+                   cpu_float)
+          .to(torch::kBFloat16)
+          .to(torch::kPrivateUse1)
+          .contiguous();
+
+  auto run_case = [&](const std::vector<int64_t>& actual_seq_lengths_kv,
+                      const std::vector<int32_t>& block_ids,
+                      int64_t block_table_width) {
+    const int64_t num_tokens =
+        static_cast<int64_t>(actual_seq_lengths_kv.size());
+    std::vector<int64_t> actual_seq_lengths;
+    actual_seq_lengths.reserve(static_cast<size_t>(num_tokens));
+    for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
+      actual_seq_lengths.emplace_back(token_idx + 1);
+    }
+
+    torch::Tensor query =
+        torch::randn({num_tokens, kQueryHeads, kHeadDim}, cpu_float)
+            .to(torch::kBFloat16)
+            .to(torch::kPrivateUse1)
+            .contiguous();
+    torch::Tensor block_table =
+        torch::tensor(block_ids, torch::TensorOptions().dtype(torch::kInt32))
+            .view({num_tokens, block_table_width})
+            .to(torch::kPrivateUse1);
+    auto eager_result = xllm::kernel::npu::npu_fused_infer_attention(
+        query,
+        key,
+        value,
+        /*atten_mask=*/std::nullopt,
+        std::make_optional(block_table),
+        actual_seq_lengths,
+        actual_seq_lengths_kv,
+        kQueryHeads,
+        kKvHeads,
+        kScale,
+        kBlockSize,
+        /*sparse_mode=*/0,
+        /*input_layout=*/"TND");
+    torch::Tensor expected = std::get<0>(eager_result);
+    torch::Tensor output = torch::zeros_like(expected);
+    const void* output_data = output.const_data_ptr();
+
+    xllm::kernel::npu::npu_fused_infer_attention_decode_out_cached(
+        query,
+        key,
+        value,
+        block_table,
+        actual_seq_lengths,
+        actual_seq_lengths_kv,
+        kQueryHeads,
+        kKvHeads,
+        kScale,
+        kBlockSize,
+        output);
+
+    EXPECT_EQ(output.const_data_ptr(), output_data);
+    const torch::Tensor actual_cpu = output.cpu();
+    const torch::Tensor expected_cpu = expected.cpu();
+    EXPECT_TRUE(torch::equal(actual_cpu, expected_cpu))
+        << "cached FIA output must be bitwise identical, max abs diff = "
+        << (actual_cpu.to(torch::kFloat32) - expected_cpu.to(torch::kFloat32))
+               .abs()
+               .max()
+               .item<float>();
+  };
+
+  run_case(/*actual_seq_lengths_kv=*/{127},
+           /*block_ids=*/{0},
+           /*block_table_width=*/1);
+  run_case(/*actual_seq_lengths_kv=*/{127, 128, 129},
+           /*block_ids=*/{0, 0, 1, 0, 2, 3},
+           /*block_table_width=*/2);
+  std::vector<int32_t> long_context_block_ids;
+  long_context_block_ids.reserve(kNumPhysicalBlocks);
+  for (int32_t block_id = 0;
+       block_id < static_cast<int32_t>(kNumPhysicalBlocks);
+       ++block_id) {
+    long_context_block_ids.emplace_back(block_id);
+  }
+  run_case(/*actual_seq_lengths_kv=*/{kNumPhysicalBlocks * kBlockSize},
+           long_context_block_ids,
+           /*block_table_width=*/kNumPhysicalBlocks);
 }
 
 TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_FullAttentionMatchesReference) {

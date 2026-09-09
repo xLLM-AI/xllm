@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 #include <torch/types.h>
 
+#include "core/framework/sampling/draft_proposal.h"
 #include "sampling_params.h"
 
 namespace xllm {
@@ -37,16 +38,7 @@ class RejectionSampler final {
     return this->forward(::std::forward<Args>(args)...);
   }
 
-  // Sample tokens ids using rejection sampling.
-  // draft_token_ids: [batch_size, n_speculative_tokens]
-  // draft_probs:
-  //   1) dense format: [batch_size, n_speculative_tokens, vocab_size]
-  //   2) selected-only format: [batch_size, n_speculative_tokens]
-  //   3) undefined for all-greedy sampling
-  // target_logits: [batch_size, n_speculative_tokens + 1, vocab_size]
-  // bonus_token_ids: [batch_size, 1]
-  SampleOutput forward(const torch::Tensor& draft_token_ids,
-                       const torch::Tensor& draft_probs,
+  SampleOutput forward(const DraftProposal& draft_proposal,
                        const torch::Tensor& target_logits,
                        const torch::Tensor& bonus_token_ids,
                        bool mask_out_rejected_tokens = false) const;
@@ -57,8 +49,7 @@ class RejectionSampler final {
   static torch::Tensor build_accepted_mask(const torch::Tensor& accepted);
 
   static std::tuple<torch::Tensor, torch::Tensor> random_sample(
-      const torch::Tensor& draft_token_ids,
-      const torch::Tensor& draft_probs,
+      const DraftProposal& draft_proposal,
       const torch::Tensor& target_probs,
       const torch::Tensor& uniform_rand,
       const torch::Tensor& bonus_token_ids,

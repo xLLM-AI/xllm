@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +15,12 @@ limitations under the License.
 
 #pragma once
 
-#include <torch/torch.h>
-
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -28,32 +29,34 @@ limitations under the License.
 #include "framework/block/block.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/kv_cache_utils.h"
+#include "framework/kv_cache_transfer/host_transfer/transfer.h"
 #include "framework/model/model_input_params.h"
-#include "platform/batch_memcpy.h"
 #include "platform/device.h"
-#include "platform/layer_synchronizer.h"
-#include "util/blockingconcurrentqueue.h"
 #include "util/threadpool.h"
 
 namespace xllm {
-class HierarchyKVCacheTransfer {
+
+class KVCacheStore;
+
+class HierarchyKVCacheTransfer final {
  public:
-  struct LayerBatchRange {
-    int64_t begin_layer = 0;
-    int64_t end_layer = 0;
-  };
-
-  struct CopyPlan {
-    std::vector<torch::Tensor> src_tensors;
-    std::vector<torch::Tensor> dst_tensors;
-  };
-
   using GroupedCaches = std::map<BlockType, std::vector<KVCache*>>;
-
-  // Host prefix caches: one real KVCache per block type, allocated over
-  // page-aligned + mlock'd + NPU-registered host memory. Shape per tensor is
-  // [host_blocks, layer_count, ...per_block_dims].
   using HostGroupedCaches = std::map<BlockType, std::unique_ptr<KVCache>>;
+  using CacheHandle = uint32_t;
+
+  enum class CacheRole : uint8_t {
+    TARGET = 0,
+    DRAFT,
+  };
+
+  struct CacheRegistration {
+    CacheRole role = CacheRole::TARGET;
+    std::vector<KVCache>* device_kv_caches = nullptr;
+    KVCacheShape kv_cache_shape;
+    KVCacheCreateOptions create_options;
+    const Stream* producer_stream = nullptr;
+    std::string store_key_component;
+  };
 
   struct Options {
     PROPERTY(uint32_t, tp_rank);
@@ -64,62 +67,84 @@ class HierarchyKVCacheTransfer {
     PROPERTY(bool, enable_mla) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
     PROPERTY(std::string, store_protocol) = "rdma";
+    PROPERTY(std::string, store_rdma_devices) = "";
     PROPERTY(std::string, store_master_server_address) = "";
     PROPERTY(std::string, store_metadata_server) = "";
     PROPERTY(std::string, store_local_hostname) = "";
+    PROPERTY(std::string, store_namespace) = "";
+    PROPERTY(uint32_t, store_worker_id) = 0;
   };
 
+  HierarchyKVCacheTransfer(const Options& options, const torch::Device& device);
   HierarchyKVCacheTransfer(const Options& options,
                            const torch::Device& device,
                            const Stream* compute_stream,
                            std::vector<xllm::KVCache>* kv_caches_ptr,
                            const KVCacheShape& kv_cache_shape,
                            const KVCacheCreateOptions& create_options);
-  ~HierarchyKVCacheTransfer() = default;
+  ~HierarchyKVCacheTransfer();
+
+  CacheHandle register_cache(CacheRegistration registration);
+  bool finalize_registration();
+  void shutdown();
+  [[nodiscard]] bool registration_finalized() const {
+    return registration_finalized_;
+  }
 
   uint32_t transfer_kv_blocks(
-      const uint64_t batch_id,
+      uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
-
-  uint32_t transfer_kv_blocks(const uint64_t batch_id,
+  uint32_t transfer_kv_blocks(uint64_t batch_id,
                               Slice<BlockTransferInfo>& block_transfer_info);
-
+  std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info);
+  std::optional<HostKVLoadHandle> take_load_handle(uint64_t batch_id);
   void set_layer_synchronizer(ModelInputParams& params);
+  [[nodiscard]] bool supports_block_type(BlockType block_type) const;
+  [[nodiscard]] bool supports_block_type(CacheRole role,
+                                         BlockType block_type) const;
 
  private:
-  void build_device_block_type_map();
-  void create_host_cache();
-  CopyPlan build_copy_plan(
+  struct CacheDomain {
+    CacheHandle handle = 0;
+    CacheRole role = CacheRole::TARGET;
+    std::vector<KVCache>* device_kv_caches = nullptr;
+    KVCacheShape kv_cache_shape;
+    KVCacheCreateOptions create_options;
+    GroupedCaches device_caches_by_type;
+    std::map<BlockType, std::vector<int64_t>> layer_ids_by_type;
+    HostGroupedCaches host_caches_by_type;
+    std::unique_ptr<HostKVLayout> host_layout;
+    const Stream* producer_stream = nullptr;
+    std::string store_key_component;
+  };
+
+  static int32_t domain_group_id(CacheHandle handle, BlockType block_type);
+  GroupedCaches build_device_groups(CacheDomain* domain) const;
+  void create_host_cache(CacheDomain* domain);
+  HostKVLayout create_host_kv_layout(const CacheDomain& domain) const;
+  HostKVRequest make_request(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      const LayerBatchRange& layer_batch_range) const;
+      TransferType transfer_type) const;
 
   uint32_t offload(const std::vector<BlockTransferInfo>& block_transfer_info);
-  bool offload_to_host(Slice<BlockTransferInfo>& block_transfer_info);
-  bool load_from_host(
-      std::shared_ptr<LayerSynchronizer> synchronizer,
-      const std::vector<BlockTransferInfo>& block_transfer_info);
+  bool offload_to_host(const HostKVRequest& request);
+  bool load_from_host(const HostKVRequest& request,
+                      const HostKVLoadHandle& handle);
 
- private:
   Options options_;
   Device device_;
-  const Stream* compute_stream_ = nullptr;
-
   std::unique_ptr<ThreadPool> load_threadpool_;
-  moodycamel::BlockingConcurrentQueue<std::unique_ptr<Stream>> copy_stream_;
 
-  std::vector<xllm::KVCache>* kv_caches_ptr_ = nullptr;
-  KVCacheShape kv_cache_shape_;
-  KVCacheCreateOptions create_options_;
-  GroupedCaches device_kv_caches_;
-  std::map<BlockType, std::vector<int64_t>> device_block_type_layer_ids_;
-  HostGroupedCaches host_kv_caches_;
-  std::vector<LayerBatchRange> layer_batch_ranges_;
+  std::vector<CacheDomain> cache_domains_;
+  bool registration_finalized_ = false;
+  bool shutdown_ = false;
 
-  std::unique_ptr<BatchMemcpy> batch_memcpy_;
+  std::unique_ptr<HostKVTransfer> host_kv_transfer_;
+  std::unique_ptr<KVCacheStore> kv_cache_store_;
 
   mutable std::mutex mutex_;
-  std::unordered_map<uint64_t, std::shared_ptr<LayerSynchronizer>>
-      layer_wise_load_synchronizer_;
+  std::unordered_map<uint64_t, HostKVLoadHandle> load_handles_;
 };
 
 }  // namespace xllm

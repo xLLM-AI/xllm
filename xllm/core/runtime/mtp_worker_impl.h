@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,23 +16,25 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "core/runtime/mtp_async_state.h"
-#include "framework/kv_cache/embedding_cache.h"
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
-#if defined(USE_NPU)
-#include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
-#endif
 #include "core/framework/speculative/adaptive_speculative_controller.h"
+#include "core/framework/speculative/embedding_cache.h"
+#include "core/framework/speculative/mtp_async_state.h"
+#include "core/framework/speculative/mtp_json_object_state.h"
+#include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
 
 #if defined(USE_NPU)
-using namespace llm_datadist;
+namespace detail {
+class NpuJsonDraftTokenHandoff;
+}  // namespace detail
 #endif
 
 // MTP (Multi-Token Prediction) speculative worker.
@@ -42,9 +44,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
  public:
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
-                const runtime::Options& options);
+                const runtime::Options& options,
+                WorkerType worker_type);
 
-  ~MTPWorkerImpl() override = default;
+  ~MTPWorkerImpl() override;
 
  protected:
   // For derived classes (e.g. Eagle3WorkerImpl) that need custom options for
@@ -56,7 +59,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const runtime::Options& options,
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
-                bool enable_opt_validate_probs = false,
+                WorkerType worker_type,
                 bool enable_adaptive_speculative_decode = false);
 
  public:
@@ -68,20 +71,14 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
-  uint32_t transfer_kv_blocks(
-      uint64_t batch_id,
-      const std::vector<BlockTransferInfo>& block_transfer_info) override;
-
-  uint32_t transfer_kv_blocks(
-      uint64_t batch_id,
-      Slice<BlockTransferInfo>& block_transfer_info) override;
-
 #if defined(USE_NPU) || defined(USE_MLU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;
 #endif
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
+  ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& inputs) override;
   void prepare_work_before_execute(const ForwardInput& inputs,
                                    ForwardInput& processed_inputs) override;
 
@@ -94,9 +91,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   std::optional<ForwardOutput> step_empty(const ForwardInput& inputs) override;
 
   void fill_validate_input_from_draft_outputs(
+      const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
       const std::vector<int32_t>& per_seq_val_tokens,
+      const detail::JsonDraftValidationScratch* json_scratch,
       Stream& compute_stream);
   // Adaptive pruning path: compute per-seq prefix lengths, truncate draft
   // outputs, and run variable-length validate.
@@ -110,14 +109,16 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
       int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      const std::vector<int32_t>* pruned_prefix_lengths,
+      const detail::JsonDraftValidationScratch* json_scratch);
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
       int32_t num_speculative_tokens,
       const std::vector<int32_t>& per_seq_val_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      const std::vector<int32_t>* pruned_prefix_lengths,
+      const detail::JsonDraftValidationScratch* json_scratch);
 
   virtual SampleOutput validate(
       const SamplingParameters& sampling_params,
@@ -128,27 +129,40 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       // statically from the declared base type, so an override changing the
       // default would silently diverge when called through a base reference.
       // Callers must pass nullptr explicitly for the static path.
-      const std::vector<int32_t>* pruned_prefix_lengths);
+      const std::vector<int32_t>* pruned_prefix_lengths,
+      const torch::Tensor& target_filter_mask,
+      const torch::Tensor& target_filter_bitmask,
+      const std::vector<uint8_t>& invalid_draft);
 
   // Hook for algorithm-specific draft output post-processing during decode.
-  // Default MTP behavior always compresses probs for cache storage.
   virtual void process_draft_sample_output(SampleOutput& sample_output);
+
+  virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
+                                           const std::string& /*phase*/) const {
+  }
+  virtual bool share_target_lm_head_with_draft() const { return true; }
 
   SampleOutput validate(
       const SamplingParameters& sampling_params,
-      const torch::Tensor& draft_token_ids,
-      const torch::Tensor& draft_probs,
+      const DraftProposal& draft_proposal,
       const ForwardOutput& target_output,
       int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr,
+      const torch::Tensor& target_filter_mask = torch::Tensor(),
+      const torch::Tensor& target_filter_bitmask = torch::Tensor(),
+      const std::vector<uint8_t>& invalid_draft = {});
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
   virtual int64_t get_embedding_placeholder_size();
+  bool should_use_separate_draft_kv_cache_shape() const;
+  KVCacheShape draft_kv_cache_shape(
+      const KVCacheShape& target_kv_cache_shape) const override;
 
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
+  void prepare_draft_sampling(SamplingParameters& sampling_params) const;
   bool supports_explicit_spec_verify_replay_update() const;
   bool should_use_explicit_spec_verify_replay_update(
       const ForwardInput& input) const;
@@ -164,7 +178,17 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Returns true when validation must use chunked-prefill to avoid the
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
-
+  bool uses_embedded_eagle3_draft() const;
+  // Multiaxis RoPE positions can include a prompt-dependent offset and do not
+  // identify the corresponding KV cache length.
+  bool positions_are_decoupled_from_kv_length() const;
+  bool requires_probability_based_validation() const;
+  bool uses_step_major_validate_layout() const;
+  void synchronize_embedded_eagle3_forward();
+  std::optional<ForwardOutput> run_worker_no_sync(
+      WorkerImpl& worker,
+      const ForwardInput& input,
+      ForwardInput& processed_input);
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs,
@@ -204,6 +228,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     torch::Tensor accepted_embeddings;
     torch::Tensor base_positions;
     torch::Tensor base_kv_seq_lens;
+    std::vector<uint8_t> json_constrained_rows;
+    std::vector<size_t> failed_rows;
     StreamEventPtr ready_event;
   };
 
@@ -222,7 +248,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                   torch::Tensor base_positions,
                                   torch::Tensor base_kv_seq_lens,
                                   StreamEventPtr ready_event,
-                                  torch::Tensor accepted_tokens_host);
+                                  torch::Tensor accepted_tokens_host,
+                                  std::vector<size_t> failed_rows);
   torch::Tensor acquire_accepted_tokens_host_buffer(
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
@@ -246,18 +273,12 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                      const SampleOutput& validate_output,
                                      int32_t num_speculative_tokens);
   void record_validate_metrics(
-      const SampleOutput& validate_output,
+      SampleOutput& validate_output,
       int32_t num_speculative_tokens,
       const std::vector<int32_t>* pruned_prefix_lengths = nullptr) const;
   bool adaptive_enabled() const;
 
  protected:
-  // Draft model worker
-  std::unique_ptr<LLMWorkerImpl> draft_impl_;
-
-  // Embedding cache for speculative decoding
-  std::shared_ptr<EmbeddingCache> embedding_cache_;
-
   // Rejection sampling produces accepted state on the compute stream.  Keep
   // that state device-resident so the next overlap task can be fully enqueued
   // without waiting for target verification to finish.
@@ -274,10 +295,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.
   PendingDraftContext pending_draft_context_;
-  // Whether validation directly uses selected-only draft_probs [B, S].
-  // If false, selected-only cache values are restored to dense [B, S, V].
-  bool enable_opt_validate_probs_ = false;
-  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
+  // adaptive_spec_controller_ now lives on SpeculativeWorkerImpl (base class).
 
   // Classified once when the corresponding models are loaded. Decode-path
   // decisions only read these closed policies.
@@ -301,10 +319,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // topology, and are rebuilt only when that width changes.
   torch::Tensor mtp_validate_greedy_indices_;
   torch::Tensor mtp_validate_greedy_do_sample_;
-#endif
-
-#if defined(USE_NPU) || defined(USE_MLU)
-  std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
+  std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
 #endif
 };
 }  // namespace xllm

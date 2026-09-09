@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,6 +37,18 @@ limitations under the License.
 #include "sample_slot.h"
 
 namespace xllm {
+
+enum class ResponseFormatType : int8_t {
+  NONE = 0,
+  JSON_OBJECT = 1,
+};
+
+// Defined in core/framework/sampling/sampling_params.h and
+// core/framework/request/request_state.h respectively. Forward-declared here so
+// the projection helpers below don't drag those (torch-heavy) headers into
+// every translation unit that only needs RequestParams.
+struct RequestSamplingParam;
+struct SchedulerParam;
 
 struct RequestParams {
   RequestParams() = default;
@@ -70,6 +82,21 @@ struct RequestParams {
 
   bool verify_params(OutputCallback callback) const;
 
+  // Projects the shared sampling-related fields into a RequestSamplingParam.
+  // `best_of` is the effective best_of (== best_of.value_or(n)); when it
+  // exceeds `n`, logprobs are forced on so a per-sequence logprob can be
+  // produced. Model-specific fields/rules are intentionally left out and
+  // layered on by the individual request factories: json_object (LLM), and the
+  // beam-search fields beam_width/num_return_sequences plus their logprob
+  // normalization, which differ per model (LLM normalizes, REC copies both, VLM
+  // omits them).
+  RequestSamplingParam to_sampling_param(size_t best_of) const;
+
+  // Projects the scheduler-related fields into a SchedulerParam. SLO/priority
+  // weights are only meaningful for online requests, so they are left at their
+  // defaults when `offline` is set.
+  SchedulerParam to_scheduler_param() const;
+
   // request id
   std::string request_id;
   std::string service_request_id = "";
@@ -79,7 +106,7 @@ struct RequestParams {
 
   bool streaming = false;
 
-  // number of tokens to generate. truncted to model's max context length.
+  // number of tokens to generate. truncated to model's max context length.
   uint32_t max_tokens = 5120;
 
   // number of sequences to generate for each prompt.
@@ -102,13 +129,13 @@ struct RequestParams {
   // based on their existing in the prompt. default = 0.0
   float presence_penalty = 0.0;
 
-  // repetition penalty to penalize new tokens based on their occurence in the
+  // repetition penalty to penalize new tokens based on their occurrence in the
   // text. values > 1.0 encourage the model to use new tokens, while values
   // < 1.0 encourage the model to repeat tokens. default = 1.0
   float repetition_penalty = 1.0;
 
   // temperature of the sampling, between [0, 2]. default = 0.0
-  // higher value will make the ouput more random.
+  // higher value will make the output more random.
   float temperature = 0.0;
 
   // top_p sampling cutoff, between [0.0, 1.0]. default = 1.0
@@ -133,7 +160,7 @@ struct RequestParams {
   // whether to ignore the end of sequence token. default = false.
   bool ignore_eos = false;
 
-  // wheteher to get the embeddings of the tokens. used by embeddings model.
+  // whether to get the embeddings of the tokens. used by embeddings model.
   bool is_embeddings = false;
 
   // the list of strings to stop generating further tokens.
@@ -175,6 +202,9 @@ struct RequestParams {
   bool add_special_tokens = false;
 
   nlohmann::json chat_template_kwargs = nlohmann::json::object();
+
+  ResponseFormatType response_format = ResponseFormatType::NONE;
+  std::string response_format_error;
 
   bool is_sample_request = false;
 

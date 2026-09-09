@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -66,19 +66,6 @@ class DiTMaster : public Master {
 
   // flag to indicate if the handler is running
   std::atomic_bool running_{false};
-};
-
-class DiTAssistantMaster : public Master {
- public:
-  DiTAssistantMaster(const Options& options);
-  ~DiTAssistantMaster();
-  void run() override;
-
-  static void handle_signal(int signum) { running_ = false; }
-
- private:
-  std::thread loop_thread_;
-  static volatile bool running_;
 };
 
 }  // namespace xllm

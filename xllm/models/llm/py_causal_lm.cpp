@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,20 +15,23 @@ limitations under the License.
 
 #include "models/llm/py_causal_lm.h"
 
-#include <Python.h>
 #include <glog/logging.h>
 #include <pybind11/stl.h>
-#include <torch/extension.h>
+#include <torch/python.h>
 
 #include <memory>
 #include <string>
-#include <utility>
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/util/pybind_helper.h"
 #include "models/py_model_helper.h"
+
+#if defined(USE_NPU)
+#include "platform/npu/npu_layer_synchronizer.h"
+#endif
 
 namespace py = pybind11;
 
@@ -37,29 +40,33 @@ namespace detail {
 
 void share_python_model_weights(py::object& draft_model,
                                 const py::object& target_model) {
-  draft_model.attr("lm_head") = target_model.attr("lm_head");
+  // Keep the draft's own head/embedding when the checkpoint ships them (DSpark
+  // carries a trained mask-token basis); borrow the target's only when None.
+  if (draft_model.attr("lm_head").is_none()) {
+    draft_model.attr("lm_head") = target_model.attr("lm_head");
+  }
   py::object draft_body = draft_model.attr("model");
   py::object target_body = target_model.attr("model");
-  draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+  if (draft_body.attr("embed_tokens").is_none()) {
+    draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+  }
 }
 
 }  // namespace detail
 
 namespace {
 
-void clear_python_object(py::object& object) {
-  if (!object) {
-    return;
+py::list build_python_kv_caches(std::vector<KVCache>& kv_caches) {
+  py::list python_caches;
+  for (KVCache& kv_cache : kv_caches) {
+    python_caches.append(
+        py::make_tuple(optional_tensor(kv_cache.get_k_cache()),
+                       optional_tensor(kv_cache.get_v_cache()),
+                       optional_tensor(kv_cache.get_index_cache()),
+                       optional_tensor(kv_cache.get_conv_cache()),
+                       optional_tensor(kv_cache.get_ssm_cache())));
   }
-  if (!Py_IsInitialized()) {
-    // CPython has already torn down its GIL. Avoid decref during C++ static
-    // destruction; the process is exiting and the reference cannot be safely
-    // released anymore.
-    (void)object.release();
-    return;
-  }
-  py::gil_scoped_acquire gil;
-  object = py::object();
+  return python_caches;
 }
 
 }  // namespace
@@ -73,76 +80,133 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;
+  cp_size_ = parallel_args.cp_size();
+  cp_rank_ = parallel_args.cp_rank();
+  layerwise_split_size_ = parallel_args.layerwise_split_size();
+  kv_split_size_ = parallel_args.kv_split_size_effective();
+  kv_split_rank_ = parallel_args.kv_split_rank();
+  // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
+  // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
+  // separate cp_group_ over the cp-strided ranks. Read each dimension from its
+  // own group instead of carving CP back out of tp_group_. TP and CP are
+  // orthogonal: a rank can shard both attention heads (TP) and sequence tokens
+  // (CP) at once, so both dimensions may be > 1 simultaneously.
   tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
   ProcessGroup* dp_group = parallel_args.dp_local_process_group_;
   dp_size_ = (dp_group != nullptr) ? dp_group->world_size() : 1;
   dp_rank_ = (dp_group != nullptr) ? dp_group->rank() : 0;
   ep_size_ = parallel_args.ep_size();
-  CHECK(ep_size_ == 1 || ep_size_ == parallel_args.world_size())
-      << "Python models support only ep_size=1 or ep_size=world_size.";
 
   CHECK(parallel_args.moe_tp_group_ != nullptr);
-  ProcessGroup* moe_tp_group = parallel_args.moe_tp_group_;
-  ProcessGroup* ep_group = nullptr;
+  moe_tp_group_ = parallel_args.moe_tp_group_;
   if (ep_size_ > 1) {
     CHECK(parallel_args.moe_ep_group_ != nullptr);
-    ep_group = parallel_args.moe_ep_group_;
+    moe_ep_group_ = parallel_args.moe_ep_group_;
   }
-  moe_tp_size_ = (moe_tp_group != nullptr) ? moe_tp_group->world_size() : 1;
-  moe_tp_rank_ = (moe_tp_group != nullptr) ? moe_tp_group->rank() : 0;
-  ep_rank_ = (ep_group != nullptr) ? ep_group->rank() : 0;
+  moe_tp_size_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->world_size() : 1;
+  moe_tp_rank_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->rank() : 0;
+  ep_rank_ = (moe_ep_group_ != nullptr) ? moe_ep_group_->rank() : 0;
 
   py::gil_scoped_acquire gil;
-  py::object init_process_group =
-      py::module_::import("xllm.python.distributed").attr("init_process_group");
-  CHECK(!parallel_args.python_rendezvous_host_.empty());
-  CHECK_GT(parallel_args.python_rendezvous_port_, 0);
-  const int32_t global_rank = parallel_args.rank();
-  const int32_t global_world_size = parallel_args.world_size();
-  if (tp_size_ > 1) {
-    init_process_group("tp",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       tp_rank_,
-                       tp_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank / tp_size_);
-  }
-  if (dp_size_ > 1) {
-    init_process_group("dp",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       dp_rank_,
-                       dp_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank % tp_size_);
-  }
-  if (moe_tp_size_ > 1) {
-    init_process_group("moe_tp",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       moe_tp_rank_,
-                       moe_tp_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank / moe_tp_size_);
-  }
-  if (ep_size_ > 1) {
-    init_process_group("moe_ep",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       ep_rank_,
-                       ep_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       global_rank % moe_tp_size_);
+  if (model_args_.model_type() != "deepseek_v4") {
+    py::object init_process_group =
+        py::module_::import("xllm.python.distributed")
+            .attr("init_process_group");
+    CHECK(!parallel_args.python_rendezvous_host_.empty());
+    CHECK_GT(parallel_args.python_rendezvous_port_, 0);
+    const int32_t global_rank = parallel_args.rank();
+    const int32_t global_world_size = parallel_args.world_size();
+    if (tp_size_ > 1) {
+      init_process_group("tp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         tp_rank_,
+                         tp_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         global_rank / tp_size_);
+    }
+    if (dp_size_ > 1) {
+      init_process_group("dp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         dp_rank_,
+                         dp_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         global_rank % tp_size_);
+    }
+    if (moe_tp_size_ > 1) {
+      init_process_group("moe_tp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         moe_tp_rank_,
+                         moe_tp_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         global_rank / moe_tp_size_);
+    }
+    if (ep_size_ > 1) {
+      init_process_group("moe_ep",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         ep_rank_,
+                         ep_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         global_rank % moe_tp_size_);
+    }
+    if (cp_size_ > 1) {
+      const int32_t cp_group_index =
+          (global_rank / (cp_size_ * tp_size_)) * tp_size_ +
+          global_rank % tp_size_;
+      init_process_group("cp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         cp_rank_,
+                         cp_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         cp_group_index);
+    }
+    const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+    if (cp_size_ == 1 && kv_split_size > 1) {
+      const int32_t dcp_rank = parallel_args.kv_split_rank();
+      const int32_t dcp_group_index =
+          global_rank % (global_world_size / kv_split_size);
+      init_process_group("dcp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         dcp_rank,
+                         kv_split_size,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         dcp_group_index);
+    }
+    if (layerwise_split_size_ > 1) {
+      CHECK_EQ(tp_size_ % layerwise_split_size_, 0)
+          << "layerwise_split_size must divide Python attention TP size";
+      const int32_t layerwise_group_index =
+          (global_rank / tp_size_) * (tp_size_ / layerwise_split_size_) +
+          tp_rank_ / layerwise_split_size_;
+      layerwise_split_rank_ = tp_rank_ % layerwise_split_size_;
+      init_process_group("layerwise",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         layerwise_split_rank_,
+                         layerwise_split_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         layerwise_group_index);
+    }
   }
   const std::string module_name = context.get_model_args().model_type().empty()
                                       ? std::string("Qwen3ForCausalLM")
@@ -156,8 +220,17 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 }
 
 PyCausalLM::~PyCausalLM() {
+  clear_python_object(python_kv_caches_);
   clear_python_object(py_model_);
   clear_python_object(config_dict_);
+}
+
+const py::object& PyCausalLM::get_or_build_python_kv_caches(
+    std::vector<KVCache>& kv_caches) {
+  if (!python_kv_caches_) {
+    python_kv_caches_ = build_python_kv_caches(kv_caches);
+  }
+  return python_kv_caches_;
 }
 
 py::dict PyCausalLM::build_config_dict(
@@ -176,16 +249,28 @@ py::dict PyCausalLM::build_config_dict(
   d["moe_tp_rank"] = moe_tp_rank_;
   d["ep_size"] = ep_size_;
   d["ep_rank"] = ep_rank_;
-  d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
+  // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
+  // a derived member function, so pass it explicitly for the Python executor.
+  d["cp_rank"] = cp_rank_;
+  d["layerwise_split_rank"] = layerwise_split_rank_;
+  const bool requires_eager_execution =
+      !model_args_.layers_to_capture().empty() ||
+      model_args_.model_type() == "DFlashDraftModel" ||
+      model_args_.model_type() == "DSparkDraftModel";
+  d["enable_graph"] = requires_eager_execution
+                          ? false
+                          : ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
-      ExecutionConfig::get_instance().python_graph_backend();
+      requires_eager_execution
+          ? std::string("off")
+          : ExecutionConfig::get_instance().python_graph_backend();
   return d;
 }
 
 void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   py::gil_scoped_acquire gil;
   auto& state_dicts = loader->get_state_dicts();
-  py::module_::import("xllm_weight_loader");
+  ensure_xllm_weight_loader_module();
 
   py::list py_state_dicts;
   for (const auto& sd : state_dicts) {
@@ -196,6 +281,14 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   py_model_.attr("load_weights")(py_state_dicts,
                                  static_cast<int32_t>(tp_rank_),
                                  static_cast<int32_t>(tp_size_));
+  const std::string& reference_model_path =
+      loader->reference_model_weights_path();
+  if (!reference_model_path.empty()) {
+    // Quantized reference models (e.g. QuaRot) transform the residual basis the
+    // draft trained against; fuse that transform into the draft's weights.
+    py_model_.attr("adapt_weights_for_reference_model")(
+        py::str(reference_model_path));
+  }
 }
 
 ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
@@ -211,11 +304,104 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                                  const torch::Tensor& seleted_idxes) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
-  py::object selected = seleted_idxes.defined()
-                            ? py::object(py::cast(seleted_idxes))
-                            : py::object(py::none());
+  py::object selected = optional_tensor(seleted_idxes);
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
+}
+
+ModelOutput PyCausalLM::write_context_kv(
+    const torch::Tensor& target_hidden,
+    const torch::Tensor& positions,
+    const torch::Tensor& device_cache_slots,
+    std::vector<KVCache>& kv_caches,
+    const ModelInputParams& input_params) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  py::object layer_synchronizer = py::none();
+#if defined(USE_NPU)
+  if (input_params.parallel.layer_synchronizer != nullptr) {
+    layer_synchronizer = py::cast(input_params.parallel.layer_synchronizer);
+  }
+#endif
+  const py::object& python_kv_caches = get_or_build_python_kv_caches(kv_caches);
+  py::object output = py_model_.attr("write_context_kv")(target_hidden,
+                                                         positions,
+                                                         device_cache_slots,
+                                                         python_kv_caches,
+                                                         layer_synchronizer);
+  if (output.is_none()) {
+    return ModelOutput();
+  }
+  return ModelOutput(output.cast<torch::Tensor>());
+}
+
+torch::Tensor PyCausalLM::dspark_markov_bias(
+    const torch::Tensor& previous_token_ids) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  return py_model_.attr("dspark_markov_bias")(previous_token_ids)
+      .cast<torch::Tensor>();
+}
+
+torch::Tensor PyCausalLM::dspark_confidence_probs(
+    const torch::Tensor& hidden_all,
+    const torch::Tensor& prev_matrix) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  py::object previous = optional_tensor(prev_matrix);
+  return py_model_.attr("dspark_confidence_probs")(hidden_all, previous)
+      .cast<torch::Tensor>();
+}
+
+bool PyCausalLM::has_dspark_confidence_head() const {
+  py::gil_scoped_acquire gil;
+  return py_model_.attr("has_dspark_confidence_head")().cast<bool>();
+}
+
+void PyCausalLM::tp_all_reduce(torch::Tensor& tensor) {
+  if (tp_group_ != nullptr) {
+    tp_group_->allreduce(tensor);
+  }
+}
+
+torch::Tensor PyCausalLM::tp_all_gather(const torch::Tensor& tensor,
+                                        int64_t dim) {
+  if (tp_group_ == nullptr) {
+    return tensor;
+  }
+  auto gathered = tp_group_->allgather_base_sync(tensor);
+  const int64_t world_size = tp_group_->world_size();
+  const int64_t ndim = tensor.dim();
+  if (dim < 0) {
+    dim += ndim;
+  }
+  CHECK(dim >= 0 && dim < ndim)
+      << "tensor-parallel gather dimension out of range: " << dim;
+  std::vector<int64_t> permutation;
+  permutation.reserve(static_cast<size_t>(ndim + 1));
+  for (int64_t index = 1; index <= dim; ++index) {
+    permutation.push_back(index);
+  }
+  permutation.push_back(0);
+  for (int64_t index = dim + 1; index < ndim + 1; ++index) {
+    permutation.push_back(index);
+  }
+  gathered = gathered.permute(permutation);
+  auto output_shape = tensor.sizes().vec();
+  output_shape[dim] *= world_size;
+  return gathered.reshape(output_shape).contiguous();
+}
+
+void PyCausalLM::moe_tp_all_reduce(torch::Tensor& tensor) {
+  if (moe_tp_group_ != nullptr) {
+    moe_tp_group_->allreduce(tensor);
+  }
+}
+
+void PyCausalLM::moe_ep_all_reduce(torch::Tensor& tensor) {
+  if (moe_ep_group_ != nullptr) {
+    moe_ep_group_->allreduce(tensor);
+  }
 }
 
 bool PyCausalLM::share_weights_from(CausalLM& source) {

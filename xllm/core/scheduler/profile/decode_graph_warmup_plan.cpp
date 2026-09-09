@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "scheduler/profile/decode_graph_warmup_plan.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <utility>
@@ -98,6 +99,49 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   }
 
   const int32_t max_local_batch_size = max_global_batch_size / dp_size;
+
+  if (execution_shape.max_graph_batch_size > 0) {
+    // The graph batch limit caps the DP-local decode batch: the executor
+    // compares the largest DP-local batch against it before entering graph
+    // mode, so the warmup sweep must apply the limit in local terms as well.
+    const int32_t max_graph_local_batch_size =
+        std::min(max_local_batch_size, execution_shape.max_graph_batch_size);
+    const int32_t max_graph_global_batch_size =
+        max_graph_local_batch_size * dp_size;
+    std::vector<int32_t> graph_batch_sizes;
+    int64_t current_token_bucket = 0;
+    for (int32_t local_batch_size = 1;
+         local_batch_size <= max_graph_local_batch_size;
+         ++local_batch_size) {
+      const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
+                                 execution_shape.num_decoding_tokens;
+      const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
+          num_tokens, execution_shape.enable_graph_mode_decode_no_padding);
+      const int32_t global_batch_size = local_batch_size * dp_size;
+      if (graph_batch_sizes.empty() || token_bucket != current_token_bucket) {
+        graph_batch_sizes.emplace_back(global_batch_size);
+        current_token_bucket = token_bucket;
+      } else {
+        graph_batch_sizes.back() = global_batch_size;
+      }
+    }
+
+    std::vector<int32_t> batch_sizes;
+    batch_sizes.reserve(plan.batch_sizes.size() + graph_batch_sizes.size());
+    for (int32_t batch_size : plan.batch_sizes) {
+      if (batch_size > max_graph_global_batch_size) {
+        batch_sizes.emplace_back(batch_size);
+      }
+    }
+    batch_sizes.insert(
+        batch_sizes.end(), graph_batch_sizes.begin(), graph_batch_sizes.end());
+    std::sort(batch_sizes.begin(), batch_sizes.end());
+    batch_sizes.erase(std::unique(batch_sizes.begin(), batch_sizes.end()),
+                      batch_sizes.end());
+    plan.batch_sizes = std::move(batch_sizes);
+    return plan;
+  }
+
   std::vector<int32_t> batch_sizes;
   batch_sizes.reserve(static_cast<size_t>(max_local_batch_size) + 1);
   int64_t last_token_bucket = 0;

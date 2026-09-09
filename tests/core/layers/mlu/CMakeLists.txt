@@ -38,6 +38,7 @@ cc_test(
   SRCS
     dense_mlp_test.cpp
     dcp_attention_merge_test.cpp
+    dcp_indexer_candidate_test.cpp
     dcp_decode_context_test.cpp
     tests_utils.cpp
     deepseek_v32_sp_utils_test.cpp
@@ -136,6 +137,17 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    deepseek_v4_cp_context_test
+  SRCS
+    deepseek_v4_cp_context_test.cpp
+  DEPS
+    :mlu_layers
+    GTest::gtest_main
+    glog::glog
+)
+
 # MoE Gate unit test for MLU (uses layers/mlu/moe_gate)
 cc_test(
   NAME
@@ -215,8 +227,25 @@ cc_test(
     :config
     :block
     :mlu_layers
+    :model_context
     :parallel_state
     :state_dict
+    GTest::gtest_main
+    torch
+    glog::glog
+)
+
+# This target forks MLU ranks and must remain isolated from layer_test, which
+# may initialize an MLU device before the candidate collective test runs.
+cc_test(
+  NAME
+    dcp_indexer_candidate_multi_device_test
+  SRCS
+    dcp_indexer_candidate_multi_device_test.cpp
+  DEPS
+    :mlu_layers
+    :parallel_state
+    :util
     GTest::gtest_main
     torch
     glog::glog

@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import datetime
 
+
 class _GlogStyleFormatter(logging.Formatter):
     _LEVEL_MAP = {
         logging.INFO: "I",
@@ -23,12 +24,7 @@ class _GlogStyleFormatter(logging.Formatter):
         filename = record.filename
         lineno = record.lineno
 
-        prefix = (
-            f"{level}"
-            f"{timestamp}.{microsecond} "
-            f"{pid} "
-            f"{filename}:{lineno}]"
-        )
+        prefix = f"{level}{timestamp}.{microsecond} {pid} {filename}:{lineno}]"
 
         output = f"{prefix} {record.getMessage()}"
 

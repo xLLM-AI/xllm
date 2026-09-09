@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -277,19 +277,6 @@ TEST(EplbPolicyTest, Factory_MakeEplbPolicy) {
   ASSERT_NE(balanced, nullptr);
   EXPECT_NE(dynamic_cast<GreedyEplbPolicy*>(greedy.get()), nullptr);
   EXPECT_NE(dynamic_cast<BalancedEplbPolicy*>(balanced.get()), nullptr);
-}
-
-TEST(EplbPolicyTest, LegacyFacadeStartsFromManagerIdentityPlacement) {
-  EplbPolicy policy(kDeviceExpertsNum, kDeviceNum, kLayerNum);
-  torch::Tensor uniform =
-      torch::full({kLayerNum, kNumExperts}, 10, torch::kInt64);
-
-  auto [distribution, update] = policy.rebalance_experts(uniform);
-
-  EXPECT_FALSE(update[0]);
-  EXPECT_EQ(distribution.size(0), kLayerNum);
-  EXPECT_EQ(distribution.size(1), kDeviceNum);
-  EXPECT_EQ(distribution.size(2), kDeviceExpertsNum);
 }
 
 TEST(EplbPolicyTest, Factory_LegacyNamesAliasToBalanced) {

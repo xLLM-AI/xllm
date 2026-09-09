@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -51,8 +51,12 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
   virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
+      Stream& compute_stream) override;
+
+  std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
       Stream& compute_stream,
-      bool record_ready_event = true);
+      bool record_ready_event);
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
       const ForwardInput& input);
@@ -72,40 +76,26 @@ class LLMWorkerImpl : public WorkerImpl {
 #if defined(USE_NPU)
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const Stream& signal_stream);
-
-  layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };
-
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    model_->set_npu_lm_head(head);
-  };
-
-  layer::NpuWordEmbedding get_npu_word_embedding() {
-    return model_->get_npu_word_embedding();
-  };
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
-    model_->set_npu_word_embedding(embedding);
-  };
-
 #endif
-  layer::LmHead get_lm_head() { return model_->get_lm_head(); };
-
-  void set_lm_head(layer::LmHead& head) { model_->set_lm_head(head); };
-
-  layer::WordEmbedding get_word_embedding() {
-    return model_->get_word_embedding();
-  };
-
-  void set_word_embedding(layer::WordEmbedding& embedding) {
-    model_->set_word_embedding(embedding);
-  };
 
   torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
     return model_->dspark_markov_bias(previous_token_ids);
   }
 
-  bool share_weights_from(LLMWorkerImpl& source) {
-    return model_->share_weights_from(*source.model_);
+  torch::Tensor dspark_confidence_probs(const torch::Tensor& hidden_all,
+                                        const torch::Tensor& prev_matrix) {
+    return model_->dspark_confidence_probs(hidden_all, prev_matrix);
+  }
+  bool has_dspark_confidence_head() const {
+    return model_->has_dspark_confidence_head();
+  }
+
+  DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) {
+    return model_->dflash2_candidates(
+        hidden_states, unary_logits, anchor_token_ids);
   }
 
   // DFlash-specific delegate: eagerly project target hidden into the draft's

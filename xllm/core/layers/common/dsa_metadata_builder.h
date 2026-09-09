@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -82,6 +82,7 @@ class DSAMetadataBuilder {
                             const DSAGroupInfo& gi,
                             const std::vector<int32_t>& ctx_lens,
                             const std::vector<int32_t>& q_lens,
+                            const std::vector<int32_t>& new_cache_slots,
                             int32_t batch_size,
                             int64_t total_tokens,
                             int64_t graph_slot_capacity,
@@ -105,6 +106,7 @@ class DSAMetadataBuilder {
                                 int32_t block_size,
                                 const std::vector<int32_t>& ctx_lens,
                                 const std::vector<int32_t>& q_lens,
+                                const std::vector<int32_t>& new_cache_slots,
                                 int32_t batch_size,
                                 int64_t graph_slot_capacity,
                                 int32_t block_table_capacity_cols,

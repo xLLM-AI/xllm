@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,10 +50,10 @@ class MMInputGatherVisitor final : public MMInputItem::IVisitor {
 class CollectItemTensorVisitor : public MMData::IItemVisitor {
  public:
   CollectItemTensorVisitor(
-      std::unordered_map<MMKey, std::vector<torch::Tensor>>& datas,
+      std::unordered_map<MMKey, std::vector<torch::Tensor>>& data,
       const std::unordered_set<MMKey>& black_keys = {},
       const std::unordered_set<MMKey>& white_keys = {})
-      : datas_(datas), black_keys_(black_keys), white_keys_(white_keys) {};
+      : datas_(data), black_keys_(black_keys), white_keys_(white_keys) {};
 
   CollectItemTensorVisitor(const std::unordered_set<MMKey>& black_keys = {},
                            const std::unordered_set<MMKey>& white_keys = {})

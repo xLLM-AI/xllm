@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
+#include "runtime/dflash2_worker_impl.h"
 #include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
 #include "runtime/dspark_worker_impl.h"
@@ -53,15 +54,20 @@ Worker::Worker(const ParallelArgs& parallel_args,
     const std::string& algorithm = options.speculative_algorithm();
     LOG(INFO) << "Speculative decode is enabled, algorithm: " << algorithm;
     if (algorithm == "Eagle3") {
-      impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
+      impl_ = new Eagle3WorkerImpl(parallel_args, device, options, worker_type);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (SpeculativeConfig::is_dflash2_algorithm(algorithm)) {
+#if !defined(USE_NPU)
+      LOG(FATAL) << "DFlash2 speculative decoding is only supported on NPU.";
+#endif
+      impl_ = new DFlash2WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DSpark") {
       impl_ = new DSparkWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "Suffix") {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
-      impl_ = new MTPWorkerImpl(parallel_args, device, options);
+      impl_ = new MTPWorkerImpl(parallel_args, device, options, worker_type);
     } else {
       LOG(FATAL) << "Unsupported speculative decoding algorithm: " << algorithm;
     }
@@ -183,14 +189,6 @@ folly::SemiFuture<bool> Worker::pull_kv_blocks_async(
   return impl_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
 }
 
-folly::SemiFuture<bool> Worker::pull_hetero_kv_blocks_async(
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<KVTransferMapping>& mappings) {
-  return impl_->pull_hetero_kv_blocks_async(
-      src_cluster_ids, src_addrs, mappings);
-}
-
 uint32_t Worker::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
@@ -201,6 +199,11 @@ uint32_t Worker::transfer_kv_blocks(
     const uint64_t batch_id,
     Slice<BlockTransferInfo>& block_transfer_info) {
   return impl_->transfer_kv_blocks(batch_id, block_transfer_info);
+}
+
+std::vector<uint8_t> Worker::prefetch_kv_blocks(
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  return impl_->prefetch_kv_blocks(block_transfer_info);
 }
 
 const torch::Device& Worker::device() const { return impl_->device(); }

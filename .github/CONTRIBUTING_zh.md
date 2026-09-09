@@ -23,7 +23,7 @@ xLLM致力于为每一位用户和开发者提供开放的XX，因此无论您�
 + 提出或回答问题
 + 提供使用或测试样例
 + 提供建议或其他评论
-+ 参与[issues](https://github.com/jd-opensource/xllm/issues) 或[discussions](https://github.com/jd-opensource/xllm/discussions)
++ 参与[issues](https://github.com/xLLM-AI/xllm/issues) 或[discussions](https://github.com/xLLM-AI/xllm/discussions)
 + 提交Pull request
 + 分享相关研究或应用场景
 + 其他任何对xLLM的帮助

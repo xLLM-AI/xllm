@@ -24,6 +24,7 @@ Usage:
     # MiMo
     python3 export_mtp.py --input-dir /path/to/MiMo-7B-Base --output-dir /path/to/MiMo-7B-Base-mtp
 """
+
 # adapted from https://github.com/sgl-project/sglang/blob/main/scripts/export_deepseek_nextn.py
 import argparse
 import copy
@@ -39,8 +40,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig
-from scripts.logger import logger
 
+from scripts.logger import logger
 
 LEGACY_LAYER_MTP_MODEL_TYPES = {"deepseek_v3", "deepseek_v32", "glm4_moe", "glm_moe_dsa"}
 MIMO_MTP_MODEL_TYPES = {"mimo"}
@@ -410,8 +411,8 @@ def block_dequant(
     for i in range(k_tiles):
         for j in range(n_tiles):
             x_dq_block[
-                j * block_n:min((j + 1) * block_n, n),
-                i * block_k:min((i + 1) * block_k, k),
+                j * block_n : min((j + 1) * block_n, n),
+                i * block_k : min((i + 1) * block_k, k),
             ] *= x_s[j][i]
 
     return x_dq_block.to(torch.bfloat16)
@@ -469,7 +470,7 @@ def _get_qwen3_5_mtp_relative_key(key: str) -> str | None:
     """Return key relative to the qwen3.5 MTP module when applicable."""
     for prefix in QWEN3_5_MTP_PREFIXES:
         if key.startswith(prefix):
-            return key[len(prefix):]
+            return key[len(prefix) :]
     return None
 
 
@@ -509,8 +510,7 @@ def export_qwen3_5_mtp_parameters(input_dir: str, output_dir: str, config: Confi
 
     if not found_embedding:
         raise ValueError(
-            "No Qwen3.5 shared embedding weights found. Expected one of: "
-            f"{', '.join(QWEN3_5_EMBEDDING_KEYS)}"
+            f"No Qwen3.5 shared embedding weights found. Expected one of: {', '.join(QWEN3_5_EMBEDDING_KEYS)}"
         )
 
     if not config.get("tie_word_embeddings", False) and not found_lm_head:

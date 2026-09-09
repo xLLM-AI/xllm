@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,9 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "common/types.h"
 #include "framework/kv_cache/kv_cache_capacity.h"
+#include "framework/kv_cache/layerwise_split_layout.h"
 
 namespace xllm {
 
@@ -38,11 +40,23 @@ struct KVCacheEstimateOptions {
   int64_t n_local_linear_k_heads = 0;
   int64_t n_local_linear_v_heads = 0;
   int64_t max_seqs_per_batch = 0;
+  int64_t max_concurrent_requests = 0;
   int64_t num_speculative_tokens = 0;
   int64_t max_tokens_per_batch = 0;
+  int64_t max_tokens_per_chunk_for_prefill = 0;
   int64_t max_linear_state_cache_slots = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
+  int32_t layerwise_split_size = 1;
+  bool enable_chunked_prefill = true;
+  bool enable_schedule_overlap = true;
+  bool enable_disagg_pd = false;
+  InstanceRole instance_role = InstanceRole::DEFAULT;
+  // DP size used to bound the per-group prefill burst when
+  // enable_dp_fair_token_budget caps each DP group at
+  // max_tokens_per_batch / dp_size tokens per scheduling round.
+  int64_t dp_size = 1;
+  bool enable_dp_fair_token_budget = false;
   const ModelArgs* draft_model_args = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };
@@ -51,6 +65,7 @@ struct Dsv4KVCacheEstimateCost {
   int64_t swa_count = 0;
   int64_t n_c4_layers = 0;
   int64_t n_c128_layers = 0;
+  int64_t swa_bytes_per_block = 0;
   int64_t constant_swa_bytes = 0;
   int64_t token_unit_bytes = 0;
   int64_t manager_blocks_per_unit = 1;
@@ -60,14 +75,24 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
     const ModelArgs& model_args,
     int64_t num_cache_layers);
 
+// Linear-attention layers stay owned on every rank. Full-attention layers
+// follow LayerwiseSplitLayout.
+std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers);
+
+// Common block count across a layerwise split group. Each rank pays for the
+// layers it owns plus one shared scratch layer of the same per-block cost, so
+// the group settles on the smallest count any rank can afford.
+int64_t estimate_layerwise_split_block_count(
+    const ModelArgs& model_args,
+    int32_t layerwise_split_size,
+    const KVCacheCapacity& kv_cache_cap,
+    int64_t available_bytes,
+    int64_t additional_block_bytes);
+
 KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options);
-
-int64_t estimate_speculative_kv_cache_blocks(
-    const KVCacheCapacity& target_kv_cache_cap,
-    const KVCacheCapacity& draft_kv_cache_cap,
-    bool share_device,
-    bool draft_body_uses_tp1 = false);
 
 }  // namespace xllm

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,7 +37,7 @@ namespace layer {
 
 // Qwen3.5 routed MoE with masked grouped-GEMM. Currently TP1/EP1 only:
 // partial expert replication would be incorrect, so larger TP/EP fails fast.
-class Qwen3_5FusedMoEImpl : public torch::nn::Module {
+class Qwen3_5FusedMoEImpl final : public torch::nn::Module {
  public:
   Qwen3_5FusedMoEImpl() = default;
   Qwen3_5FusedMoEImpl(const ModelArgs& model_args,

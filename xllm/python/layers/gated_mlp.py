@@ -21,6 +21,10 @@ import torch.nn as nn
 
 from xllm.python import kernels
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
+from xllm.python.model_loader import (
+    ParallelLoadContext,
+    ScopedWeightLoader,
+)
 
 
 class GatedMLP(nn.Module):
@@ -51,6 +55,26 @@ class GatedMLP(nn.Module):
             dtype=dtype,
             device=device,
             reduce_results=reduce_results,
+        )
+
+    def load_weights(
+        self,
+        state: ScopedWeightLoader,
+        context: ParallelLoadContext,
+    ) -> None:
+        state.load_fused(
+            self.gate_up_proj.weight,
+            ["gate_proj.weight", "up_proj.weight"],
+            "{gate,up}_proj.weight",
+            context.tp_rank,
+            context.tp_size,
+        )
+        state.load_tensor(
+            self.down_proj.weight,
+            "down_proj.weight",
+            dim=1,
+            rank=context.tp_rank,
+            world_size=context.tp_size,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

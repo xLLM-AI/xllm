@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -87,6 +87,8 @@ class Glm52ModelImpl : public Glm5ModelImpl {
         attention_metadata->kv_seq_lens, graph_state->kv_seq_lens);
 
     auto shard_metadata = std::make_shared<layer::KVShardBatchMetadata>();
+    shard_metadata->kv_split_size = kv_shard_layout_->dcp_size();
+    shard_metadata->kv_split_rank = kv_shard_layout_->dcp_rank();
     shard_metadata->local_slot_mapping = copy_to_graph_tensor(
         layer::localize_kv_shard_slots(attention_metadata->slot_mapping,
                                        kv_shard_layout_.value()),

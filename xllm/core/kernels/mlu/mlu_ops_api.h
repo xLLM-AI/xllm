@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,6 +26,10 @@ limitations under the License.
 #include "torch_mlu_ops.h"
 
 namespace xllm::kernel::mlu {
+
+void pack_cache_blocks(const std::vector<torch::Tensor>& sources,
+                       const torch::Tensor& block_ids,
+                       const std::vector<torch::Tensor>& destinations);
 
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,

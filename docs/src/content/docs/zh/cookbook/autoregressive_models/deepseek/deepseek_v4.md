@@ -4,7 +4,7 @@ description: "DeepSeek-V4 在 Ascend A3 设备上的 xLLM 推理实践指南"
 ---
 # 使用 xLLM 在 Ascend A3 设备 推理
 
-源码地址：https://github.com/jd-opensource/xllm
+源码地址：https://github.com/xLLM-AI/xllm
 
 国内可用: https://gitcode.com/xLLM-AI/xllm
 
@@ -12,6 +12,9 @@ description: "DeepSeek-V4 在 Ascend A3 设备上的 xLLM 推理实践指南"
 
 Flash权重：
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp
+
+带 DSpark 权重的 DeepSeek-V4-Flash-0731 W8A8：
+https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
 
 Pro权重:
 https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
@@ -23,11 +26,11 @@ https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 然后创建对应的容器
@@ -47,7 +50,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
 ```
 
 ## 2. 拉取源码并编译
@@ -55,7 +58,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
 下载官方仓库与模块依赖：
 
 ```bash
-git clone https://github.com/jd-opensource/xllm
+git clone https://github.com/xLLM-AI/xllm
 cd xllm 
 git submodule update --init --recursive
 ```
@@ -83,11 +86,24 @@ python -c "import torch_npu
 for i in range(16):torch_npu.npu.set_device(i)"
 ```
 
-### 导出MTP权重
+### 选择 speculative decoding 权重格式
+
+原有 DeepSeek-V4 MTP 路径和 DeepSeek-V4-Flash-0731 DSpark 路径使用不同的
+draft 模型格式：
+
+- 使用原有 MTP 路径时，需要将 MTP 权重额外导出到独立目录：
 
 ```bash
 python tools/export_mtp.py --input-dir ${W4A8/W8A8权重目录} --output-dir ${导出MTP权重目录}
 ```
+
+- 使用 DeepSeek-V4-Flash-0731 DSpark 时，**不要**执行 `export_mtp.py`。
+  三层 DSpark、独立的词表 embedding/head 和 Markov head 都保留在 target
+  权重的 `mtp.0`、`mtp.1`、`mtp.2` 下。`--model` 和 `--draft_model` 应指向
+  同一个原始或量化后的 0731 权重目录。原始 FP 权重可能复用顶层
+  `embed.weight/head.weight`，QuaRot 权重可能带独立的
+  `mtp.0.embed.weight/mtp.2.head.weight`；xLLM 同时兼容两种格式，且两者
+  同时存在时优先使用 DSpark 独立词表权重。
 
 ### 环境变量
 
@@ -165,6 +181,11 @@ done
     # --draft_model=$DRAFT_MODEL_PATH \
     # --num_speculative_tokens=1 \
 
+    # DeepSeek-V4-Flash-0731 DSpark 改用：
+    # --speculative_algorithm=DSpark \
+    # --draft_model=$MODEL_PATH \
+    # --num_speculative_tokens=5 \
+
 # numactl -C xxxxx          亲和性绑核(NUMA亲和性查询命令： npu-smi info -t topo)
 #--max_memory_utilization   单卡最大显存占用比例
 #--max_tokens_per_batch     单batch最大token数  （主要限制prefill）
@@ -177,6 +198,46 @@ done
 #--draft_model              mtp - mtp权重路径
 #--num_speculative_tokens   mtp - 预测token数
 ```
+
+### DSpark 使用方式
+
+DSpark 不需要额外导出 MTP 权重。将 `--model` 和 `--draft_model` 设置为同一个
+DeepSeek-V4-Flash-0731 权重目录即可：
+
+```bash
+--speculative_algorithm=DSpark \
+--model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--draft_model=/path/to/DeepSeek-V4-Flash-0731-w8a8 \
+--num_speculative_tokens=5
+```
+
+推荐使用 `--num_speculative_tokens=5`，因为 0731 权重按
+`dspark_block_size=5` 训练。改用其他 gamma 会改变扩散块几何，超出训练分布，
+需要重新验证接受率和性能。当前路径暂不支持 `cp_size > 1`。
+
+在 NPU 上，xLLM 支持两种 SAS 模式。默认兼容模式适配 CANN 9.0，无需增加参数；
+若当前 SAS 算子支持非空 `ori_sparse_indices`，可设置
+`--enable_dspark_native_sas=true`，使用完整的 DSpark SWA 窗口。旧版算子会在
+tiling 阶段直接终止进程，因此无法安全地自动探测该能力。
+
+可通过逐位置计数观察 DSpark 接受率：
+
+```bash
+curl http://${HOST}:${PORT}/brpc_metrics | grep speculative_num
+```
+
+```text
+# 逐位置条件接受率（隔离 draft 质量）：
+conditional_acceptance[i] =
+  speculative_num_accepted_tokens_per_pos{i} /
+  speculative_num_accepted_tokens_per_pos{i-1}   # i = 0 时分母用 speculative_num_drafts_total
+```
+
+`speculative_num_accepted_tokens_per_pos` 是原始 counter（充分统计量）；逐位置优先看上式的**条件**接受率——“已到第 i 位、这一位能过”的概率。marginal 口径（`… / speculative_num_drafts_total`）因前缀存活偏差、即使 draft 每位一样好也会一路衰减，把 draft 质量和“能否走到”混在一起；条件率隔离每位质量，是选投机深度时该看的。xLLM 已把它直接暴露为 gauge `speculative_conditional_acceptance_rate_per_pos{position}`（由上面的 counter 算出），无需手动推导。
+
+指标 `speculative_mean_acceptance_length` 是累计 acceptance length：每个 proposal
+序列平均产出的 token 数（接受的草稿 + 1 个 target bonus），即
+`1 + speculative_num_accepted_tokens_total / speculative_num_drafts_total`。
 
 日志出现"Brpc Server Started"表示服务成功拉起。
 

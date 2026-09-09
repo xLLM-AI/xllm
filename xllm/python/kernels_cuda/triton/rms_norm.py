@@ -46,9 +46,7 @@ def _rms_norm_gated_kernel(
     mask = row_mask & feature_mask
 
     value_offsets = rows[:, None] * stride_value_row + features[None, :]
-    values = tl.load(value_ptr + value_offsets, mask=mask, other=0.0).to(
-        tl.float32
-    )
+    values = tl.load(value_ptr + value_offsets, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(tl.where(mask, values * values, 0.0), axis=1) / feature_dim
     inverse_rms = tl.rsqrt(variance + eps)
     tl.store(inverse_rms_ptr + rows, inverse_rms, mask=rows < num_rows)

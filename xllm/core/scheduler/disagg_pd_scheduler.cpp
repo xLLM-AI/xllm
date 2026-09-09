@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,8 +20,12 @@ limitations under the License.
 #include <brpc/server.h>
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <iomanip>
 #include <limits>
+#include <queue>
 #include <random>
+#include <vector>
 
 #include "common/global_flags.h"
 #include "common/macros.h"
@@ -48,6 +52,50 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+using RequestPtr = std::shared_ptr<Request>;
+
+// Returns true when |a| has lower scheduling priority than |b| (i.e. |a|
+// should be dispatched after |b|).  std::priority_queue is a max-heap, so the
+// comparator that returns true for "lower priority" places the highest-priority
+// request on top.  Ordering mirrors the original
+// wait_dequeue_timed(online) / try_dequeue(offline) loop:
+//   1. online requests always come before offline ones, and
+//   2. within each group the earliest created_time wins.
+struct RequestPriorityComparator {
+  bool operator()(const RequestPtr& a, const RequestPtr& b) const {
+    const bool a_online = !a->offline();
+    const bool b_online = !b->offline();
+    if (a_online != b_online) {
+      return !a_online;
+    }
+    return a->created_time() > b->created_time();
+  }
+};
+
+using PendingQueue = std::priority_queue<RequestPtr,
+                                         std::vector<RequestPtr>,
+                                         RequestPriorityComparator>;
+
+// ConcurrentQueue is not FIFO across the HTTP handling threads. Drain what is
+// currently queued so dispatch can restore created_time order.
+void drain_dispatch_queue(
+    moodycamel::BlockingConcurrentQueue<RequestPtr>& queue,
+    PendingQueue* pending,
+    bool* exit_requested) {
+  RequestPtr incoming;
+  while (queue.try_dequeue(incoming)) {
+    if (incoming == nullptr) {
+      *exit_requested = true;
+      return;
+    }
+    pending->push(std::move(incoming));
+  }
+}
+
+}  // namespace
+
 bool is_permanent_rejection(int32_t status_code) {
   return status_code == kDecodeAddNewPromptTooLongStatusCode;
 }
@@ -61,6 +109,19 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
   const size_t needed_blocks = util::ceil_div(num_prompt_tokens, block_size);
   const size_t usable_blocks = num_blocks == 0 ? 0 : num_blocks - 1;
   return needed_blocks > usable_blocks;
+}
+
+bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response) {
+  return std::all_of(
+      response.groups().begin(),
+      response.groups().end(),
+      [](const proto::KVTransferGroup& group) {
+        const std::optional<BlockType> block_type =
+            block_type_from_cache_group_id(group.group_id());
+        return block_type.has_value() &&
+               (block_type.value() == BlockType::KV ||
+                !is_kv_split_cache_block_type(block_type.value()));
+      });
 }
 
 DisaggPDScheduler::DisaggPDScheduler(Engine* engine, const Options& options)
@@ -312,46 +373,53 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
-  CHECK(request != nullptr);
-  CHECK(!request->sequences().empty());
-
-  kv_cache_manager_->prefetch_from_storage(request);
-
+bool DisaggPDScheduler::enqueue_ready_request(
+    std::shared_ptr<Request> request) {
   if (request->offline()) {
-    // offline request, push to offline queue
-    prefill_request_queue_offline_.enqueue(request);
+    prefill_request_queue_offline_.enqueue(std::move(request));
     return true;
   }
-  // push and wait
-  prefill_request_queue_.enqueue(request);
-
+  prefill_request_queue_.enqueue(std::move(request));
   return true;
 }
 
 // prefill send new request to remote instance
 void DisaggPDScheduler::dispatch_requests() {
+  PendingQueue pending;
   while (true) {
-    const auto timeout = std::chrono::milliseconds(100);
-    // Wait for online request until timeout.
-    // If timeout, try to get offline request once. If no offline request,
-    // continue to wait for online request. This can avoid offline request
-    // blocking online request for too long time.
-    std::shared_ptr<Request> request;
-    if (!prefill_request_queue_.wait_dequeue_timed(request, timeout)) {
-      if (!prefill_request_queue_offline_.try_dequeue(request)) {
-        continue;
-      }
-    }
-
-    if (request == nullptr) {
-      // nullptr is a signal to exit
+    bool exit_requested = false;
+    drain_dispatch_queue(prefill_request_queue_, &pending, &exit_requested);
+    if (exit_requested) {
       break;
     }
 
-    if (request->state().decode_address.empty()) {
-      // No decode address provided to the prefill instance, just finish the
-      // request.
+    if (pending.empty()) {
+      const auto timeout = std::chrono::milliseconds(100);
+      // Wait for online request until timeout.
+      // If timeout, try to get offline request once. If no offline request,
+      // continue to wait for online request. This can avoid offline request
+      // blocking online request for too long time.
+      std::shared_ptr<Request> incoming;
+      if (!prefill_request_queue_.wait_dequeue_timed(incoming, timeout)) {
+        if (!prefill_request_queue_offline_.try_dequeue(incoming)) {
+          continue;
+        }
+      }
+      if (incoming == nullptr) {
+        break;
+      }
+      pending.push(std::move(incoming));
+      drain_dispatch_queue(prefill_request_queue_, &pending, &exit_requested);
+      if (exit_requested) {
+        break;
+      }
+    }
+
+    std::shared_ptr<Request> request = pending.top();
+    pending.pop();
+
+    std::string selected_instance = request->state().decode_address;
+    if (selected_instance.empty()) {
       response_processor_->process_failed_request(
           request,
           {StatusCode::INVALID_ARGUMENT,
@@ -361,7 +429,6 @@ void DisaggPDScheduler::dispatch_requests() {
 
     std::vector<std::shared_ptr<Request>> requests;
     requests.emplace_back(request);
-    std::string selected_instance = request->state().decode_address;
 
     const InstanceInfo remote_info =
         xservice_client_->get_instance_info(selected_instance);
@@ -373,15 +440,8 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     remote_instances_info_[selected_instance] = remote_info;
 
-    const bool enable_mla = engine_->model_args().enable_mla();
-    const bool enable_heterogeneous_pd =
-        DisaggPDConfig::get_instance().enable_heterogeneous_pd();
-    const PdTopoResult topo_result =
-        check_pd_topo(instance_info_,
-                      remote_info,
-                      options_.kv_cache_transfer_mode(),
-                      enable_mla,
-                      enable_heterogeneous_pd);
+    const PdTopoResult topo_result = check_pd_topo(
+        instance_info_, remote_info, options_.kv_cache_transfer_mode());
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
     if (!allow_pd_topo) {
@@ -395,14 +455,6 @@ void DisaggPDScheduler::dispatch_requests() {
                " is incompatible: " + topo_result.reason});
       continue;
     }
-    if (!enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO &&
-        options_.num_speculative_tokens() <= 0) {
-      response_processor_->process_failed_request(
-          request,
-          {StatusCode::INVALID_ARGUMENT,
-           "non-mla heterogeneous PD requires speculative decoding"});
-      continue;
-    }
     if (topo_result.status == PdTopoStatus::ALLOW_HETERO && VLOG_IS_ON(1)) {
       const PdTopo local_topo = get_pd_topo(instance_info_);
       const PdTopo remote_topo = get_pd_topo(remote_info);
@@ -411,18 +463,14 @@ void DisaggPDScheduler::dispatch_requests() {
               << ", remote dp/tp=" << remote_topo.dp_size << "/"
               << remote_topo.tp_size;
     }
-    request->state().heterogeneous_pd =
-        !enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO;
-
     proto::DisaggPDService_Stub* stub = create_rpc_channel(selected_instance);
     if (stub == nullptr) {
       response_processor_->process_failed_request(
           request, {StatusCode::UNKNOWN, "Fail to create rpc channel"});
       continue;
     }
-
     // NOTE: TODO: maybe we need to support batch disatch
-    // later, this meybe decrease the communication cost.
+    // later, this maybe decrease the communication cost.
     // currently we only support one request per dispatch.
 
     // TODO: try to get a batch request.
@@ -498,6 +546,9 @@ void DisaggPDScheduler::dispatch_requests() {
       req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
       req->set_include_stop_str_in_output(
           requests[i]->state().include_stop_str_in_output);
+      req->set_json_object(requests[i]->state().sampling_param.json_object);
+      req->set_json_reasoning_enabled(
+          requests[i]->state().json_reasoning_enabled);
       //*reqs.mutable_reqs()->Add() = req;
     }
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
@@ -552,18 +603,17 @@ void DisaggPDScheduler::dispatch_requests() {
           do_permanent_rejection(requests[i]);
           continue;
         }
-        // push back to prefill_request_queue_
-        if (requests[i]->offline()) {
-          prefill_request_queue_offline_.enqueue(requests[i]);
-        } else {
-          prefill_request_queue_.enqueue(requests[i]);
-        }
+        // Keep created_time order: retry from the local pending queue instead
+        // of the MPMC queue, which is not FIFO across HTTP threads.
+        pending.push(requests[i]);
 
       } else {
         for (auto& sequence : requests[i]->sequences()) {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
           const auto& resp = resps.resps()[i];
+          info.rank_local_mapping = instance_info_.kv_split_size > 1 &&
+                                    has_rank_preserving_kv_groups(resp);
           info.mappings.reserve(resp.groups_size());
           for (const proto::KVTransferGroup& proto_group : resp.groups()) {
             KVTransferMapping mapping;
@@ -731,11 +781,9 @@ void DisaggPDScheduler::prefill_send_first_generation() {
             request->sequences()[0]->first_token().value().token_top_logprobs);
       }
       gen->set_kv_cache_transfer_mode(options_.kv_cache_transfer_mode());
-      gen->set_heterogeneous_pd(request->state().heterogeneous_pd);
-      // Native PULL and heterogeneous PUSH both need source cache metadata.
-      // Homogeneous PUSH does not consume it, so keep that request compact.
-      if (options_.kv_cache_transfer_mode() == "PULL" ||
-          request->state().heterogeneous_pd) {
+      // PUSH is completed before FirstGeneration. Only native PULL needs
+      // source cache metadata in this request.
+      if (options_.kv_cache_transfer_mode() == "PULL") {
         ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
                             instance_info_.cluster_ids);
         ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
@@ -812,6 +860,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       proto::Status resp;
       brpc::Controller cntl;
       Timer rpc_timer;
+      gen->set_upstream_elapsed_seconds(request->end_to_end_latency_seconds());
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
       const double rpc_seconds = rpc_timer.elapsed_seconds();
       VLOG(1) << "Prefill first-generation request_id=" << request->request_id()
@@ -871,6 +920,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     bool has_logprob,
     float logprob,
     double time_to_first_token_latency_seconds,
+    double upstream_elapsed_seconds,
     std::vector<int64_t> top_tokens,
     std::vector<float> top_logprobs,
     const std::string& kv_cache_transfer_mode,
@@ -879,7 +929,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     std::vector<KVTransferMapping> source_mappings,
     int32_t src_dp_size,
     int32_t src_dp_rank,
-    bool heterogeneous_pd,
     torch::Tensor mtp_bootstrap_embedding,
     int32_t num_cached_tokens) {
   Timer receive_timer;
@@ -922,16 +971,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   request->record_num_prefix_cache_tokens(
       static_cast<size_t>(num_cached_tokens));
-  const bool hetero_kv_pull =
-      heterogeneous_pd &&
-      DisaggPDConfig::get_instance().enable_heterogeneous_pd();
-  if (heterogeneous_pd && !hetero_kv_pull) {
-    LOG(ERROR) << "Prefill requested heterogeneous PD but Decode did not "
-                  "enable it, request_id: "
-               << req_id;
-    kv_cache_manager_->deallocate(request.get());
-    return false;
-  }
   const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
   if (need_mtp_bootstrap) {
     const int32_t slot_id = sequence->get_embedding_block_id();
@@ -972,12 +1011,12 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
 
   // update latency metrics
-  sequence->set_time_to_first_token_latency_seconds(
-      time_to_first_token_latency_seconds);
+  restore_disaggregated_latency(request.get(),
+                                time_to_first_token_latency_seconds,
+                                upstream_elapsed_seconds);
   // Rebase the ITL clock to the moment Decode receives the first token. The
-  // prefill->decode transfer cost is attributed to TTFT, not ITL;
-  // reconstructing prefill's first-token timestamp would require cross-machine
-  // clock sync.
+  // cumulative handoff latency is tracked by Request, while ITL only measures
+  // the local interval after the first token is received.
   sequence->tbt(absl::Now());
 
   // TODO: we only support one sequence for currently.
@@ -994,10 +1033,9 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   const double prepare_seconds = receive_timer.elapsed_seconds();
 
-  // Pull KV cache in native PULL mode. For a non-MLA heterogeneous TP PUSH
-  // deployment, pull every P-side shard into temporary D-side caches and
-  // concatenate the sharded tensor dimensions before decode starts.
-  if (kv_cache_transfer_mode == "PULL" || hetero_kv_pull) {
+  // Pull KV cache only in native PULL mode. Heterogeneous PUSH writes directly
+  // into the final destination tensors before FirstGeneration is sent.
+  if (kv_cache_transfer_mode == "PULL") {
     Timer pull_timer;
     for (KVTransferMapping& mapping : source_mappings) {
       const std::optional<BlockType> block_type =
@@ -1044,28 +1082,18 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     }
 
     const int32_t dst_dp_rank = sequence->dp_rank();
-    const bool pulled = hetero_kv_pull
-                            ? engine_->pull_hetero_kv_blocks(src_dp_size,
-                                                             src_dp_rank,
-                                                             src_cluster_ids,
-                                                             src_addrs,
-                                                             dst_dp_rank,
-                                                             source_mappings)
-                            : engine_->pull_kv_blocks(src_dp_size,
-                                                      src_dp_rank,
-                                                      src_cluster_ids,
-                                                      src_addrs,
-                                                      dst_dp_rank,
-                                                      source_mappings);
+    const bool pulled = engine_->pull_kv_blocks(src_dp_size,
+                                                src_dp_rank,
+                                                src_cluster_ids,
+                                                src_addrs,
+                                                dst_dp_rank,
+                                                source_mappings);
     if (!pulled) {
-      LOG(ERROR) << "Failed to pull"
-                 << (hetero_kv_pull ? " and merge heterogeneous" : "")
-                 << " KV blocks, request_id: " << req_id;
+      LOG(ERROR) << "Failed to pull KV blocks, request_id: " << req_id;
       kv_cache_manager_->deallocate(request.get());
       return false;
     }
     VLOG(1) << "Decode KV restore request_id=" << req_id
-            << ", hetero=" << hetero_kv_pull
             << ", pull_ms=" << pull_timer.elapsed_seconds() * 1000.0;
   }
 
@@ -1080,6 +1108,28 @@ bool DisaggPDScheduler::decode_recv_first_generation(
           << ", enqueue_ms=" << enqueue_timer.elapsed_seconds() * 1000.0
           << ", total_ms=" << receive_timer.elapsed_seconds() * 1000.0;
   return true;
+}
+
+void DisaggPDScheduler::restore_disaggregated_latency(
+    Request* request,
+    double time_to_first_token_latency_seconds,
+    double upstream_elapsed_seconds) {
+  CHECK(request != nullptr);
+  CHECK(!request->sequences().empty());
+
+  Sequence* sequence = request->sequences()[0].get();
+  if (time_to_first_token_latency_seconds > 0 &&
+      sequence->time_to_first_token_latency_seconds() <= 0) {
+    sequence->set_time_to_first_token_latency_seconds(
+        time_to_first_token_latency_seconds);
+  }
+
+  const double cumulative_upstream_latency_seconds =
+      std::max(upstream_elapsed_seconds,
+               sequence->time_to_first_token_latency_seconds());
+  if (cumulative_upstream_latency_seconds > 0) {
+    request->set_upstream_latency_seconds(cumulative_upstream_latency_seconds);
+  }
 }
 
 bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
@@ -1130,8 +1180,6 @@ void DisaggPDScheduler::update_token_latency_metrics(
   const auto now = absl::Now();
   const bool speculative_metrics_enabled =
       options_.num_speculative_tokens() > 0;
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
@@ -1154,18 +1202,12 @@ void DisaggPDScheduler::update_token_latency_metrics(
       if (speculative_metrics_enabled && committed_tokens > 0) {
         inter_token_latency_us =
             amortized_token_latency(tbt_microseconds, committed_tokens);
-        step_committed_tokens += static_cast<int64_t>(committed_tokens);
-        ++step_decode_seqs;
       }
       HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
                         inter_token_latency_us);
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
                         microseconds_to_milliseconds(inter_token_latency_us));
     }
-  }
-  if (step_decode_seqs > 0) {
-    GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              static_cast<double>(step_committed_tokens) / step_decode_seqs);
   }
 }
 

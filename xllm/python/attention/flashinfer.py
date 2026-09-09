@@ -40,10 +40,7 @@ def _should_use_tensor_core_decode(
     num_heads: int,
     num_kv_heads: int,
 ) -> bool:
-    return (
-        dtype in (torch.float16, torch.bfloat16)
-        and num_heads // num_kv_heads >= 4
-    )
+    return dtype in (torch.float16, torch.bfloat16) and num_heads // num_kv_heads >= 4
 
 
 def _pack_head_axes(tensor: torch.Tensor) -> torch.Tensor:
@@ -78,37 +75,27 @@ class FlashInferBackend(AttentionBackend):
         self.scale = scale
         self.sliding_window = sliding_window
         self.dtype = dtype
-        self._decode_use_tensor_cores = _should_use_tensor_core_decode(
-            dtype, num_heads, num_kv_heads
-        )
+        self._decode_use_tensor_cores = _should_use_tensor_core_decode(dtype, num_heads, num_kv_heads)
 
-        self._decode_workspace = torch.empty(
-            _WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
+        self._decode_workspace = torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         self._decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             self._decode_workspace,
             "NHD",
             use_tensor_cores=self._decode_use_tensor_cores,
         )
-        self._prefill_ragged_wrapper = (
-            flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
-                torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device),
-                "NHD",
-            )
+        self._prefill_ragged_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device),
+            "NHD",
         )
-        self._prefill_paged_wrapper = (
-            flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device),
-                "NHD",
-            )
+        self._prefill_paged_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device),
+            "NHD",
         )
 
         self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
         self._active_decode_wrapper = self._decode_wrapper
-        self._graph_decode_wrappers: dict[
-            int, flashinfer.BatchDecodeWithPagedKVCacheWrapper
-        ] = {}
+        self._graph_decode_wrappers: dict[int, flashinfer.BatchDecodeWithPagedKVCacheWrapper] = {}
         self._graph_decode_buffer_ptrs: dict[int, tuple[int, int, int]] = {}
         self._planned_graph_batches: set[int] = set()
 
@@ -122,11 +109,7 @@ class FlashInferBackend(AttentionBackend):
         if not self._kv_caches:
             raise RuntimeError("KV caches are not bound")
         cache = next(
-            (
-                cache
-                for cache in self._kv_caches
-                if cache.key is not None and cache.key.numel()
-            ),
+            (cache for cache in self._kv_caches if cache.key is not None and cache.key.numel()),
             None,
         )
         if cache is None:
@@ -138,11 +121,7 @@ class FlashInferBackend(AttentionBackend):
         if not self._kv_caches:
             raise RuntimeError("KV caches are not bound")
         cache = next(
-            (
-                cache
-                for cache in self._kv_caches
-                if cache.key is not None and cache.key.numel()
-            ),
+            (cache for cache in self._kv_caches if cache.key is not None and cache.key.numel()),
             None,
         )
         if cache is None:
@@ -256,9 +235,7 @@ class FlashInferBackend(AttentionBackend):
             global_override_indptr_cpu=indptr_host,
         )
 
-    def _get_graph_decode_wrapper(
-        self, metadata: AttentionMetadata, batch_size: int
-    ):
+    def _get_graph_decode_wrapper(self, metadata: AttentionMetadata, batch_size: int):
         wrapper = self._graph_decode_wrappers.get(batch_size)
         if wrapper is None:
             wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
@@ -271,14 +248,10 @@ class FlashInferBackend(AttentionBackend):
                 use_tensor_cores=self._decode_use_tensor_cores,
             )
             self._graph_decode_wrappers[batch_size] = wrapper
-            self._graph_decode_buffer_ptrs[batch_size] = self._buffer_ptrs(
-                metadata
-            )
+            self._graph_decode_buffer_ptrs[batch_size] = self._buffer_ptrs(metadata)
             return wrapper
 
-        if self._graph_decode_buffer_ptrs[batch_size] != self._buffer_ptrs(
-            metadata
-        ):
+        if self._graph_decode_buffer_ptrs[batch_size] != self._buffer_ptrs(metadata):
             raise RuntimeError("decode CUDA graph metadata address changed")
         return wrapper
 
@@ -295,7 +268,7 @@ class FlashInferBackend(AttentionBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer: "Attention",
+        layer: Attention,
     ) -> torch.Tensor:
         metadata = self._metadata
         if metadata is None:
@@ -304,16 +277,12 @@ class FlashInferBackend(AttentionBackend):
         layer_cache = self._kv_caches[layer.layer_id]
         k_cache, v_cache = layer_cache.key, layer_cache.value
         if k_cache is None or v_cache is None:
-            raise RuntimeError(
-                f"full-attention KV cache is missing for layer {layer.layer_id}"
-            )
+            raise RuntimeError(f"full-attention KV cache is missing for layer {layer.layer_id}")
         q_3d = q.view(-1, layer.num_heads, layer.head_dim)
         k_3d = _pack_head_axes(k.view(-1, layer.num_kv_heads, layer.head_dim))
         v_3d = _pack_head_axes(v.view(-1, layer.num_kv_heads, layer.head_dim))
 
-        kernels.reshape_paged_cache(
-            metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
-        )
+        kernels.reshape_paged_cache(metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache)
 
         if metadata.is_prefill:
             output = self._prefill_ragged_wrapper.run(q_3d, k_3d, v_3d)

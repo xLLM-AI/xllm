@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
+#include "framework/request/rec_request_factory.h"
 #include "framework/request/rec_type.h"
 #include "master.h"
 #include "rec.pb.h"
@@ -70,120 +71,26 @@ class RecMaster : public Master {
       std::function<std::shared_ptr<Request>(const RequestParams&,
                                              OutputCallback)>;
 
-  // ============================================================
-  // RecMasterPipeline: Abstract base class for request processing
-  // ============================================================
-  class RecMasterPipeline {
-   public:
-    explicit RecMasterPipeline(RecMaster& master) : master_(master) {}
-    virtual ~RecMasterPipeline() = default;
-
-    // For prompt-based input (OneRec and LlmRec without mm_data)
-    virtual std::shared_ptr<Request> generate_request(
-        std::string prompt,
-        std::optional<std::vector<int>> prompt_tokens,
-        std::optional<std::vector<proto::InferInputTensor>> input_tensors,
-        const RequestParams& sp,
-        OutputCallback callback);
-
-    // For raw input (LlmRec with mm_data)
-    virtual std::shared_ptr<Request> generate_request(
-        const std::vector<int>& prompt_tokens,
-        std::optional<MMData> mm_data,
-        const RequestParams& sp,
-        OutputCallback callback);
-
-   protected:
-    std::shared_ptr<Request> generate_onerec_request_common(
-        std::string prompt,
-        std::optional<std::vector<int>> prompt_tokens,
-        std::optional<std::vector<proto::InferInputTensor>> input_tensors,
-        const RequestParams& sp,
-        OutputCallback callback,
-        bool build_stop_checker);
-
-    RecMaster& master_;
-  };
-
-  // LlmRecMasterPipeline - pure qwen3 (prompt-based, no mm_data)
-  class LlmRecMasterPipeline final : public RecMasterPipeline {
-   public:
-    explicit LlmRecMasterPipeline(RecMaster& master);
-    std::shared_ptr<Request> generate_request(
-        std::string prompt,
-        std::optional<std::vector<int>> prompt_tokens,
-        std::optional<std::vector<proto::InferInputTensor>> input_tensors,
-        const RequestParams& sp,
-        OutputCallback callback) override;
-  };
-
-  // LlmRecWithMmDataMasterPipeline - qwen3 with embedding (raw input)
-  class LlmRecWithMmDataMasterPipeline final : public RecMasterPipeline {
-   public:
-    explicit LlmRecWithMmDataMasterPipeline(RecMaster& master);
-    std::shared_ptr<Request> generate_request(
-        const std::vector<int>& prompt_tokens,
-        std::optional<MMData> mm_data,
-        const RequestParams& sp,
-        OutputCallback callback) override;
-  };
-
-  // OneRecPrefillOnlyMasterPipeline - legacy OneRec without stop checker.
-  class OneRecPrefillOnlyMasterPipeline final : public RecMasterPipeline {
-   public:
-    explicit OneRecPrefillOnlyMasterPipeline(RecMaster& master);
-    std::shared_ptr<Request> generate_request(
-        std::string prompt,
-        std::optional<std::vector<int>> prompt_tokens,
-        std::optional<std::vector<proto::InferInputTensor>> input_tensors,
-        const RequestParams& sp,
-        OutputCallback callback) override;
-  };
-
-  // OneRecXAttentionMasterPipeline - OneRec xattention with stop checker for
-  // device-side multi-round decode.
-  class OneRecXAttentionMasterPipeline final : public RecMasterPipeline {
-   public:
-    explicit OneRecXAttentionMasterPipeline(RecMaster& master)
-        : RecMasterPipeline(master) {}
-
-    std::shared_ptr<Request> generate_request(
-        std::string prompt,
-        std::optional<std::vector<int>> prompt_tokens,
-        std::optional<std::vector<proto::InferInputTensor>> input_tensors,
-        const RequestParams& sp,
-        OutputCallback callback) override;
-  };
-
-  // Factory method to create pipeline (can access private classes)
-  static std::unique_ptr<RecMasterPipeline> create_pipeline(
-      RecPipelineType type,
-      RecMaster& master);
-
   void schedule_request(RequestParams sp,
                         OutputCallback callback,
                         RequestBuilder build_request);
-
-  std::shared_ptr<Request> build_request_common(
-      std::string prompt,
-      std::vector<int32_t> prompt_tokens,
-      MMData mm_data,
-      const RequestParams& sp,
-      OutputCallback callback,
-      bool build_stop_checker);
-
-  // Pipeline instances
-  std::unique_ptr<RecMasterPipeline> pipeline_;
-  std::unique_ptr<RecMasterPipeline> mm_data_pipeline_;
 
   std::unique_ptr<FixedStepsScheduler> scheduler_;
   // model args
   ModelArgs model_args_;
   RecType rec_type_ = RecType::kNone;
+  // Scheduled request closures dereference request_factory_ and scheduler_, so
+  // the pool is explicitly reset (drained/joined) in ~RecMaster before those
+  // members are destroyed.
   std::unique_ptr<ThreadPool> threadpool_;
   std::unique_ptr<Tokenizer> tokenizer_;
   // chat template instance
   std::unique_ptr<JinjaChatTemplate> chat_template_;
+
+  // builds Request aggregates from prompts/tokens/tensors + multimodal data;
+  // holds non-owning pointers to model_args_/tokenizer_, so declare it after
+  // them to guarantee it is destroyed first.
+  std::unique_ptr<RecRequestFactory> request_factory_;
   // thread for moving forward the scheduler
   std::thread loop_thread_;
   // flag to stop the loop

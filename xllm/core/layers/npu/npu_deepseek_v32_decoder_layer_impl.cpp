@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@ limitations under the License.
 #include "npu_deepseek_v32_decoder_layer_impl.h"
 
 #include <gflags/gflags.h>
+#include <torch_npu/csrc/aten/CustomFunctions.h>
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
@@ -28,6 +29,7 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -45,6 +47,7 @@ namespace {
 constexpr int32_t kQProjBLinearIndex = 1;
 constexpr int32_t kIndexerWqBLinearIndex = 6;
 constexpr int32_t kIndexerProjLinearIndex = 8;
+constexpr int32_t kMoeDownLinearIndex = 3;
 constexpr int32_t kTranspose = 1;
 constexpr int32_t kNotTranspose = 0;
 
@@ -389,6 +392,12 @@ NpuDeepseekV32DecoderLayerImpl::NpuDeepseekV32DecoderLayerImpl(
       prefill_param_, model_args, parallel_args, /*is_prefill=*/true);
   param_from_args(
       decode_param_, model_args, parallel_args, /*is_prefill=*/false);
+  if (decode_param_.enableMegaMoe) {
+    // MegaMoe stores the down projection as [intermediate, hidden]. Reuse that
+    // storage in the generic prefill path without transposing it again.
+    prefill_param_.moeLinearTransposeType[kMoeDownLinearIndex] = kNotTranspose;
+  }
+  initialize_mega_moe_resource(parallel_args);
   has_mtp_topk_fallback_ =
       skip_topk_ && model_args.index_share_for_mtp_iteration() &&
       model_args.model_type().find("_mtp") != std::string::npos;
@@ -589,11 +598,14 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_mlp_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args) {
+  const bool is_glm_moe_dsa =
+      args.model_type().find("glm_moe_dsa") != std::string::npos;
   param.hasSharedExpert = (args.n_shared_experts() > 0);
   param.hasSharedExpertGate = false;
   param.processLogits = "normScaling";
   param.routedScalingFactor = args.routed_scaling_factor();
   param.numOfSelectedExperts = {args.num_experts_per_tok()};
+  param.enableDispatchCombineV2 = is_glm_moe_dsa && !param.isPrefill;
 
   if (ep_size_ > 1) {
     param.expertParallelDegree = std::max(
@@ -643,11 +655,45 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_mlp_parameters(
 
   param.enableIndexGmm = false;
   // LCOC fused all2all path is unstable under ACL graph launch in current
-  // runtime; keep it for eager mode and fall back to the standard dynamic-ep
-  // path when graph is enabled.
+  // runtime and initializes a separate communicator from MegaMoe. Keep BF16,
+  // graph execution, and MegaMoe deployments on the standard dynamic-ep path.
   param.enableLcocAll2All =
-      param.isPrefill && cp_size_ == 1 && dp_size_ == 1 &&
+      quantize_type_ == "w8a8_dynamic" && param.isPrefill && cp_size_ == 1 &&
+      dp_size_ == 1 &&
+      !::xllm::KernelConfig::get_instance().enable_mega_moe() &&
       !::xllm::ExecutionConfig::get_instance().enable_graph();
+
+  const bool is_mtp_model = args.model_type().find("_mtp") != std::string::npos;
+  const bool is_mega_moe_quantized =
+      quantize_type_ == "w4a8_dynamic" || quantize_type_ == "w8a8_dynamic";
+  const bool is_mega_moe_bf16 = quantize_type_.empty() && param.isBF16;
+  const bool enable_mega_moe =
+      ::xllm::KernelConfig::get_instance().enable_mega_moe();
+  param.enableMegaMoe = enable_mega_moe && !param.isPrefill && !is_mtp_model &&
+                        (is_mega_moe_quantized || is_mega_moe_bf16) &&
+                        layer_id_ >= param.firstKDenseReplace && ep_size_ > 1 &&
+                        param.isDynamicEp &&
+                        !::xllm::EPLBConfig::get_instance().enable_eplb();
+  if (param.enableMegaMoe) {
+    const atb_speed::common::ParallelInfo moe_ep_info =
+        parallel_args.mapping().Get(atb_speed::base::MOE_EP);
+    param.megaMoeParam.moeExpertNum =
+        static_cast<int64_t>(args.n_routed_experts());
+    param.megaMoeParam.epWorldSize = static_cast<int64_t>(ep_size_);
+    param.megaMoeParam.cclBufferSize =
+        static_cast<int64_t>(moe_ep_info.bufferSize);
+    param.megaMoeParam.weight1TensorNum = 1;
+    param.megaMoeParam.weight2TensorNum = 1;
+    if (is_mega_moe_quantized) {
+      param.megaMoeParam.dispatchQuantMode = 2;
+      param.megaMoeParam.weightScales1TensorNum = 1;
+      param.megaMoeParam.weightScales2TensorNum = 1;
+    }
+    if (quantize_type_ == "w4a8_dynamic") {
+      param.megaMoeParam.bias1TensorNum = 1;
+      param.megaMoeParam.bias2TensorNum = 1;
+    }
+  }
 
   if (layer_id_ >= param.firstKDenseReplace) {
     param.enableQkvdownDp = false;
@@ -668,7 +714,10 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_parallel_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
     const ParallelArgs& parallel_args) {
   param.lmHeadLocalTp = dp_local_tp_size_;
-  param.enableSharedExpertOverlap = false;  // TODO
+  param.enableSharedExpertOverlap =
+      param.enableDispatchCombineV2 && !param.isPrefill &&
+      param.expertParallelDegree == 2 && param.isDynamicEp &&
+      param.hasSharedExpert && !param.isDenseLayer;
 
   param.enableAllToAllMC2 = (param.expertParallelDegree == 2);
   param.enableGatherPreNorm = true;
@@ -762,13 +811,100 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_quantization_parameters(
   }
 }
 
+void NpuDeepseekV32DecoderLayerImpl::initialize_mega_moe_resource(
+    const ParallelArgs& parallel_args) {
+  if (!decode_param_.enableMegaMoe) {
+    return;
+  }
+
+  CHECK(parallel_args.moe_ep_group_ != nullptr)
+      << "ATB MegaMoe requires a dedicated MoE EP process group.";
+
+  ProcessGroup* ep_group = parallel_args.moe_ep_group_;
+  MegaMoeCommSpec comm_spec;
+  comm_spec.group_name = ep_group->hccl_comm_name(/*init_comm=*/true);
+  comm_spec.hccl_comm = ep_group->hccl_comm();
+  comm_spec.ep_world_size = ep_group->world_size();
+  comm_spec.device_index = device_id_;
+  comm_spec.max_num_tokens_per_rank =
+      ::xllm::SchedulerConfig::get_instance().max_seqs_per_batch() *
+      (num_speculative_tokens_ + 1);
+  mega_moe_comm_resource_ = ep_group->acquire_mega_moe_comm_resource(comm_spec);
+  CHECK(mega_moe_comm_resource_ != nullptr)
+      << "Failed to acquire ATB MegaMoe communication resource.";
+
+  mega_moe_context_tensor_ = atb_speed::Utils::AtTensor2Tensor(
+      mega_moe_comm_resource_->context_tensor());
+  const int64_t ccl_buffer_size = mega_moe_comm_resource_->ccl_buffer_size();
+  const int64_t max_tokens_per_rank =
+      mega_moe_comm_resource_->max_num_tokens_per_rank();
+  decode_param_.megaMoeParam.cclBufferSize = ccl_buffer_size;
+  decode_param_.megaMoeParam.numMaxTokensPerRank = max_tokens_per_rank;
+  decode_param_.megaMoeParam.dispatchQuantOutDtype =
+      quantize_type_.empty() ? ACL_BF16 : ACL_INT8;
+}
+
+torch::Tensor NpuDeepseekV32DecoderLayerImpl::encode_mega_moe_scale(
+    const torch::Tensor& scale,
+    const torch::Tensor& offset) const {
+  CHECK(scale.defined()) << "ATB MegaMoe requires a defined weight scale.";
+  CHECK(offset.defined()) << "ATB MegaMoe requires a defined weight offset.";
+  CHECK_EQ(scale.sizes(), offset.sizes())
+      << "ATB MegaMoe weight scale and offset shapes must match.";
+
+  const std::vector<int64_t> original_shape = scale.sizes().vec();
+  torch::Tensor flat_scale =
+      scale.to(torch::kFloat32).contiguous().reshape({-1});
+  torch::Tensor flat_offset =
+      offset.to(torch::kFloat32).contiguous().reshape({-1});
+  torch::Tensor encoded = at_npu::native::custom_ops::npu_trans_quant_param(
+      flat_scale, flat_offset, /*round_mode=*/0);
+  CHECK_EQ(encoded.scalar_type(), torch::kInt64)
+      << "ATB MegaMoe encoded weight scale must use int64 storage.";
+  return encoded.reshape(original_shape).contiguous();
+}
+
 void NpuDeepseekV32DecoderLayerImpl::merge_loaded_weights() {
   loader_->merge_loaded_weights();
   auto& at_weight_tensors = loader_->get_at_weight_tensors();
+  if (decode_param_.enableMegaMoe) {
+    if (quantize_type_.empty()) {
+      at_weight_tensors[IN_MLP_GATEUP_WEIGHT_EXPERT] =
+          at_npu::native::npu_format_cast(
+              at_weight_tensors[IN_MLP_GATEUP_WEIGHT_EXPERT], ACL_FORMAT_ND);
+      at_weight_tensors[IN_MLP_DOWN_WEIGHT_EXPERT] =
+          at_npu::native::npu_format_cast(
+              at_weight_tensors[IN_MLP_DOWN_WEIGHT_EXPERT], ACL_FORMAT_ND)
+              .transpose(1, 2)
+              .contiguous();
+    } else {
+      prefill_gateup_scale_ = at_weight_tensors[IN_MLP_GATEUP_SCALE_EXPERT];
+      prefill_down_scale_ = at_weight_tensors[IN_MLP_DOWN_SCALE_EXPERT];
+      at_weight_tensors[IN_MLP_DOWN_WEIGHT_EXPERT] =
+          at_npu::native::npu_format_cast(
+              at_weight_tensors[IN_MLP_DOWN_WEIGHT_EXPERT]
+                  .transpose(1, 2)
+                  .contiguous(),
+              ACL_FORMAT_FRACTAL_NZ);
+      at_weight_tensors[IN_MLP_GATEUP_SCALE_EXPERT] =
+          encode_mega_moe_scale(at_weight_tensors[IN_MLP_GATEUP_SCALE_EXPERT],
+                                at_weight_tensors[IN_MLP_GATEUP_OFFSET_EXPERT]);
+      at_weight_tensors[IN_MLP_DOWN_SCALE_EXPERT] =
+          encode_mega_moe_scale(at_weight_tensors[IN_MLP_DOWN_SCALE_EXPERT],
+                                at_weight_tensors[IN_MLP_DOWN_OFFSET_EXPERT]);
+    }
+  }
   Device::empty_cache(device_.index());
   for (int i = 0; i < WEIGHT_COUNT_PER_LAYER; ++i) {
     atb_weight_tensors_[i] =
         atb_speed::Utils::AtTensor2Tensor(at_weight_tensors[i]);
+  }
+  prefill_atb_weight_tensors_ = atb_weight_tensors_;
+  if (prefill_gateup_scale_.defined()) {
+    prefill_atb_weight_tensors_[IN_MLP_GATEUP_SCALE_EXPERT] =
+        atb_speed::Utils::AtTensor2Tensor(prefill_gateup_scale_);
+    prefill_atb_weight_tensors_[IN_MLP_DOWN_SCALE_EXPERT] =
+        atb_speed::Utils::AtTensor2Tensor(prefill_down_scale_);
   }
   init_layer();
 }
@@ -1005,7 +1141,9 @@ int64_t NpuDeepseekV32DecoderLayerImpl::init_node(
 
   for (size_t weightTensorId = 0; weightTensorId < WEIGHT_COUNT_PER_LAYER;
        ++weightTensorId) {
-    node.inTensors.at(weightTensorId) = &atb_weight_tensors_[weightTensorId];
+    std::vector<atb::Tensor>& weight_tensors =
+        param.isPrefill ? prefill_atb_weight_tensors_ : atb_weight_tensors_;
+    node.inTensors.at(weightTensorId) = &weight_tensors[weightTensorId];
   }
 
   node.variantPack.inTensors.reserve(node.inTensors.size());
@@ -1068,10 +1206,11 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_topk(
                             shared_topk_indices,
                             output_topk_indices,
                             skip_topk_,
-                            output_topk_);
+                            output_topk_,
+                            decode_param_.enableMegaMoe);
     st = execute_node(decode_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "execute prefill layer fail, error code: " << st;
+                           << "execute decode layer fail, error code: " << st;
   } else {
     build_node_variant_pack(prefill_node_,
                             x,
@@ -1084,7 +1223,8 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_topk(
                             shared_topk_indices,
                             output_topk_indices,
                             skip_topk_,
-                            output_topk_);
+                            output_topk_,
+                            prefill_param_.enableMegaMoe);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "execute prefill layer fail, error code: " << st;
@@ -1123,7 +1263,8 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_mtp_topk_fallback(
                             torch::Tensor(),
                             output_topk_indices,
                             false,
-                            true);
+                            true,
+                            mtp_decode_fallback_param_.enableMegaMoe);
     st = execute_node(mtp_decode_fallback_node_, node_id, event, event_flag);
   } else {
     build_node_variant_pack(mtp_prefill_fallback_node_,
@@ -1137,7 +1278,8 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_mtp_topk_fallback(
                             torch::Tensor(),
                             output_topk_indices,
                             false,
-                            true);
+                            true,
+                            mtp_prefill_fallback_param_.enableMegaMoe);
     st = execute_node(mtp_prefill_fallback_node_, node_id, event, event_flag);
   }
   LOG_IF(FATAL, st != 0)
@@ -1158,7 +1300,8 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
     const torch::Tensor& shared_topk_indices,
     torch::Tensor* output_topk_indices,
     bool skip_topk,
-    bool output_topk) {
+    bool output_topk,
+    bool enable_mega_moe) {
   internal_tensor_ = atb_speed::Utils::AtTensor2Tensor(x);
   // final_hidden_states_ = torch::zeros_like(x);
   int32_t input_idx = 0;
@@ -1330,8 +1473,12 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
     node.variantPack.inTensors.at(i) = *node.inTensors.at(i);
   }
 
+  const torch::Tensor index_cache = kv_cache.get_index_cache();
+  CHECK(index_cache.defined() || skip_topk)
+      << "DSA full indexer layer requires an allocated indexer cache.";
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 30) =
-      atb_speed::Utils::AtTensor2Tensor(kv_cache.get_index_cache());
+      atb_speed::Utils::AtTensor2Tensor(
+          index_cache.defined() ? index_cache : tensor_placeholder_);
 
   const bool empty_eager_batch =
       !input_params.enable_graph && input_params.meta.num_sequences == 0;
@@ -1391,6 +1538,11 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
           atb_speed::Utils::AtTensor2Tensor(
               input_params.attention.device.in_prefix_slots);
     }
+  }
+
+  if (enable_mega_moe) {
+    node.variantPack.inTensors.at(node.variantPack.inTensors.size() - 1) =
+        mega_moe_context_tensor_;
   }
 
   node.variantPack.outTensors.at(0) = internal_tensor_;

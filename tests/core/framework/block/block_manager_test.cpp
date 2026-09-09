@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -297,6 +297,90 @@ TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
   EXPECT_GT(seq.get_embedding_block_id(), 0);
 }
 
+TEST(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
+  BlockManagerPool::Options options;
+  options.num_blocks(1).block_size(1).enable_prefix_cache(false);
+  BlockManagerPool pool(options, /*dp_size=*/3);
+
+  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 0);
+  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 1);
+  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 2);
+  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 0);
+}
+
+TEST(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
+  ScopedValue<int32_t> chunk_guard(
+      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
+  BlockManagerPool::Options options;
+  options.num_blocks(8)
+      .host_num_blocks(0)
+      .block_size(4)
+      .enable_prefix_cache(true)
+      .enable_linear_state(true)
+      .linear_state_num_slots(4);
+  BlockManagerPool pool(options, /*dp_size=*/2);
+
+  Sequence first = make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4});
+  Sequence second = make_sequence(1, /*prompt_tokens=*/{5, 6, 7, 8});
+  first.set_dp_rank(0);
+  second.set_dp_rank(1);
+
+  ASSERT_TRUE(pool.allocate(&first));
+  ASSERT_TRUE(pool.allocate(&second));
+  EXPECT_EQ(first.dp_rank(), 0);
+  EXPECT_EQ(second.dp_rank(), 1);
+  // Slot 0 is reserved independently in each DP-local slot namespace, so both
+  // replicas may validly assign the same positive slot id.
+  EXPECT_EQ(first.get_linear_state_slot_id(), 1);
+  EXPECT_EQ(second.get_linear_state_slot_id(), 1);
+
+  LinearStateBlockManager* first_linear =
+      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
+  LinearStateBlockManager* second_linear =
+      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/1);
+  ASSERT_NE(first_linear, nullptr);
+  ASSERT_NE(second_linear, nullptr);
+  ASSERT_NE(first_linear, second_linear);
+
+  const LinearStatePrefixHash first_only_hash = make_prefix_hash(42);
+  ASSERT_GE(insert_linear_state_checkpoint(first_linear, first_only_hash), 1);
+  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(
+      first_linear, XXH3Key(first_only_hash.data())));
+  EXPECT_FALSE(BlockManagerPoolTestPeer::contains(
+      second_linear, XXH3Key(first_only_hash.data())));
+
+  pool.deallocate_without_cache(&first);
+  EXPECT_EQ(second.dp_rank(), 1);
+  EXPECT_EQ(second.get_linear_state_slot_id(), 1);
+  pool.deallocate_without_cache(&second);
+}
+
+TEST(BlockManagerPoolTest, DpSelectionCountsEvictablePrefixBlocksAsAvailable) {
+  BlockManagerPool::Options options;
+  options.num_blocks(4).block_size(1).enable_prefix_cache(true);
+  BlockManagerPool pool(options, /*dp_size=*/2);
+
+  Sequence active = make_sequence(0, /*prompt_tokens=*/{1});
+  active.set_dp_rank(0);
+  ASSERT_TRUE(pool.try_allocate(&active));
+
+  Sequence cached = make_sequence(1, /*prompt_tokens=*/{2, 3, 4});
+  cached.set_dp_rank(1);
+  ASSERT_TRUE(pool.try_allocate(&cached));
+  pool.deallocate(&cached);
+
+  const std::vector<size_t> free_blocks = pool.num_free_blocks();
+  const std::vector<size_t> used_blocks = pool.num_used_blocks();
+  ASSERT_EQ(free_blocks.size(), 2u);
+  ASSERT_EQ(used_blocks.size(), 2u);
+  EXPECT_GT(free_blocks[0], free_blocks[1]);
+  EXPECT_GT(used_blocks[0], used_blocks[1]);
+  EXPECT_DOUBLE_EQ(pool.kv_cache_utilization(), 0.0);
+  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 1);
+
+  pool.deallocate(&active);
+}
+
 TEST(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 0);
@@ -472,11 +556,14 @@ TEST(BlockManagerPoolTest, SingleBlockExhaustionBehavesLikeKvBlockExhaustion) {
 
   Sequence retry = make_sequence(2, /*prompt_tokens=*/{3});
   EXPECT_FALSE(pool.try_allocate(&retry));
-  EXPECT_EQ(retry.dp_rank(), 0);
+  const int32_t retry_dp_rank = retry.dp_rank();
+  ASSERT_TRUE(retry_dp_rank == seq0.dp_rank() ||
+              retry_dp_rank == seq1.dp_rank());
 
-  pool.deallocate(&seq0);
+  Sequence* selected_sequence = retry_dp_rank == seq0.dp_rank() ? &seq0 : &seq1;
+  pool.deallocate(selected_sequence);
   ASSERT_TRUE(pool.try_allocate(&retry));
-  EXPECT_EQ(retry.dp_rank(), 0);
+  EXPECT_EQ(retry.dp_rank(), retry_dp_rank);
 }
 
 TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenLinearStateDisabled) {

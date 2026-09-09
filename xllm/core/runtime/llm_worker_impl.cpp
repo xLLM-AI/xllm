@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,12 +36,15 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
+#include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
 #include "layers/cuda/flashinfer_workspace.h"
 #endif
 #include "models/model_registry.h"
+#include "runtime/params_utils.h"
+#include "util/env_var.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
 
@@ -81,8 +84,26 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
 bool LLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
   const auto& model_config = ModelConfig::get_instance();
+#if defined(USE_MUSA)
+  static const bool use_pool_compute_stream = util::get_bool_env(
+      "XLLM_MUSA_POOL_COMPUTE_STREAM", /*default_value=*/true);
+  const bool is_qwen3 = context.get_model_args().model_type() == "qwen3";
+  if (use_pool_compute_stream && !is_qwen3) {
+    compute_stream_ = device_.get_stream_from_pool();
+  } else if (use_pool_compute_stream) {
+    LOG(WARNING) << "MUSA pool compute streams are not validated for Qwen3 "
+                    "attention; using the default compute stream.";
+  }
 
-#if defined(USE_CUDA)
+  const auto& beam_search_config = BeamSearchConfig::get_instance();
+  CHECK(!has_linear_attention_layers(context.get_model_args()) ||
+        (!beam_search_config.enable_beam_search_kernel() &&
+         beam_search_config.beam_width() <= 1))
+      << "MUSA beam search is not supported for models with linear-attention "
+         "layers.";
+#endif
+
+#if defined(USE_CUDA) || defined(USE_MUSA)
   // Ensure FlashinferWorkspace is initialized on the calling thread before
   // constructing model layers. When called synchronously from
   // SpeculativeWorkerImpl (e.g. MTP target/draft setup), init_model runs on
@@ -139,6 +160,13 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
   prepare_work_before_execute(input, input_on_device);
   std::unique_ptr<Stream> current_stream = device_.current_stream();
   return execute_no_sync_on_stream(input_on_device, *current_stream);
+}
+
+std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input,
+    Stream& compute_stream) {
+  return execute_no_sync_on_stream(
+      input, compute_stream, /*record_ready_event=*/true);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
@@ -242,7 +270,8 @@ LLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
       << "failed to wait last step output ready event";
-  return update_input_by_last_step_output(input);
+  return WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
+      input);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
@@ -301,8 +330,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
+  torch::Tensor lm_head_selected_token_idxes;
+  torch::Tensor selected_hidden;
   if (sampling_params.selected_token_idxes.defined()) {
-    torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
+    torch::Tensor selected_token_idxes = choose_lm_head_selected_token_idxes(
+        sampling_params.selected_token_idxes,
+        input.input_params,
+        context_.get_parallel_args(),
+        model_output.hidden_states.size(0),
+        model_output.hidden_states.device());
     if (model_output.hidden_states.defined() &&
         selected_token_idxes.device() != model_output.hidden_states.device()) {
       selected_token_idxes = selected_token_idxes
@@ -310,7 +346,33 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    lm_head_selected_token_idxes = selected_token_idxes;
+    const bool need_selected_hidden =
+        input.return_selected_hidden ||
+        (options_.cp_size() > 1 && options_.enable_speculative_decode());
+    if (need_selected_hidden) {
+      // Emit both selected hidden and logits from a single lm_head pass so the
+      // ConfidenceHead and CP speculative paths can consume hidden without a
+      // second projection.
+      logits = model_->logits(
+          model_output.hidden_states, selected_token_idxes, selected_hidden);
+      if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
+        // ATB lm_head backend does not expose a second output tensor
+        // (LmHeadParam::outputHidden is false), so we surface the hidden here.
+        // selected_hidden must align row-for-row with `logits`, which is
+        // produced in selected_token_idxes order. index_select reproduces that
+        // order for any selection. We deliberately do NOT alias the full
+        // hidden_states on a numel match: equal row count does not imply the
+        // idxes are the identity permutation, and a full-but-reordered
+        // selection would silently misalign hidden against logits. The gather
+        // is one [num_selected, hidden] copy per decode step (not per layer),
+        // negligible next to the forward.
+        selected_hidden = model_output.hidden_states.index_select(
+            /*dim=*/0, selected_token_idxes.to(torch::kLong));
+      }
+    } else {
+      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    }
   }
 
   ForwardOutput output;
@@ -339,11 +401,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   // driver prepare model output
   if (sampling_params.selected_token_idxes.defined()) {
     output.logits = logits;
+    output.selected_hidden = selected_hidden;
     output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
+      output.filter_bitmask_applied_to_logits =
+          sampling_params.filter_bitmask.defined();
 
       // beam search kernel
       BeamSearchOutput beam_search_output;
@@ -375,8 +440,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // Target prefill: keep full embeddings (global-real under model-side CP).
       output.sample_output.embeddings = embeddings;
     } else if (sampling_params.selected_token_idxes.defined()) {
-      output.sample_output.embeddings = embeddings.index_select(
-          /*dim=*/0, sampling_params.selected_token_idxes);
+      if (options_.cp_size() > 1) {
+        CHECK(selected_hidden.defined())
+            << "selected_hidden must be defined when "
+               "selected_token_idxes is defined.";
+        output.sample_output.embeddings = selected_hidden;
+      } else {
+        output.sample_output.embeddings = embeddings.index_select(
+            /*dim=*/0, lm_head_selected_token_idxes);
+      }
     }
   }
 
@@ -388,7 +460,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 #endif
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
     wait_kv_push();
-    output.retained_input = std::make_shared<ForwardInput>(input);
+    output.retained_inputs.emplace_back(std::make_shared<ForwardInput>(input));
     if (enable_schedule_overlap() && record_ready_event) {
       output.ready_event = record_current_stream_event(device_);
     }

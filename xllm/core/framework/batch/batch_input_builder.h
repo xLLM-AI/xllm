@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -85,6 +85,9 @@ class BatchInputBuilder {
 
     // Sampling data
     std::vector<const RequestSamplingParam*> sampling_params;
+    std::vector<JsonObjectGrammarState> json_object_states;
+    std::vector<std::string> sample_sequence_ids;
+    std::vector<int32_t> sample_prior_output_rows;
     std::vector<int32_t> selected_token_idxes;
     std::vector<int32_t> sample_idxes;
 
@@ -97,14 +100,13 @@ class BatchInputBuilder {
     BatchForwardType batch_forward_type;
     uint32_t max_seq_len = 0;
     uint32_t q_max_seq_len = 0;
-    // Tracking token counts in KV cache，only used for deepseek chunked prefill
-    // ops on npu device
+    // Tracking token counts in KV cache for linear-attention state setup.
     std::vector<int32_t> kv_cache_tokens_nums;
-#if defined(USE_NPU) || defined(USE_MUSA)
+#if defined(USE_NPU)
     std::vector<int32_t> seq_lens;
     std::vector<int32_t> q_seq_lens;
 #elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU)
+    defined(USE_DCU) || defined(USE_MUSA)
     std::vector<int32_t> seq_lens = {0};    // cu_seq_lens
     std::vector<int32_t> q_seq_lens = {0};  // q_cu_seq_len
 #endif
@@ -127,6 +129,7 @@ class BatchInputBuilder {
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
     std::vector<int32_t> mtp_shifted_token_ids;
+    std::vector<int32_t> eplb_decode_token_mask;
     std::vector<int32_t> mtp_bootstrap_row_idxes;
     std::vector<torch::Tensor> mtp_bootstrap_embeddings;
     std::vector<TransferKVInfo> transfer_kv_infos;
@@ -188,9 +191,12 @@ class BatchInputBuilder {
   BuilderState state_;
 
   // Configuration
+  bool enable_json_object_output_ = true;
   bool use_mrope_ = false;
   uint32_t num_sequences_ = 0;
   bool need_unique_tokens_ = true;
+  bool build_eplb_decode_token_mask_ = false;
+  bool is_graph_warmup_ = false;
   int32_t cp_size_ = 1;
 
   // copy in and out cache contents

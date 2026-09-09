@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,6 +21,7 @@ limitations under the License.
 #include <tuple>
 
 #include "common/dense_mlp.h"
+#include "common/dflash2_grouped_conv.h"
 #include "common/qwen2_attention.h"
 #include "common/rms_norm.h"
 #include "framework/kv_cache/kv_cache.h"
@@ -40,6 +41,8 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict);
 
+  void verify_loaded_weights(const std::string& prefix) const;
+
   torch::Tensor forward(torch::Tensor& x,
                         std::optional<torch::Tensor>& residual,
                         torch::Tensor& positions,
@@ -52,6 +55,9 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
   DenseMLP mlp_{nullptr};
   RMSNorm input_norm_{nullptr};
   RMSNorm post_norm_{nullptr};
+  DFlash2GroupedConv attention_conv_{nullptr};
+  DFlash2GroupedConv mlp_conv_{nullptr};
+  bool use_dflash2_conv_ = false;
 
   ParallelArgs parallel_args_;
 

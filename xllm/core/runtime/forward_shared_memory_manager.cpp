@@ -3,7 +3,7 @@ Copyright 2024 The ScaleLLM Authors. All Rights Reserved.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -28,7 +28,13 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
+#if defined(USE_MUSA)
+#include "layers/common/attention_metadata.h"
+#endif
 #include "platform/stream.h"
+#if defined(USE_MUSA)
+#include <musa_runtime.h>
+#endif
 #if defined(USE_CUDA)
 #include <cuda_runtime_api.h>
 #endif
@@ -219,8 +225,10 @@ inline size_t get_kv_transfer_mappings_size(
 }
 
 inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
-  return get_string_size(info.request_id) + type_size<int32_t>  // dp_rank
-         + get_instance_info_size(info.remote_instance_info) +
+  return get_string_size(info.request_id) +
+         type_size<bool> +     // rank_local_mapping
+         type_size<int32_t> +  // dp_rank
+         get_instance_info_size(info.remote_instance_info) +
          get_xtensor_layer_offsets_size(info.dst_xtensor_layer_offsets) +
          get_kv_transfer_mappings_size(info.mappings);
 }
@@ -279,6 +287,8 @@ size_t get_sampling_params_size(const SamplingParameters& params) {
   size_t total = 0;
 
   total += get_tensor_size(params.selected_token_idxes);
+  total += get_tensor_size(params.filter_mask);
+  total += get_tensor_size(params.filter_bitmask);
   total += get_tensor_size(params.frequency_penalties);
   total += get_tensor_size(params.presence_penalties);
   total += get_tensor_size(params.repetition_penalties);
@@ -596,6 +606,17 @@ inline void write_vector(RawInputSectionCursor& cursor,
   }
 }
 
+void write_json_object_state_snapshots(
+    RawInputSectionCursor& cursor,
+    const std::vector<JsonObjectGrammarSnapshot>& snapshots) {
+  write_data(cursor, static_cast<uint64_t>(snapshots.size()));
+  for (const auto& snapshot : snapshots) {
+    write_data(cursor, snapshot.enabled);
+    write_data(cursor, snapshot.reasoning_enabled);
+    write_vector(cursor, snapshot.token_ids);
+  }
+}
+
 template <typename T>
 void write_vector_to_tensor(char*& buffer, const std::vector<T>& vec) {
   // write ndim
@@ -804,6 +825,7 @@ inline void write_xtensor_layer_offsets(
 
 inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
   write_string(buffer, info.request_id);
+  write_data(buffer, info.rank_local_mapping);
   write_data(buffer, info.dp_rank);
   write_instance_info(buffer, info.remote_instance_info);
   write_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
@@ -813,6 +835,7 @@ inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
 inline void write_transfer_kv_info(RawInputSerializeContext& context,
                                    const TransferKVInfo& info) {
   write_string(context.descriptor, info.request_id);
+  write_data(context.descriptor, info.rank_local_mapping);
   write_data(context.descriptor, info.dp_rank);
   write_instance_info(context, info.remote_instance_info);
   write_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
@@ -1162,7 +1185,7 @@ struct DeviceBufferSession final {
   bool need_finalize_sync = false;
 #if defined(USE_NPU)
   std::optional<std::unique_lock<std::mutex>> capture_lock_guard;
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_MUSA)
   std::optional<std::shared_lock<std::shared_mutex>> capture_lock_guard;
 #endif
 };
@@ -1364,15 +1387,38 @@ inline torch::Tensor materialize_tensor_from_current_cursor(
   const char* device_buffer = session.device_cursor;
 #if defined(USE_NPU)
   return get_tensor_from_blob(meta.shape, meta.dtype, device_buffer);
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_MUSA)
   if (session.owner_buffer.defined() &&
       is_aligned_for_cuda_zero_copy(device_buffer)) {
     return get_tensor_from_blob(
         meta.shape, meta.dtype, device_buffer, session.owner_buffer);
   }
 
-  auto options = torch::TensorOptions().dtype(meta.dtype).device(torch::kCUDA);
+  auto options = torch::TensorOptions()
+                     .dtype(meta.dtype)
+#if defined(USE_MUSA)
+                     .device(torch::kPrivateUse1);
+#else
+                     .device(torch::kCUDA);
+#endif
   auto tensor = torch::empty(meta.shape, options);
+#if defined(USE_MUSA)
+  musaError_t err;
+  if (stream != nullptr) {
+    err = musaMemcpyAsync(tensor.data_ptr(),
+                          device_buffer,
+                          meta.data_bytes,
+                          musaMemcpyDeviceToDevice,
+                          stream->get_stream()->stream());
+  } else {
+    err = musaMemcpy(tensor.data_ptr(),
+                     device_buffer,
+                     meta.data_bytes,
+                     musaMemcpyDeviceToDevice);
+  }
+  CHECK_EQ(err, musaSuccess)
+      << "MUSA device buffer copy failed: " << musaGetErrorString(err);
+#else
   cudaError_t err;
   if (stream != nullptr) {
     err = cudaMemcpyAsync(tensor.data_ptr(),
@@ -1388,6 +1434,7 @@ inline torch::Tensor materialize_tensor_from_current_cursor(
   }
   CHECK_EQ(err, cudaSuccess)
       << "CUDA device buffer copy failed: " << cudaGetErrorString(err);
+#endif
   return tensor;
 #elif defined(USE_MLU)
   if (session.owner_buffer.defined()) {
@@ -1529,6 +1576,19 @@ inline void read_vector(ReadContext& context, std::vector<T>& vec) {
     const size_t bytes = size * type_size<T>;
     std::memcpy(vec.data(), context.descriptor_cursor, bytes);
     advance_descriptor_cursor(context, bytes);
+  }
+}
+
+void read_json_object_state_snapshots(
+    ReadContext& context,
+    std::vector<JsonObjectGrammarSnapshot>& snapshots) {
+  uint64_t size;
+  read_data(context, size);
+  snapshots.resize(size);
+  for (auto& snapshot : snapshots) {
+    read_data(context, snapshot.enabled);
+    read_data(context, snapshot.reasoning_enabled);
+    read_vector(context, snapshot.token_ids);
   }
 }
 
@@ -1712,6 +1772,7 @@ inline void read_xtensor_layer_offsets(
 
 inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
   read_string(buffer, info.request_id);
+  read_data(buffer, info.rank_local_mapping);
   read_data(buffer, info.dp_rank);
   read_instance_info(buffer, info.remote_instance_info);
   read_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
@@ -1720,6 +1781,7 @@ inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
 
 inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
   read_string(context, info.request_id);
+  read_data(context, info.rank_local_mapping);
   read_data(context, info.dp_rank);
   read_instance_info(context, info.remote_instance_info);
   read_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
@@ -2200,7 +2262,8 @@ inline void initialize_device_buffer_session(ReadContext& context,
     return;
   }
 
-#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MUSA) || \
+    defined(USE_MLU)
   if (!materialize_device_buffer ||
       !::xllm::ExecutionConfig::get_instance().use_contiguous_input_buffer()) {
     return;
@@ -2208,6 +2271,10 @@ inline void initialize_device_buffer_session(ReadContext& context,
 
 #if defined(USE_CUDA)
   if (device.type() != torch::kCUDA) {
+    return;
+  }
+#elif defined(USE_MUSA)
+  if (device.type() != torch::kPrivateUse1) {
     return;
   }
 #elif defined(USE_MLU)
@@ -2277,7 +2344,8 @@ inline void initialize_device_buffer_session(ReadContext& context,
 
 inline void finalize_device_buffer_session(DeviceBufferSession& session,
                                            Stream* stream) {
-#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MUSA) || \
+    defined(USE_MLU)
   if (session.need_finalize_sync && stream != nullptr) {
     stream->synchronize();
   }
@@ -2337,6 +2405,7 @@ inline void deserialize_forward_input_payload(
   read_data(context, input_params.meta.kv_max_seq_len);
   read_data(context, input_params.meta.q_max_seq_len);
   read_data(context, input_params.meta.batch_id);
+  read_data(context, input_params.meta.is_graph_warmup);
   read_tensor_and_vector(context,
                          input_params.attention.device.q_seq_lens,
                          input_params.attention.host.q_seq_lens,
@@ -2352,10 +2421,34 @@ inline void deserialize_forward_input_payload(
                          input_params.attention.device.kv_seq_lens,
                          input_params.attention.host.kv_seq_lens,
                          stream);
+#if defined(USE_MUSA)
+  torch::Tensor paged_kv_indptr_host;
+  torch::Tensor paged_kv_indices_host;
+  torch::Tensor paged_kv_last_page_len_host;
+  read_tensor_and_host(context,
+                       input_params.attention.device.paged_kv_indptr,
+                       paged_kv_indptr_host,
+                       stream);
+  read_tensor_and_host(context,
+                       input_params.attention.device.paged_kv_indices,
+                       paged_kv_indices_host,
+                       stream);
+  read_tensor_and_host(context,
+                       input_params.attention.device.paged_kv_last_page_len,
+                       paged_kv_last_page_len_host,
+                       stream);
+  auto attn_metadata = std::make_shared<layer::AttentionMetadata>();
+  attn_metadata->fa3_metadata.paged_kv_indptr_host = paged_kv_indptr_host;
+  attn_metadata->fa3_metadata.paged_kv_indices_host = paged_kv_indices_host;
+  attn_metadata->fa3_metadata.paged_kv_last_page_len_host =
+      paged_kv_last_page_len_host;
+  input_params.attn_metadata = std::move(attn_metadata);
+#else
   read_tensor(context, input_params.attention.device.paged_kv_indptr, stream);
   read_tensor(context, input_params.attention.device.paged_kv_indices, stream);
   read_tensor(
       context, input_params.attention.device.paged_kv_last_page_len, stream);
+#endif
   read_tensor(
       context, input_params.attention.device.new_cache_slot_offsets, stream);
   read_tensor(
@@ -2403,6 +2496,8 @@ inline void deserialize_forward_input_payload(
   if (selected_token_idxes_size > 0) {
     auto& sampling_params = forward_input.sampling_params;
     read_tensor(context, sampling_params.selected_token_idxes, stream);
+    read_tensor(context, sampling_params.filter_mask, stream);
+    read_tensor(context, sampling_params.filter_bitmask, stream);
     read_tensor(context, sampling_params.frequency_penalties, stream);
     read_tensor(context, sampling_params.presence_penalties, stream);
     read_tensor(context, sampling_params.repetition_penalties, stream);
@@ -2424,6 +2519,10 @@ inline void deserialize_forward_input_payload(
   }
   // acc_logprob
   read_tensor(context, forward_input.sampling_params.acc_logprob, stream);
+  read_string_vector(context, forward_input.sample_sequence_ids);
+  read_vector(context, forward_input.sample_prior_output_rows);
+  read_json_object_state_snapshots(context,
+                                   forward_input.json_object_state_snapshots);
 
   // Keep transfer/eplb host-materialized, but continue advancing the
   // device cursor when a contiguous device buffer is active.
@@ -2434,6 +2533,9 @@ inline void deserialize_forward_input_payload(
     read_transfer_kv_info(context, transfer);
   }
   read_eplb_info(context, forward_input.input_params.expert.eplb_info);
+  read_tensor(context,
+              forward_input.input_params.expert.eplb_decode_token_mask,
+              stream);
 
   read_tensor_and_vector(context,
                          input_params.attention.device.new_cache_slots,
@@ -2525,6 +2627,18 @@ size_t calculate_raw_sample_output_size(const RawSampleOutput& sample) {
     size += calculate_raw_token_size(token);
   }
   size += get_vector_tensor_size(sample.mm_embeddings);
+  size += type_size<int64_t>;  // accepted speculative tokens
+  size += type_size<int64_t>;  // proposed speculative tokens
+  return size;
+}
+
+size_t calculate_json_object_errors_size(
+    const std::vector<JsonObjectOutputError>& errors) {
+  size_t size = type_size<uint64_t>;
+  for (const JsonObjectOutputError& error : errors) {
+    size += get_string_size(error.sample_sequence_id);
+    size += get_string_size(error.message);
+  }
   return size;
 }
 
@@ -2535,6 +2649,8 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   for (const auto& sample : output.outputs) {
     size += calculate_raw_sample_output_size(sample);
   }
+
+  size += calculate_json_object_errors_size(output.json_object_errors);
 
   size += get_vector_size(output.expert_load_data);
   size += get_vector_size(output.src_seq_idxes);
@@ -2570,6 +2686,8 @@ void write_raw_sample_output(char*& buffer, const RawSampleOutput& sample) {
     write_raw_token(buffer, token);
   }
   write_vector_tensor(buffer, sample.mm_embeddings);
+  write_data(buffer, sample.speculative_token_stats.accepted_tokens);
+  write_data(buffer, sample.speculative_token_stats.proposed_tokens);
 }
 
 void read_raw_token(const char*& buffer, RawToken& token) {
@@ -2598,6 +2716,29 @@ void read_raw_sample_output(const char*& buffer, RawSampleOutput& sample) {
     read_raw_token(buffer, token);
   }
   read_vector_tensor(buffer, sample.mm_embeddings);
+  read_data(buffer, sample.speculative_token_stats.accepted_tokens);
+  read_data(buffer, sample.speculative_token_stats.proposed_tokens);
+}
+
+void write_json_object_errors(
+    char*& buffer,
+    const std::vector<JsonObjectOutputError>& errors) {
+  write_data(buffer, static_cast<uint64_t>(errors.size()));
+  for (const JsonObjectOutputError& error : errors) {
+    write_string(buffer, error.sample_sequence_id);
+    write_string(buffer, error.message);
+  }
+}
+
+void read_json_object_errors(const char*& buffer,
+                             std::vector<JsonObjectOutputError>& errors) {
+  uint64_t error_count;
+  read_data(buffer, error_count);
+  errors.resize(error_count);
+  for (JsonObjectOutputError& error : errors) {
+    read_string(buffer, error.sample_sequence_id);
+    read_string(buffer, error.message);
+  }
 }
 
 void deserialize_raw_forward_output(const char* buffer,
@@ -2608,6 +2749,8 @@ void deserialize_raw_forward_output(const char* buffer,
   for (auto& sample : output.outputs) {
     read_raw_sample_output(buffer, sample);
   }
+
+  read_json_object_errors(buffer, output.json_object_errors);
 
   read_vector(buffer, output.expert_load_data);
   read_vector(buffer, output.src_seq_idxes);
@@ -2629,6 +2772,8 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
   for (const auto& sample : output.outputs) {
     write_raw_sample_output(buffer, sample);
   }
+
+  write_json_object_errors(buffer, output.json_object_errors);
 
   write_vector(buffer, output.expert_load_data);
   write_vector(buffer, output.src_seq_idxes);
@@ -2683,6 +2828,23 @@ torch::Tensor choose_host_or_device_tensor(const torch::Tensor& host_tensor,
   return device_tensor;
 }
 
+#if defined(USE_MUSA)
+torch::Tensor choose_paged_kv_host_or_device_tensor(
+    const torch::Tensor& host_tensor,
+    const torch::Tensor& device_tensor) {
+  if (!host_tensor.defined() || !host_tensor.device().is_cpu() ||
+      host_tensor.scalar_type() != torch::kInt32) {
+    return device_tensor;
+  }
+  if (device_tensor.defined() &&
+      (device_tensor.scalar_type() != torch::kInt32 ||
+       device_tensor.sizes() != host_tensor.sizes())) {
+    return device_tensor;
+  }
+  return host_tensor;
+}
+#endif
+
 void write_host_vector_or_tensor(RawInputSerializeContext& context,
                                  const std::vector<int32_t>& host_values,
                                  const torch::Tensor& tensor) {
@@ -2709,6 +2871,7 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, input_params.meta.kv_max_seq_len);
   write_data(context.descriptor, input_params.meta.q_max_seq_len);
   write_data(context.descriptor, input_params.meta.batch_id);
+  write_data(context.descriptor, input_params.meta.is_graph_warmup);
 
   write_host_vector_or_tensor(context,
                               input_params.attention.host.q_seq_lens,
@@ -2719,9 +2882,37 @@ inline void serialize_forward_input_sections(
   write_host_vector_or_tensor(context,
                               input_params.attention.host.kv_seq_lens,
                               input_params.attention.device.kv_seq_lens);
+#if defined(USE_MUSA)
+  const layer::Fa3AttentionMetadata* fa3_metadata = nullptr;
+  if (input_params.attn_metadata != nullptr) {
+    fa3_metadata = &input_params.attn_metadata->fa3_metadata;
+  }
+  const torch::Tensor paged_kv_indptr_host =
+      fa3_metadata == nullptr ? torch::Tensor()
+                              : fa3_metadata->paged_kv_indptr_host;
+  const torch::Tensor paged_kv_indices_host =
+      fa3_metadata == nullptr ? torch::Tensor()
+                              : fa3_metadata->paged_kv_indices_host;
+  const torch::Tensor paged_kv_last_page_len_host =
+      fa3_metadata == nullptr ? torch::Tensor()
+                              : fa3_metadata->paged_kv_last_page_len_host;
+  write_tensor(
+      context,
+      choose_paged_kv_host_or_device_tensor(
+          paged_kv_indptr_host, input_params.attention.device.paged_kv_indptr));
+  write_tensor(context,
+               choose_paged_kv_host_or_device_tensor(
+                   paged_kv_indices_host,
+                   input_params.attention.device.paged_kv_indices));
+  write_tensor(context,
+               choose_paged_kv_host_or_device_tensor(
+                   paged_kv_last_page_len_host,
+                   input_params.attention.device.paged_kv_last_page_len));
+#else
   write_tensor(context, input_params.attention.device.paged_kv_indptr);
   write_tensor(context, input_params.attention.device.paged_kv_indices);
   write_tensor(context, input_params.attention.device.paged_kv_last_page_len);
+#endif
   write_tensor(context, input_params.attention.device.new_cache_slot_offsets);
   write_tensor(context, input_params.attention.device.kv_cache_start_offsets);
   write_tensor(context, input_params.embedding.input_embedding);
@@ -2763,6 +2954,8 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, selected_token_idxes_size);
   if (selected_token_idxes_size > 0) {
     write_tensor(context, sampling_params.selected_token_idxes);
+    write_tensor(context, sampling_params.filter_mask);
+    write_tensor(context, sampling_params.filter_bitmask);
     write_tensor(context, sampling_params.frequency_penalties);
     write_tensor(context, sampling_params.presence_penalties);
     write_tensor(context, sampling_params.repetition_penalties);
@@ -2784,6 +2977,10 @@ inline void serialize_forward_input_sections(
   }
 
   write_tensor(context, sampling_params.acc_logprob);
+  write_string_vector(context.descriptor, input.sample_sequence_ids);
+  write_vector(context.descriptor, input.sample_prior_output_rows);
+  write_json_object_state_snapshots(context.descriptor,
+                                    input.json_object_state_snapshots);
 
   write_data(context.descriptor,
              static_cast<uint64_t>(input.transfer_kv_infos.size()));
@@ -2791,6 +2988,7 @@ inline void serialize_forward_input_sections(
     write_transfer_kv_info(context, transfer);
   }
   write_eplb_info(context, input_params.expert.eplb_info);
+  write_tensor(context, input_params.expert.eplb_decode_token_mask);
 
   write_host_vector_or_tensor(context,
                               input_params.attention.host.new_cache_slots,
@@ -3175,6 +3373,8 @@ void ForwardSharedMemoryManager::input_read(
       policy == InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
 #elif defined(USE_CUDA)
   materialize_device_buffer = device.type() == torch::kCUDA;
+#elif defined(USE_MUSA)
+  materialize_device_buffer = device.type() == torch::kPrivateUse1;
 #elif defined(USE_MLU)
   materialize_device_buffer = device.type() == torch::kPrivateUse1;
 #endif
@@ -3208,13 +3408,15 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
-    const torch::Tensor& out_logprobs) {
+    const torch::Tensor& out_logprobs,
+    const std::vector<JsonObjectOutputError>& json_object_errors) {
   RawForwardOutput output;
   convert_tensor_to_raw_output(next_tokens,
                                logprobs,
@@ -3230,6 +3432,14 @@ bool ForwardSharedMemoryManager::raw_output_write(
                                out_tokens,
                                out_logprobs,
                                output);
+  if (!speculative_token_stats.empty()) {
+    CHECK_EQ(output.outputs.size(), speculative_token_stats.size())
+        << "speculative token stats must match raw output rows.";
+    for (size_t i = 0; i < speculative_token_stats.size(); ++i) {
+      output.outputs[i].speculative_token_stats = speculative_token_stats[i];
+    }
+  }
+  output.json_object_errors = json_object_errors;
   uint64_t total_size = sizeof(ControlMetadata);
   total_size += calculate_raw_forward_output_size(output);
   if (unlikely(total_size > size())) {

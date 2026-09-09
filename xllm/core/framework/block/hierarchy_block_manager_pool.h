@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,11 +16,15 @@ limitations under the License.
 #pragma once
 
 #include <map>
+#include <mutex>
+#include <unordered_map>
 
 #include "block_manager_pool.h"
 #include "composite_block_manager.h"
+#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "distributed_runtime/engine.h"
 #include "util/blockingconcurrentqueue.h"
+#include "util/timer.h"
 
 namespace xllm {
 
@@ -48,6 +52,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
 
   void allocate_shared(Sequence* sequence) override;
   bool supports_host_cache_restore() const override { return true; }
+  bool has_pending_async_block_release() const override;
   HostCacheRestorePoint select_host_cache_restore(
       Sequence* sequence,
       size_t max_copy_units) override;
@@ -65,8 +70,27 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
                               const uint32_t timeout) override;
 
  private:
+  struct PrefetchQuery {
+    size_t probe_index = 0;
+    size_t block_index = 0;
+    size_t result_index = 0;
+    size_t token_start = 0;
+  };
+
+  struct PrefetchPlan {
+    // Each probe owns the complete logical prompt vector for its Host leaf.
+    // Invalid entries are either local misses waiting for Store or Store
+    // misses after completion; SWA intentionally keeps those holes positional.
+    std::vector<CompositeBlockManager::ProbeResult> host_probes;
+    std::vector<PrefetchQuery> queries;
+    Sequence* sequence = nullptr;
+    std::shared_ptr<PrefetchResult> result;
+    Timer timer;
+  };
+
   friend class HierarchyPoolTestPeer;
   void release_host_match(Sequence* sequence, int32_t dp_rank);
+  void release_prefetch_plan(PrefetchPlan* plan, bool publish_store_hits);
   void collect_offload_pairs(Sequence* sequence,
                              int32_t dp_rank,
                              size_t completed_tokens);
@@ -84,6 +108,13 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   // owned only by the Sequence's Host/device cache states.
   std::vector<std::vector<BlockTransferInfo>> load_block_transfer_infos_;
   std::vector<OffloadBlockPairQueue> offload_block_pair_queues_;
+
+  std::mutex prefetch_plans_mutex_;
+  std::unordered_map<Sequence*, std::shared_ptr<PrefetchPlan>> prefetch_plans_;
+
+  // Declared last so destruction waits for callbacks before any manager or
+  // block storage captured by those callbacks is released.
+  KVTransferTracker offload_transfers_;
 };
 
 }  // namespace xllm

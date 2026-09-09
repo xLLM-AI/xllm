@@ -4,7 +4,7 @@ sidebar:
   order: 100
 ---
 
-xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。使用 `--config_json_file` 时，JSON 文件中的值会覆盖命令行 flag 值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
+xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。对于原生配置，显式指定的命令行 flag 优先于 JSON 配置值，后者优先于编译时默认值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
 
 > **设备选择**：xLLM 不再提供 `--devices` / `--device_id` / `--draft_devices` 参数。可用设备由可见设备掩码环境变量决定（NPU 用 `ASCEND_RT_VISIBLE_DEVICES`，NVIDIA 用 `CUDA_VISIBLE_DEVICES`，寒武纪用 `MLU_VISIBLE_DEVICES`，DCU 用 `HIP_VISIBLE_DEVICES`，摩尔线程用 `MUSA_VISIBLE_DEVICES`）。每个服务进程根据全局 `node_rank` 从其可见设备中选择一个运行时逻辑设备；可见设备的子集化与重排由硬件运行时解析。draft 模型始终与 target 模型共享所选设备。
 
@@ -12,7 +12,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `config_json_file` | `string` | `""` | JSON 配置文件路径；文件中的值会覆盖命令行 flag 值。 |
+| `config_json_file` | `string` | `""` | JSON 配置文件路径；对于原生配置，显式指定的命令行 flag 优先于文件中的值。 |
 | `enable_dump_config_json` | `bool` | `false` | 是否将最终生效的启动配置导出为 JSON。 |
 | `dump_config_json_file` | `string` | `"xllm_config.json"` | 导出启动配置 JSON 的路径，仅在 `enable_dump_config_json=true` 时使用。 |
 
@@ -80,13 +80,14 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `prefetch_timeout` | `uint32` | `0` | 从 KV Cache Store 预取数据的超时时间。 |
+| `prefetch_timeout` | `uint32` | `0` | 到期后停止下发新的 KV Cache Store 预取批次，并等待在途批次完成；`0` 表示无限等待。 |
 | `prefetch_batch_size` | `uint32` | `2` | 从 KV Cache Store 预取并拷贝的 batch size。 |
 | `layers_wise_copy_batchs` | `uint32` | `4` | 按层执行 H2D 拷贝的 batch 数。 |
 | `host_blocks_factor` | `double` | `0.0` | host block 系数，例如 `host block num = host_blocks_factor * hbm block num`。 |
 | `enable_kvcache_store` | `bool` | `false` | 是否启用 KV Cache Store。 |
 | `store_protocol` | `string` | `"tcp"` | KV Cache Store 协议，例如 `tcp`、`rdma`。 |
-| `store_master_server_address` | `string` | `""` | Store master service 的地址信息。 |
+| `store_rdma_devices` | `string` | `""` | xLLM Worker 内嵌 Store client 使用的 RDMA HCA 列表，多个设备以逗号分隔；空值表示由 Mooncake 自动发现。 |
+| `store_master_server_address` | `string` | `""` | Store master 地址。单机模式使用 `IP:Port`；etcd 高可用模式使用 `etcd://IP:Port;IP:Port;...`。 |
 | `store_metadata_server` | `string` | `""` | KV Cache Store metadata service 的地址。 |
 | `store_local_hostname` | `string` | `""` | KV Cache Store client 的本地主机名。 |
 | `enable_control_h2d_block_num` | `bool` | `false` | 是否控制 H2D 拷贝的 block 数。 |
@@ -97,7 +98,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `enable_beam_search_kernel` | `bool` | `false` | 是否启用 beam search kernel。 |
 | `beam_width` | `int32` | `1` | Beam search 的 beam width。 |
-| `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
+| `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA/MUSA/DCU）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
 | `enable_topk_sorted` | `bool` | `true` | 是否启用 top-k 结果排序输出。 |
 
 ## SchedulerConfig
@@ -105,7 +106,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `max_tokens_per_batch` | `int32` | `10240` | 每个 batch 可处理的最大 token 数。 |
-| `max_seqs_per_batch` | `int32` | `1024` | 每个 batch 可处理的最大 sequence 数。 |
+| `max_seqs_per_batch` | `int32` | `200` | 每个 batch 可处理的最大 sequence 数。 |
 | `enable_schedule_overlap` | `bool` | `false` | 是否启用 schedule overlap（异步调度）；详见 [异步调度](/zh/features/async_schedule/)。 |
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | prefill 调度时的内存使用阈值。 |
 | `enable_chunked_prefill` | `bool` | `true` | 是否启用 chunked prefill。 |
@@ -114,7 +115,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `use_zero_evict` | `bool` | `false` | 是否使用 ZeroEvictionScheduler；详见 [Zero Evict Scheduler](/zh/features/zero_evict_scheduler/)。 |
 | `max_decode_token_per_sequence` | `int32` | `256` | ZeroEvictionScheduler 中每个 sequence 的最大 decode token 数。 |
 | `priority_strategy` | `string` | `"fcfs"` | 请求优先级策略，例如 `fcfs`、`priority`、`deadline`。 |
-| `use_mix_scheduler` | `bool` | `false` | 是否使用 MixScheduler 统一处理 prefill 和 decode。 |
+| `enable_mix_batch` | `bool` | `true` | 是否在同一 batch 中运行 prefill 和 decode。启用 CP 或 MTP 时会被强制设为 `false`。 |
 | `enable_online_preempt_offline` | `bool` | `true` | 是否允许在线请求抢占离线请求。 |
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |
 | `starve_threshold` | `double` | `1.0` | MixScheduler 的饥饿阈值系数。 |
@@ -145,7 +146,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_eplb` | `bool` | `false` | 是否启用 expert parallel load balance；详见 [EPLB](/zh/features/eplb/)。 |
 | `redundant_experts_num` | `int32` | `1` | 每个 device 上的冗余 expert 数量。 |
 | `eplb_update_interval` | `int64` | `1000` | EPLB 更新间隔。 |
-| `eplb_update_threshold` | `double` | `0.8` | EPLB 更新阈值。 |
 | `expert_parallel_degree` | `int32` | `0` | Expert parallel degree。 |
 | `rank_tablefile` | `string` | `""` | ATB HCCL rank table 文件。 |
 
@@ -171,7 +171,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_pd_ooc` | `bool` | `false` | 是否在 PD 分离模式下启用在线/离线混部。 |
 | `disagg_pd_port` | `int32` | `7777` | PD 分离 bRPC server 的监听端口。 |
 | `instance_role` | `string` | `"DEFAULT"` | 当前实例角色，例如 `DEFAULT`、`PREFILL`、`DECODE`、`MIX`。 |
-| `kv_cache_transfer_type` | `string` | `"Mooncake"` | KV Cache 传输类型，例如 `Mooncake`、`LlmDataDist`、`HCCL`。 |
 | `kv_cache_transfer_mode` | `string` | `"PUSH"` | KV Cache 传输模式，例如 `PUSH`、`PULL`。 |
 | `transfer_listen_port` | `int32` | `26000` | KV Cache Transfer 的监听端口。 |
 | `kv_push_dst_rotate` | `bool` | `false` | 在 `push_kv_blocks` 中按 KV-split rank 轮转遍历目标 worker，用于分散对 decode worker 的流量。 |
@@ -182,14 +181,14 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `draft_model` | `string` | `""` | draft 模型路径；MTP 使用方式详见 [MTP](/zh/features/mtp/)。 |
 | `num_speculative_tokens` | `int32` | `0` | 每轮 speculative decoding 生成的 speculative token 数。 |
-| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding 算法，支持 `MTP`、`Eagle3`、`Suffix`、`DFlash`。 |
+| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding 算法，支持 `MTP`、`Eagle3`、`Suffix`、`DFlash`、`DSpark`。 |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Suffix speculative decoding 的后缀树最大深度。 |
 | `speculative_suffix_max_spec_factor` | `double` | `1.0` | Suffix speculation 相对于匹配长度的最大 token 系数。 |
 | `speculative_suffix_max_spec_offset` | `double` | `0.0` | Suffix speculation 的最大 token 加性偏移。 |
 | `speculative_suffix_min_token_prob` | `double` | `0.1` | Suffix speculation 使用的最小 token 概率。 |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Suffix speculation 全局最大缓存请求数；`-1` 表示不限，`0` 表示禁用。 |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | 是否使用 tree-based suffix speculation，而不是 path speculation。 |
-| `enable_opt_validate_probs` | `bool` | `false` | validate 阶段是否直接使用 selected-only `draft_probs [B,S]`；设为 `false` 时会将 selected-only cache 值恢复为 dense `[B,S,V]`。 |
+| `draft_sampling_mode` | `string` | `"greedy"` | draft 模型生成 proposal token 的采样方式：`greedy`、`probabilistic`。仅 `MTP`、`DSpark`、`Eagle3` 支持 `probabilistic`。 |
 | `enable_atb_spec_kernel` | `bool` | `false` | 是否使用 ATB speculative kernel。 |
 
 ## ProfileConfig
@@ -238,6 +237,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_split_rmsnorm_rope` | `bool` | `false` | 是否启用 fused split rmsnorm rope ops。 |
 | `enable_aclnn_matmul` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN matmul 后端。 |
 | `enable_aclnn_swiglu` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN SwiGLU 后端。 |
+| `enable_dspark_native_sas` | `bool` | `false` | 启用 NPU DSpark 原生 SparseAttnSharedkv 语义。旧版算子若不接受非空 `ori_sparse_indices`，可能在 tiling 阶段终止进程；请保持关闭以使用 q_len=1 兼容模式。 |
 
 ## DiTConfig
 

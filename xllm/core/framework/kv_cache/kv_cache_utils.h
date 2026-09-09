@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,6 +44,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
+#include "framework/kv_cache/logical_cache_layout.h"
 
 namespace xllm {
 
@@ -56,7 +57,7 @@ class MLUHostMemoryRegion;
 
 struct KVCacheCreateOptions {
   PROPERTY(torch::Device, device) = torch::Device(torch::kCPU);
-  // kvcache dtype for key/value cacahe, index cache
+  // kvcache dtype for key/value cache, index cache
   PROPERTY(torch::ScalarType, dtype) = torch::kBFloat16;
   // ssm dtype for linear attention layers
   PROPERTY(torch::ScalarType, ssm_dtype) = torch::kBFloat16;
@@ -73,6 +74,10 @@ struct KVCacheCreateOptions {
   PROPERTY(bool, enable_sleep_mode) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
+  // Empty keeps the legacy full allocation. Otherwise false means that the
+  // layer holds no blocks of its own and instead views the shared layerwise
+  // scratch cache.
+  PROPERTY(std::vector<bool>, layer_cache_owned);
   // Empty keeps the legacy all-layer behavior. Otherwise each entry controls
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
@@ -139,6 +144,7 @@ struct KVCacheTensor {
   torch::Tensor tensor;
   int32_t group_id = cache_group_id(BlockType::KV);
   bool sequence_scoped = false;
+  std::optional<LogicalShardDescriptor> shard_descriptor;
 };
 
 using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;

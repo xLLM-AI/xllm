@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,7 +46,7 @@ class VLMEngine : public Engine {
 
   const runtime::Options& options() const { return options_; }
 
-  bool init() override;
+  bool init(MasterStatus master_status) override;
 
   void update_last_step_result(std::vector<Batch>& batch) override;
 
@@ -54,7 +54,9 @@ class VLMEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const override;
 
  private:
-  bool init_model();
+  template <typename TargetEngine>
+  friend class SpeculativeEngineBase;
+  bool init_model(MasterStatus master_status);
   KVCacheCapacity estimate_kv_cache_capacity();
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap);
   std::vector<ForwardInput> prepare_inputs(std::vector<Batch>& batch);

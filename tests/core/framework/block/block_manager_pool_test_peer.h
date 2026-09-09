@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,11 +21,14 @@ limitations under the License.
 
 namespace xllm {
 
-// Test-only accessor for BlockManagerPool internals. Exposes the private LINEAR
-// leaf so tests can seed checkpoints directly the way the scheduler does while
-// resolving cache ops, without widening the production API surface.
+// Test-only accessor for BlockManagerPool internals. Exposes DP selection and
+// the private LINEAR leaf without widening the production API surface.
 class BlockManagerPoolTestPeer final {
  public:
+  static int32_t select_dp_rank(BlockManagerPool& pool) {
+    return pool.select_dp_rank();
+  }
+
   static LinearStateBlockManager* linear_leaf(BlockManagerPool& pool,
                                               int32_t dp_rank) {
     if (!pool.options_.enable_linear_state()) {

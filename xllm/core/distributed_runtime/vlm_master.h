@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,14 +32,13 @@ limitations under the License.
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
+#include "framework/request/vlm_request_factory.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "master.h"
 #include "scheduler/continuous_scheduler.h"
 #include "xllm/processors/multimodal_processor.h"
 
 namespace xllm {
-
-struct MMData;
 
 class VLMMaster : public Master {
  public:
@@ -56,7 +55,8 @@ class VLMMaster : public Master {
   void handle_request(std::vector<Message> messages,
                       RequestParams sp,
                       std::string payload,
-                      OutputCallback callback);
+                      OutputCallback callback,
+                      bool use_prompt_as_is = false);
 
   // batch completion
   void handle_batch_request(std::vector<std::string> prompts,
@@ -86,33 +86,23 @@ class VLMMaster : public Master {
 
  private:
   using Task = folly::Function<void()>;
-  std::shared_ptr<Request> build_request(std::string prompt,
-                                         std::vector<int32_t> prompt_tokens,
-                                         MMData mm_data,
-                                         RequestParams sp,
-                                         OutputCallback callback);
-
-  std::shared_ptr<Request> generate_request(std::string prompt,
-                                            MMData mm_data,
-                                            RequestParams sp,
-                                            OutputCallback callback);
-
-  std::shared_ptr<Request> generate_request(std::vector<Message> messages,
-                                            RequestParams sp,
-                                            std::string payload,
-                                            OutputCallback callback);
 
   std::unique_ptr<Scheduler> scheduler_;
 
   // model args
   ModelArgs model_args_;
 
-  // thread pool for handling requests
+  // thread pool for handling requests. Its worker lambdas dereference
+  // request_factory_ and scheduler_, so the pool is explicitly reset
+  // (drained/joined) in ~VLMMaster before those members are destroyed.
   std::unique_ptr<ThreadPool> threadpool_;
 
   std::unique_ptr<JinjaChatTemplate> chat_template_;
   std::unique_ptr<MultimodalProcessorBase> processor_;
   std::shared_ptr<Tokenizer> tokenizer_;
+
+  // builds Request aggregates from prompts/messages + multimodal data
+  std::unique_ptr<VLMRequestFactory> request_factory_;
 
   // thread for moving forward the scheduler
   std::thread loop_thread_;
@@ -122,19 +112,6 @@ class VLMMaster : public Master {
 
   // flag to indicate if the handler is running
   std::atomic_bool running_{false};
-};
-
-class VLMAssistantMaster : public Master {
- public:
-  explicit VLMAssistantMaster(const Options& options);
-  ~VLMAssistantMaster();
-  void run() override;
-
-  static void handle_signal(int signum) { running_ = false; }
-
- private:
-  std::thread loop_thread_;
-  static volatile bool running_;
 };
 
 }  // namespace xllm

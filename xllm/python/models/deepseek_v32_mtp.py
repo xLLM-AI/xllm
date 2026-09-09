@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,8 +22,6 @@ the next MTP step.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
-
 import torch
 import torch.nn as nn
 
@@ -34,20 +32,28 @@ from xllm.python.models.deepseek_v32 import (
     DeepseekV3ForCausalLM,
     DeepseekYarnRotaryEmbedding,
 )
+from xllm.python.models.weight_utils import W8A8WeightLoader
+
+# The loader strips "model.", so a bare "shared_head.norm.weight" needs no entry.
+_MTP_NORM_ALIASES: dict[str, tuple[str, ...]] = {
+    "model.norm.weight": (
+        "model.norm.weight",
+        "model.final_norm.weight",
+        "model.shared_head.norm.weight",
+    ),
+}
 
 
 class DeepseekV32MtpModel(nn.Module):
     """MTP body matching ``MtpModelImplBase`` and ``DeepseekV32MtpModel``."""
 
-    def __init__(
-        self, cfg: DeepseekV3Config, dtype: torch.dtype, device: torch.device
-    ) -> None:
+    def __init__(self, cfg: DeepseekV3Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         tp = cfg.tp_size
         assert cfg.hidden_size % tp == 0
 
         self.cfg = cfg
-        self.embed_tokens: Optional[nn.Module] = None
+        self.embed_tokens: nn.Module | None = None
         self.eh_proj = ColumnParallelLinear(
             2 * cfg.hidden_size,
             cfg.hidden_size // tp,
@@ -66,12 +72,7 @@ class DeepseekV32MtpModel(nn.Module):
         )
         self.enorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.hnorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
-        self.layers = nn.ModuleList(
-            [
-                DeepseekV3DecoderLayer(cfg, i, dtype, device)
-                for i in range(cfg.n_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([DeepseekV3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.rotary = DeepseekYarnRotaryEmbedding(
             cfg.qk_rope_head_dim,
@@ -91,56 +92,33 @@ class DeepseekV32MtpModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_embedding: Optional[torch.Tensor] = None,
+        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.embed_tokens is not None
         token_hidden = self.embed_tokens(input_ids)
         if input_embedding is None:
             input_embedding = token_hidden
 
-        rotated_embedding = (
-            self.rot(input_embedding) if self.enable_rot else input_embedding
-        )
-        h = self.eh_proj(
-            torch.cat((self.enorm(token_hidden), self.hnorm(rotated_embedding)), dim=-1)
-        )
+        rotated_embedding = self.rot(input_embedding) if self.enable_rot else input_embedding
+        enorm_out = self.enorm(token_hidden)
+        hnorm_out = self.hnorm(rotated_embedding)
+
+        h = self.eh_proj(torch.cat((enorm_out, hnorm_out), dim=-1))
+
         positions = positions.to(torch.int64).contiguous()
-        cos_sin_cache = self.rotary.cos_sin_cache
-        residual: Optional[torch.Tensor] = None
+        half_rope_cos, half_rope_sin, rope_cos, rope_sin = self.rotary(positions)
+        residual: torch.Tensor | None = None
         for layer in self.layers:
-            h, residual = layer(h, residual, positions, cos_sin_cache)
+            h, residual = layer(
+                h,
+                residual,
+                half_rope_cos,
+                half_rope_sin,
+                rope_cos,
+                rope_sin,
+            )
         h, _ = self.norm(h, residual)
         return h
-
-
-class _MtpStateDictView:
-    """Add aliases for the two MTP checkpoint naming conventions."""
-
-    def __init__(self, state_dict: object) -> None:
-        self._state_dict = state_dict
-
-    @staticmethod
-    def _aliases(name: str) -> Iterable[str]:
-        if name == "model.norm.weight":
-            yield "model.norm.weight"
-            yield "model.final_norm.weight"
-            yield "model.shared_head.norm.weight"
-            yield "shared_head.norm.weight"
-            return
-        yield name
-        if name.startswith("model."):
-            yield name[len("model.") :]
-        else:
-            yield "model." + name
-
-    def has(self, name: str) -> bool:
-        return any(self._state_dict.has(alias) for alias in self._aliases(name))
-
-    def get_tensor(self, name: str) -> torch.Tensor:
-        for alias in self._aliases(name):
-            if self._state_dict.has(alias):
-                return self._state_dict.get_tensor(alias)
-        raise KeyError(name)
 
 
 class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
@@ -151,42 +129,34 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
         self.model = DeepseekV32MtpModel(self.cfg, self.dtype, self.device)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        views = [_MtpStateDictView(state_dict) for state_dict in state_dicts]
+        loader = W8A8WeightLoader(
+            self,
+            state_dicts,
+            self.cfg.tp_size,
+            self.cfg.tp_rank,
+            src_prefixes=("", "model."),
+            name_aliases=_MTP_NORM_ALIASES,
+        )
         super().load_weights(
-            views,
+            state_dicts,
             tp_rank,
             tp_size,
             load_lm_head=False,
             load_embedding=False,
+            loader=loader,
         )
 
-        def find(name: str):
-            for state_dict in views:
-                if state_dict.has(name):
-                    return state_dict
-            return None
-
-        def copy_if_present(
-            module_name: str, *aliases: str, required: bool = False
-        ) -> bool:
-            state_dict = find(module_name + ".weight")
-            if state_dict is None:
-                for alias in aliases:
-                    state_dict = find(alias + ".weight")
-                    if state_dict is not None:
-                        break
-            if state_dict is None:
+        def copy_if_present(module_name: str, required: bool = False) -> bool:
+            key = module_name + ".weight"
+            if not loader.has(key):
                 if required:
-                    raise KeyError(
-                        f"missing required MTP weight: {module_name}.weight"
-                    )
+                    raise KeyError(f"missing required MTP weight: {key}")
                 return False
-            tensor = state_dict.get_tensor(module_name + ".weight")
-            parameter = self.get_parameter("model." + module_name + ".weight")
+            tensor = loader.load_tensor(key)
+            parameter = self.get_parameter("model." + key)
             if tensor.shape != parameter.shape and tensor.dim() == 2:
-                part = tensor.shape[0] // self.cfg.tp_size
-                tensor = tensor.narrow(0, self.cfg.tp_rank * part, part)
-            parameter.data.copy_(tensor.to(dtype=parameter.dtype, device=parameter.device))
+                tensor = loader.shard(tensor, dim=0)
+            loader.copy_in("model." + key, tensor)
             return True
 
         copy_if_present("eh_proj", required=True)

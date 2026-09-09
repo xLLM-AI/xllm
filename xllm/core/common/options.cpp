@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +36,7 @@ std::string Options::to_string() const {
      << max_tokens_per_chunk_for_prefill()
      << ", num_speculative_tokens: " << num_speculative_tokens()
      << ", speculative_algorithm: " << speculative_algorithm()
+     << ", draft_sampling_mode: " << draft_sampling_mode()
      << ", speculative_suffix_cache_max_depth: "
      << speculative_suffix_cache_max_depth()
      << ", speculative_suffix_max_spec_factor: "
@@ -80,6 +81,7 @@ std::string Options::to_string() const {
      << ", prefetch_batch_size: " << prefetch_batch_size()
      << ", layers_wise_copy_batchs: " << layers_wise_copy_batchs()
      << ", store_protocol: " << store_protocol()
+     << ", store_rdma_devices: " << store_rdma_devices()
      << ", store_master_server_address: " << store_master_server_address()
      << ", store_metadata_server: " << store_metadata_server()
      << ", store_local_hostname: " << store_local_hostname()

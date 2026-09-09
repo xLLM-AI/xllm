@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -87,7 +87,7 @@ struct XLLM_CAPI_EXPORT XLLM_InitLLMOptions {
   int block_size = 128;
 
   // Max gpu memory size for kv cache. Default is 0, which means cache size is
-  // caculated by available memory
+  // calculated by available memory
   int max_cache_size = 0;
 
   // Max number of tokens per batch
@@ -203,13 +203,13 @@ struct XLLM_CAPI_EXPORT XLLM_RequestParams {
   // based on their existing in the prompt. default = 0.0
   float presence_penalty = 0.0;
 
-  // Repetition penalty to penalize new tokens based on their occurence in the
+  // Repetition penalty to penalize new tokens based on their occurrence in the
   // text. values > 1.0 encourage the model to use new tokens, while values
   // < 1.0 encourage the model to repeat tokens. default = 1.0
   float repetition_penalty = 1.0;
 
   // Temperature of the sampling, between [0, 2]. default = 0.0
-  // higher value will make the ouput more random.
+  // higher value will make the output more random.
   float temperature = 0.0;
 
   // The list of strings to stop generating further tokens.
@@ -283,7 +283,7 @@ struct XLLM_CAPI_EXPORT XLLM_Choice {
   // The log probabilities of output tokens.
   std::optional<std::vector<XLLM_LogProb>> logprobs;
 
-  // The reason of the model stoped generating tokens.
+  // The reason of the model stopped generating tokens.
   // "stop" - the model hit a natural stop point or a provided stop sequence.
   // "length" - the maximum number of tokens specified in the request was
   // reached. "function_call" - the model called a function.

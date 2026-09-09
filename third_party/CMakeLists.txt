@@ -5,6 +5,15 @@ add_subdirectory(minja)
 add_subdirectory(brpc)
 add_subdirectory(smhasher/src)
 add_subdirectory(cpprestsdk)
+if(USE_MUSA AND TARGET cpprest)
+  # mcc_wrapper diagnoses signed conversions in cpprestsdk headers more
+  # aggressively than the host compiler. Keep the suppression local to the
+  # third-party target instead of muting warnings for the whole build.
+  target_compile_options(cpprest PRIVATE
+    -Wno-sign-conversion
+    -Wno-error=sign-conversion
+  )
+endif()
 set(CPPREST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/cpprestsdk/Release/include)
 set(CPPREST_LIB ${CMAKE_BINARY_DIR}/third_party/cpprestsdk/Release/Binaries/libcpprest.a)
 

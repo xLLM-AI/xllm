@@ -1,7 +1,7 @@
 # ASCEND_RT_VISIBLE_DEVICES=0 python examples/generate_beam_search.py --model='/path/models/Qwen2-7B-Instruct'
 # ASCEND_RT_VISIBLE_DEVICES=0,1 python generate_beam_search.py --model='/path/models/Qwen2-7B-Instruct'
 
-from xllm import ArgumentParser, BeamSearchParams, LLM
+from xllm import LLM, ArgumentParser, BeamSearchParams
 
 # Create an LLM.
 parser = ArgumentParser()
@@ -16,10 +16,10 @@ beam_search_params = BeamSearchParams(
 
 outputs = llm.beam_search(
     [
-     {"prompt": "Hello, my name is "},
-     {"prompt": "The president of the United States is "},
-     {"prompt": "The capital of France is "},
-     {"prompt": "The future of AI is "}
+        {"prompt": "Hello, my name is "},
+        {"prompt": "The president of the United States is "},
+        {"prompt": "The capital of France is "},
+        {"prompt": "The future of AI is "},
     ],
     params=beam_search_params,
 )

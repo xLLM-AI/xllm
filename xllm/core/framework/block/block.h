@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -67,6 +67,23 @@ inline constexpr std::array<BlockType, 3> kMultiBlockExportOrder = {
 // backends.
 inline constexpr int32_t cache_group_id(BlockType type) {
   return static_cast<int32_t>(type);
+}
+
+// KV-split widens one source-side logical block across multiple destination
+// blocks. This applies to ordinary KV and every grouped attention-cache pool,
+// but not to the sequence-scoped embedding or recurrent-state slots.
+inline constexpr bool is_kv_split_cache_block_type(BlockType type) {
+  switch (type) {
+    case BlockType::KV:
+    case BlockType::SWA:
+    case BlockType::C4:
+    case BlockType::C128:
+      return true;
+    case BlockType::EMBEDDING:
+    case BlockType::LINEAR:
+      return false;
+  }
+  return false;
 }
 
 inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
@@ -168,7 +185,7 @@ class Block final {
   uint8_t hash_value_[XXH3_128BITS_HASH_VALUE_LEN];
 };
 
-// equeal operator, mainly used for testing
+// equal operator, mainly used for testing
 inline constexpr bool operator==(const Block& lhs, const Block& rhs) {
   return lhs.id() == rhs.id();
 }

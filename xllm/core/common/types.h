@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +36,7 @@ class EngineType {
     VLM = 2,
     DIT = 3,
     REC = 4,
+    VLMSSM = 5,
     INVALID = -1,
   };
 
@@ -47,6 +48,8 @@ class EngineType {
       value_ = SSM;
     } else if (str == "VLM" || str == "vlm") {
       value_ = VLM;
+    } else if (str == "VLMSSM" || str == "vlmssm") {
+      value_ = VLMSSM;
     } else if (str == "DIT" || str == "dit") {
       value_ = DIT;
     } else if (str == "REC" || str == "rec") {
@@ -73,6 +76,8 @@ class EngineType {
       return "SSM";
     } else if (this->value_ == VLM) {
       return "VLM";
+    } else if (this->value_ == VLMSSM) {
+      return "VLMSSM";
     } else if (this->value_ == DIT) {
       return "DIT";
     } else if (this->value_ == REC) {
@@ -306,6 +311,10 @@ struct KVTransferMapping {
 
 struct TransferKVInfo {
   std::string request_id;
+  // True when mappings are scoped to the current KV rank and remote_ids maps
+  // one-to-one to local_ids. False means remote_ids is expanded across all
+  // KV-split ranks and must be filtered before transfer.
+  bool rank_local_mapping = false;
   int32_t dp_rank = 0;
   InstanceInfo remote_instance_info;
 

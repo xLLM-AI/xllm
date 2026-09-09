@@ -4,7 +4,7 @@ sidebar:
   order: 100
 ---
 
-xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. When `--config_json_file` is used, values in the JSON file override command-line flag values. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
+xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. For native configuration, explicitly supplied command-line flags override JSON configuration values, which override compiled defaults. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
 
 > **Device selection**: xLLM no longer provides `--devices` / `--device_id` / `--draft_devices`. The available devices are determined by the visible-device mask environment variables (`ASCEND_RT_VISIBLE_DEVICES` for NPU, `CUDA_VISIBLE_DEVICES` for NVIDIA, `MLU_VISIBLE_DEVICES` for Cambricon, `HIP_VISIBLE_DEVICES` for DCU, `MUSA_VISIBLE_DEVICES` for Moore Threads). Each service process selects one runtime logical device from its visible devices according to its global `node_rank`; visible-device subsetting and reordering are resolved by the hardware runtime. The draft model always shares the selected device with the target model.
 
@@ -12,7 +12,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `config_json_file` | `string` | `""` | Path to a JSON config file. Values in the file override command-line flag values. |
+| `config_json_file` | `string` | `""` | Path to a JSON config file. For native configuration, explicit command-line flags take precedence over file values. |
 | `enable_dump_config_json` | `bool` | `false` | Whether to dump the resolved startup config as JSON. |
 | `dump_config_json_file` | `string` | `"xllm_config.json"` | Path to write the resolved startup config as JSON. Used only when `enable_dump_config_json=true`. |
 
@@ -80,13 +80,14 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `prefetch_timeout` | `uint32` | `0` | Timeout for prefetching from KV Cache Store. |
+| `prefetch_timeout` | `uint32` | `0` | Stops issuing new KV Cache Store prefetch batches after the timeout and waits for in-flight batches; `0` waits indefinitely. |
 | `prefetch_batch_size` | `uint32` | `2` | Copy batch size for prefetching from KV Cache Store. |
 | `layers_wise_copy_batchs` | `uint32` | `4` | Number of batches for layer-wise H2D copy. |
 | `host_blocks_factor` | `double` | `0.0` | Host block factor, for example `host block num = host_blocks_factor * hbm block num`. |
 | `enable_kvcache_store` | `bool` | `false` | Whether to enable KV Cache Store. |
 | `store_protocol` | `string` | `"tcp"` | KV Cache Store protocol, for example `tcp` or `rdma`. |
-| `store_master_server_address` | `string` | `""` | Address information of the Store master service. |
+| `store_rdma_devices` | `string` | `""` | Comma-separated RDMA HCAs for the embedded xLLM Store client. Empty means Mooncake auto-discovery. |
+| `store_master_server_address` | `string` | `""` | Store master address. Use `IP:Port` in standalone mode or `etcd://IP:Port;IP:Port;...` in etcd-backed HA mode. |
 | `store_metadata_server` | `string` | `""` | Address of the KV Cache Store metadata service. |
 | `store_local_hostname` | `string` | `""` | Local host name of the KV Cache Store client. |
 | `enable_control_h2d_block_num` | `bool` | `false` | Whether to control the number of H2D copy blocks. |
@@ -97,7 +98,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `enable_beam_search_kernel` | `bool` | `false` | Whether to enable the beam search kernel. |
 | `beam_width` | `int32` | `1` | Beam width for beam search. |
-| `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
+| `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA/MUSA/DCU); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
 | `enable_topk_sorted` | `bool` | `true` | Whether to enable sorted top-k output. |
 
 ## SchedulerConfig
@@ -105,7 +106,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `max_tokens_per_batch` | `int32` | `10240` | Maximum number of tokens per batch. |
-| `max_seqs_per_batch` | `int32` | `1024` | Maximum number of sequences per batch. |
+| `max_seqs_per_batch` | `int32` | `200` | Maximum number of sequences per batch. |
 | `enable_schedule_overlap` | `bool` | `false` | Whether to enable schedule overlap, also known as asynchronous scheduling. See [Async Scheduling](/en/features/async_schedule/). |
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | Memory usage threshold during prefill scheduling. |
 | `enable_chunked_prefill` | `bool` | `true` | Whether to enable chunked prefill. |
@@ -114,7 +115,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `use_zero_evict` | `bool` | `false` | Whether to use ZeroEvictionScheduler. See [Zero Evict Scheduler](/en/features/zero_evict_scheduler/). |
 | `max_decode_token_per_sequence` | `int32` | `256` | Maximum decode tokens per sequence for ZeroEvictionScheduler. |
 | `priority_strategy` | `string` | `"fcfs"` | Request priority strategy, for example `fcfs`, `priority`, or `deadline`. |
-| `use_mix_scheduler` | `bool` | `false` | Whether to use MixScheduler to handle prefill and decode uniformly. |
+| `enable_mix_batch` | `bool` | `true` | Whether to run prefill and decode in the same batch. Forced to `false` when CP or MTP is active. |
 | `enable_online_preempt_offline` | `bool` | `true` | Whether online requests can preempt offline requests. |
 | `aggressive_coeff` | `double` | `1.0` | Aggressive coefficient for MixScheduler urgency judgment. |
 | `starve_threshold` | `double` | `1.0` | Starvation threshold coefficient for MixScheduler. |
@@ -145,7 +146,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_eplb` | `bool` | `false` | Whether to enable expert parallel load balance. See [EPLB](/en/features/eplb/). |
 | `redundant_experts_num` | `int32` | `1` | Number of redundant experts per device. |
 | `eplb_update_interval` | `int64` | `1000` | EPLB update interval. |
-| `eplb_update_threshold` | `double` | `0.8` | EPLB update threshold. |
 | `expert_parallel_degree` | `int32` | `0` | Expert parallel degree. |
 | `rank_tablefile` | `string` | `""` | ATB HCCL rank table file. |
 
@@ -171,7 +171,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_pd_ooc` | `bool` | `false` | Whether to enable online-offline co-location in disaggregated PD mode. |
 | `disagg_pd_port` | `int32` | `7777` | Listening port for the disaggregated PD bRPC server. |
 | `instance_role` | `string` | `"DEFAULT"` | Instance role, for example `DEFAULT`, `PREFILL`, `DECODE`, or `MIX`. |
-| `kv_cache_transfer_type` | `string` | `"Mooncake"` | KV Cache transfer type, for example `Mooncake`, `LlmDataDist`, or `HCCL`. |
 | `kv_cache_transfer_mode` | `string` | `"PUSH"` | KV Cache transfer mode, for example `PUSH` or `PULL`. |
 | `transfer_listen_port` | `int32` | `26000` | Listening port for KV Cache Transfer. |
 | `kv_push_dst_rotate` | `bool` | `false` | Rotate the destination-worker traversal order in `push_kv_blocks` per KV-split rank to spread incast across decode workers. |
@@ -182,14 +181,14 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `draft_model` | `string` | `""` | Draft model path. See [MTP](/en/features/mtp/) for MTP usage. |
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
-| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`. |
+| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`, `DSpark`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |
 | `speculative_suffix_max_spec_factor` | `double` | `1.0` | Maximum suffix speculation token factor relative to match length. |
 | `speculative_suffix_max_spec_offset` | `double` | `0.0` | Maximum additive token offset for suffix speculation. |
 | `speculative_suffix_min_token_prob` | `double` | `0.1` | Minimum token probability used in suffix speculation. |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Maximum number of globally cached requests for suffix speculation. `-1` means unlimited; `0` disables it. |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | Whether to use tree-based suffix speculation instead of path speculation. |
-| `enable_opt_validate_probs` | `bool` | `false` | Whether validation uses selected-only `draft_probs [B,S]` directly. If false, selected-only cache values are restored to dense `[B,S,V]`. |
+| `draft_sampling_mode` | `string` | `"greedy"` | How the draft model samples proposal tokens: `greedy`, `probabilistic`. Only `MTP`, `DSpark`, `Eagle3` accept `probabilistic`. |
 | `enable_atb_spec_kernel` | `bool` | `false` | Whether to use the ATB speculative kernel. |
 
 ## ProfileConfig
@@ -238,6 +237,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_split_rmsnorm_rope` | `bool` | `false` | Whether to enable fused split rmsnorm rope ops. |
 | `enable_aclnn_matmul` | `bool` | `false` | Whether to enable the ACLNN matmul backend for supported NPU ATB layers. |
 | `enable_aclnn_swiglu` | `bool` | `false` | Whether to enable the ACLNN SwiGLU backend for supported NPU ATB layers. |
+| `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig
 

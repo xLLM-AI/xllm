@@ -56,9 +56,7 @@ def moe_fused_topk(
     Returns:
         Routing weights and expert indices, both ``[num_tokens, topk]``.
     """
-    return torch.ops.xllm_ops.moe_fused_topk(
-        gating_output, topk, renormalize, scoring_func
-    )
+    return torch.ops.xllm_ops.moe_fused_topk(gating_output, topk, renormalize, scoring_func)
 
 
 def cutlass_fused_moe(
@@ -162,6 +160,7 @@ def grouped_moe(
     topk_group: int,
     num_expert_groups: int,
     renormalize: bool,
+    active_expert_range: list[int] | None = None,
 ) -> torch.Tensor:
     """Route and run grouped quantized experts as one fused operator.
 
@@ -177,6 +176,8 @@ def grouped_moe(
         topk_group: Groups selected per token.
         num_expert_groups: Expert groups the router splits experts into.
         renormalize: Whether to rescale the selected weights to sum to one.
+        active_expert_range: ``[start, end)`` of global expert indices handled
+            by this rank.  Defaults to ``[0, num_experts]`` (all experts).
 
     Returns:
         Hidden states of shape ``[num_tokens, hidden_size]``.
@@ -193,10 +194,10 @@ def grouped_moe(
         topk_group,
         num_expert_groups,
         renormalize,
+        active_expert_range,
     )
     raise NotImplementedError(
-        "grouped_moe has no CUDA kernel; the equivalent CUDA path is "
-        "moe_fused_topk followed by cutlass_fused_moe"
+        "grouped_moe has no CUDA kernel; the equivalent CUDA path is moe_fused_topk followed by cutlass_fused_moe"
     )
 
 

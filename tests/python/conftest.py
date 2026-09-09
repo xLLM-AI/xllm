@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Package stubs for Python tests that run without compiled operators.
-
-Tests of the real platform binding run in isolated subprocesses instead.
-"""
+"""Package stubs for pure-Python tests that run without platform kernels."""
 
 from __future__ import annotations
 
@@ -28,16 +25,23 @@ _PYTHON_ROOT = Path(__file__).parents[2] / "xllm" / "python"
 
 def _install_python_package_stub() -> None:
     kernels = types.ModuleType("xllm.python.kernels")
+    kernels_npu = types.ModuleType("xllm.python.kernels_npu")
+    kernels_npu.__path__ = [str(_PYTHON_ROOT / "kernels_npu")]
     distributed = types.ModuleType("xllm.python.distributed")
+    distributed.dcp_group = lambda _device=None: None
 
     package = types.ModuleType("xllm.python")
     # Keep source submodules importable without executing the real package binding.
     package.__path__ = [str(_PYTHON_ROOT)]
     package.kernels = kernels
+    package.kernels_npu = kernels_npu
     package.distributed = distributed
+
+    distributed.tp_rank = lambda device: 0
 
     sys.modules["xllm.python"] = package
     sys.modules["xllm.python.kernels"] = kernels
+    sys.modules["xllm.python.kernels_npu"] = kernels_npu
     sys.modules["xllm.python.distributed"] = distributed
 
 

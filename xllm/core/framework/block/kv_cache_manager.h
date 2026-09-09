@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -56,6 +56,7 @@ class KVCacheManager {
 
   virtual void allocate_shared(Sequence* sequence) = 0;
   virtual bool supports_host_cache_restore() const { return false; }
+  virtual bool has_pending_async_block_release() const { return false; }
   virtual HostCacheRestorePoint select_host_cache_restore(
       Sequence* sequence,
       size_t /*max_copy_units*/) {
@@ -87,6 +88,13 @@ class KVCacheManager {
   virtual std::vector<size_t> num_free_blocks() const = 0;
   virtual std::vector<size_t> num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
+
+  // Predict which DP rank a fresh sequence would be assigned to during
+  // allocation. Uses the same effective-headroom metric and round-robin
+  // tie-break as the real allocation path so callers can perform accurate
+  // per-rank admission checks before allocation happens.
+  // Returns 0 for single-rank or non-pool managers.
+  virtual int32_t select_dp_rank() const { return 0; }
 
   // Reserve XTensor padding blocks after KV tensors are created.
   virtual void reserve_xtensor_padding_blocks() {}

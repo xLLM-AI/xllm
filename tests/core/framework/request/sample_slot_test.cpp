@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -195,7 +195,7 @@ TEST(SampleSlotTest, RequestPropagatesSampleSlotsToSequenceRuntime) {
 
   request_state.sample_slots = {first_slot, second_slot};
 
-  Request request("sample-req", "", "", request_state);
+  Request request("sample-req", "", "", std::move(request_state));
 
   ASSERT_EQ(request.sequences().size(), 1);
   const auto& runtime_sample_slots = request.sequences()[0]->sample_slots();
@@ -203,6 +203,49 @@ TEST(SampleSlotTest, RequestPropagatesSampleSlotsToSequenceRuntime) {
   EXPECT_EQ(runtime_sample_slots[0].sample_id, 0);
   EXPECT_EQ(runtime_sample_slots[0].token_position, 2);
   EXPECT_EQ(runtime_sample_slots[1].sample_id, 1);
+}
+
+TEST(RequestTest, GenerateOutputReturnsSequenceFailureStatus) {
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  RequestState request_state(
+      "abc",
+      std::vector<int32_t>{10, 11, 12},
+      sampling_param,
+      SchedulerParam{},
+      stopping_checker,
+      /*seq_capacity=*/8,
+      /*n=*/1,
+      /*best_of=*/1,
+      /*logprobs=*/false,
+      /*stream=*/false,
+      /*echo=*/false,
+      /*skip_special_tokens=*/true,
+      /*enable_schedule_overlap=*/true,
+      [](const RequestOutput&) { return true; },
+      OutputsFunc{});
+  Request request("req-error", "", "", std::move(request_state));
+  Status failure(StatusCode::UNKNOWN,
+                 "json_object constrained decoding failed");
+  request.sequences()[0]->fail(failure);
+
+  Sequence copied_sequence(*request.sequences()[0], /*index=*/1);
+  EXPECT_EQ(copied_sequence.sample_sequence_id(), "req-error#1");
+  copied_sequence.reset_finish_state_for_beam_search();
+  EXPECT_TRUE(copied_sequence.finished());
+  ASSERT_TRUE(copied_sequence.error_status().has_value());
+
+  CharTokenizer tokenizer;
+  const RequestOutput output = request.generate_output(tokenizer);
+
+  EXPECT_TRUE(output.finished);
+  ASSERT_TRUE(output.status.has_value());
+  EXPECT_EQ(output.status->code(), StatusCode::UNKNOWN);
+  EXPECT_EQ(output.status->message(),
+            "json_object constrained decoding failed");
+  EXPECT_TRUE(output.outputs.empty());
+  ASSERT_TRUE(output.usage.has_value());
+  EXPECT_EQ(output.usage->num_generated_tokens, 0u);
 }
 
 TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
@@ -247,7 +290,7 @@ TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
 
   request_state.sample_slots = {first_slot, second_slot};
 
-  Request request("sample-req", "", "", request_state);
+  Request request("sample-req", "", "", std::move(request_state));
   auto* seq = request.sequences()[0].get();
   seq->add_blocks(BlockType::KV, manager.allocate(1));
   seq->kv_state().set_kv_cache_tokens_num(seq->num_prompt_tokens());
@@ -332,7 +375,7 @@ TEST(SampleSlotTest, RequestOutputStableSortsOutOfOrderSampleIds) {
 
   request_state.sample_slots = {slot2, slot0, slot1};
 
-  Request request("sample-req", "", "", request_state);
+  Request request("sample-req", "", "", std::move(request_state));
   auto* seq = request.sequences()[0].get();
   seq->add_blocks(BlockType::KV, manager.allocate(1));
   seq->kv_state().set_kv_cache_tokens_num(seq->num_prompt_tokens());
@@ -394,7 +437,7 @@ TEST(SampleSlotTest, OneRecOutputCarriesTokenLogprobsWhenEnabled) {
   Request request("onerec-score",
                   /*x_request_id=*/"",
                   /*x_request_time=*/"",
-                  request_state);
+                  std::move(request_state));
   auto* seq = request.sequences()[0].get();
 
   Token first_token(101);

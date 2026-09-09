@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -76,15 +76,13 @@ TEST(DeepseekV4EplbLoadUtilsTest,
   EXPECT_FALSE(eager_mask.defined());
 }
 
-TEST(DeepseekV4EplbLoadUtilsTest, WarmupDoesNotRecordDispatchLoad) {
-  torch::Tensor expert_load_data = torch::full({1, 4}, 7, torch::kInt64);
-  torch::Tensor receiver_counts = torch::tensor({2, 1, 3, 4}, torch::kInt32);
-
-  dsv4_eplb::record_dispatch_expert_load(
-      receiver_counts, expert_load_data, 0, /*is_graph_warmup=*/true);
-
-  EXPECT_TRUE(
-      torch::equal(expert_load_data, torch::full_like(expert_load_data, 7)));
+TEST(DeepseekV4EplbLoadUtilsTest, DistinguishesEagerAndGraphWarmup) {
+  EXPECT_TRUE(dsv4_eplb::is_eager_warmup(
+      /*is_graph_warmup=*/true, /*enable_graph=*/false));
+  EXPECT_FALSE(dsv4_eplb::is_eager_warmup(
+      /*is_graph_warmup=*/true, /*enable_graph=*/true));
+  EXPECT_FALSE(dsv4_eplb::is_eager_warmup(
+      /*is_graph_warmup=*/false, /*enable_graph=*/false));
 }
 
 }  // namespace

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -24,7 +25,9 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -39,7 +42,9 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "max_tokens_per_batch": 8192,
   "max_seqs_per_batch": 64,
   "model_impl": "py",
-  "python_graph_backend": "cudagraphs"
+  "disable_graph_warmup": true,
+  "python_graph_backend": "cudagraphs",
+  "enable_fia_decode": true
 })json";
 
 inline constexpr std::string_view kUpdatedConfig = R"json({
@@ -50,6 +55,16 @@ inline constexpr std::string_view kUpdatedConfig = R"json({
 inline constexpr std::string_view kMalformedConfig = R"json({
   "block_size":
 })json";
+
+#if !defined(USE_NPU)
+TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
+  JsonReader json_config =
+      config::parse_json_string(R"json({"enable_dspark_native_sas":true})json");
+  KernelConfig kernel_config;
+  EXPECT_DEATH(kernel_config.from_json(json_config),
+               "enable_dspark_native_sas is only supported on NPU");
+}
+#endif
 
 class ConfigJsonFileFlagGuard final {
  public:
@@ -101,7 +116,9 @@ class ConfigFlagGuard final {
         old_max_seqs_per_batch_(FLAGS_max_seqs_per_batch),
         old_model_impl_(FLAGS_model_impl),
         old_python_model_path_(FLAGS_python_model_path),
-        old_python_graph_backend_(FLAGS_python_graph_backend) {}
+        old_disable_graph_warmup_(FLAGS_disable_graph_warmup),
+        old_python_graph_backend_(FLAGS_python_graph_backend),
+        old_enable_fia_decode_(FLAGS_enable_fia_decode) {}
 
   ~ConfigFlagGuard() {
     FLAGS_block_size = old_block_size_;
@@ -111,7 +128,9 @@ class ConfigFlagGuard final {
     FLAGS_max_seqs_per_batch = old_max_seqs_per_batch_;
     FLAGS_model_impl = old_model_impl_;
     FLAGS_python_model_path = old_python_model_path_;
+    FLAGS_disable_graph_warmup = old_disable_graph_warmup_;
     FLAGS_python_graph_backend = old_python_graph_backend_;
+    FLAGS_enable_fia_decode = old_enable_fia_decode_;
   }
 
  private:
@@ -122,7 +141,9 @@ class ConfigFlagGuard final {
   int32_t old_max_seqs_per_batch_;
   std::string old_model_impl_;
   std::string old_python_model_path_;
+  bool old_disable_graph_warmup_;
   std::string old_python_graph_backend_;
+  bool old_enable_fia_decode_;
 };
 
 class StartupConfigGuard final {
@@ -135,6 +156,7 @@ class StartupConfigGuard final {
         old_model_impl_(model_config_.model_impl()),
         old_python_model_path_(model_config_.python_model_path()),
         old_python_graph_backend_(execution_config_.python_graph_backend()),
+        old_enable_fia_decode_(execution_config_.enable_fia_decode()),
         old_block_size_(kv_cache_config_.block_size()),
         old_enable_prefix_cache_(kv_cache_config_.enable_prefix_cache()),
         old_max_tokens_per_batch_(scheduler_config_.max_tokens_per_batch()),
@@ -145,7 +167,8 @@ class StartupConfigGuard final {
   ~StartupConfigGuard() {
     model_config_.model_impl(old_model_impl_)
         .python_model_path(old_python_model_path_);
-    execution_config_.python_graph_backend(old_python_graph_backend_);
+    execution_config_.python_graph_backend(old_python_graph_backend_)
+        .enable_fia_decode(old_enable_fia_decode_);
     kv_cache_config_.block_size(old_block_size_)
         .enable_prefix_cache(old_enable_prefix_cache_);
     scheduler_config_.max_tokens_per_batch(old_max_tokens_per_batch_)
@@ -161,6 +184,7 @@ class StartupConfigGuard final {
   std::string old_model_impl_;
   std::string old_python_model_path_;
   std::string old_python_graph_backend_;
+  bool old_enable_fia_decode_;
   int32_t old_block_size_;
   bool old_enable_prefix_cache_;
   int32_t old_max_tokens_per_batch_;
@@ -252,15 +276,25 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   // model and python_model_path are command-line-only: from_json neither reads
   // them nor touches their gflags, so both keep their pre-call values.
   EXPECT_EQ(model_config.python_model_path(), "");
+  EXPECT_TRUE(execution_config.disable_graph_warmup());
   EXPECT_EQ(execution_config.python_graph_backend(), "cudagraphs");
+  EXPECT_TRUE(execution_config.enable_fia_decode());
 
   EXPECT_EQ(FLAGS_model_impl, "py");
   EXPECT_EQ(FLAGS_python_model_path, old_python_model_path);
+  EXPECT_TRUE(FLAGS_disable_graph_warmup);
   EXPECT_EQ(FLAGS_python_graph_backend, "cudagraphs");
+  EXPECT_TRUE(FLAGS_enable_fia_decode);
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
+}
+
+TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {
+  const ExecutionConfig execution_config;
+
+  EXPECT_FALSE(execution_config.disable_graph_warmup());
 }
 
 TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {
@@ -307,6 +341,27 @@ TEST(ConfigJsonTest, ParallelConfigReadsContextParallelSize) {
   EXPECT_EQ(parallel_config.cp_size(), 4);
 }
 
+TEST(KVCacheStoreConfigTest, ReadsAndExportsRdmaDevices) {
+  KVCacheStoreConfig default_config;
+  EXPECT_TRUE(default_config.store_rdma_devices().empty());
+  const std::vector<std::string>& option_names =
+      KVCacheStoreConfig::option_category().option_names;
+  EXPECT_NE(
+      std::find(option_names.begin(), option_names.end(), "store_rdma_devices"),
+      option_names.end());
+
+  JsonReader json_config = config::parse_json_string(
+      R"json({"store_rdma_devices":"mlx5_0,mlx5_1"})json");
+  KVCacheStoreConfig config;
+  config.from_json(json_config);
+  EXPECT_EQ(config.store_rdma_devices(), "mlx5_0,mlx5_1");
+
+  nlohmann::ordered_json exported;
+  config.append_config_json(exported);
+  EXPECT_EQ(exported.at("store_rdma_devices").get<std::string>(),
+            "mlx5_0,mlx5_1");
+}
+
 TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
   google::CommandLineFlagInfo flag_info;
   EXPECT_TRUE(google::GetCommandLineFlagInfo("cp_size", &flag_info));
@@ -315,6 +370,17 @@ TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
   const std::string removed_flag = std::string("enable_") + "prefill_sp";
   EXPECT_FALSE(
       google::GetCommandLineFlagInfo(removed_flag.c_str(), &flag_info));
+}
+
+TEST(ConfigJsonTest, RegistersExplicitFiaDecodeCommandLineOption) {
+  google::CommandLineFlagInfo flag_info;
+  EXPECT_TRUE(google::GetCommandLineFlagInfo("enable_fia_decode", &flag_info));
+  EXPECT_EQ(flag_info.default_value, "false");
+  EXPECT_FALSE(
+      google::GetCommandLineFlagInfo("disable_fia_decode", &flag_info));
+
+  const ExecutionConfig execution_config;
+  EXPECT_FALSE(execution_config.enable_fia_decode());
 }
 
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
@@ -591,7 +657,9 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
 
   ModelConfig::get_instance().model_impl("python").python_model_path(
       "/tmp/xllm-python-model");
-  ExecutionConfig::get_instance().python_graph_backend("cudagraphs");
+  ExecutionConfig::get_instance()
+      .python_graph_backend("cudagraphs")
+      .enable_fia_decode(true);
   KVCacheConfig::get_instance().block_size(256).enable_prefix_cache(false);
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(2048)
@@ -606,6 +674,7 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   EXPECT_EQ(config_json.at("model_impl").get<std::string>(), "python");
   EXPECT_EQ(config_json.at("python_graph_backend").get<std::string>(),
             "cudagraphs");
+  EXPECT_TRUE(config_json.at("enable_fia_decode").get<bool>());
   EXPECT_EQ(config_json.at("block_size").get<int32_t>(), 256);
   EXPECT_FALSE(config_json.at("enable_prefix_cache").get<bool>());
   EXPECT_EQ(config_json.at("max_tokens_per_batch").get<int32_t>(), 2048);

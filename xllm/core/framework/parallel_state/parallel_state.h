@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <functional>
+#include <vector>
 
 #include "parallel_args.h"
 #include "process_group.h"
@@ -69,12 +70,6 @@ torch::Tensor reduce(torch::Tensor& input, ProcessGroup* process_group);
 
 torch::Tensor reduce_scatter(const torch::Tensor& input,
                              ProcessGroup* process_group);
-
-// Global ranks in this rank's CP group, ordered by CP rank.
-std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
-                                            int32_t world_size,
-                                            int32_t dp_size,
-                                            int32_t cp_size);
 
 torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,

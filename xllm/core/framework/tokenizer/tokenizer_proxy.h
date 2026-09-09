@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,6 +33,8 @@ class TokenizerProxy : public Tokenizer {
 
   std::string decode(const Slice<int32_t>& ids,
                      bool skip_special_tokens) const override;
+
+  std::string decode_token(int32_t id) const override;
 
   bool decode(const Slice<int32_t>& token_ids,
               bool skip_special_tokens,

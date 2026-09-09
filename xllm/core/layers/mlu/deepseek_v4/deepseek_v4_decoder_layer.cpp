@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -94,10 +94,18 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
       DeepseekV4Attention(
           model_args, quant_args, parallel_args, options, layer_id_));
 
+  const std::shared_ptr<ModelStreamRegistry>& stream_registry =
+      context.stream_registry();
   sparse_moe_ = register_module(
       "mlp",
       DeepseekV4SparseMoEBlock(
-          model_args, quant_args, parallel_args, options, use_hash_));
+          model_args,
+          quant_args,
+          parallel_args,
+          options,
+          use_hash_,
+          stream_registry->get(ExecutionStreamRole::COMMUNICATION),
+          stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
 }
 
 void DeepseekV4DecoderLayerImpl::set_cache_mapping(
@@ -176,7 +184,8 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     const ModelInputParams& input_params,
     const std::optional<torch::Tensor>& input_ids,
     std::optional<DeepseekV4PendingMHC>* pending_mhc,
-    bool is_last_layer) {
+    bool is_last_layer,
+    const mlu_v4_cp::DeepseekV4CpContext* cp_context) {
   (void)positions;
 
   residual = std::nullopt;
@@ -204,7 +213,7 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   }
   torch::Tensor attn_output;
   std::tie(attn_output, std::ignore) =
-      attention_->forward(attn_metadata, attn_input, kv_cache);
+      attention_->forward(attn_metadata, attn_input, kv_cache, cp_context);
 
   torch::Tensor residual_ffn;
   DeepseekV4HCPreOutput ffn_hc;
@@ -223,10 +232,24 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     ffn_hc = ffn_hc_pre_->forward(x);
     ffn_input = std::get<0>(ffn_norm_->forward(ffn_hc.output));
   }
-  std::optional<torch::Tensor> ids = route_input_ids(ffn_input, input_ids);
-  FusedMoEImpl::RouteInfo route_info = sparse_moe_->prep_route(ffn_input, ids);
-  torch::Tensor ffn_output = sparse_moe_->forward_selected(
-      ffn_input, route_info.reduce_weight, route_info.expert_id, input_params);
+  torch::Tensor ffn_output;
+  if (cp_context != nullptr) {
+    std::optional<torch::Tensor> local_ids = std::nullopt;
+    if (use_hash_) {
+      CHECK(input_ids.has_value() && input_ids.value().defined());
+      local_ids =
+          mlu_v4_cp::shard_rows(input_ids.value().reshape({-1}), *cp_context);
+    }
+    ffn_output = sparse_moe_->forward_cp(ffn_input, local_ids, *cp_context);
+  } else {
+    std::optional<torch::Tensor> ids = route_input_ids(ffn_input, input_ids);
+    FusedMoEImpl::RouteInfo route_info =
+        sparse_moe_->prep_route(ffn_input, ids);
+    ffn_output = sparse_moe_->forward_selected(ffn_input,
+                                               route_info.reduce_weight,
+                                               route_info.expert_id,
+                                               input_params);
+  }
   if (use_fused_mhc && !is_last_layer) {
     pending_mhc->emplace(DeepseekV4PendingMHC{
         ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb});

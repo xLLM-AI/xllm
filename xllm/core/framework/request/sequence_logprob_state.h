@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,8 +29,26 @@ namespace xllm {
 
 class LogprobState {
  public:
-  LogprobState(int64_t num_prompt_tokens, size_t capacity);
+  // `enable_logprobs` / `enable_top_logprobs` gate the per-position buffers:
+  // when a request does not produce logprobs they stay empty (size 0) and cost
+  // nothing, instead of eagerly allocating + zero-initializing capacity-sized
+  // vectors. All readers are gated on the same logprobs flag (or bounds-check),
+  // so an empty buffer is safe. See Sequence::Sequence for how the flags are
+  // derived.
+  LogprobState(int64_t num_prompt_tokens,
+               size_t capacity,
+               bool enable_logprobs,
+               bool enable_top_logprobs);
+  // Empty state (no buffers). Lets Sequence hold a LogprobState by value and
+  // assign the real one once capacity/flags are known, avoiding a heap
+  // allocation + pointer indirection per sequence.
+  LogprobState() = default;
   ~LogprobState() = default;
+
+  LogprobState(const LogprobState&) = default;
+  LogprobState& operator=(const LogprobState&) = default;
+  LogprobState(LogprobState&&) = default;
+  LogprobState& operator=(LogprobState&&) = default;
 
   // for generated tokens
   float get_acc_logprob(int64_t num_tokens);
@@ -66,7 +84,7 @@ class LogprobState {
   }
 
  private:
-  int64_t num_prompt_tokens_;
+  int64_t num_prompt_tokens_ = 0;
   std::vector<std::optional<float>> logprobs_;
   // accumulated log probability of the sequence
   float acc_logprob_ = 0.0;

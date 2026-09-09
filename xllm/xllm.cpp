@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,9 +35,7 @@ namespace py = pybind11;
 #include "core/common/metrics.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/master.h"
-#include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -114,6 +112,14 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const DiTConfig& dit_config = DiTConfig::get_instance();
   const RecConfig& rec_config = RecConfig::get_instance();
 
+  if (kv_cache_store_config.enable_kvcache_store()) {
+    CHECK(kv_cache_config.enable_prefix_cache())
+        << "KV cache Store requires --enable_prefix_cache=true.";
+    CHECK_GT(kv_cache_store_config.host_blocks_factor(), 1.0)
+        << "KV cache Store requires --host_blocks_factor > 1 so Host cache "
+           "blocks can serve as transfer destinations.";
+  }
+
 #if !defined(USE_NPU)
   CHECK(!speculative_config.enable_mtp_draft_body_tp1())
       << "enable_mtp_draft_body_tp1 is only supported on the NPU backend";
@@ -148,6 +154,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
           scheduler_config.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(speculative_config.num_speculative_tokens())
       .speculative_algorithm(speculative_config.speculative_algorithm())
+      .draft_sampling_mode(speculative_config.draft_sampling_mode())
       .speculative_suffix_cache_max_depth(
           speculative_config.speculative_suffix_cache_max_depth())
       .speculative_suffix_max_spec_factor(
@@ -171,7 +178,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_eplb(eplb_config.enable_eplb())
       .redundant_experts_num(eplb_config.redundant_experts_num())
       .eplb_update_interval(eplb_config.eplb_update_interval())
-      .eplb_update_threshold(eplb_config.eplb_update_threshold())
+      .eplb_min_peak_load_improvement(
+          eplb_config.eplb_min_peak_load_improvement())
       .rank_tablefile(eplb_config.rank_tablefile())
       .expert_parallel_degree(eplb_config.expert_parallel_degree())
       .enable_chunked_prefill(scheduler_config.enable_chunked_prefill())
@@ -205,13 +213,12 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_online_preempt_offline(
           scheduler_config.enable_online_preempt_offline())
       .host_blocks_factor(kv_cache_store_config.host_blocks_factor())
-      .enable_kvcache_store(kv_cache_store_config.enable_kvcache_store() &&
-                            kv_cache_config.enable_prefix_cache() &&
-                            (kv_cache_store_config.host_blocks_factor() > 1.0))
+      .enable_kvcache_store(kv_cache_store_config.enable_kvcache_store())
       .prefetch_timeout(kv_cache_store_config.prefetch_timeout())
       .prefetch_batch_size(kv_cache_store_config.prefetch_batch_size())
       .layers_wise_copy_batchs(kv_cache_store_config.layers_wise_copy_batchs())
       .store_protocol(kv_cache_store_config.store_protocol())
+      .store_rdma_devices(kv_cache_store_config.store_rdma_devices())
       .store_master_server_address(
           kv_cache_store_config.store_master_server_address())
       .store_metadata_server(kv_cache_store_config.store_metadata_server())
@@ -472,7 +479,7 @@ int run() {
   }
 
 // disable block copy kernel on unsupported backends
-#if !defined(USE_NPU) && !defined(USE_CUDA)
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
   beam_search_config.enable_block_copy_kernel(false);
 #endif
   std::string model_type = "";
@@ -536,20 +543,8 @@ int run() {
     LOG(INFO) << "XTensor initialized with " << num_pages << " physical pages";
   }
 
-  std::unique_ptr<Master> master;
-  // working node
-  if (options.node_rank() != 0) {
-    if (model_config.backend() == "dit") {
-      master = std::make_unique<DiTAssistantMaster>(options);
-    } else if (model_config.backend() == "vlm") {
-      master = std::make_unique<VLMAssistantMaster>(options);
-    } else {
-      master = std::make_unique<LLMAssistantMaster>(options);
-    }
-  } else {
-    // master node
-    master = create_master(model_config.backend(), options);
-  }
+  std::unique_ptr<Master> master =
+      create_master(model_config.backend(), options);
   master->run();
 
   // supported models
@@ -570,6 +565,10 @@ int run() {
                  << service_config.port();
       return -1;
     }
+  } else {
+    // No HTTP server on this rank. Stay alive until SIGINT/SIGTERM so
+    // the destructor can stop the idle thread instead of hanging on it.
+    master->wait();
   }
 
   return 0;

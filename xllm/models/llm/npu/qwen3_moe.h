@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -124,7 +124,11 @@ TORCH_MODULE(Qwen3MoeDecoderLayer);
 class Qwen3MoeModelImpl : public torch::nn::Module {
  public:
   Qwen3MoeModelImpl(const ModelContext& context)
-      : device_(context.get_tensor_options().device()) {
+      : device_(context.get_tensor_options().device()),
+        aux_capture_(
+            context.get_model_args(),
+            context.get_tensor_options(),
+            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
     auto options = context.get_tensor_options();
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
@@ -168,11 +172,6 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     for (int i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
       indices.push_back(i);
     }
-
-    aux_capture_.init(
-        model_args,
-        options,
-        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   // tokens: [num_tokens]
@@ -281,7 +280,6 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     if (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm()) {
       residual = torch::zeros_like(h);
     }
-    aux_capture_.reset_capture_index();
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
@@ -293,9 +291,6 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       if (!input_params.synchronize_layer(i)) {
         return ModelOutput();
       }
-
-      // Intralayer add-norm splits the stream, so pass residual for the add.
-      aux_capture_.capture_layer(static_cast<int32_t>(i), h, residual);
 
       auto& layer = layers_[i];
       const int32_t layer_index = i;
@@ -314,6 +309,8 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       if (deep_stack_size && i < deep_stack_size) {
         h = h + deep_stacks[i];
       }
+      // Intralayer add-norm splits the stream, so pass residual for the add.
+      aux_capture_.capture_layer(layer_index, h, residual);
     }
 
     if (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm())

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,8 +19,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
-#include <optional>
-#include <string>
 #include <vector>
 
 #include "framework/kv_cache/kv_cache_capacity.h"
@@ -33,18 +31,18 @@ namespace xllm {
 namespace {
 
 TEST(HierarchyKVCacheTransferTest,
-     RestoreRegistersReadyEventsForConfiguredLayerGroups) {
+     RoundTripPublishesStrategyLayerReadyGranularity) {
   if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "MLU device is required for hierarchy KV cache transfer.";
+    GTEST_SKIP()
+        << "An accelerator device is required for hierarchy KV transfer.";
   }
 
   constexpr int64_t kBlockCount = 2;
   constexpr int64_t kBlockSize = 4;
-  constexpr int64_t kLayerCount = 3;
+  constexpr int64_t kLayerCount = 4;
   constexpr int64_t kSourceBlockId = 0;
   constexpr int64_t kDestinationBlockId = 1;
   constexpr uint64_t kBatchId = 7;
-  constexpr double kHostBlocksFactor = 2.0;
 
   Device device(/*device_index=*/0);
   device.set_device();
@@ -52,7 +50,6 @@ TEST(HierarchyKVCacheTransferTest,
 
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
-
   ModelArgs model_args;
   model_args.model_type("test_model")
       .n_layers(kLayerCount)
@@ -70,20 +67,18 @@ TEST(HierarchyKVCacheTransferTest,
   allocate_kv_caches(caches, cache_shape, create_options);
   ASSERT_EQ(caches.size(), static_cast<size_t>(kLayerCount));
 
-  for (size_t layer_idx = 0; layer_idx < caches.size(); ++layer_idx) {
-    const double layer_value = static_cast<double>(layer_idx);
-    caches[layer_idx].get_k_cache()[kSourceBlockId].fill_(3.0 + layer_value);
-    caches[layer_idx].get_v_cache()[kSourceBlockId].fill_(7.0 + layer_value);
-    caches[layer_idx].get_k_cache()[kDestinationBlockId].zero_();
-    caches[layer_idx].get_v_cache()[kDestinationBlockId].zero_();
+  for (size_t layer_index = 0; layer_index < caches.size(); ++layer_index) {
+    const double layer_value = static_cast<double>(layer_index);
+    caches[layer_index].get_k_cache()[kSourceBlockId].fill_(3.0 + layer_value);
+    caches[layer_index].get_v_cache()[kSourceBlockId].fill_(7.0 + layer_value);
+    caches[layer_index].get_k_cache()[kDestinationBlockId].zero_();
+    caches[layer_index].get_v_cache()[kDestinationBlockId].zero_();
   }
   ASSERT_EQ(device.synchronize_default_stream(), 0);
 
   HierarchyKVCacheTransfer::Options transfer_options;
-  transfer_options.tp_rank(0)
-      .tp_size(1)
-      .layers(kLayerCount)
-      .host_blocks_factor(kHostBlocksFactor)
+  transfer_options.layers(kLayerCount)
+      .host_blocks_factor(2.0)
       .layers_wise_copy_batchs(2);
   std::unique_ptr<Stream> compute_stream = device.current_stream();
   HierarchyKVCacheTransfer transfer(transfer_options,
@@ -107,10 +102,10 @@ TEST(HierarchyKVCacheTransferTest,
   input_params.meta.batch_id = kBatchId;
   transfer.set_layer_synchronizer(input_params);
   ASSERT_NE(input_params.parallel.layer_wise_load_synchronizer, nullptr);
-  EXPECT_EQ(input_params.parallel.layer_wise_load_synchronizer->size(), 3U);
-  EXPECT_EQ(input_params.parallel.layers_per_bacth_copy, 1U);
-  for (uint32_t layer_idx = 0; layer_idx < kLayerCount; ++layer_idx) {
-    ASSERT_TRUE(input_params.synchronize_layer(layer_idx));
+  EXPECT_EQ(input_params.parallel.layer_wise_load_synchronizer->size(), 2U);
+  EXPECT_EQ(input_params.parallel.layers_per_event, 2U);
+  for (uint32_t layer_index = 0; layer_index < kLayerCount; ++layer_index) {
+    ASSERT_TRUE(input_params.synchronize_layer(layer_index));
   }
 
   for (KVCache& cache : caches) {
@@ -121,75 +116,34 @@ TEST(HierarchyKVCacheTransferTest,
   }
 }
 
-TEST(HierarchyKVCacheTransferTest,
-     QuantizedIndexerRoundTripRestoresIndexAndScale) {
+TEST(HierarchyKVCacheTransferTest, RejectsMixedOffloadBatchBeforeSubmission) {
   if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "MLU device is required for hierarchy KV cache transfer.";
+    GTEST_SKIP()
+        << "An accelerator device is required for hierarchy KV transfer.";
   }
-
-  constexpr int64_t kBlockCount = 2;
-  constexpr int64_t kBlockSize = 4;
-  constexpr int64_t kSourceBlockId = 0;
-  constexpr int64_t kDestinationBlockId = 1;
-  constexpr uint64_t kBatchId = 7;
-  constexpr double kHostBlocksFactor = 2.0;
-
-  HostCacheValidationOptions validation_options;
-  validation_options.host_blocks_factor = kHostBlocksFactor;
-  validation_options.device_block_count = kBlockCount;
-  validation_options.supports_host_kv_offload = true;
-  validation_options.indexer_cache_dtype = "int8";
-  validation_options.model_type = "deepseek_v32";
-  EXPECT_FALSE(validate_host_cache_options(validation_options).has_value());
 
   Device device(/*device_index=*/0);
   device.set_device();
   device.init_device_context();
-
   KVCacheCapacity capacity;
-  capacity.n_blocks(kBlockCount)
-      .block_size(kBlockSize)
-      .enable_indexer_cache_quant(true);
-
+  capacity.n_blocks(2).block_size(4);
   ModelArgs model_args;
-  model_args.model_type("deepseek_v32")
-      .enable_mla(true)
-      .n_heads(8)
-      .n_kv_heads(2)
-      .head_dim(8)
-      .kv_lora_rank(8)
-      .qk_rope_head_dim(4)
-      .index_n_heads(1)
-      .index_head_dim(4);
+  model_args.model_type("test_model")
+      .n_layers(1)
+      .n_heads(2)
+      .n_kv_heads(1)
+      .head_dim(8);
   const KVCacheShape cache_shape(capacity, model_args, /*world_size=*/1);
-
   KVCacheCreateOptions create_options;
   create_options.device(device.unwrap())
-      .dtype(torch::kBFloat16)
+      .dtype(torch::kFloat32)
       .num_layers(1)
-      .model_type("deepseek_v32")
-      .enable_lighting_indexer(true)
-      .enable_indexer_cache_quant(true);
+      .model_type("test_model");
   std::vector<KVCache> caches;
   allocate_kv_caches(caches, cache_shape, create_options);
-  ASSERT_EQ(caches.size(), 1U);
-
-  torch::Tensor source_index = caches[0].get_index_cache()[kSourceBlockId];
-  const std::optional<torch::Tensor> index_scale =
-      caches[0].get_indexer_cache_scale();
-  ASSERT_TRUE(index_scale.has_value());
-  torch::Tensor source_scale = index_scale.value()[kSourceBlockId];
-  source_index.fill_(37);
-  source_scale.fill_(0.625F);
-  caches[0].get_index_cache()[kDestinationBlockId].zero_();
-  index_scale.value()[kDestinationBlockId].zero_();
 
   HierarchyKVCacheTransfer::Options transfer_options;
-  transfer_options.tp_rank(0)
-      .tp_size(1)
-      .layers(1)
-      .host_blocks_factor(kHostBlocksFactor)
-      .layers_wise_copy_batchs(1);
+  transfer_options.layers(1).host_blocks_factor(2.0).layers_wise_copy_batchs(1);
   std::unique_ptr<Stream> compute_stream = device.current_stream();
   HierarchyKVCacheTransfer transfer(transfer_options,
                                     device.unwrap(),
@@ -198,28 +152,18 @@ TEST(HierarchyKVCacheTransferTest,
                                     cache_shape,
                                     create_options);
 
-  BlockTransferInfo offload_info(kSourceBlockId, /*dst_block_id=*/0);
-  offload_info.block_type = BlockType::KV;
-  offload_info.transfer_type = TransferType::D2H2G;
-  EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {offload_info}), 1U);
+  BlockTransferInfo d2h_info(/*src_block_id=*/0, /*dst_block_id=*/0);
+  d2h_info.block_type = BlockType::KV;
+  d2h_info.transfer_type = TransferType::D2H2G;
+  BlockTransferInfo h2d_info(/*src_block_id=*/0, /*dst_block_id=*/1);
+  h2d_info.block_type = BlockType::KV;
+  h2d_info.transfer_type = TransferType::H2D;
 
-  BlockTransferInfo load_info(/*src_block_id=*/0, kDestinationBlockId);
-  load_info.block_type = BlockType::KV;
-  load_info.transfer_type = TransferType::H2D;
-  EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {load_info}), 1U);
-
-  ModelInputParams params;
-  params.meta.batch_id = kBatchId;
-  transfer.set_layer_synchronizer(params);
-  ASSERT_NE(params.parallel.layer_wise_load_synchronizer, nullptr);
-  ASSERT_TRUE(params.parallel.layer_wise_load_synchronizer->synchronize_layer(
-      /*layer_index=*/0));
-
-  EXPECT_TRUE(
-      torch::equal(source_index.cpu(),
-                   caches[0].get_index_cache()[kDestinationBlockId].cpu()));
-  EXPECT_TRUE(torch::equal(source_scale.cpu(),
-                           index_scale.value()[kDestinationBlockId].cpu()));
+  EXPECT_DEATH(
+      {
+        (void)transfer.transfer_kv_blocks(/*batch_id=*/7, {d2h_info, h2d_info});
+      },
+      "mixed transfer types");
 }
 
 }  // namespace

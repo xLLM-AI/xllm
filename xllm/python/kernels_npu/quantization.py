@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+import torch_npu
 
 
 def quant_matmul(
@@ -44,6 +45,16 @@ def quant_matmul(
     Returns:
         The product with shape ``[..., N]`` in ``output_dtype``.
     """
+    if not transpose2:
+        return torch_npu.npu_quant_matmul(
+            x1,
+            x2,
+            scale,
+            offset=offset,
+            pertoken_scale=pertoken_scale,
+            bias=bias,
+            output_dtype=output_dtype,
+        )
     return torch.ops.xllm_ops.quant_matmul(
         x1,
         x2,
@@ -75,9 +86,7 @@ def quantize_per_tensor(
     Returns:
         The quantized tensor with the shape of ``value`` and dtype ``dtype``.
     """
-    return torch.ops.xllm_ops.quantize_per_tensor(
-        value, scales, zero_points, dtype, axis
-    )
+    return torch.ops.xllm_ops.quantize_per_tensor(value, scales, zero_points, dtype, axis)
 
 
 def dynamic_quant(
@@ -97,9 +106,11 @@ def dynamic_quant(
     Returns:
         The quantized tensor and its per-token scale.
     """
-    return torch.ops.xllm_ops.dynamic_quant(
-        value, smooth_scales, group_index, dst_type
-    )
+    return torch.ops.xllm_ops.dynamic_quant(value, smooth_scales, group_index, dst_type)
 
 
-__all__ = ["quant_matmul", "quantize_per_tensor", "dynamic_quant"]
+__all__ = [
+    "quant_matmul",
+    "quantize_per_tensor",
+    "dynamic_quant",
+]

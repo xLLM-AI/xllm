@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ limitations under the License.
 #include <tuple>
 
 #include "attention.h"
+#include "framework/kv_cache/kv_shard_layout.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/process_group.h"
@@ -64,6 +65,18 @@ struct IndexerSPPreOut {
   std::optional<torch::Tensor> q_scale;
 };
 
+struct DcpIndexerLocalCandidates {
+  torch::Tensor scores;
+  torch::Tensor global_slots;
+};
+
+// Bounds the temporary score workspace used by rank-local DCP candidate
+// reconstruction. The score result itself remains [token_count, topk].
+int64_t dcp_indexer_score_rows_per_chunk(int64_t token_count,
+                                         int64_t topk,
+                                         int64_t index_heads,
+                                         int64_t head_dim);
+
 class IndexerImpl : public torch::nn::Module {
  public:
   IndexerImpl() = default;
@@ -89,6 +102,30 @@ class IndexerImpl : public torch::nn::Module {
       bool is_prefill,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt,
       const std::optional<torch::Tensor>& mask = std::nullopt);
+
+  DcpIndexerLocalCandidates forward_dcp_local(
+      const torch::Tensor& x,
+      const torch::Tensor& q_norm,
+      const torch::Tensor& positions,
+      torch::Tensor& k_cache,
+      const AttentionMetadata& attn_metadata,
+      const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
+
+  DcpIndexerLocalCandidates forward_dcp_local_prefill(
+      const torch::Tensor& x,
+      const torch::Tensor& q_norm,
+      const torch::Tensor& positions,
+      torch::Tensor& k_cache,
+      const AttentionMetadata& prefill_metadata,
+      const AttentionMetadata& selector_metadata,
+      const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
+
+  DcpIndexerLocalCandidates forward_dcp_local_prefill_from_sp(
+      const IndexerSPPreOut& pre_out,
+      torch::Tensor& k_cache,
+      const AttentionMetadata& prefill_metadata,
+      const AttentionMetadata& selector_metadata,
+      const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
 
   IndexerSPPreOut sp_pre(const torch::Tensor& x,
                          const torch::Tensor& q_norm,
@@ -136,6 +173,7 @@ class IndexerImpl : public torch::nn::Module {
 
   // Hadamard matrix
   torch::Tensor hadamard_matrix_;
+  std::optional<KVShardLayout> dcp_indexer_layout_;
 
   // Helper function for rotation activation
   torch::Tensor rotate_activation(const torch::Tensor& input,
@@ -214,6 +252,15 @@ class IndexerImpl : public torch::nn::Module {
       const std::optional<torch::Tensor>& k_source_scale,
       const AttentionMetadata& attn_metadata,
       const v32_cp::DeepseekV32CPContext& sp_ctx);
+
+  torch::Tensor score_dcp_local_candidates(
+      const torch::Tensor& q,
+      const torch::Tensor& weights,
+      const torch::Tensor& k_cache,
+      const torch::Tensor& local_slots,
+      const torch::Tensor& context_lens,
+      const std::optional<torch::Tensor>& q_scale,
+      const std::optional<torch::Tensor>& k_cache_scale) const;
 };
 
 TORCH_MODULE(Indexer);

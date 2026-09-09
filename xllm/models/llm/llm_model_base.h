@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -177,10 +177,19 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     embedding_mode_ = context.get_model_args().embedding_mode();
     // register submodules
     model_ = register_module("model", LlmModelType(context));
-    if (!embedding_mode_) {
+    // DFlash2 shares the target lm-head after loading.  Avoid registering a
+    // draft-local copy: assigning lm_head_ later does not remove an already
+    // registered module, so the unused vocabulary projection would otherwise
+    // remain resident on the device.
+    const bool shares_target_lm_head =
+        is_dflash2_draft_model_type(context.get_model_args().model_type());
+    if (!embedding_mode_ && !shares_target_lm_head) {
       lm_head_ = register_module("lm_head", layer::LmHead(context));
-    } else {
+    } else if (embedding_mode_) {
       LOG(INFO) << "Skip registering lm_head in embedding mode.";
+    } else {
+      LOG(INFO) << "Skip registering draft-local lm_head for DFlash2; the "
+                   "target lm_head will be shared after model loading.";
     }
   }
 

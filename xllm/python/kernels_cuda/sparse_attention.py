@@ -74,10 +74,7 @@ def lightning_indexer(
         next_tokens,
         return_value,
     )
-    raise NotImplementedError(
-        "lightning_indexer has no CUDA kernel; sparse attention on CUDA is not "
-        "supported yet"
-    )
+    raise NotImplementedError("lightning_indexer has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
 def lightning_indexer_out(
@@ -115,10 +112,7 @@ def lightning_indexer_out(
         sparse_indices_out,
         sparse_values_out,
     )
-    raise NotImplementedError(
-        "lightning_indexer_out has no CUDA kernel; sparse attention on CUDA is "
-        "not supported yet"
-    )
+    raise NotImplementedError("lightning_indexer_out has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
 def scatter_nd_update(
@@ -134,10 +128,7 @@ def scatter_nd_update(
         updates: Rows written into ``value``.
     """
     del value, indices, updates
-    raise NotImplementedError(
-        "scatter_nd_update has no CUDA kernel; sparse attention on CUDA is not "
-        "supported yet"
-    )
+    raise NotImplementedError("scatter_nd_update has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
 def sparse_flash_attention(
@@ -194,8 +185,7 @@ def sparse_flash_attention(
         sparse_mode,
     )
     raise NotImplementedError(
-        "sparse_flash_attention has no CUDA kernel; sparse attention on CUDA "
-        "is not supported yet"
+        "sparse_flash_attention has no CUDA kernel; sparse attention on CUDA is not supported yet"
     )
 
 
@@ -235,8 +225,53 @@ def sparse_flash_attention_out(
         output,
     )
     raise NotImplementedError(
-        "sparse_flash_attention_out has no CUDA kernel; sparse attention on "
-        "CUDA is not supported yet"
+        "sparse_flash_attention_out has no CUDA kernel; sparse attention on CUDA is not supported yet"
+    )
+
+
+def sparse_flash_attention_lse(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sparse_indices: torch.Tensor,
+    block_table: torch.Tensor | None,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_kv: torch.Tensor | None,
+    query_rope: torch.Tensor | None,
+    key_rope: torch.Tensor | None,
+    scale_value: float,
+    sparse_block_size: int,
+    layout_query: str,
+    layout_kv: str,
+    sparse_mode: int,
+    pre_tokens: int = 9223372036854775807,
+    next_tokens: int = 9223372036854775807,
+    attention_mode: int = 2,
+    return_softmax_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Attend to selected blocks and optionally return softmax max/sum."""
+    del (
+        query,
+        key,
+        value,
+        sparse_indices,
+        block_table,
+        actual_seq_lengths_query,
+        actual_seq_lengths_kv,
+        query_rope,
+        key_rope,
+        scale_value,
+        sparse_block_size,
+        layout_query,
+        layout_kv,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        attention_mode,
+        return_softmax_lse,
+    )
+    raise NotImplementedError(
+        "sparse_flash_attention_lse has no CUDA kernel; sparse attention on CUDA is not supported yet"
     )
 
 
@@ -246,4 +281,5 @@ __all__ = [
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",
+    "sparse_flash_attention_lse",
 ]

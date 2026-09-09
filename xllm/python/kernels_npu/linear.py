@@ -44,4 +44,25 @@ def prepare_row_parallel_weight(
     return torch_npu.npu_format_cast(transposed, _FRACTAL_NZ_FORMAT), True
 
 
-__all__ = ["prepare_row_parallel_weight"]
+def prepare_quant_weight(
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """Pack an INT8 ``[out, in]`` weight for quantized matmul.
+
+    ``torch_npu.npu_quant_matmul`` reads the right-hand operand as ``[K, N]``
+    and benefits substantially from the NPU Fractal-NZ layout. Quantized Python
+    linear layers use the same layout as the checkpoint before this helper is
+    called, so keep the transpose and format conversion together here.  The
+    CPU branch is intentionally a plain transpose for unit tests and weight
+    loading without an initialized NPU.
+    """
+    transposed = weight.transpose(0, 1).contiguous()
+    if weight.device.type == "cpu":
+        return transposed
+    return torch_npu.npu_format_cast(transposed, _FRACTAL_NZ_FORMAT)
+
+
+__all__ = [
+    "prepare_row_parallel_weight",
+    "prepare_quant_weight",
+]

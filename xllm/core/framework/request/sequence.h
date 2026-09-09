@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,6 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -31,6 +32,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/prefix_cache/block_hasher.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/util/slice.h"
@@ -60,6 +62,10 @@ enum class SequenceStage : int8_t {
   CHUNKED_PREFILL = 1,
   // Decode one token.
   DECODE = 2
+};
+
+struct RequestFailureState final {
+  std::optional<Status> status;
 };
 
 struct SequenceParams {
@@ -92,6 +98,8 @@ struct SequenceParams {
   // enable_schedule_overlap or not. default = false.
   bool enable_schedule_overlap = false;
 
+  bool is_graph_warmup = false;
+
   RecType rec_type = RecType::kNone;
 
   int32_t bos_token_id = 0;
@@ -108,6 +116,11 @@ struct SequenceParams {
   // stopping checker
   // reference from request
   StoppingChecker* stopping_checker;  // not owned
+
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar;
+  bool json_reasoning_enabled = false;
+  std::shared_ptr<RequestFailureState> request_failure_state;
+  std::shared_ptr<SpeculativeTokenStats> speculative_token_stats;
 };
 
 class Sequence final {
@@ -120,6 +133,7 @@ class Sequence final {
            const SequenceParams& seq_params);
 
   Sequence(const Sequence& other);
+  Sequence(const Sequence& other, size_t index);
 
   // get mm data
   const MMData& mm_data() const { return mm_data_; }
@@ -191,6 +205,7 @@ class Sequence final {
   void append_token(const Token& token);
   void append_token(int64_t token_id) { append_token(Token(token_id)); }
   void update_token(size_t index, const Token& token);
+  bool restore_json_object_state(const JsonObjectGrammarSnapshot& snapshot);
   void update_last_step_token(const Token& token, size_t token_offset = 0);
   bool has_new_tokens_generated() const {
     return num_tokens_ > stream_output_token_offset_;
@@ -201,6 +216,7 @@ class Sequence final {
   // update embeddings to the sequence
   void update_embeddings(const torch::Tensor& embedding);
   void update_mtp_bootstrap_embedding(const torch::Tensor& embedding);
+  void record_speculative_token_stats(const SpeculativeTokenStats& stats);
   torch::Tensor get_mtp_bootstrap_embedding() const {
     return mtp_bootstrap_embedding_;
   }
@@ -245,7 +261,14 @@ class Sequence final {
     return kv_state_.take_linear_restore_src_block();
   }
   Block copy_block(BlockType type) const { return kv_state_.copy_block(type); }
-  const std::string& request_id() const { return request_id_; }
+  // The request id already lives in sequence_params_; don't keep a second
+  // copy per sequence (a heap allocation each for UUID-length ids).
+  const std::string& request_id() const { return sequence_params_.request_id; }
+  std::string sample_sequence_id() const {
+    return sequence_params_.request_id + "#" + std::to_string(index_);
+  }
+
+  bool is_graph_warmup() const { return sequence_params_.is_graph_warmup; }
   // get input embedding
   torch::Tensor get_input_embedding() const { return input_embedding_; }
 
@@ -290,10 +313,14 @@ class Sequence final {
   }
 
   FinishReason finish_reason() const { return finish_reason_; }
+  const std::optional<Status>& error_status() const {
+    return sequence_params_.request_failure_state->status;
+  }
   // check finish status, use cached value if not invalidated
   bool finished() const;
   // mark sequence as finished (used by rec model multi-round decoding)
   void finish();
+  void fail(Status status);
 
   // get the output of the sequence until the specified number of tokens,
   // returns nullopt if no delta text and not finished
@@ -309,6 +336,11 @@ class Sequence final {
   // get the sampling parameters
   const RequestSamplingParam* sampling_param() const {
     return sequence_params_.sampling_param;
+  }
+
+  const JsonObjectGrammarState* json_object_state() const {
+    return json_object_state_.has_value() ? &json_object_state_.value()
+                                          : nullptr;
   }
 
   // get the stopping criteria
@@ -387,9 +419,6 @@ class Sequence final {
       const Tokenizer& tokenizer,
       std::optional<std::vector<LogProb>>& out_logprobs);
 
-  std::shared_ptr<std::atomic<int32_t>> get_termination_flag() {
-    return termination_flag_;
-  }
   std::vector<std::shared_ptr<std::atomic<uint32_t>>>* get_prefetch_results() {
     return &prefetch_results_;
   }
@@ -449,7 +478,7 @@ class Sequence final {
   int32_t beam_width_cached() const { return beam_width_cached_; }
   int32_t total_rounds_cached() const { return total_rounds_cached_; }
 
-  LogprobState* logprob_state() { return logprob_state_.get(); }
+  LogprobState* logprob_state() { return &logprob_state_; }
   void set_estimated_latency(double estimated_latency) {
     estimated_latency_ = estimated_latency;
   }
@@ -501,6 +530,7 @@ class Sequence final {
 
  private:
   void record_first_token(const Token& token);
+  bool try_commit_json_object_token(int32_t token_id, int64_t token_offset);
 
   // Drop cached block hashes that may be stale after the token at
   // `token_index` was rewritten (beam search / speculative / disagg PD).
@@ -549,7 +579,10 @@ class Sequence final {
   std::optional<size_t> effective_restore_tokens_;
   size_t host_cache_copy_units_ = 0;
 
-  std::unique_ptr<LogprobState> logprob_state_;
+  // Held by value: it is always present after construction, so a unique_ptr
+  // only added a heap allocation per sequence and an indirection on the
+  // per-token update_logprob() path.
+  LogprobState logprob_state_;
 
   // latest token generate time
   absl::Time latest_generate_time_;
@@ -627,6 +660,8 @@ class Sequence final {
 
   std::optional<OneRecState> onerec_state_;
 
+  std::optional<JsonObjectGrammarState> json_object_state_;
+
   // NOTE: MUST FIXME Later
   // record all tokens num in last turn when the request is
   // interrupted due to the lack of kv cache capacity.
@@ -673,8 +708,10 @@ class Sequence final {
 
   std::atomic<bool> cancelled_{false};
 
-  // kvcache store copy async result
-  std::shared_ptr<std::atomic<int32_t>> termination_flag_;
+  // kvcache store copy async result. Only ever read/written by this sequence
+  // (nothing shares it), so it is a plain atomic rather than a heap-allocated
+  // shared_ptr<atomic>.
+  std::atomic<int32_t> termination_flag_{INT32_MAX};
   std::vector<std::shared_ptr<std::atomic<uint32_t>>> prefetch_results_;
 
   Timer timer_;
@@ -682,8 +719,6 @@ class Sequence final {
 
   // whether the last token is handled
   std::atomic<bool> last_token_handled_{false};
-
-  std::string request_id_;
 
   // Multi-round beam search result caching
   int32_t beam_width_cached_ = 0;

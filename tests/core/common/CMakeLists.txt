@@ -5,6 +5,7 @@ cc_test(
     common_test
   SRCS
     flash_comm1_context_test.cpp
+    metrics_test.cpp
     options_test.cpp
     rate_limiter_test.cpp
   DEPS

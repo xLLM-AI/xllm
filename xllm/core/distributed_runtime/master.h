@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,8 +17,12 @@ limitations under the License.
 
 #include <folly/Function.h>
 
+#include <atomic>
 #include <functional>
 #include <future>
+#include <optional>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "common/macros.h"
@@ -32,8 +36,14 @@ namespace xllm {
 class Master {
  public:
   explicit Master(const Options& options, EngineType type);
-  virtual ~Master() = default;
-  virtual void run() = 0;
+  virtual ~Master();
+  // Rank-0 masters override this to start the scheduler loop. Non-zero
+  // ranks use the default implementation, which starts a background idle
+  // thread. The destructor stops that thread.
+  virtual void run();
+  // Block until the idle thread exits (SIGINT/SIGTERM). Used by the
+  // binary when no HTTP server is started on a non-leader rank.
+  void wait();
   virtual const Options& options() const { return options_; }
   EngineType engine_type() const { return engine_type_; }
 
@@ -74,12 +84,26 @@ class Master {
   RateLimiter* get_rate_limiter() { return &rate_limiter_; }
 
  protected:
+  // node_rank == 0. Only the base class and derived masters branch on this;
+  // no external caller needs it.
+  bool is_leader() const { return options_.node_rank() == 0; }
+
   Options options_;
   EngineType engine_type_ = EngineType::INVALID;
   std::unique_ptr<Engine> engine_;
   RateLimiter rate_limiter_;
   MasterStatus master_status_{MasterStatus::WAKEUP};
+
+ private:
+  static void handle_shutdown_signal(int signum);
+  static std::atomic<bool> idle_running_;
+  std::thread idle_thread_;
 };
+
+std::optional<std::string> validate_model_cp(const Options& options,
+                                             EngineType engine_type,
+                                             const std::string& model_type,
+                                             int32_t global_world_size);
 
 std::unique_ptr<Master> create_master(const std::string& backend,
                                       const Options& options);

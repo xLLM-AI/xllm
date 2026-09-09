@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -164,8 +164,7 @@ class OverlapLinearStateRestoreWorker final : public LLMWorkerImpl {
 
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& /*input*/,
-      Stream& compute_stream,
-      bool /*record_ready_event*/) override {
+      Stream& compute_stream) override {
     c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
     for (KVCache& kv_cache : kv_caches_) {
       torch::Tensor conv_cache = kv_cache.get_conv_cache();

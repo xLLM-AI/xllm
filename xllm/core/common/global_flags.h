@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -78,7 +78,7 @@ DECLARE_int32(num_speculative_tokens);
 
 DECLARE_string(speculative_algorithm);
 
-DECLARE_bool(enable_opt_validate_probs);
+DECLARE_string(draft_sampling_mode);
 
 DECLARE_bool(enable_mtp_draft_body_tp1);
 DECLARE_bool(enable_adaptive_speculative_decode);
@@ -110,6 +110,10 @@ DECLARE_int32(ep_size);
 
 DECLARE_int32(cp_size);
 
+DECLARE_int32(layerwise_split_size);
+
+DECLARE_int32(kv_split_size);
+
 DECLARE_int64(tp_size);
 
 DECLARE_int64(sp_size);
@@ -135,7 +139,11 @@ DECLARE_int32(redundant_experts_num);
 
 DECLARE_int64(eplb_update_interval);
 
-DECLARE_double(eplb_update_threshold);
+DECLARE_double(eplb_min_peak_load_improvement);
+
+DECLARE_string(eplb_policy_kind);
+
+DECLARE_bool(eplb_use_decode_only_load);
 
 DECLARE_int32(expert_parallel_degree);
 
@@ -144,6 +152,8 @@ DECLARE_string(rank_tablefile);
 constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);
+
+DECLARE_bool(disable_graph_warmup);
 
 DECLARE_bool(enable_graph_double_buffer);
 
@@ -159,6 +169,8 @@ DECLARE_int32(acl_graph_decode_batch_size_limit);
 
 DECLARE_string(python_graph_backend);
 
+DECLARE_bool(enable_fia_decode);
+
 DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_string(master_node_addr);
@@ -173,8 +185,6 @@ DECLARE_bool(enable_pd_ooc);
 DECLARE_int32(disagg_pd_port);
 
 DECLARE_string(instance_role);
-
-DECLARE_string(kv_cache_transfer_type);
 
 DECLARE_string(kv_cache_transfer_mode);
 
@@ -239,6 +249,8 @@ DECLARE_double(host_blocks_factor);
 DECLARE_bool(enable_kvcache_store);
 
 DECLARE_string(store_protocol);
+
+DECLARE_string(store_rdma_devices);
 
 DECLARE_string(store_master_server_address);
 
@@ -404,6 +416,8 @@ DECLARE_bool(enable_aclnn_matmul);
 
 DECLARE_bool(enable_aclnn_swiglu);
 
+DECLARE_bool(enable_dspark_native_sas);
+
 DECLARE_bool(enable_flashcomm1);
 
 DECLARE_int32(flashcomm1_min_prefill_tokens);
@@ -417,6 +431,8 @@ DECLARE_string(mmrs_comm_mode);
 DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
+
+DECLARE_bool(enable_json_object_output);
 
 // --- verbose trace logging config ---
 DECLARE_bool(enable_verbose_trace_log);

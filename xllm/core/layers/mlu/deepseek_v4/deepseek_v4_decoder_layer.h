@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -58,7 +58,8 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
       const ModelInputParams& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt,
       std::optional<DeepseekV4PendingMHC>* pending_mhc = nullptr,
-      bool is_last_layer = true);
+      bool is_last_layer = true,
+      const mlu_v4_cp::DeepseekV4CpContext* cp_context = nullptr);
 
  private:
   std::optional<torch::Tensor> route_input_ids(

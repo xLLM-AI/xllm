@@ -24,6 +24,7 @@ cc_library(
     rec_multi_round_batch_input_builder.cpp
     beam_search.h
   DEPS
+    :config
     :request
     :runtime
     :common

@@ -55,9 +55,7 @@ class KernelFamilyManifest:
     def to_json_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["dispatch_schema"] = [asdict(field) for field in self.dispatch_schema]
-        data["kernel_abi"] = (
-            None if self.kernel_abi is None else self.kernel_abi.to_json_dict()
-        )
+        data["kernel_abi"] = None if self.kernel_abi is None else self.kernel_abi.to_json_dict()
         data["variants"] = [variant.to_json_dict() for variant in self.variants]
         return data
 
@@ -82,24 +80,17 @@ class KernelFamilyManifest:
         output.write_text(content, encoding="utf-8")
 
     @classmethod
-    def read(cls, path: str | Path) -> "KernelFamilyManifest":
+    def read(cls, path: str | Path) -> KernelFamilyManifest:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        dispatch_schema = [
-            DispatchField(**field) for field in data.pop("dispatch_schema", [])
-        ]
+        dispatch_schema = [DispatchField(**field) for field in data.pop("dispatch_schema", [])]
         kernel_abi_data = data.pop("kernel_abi", None)
         kernel_abi = None
         if kernel_abi_data is not None:
             kernel_abi = KernelAbi(
                 return_type=kernel_abi_data["return_type"],
-                parameters=[
-                    KernelAbiParameter(**param)
-                    for param in kernel_abi_data.get("parameters", [])
-                ],
+                parameters=[KernelAbiParameter(**param) for param in kernel_abi_data.get("parameters", [])],
             )
-        variants = [
-            KernelVariantManifest(**variant) for variant in data.pop("variants", [])
-        ]
+        variants = [KernelVariantManifest(**variant) for variant in data.pop("variants", [])]
         return cls(
             dispatch_schema=dispatch_schema,
             kernel_abi=kernel_abi,

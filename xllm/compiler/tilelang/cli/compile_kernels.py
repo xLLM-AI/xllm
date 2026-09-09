@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from scripts.build_support.env import set_npu_envs
 from scripts.logger import logger
+
+from ..common.toolchain import prepare_tilelang_import
+from ..tilelang_ascend_install import check_tilelang_artifacts
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Compile xLLM TileLang kernels and emit manifests."
-    )
+    parser = argparse.ArgumentParser(description="Compile xLLM TileLang kernels and emit manifests.")
     parser.add_argument(
         "--target",
         required=True,
@@ -53,11 +55,11 @@ def main(argv: list[str] | None = None) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
 
     if args.target == "ascend":
-        from ..bootstrap import ensure_ascend_ready
-
         if args.device is None:
             raise ValueError("--device is required for Ascend TileLang kernel compilation.")
-        ensure_ascend_ready()
+        set_npu_envs()
+        tilelang_root = prepare_tilelang_import()
+        check_tilelang_artifacts(tilelang_root)
         from ..targets.ascend.build import build_kernels
 
         manifests = build_kernels(

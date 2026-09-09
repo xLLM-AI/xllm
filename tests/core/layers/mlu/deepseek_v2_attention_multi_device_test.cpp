@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/model_context.h"
+#include "core/framework/parallel_state/context_parallel_topology.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -283,6 +285,9 @@ class DistributedAttentionChildContext final {
 
     parallel_args_ =
         std::make_unique<ParallelArgs>(rank, world_size, process_group_.get());
+    // Keep the CP output-baseline tests on the supported replicated-KV path.
+    // Dedicated DCP tests must opt into KV sharding explicitly.
+    parallel_args_->kv_split_size() = 1;
     parallel_args_->tp_group_ = process_group_.get();
     parallel_args_->single_rank_group_ = self_group_.get();
     parallel_args_->cp_group_ = process_group_.get();
@@ -781,7 +786,6 @@ AttentionRunResult run_attention_prefill_once(
     const torch::Tensor& hidden_states,
     KVCache& kv_cache,
     bool enable_full_weight_path,
-    bool enable_fused_mla_kernel,
     BatchForwardType batch_forward_type = BatchForwardType::PREFILL,
     int32_t prefix_len = 0,
     bool build_cp_context = true,
@@ -790,15 +794,9 @@ AttentionRunResult run_attention_prefill_once(
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
-  OptimizationConfig optimization_config;
-  optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
-  optimization_config.enable_fused_indexer_qk = false;
-  DeepseekV2Attention attention(args,
-                                quant_args,
-                                effective_parallel_args,
-                                options,
-                                optimization_config,
-                                enable_indexer);
+  ModelContext model_context(
+      effective_parallel_args, args, quant_args, options);
+  DeepseekV2Attention attention(model_context, enable_indexer);
   attention->load_state_dict(state_dict);
   const int32_t token_num = static_cast<int32_t>(tokens.numel());
   AttentionMetadata metadata =
@@ -812,6 +810,12 @@ AttentionRunResult run_attention_prefill_once(
     ProcessGroup* cp_group = parallel_args.cp_group_ != nullptr
                                  ? parallel_args.cp_group_
                                  : parallel_args.process_group_;
+    std::optional<KVShardLayout> kv_shard_layout;
+    if (effective_parallel_args.kv_split_size_effective() > 1) {
+      kv_shard_layout.emplace(KVCacheConfig::get_instance().block_size(),
+                              effective_parallel_args.kv_split_size_effective(),
+                              effective_parallel_args.kv_split_rank());
+    }
     sp_ctx = layer::v32_cp::build_deepseek_v32_cp_context(
         effective_parallel_args.cp_size(),
         metadata,
@@ -819,7 +823,8 @@ AttentionRunResult run_attention_prefill_once(
         tokens,
         cp_group,
         parallel_args.rank(),
-        parallel_args.world_size());
+        parallel_args.world_size(),
+        kv_shard_layout);
     if (sp_ctx.has_value()) {
       local_positions =
           layer::v32_cp::reorder_to_local_shard(positions, sp_ctx.value());
@@ -945,19 +950,16 @@ int32_t run_attention_prefill_repl_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto repl_result =
-            run_attention_prefill_once(model_args,
-                                       quant_args,
-                                       parallel_args,
-                                       options,
-                                       state_dict,
-                                       tokens,
-                                       positions,
-                                       hidden_states,
-                                       full_weight_kv_cache,
-                                       true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+        auto repl_result = run_attention_prefill_once(model_args,
+                                                      quant_args,
+                                                      parallel_args,
+                                                      options,
+                                                      state_dict,
+                                                      tokens,
+                                                      positions,
+                                                      hidden_states,
+                                                      full_weight_kv_cache,
+                                                      true);
 
         xllm_device.synchronize_default_stream();
         check_repl_output_contract(repl_result,
@@ -1008,19 +1010,16 @@ int32_t run_attention_prefill_fallback_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto repl_result =
-            run_attention_prefill_once(model_args,
-                                       quant_args,
-                                       parallel_args,
-                                       options,
-                                       state_dict,
-                                       tokens,
-                                       positions,
-                                       hidden_states,
-                                       full_weight_kv_cache,
-                                       true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+        auto repl_result = run_attention_prefill_once(model_args,
+                                                      quant_args,
+                                                      parallel_args,
+                                                      options,
+                                                      state_dict,
+                                                      tokens,
+                                                      positions,
+                                                      hidden_states,
+                                                      full_weight_kv_cache,
+                                                      true);
 
         xllm_device.synchronize_default_stream();
         check_repl_output_contract(repl_result,
@@ -1084,9 +1083,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
                                                     positions,
                                                     hidden_states,
                                                     full_weight_kv_cache,
-                                                    true,
-                                                    /*enable_fused_mla_kernel=*/
-                                                    false);
+                                                    true);
 
         xllm_device.synchronize_default_stream();
         check_sp_output_contract(sp_result,
@@ -1103,6 +1100,241 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
                           : "DeepseekV2Attention prefill sp output");
         return 0;
       });
+}
+
+// Runs prefill once under an orthogonal CP x TP topology (world_size=4,
+// cp_size=2, tp_size=2). With `use_sp` the sequence is sharded across the CP
+// group and attention goes through forward_sp with TP-sharded heads; otherwise
+// the full sequence runs through the TP-sharded forward_normal_tp path and is
+// used as the reference.
+AttentionRunResult run_cptp_attention_prefill_once(
+    const ModelArgs& args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options,
+    const StateDict& state_dict,
+    const torch::Tensor& tokens,
+    const torch::Tensor& positions,
+    const torch::Tensor& hidden_states,
+    KVCache& kv_cache,
+    int32_t cp_size,
+    bool use_sp,
+    ProcessGroup* cp_group = nullptr,
+    int32_t cp_local_rank = 0) {
+  ParallelArgs effective_parallel_args = parallel_args;
+  // Keep world_size=4 / cp_size=2 so the attention selects the TP-sharded
+  // (non-replicated) weights path.
+  effective_parallel_args.cp_size() = cp_size;
+  ModelContext model_context(
+      effective_parallel_args, args, quant_args, options);
+  DeepseekV2Attention attention(model_context);
+  attention->load_state_dict(state_dict);
+  const int32_t token_num = static_cast<int32_t>(tokens.numel());
+  AttentionMetadata metadata = create_prefill_metadata(options, token_num);
+  std::optional<layer::v32_cp::DeepseekV32CPContext> sp_ctx;
+  torch::Tensor local_positions = positions;
+  torch::Tensor local_hidden_states = hidden_states;
+  if (use_sp) {
+    CHECK(cp_group != nullptr) << "cp x tp SP run requires a CP group";
+    sp_ctx =
+        layer::v32_cp::build_deepseek_v32_cp_context(cp_size,
+                                                     metadata,
+                                                     BatchForwardType::PREFILL,
+                                                     tokens,
+                                                     cp_group,
+                                                     cp_local_rank,
+                                                     cp_group->world_size());
+    CHECK(sp_ctx.has_value()) << "cp x tp test failed to build the CP context";
+    local_positions =
+        layer::v32_cp::reorder_to_local_shard(positions, sp_ctx.value());
+    local_hidden_states =
+        layer::v32_cp::reorder_to_local_shard(hidden_states, sp_ctx.value());
+  }
+  AttentionRunResult result;
+  auto attention_result = attention->forward(local_positions,
+                                             local_hidden_states,
+                                             metadata,
+                                             kv_cache,
+                                             sp_ctx ? &sp_ctx.value() : nullptr,
+                                             /*topk_transfer=*/nullptr);
+  result.local_output = std::move(attention_result.output);
+  result.layout = attention_result.layout;
+  result.global_output = result.local_output;
+  result.used_sp = sp_ctx.has_value();
+  result.local_token_num =
+      sp_ctx.has_value() ? sp_ctx->comm_plan.tokens_per_rank.at(sp_ctx->rank)
+                         : result.local_output.size(0);
+  if (sp_ctx.has_value()) {
+    result.global_output = layer::v32_cp::restore_gathered_to_global_order(
+        layer::v32_cp::all_gather_across_ranks(result.local_output,
+                                               sp_ctx.value()),
+        sp_ctx.value());
+  }
+  return result;
+}
+
+int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
+                                               int32_t world_size,
+                                               int32_t port,
+                                               const std::string& host) {
+  // Orthogonal CP x TP: world_size=4, cp_size=2, tp_size=2. The TP group is
+  // contiguous ({0,1}/{2,3}) and the CP group is strided ({0,2}/{1,3}),
+  // mirroring collective_communicator + ContextParallelTopology.
+  constexpr int32_t kCpSize = 2;
+  constexpr int32_t kTpSize = 2;
+  try {
+    const int32_t device_count = xllm::Platform::device_count();
+    if (device_count < world_size) {
+      LOG(WARNING) << "Rank " << rank << ": insufficient devices. Skipping.";
+      return EXIT_CODE_SKIP;
+    }
+
+    KVCacheConfig::get_instance().block_size(16);
+    const int32_t device_index = rank % device_count;
+    xllm::Device xllm_device(device_index);
+    xllm_device.set_device();
+    torch::Device device = xllm_device.unwrap();
+    torch::TensorOptions options = torch::TensorOptions()
+                                       .dtype(torch::kBFloat16)
+                                       .device(device)
+                                       .requires_grad(false);
+
+    std::unique_ptr<xllm::ProcessGroup> world_group =
+        create_test_process_group(rank, world_size, port, host, device);
+    std::unique_ptr<xllm::ProcessGroup> self_group =
+        create_test_self_group(rank, world_size, host, device);
+
+    // One TCPStore port per subgroup (mirrors collective_communicator).
+    const xllm::parallel_state::ContextParallelTopology cp_topology(
+        rank,
+        world_size,
+        /*dp_size=*/1,
+        kCpSize,
+        /*dcp_size=*/1);
+    const int32_t tp_rank = cp_topology.tp_rank();
+    const int32_t cp_local_rank = cp_topology.pcp_rank();
+    std::unique_ptr<xllm::ProcessGroup> tp_group =
+        xllm::create_process_group(rank,
+                                   world_size,
+                                   kTpSize,
+                                   port + (rank / kTpSize) + 1,
+                                   /*trans=*/false,
+                                   host,
+                                   "cp_tp_test_tp_group",
+                                   device);
+    const std::vector<int32_t>& cp_ranks = cp_topology.pcp_group_ranks();
+    std::unique_ptr<xllm::ProcessGroup> cp_group =
+        xllm::create_process_group(rank,
+                                   cp_local_rank,
+                                   cp_ranks,
+                                   world_size,
+                                   kCpSize,
+                                   port + 10 + tp_rank + 1,
+                                   host,
+                                   "cp_tp_test_cp_group",
+                                   device);
+    CHECK(tp_group) << "Rank " << rank << ": failed to create TP group";
+    CHECK(cp_group) << "Rank " << rank << ": failed to create CP group";
+    CHECK_EQ(tp_group->world_size(), kTpSize);
+    CHECK_EQ(cp_group->world_size(), kCpSize);
+
+    ParallelArgs parallel_args(rank, world_size, world_group.get());
+    parallel_args.kv_split_size() = 1;
+    parallel_args.tp_group_ = tp_group.get();
+    parallel_args.single_rank_group_ = self_group.get();
+    parallel_args.cp_group_ = cp_group.get();
+    parallel_args.dcp_group_ = self_group.get();
+    parallel_args.cp_size() = kCpSize;
+
+    ModelArgs model_args = create_glm5_attention_model_args();
+    QuantArgs quant_args = create_default_quant_args();
+    StateDict state_dict = create_attention_state_dict(model_args, options);
+
+    // Sanity: cp_size=2, world_size=4, kv_split=1 must select TP-sharded
+    // (non-replicated) attention so forward_sp actually shards the heads.
+    {
+      ParallelArgs probe_args = parallel_args;
+      probe_args.cp_size() = kCpSize;
+      OptimizationConfig probe_opt;
+      DeepseekV2Attention probe(
+          model_args, quant_args, probe_args, options, probe_opt);
+      CHECK(!probe->use_replicated_attn_weights())
+          << "cp x tp topology must select TP-sharded attention weights";
+    }
+
+    constexpr int32_t seq_len = 4;
+    torch::Tensor tokens =
+        torch::arange(seq_len, options.dtype(torch::kInt32).device(device));
+    torch::Tensor hidden_states =
+        seeded_tensor("attention_multi_device/cp_tp_sp_hidden_states",
+                      {seq_len, model_args.hidden_size()},
+                      torch::kBFloat16,
+                      device);
+    torch::Tensor positions =
+        torch::arange(seq_len, options.dtype(torch::kInt32).device(device));
+
+    // Reference: full sequence, no CP context -> TP-sharded forward_normal_tp
+    // (kTpShard partial, reduced over the TP group below).
+    KVCache ref_kv_cache = create_decode_kv_cache(model_args, options);
+    ref_kv_cache.get_k_cache().zero_();
+    AttentionRunResult ref_result =
+        run_cptp_attention_prefill_once(model_args,
+                                        quant_args,
+                                        parallel_args,
+                                        options,
+                                        state_dict,
+                                        tokens,
+                                        positions,
+                                        hidden_states,
+                                        ref_kv_cache,
+                                        /*cp_size=*/kCpSize,
+                                        /*use_sp=*/false);
+
+    // SP run: CP-sharded sequence, forward_sp with TP-sharded heads.
+    KVCache sp_kv_cache = create_decode_kv_cache(model_args, options);
+    sp_kv_cache.get_k_cache().zero_();
+    AttentionRunResult sp_result =
+        run_cptp_attention_prefill_once(model_args,
+                                        quant_args,
+                                        parallel_args,
+                                        options,
+                                        state_dict,
+                                        tokens,
+                                        positions,
+                                        hidden_states,
+                                        sp_kv_cache,
+                                        /*cp_size=*/kCpSize,
+                                        /*use_sp=*/true,
+                                        cp_group.get(),
+                                        cp_local_rank);
+
+    xllm_device.synchronize_default_stream();
+
+    CHECK(sp_result.used_sp) << "cp x tp prefill must use sequence parallel";
+    CHECK(sp_result.layout ==
+          DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal)
+        << "cp x tp SP prefill must report packed-local layout";
+    CHECK_EQ(sp_result.local_output.size(1), model_args.hidden_size())
+        << "cp x tp SP prefill output hidden width mismatch";
+    CHECK(ref_result.layout ==
+          DeepseekV2AttentionImpl::PostAttnLayout::kTpShard)
+        << "cp x tp reference must report TP-shard layout";
+
+    // The reference is a TP-shard partial over the full sequence; reduce it
+    // over the TP group before comparing with the SP output restored across
+    // the CP group.
+    torch::Tensor ref_full = get_full_out(
+        ref_result.local_output, tp_group.get(), model_args.hidden_size());
+    check_tensors_close(sp_result.global_output,
+                        ref_full,
+                        /*rtol=*/1e-3,
+                        /*atol=*/1e-2,
+                        "DeepseekV2Attention cp x tp TP-sharded SP output");
+    return 0;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Rank " << rank << ": Exception: " << e.what();
+    return 1;
+  }
 }
 
 int32_t run_attention_prefill_sp_topk_share_test_child(
@@ -1130,6 +1362,9 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
     CHECK(self_group) << "Rank " << rank << ": failed to create self group";
 
     ParallelArgs parallel_args(rank, world_size, process_group.get());
+    // This GLM-5.2 case validates rank-local top-k reuse with DCP KV shards.
+    parallel_args.kv_split_size() = world_size;
+    parallel_args.dcp_group_ = process_group.get();
     parallel_args.tp_group_ = process_group.get();
     parallel_args.single_rank_group_ = self_group.get();
     parallel_args.cp_group_ = process_group.get();
@@ -1167,7 +1402,6 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    hidden_states,
                                    full_layer_cache,
                                    /*enable_full_weight_path=*/true,
-                                   /*enable_fused_mla_kernel=*/false,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
                                    /*build_cp_context=*/true,
@@ -1201,7 +1435,6 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    hidden_states,
                                    shared_layer_cache,
                                    /*enable_full_weight_path=*/true,
-                                   /*enable_fused_mla_kernel=*/false,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
                                    /*build_cp_context=*/true,
@@ -1284,7 +1517,6 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                        hidden_states,
                                        baseline_kv_cache,
                                        /*enable_full_weight_path=*/true,
-                                       /*enable_fused_mla_kernel=*/false,
                                        BatchForwardType::PREFILL,
                                        /*prefix_len=*/0,
                                        /*build_cp_context=*/false);
@@ -1298,9 +1530,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                        positions,
                                        hidden_states,
                                        sp_kv_cache,
-                                       /*enable_full_weight_path=*/true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+                                       /*enable_full_weight_path=*/true);
 
         xllm_device.synchronize_default_stream();
         check_repl_output_contract(baseline_result,
@@ -1387,19 +1617,16 @@ int32_t run_attention_chunked_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto sp_prefix_result =
-            run_attention_prefill_once(model_args,
-                                       quant_args,
-                                       parallel_args,
-                                       options,
-                                       state_dict,
-                                       prefix_tokens,
-                                       prefix_positions,
-                                       prefix_hidden_states,
-                                       full_weight_kv_cache,
-                                       true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false);
+        auto sp_prefix_result = run_attention_prefill_once(model_args,
+                                                           quant_args,
+                                                           parallel_args,
+                                                           options,
+                                                           state_dict,
+                                                           prefix_tokens,
+                                                           prefix_positions,
+                                                           prefix_hidden_states,
+                                                           full_weight_kv_cache,
+                                                           true);
         check_sp_output_contract(sp_prefix_result,
                                  prefix_len,
                                  model_args.hidden_size(),
@@ -1421,8 +1648,6 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                        chunk1_hidden_states,
                                        full_weight_kv_cache,
                                        true,
-                                       /*enable_fused_mla_kernel=*/
-                                       false,
                                        BatchForwardType::CHUNKED_PREFILL,
                                        prefix_len);
 
@@ -1448,7 +1673,6 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                        chunk2_hidden_states,
                                        full_weight_kv_cache,
                                        true,
-                                       /*enable_fused_mla_kernel=*/false,
                                        BatchForwardType::CHUNKED_PREFILL,
                                        prefix_len + chunk1_len);
 
@@ -1906,6 +2130,20 @@ class AttentionMultiDeviceTest : public ::testing::Test {
         "Attention multi-device SP prefill test failed.");
   }
 
+  void run_prefill_cp_tp_test() {
+    // Orthogonal CP x TP requires a 4-rank world (cp_size=2, tp_size=2).
+    world_size_ = 4;
+    run_child_test(
+        [](int32_t rank,
+           int32_t world_size,
+           int32_t port,
+           const std::string& host) {
+          return run_attention_prefill_cp_tp_test_child(
+              rank, world_size, port, host);
+        },
+        "Attention multi-device CP x TP TP-sharded SP prefill test failed.");
+  }
+
   void run_prefill_sp_topk_share_test() {
     run_child_test(
         [](int32_t rank,
@@ -2006,6 +2244,10 @@ TEST_F(AttentionMultiDeviceTest, PrefillShortSeqFallsBackToReplicatedPath) {
 
 TEST_F(AttentionMultiDeviceTest, Glm5PrefillSpRestoresToTpBaseline) {
   run_prefill_sp_test(/*use_glm5_args=*/true);
+}
+
+TEST_F(AttentionMultiDeviceTest, CpTpPrefillSpTpShardsAttentionHeads) {
+  run_prefill_cp_tp_test();
 }
 
 TEST_F(AttentionMultiDeviceTest, Glm52PrefillCpReusesRankLocalTopkState) {

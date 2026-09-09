@@ -19,8 +19,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import distributed, kernels
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python import kernels
+from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
 
 
 class FusedMoE(nn.Module):
@@ -58,9 +58,7 @@ class FusedMoE(nn.Module):
             # The DP path slices the gathered output down to this rank's tokens,
             # which is only meaningful once every rank's partial sums have been
             # combined, so the reduction cannot be deferred past this layer.
-            raise ValueError(
-                "a deferred reduction cannot be combined with data parallelism"
-            )
+            raise ValueError("a deferred reduction cannot be combined with data parallelism")
 
         num_experts_per_rank = num_experts // ep_size
         local_intermediate_size = intermediate_size // moe_tp_size
@@ -105,21 +103,7 @@ class FusedMoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        local_hidden_states = hidden_states
-        token_counts: list[int] | None = None
-        if self.dp_size > 1:
-            token_counts = list(get_forward_context().metadata.dp_token_counts)
-            if len(token_counts) != self.dp_size:
-                raise RuntimeError(
-                    f"expected {self.dp_size} DP token counts, got {token_counts}"
-                )
-            hidden_states = distributed.all_gather_variable(
-                hidden_states,
-                token_counts,
-                self.dp_rank,
-                "dp",
-            )
-
+        hidden_states, scatter_state = dp_gather_tokens(hidden_states, self.dp_size, self.dp_rank)
         router_logits = self.gate(hidden_states)
         topk_weights, topk_ids = kernels.moe_fused_topk(
             router_logits,
@@ -148,25 +132,11 @@ class FusedMoE(nn.Module):
                 self.w2,
             )
         else:
-            raise NotImplementedError(
-                "pre-SM90 Python MoE fallback does not support TP or EP"
-            )
-        if self.reduce_results:
-            if self.moe_tp_size > 1:
-                distributed.all_reduce_(output, "moe_tp")
-            if self.ep_size > 1:
-                distributed.all_reduce_(output, "moe_ep")
-        if token_counts is not None:
-            local_tokens = token_counts[self.dp_rank]
-            if local_tokens == 0:
-                return torch.zeros_like(local_hidden_states)
-            start = sum(token_counts[: self.dp_rank])
-            local_output = output.narrow(0, start, local_tokens)
-            if local_tokens == local_hidden_states.shape[0]:
-                return local_output
-            padding_shape = list(local_hidden_states.shape)
-            padding_shape[0] -= local_tokens
-            return torch.cat(
-                [local_output, local_hidden_states.new_zeros(padding_shape)], dim=0
-            )
-        return output
+            raise NotImplementedError("pre-SM90 Python MoE fallback does not support TP or EP")
+        return reduce_and_scatter(
+            output,
+            scatter_state,
+            reduce_results=self.reduce_results,
+            moe_tp_size=self.moe_tp_size,
+            ep_size=self.ep_size,
+        )

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,11 @@ DEFINE_bool(
     "the engine uses graph mode (CUDA Graph for GPU, ACL Graph for NPU, "
     "MLU Graph, or DCU Graph) to optimize decode performance by reducing "
     "kernel launch overhead and device idle time.");
+
+DEFINE_bool(disable_graph_warmup,
+            false,
+            "Whether to skip synthetic graph warmup during engine startup. "
+            "When enabled, graphs are captured lazily by real requests.");
 
 DEFINE_bool(enable_graph_double_buffer,
             true,
@@ -90,10 +95,17 @@ DEFINE_string(
     "aclgraph (NPU decode graph with eager prefill), "
     "or any torch.compile backend name.");
 
+DEFINE_bool(
+    enable_fia_decode,
+    false,
+    "Enable FIA for Qwen3.5 decode attention. Applies to both target and MTP "
+    "draft models. Prefill attention is unaffected.");
+
 namespace xllm {
 
 void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_double_buffer);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_mode_decode_no_padding);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefill_piecewise_graph);
@@ -106,10 +118,12 @@ void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(output_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(random_seed);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(python_graph_backend);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_fia_decode);
 }
 
 void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_double_buffer);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_mode_decode_no_padding);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefill_piecewise_graph);
@@ -122,6 +136,7 @@ void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(output_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(random_seed);
   XLLM_CONFIG_ASSIGN_FROM_JSON(python_graph_backend);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_fia_decode);
 }
 
 void ExecutionConfig::append_config_json(
@@ -129,6 +144,8 @@ void ExecutionConfig::append_config_json(
   const ExecutionConfig default_config;
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_graph);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, disable_graph_warmup);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_graph_double_buffer);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -153,6 +170,8 @@ void ExecutionConfig::append_config_json(
       config_json, default_config, random_seed);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, python_graph_backend);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_fia_decode);
 }
 
 ExecutionConfig& ExecutionConfig::get_instance() {

@@ -7,7 +7,7 @@ body:
 - type: markdown
   attributes:
     value: >
-      #### Before submitting an issue, please make sure the issue hasn't been already addressed. please search: [existing issues](https://github.com/jd-opensource/xllm/issues).
+      #### Before submitting an issue, please make sure the issue hasn't been already addressed. please search: [existing issues](https://github.com/xLLM-AI/xllm/issues).
 - type: textarea
   attributes:
     label: Your environment

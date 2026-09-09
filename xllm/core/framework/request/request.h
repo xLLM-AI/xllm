@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -40,7 +40,7 @@ class Request : public RequestBase {
   Request(const std::string& request_id,
           const std::string& x_request_id,
           const std::string& x_request_time,
-          const RequestState& state,
+          RequestState state,
           const std::string& service_request_id = "",
           const std::string& source_xservice_addr = "",
           RateLimiter* rate_limiter = nullptr);
@@ -58,6 +58,8 @@ class Request : public RequestBase {
 
   bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
 
+  std::optional<Status> error_status() const;
+
   RequestOutput generate_output(const Tokenizer& tokenizer,
                                 ThreadPool* thread_pool = nullptr);
 
@@ -72,6 +74,11 @@ class Request : public RequestBase {
   bool preempted() const { return state_.preempted; }
 
   void log_statistic(double total_latency);
+
+  // Rebase local elapsed time with cumulative upstream latency at handoff.
+  void set_upstream_latency_seconds(double upstream_latency_seconds);
+
+  double end_to_end_latency_seconds() const;
 
   void log_error_statistic(Status status);
 
@@ -166,6 +173,10 @@ class Request : public RequestBase {
 
  private:
   RequestState state_;
+  std::shared_ptr<RequestFailureState> failure_state_ =
+      std::make_shared<RequestFailureState>();
+  std::shared_ptr<SpeculativeTokenStats> speculative_token_stats_ =
+      std::make_shared<SpeculativeTokenStats>();
   // list of sequences to generate completions for the prompt
   // use deque instead of vector to avoid no-copy move for Sequence
   //  std::deque<Sequence> sequences;
@@ -182,6 +193,10 @@ class Request : public RequestBase {
   bool starved_ = false;
 
   size_t num_prefix_cache_tokens_ = 0;
+
+  bool prefix_cache_hit_metrics_recorded_ = false;
+
+  double end_to_end_latency_offset_seconds_ = 0.0;
 
   void create_sequences_group();
 };

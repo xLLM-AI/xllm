@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -171,7 +171,6 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
 
     const size_t prefix_length =
         shared_blocks.size() * static_cast<size_t>(block_size_);
-    COUNTER_ADD(prefix_cache_match_length_total, prefix_length);
     VLOG(1) << "Prefix cache matched " << shared_blocks.size()
             << " blocks, prefix_length=" << prefix_length;
 

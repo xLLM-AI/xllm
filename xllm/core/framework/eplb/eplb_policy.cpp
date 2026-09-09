@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -758,56 +758,5 @@ std::unique_ptr<IEplbPolicy> MakeEplbPolicy(EplbPolicyKind kind,
           device_experts_num, device_num, layer_num, std::move(options));
   }
 }
-
-EplbPolicy::EplbPolicy(int32_t device_experts_num,
-                       int32_t device_num,
-                       int32_t layer_num) {
-  EplbOptions options = EplbOptions::from_global_config();
-  const int32_t routed_experts_num =
-      device_experts_num - options.redundant_experts_num;
-  CHECK_GT(routed_experts_num, 0)
-      << "EPLB routed experts per device must be positive.";
-
-  const EplbPolicyKind policy_kind =
-      eplb_policy_kind_from_string(options.eplb_policy_kind);
-  impl_ = MakeEplbPolicy(policy_kind,
-                         device_experts_num,
-                         device_num,
-                         layer_num,
-                         std::move(options));
-  torch::Tensor initial_distribution =
-      torch::zeros({layer_num, device_num, device_experts_num}, torch::kInt32);
-  for (int32_t layer = 0; layer < layer_num; ++layer) {
-    for (int32_t device = 0; device < device_num; ++device) {
-      const int32_t base = device * routed_experts_num;
-      for (int32_t slot = 0; slot < device_experts_num; ++slot) {
-        const int32_t routed_slot =
-            slot < routed_experts_num ? slot : routed_experts_num - 1;
-        initial_distribution[layer][device][slot] = base + routed_slot;
-      }
-    }
-  }
-  impl_->initialize_distribution(initial_distribution);
-}
-
-std::pair<torch::Tensor, std::vector<bool>> EplbPolicy::rebalance_experts(
-    torch::Tensor expert_load,
-    torch::Tensor physical_expert_load) {
-  return impl_->rebalance_experts(std::move(expert_load),
-                                  std::move(physical_expert_load));
-}
-
-void EplbPolicy::initialize_distribution(
-    const torch::Tensor& current_distribution) {
-  impl_->initialize_distribution(current_distribution);
-}
-
-void EplbPolicy::commit_layer(int32_t layer_id) {
-  impl_->commit_layer(layer_id);
-}
-
-void EplbPolicy::abort_layer(int32_t layer_id) { impl_->abort_layer(layer_id); }
-
-std::string EplbPolicy::name() const { return impl_->name(); }
 
 }  // namespace xllm

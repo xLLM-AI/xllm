@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,7 +28,9 @@ class Qwen3_5FusedMoEImpl final : public FusedMoEImpl {
                       const FusedMoEArgs& moe_args,
                       const QuantArgs& quant_args,
                       const ParallelArgs& parallel_args,
-                      const torch::TensorOptions& options);
+                      const torch::TensorOptions& options,
+                      const std::shared_ptr<Stream>& routed_comm_stream,
+                      const std::shared_ptr<Stream>& shared_compute_stream);
 
   void load_state_dict(const StateDict& state_dict) override;
 

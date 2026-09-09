@@ -37,12 +37,8 @@ def _silu_and_mul_kernel(
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     mask = col < d
-    gate = tl.load(x_ptr + row * x_row_stride + col, mask=mask, other=0.0).to(
-        tl.float32
-    )
-    up = tl.load(x_ptr + row * x_row_stride + d + col, mask=mask, other=0.0).to(
-        tl.float32
-    )
+    gate = tl.load(x_ptr + row * x_row_stride + col, mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(x_ptr + row * x_row_stride + d + col, mask=mask, other=0.0).to(tl.float32)
     silu = gate * tl.sigmoid(gate)
     tl.store(out_ptr + row * out_row_stride + col, silu * up, mask=mask)
 
@@ -55,7 +51,5 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     n_rows = x2d.shape[0]
     out = torch.empty((n_rows, d), dtype=x.dtype, device=x.device)
     grid = (n_rows, triton.cdiv(d, _SILU_BLOCK))
-    _silu_and_mul_kernel[grid](
-        x2d, out, d, x2d.stride(0), out.stride(0), BLOCK=_SILU_BLOCK
-    )
+    _silu_and_mul_kernel[grid](x2d, out, d, x2d.stride(0), out.stride(0), BLOCK=_SILU_BLOCK)
     return out.reshape(*x.shape[:-1], d)

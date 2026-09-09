@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/framework/parallel_state/collective_communicator.h"
 
 #include <algorithm>
+#include <optional>
 
 #include "core/framework/parallel_state/mapping_npu.h"
 
@@ -35,6 +36,8 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/parallel_state/context_parallel_topology.h"
+#include "core/platform/platform.h"
 #include "parallel_args.h"
 #include "parallel_state.h"
 #include "process_group.h"
@@ -151,7 +154,8 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
                                                         int32_t world_size,
                                                         int32_t dp_size,
                                                         int32_t ep_size,
-                                                        int32_t cp_size) {
+                                                        int32_t cp_size,
+                                                        bool initialize_hccl) {
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
   const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
 
@@ -162,7 +166,9 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
       .moe_ep_size(ep_size)
       .pp_size(1)
       .sp_size(1)
-      .cp_size(normalized_cp_size);
+      .cp_size(normalized_cp_size)
+      .layerwise_split_size(
+          ParallelConfig::get_instance().layerwise_split_size());
 
   MappingNPU mapping_npu(EPLBConfig::get_instance().rank_tablefile(),
                          world_size,
@@ -171,6 +177,9 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
   DispatchAndCombineComm result;
   result.mapping_data = mapping_npu.to_json();
   result.mapping.ParseParam(result.mapping_data);
+  if (!initialize_hccl) {
+    return result;
+  }
   result.mapping.InitGlobalCommDomain(
       ParallelConfig::get_instance().communication_backend());
 
@@ -197,6 +206,25 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
 
 }  // namespace
 #endif
+
+namespace {
+
+void apply_layerwise_split_config(ParallelArgs* parallel_args) {
+  parallel_args->layerwise_split_size(
+      ParallelConfig::get_instance().layerwise_split_size());
+}
+
+std::string get_context_parallel_group_host(int32_t group_root_rank,
+                                            const std::string& fallback_host) {
+#if defined(USE_NPU)
+  return get_rank_table_server_host(group_root_rank, fallback_host);
+#else
+  (void)group_root_rank;
+  return fallback_host;
+#endif
+}
+
+}  // namespace
 
 CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                int world_size,
@@ -229,6 +257,7 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
         global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
     parallel_args_->kv_split_size(
         ::xllm::ParallelConfig::get_instance().kv_split_size());
+    apply_layerwise_split_config(parallel_args_.get());
     return;
   }
 
@@ -252,7 +281,9 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
       .pp_size(1)
       .sp_size(1)
       .cp_size(normalized_cp_size)
-      .kv_split_size(mapping_kv_split_size);
+      .kv_split_size(mapping_kv_split_size)
+      .layerwise_split_size(
+          ::xllm::ParallelConfig::get_instance().layerwise_split_size());
   MappingNPU mapping_npu(::xllm::EPLBConfig::get_instance().rank_tablefile(),
                          world_size,
                          global_rank,
@@ -286,11 +317,13 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                   dispatchAndCombineHcclComm);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  apply_layerwise_split_config(parallel_args_.get());
 #else
   parallel_args_ = std::make_unique<ParallelArgs>(
       global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  apply_layerwise_split_config(parallel_args_.get());
 #endif
 }
 
@@ -329,26 +362,41 @@ void CollectiveCommunicator::create_process_groups(
 
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB") {
+    if (::xllm::KernelConfig::get_instance().enable_mega_moe()) {
+      const int32_t attn_tp_size = world_size / (dp_size * cp_size);
+      const int32_t moe_ep_port = port + 1 + (cp_size > 1 ? attn_tp_size : 0);
+      moe_ep_group_ = create_process_group(global_rank,
+                                           world_size,
+                                           ep_size,
+                                           moe_ep_port,
+                                           true,
+                                           host,
+                                           "moe_ep_group",
+                                           device);
+      parallel_args_->moe_ep_group_ = moe_ep_group_.get();
+    }
+
     // ATB owns TP/DP/EP; build a standalone HCCL CP ProcessGroup for
     // model-side AllGather.
     if (cp_size > 1) {
-      const std::vector<int32_t> cp_ranks =
-          parallel_state::compute_cp_group_ranks(
-              global_rank, world_size, dp_size, cp_size);
-      const int32_t cp_local_rank = parallel_args_->cp_rank();
+      const parallel_state::ContextParallelTopology cp_topology(global_rank,
+                                                                world_size,
+                                                                dp_size,
+                                                                cp_size,
+                                                                /*dcp_size=*/1);
+      const std::vector<int32_t>& cp_ranks = cp_topology.pcp_group_ranks();
+      const int32_t cp_local_rank = cp_topology.pcp_rank();
       CHECK_EQ(cp_ranks.size(), cp_size);
       CHECK_GE(cp_local_rank, 0);
       CHECK_LT(cp_local_rank, cp_size);
       CHECK_EQ(cp_ranks[cp_local_rank], global_rank);
       // Unique TCPStore port per CP group (keyed by attn TP rank).
-      const int32_t attn_tp_size = world_size / (dp_size * cp_size);
-      const int32_t tp_rank = global_rank % attn_tp_size;
       cp_group_ = create_process_group(global_rank,
                                        cp_local_rank,
                                        cp_ranks,
                                        world_size,
                                        cp_size,
-                                       port + 1 + tp_rank,
+                                       port + 1 + cp_topology.tp_rank(),
                                        host,
                                        "cp_group",
                                        device);
@@ -371,7 +419,7 @@ void CollectiveCommunicator::create_process_groups(
   parallel_args_->python_rendezvous_host_ = host;
   parallel_args_->python_rendezvous_port_ = world_group_port;
 
-  // Orthogonal CP x TP (NPU TORCH only): the rank layout is
+  // Orthogonal CP x TP: the rank layout is
   //   rank = dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
   // so tensor parallelism spans world_size / (dp_size * cp_size), NOT
   // world_size / dp_size. Narrowing tp_size here is what makes attention head
@@ -380,20 +428,23 @@ void CollectiveCommunicator::create_process_groups(
   // make ranks r and r + tp_size hold the same heads and double-accumulate in
   // the all-reduce, which is a silent numerical error rather than a crash.
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
-  bool use_orthogonal_cp = false;
-#if defined(USE_NPU)
-  use_orthogonal_cp =
-      ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
-      normalized_cp_size > 1;
-#endif
-  int32_t tp_size = use_orthogonal_cp
-                        ? world_size / (dp_size * normalized_cp_size)
-                        : world_size / dp_size;
+  CHECK_EQ(world_size % (dp_size * normalized_cp_size), 0)
+      << "world_size (" << world_size
+      << ") must be divisible by dp_size * cp_size (" << dp_size << " * "
+      << normalized_cp_size << ")";
+  const int32_t tp_size = world_size / (dp_size * normalized_cp_size);
+  std::optional<parallel_state::ContextParallelTopology> cp_topology;
+  if (normalized_cp_size > 1) {
+    cp_topology.emplace(global_rank,
+                        world_size,
+                        dp_size,
+                        normalized_cp_size,
+                        parallel_args_->kv_split_size_effective());
+  }
   CHECK_GT(tp_size, 0) << "attention tp_size must be positive: world_size="
                        << world_size << ", dp_size=" << dp_size
                        << ", cp_size=" << normalized_cp_size;
-  CHECK_EQ(tp_size * dp_size * (use_orthogonal_cp ? normalized_cp_size : 1),
-           world_size)
+  CHECK_EQ(tp_size * dp_size * normalized_cp_size, world_size)
       << "world_size (" << world_size << ") must equal dp_size * cp_size * "
       << "tp_size (" << dp_size << " * " << normalized_cp_size << " * "
       << tp_size << ")";
@@ -448,47 +499,65 @@ void CollectiveCommunicator::create_process_groups(
   }
   port += tp_group_count + single_rank_group_port_gap + single_rank_group_count;
 
-#if defined(USE_NPU)
-  if (use_orthogonal_cp) {
-    // A CP group varies cp_rank while holding (dp_rank, tp_rank) fixed, so its
-    // members are strided by tp_size and cannot be expressed by the contiguous
-    // or `trans` groupings of the size-only overload. Enumerate the ranks
-    // explicitly instead.
-    const std::vector<int32_t> cp_ranks =
-        parallel_state::compute_cp_group_ranks(
-            global_rank, world_size, dp_size, normalized_cp_size);
-    const int32_t cp_local_rank = parallel_args_->cp_rank();
-    CHECK_EQ(static_cast<int32_t>(cp_ranks.size()), normalized_cp_size);
-    CHECK_GE(cp_local_rank, 0);
-    CHECK_LT(cp_local_rank, normalized_cp_size);
-    CHECK_EQ(cp_ranks[cp_local_rank], global_rank)
-        << "cp_rank() must index this rank inside its own CP group";
-    // One CP group per (dp_rank, tp_rank) pair. tp_rank alone is not unique:
-    // with dp=2/cp=2/tp=4 the groups {0,4} and {8,12} both have tp_rank 0 and
-    // would race for the same TCPStore port.
-    const int32_t dp_stride = normalized_cp_size * tp_size;
+  if (cp_topology.has_value()) {
+    const std::vector<int32_t>& cp_ranks = cp_topology->pcp_group_ranks();
+    const int32_t cp_local_rank = cp_topology->pcp_rank();
+    if constexpr (Platform::is_npu()) {
+      if (normalized_cp_size > 1) {
+        CHECK_EQ(cp_local_rank, parallel_args_->cp_rank());
+      }
+    }
     const int32_t cp_group_index =
-        (global_rank / dp_stride) * tp_size + global_rank % tp_size;
-    const int32_t cp_group_count = dp_size * tp_size;
-    cp_group_ =
-        create_process_group(global_rank,
-                             cp_local_rank,
-                             cp_ranks,
-                             world_size,
-                             normalized_cp_size,
-                             port + cp_group_index + 1,
-                             get_rank_table_server_host(cp_ranks.front(), host),
-                             "cp_group",
-                             device);
+        cp_topology->dp_rank() * tp_size + cp_topology->tp_rank();
+    cp_group_ = create_process_group(
+        global_rank,
+        cp_local_rank,
+        cp_ranks,
+        world_size,
+        normalized_cp_size,
+        port + cp_group_index + 1,
+        get_context_parallel_group_host(cp_ranks.front(), host),
+        "cp_group",
+        device);
     parallel_args_->cp_group_ = cp_group_.get();
-    port += cp_group_count;
-  } else
-#endif
-  {
-    // The current MLU model-side CP path spans the full DP-local rank set,
-    // which is also represented by tp_group_ today. Keep a distinct CP handle
-    // so an orthogonal CP x TP topology can provide its own process group.
+    port += dp_size * tp_size;
+
+    // Only MLU materializes the logical DCP topology as a collective.
+    if constexpr (Platform::is_mlu()) {
+      if (cp_topology->dcp_size() == 1) {
+        parallel_args_->dcp_group_ = parallel_args_->single_rank_group_;
+      } else if (cp_topology->dcp_size() == cp_topology->pcp_size()) {
+        parallel_args_->dcp_group_ = cp_group_.get();
+      } else {
+        const std::vector<int32_t>& dcp_ranks = cp_topology->dcp_group_ranks();
+        dcp_group_ = create_process_group(
+            global_rank,
+            cp_topology->dcp_rank(),
+            dcp_ranks,
+            world_size,
+            cp_topology->dcp_size(),
+            port + cp_topology->dp_rank() + 1,
+            get_context_parallel_group_host(dcp_ranks.front(), host),
+            "dcp_group",
+            device);
+        parallel_args_->dcp_group_ = dcp_group_.get();
+        port += dp_size;
+      }
+      CHECK_EQ(parallel_args_->dcp_group_->rank(), cp_topology->dcp_rank());
+    }
+    LOG(INFO) << "Context parallel topology: rank=" << global_rank
+              << ", tp_rank=" << cp_topology->tp_rank()
+              << ", tp_size=" << cp_topology->tp_size()
+              << ", pcp_rank=" << cp_topology->pcp_rank()
+              << ", pcp_size=" << cp_topology->pcp_size()
+              << ", dcp_rank=" << cp_topology->dcp_rank()
+              << ", dcp_size=" << cp_topology->dcp_size();
+  } else {
+    // CP is disabled, so the TP group remains the CP collective handle.
     parallel_args_->cp_group_ = tp_group_.get();
+    if constexpr (Platform::is_mlu()) {
+      parallel_args_->dcp_group_ = tp_group_.get();
+    }
   }
 
   if (dp_size > 1) {
@@ -499,12 +568,19 @@ void CollectiveCommunicator::create_process_groups(
     // while tp_size == world/dp; after narrowing it collides.
     const int32_t dp_group_count = world_size / dp_size;
     port_offset = global_rank % dp_group_count + 1;
+    std::string dp_host = host;
+#if defined(USE_NPU)
+    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
+      const int32_t dp_group_start = global_rank % dp_group_count;
+      dp_host = get_rank_table_server_host(dp_group_start, host);
+    }
+#endif
     dp_local_process_group_ = create_process_group(global_rank,
                                                    world_size,
                                                    dp_size,
                                                    port + port_offset,
                                                    true,
-                                                   host,
+                                                   dp_host,
                                                    "dp_group",
                                                    device);
     parallel_args_->dp_local_process_group_ = dp_local_process_group_.get();
@@ -592,13 +668,21 @@ void CollectiveCommunicator::create_process_groups(
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
       ep_size == world_size) {
+    // Torch already owns the HCCL process group. Creating an ATB rank-table
+    // communicator here initializes HCCL a second time for full-world EP.
     auto dispatch_and_combine_comm = create_dispatch_and_combine_comm(
-        global_rank, world_size, dp_size, ep_size, cp_size);
+        global_rank, world_size, dp_size, ep_size, cp_size, false);
     parallel_args_->mapping_data(dispatch_and_combine_comm.mapping_data);
     parallel_args_->mapping(dispatch_and_combine_comm.mapping);
+    CHECK(parallel_args_->moe_ep_group_ != nullptr)
+        << "EP2 dispatch/combine requires a Torch MoE EP process group.";
+    const std::string dispatch_and_combine_comm_name =
+        parallel_args_->moe_ep_group_->hccl_comm_name(/*init_comm=*/true);
+    CHECK(!dispatch_and_combine_comm_name.empty())
+        << "EP2 dispatch/combine requires an initialized Torch MoE EP "
+           "communicator.";
     parallel_args_->dispatchAndCombinecommDomain(
-        dispatch_and_combine_comm.domain);
-    parallel_args_->dispatchAndCombineHcclComm(dispatch_and_combine_comm.comm);
+        dispatch_and_combine_comm_name);
   }
 #endif
 }

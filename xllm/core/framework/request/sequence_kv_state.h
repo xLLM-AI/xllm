@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -53,6 +53,15 @@ class KVCacheState {
   // to decide whether an allocation that started from an empty sequence should
   // be fully rolled back on failure (vs. a grow on an already-populated seq).
   bool has_any_blocks() const;
+
+  // True after this cache tier has completed its prefix-cache probe.  This is
+  // deliberately independent from has_any_blocks(): a completed probe may
+  // have matched zero blocks, and a Mooncake prefetch may have populated Host
+  // blocks before HBM has been probed.
+  bool prefix_cache_matched() const { return prefix_cache_matched_; }
+  void set_prefix_cache_matched(bool matched = true) {
+    prefix_cache_matched_ = matched;
+  }
   // token <-> physical slot mapping for `type` (paged attention). CHECKs the
   // type is present.
   std::vector<int32_t> cache_slots(BlockType type,
@@ -82,6 +91,11 @@ class KVCacheState {
   // the map entry).
   void erase_blocks(BlockType type);
 
+  // Move the blocks for `type` out without dropping their references.  The
+  // caller becomes responsible for the returned aliases and may mount them
+  // again after combining probes from another cache tier.
+  std::vector<Block> take_blocks(BlockType type);
+
   // Number of shared (prefix-cache-hit) blocks held under `type`.
   size_t shared_blocks_num(BlockType type) const;
   // Number of shared tokens for this sequence. Sequence-level: the value is the
@@ -94,8 +108,9 @@ class KVCacheState {
   // inserted. For sparse SWA this is a logical position and may span invalid
   // placeholders. Grows monotonically:
   //   - Admission mount: set to that type's retained probe-vector length.
-  //   - Pre-grow hook: after inserting a run [cursor, end), advance cursor to
-  //     `end`.
+  //   - Pre-grow hook: after processing positions through `end`, advance the
+  //     cursor to `end`. Sparse SWA may intentionally insert only the trailing
+  //     window of each cache unit while skipping earlier positions.
   //   - reset(): cleared alongside the rest of the sequence's cache state.
   size_t num_cached_blocks(BlockType type) const;
   // Per-type cursor table. Callers that need a stable snapshot must copy it.
@@ -202,6 +217,8 @@ class KVCacheState {
 
   // number of tokens in kv cache
   size_t kv_cache_tokens_num_ = 0;
+
+  bool prefix_cache_matched_ = false;
 
   // KV cache blocks keyed by cache role. The flat attention KV lives under
   // BlockType::KV; DSV4 keeps its SWA / C4 / C128 groups here; the per-sequence

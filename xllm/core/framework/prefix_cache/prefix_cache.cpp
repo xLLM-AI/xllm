@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,6 @@ limitations under the License.
 #include <iostream>
 #include <thread>
 
-#include "common/metrics.h"
 #include "core/framework/multimodal/mm_data.h"
 
 namespace xllm {
@@ -30,7 +29,7 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                                       const Slice<Block>& existed_shared_blocks,
                                       const MMData& mm_data,
                                       const Slice<XXH3Key>& block_hashes) {
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
     return std::vector<Block>();
@@ -95,11 +94,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
 
   matched_blocks_.fetch_add(blocks.size());
 
-  int64_t int_rate_percent = static_cast<int64_t>(
-      static_cast<double>(blocks.size()) * 100.0 / n_blocks);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_num, blocks.size());
-
   return blocks;
 }
 
@@ -109,7 +103,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            const MMData& mm_data,
                            const Slice<XXH3Key>& block_hashes) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_blocks =
       std::min(token_ids.size() / block_size_, blocks.size());
 

@@ -43,6 +43,7 @@ cc_library(
     :request
     :common
     :prefix_cache
+    :kv_transfer_completion
     glog::glog
     Boost::serialization
     SMHasherSupport

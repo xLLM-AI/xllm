@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -86,16 +86,11 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
   }
 
   // Initialize attention layers
-  OptimizationConfig optimization_config = context.get_optimization_config();
   attention_ = register_module(
       "self_attn",
-      DeepseekV2Attention(model_args,
-                          quant_args,
-                          parallel_args_,
-                          options,
-                          optimization_config,
-                          /*enable_indexer=*/
-                          mtp_layer || !topk_share_decision_.reuse_topk));
+      DeepseekV2Attention(
+          context,
+          /*enable_indexer=*/mtp_layer || !topk_share_decision_.reuse_topk));
 
   // Initialize norm layers
   input_norm_ = register_module(
@@ -108,10 +103,17 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
 
   // Initialize mlp
   if (is_moe_layer_) {
-    sparse_moe_ =
-        register_module("mlp",
-                        DeepseekV2SparseMoEBlock(
-                            model_args, quant_args, parallel_args_, options));
+    const std::shared_ptr<ModelStreamRegistry>& stream_registry =
+        context.stream_registry();
+    sparse_moe_ = register_module(
+        "mlp",
+        DeepseekV2SparseMoEBlock(
+            model_args,
+            quant_args,
+            parallel_args_,
+            options,
+            stream_registry->get(ExecutionStreamRole::COMMUNICATION),
+            stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
   } else {
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),

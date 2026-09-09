@@ -60,9 +60,7 @@ def _causal_conv1d_update_kernel(
 
     features = tl.program_id(1) * BLOCK_DIM + tl.arange(0, BLOCK_DIM)
     feature_mask = features < dim
-    state_index = tl.load(
-        state_indices_ptr + sequence * stride_state_indices
-    ).to(tl.int64)
+    state_index = tl.load(state_indices_ptr + sequence * stride_state_indices).to(tl.int64)
     if state_index == 0:
         return
     has_initial_state = True
@@ -85,11 +83,7 @@ def _causal_conv1d_update_kernel(
     if query_start == query_end:
         return
 
-    state_base = (
-        conv_state_ptr
-        + state_index * stride_state_sequence
-        + features * stride_state_dim
-    )
+    state_base = conv_state_ptr + state_index * stride_state_sequence + features * stride_state_dim
     history_mask = feature_mask & has_initial_state
     if KERNEL_WIDTH >= 2:
         history_0 = tl.load(state_base, mask=history_mask, other=0.0)
@@ -114,18 +108,13 @@ def _causal_conv1d_update_kernel(
         + (state_tokens + sequence_length)[:, None] * stride_state_token
     )
     old_state_mask = (
-        (state_tokens + sequence_length < state_length)[:, None]
-        & feature_mask[None, :]
-        & has_initial_state
+        (state_tokens + sequence_length < state_length)[:, None] & feature_mask[None, :] & has_initial_state
     )
     old_state = tl.load(old_state_ptrs, mask=old_state_mask, other=0.0)
 
     input_base = input_ptr + input_offset + features * stride_input_dim
     first_tail_token = state_length - sequence_length
-    tail_input_ptrs = (
-        input_base[None, :]
-        + (state_tokens - first_tail_token)[:, None] * stride_input_token
-    )
+    tail_input_ptrs = input_base[None, :] + (state_tokens - first_tail_token)[:, None] * stride_input_token
     tail_input_mask = (
         (state_tokens - first_tail_token >= 0)[:, None]
         & (state_tokens - first_tail_token < sequence_length)[:, None]
@@ -140,9 +129,7 @@ def _causal_conv1d_update_kernel(
         + features[None, :] * stride_state_dim
         + state_tokens[:, None] * stride_state_token
     )
-    state_output_mask = (
-        (state_tokens < state_length)[:, None] & feature_mask[None, :]
-    )
+    state_output_mask = (state_tokens < state_length)[:, None] & feature_mask[None, :]
     tl.store(state_output_ptrs, updated_state, mask=state_output_mask)
 
     weight_base = weight_ptr + features * stride_weight_dim
@@ -218,10 +205,7 @@ def _causal_conv1d_update_kernel(
 
         accumulator = accumulator / (1 + tl.exp(-accumulator))
         tl.store(
-            output_ptr
-            + output_offset
-            + token * stride_output_token
-            + features * stride_output_dim,
+            output_ptr + output_offset + token * stride_output_token + features * stride_output_dim,
             accumulator,
             mask=feature_mask,
         )
@@ -276,9 +260,7 @@ def _launch_causal_conv1d_update(
         stride_output_token, stride_output_dim = output.stride()
         stride_output_sequence = 0
     else:
-        stride_output_sequence, stride_output_dim, stride_output_token = (
-            output.stride()
-        )
+        stride_output_sequence, stride_output_dim, stride_output_token = output.stride()
 
     block_state = triton.next_power_of_2(state_length)
     grid = (batch, triton.cdiv(dim, 256))
@@ -344,7 +326,6 @@ def causal_conv1d_prefill(
         query_start_loc,
         max_sequence_length,
     )
-
 
 
 def causal_conv1d_decode(

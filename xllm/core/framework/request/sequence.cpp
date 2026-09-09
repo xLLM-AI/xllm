@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -153,7 +153,20 @@ void Sequence::init_onerec_sequence(
   volatile_num_prompt_tokens_ = num_prompt_tokens_;
   input_embedding_ = std::move(input_embedding);
   cur_generated_token_idx_ = num_prompt_tokens_;
-  logprob_state_ = std::make_unique<LogprobState>(num_prompt_tokens_, capacity);
+  // OneRec can also emit per-token logprobs via enable_output_sku_logprobs
+  // (see generate_onerec_streaming_output), independent of the sampling flag,
+  // so allocate the logprob buffer when either path needs it. The beam readers
+  // index both buffers by token position (see the main constructor), so keep
+  // them allocated for beam requests too.
+  const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
+  const bool enable_logprobs =
+      sequence_params_.sampling_param->logprobs ||
+      ::xllm::RecConfig::get_instance().enable_output_sku_logprobs() ||
+      is_beam_search;
+  const bool enable_top_logprobs =
+      sequence_params_.sampling_param->top_logprobs > 0 || is_beam_search;
+  logprob_state_ = LogprobState(
+      num_prompt_tokens_, capacity, enable_logprobs, enable_top_logprobs);
 }
 
 void Sequence::generate_onerec_streaming_output(const Slice<int32_t>& ids,
@@ -175,9 +188,8 @@ void Sequence::generate_onerec_output(const Slice<int32_t>& ids,
     output.finish_reason = finish_reason_.to_string();
   }
   output.token_ids = ids.slice(num_prompt_tokens_, size);
-  if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs() &&
-      logprob_state_ != nullptr) {
-    const auto& token_logprobs = logprob_state_->get_logprobs();
+  if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs()) {
+    const auto& token_logprobs = logprob_state_.get_logprobs();
     output.token_ids_logprobs.reserve(output.token_ids.size());
     for (size_t i = num_prompt_tokens_; i < size; ++i) {
       if (i < token_logprobs.size()) {
@@ -235,9 +247,15 @@ Sequence::Sequence(size_t index,
       latest_generate_time_(absl::Now()),
       sequence_params_(seq_params),
       decoder_(std::move(decoder)),
-      stream_output_token_offset_(decoder_.output_offset()),
-      termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)),
-      request_id_(seq_params.request_id) {
+      stream_output_token_offset_(decoder_.output_offset()) {
+  if (sequence_params_.request_failure_state == nullptr) {
+    sequence_params_.request_failure_state =
+        std::make_shared<RequestFailureState>();
+  }
+  if (sequence_params_.json_object_grammar != nullptr) {
+    json_object_state_ = sequence_params_.json_object_grammar->initial_state(
+        sequence_params_.json_reasoning_enabled);
+  }
   if (is_onerec_model()) {
     init_onerec_sequence(prompt_token_ids, std::move(input_embedding));
     return;
@@ -249,10 +267,34 @@ Sequence::Sequence(size_t index,
 
   num_prompt_tokens_ = prompt_token_ids.size();
   volatile_num_prompt_tokens_ = num_prompt_tokens_;
-  tokens_.resize(capacity);
 
-  // init logprob state
-  logprob_state_ = std::make_unique<LogprobState>(num_prompt_tokens_, capacity);
+  // Build the token buffer in a single allocation: memcpy the prompt in, then
+  // zero-fill only the generation tail (capacity - n). The previous
+  // resize(capacity) + per-token store loop zero-initialized every slot and
+  // then overwrote the first n one at a time -- two O(n) passes where one
+  // memcpy suffices. The resulting state is identical: size() == capacity, the
+  // first n slots hold the prompt, the rest are 0.
+  tokens_.reserve(capacity);
+  tokens_.assign(prompt_token_ids.begin(), prompt_token_ids.end());
+  tokens_.resize(capacity);
+  num_tokens_ = num_prompt_tokens_;
+
+  // init logprob state. Only allocate the per-position buffers when they will
+  // actually be read. The beam readers (SequencesGroup::process_beam_search and
+  // Batch::process_beam_search_output) index both the logprob and top-k buffers
+  // by token position, so a beam request must have them allocated. The request
+  // factories already force logprobs/top_logprobs on for beam
+  // (RequestSamplingParam::enable_beam_search); tying the allocation to
+  // beam_width itself as well keeps the readers' requirement enforced where the
+  // buffers are created, independent of any upstream normalization. best_of>n
+  // forces logprobs on upstream, so it is already covered.
+  const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
+  const bool enable_logprobs =
+      sequence_params_.sampling_param->logprobs || is_beam_search;
+  const bool enable_top_logprobs =
+      sequence_params_.sampling_param->top_logprobs > 0 || is_beam_search;
+  logprob_state_ = LogprobState(
+      num_prompt_tokens_, capacity, enable_logprobs, enable_top_logprobs);
 
   if (sequence_params_.sampling_param->frequency_penalty != 0 ||
       sequence_params_.sampling_param->presence_penalty != 0 ||
@@ -260,10 +302,10 @@ Sequence::Sequence(size_t index,
     need_unique_tokens_ = true;
   }
 
-  // add the prompt tokens
-  for (const auto token_id : prompt_token_ids) {
-    tokens_[num_tokens_++] = token_id;
-    if (need_unique_tokens_) {
+  // The prompt tokens were already copied into tokens_ above; only walk them
+  // again to seed the unique-token map when a penalty actually needs it.
+  if (need_unique_tokens_) {
+    for (const auto token_id : prompt_token_ids) {
       token_to_count_map_[token_id] = 0;
     }
   }
@@ -273,8 +315,10 @@ Sequence::Sequence(size_t index,
   cur_generated_token_idx_ = num_prompt_tokens_;
 }
 
-Sequence::Sequence(const Sequence& other)
-    : index_(other.index_),
+Sequence::Sequence(const Sequence& other) : Sequence(other, other.index_) {}
+
+Sequence::Sequence(const Sequence& other, size_t index)
+    : index_(index),
       kv_state_(other.kv_state_),
       host_kv_state_(other.host_kv_state_),
       effective_restore_tokens_(other.effective_restore_tokens_),
@@ -301,8 +345,8 @@ Sequence::Sequence(const Sequence& other)
       linear_state_hashes_(other.linear_state_hashes_),
       linear_hash_stride_(other.linear_hash_stride_),
       onerec_state_(other.onerec_state_),
+      json_object_state_(other.json_object_state_),
       volatile_num_prompt_tokens_(other.volatile_num_prompt_tokens_),
-      request_id_(other.request_id_),
       finished_(other.finished_),
       finish_status_invalidated_(other.finish_status_invalidated_),
       finish_reason_(other.finish_reason_),
@@ -312,9 +356,10 @@ Sequence::Sequence(const Sequence& other)
       cur_generated_token_idx_(other.cur_generated_token_idx_),
       first_token_(other.first_token_),
       is_pre_scheduled_step_prefill_(other.is_pre_scheduled_step_prefill_),
-      updated_since_last_beam_search_(other.updated_since_last_beam_search_),
-      termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)) {
-  logprob_state_ = std::make_unique<LogprobState>(*other.logprob_state_);
+      updated_since_last_beam_search_(other.updated_since_last_beam_search_) {
+  logprob_state_ = other.logprob_state_;
+  // termination_flag_ intentionally starts fresh (INT32_MAX) rather than
+  // copying: a forked sequence has its own kvcache-store copy lifecycle.
   // A forked sequence (beam / best_of) shares the prompt KV prefix by
   // ref-counting those blocks, but its linear-state / embedding resource block
   // is private: drop the copied Embedding and Linear blocks so this sequence
@@ -327,6 +372,17 @@ Sequence::Sequence(const Sequence& other)
   kv_state_.erase_blocks(BlockType::LINEAR);
   host_kv_state_.erase_blocks(BlockType::EMBEDDING);
   host_kv_state_.erase_blocks(BlockType::LINEAR);
+}
+
+void Sequence::record_speculative_token_stats(
+    const SpeculativeTokenStats& stats) {
+  if (sequence_params_.speculative_token_stats == nullptr) {
+    return;
+  }
+  sequence_params_.speculative_token_stats->accepted_tokens +=
+      stats.accepted_tokens;
+  sequence_params_.speculative_token_stats->proposed_tokens +=
+      stats.proposed_tokens;
 }
 
 // The first token will be only used in disagg pd mode.
@@ -345,13 +401,84 @@ void Sequence::record_first_token(const Token& token) {
   first_token_ = std::move(t);
 }
 
+bool Sequence::try_commit_json_object_token(int32_t token_id,
+                                            int64_t token_offset) {
+  if (!json_object_state_.has_value() || token_id < 0) {
+    return true;
+  }
+  if (json_object_state_->can_accept_token(token_id)) {
+    CHECK(json_object_state_->accept_token(token_id));
+    return true;
+  }
+
+  const JsonObjectGrammarSnapshot snapshot = json_object_state_->snapshot();
+  const bool is_overlap_commit = token_offset >= 0;
+  if (is_overlap_commit) {
+    const JsonObjectGrammar* grammar = json_object_state_->grammar();
+    LOG(ERROR)
+        << "MTP JSON grammar mismatch: token_offset=" << token_offset
+        << ", request_id=" << request_id() << ", sequence_index=" << index_
+        << ", output_row=-1"
+        << ", token_id=" << token_id
+        << ", committed_tokens=" << snapshot.token_ids.size()
+        << ", state_fingerprint=" << json_object_state_->fingerprint()
+        << ", allowed_tokens="
+        << (grammar == nullptr
+                ? 0
+                : grammar->allowed_token_ids(*json_object_state_).size());
+  } else {
+    LOG(ERROR) << "JSON grammar commit mismatch: request_id=" << request_id()
+               << ", sequence_index=" << index_
+               << ", output_row=-1, token_offset=-1"
+               << ", token_id=" << token_id
+               << ", committed_tokens=" << snapshot.token_ids.size()
+               << ", state_fingerprint=" << json_object_state_->fingerprint();
+  }
+  const std::string token_source =
+      is_overlap_commit ? "accepted MTP token" : "generated token";
+  fail(Status(StatusCode::UNKNOWN,
+              token_source + " violates json_object grammar, token_id=" +
+                  std::to_string(token_id)));
+  return false;
+}
+
+bool Sequence::restore_json_object_state(
+    const JsonObjectGrammarSnapshot& snapshot) {
+  if (!json_object_state_.has_value()) {
+    return true;
+  }
+  const JsonObjectGrammar* grammar = json_object_state_->grammar();
+  if (grammar == nullptr) {
+    fail(Status(StatusCode::UNKNOWN,
+                "cannot restore an uninitialized json_object grammar state"));
+    return false;
+  }
+  JsonObjectGrammarState restored_state = grammar->restore_state(snapshot);
+  if (!restored_state.is_valid()) {
+    LOG(ERROR) << "JSON grammar replay failed during beam state restoration: "
+               << "request_id=" << request_id() << ", sequence_index=" << index_
+               << ", committed_tokens=" << snapshot.token_ids.size();
+    fail(Status(StatusCode::UNKNOWN,
+                "beam candidate violates json_object grammar"));
+    return false;
+  }
+  json_object_state_ = std::move(restored_state);
+  return true;
+}
+
 void Sequence::append_token(const Token& token) {
   CHECK_LT(num_tokens_, tokens_.size())
       << "exceed the token capacity of the sequence";
-  CHECK(!finished_) << "cannot append token to a finished sequence";
+  CHECK(!finished_ && !error_status().has_value())
+      << "cannot append token to a finished sequence";
   if (!is_onerec_model()) {
     CHECK(kv_state_.kv_cache_tokens_num() > 0 && !is_chunked_prefill_stage())
         << "cannot append token to a prefill sequence";
+  }
+
+  const int32_t token_id = static_cast<int32_t>(token.id);
+  if (!try_commit_json_object_token(token_id, /*token_offset=*/-1)) {
+    return;
   }
 
   // The real token was generated in function
@@ -366,7 +493,6 @@ void Sequence::append_token(const Token& token) {
   // append the token id and update the token count
   const auto cur_idx = num_tokens_++;
   kv_state_.set_kv_cache_tokens_num(cur_idx);
-  const int32_t token_id = static_cast<int32_t>(token.id);
   tokens_[cur_idx] = token_id;
 
   // skip update in enable_schedule_overlap
@@ -377,13 +503,12 @@ void Sequence::append_token(const Token& token) {
 
   // A real token was committed (overlap-fake placeholders returned above).
   ++generated_tokens_since_latency_;
-
   if (need_unique_tokens_) {
     token_to_count_map_[token_id]++;
   }
   // update logprobs if needed
   if (sequence_params_.sampling_param->logprobs) {
-    logprob_state_->update_logprob(
+    logprob_state_.update_logprob(
         cur_idx, token, sequence_params_.sampling_param->top_logprobs);
   }
 
@@ -396,6 +521,15 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   CHECK(sequence_params_.enable_schedule_overlap)
       << "update_last_step_token should only be called when "
          "enable_schedule_overlap";
+  if (error_status().has_value()) {
+    return;
+  }
+
+  const int32_t token_id = static_cast<int32_t>(token.id);
+  if (!try_commit_json_object_token(token_id,
+                                    static_cast<int64_t>(token_offset))) {
+    return;
+  }
   // check if the token is the first token
   is_first_token_ = cur_generated_token_idx_ == num_prompt_tokens_;
   record_first_token(token);
@@ -422,7 +556,6 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   // MTP token when token_offset > 0); preempted MTP steps returned above.
   ++generated_tokens_since_latency_;
 
-  const int32_t token_id = static_cast<int32_t>(token.id);
   tokens_[cur_generated_token_idx_] = token_id;
   // Overlap/MTP may rewrite tokens at decode positions; drop any cached block
   // hash from this position onward so it is recomputed when next needed.
@@ -433,7 +566,7 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   }
   // update logprobs if needed
   if (sequence_params_.sampling_param->logprobs) {
-    logprob_state_->update_logprob(
+    logprob_state_.update_logprob(
         cur_generated_token_idx_,
         token,
         sequence_params_.sampling_param->top_logprobs);
@@ -460,7 +593,7 @@ void Sequence::update_token(size_t index, const Token& token) {
   }
   // update logprobs if needed
   if (sequence_params_.sampling_param->logprobs) {
-    logprob_state_->update_logprob(
+    logprob_state_.update_logprob(
         index, token, sequence_params_.sampling_param->top_logprobs);
   }
   // logprobs_[index] = token.logprob;
@@ -872,6 +1005,9 @@ void Sequence::invalidate_linear_state_hashes_from(size_t token_index) {
 }
 
 bool Sequence::finished() const {
+  if (error_status().has_value()) {
+    return true;
+  }
   // return the cached finish status
   if (!finish_status_invalidated_) {
     return finished_;
@@ -938,11 +1074,11 @@ int64_t Sequence::tbt_microseconds(const absl::Time& now) {
 }
 
 float Sequence::get_acc_logprob() {
-  return logprob_state_->get_acc_logprob(num_tokens_);
+  return logprob_state_.get_acc_logprob(num_tokens_);
 }
 
 float Sequence::get_base_logprob() {
-  return logprob_state_->get_base_logprob(num_tokens_);
+  return logprob_state_.get_base_logprob(num_tokens_);
 }
 
 void Sequence::generate_output_tokens_logprobs(
@@ -954,7 +1090,7 @@ void Sequence::generate_output_tokens_logprobs(
     return;
   }
 
-  logprob_state_->generate_output_tokens_logprobs(
+  logprob_state_.generate_output_tokens_logprobs(
       start_idx,
       end_idx,
       tokenizer,
@@ -977,7 +1113,7 @@ bool Sequence::update_prefetch_result(uint32_t timeout, uint32_t& success_cnt) {
     return true;
   }
 
-  if (timeout != 0 && termination_flag_->load(std::memory_order_acquire) > 0) {
+  if (timeout != 0 && termination_flag_.load(std::memory_order_acquire) > 0) {
     if (!is_timeout_set_) {
       timer_.reset();
       is_timeout_set_ = true;
@@ -989,7 +1125,7 @@ bool Sequence::update_prefetch_result(uint32_t timeout, uint32_t& success_cnt) {
     }
   }
 
-  termination_flag_->store(0, std::memory_order_release);
+  termination_flag_.store(0, std::memory_order_release);
   success_cnt = host_kv_state_.blocks(BlockType::KV).size();
   for (auto& cnt : prefetch_results_) {
     success_cnt = std::min(success_cnt, cnt->load());
@@ -1012,7 +1148,20 @@ void Sequence::finish() {
   }
 }
 
+void Sequence::fail(Status status) {
+  CHECK(!status.ok());
+  if (!sequence_params_.request_failure_state->status.has_value()) {
+    sequence_params_.request_failure_state->status = std::move(status);
+  }
+  finished_ = true;
+  finish_status_invalidated_ = false;
+  finish_reason_ = FinishReason::NONE;
+}
+
 void Sequence::reset_finish_state_for_beam_search() {
+  if (error_status().has_value()) {
+    return;
+  }
   finished_ = false;
   finish_reason_ = FinishReason::NONE;
   matched_stop_token_count_ = 0;

@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -78,15 +78,19 @@ class GraphPersistentParam final {
   // host parameters can be bucketed for graph tiling/workspace. During replay,
   // return_capture_params may still be true for metadata refresh, but
   // for_capture must stay false so dynamic host metadata uses actual lengths.
-  std::optional<ModelInputParams> update(const torch::Tensor& tokens,
-                                         const torch::Tensor& k_cache,
-                                         const torch::Tensor& v_cache,
-                                         const torch::Tensor& positions,
-                                         const ModelInputParams& params,
-                                         uint32_t padded_num_tokens,
-                                         bool return_capture_params = false,
-                                         bool skip_token_update = false,
-                                         bool for_capture = false);
+  // update_paged_attention_plan can be disabled when FIA graph tasks replace
+  // the paged-attention task for the current graph.
+  std::optional<ModelInputParams> update(
+      const torch::Tensor& tokens,
+      const torch::Tensor& k_cache,
+      const torch::Tensor& v_cache,
+      const torch::Tensor& positions,
+      const ModelInputParams& params,
+      uint32_t padded_num_tokens,
+      bool return_capture_params = false,
+      bool skip_token_update = false,
+      bool for_capture = false,
+      bool update_paged_attention_plan = true);
 
   void update_tokens(const torch::Tensor& tokens,
                      const ModelInputParams& params,
@@ -112,11 +116,8 @@ class GraphPersistentParam final {
   }
   torch::Tensor persistent_positions(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
-      int32_t slice_dim = use_mrope_ ? 1 : 0;
-      return persistent_positions_
-          .slice(
-              /*dim=*/slice_dim, /*start=*/0, /*end=*/actual_tokens)
-          .contiguous();
+      return persistent_positions_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
     }
     return persistent_positions_;
   }
@@ -126,6 +127,14 @@ class GraphPersistentParam final {
           /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
     }
     return persistent_new_cache_slots_;
+  }
+  torch::Tensor persistent_eplb_decode_token_mask(
+      uint32_t token_count = 0) const {
+    if (token_count > 0) {
+      return persistent_eplb_decode_token_mask_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/token_count);
+    }
+    return persistent_eplb_decode_token_mask_;
   }
   torch::Tensor persistent_block_tables(uint32_t actual_batch_size = 0) const {
     if (actual_batch_size > 0) {
@@ -157,7 +166,6 @@ class GraphPersistentParam final {
     }
     return hidden_states_;
   }
-  // Setter for hidden_states (for assignment)
   void set_hidden_states(const torch::Tensor& value) {
     const uint32_t result_tokens = value.size(0);
     hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens)
@@ -227,7 +235,6 @@ class GraphPersistentParam final {
     }
     return aux_hidden_states_;
   }
-  // Setter for aux_hidden_states (for assignment)
   void set_aux_hidden_states(const torch::Tensor& value);
 
  private:
@@ -241,6 +248,9 @@ class GraphPersistentParam final {
 
   // Update attention mask efficiently from input parameters
   void update_attention_mask(const ModelInputParams& input_params);
+
+  void update_eplb_decode_token_mask(const ModelInputParams& input_params,
+                                     uint32_t padded_num_tokens);
 
   // Update paged attention tiling based on input parameters
   void plan_paged_attention_tiling(const torch::Tensor& tokens,
@@ -264,6 +274,7 @@ class GraphPersistentParam final {
   torch::Tensor persistent_tokens_;
   torch::Tensor persistent_positions_;
   torch::Tensor persistent_new_cache_slots_;
+  torch::Tensor persistent_eplb_decode_token_mask_;
   torch::Tensor persistent_block_tables_;
   torch::Tensor persistent_new_cache_slots_default_;
   torch::Tensor persistent_block_tables_default_;
@@ -294,9 +305,6 @@ class GraphPersistentParam final {
   torch::Tensor persistent_embedding_;
   torch::Tensor persistent_linear_state_indices_;
   torch::Tensor persistent_num_accepted_tokens_;
-
-  // for mrope (multimodal rotary position embedding)
-  bool use_mrope_ = false;
 
   // ModelOutput fields
   torch::Tensor aux_hidden_states_;

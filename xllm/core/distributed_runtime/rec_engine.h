@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,6 +48,11 @@ class RecEngine : public Engine {
   const runtime::Options& options() const { return options_; }
 
   bool init() override;
+
+  // Start local WorkerServers without loading weights. Non-leader ranks
+  // call this so rank 0's DistManager can collect the cluster; LlmRec
+  // otherwise creates DistManager only inside init().
+  void setup_distributed_workers();
 
   void update_last_step_result(std::vector<Batch>& batch) override;
 
@@ -183,6 +188,12 @@ class RecEngine : public Engine {
   // Private methods
   // ============================================================
   bool init_model();
+  // Reject REC configurations that cannot run across multiple nodes. Only the
+  // single-round LlmRec pipeline coordinates workers through DistManager;
+  // OneRec and LlmRec multi-round pipelines are local-only. This runs in
+  // common initialization (before pipeline selection) so the leader rejects
+  // the configuration too, not just secondary ranks. No-op when nnodes <= 1.
+  void validate_multi_node_support() const;
   KVCacheCapacity estimate_kv_cache_capacity();
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap);
 

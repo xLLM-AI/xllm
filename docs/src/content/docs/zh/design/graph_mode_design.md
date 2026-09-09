@@ -102,7 +102,7 @@ max_seq_len_ = std::max(max_of_seq.item<int>(), max_seq_len_);  // host 读取 t
 
 - **算子适配**
   - 泛化要求：需要保证计算图的 kernel 执行路径稳定。对于同一个输入 shape，每次执行计算图选择的 kernel 应保持一致，不发生 prefill、chunked prefill、decode 混杂；同时 `grid_dim`、`block_dim`、task 数量、workspace 形态和 tiling 内容也不能变化
-  - 典型示例：Ascned Cann商发8.3版本 的 ATB PA 会根据序列长度和 batch size 实时决定是否启用 flash-decoding 长序列模式；长序列模式和短序列模式的 tiling key 不同，dispatch 后实际 launch 的 `kernel_name` 也不同。这种“同一业务路径、不同运行时条件触发不同 kernel”的行为，在进入 Graph Mode 前需要先收敛
+  - 典型示例：Ascend Cann商发8.3版本 的 ATB PA 会根据序列长度和 batch size 实时决定是否启用 flash-decoding 长序列模式；长序列模式和短序列模式的 tiling key 不同，dispatch 后实际 launch 的 `kernel_name` 也不同。这种“同一业务路径、不同运行时条件触发不同 kernel”的行为，在进入 Graph Mode 前需要先收敛
 
 ## 2. 动态维度参数化
 
@@ -475,4 +475,3 @@ Graph 捕获期显存复用的核心映射关系如下：
 - [CudaGraph Capture 机制参考](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cuda-graphs)
 - [vLLM 图执行实现参考](https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/cudagraph_utils.py)
 - [SGLang 图执行实现参考](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_executor/cuda_graph_runner.py)
-

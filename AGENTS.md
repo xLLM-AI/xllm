@@ -35,6 +35,7 @@
 
 * Before editing, creating, refactoring, or reviewing any file under `xllm/`, you **MUST** read [custom-code-style.md](.agents/skills/code-review/references/custom-code-style.md).
 * The file above is a **required instruction file**, not an optional reference. Do not skip reading it.
+* After editing any C++ file, run clang-format 20.1.6 with the repo `.clang-format` on every touched file before finishing. Do not leave formatting for the user to remind you.
 * Apply the rules in [custom-code-style.md](.agents/skills/code-review/references/custom-code-style.md) to **both code generation and code review**.
 * Follow DDD (Domain Driven Design) principles, and keep the codebase clean and maintainable.
 * If [custom-code-style.md](.agents/skills/code-review/references/custom-code-style.md) specifies a rule, that rule takes precedence over the Google C++/Python Style Guide.

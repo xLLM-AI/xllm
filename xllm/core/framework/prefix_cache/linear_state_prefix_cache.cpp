@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,8 +19,6 @@ limitations under the License.
 #include <absl/time/time.h>
 
 #include <memory>
-
-#include "common/metrics.h"
 
 namespace xllm {
 
@@ -104,11 +102,6 @@ std::vector<Block> LinearStatePrefixCache::match(
   }
   matched_blocks_.fetch_add(valid_hits);
 
-  const int64_t int_rate_percent =
-      static_cast<int64_t>(static_cast<double>(valid_hits) * 100.0 / n_blocks);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
-  HISTOGRAM_OBSERVE(prefix_cache_block_matched_num, valid_hits);
-
   return blocks;
 }
 
@@ -118,7 +111,7 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
                                       const MMData& mm_data,
                                       const Slice<XXH3Key>& block_hashes) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
-  // allign tokens to block boundary
+  // align tokens to block boundary
   const size_t n_blocks =
       std::min(token_ids.size() / block_size_, blocks.size());
 

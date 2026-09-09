@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -159,8 +159,6 @@ torch::Tensor FusedMoEImpl::forward_experts_all2all(
     const torch::Tensor& hidden_states,
     const std::optional<RouteInfo>& route_info,
     const std::optional<torch::Tensor>& input_ids) {
-  init_streams(hidden_states);
-
   torch::Tensor shared_expert_output;
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
   torch::ScalarType hidden_states_dtype = hidden_states.dtype().toScalarType();

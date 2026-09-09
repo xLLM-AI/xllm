@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,8 @@ limitations under the License.
 
 DEFINE_uint32(prefetch_timeout,
               0,
-              "Prefetch timeout for prefetch from kv cache store.");
+              "Stop issuing new KV cache Store prefetch batches after this "
+              "timeout; wait for in-flight batches before admission.");
 
 DEFINE_uint32(prefetch_batch_size,
               2,
@@ -39,9 +40,14 @@ DEFINE_string(store_protocol,
               "tcp",
               "KV cache store protocol(e.g. tcp, rdma).");
 
+DEFINE_string(store_rdma_devices,
+              "",
+              "Comma-separated RDMA HCAs for the embedded Store client.");
+
 DEFINE_string(store_master_server_address,
               "",
-              "The address information of the store master service.");
+              "The Store master address: IP:Port for standalone mode or "
+              "etcd://IP:Port;IP:Port;... for high availability mode.");
 
 DEFINE_string(store_metadata_server,
               "",
@@ -64,6 +70,7 @@ void KVCacheStoreConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(host_blocks_factor);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_kvcache_store);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(store_protocol);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(store_rdma_devices);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(store_master_server_address);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(store_metadata_server);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(store_local_hostname);
@@ -77,6 +84,7 @@ void KVCacheStoreConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(host_blocks_factor);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_kvcache_store);
   XLLM_CONFIG_ASSIGN_FROM_JSON(store_protocol);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(store_rdma_devices);
   XLLM_CONFIG_ASSIGN_FROM_JSON(store_master_server_address);
   XLLM_CONFIG_ASSIGN_FROM_JSON(store_metadata_server);
   XLLM_CONFIG_ASSIGN_FROM_JSON(store_local_hostname);
@@ -98,6 +106,8 @@ void KVCacheStoreConfig::append_config_json(
       config_json, default_config, enable_kvcache_store);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, store_protocol);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, store_rdma_devices);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, store_master_server_address);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

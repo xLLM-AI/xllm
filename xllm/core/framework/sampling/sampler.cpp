@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,8 +19,11 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+
 #include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "logits_utils.h"
 #include "sampling_params.h"
 
@@ -29,6 +32,8 @@ namespace xllm {
 SampleOutput Sampler::forward(torch::Tensor& logits,
                               const SamplingParameters& params,
                               const torch::Tensor& filter_mask) const {
+  const torch::Tensor& effective_filter_mask =
+      filter_mask.defined() ? filter_mask : params.filter_mask;
   SampleOutput output;
   // apply frequency and presence penalties
   if (params.frequency_penalties.defined()) {
@@ -49,6 +54,7 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   torch::Tensor sample_temperatures = params.temperatures;
   torch::Tensor sample_top_k = params.top_k;
   torch::Tensor sample_top_p = params.top_p;
+  torch::Tensor sample_filter_bitmask = params.filter_bitmask;
   const bool use_sample_indices =
       params.selected_token_idxes.numel() != params.sample_idxes.numel();
   if (use_sample_indices) {
@@ -63,20 +69,26 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     if (params.top_p.defined()) {
       sample_top_p = params.top_p.index_select(/*dim=*/0, params.sample_idxes);
     }
+    if (sample_filter_bitmask.defined()) {
+      sample_filter_bitmask =
+          sample_filter_bitmask.index_select(/*dim=*/0, params.sample_idxes);
+    }
   }
 
-  if (filter_mask.defined()) {
-    CHECK_EQ(filter_mask.dim(), 2)
-        << "filter_mask must be 2-D, dim=" << filter_mask.dim();
-    CHECK_EQ(filter_mask.size(0), sample_logits.size(0))
+  if (sample_filter_bitmask.defined()) {
+    apply_token_bitmask_inplace(sample_logits, sample_filter_bitmask);
+  } else if (effective_filter_mask.defined()) {
+    CHECK_EQ(effective_filter_mask.dim(), 2)
+        << "filter_mask must be 2-D, dim=" << effective_filter_mask.dim();
+    CHECK_EQ(effective_filter_mask.size(0), sample_logits.size(0))
         << "filter_mask batch mismatch, filter_mask.size(0)="
-        << filter_mask.size(0)
+        << effective_filter_mask.size(0)
         << ", sample_logits.size(0)=" << sample_logits.size(0);
-    CHECK_EQ(filter_mask.size(1), sample_logits.size(1))
+    CHECK_EQ(effective_filter_mask.size(1), sample_logits.size(1))
         << "filter_mask vocab mismatch, filter_mask.size(1)="
-        << filter_mask.size(1)
+        << effective_filter_mask.size(1)
         << ", sample_logits.size(1)=" << sample_logits.size(1);
-    sample_logits = sample_logits + filter_mask;
+    sample_logits = sample_logits + effective_filter_mask;
   }
 
   if (params.all_greedy_sample && !params.logprobs && !params.return_probs &&
@@ -154,8 +166,16 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     output.logprobs = selected_logprobs.view({-1});
 
     if (params.max_top_logprobs > 0) {
-      auto [values, indices] =
-          logprobs.topk(params.max_top_logprobs, /*dim=*/-1);
+      // max_top_logprobs is the batch-wide max, so one request asking for more
+      // than the vocabulary would make topk throw and fail every request in the
+      // batch. The factories reject such requests up front
+      // (RequestSamplingParam::top_logprobs_vocab_error); clamp here as the
+      // last line of defense so the sampler can never be the failure point.
+      // Every consumer sizes by the returned row width, so a shorter row is
+      // safe.
+      const int64_t k =
+          std::min<int64_t>(params.max_top_logprobs, logprobs.size(-1));
+      auto [values, indices] = logprobs.topk(k, /*dim=*/-1);
       output.top_logprobs = values;
       output.top_tokens = indices;
     }

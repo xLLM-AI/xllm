@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -157,6 +157,22 @@ void KVCacheState::erase_blocks(BlockType type) {
     pending_linear_save_hash_.reset();
     linear_restore_src_block_.reset();
   }
+}
+
+std::vector<Block> KVCacheState::take_blocks(BlockType type) {
+  auto it = composite_blocks_.find(type);
+  if (it == composite_blocks_.end()) {
+    num_owned_shared_blocks_.erase(type);
+    num_cached_blocks_.erase(type);
+    block_sizes_.erase(type);
+    return {};
+  }
+  std::vector<Block> blocks = std::move(it->second);
+  composite_blocks_.erase(it);
+  block_sizes_.erase(type);
+  num_owned_shared_blocks_.erase(type);
+  num_cached_blocks_.erase(type);
+  return blocks;
 }
 
 Block KVCacheState::copy_block(BlockType type) const {
@@ -412,6 +428,7 @@ void KVCacheState::advance_group_transfer_block_idx(BlockType type,
 
 void KVCacheState::reset() {
   kv_cache_tokens_num_ = 0;
+  prefix_cache_matched_ = false;
   num_owned_shared_blocks_.clear();
   num_cached_blocks_.clear();
   pushed_local_block_count_ = 0;
