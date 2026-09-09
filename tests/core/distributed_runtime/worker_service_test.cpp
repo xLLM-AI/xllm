@@ -37,8 +37,10 @@ class WorkerServiceTestPeer final {
   static std::vector<SpeculativeTokenStats> record_speculative_metrics(
       WorkerService& service,
       const torch::Tensor& tokens,
-      const std::vector<SpeculativeTokenStats>& output_stats) {
-    return service.record_speculative_metrics_from_output(tokens, output_stats);
+      const std::vector<SpeculativeTokenStats>& output_stats,
+      bool is_graph_warmup = false) {
+    return service.record_speculative_metrics_from_output(
+        tokens, output_stats, is_graph_warmup);
   }
 };
 
@@ -241,8 +243,7 @@ TEST(WorkerServiceMetricsTest, AdaptiveMtpUpdatesMetricsOnce) {
                          ->get_value(),
                      positions_before[position] + expected_positions[position]);
   }
-  const double mean_tokens =
-      GAUGE_VALUE(speculative_mean_tokens_per_decode_step);
+  const double mean_tokens = GAUGE_VALUE(speculative_mean_acceptance_length);
   EXPECT_DOUBLE_EQ(mean_tokens, (committed_before + 6) / (drafts_before + 3));
 }
 

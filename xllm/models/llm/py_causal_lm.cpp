@@ -190,23 +190,23 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          global_world_size,
                          dcp_group_index);
     }
-  }
-  if (layerwise_split_size_ > 1) {
-    CHECK_EQ(tp_size_ % layerwise_split_size_, 0)
-        << "layerwise_split_size must divide Python attention TP size";
-    const int32_t layerwise_group_index =
-        (global_rank / tp_size_) * (tp_size_ / layerwise_split_size_) +
-        tp_rank_ / layerwise_split_size_;
-    layerwise_split_rank_ = tp_rank_ % layerwise_split_size_;
-    init_process_group("layerwise",
-                       parallel_args.python_rendezvous_host_,
-                       parallel_args.python_rendezvous_port_,
-                       layerwise_split_rank_,
-                       layerwise_split_size_,
-                       c10::str(device_),
-                       global_rank,
-                       global_world_size,
-                       layerwise_group_index);
+    if (layerwise_split_size_ > 1) {
+      CHECK_EQ(tp_size_ % layerwise_split_size_, 0)
+          << "layerwise_split_size must divide Python attention TP size";
+      const int32_t layerwise_group_index =
+          (global_rank / tp_size_) * (tp_size_ / layerwise_split_size_) +
+          tp_rank_ / layerwise_split_size_;
+      layerwise_split_rank_ = tp_rank_ % layerwise_split_size_;
+      init_process_group("layerwise",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         layerwise_split_rank_,
+                         layerwise_split_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         layerwise_group_index);
+    }
   }
   const std::string module_name = context.get_model_args().model_type().empty()
                                       ? std::string("Qwen3ForCausalLM")
