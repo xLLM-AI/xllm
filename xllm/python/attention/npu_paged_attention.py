@@ -833,8 +833,6 @@ class NpuPagedAttentionBackend(AttentionBackend):
         actual_seq_q: torch.Tensor,
         actual_seq_kv: torch.Tensor,
         layer_id: int,
-        actual_seq_q: torch.Tensor | list[int] | None = None,
-        actual_seq_kv: torch.Tensor | list[int] | None = None,
     ) -> torch.Tensor:
         if actual_seq_q is None:
             actual_seq_q = self._mla_actual_seq_q

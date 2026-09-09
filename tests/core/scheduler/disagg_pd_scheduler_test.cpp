@@ -614,8 +614,7 @@ TEST(DisaggPDSchedulerTest, SchedulerDoesNotOverwriteSpeculativeOutputGauge) {
   std::vector<Sequence*> sequences = {first_sequence, second_sequence};
   scheduler.update_metrics(sequences);
 
-  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(),
-                   4.25);
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(), 4.25);
   EXPECT_EQ(first_sequence->generated_tokens_since_latency(), 0u);
   EXPECT_EQ(second_sequence->generated_tokens_since_latency(), 0u);
 }
@@ -636,8 +635,7 @@ TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
 
   scheduler.update_metrics(sequences);
 
-  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(),
-                   -1.0);
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(), -1.0);
 }
 
 TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {

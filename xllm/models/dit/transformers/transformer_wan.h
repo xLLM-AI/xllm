@@ -1643,12 +1643,12 @@ class WanTransformer3DModelImpl : public torch::nn::Module,
                 if (before_layer_cb) {
                   before_layer_cb(static_cast<int32_t>(i));
                 }
-                torch::Tensor out =
-                    transformer_layers_[i]->forward(h,
-                                                    encoder_hidden_states_embedded,
-                                                    timestep_proj,
-                                                    rotary_emb,
-                                                    sparse_attn_state);
+                torch::Tensor out = transformer_layers_[i]->forward(
+                    h,
+                    encoder_hidden_states_embedded,
+                    timestep_proj,
+                    rotary_emb,
+                    sparse_attn_state);
                 if (after_layer_cb) {
                   after_layer_cb(static_cast<int32_t>(i));
                 }

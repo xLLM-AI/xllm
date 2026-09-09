@@ -97,7 +97,7 @@ inline std::vector<int32_t> build_seq_offsets(
 
 inline torch::Tensor build_segment_length_matrix(
     const std::vector<v32_sp::DeepseekV32SPSegment>& segments,
-    int32_t v32_sp::DeepseekV32SPSegment::*length_field,
+    int32_t v32_sp::DeepseekV32SPSegment::* length_field,
     const torch::Device& device) {
   std::vector<int32_t> values;
   values.reserve(segments.size() * 2);

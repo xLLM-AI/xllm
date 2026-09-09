@@ -1249,12 +1249,11 @@ void ProfileManager::warmup_prefill_for_graph() {
     int32_t per_group_cap =
         (options_.max_tokens_per_batch() + dp_size - 1) / dp_size;
     if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-      const int32_t max_chunk_tokens =
-          ::xllm::SchedulerConfig::get_instance()
-              .max_tokens_per_chunk_for_prefill();
-      per_group_cap = std::max(
-          per_group_cap,
-          std::min(max_chunk_tokens, options_.max_tokens_per_batch()));
+      const int32_t max_chunk_tokens = ::xllm::SchedulerConfig::get_instance()
+                                           .max_tokens_per_chunk_for_prefill();
+      per_group_cap =
+          std::max(per_group_cap,
+                   std::min(max_chunk_tokens, options_.max_tokens_per_batch()));
     } else {
       per_group_cap = options_.max_tokens_per_batch();
     }
