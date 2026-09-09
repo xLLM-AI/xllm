@@ -135,6 +135,21 @@ ModelOutput XliteExecutorImpl::run(const torch::Tensor& tokens,
   xlite_model.Forward(
       rt, x_in, attn_meta, kv_buf_, no_deepstack, freqs_cis, x_out);
   rt.EventRecordCurrStream(ext);
+  // PUSH-mode KV transfer: push threads spin on per-layer events that the
+  // model records during forward (NPULayerSynchronizerImpl). The xlite forward
+  // is monolithic with no per-layer hooks, so record every layer's event here
+  // after the whole forward; each event then fires with all KV writes
+  // complete. Correct, at the cost of forgoing per-layer push overlap. Once
+  // xlite exposes per-layer callbacks, record there instead to restore the
+  // push/forward overlap.
+  if (params.parallel.layer_synchronizer != nullptr) {
+    const int64_t num_layers = static_cast<int64_t>(
+        params.parallel.layer_synchronizer->get_event_size());
+    for (int64_t i = 0; i < num_layers; ++i) {
+      CHECK(params.parallel.layer_synchronizer->record_event(
+          i, static_cast<int32_t>(device_.index())));
+    }
+  }
 #else
   LOG(FATAL) << "xlite backend requires USE_NPU";
 #endif

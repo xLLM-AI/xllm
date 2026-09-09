@@ -68,6 +68,8 @@ class XliteAttnMetaBuilder {
     }
 
     // DP padding: append dummy seq so sum(lens) aligns across DP groups.
+    // Block 0 is the framework-reserved padding block (BlockManagerImpl /
+    // XTensorBlockManagerImpl), never owned by real sequences.
     if (pad_count > 0) {
       m.lensCpu.push_back(static_cast<uint32_t>(pad_count));
       m.cachedLensCpu.push_back(0);

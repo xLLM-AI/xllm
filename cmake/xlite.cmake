@@ -11,7 +11,7 @@ if(USE_NPU AND USE_XLITE)
   )
 
   execute_process(
-    COMMAND ${Python_EXECUTABLE} -c
+    COMMAND ${Python3_EXECUTABLE} -c
             "import sysconfig; print(sysconfig.get_paths()['platlib'])"
     OUTPUT_VARIABLE _XLITE_PLATLIB
     OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -27,7 +27,7 @@ if(USE_NPU AND USE_XLITE)
      OR NOT EXISTS "${XLITE_MARKER_PATH}")
     message(STATUS "xlite git HEAD changed; pip installing from submodule into ${_XLITE_PLATLIB}")
     execute_process(
-      COMMAND ${Python_EXECUTABLE} -m pip install --no-deps --no-build-isolation
+      COMMAND ${Python3_EXECUTABLE} -m pip install --no-deps --no-build-isolation
               --force-reinstall ${CMAKE_SOURCE_DIR}/third_party/GVirt/xlite
       RESULT_VARIABLE XLITE_PIP_RESULT
     )
@@ -62,7 +62,7 @@ function(xllm_link_xlite target)
 
   if(NOT TARGET xlite::xlite)
     execute_process(
-      COMMAND ${Python_EXECUTABLE} -c "import xlite; print(xlite.cmake_prefix_path)"
+      COMMAND ${Python3_EXECUTABLE} -c "import xlite; print(xlite.cmake_prefix_path)"
       OUTPUT_VARIABLE _XLITE_CMAKE_PREFIX
       OUTPUT_STRIP_TRAILING_WHITESPACE
       RESULT_VARIABLE _XLITE_IMPORT_RESULT)
