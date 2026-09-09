@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <xlite/xlite.h>
 
 #include <algorithm>
@@ -33,17 +34,27 @@ namespace xllm::xlite {
 
 class XliteConfigBuilder {
  private:
-  // W8A8 quantized model (quant_method non-empty, from
-  // quant_model_description.json). Hardcoding true flips shared expert layout
-  // for BF16 models.
+  // Validate quantization method; xlite backend only supports W8A8 (Ascend
+  // int8) quantization. Fatal if a different quant method is specified.
+  static void ValidateQuantMethod(const ModelContext& context) {
+    const std::string& qm = context.get_quant_args().quant_method();
+    if (!qm.empty() && qm != kQuantMethodAscendInt8) {
+      LOG(FATAL) << "xlite backend only supports W8A8 quantization ("
+                 << kQuantMethodAscendInt8 << "), but got: " << qm;
+    }
+  }
+  // W8A8 quantized model (quant_method == kQuantMethodAscendInt8, from
+  // quant_model_description.json). BF16 models (empty quant_method)
+  // must not enable the W8A8 layout flags.
   static bool IsW8A8(const ModelContext& context) {
-    const auto& q = context.get_quant_args();
-    return !q.quant_method().empty();
+    const std::string& qm = context.get_quant_args().quant_method();
+    return !qm.empty() && qm == kQuantMethodAscendInt8;
   }
 
  public:
   // Qwen3 dense (MHA); also the base for Qwen3-MoE (nDenseLayers overridden).
   static XModelConfig FromQwen3(const ModelContext& context) {
+    ValidateQuantMethod(context);
     const ModelArgs& a = context.get_model_args();
     const ParallelArgs& p = context.get_parallel_args();
     XModelConfig c{};
@@ -104,9 +115,8 @@ class XliteConfigBuilder {
     c.blockSizes = {bs};
     c.deepstackNumLevel = 0;
     c.weightNZ = false;
-    // W8A8 quant layout flags; BF16 checkpoints must not set them. Set at
-    // the root builder so every derived builder inherits; a family with a
-    // different quant format may override after calling FromQwen3.
+    // W8A8 quant layout flags; BF16 checkpoints (empty quant_method) must not
+    // set them. Set at the root builder so every derived builder inherits.
     if (IsW8A8(context)) {
       c.quantAttnWeightTrans = true;
       c.quantAttnWeightNz = true;
