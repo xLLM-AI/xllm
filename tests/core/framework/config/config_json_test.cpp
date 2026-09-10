@@ -222,26 +222,67 @@ std::filesystem::path config_test_file_path() {
 TEST(ModelConfigValidationTest, RejectsQwen35PythonSpeculativeDecode) {
   const std::optional<std::string> error =
       ModelConfig::validate_python_speculative_decode(
-          "python", "qwen3_5_moe_text", 4);
+          "python", "qwen3_5_moe_text", 4, "MTP");
 
   ASSERT_TRUE(error.has_value());
   EXPECT_NE(error->find("does not support speculative decoding"),
             std::string::npos);
-  EXPECT_TRUE(
-      ModelConfig::validate_python_speculative_decode("py", "qwen3_5_text", 1)
-          .has_value());
+  EXPECT_TRUE(ModelConfig::validate_python_speculative_decode(
+                  "py", "qwen3_5_text", 1, "Eagle3")
+                  .has_value());
 }
 
 TEST(ModelConfigValidationTest, AcceptsSupportedPythonExecutionModes) {
   EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
-                   "python", "qwen3_5_text", 0)
+                   "python", "qwen3_5_text", 0, "MTP")
                    .has_value());
   EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
-                   "native", "qwen3_5_text", 4)
+                   "native", "qwen3_5_text", 4, "MTP")
                    .has_value());
-  EXPECT_FALSE(
-      ModelConfig::validate_python_speculative_decode("python", "qwen3", 4)
-          .has_value());
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "python", "qwen3", 4, "MTP")
+                   .has_value());
+}
+
+TEST(ModelConfigValidationTest, RejectsGlmPythonMtpBeforeDraftLoading) {
+  const std::optional<std::string> error =
+      ModelConfig::validate_python_speculative_decode(
+          "python", "glm_moe_dsa", /*num_speculative_tokens=*/4, "MTP");
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("glm_moe_dsa_mtp"), std::string::npos);
+  EXPECT_NE(error->find("native model executor"), std::string::npos);
+}
+
+TEST(ModelConfigValidationTest, GlmMtpGatePreservesOtherExecutionModes) {
+  struct Case {
+    std::string_view model_impl;
+    std::string_view algorithm;
+    int32_t num_speculative_tokens;
+    bool rejected;
+  };
+  const Case cases[] = {
+      {"python", "MTP", 4, true},
+      {"py", "Mtp", 4, true},
+      {"python", "mtp", 1, true},
+      {"native", "MTP", 4, false},
+      {"python", "MTP", 0, false},
+      {"python", "Eagle3", 4, false},
+      {"python", "DSpark", 4, false},
+      {"python", "DFlash", 4, false},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(std::string(test_case.model_impl) + "/" +
+                 std::string(test_case.algorithm) + "/" +
+                 std::to_string(test_case.num_speculative_tokens));
+    EXPECT_EQ(ModelConfig::validate_python_speculative_decode(
+                  test_case.model_impl,
+                  "glm_moe_dsa",
+                  test_case.num_speculative_tokens,
+                  test_case.algorithm)
+                  .has_value(),
+              test_case.rejected);
+  }
 }
 
 TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {

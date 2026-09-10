@@ -190,6 +190,8 @@ def scatter_nd_update(
     Args:
         value: Destination tensor, updated in place.
         indices: Index of every updated row, shape ``[num_updates, 1]``.
+            Negative row indices are padding/non-owner lanes and are skipped
+            by xLLM's ScatterNdUpdateV2 kernel without changing input shapes.
         updates: Rows written into ``value``.
     """
     torch.ops.xllm_ops.scatter_nd_update(value, indices, updates)

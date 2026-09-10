@@ -45,7 +45,8 @@ class ModelConfig final {
   [[nodiscard]] static std::optional<std::string>
   validate_python_speculative_decode(std::string_view model_impl,
                                      std::string_view model_type,
-                                     int32_t num_speculative_tokens);
+                                     int32_t num_speculative_tokens,
+                                     std::string_view speculative_algorithm);
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {

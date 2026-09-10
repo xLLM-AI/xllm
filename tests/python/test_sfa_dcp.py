@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -172,7 +173,7 @@ def test_mla_index_materialization_keeps_cache_scale_and_table_together() -> Non
     materialized_scale = torch.empty(2)
     block_table = torch.tensor([[0, 1]], dtype=torch.int32)
     metadata = MagicMock()
-    cp_context = MagicMock()
+    cp_context = SimpleNamespace(segment_seq_indices=torch.tensor([0, 0]))
     materialize_cp_cache = MagicMock(
         side_effect=[
             (materialized_cache, block_table),
@@ -190,7 +191,7 @@ def test_mla_index_materialization_keeps_cache_scale_and_table_together() -> Non
 
     assert actual_cache is materialized_cache
     assert actual_scale is materialized_scale
-    assert actual_table is block_table
+    torch.testing.assert_close(actual_table, torch.tensor([[0, 1], [0, 1]], dtype=torch.int32))
     assert [call.args[0] for call in materialize_cp_cache.call_args_list] == [
         index_cache,
         index_cache_scale,
@@ -203,7 +204,7 @@ def test_mla_index_materialization_without_scale_keeps_legacy_path() -> None:
     materialized_cache = torch.empty(2)
     block_table = torch.tensor([[0, 1]], dtype=torch.int32)
     metadata = MagicMock()
-    cp_context = MagicMock()
+    cp_context = SimpleNamespace(segment_seq_indices=torch.tensor([0, 0]))
     materialize_cp_cache = MagicMock(return_value=(materialized_cache, block_table))
     backend._materialize_cp_cache = materialize_cp_cache
 
@@ -216,11 +217,11 @@ def test_mla_index_materialization_without_scale_keeps_legacy_path() -> None:
 
     assert actual_cache is materialized_cache
     assert actual_scale is None
-    assert actual_table is block_table
+    torch.testing.assert_close(actual_table, torch.tensor([[0, 1], [0, 1]], dtype=torch.int32))
     materialize_cp_cache.assert_called_once_with(index_cache, metadata, cp_context)
 
 
-def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
+def test_glm_quant_indexer_without_cp_uses_materialized_scale() -> None:
     indexer = glm5_2.Glm52Indexer.__new__(glm5_2.Glm52Indexer)
     nn.Module.__init__(indexer)
     indexer.n_head = 1
@@ -239,9 +240,7 @@ def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
     materialized_cache = torch.empty(4, 2, 1, dtype=torch.int8)
     materialized_scale = torch.empty(4, 2, 1, dtype=torch.float16)
     materialized_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
-    global_topk = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-    local_topk = torch.tensor([[2, 3]], dtype=torch.int32)
-    cp_context = MagicMock()
+    topk = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     update_index_cache = MagicMock()
     materialize_index_cache = MagicMock(return_value=(materialized_cache, materialized_scale, materialized_table))
     context = MlaIndexContext(
@@ -254,7 +253,7 @@ def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
         get_quant_indexer_metadata=MagicMock(return_value=torch.empty(0)),
         update_index_cache=update_index_cache,
         materialize_index_cache=materialize_index_cache,
-        cp_context=cp_context,
+        cp_context=None,
     )
 
     def dynamic_quant(value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -264,7 +263,6 @@ def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
 
     with (
         patch.object(glm5_2, "_apply_half_rope", side_effect=lambda _cache, value, _positions: value),
-        patch.object(glm5_2, "cp_gather_kv", side_effect=lambda value, _context: value),
         patch.object(
             glm5_2.kernels,
             "dynamic_quant",
@@ -279,10 +277,9 @@ def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
         patch.object(
             glm5_2.kernels,
             "quant_lightning_indexer",
-            return_value=global_topk,
+            return_value=topk,
             create=True,
         ) as quant_lightning_indexer,
-        patch.object(glm5_2, "cp_shard_rows", return_value=local_topk) as cp_shard_rows,
     ):
         output = indexer.select_qli(
             torch.ones(2, 3),
@@ -292,12 +289,11 @@ def test_glm_quant_indexer_uses_materialized_scale_and_reshards_topk() -> None:
             torch.empty(0),
         )
 
-    assert output is local_topk
+    assert output is topk
     materialize_index_cache.assert_called_once_with()
     assert quant_lightning_indexer.call_args.args[1] is materialized_cache
     assert quant_lightning_indexer.call_args.args[4] is materialized_scale
     assert quant_lightning_indexer.call_args.args[8] is materialized_table
-    cp_shard_rows.assert_called_once_with(global_topk, cp_context)
 
 
 def test_lse_as_token_head_squeezes_graph_leading_one() -> None:

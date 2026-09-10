@@ -621,44 +621,58 @@ class Glm52Indexer(nn.Module):
     ) -> torch.Tensor:
         actual_seq_q = ctx.actual_seq_q
         actual_seq_kv = ctx.actual_seq_kv
-        q = self.wq_b(qr).view(-1, self.n_head, self.head_dim)
-        q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
         cache_hidden = hidden if cache_hidden is None else cache_hidden
         cache_positions = positions if cache_positions is None else cache_positions
         k = self.wk(cache_hidden)
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
         if self.indexer_rope_interleave:
-            cos, sin = _gather_interleave_cos_sin(cos_sin_cache, positions)
-            q_pe = _interleave_rope_with(q_pe, cos, sin)
             k_cos, k_sin = _gather_interleave_cos_sin(cos_sin_cache, cache_positions)
             k_pe = _interleave_rope_with(k_pe.unsqueeze(1), k_cos, k_sin).squeeze(1)
         else:
-            q_pe = _apply_half_rope(cos_sin_cache, q_pe, positions)
             k_pe = _apply_half_rope(cos_sin_cache, k_pe.unsqueeze(1), cache_positions).squeeze(1)
-        q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
-        weights = self.weights_proj(hidden)
         if ctx.cp_context is not None:
-            q = cp_gather_kv(q, ctx.cp_context).contiguous()
+            # Q/weights already contain only this rank's real query rows;
+            # only the padded K rows obey the equal-size CP gather contract.
             k = cp_gather_kv(k, ctx.cp_context).contiguous()
-            weights = cp_gather_kv(weights, ctx.cp_context).contiguous()
 
         index_cache = ctx.index_cache
         index_cache_scale = ctx.index_cache_scale
         use_quant_indexer = index_cache.dtype == torch.int8 and index_cache_scale is not None
+        k_scale = None
         if use_quant_indexer:
             rotation_scale = self.head_dim**-0.5
-            q = torch.matmul(q, self.hadamard) * rotation_scale
             k = torch.matmul(k, self.hadamard) * rotation_scale
-            q, q_scale = kernels.dynamic_quant(q)
             k, k_scale = kernels.dynamic_quant(k)
-            assert q_scale is not None
             assert k_scale is not None
-            q_scale = q_scale.to(torch.float16)
             k_scale = k_scale.unsqueeze(-1).to(torch.float16)
-            ctx.update_index_cache(k, k_scale)
-            index_cache, index_cache_scale, block_table = ctx.materialize_index_cache()
+        ctx.update_index_cache(k, k_scale)
+        index_cache, index_cache_scale, block_table = ctx.materialize_index_cache()
+        if ctx.cp_context is not None and ctx.cp_context.query_index.numel() == 0:
+            # Other ranks still need this rank's keys/cache materialization.
+            # Complete those collectives before skipping empty Q kernels.
+            return torch.full(
+                (ctx.cp_context.total_local, index_cache.size(2), self.topk),
+                -1,
+                dtype=torch.int32,
+                device=hidden.device,
+            )
+
+        q = self.wq_b(qr).view(-1, self.n_head, self.head_dim)
+        q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+        if self.indexer_rope_interleave:
+            cos, sin = _gather_interleave_cos_sin(cos_sin_cache, positions)
+            q_pe = _interleave_rope_with(q_pe, cos, sin)
+        else:
+            q_pe = _apply_half_rope(cos_sin_cache, q_pe, positions)
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        weights = self.weights_proj(hidden)
+        if use_quant_indexer:
+            q = torch.matmul(q, self.hadamard) * rotation_scale
+            q, q_scale = kernels.dynamic_quant(q)
+            assert q_scale is not None
+            q_scale = q_scale.to(torch.float16)
             assert index_cache_scale is not None
             weight_scale = self.head_dim**-0.5 * self.n_head**-0.5
             # xLLM stores one index key per source token.
@@ -682,8 +696,6 @@ class Glm52Indexer(nn.Module):
                 cmp_ratio,
             )
         else:
-            ctx.update_index_cache(k, None)
-            index_cache, _, block_table = ctx.materialize_index_cache()
             topk = kernels.lightning_indexer(
                 q,
                 index_cache,
@@ -700,7 +712,9 @@ class Glm52Indexer(nn.Module):
                 False,
             )
         if ctx.cp_context is not None:
-            topk = cp_shard_rows(topk, ctx.cp_context)
+            local_topk = topk.new_full((ctx.cp_context.total_local, *topk.shape[1:]), -1)
+            local_topk.index_copy_(0, ctx.cp_context.query_index, topk)
+            return local_topk
         return topk
 
 

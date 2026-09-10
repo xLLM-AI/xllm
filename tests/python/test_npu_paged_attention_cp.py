@@ -84,7 +84,9 @@ def test_owner_local_index_write_ignores_non_owned_slots() -> None:
     values = torch.arange(5, dtype=torch.float32).view(-1, 1)
 
     def scatter(var: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> None:
-        var.index_copy_(0, indices.flatten(), updates)
+        rows = indices.flatten()
+        valid = rows >= 0
+        var.index_copy_(0, rows[valid], updates[valid])
 
     with patch(
         "xllm.python.attention.npu_paged_attention.kernels.scatter_nd_update",

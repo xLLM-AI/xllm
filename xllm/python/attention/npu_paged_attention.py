@@ -668,22 +668,26 @@ class NpuPagedAttentionBackend(AttentionBackend):
         slot_mapping = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
         if slot_mapping is None:
             raise RuntimeError("MLA index cache requires a slot mapping")
+        cp_context = get_forward_context().cp_context
+        block_table = self._block_table_i32
+        if cp_context is not None:
+            block_table = block_table.index_select(0, cp_context.segment_seq_indices).contiguous()
         return MlaIndexContext(
             index_cache=index_cache,
             slot_mapping=slot_mapping,
-            block_table=self._block_table_i32,
-            actual_seq_q=self._mla_actual_seq_q,
-            actual_seq_kv=self._mla_actual_seq_kv,
+            block_table=block_table,
+            actual_seq_q=self._mla_actual_seq_q if cp_context is None else cp_context.q_cu_seqlens_tensor,
+            actual_seq_kv=self._mla_actual_seq_kv if cp_context is None else cp_context.segment_kv_seq_lens_tensor,
             index_cache_scale=index_cache_scale,
-            get_quant_indexer_metadata=lambda num_heads_q,
-            head_dim,
-            sparse_count,
-            cmp_ratio: self._get_quant_indexer_metadata(
-                num_heads_q,
-                index_cache.size(2),
-                head_dim,
-                sparse_count,
-                cmp_ratio,
+            get_quant_indexer_metadata=lambda num_heads_q, head_dim, sparse_count, cmp_ratio: (
+                self._get_quant_indexer_metadata(
+                    num_heads_q,
+                    index_cache.size(2),
+                    head_dim,
+                    sparse_count,
+                    cmp_ratio,
+                    cp_context,
+                )
             ),
             update_index_cache=lambda values, scales: self._update_mla_index_cache(
                 index_cache,
@@ -696,9 +700,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 index_cache,
                 index_cache_scale,
                 metadata,
-                get_forward_context().cp_context,
+                cp_context,
             ),
-            cp_context=get_forward_context().cp_context,
+            cp_context=cp_context,
         )
 
     def _get_quant_indexer_metadata(
@@ -708,20 +712,34 @@ class NpuPagedAttentionBackend(AttentionBackend):
         head_dim: int,
         sparse_count: int,
         cmp_ratio: int,
+        cp_context: CpContext | None = None,
     ) -> torch.Tensor:
         assert self._mla_actual_seq_q is not None
         assert self._mla_actual_seq_kv is not None
         cache_key = (num_heads_q, head_dim, sparse_count, cmp_ratio)
         metadata = self._mla_quant_indexer_metadata.get(cache_key)
         if metadata is None:
+            actual_seq_q = self._mla_actual_seq_q
+            actual_seq_kv = self._mla_actual_seq_kv
+            max_seqlen_q = self._mla_max_seqlen_q
+            max_seqlen_k = self._mla_max_seqlen_k
+            if cp_context is not None:
+                actual_seq_q = cp_context.q_cu_seqlens_tensor
+                actual_seq_kv = cp_context.segment_kv_seq_lens_tensor
+                ends = cp_context.q_cu_seqlens
+                max_seqlen_q = max(
+                    (end - (ends[index - 1] if index else 0) for index, end in enumerate(ends)),
+                    default=0,
+                )
+                max_seqlen_k = max(cp_context.segment_kv_seq_lens, default=0)
             metadata = kernels.quant_lightning_indexer_metadata(
                 num_heads_q,
                 num_heads_k,
                 head_dim,
-                self._mla_actual_seq_q,
-                self._mla_actual_seq_kv,
-                self._mla_max_seqlen_q,
-                self._mla_max_seqlen_k,
+                actual_seq_q,
+                actual_seq_kv,
+                max_seqlen_q,
+                max_seqlen_k,
                 sparse_count,
                 cmp_ratio,
             )
@@ -736,22 +754,24 @@ class NpuPagedAttentionBackend(AttentionBackend):
         values: torch.Tensor,
         scales: torch.Tensor | None,
     ) -> None:
-        valid_rows = torch.nonzero(slot_mapping >= 0, as_tuple=False).flatten()
-        if valid_rows.numel() == 0:
+        if slot_mapping.numel() == 0:
             return
+        # xLLM's ScatterNdUpdateV2 skips negative row offsets on device. Keep
+        # all lanes so capture/replay sees fixed shapes even when KV owners
+        # or padding change; nonzero() would synchronize the captured stream.
         cache_view = index_cache.view(-1, index_cache.size(-1))
-        scatter_indices = slot_mapping.index_select(0, valid_rows).reshape(-1, 1)
+        scatter_indices = slot_mapping.reshape(-1, 1)
         kernels.scatter_nd_update(
             cache_view,
             scatter_indices,
-            values.index_select(0, valid_rows),
+            values,
         )
         if index_cache_scale is not None and scales is not None:
             scale_view = index_cache_scale.view(-1, index_cache_scale.size(-1))
             kernels.scatter_nd_update(
                 scale_view,
                 scatter_indices,
-                scales.index_select(0, valid_rows),
+                scales,
             )
 
     def _materialize_cp_cache(
@@ -798,6 +818,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 metadata,
                 cp_context,
             )
+        if cp_context is not None:
+            block_table = block_table.index_select(0, cp_context.segment_seq_indices).contiguous()
         return materialized_cache, materialized_scale, block_table
 
     def _materialize_sfa_layout(

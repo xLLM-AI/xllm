@@ -141,6 +141,22 @@ std::optional<std::string> validate_model_cp(const Options& options,
   }
 
   if (options.cp_size() == 1) {
+    const int32_t kv_split =
+        ParallelConfig::get_instance().kv_split_size_effective();
+    if (Platform::is_npu() &&
+        ModelConfig::is_python_model_impl(
+            ModelConfig::get_instance().model_impl()) &&
+        kv_split > 1 && options.dp_size() > 1) {
+      // The Python DCP initializer currently forms KV groups over the whole
+      // world, not inside each DP request domain. Reject before the PCP early
+      // return and before workers can enter mismatched collectives.
+      return "Python DCP requires dp_size == 1 until DP-local KV groups are "
+             "implemented (world_size=" +
+             std::to_string(global_world_size) +
+             ", dp_size=" + std::to_string(options.dp_size()) + ", tp_size=" +
+             std::to_string(global_world_size / options.dp_size()) +
+             ", cp_size=1, kv_split_size=" + std::to_string(kv_split) + ").";
+    }
     return std::nullopt;
   }
 
@@ -237,7 +253,8 @@ std::optional<std::string> validate_model_cp(const Options& options,
           SpeculativeConfig::is_mtp_algorithm(
               options.speculative_algorithm())) {
         return "Python model-side CP does not support MTP speculative "
-               "verification; run MTP on a cp_size=1 Decode instance";
+               "verification; use the native model executor for GLM MTP on "
+               "a cp_size=1 Decode instance";
       }
       // On NPU, the Python executor resolves enable_graph=true with an
       // off-like backend to ACLGraph. ACLGraph handles Decode only, so Prefill
@@ -444,7 +461,8 @@ Master::Master(const Options& options, EngineType type)
       ModelConfig::validate_python_speculative_decode(
           ModelConfig::get_instance().model_impl(),
           model_type,
-          options_.num_speculative_tokens());
+          options_.num_speculative_tokens(),
+          options_.speculative_algorithm());
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   const std::optional<std::string> cp_error =
       validate_model_cp(options_, type, model_type, global_world_size);

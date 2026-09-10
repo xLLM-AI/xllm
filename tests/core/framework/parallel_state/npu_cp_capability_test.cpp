@@ -77,6 +77,57 @@ TEST(NpuCpCapabilityTest, RegistrationIsIdempotent) {
   }
 }
 
+TEST(NpuCpCapabilityTest, PythonDcpRejectsCrossDpGroupsBeforePcpEarlyReturn) {
+  ModelConfig& model_config = ModelConfig::get_instance();
+  ParallelConfig& parallel_config = ParallelConfig::get_instance();
+  const std::string original_model_impl = model_config.model_impl();
+  const int32_t original_kv_split_size = parallel_config.kv_split_size();
+  ScopeGuard config_guard([&] {
+    model_config.model_impl(original_model_impl);
+    parallel_config.kv_split_size(original_kv_split_size);
+  });
+  model_config.model_impl("python");
+  parallel_config.kv_split_size(2);
+  Options options;
+  options.cp_size(1).dp_size(2).instance_role(InstanceRole::DECODE);
+
+  const std::optional<std::string> error = validate_model_cp(
+      options, EngineType::LLM, "glm_moe_dsa", /*global_world_size=*/8);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("Python DCP requires dp_size == 1"), std::string::npos);
+  EXPECT_NE(error->find("dp_size=2"), std::string::npos);
+  EXPECT_NE(error->find("tp_size=4"), std::string::npos);
+  EXPECT_NE(error->find("cp_size=1"), std::string::npos);
+  EXPECT_NE(error->find("kv_split_size=2"), std::string::npos);
+
+  model_config.model_impl("py");
+  EXPECT_TRUE(validate_model_cp(options,
+                                EngineType::LLM,
+                                "glm_moe_dsa",
+                                /*global_world_size=*/8)
+                  .has_value());
+  options.dp_size(1);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/8)
+                   .has_value());
+  options.dp_size(2);
+  parallel_config.kv_split_size(1);
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/8)
+                   .has_value());
+  parallel_config.kv_split_size(2);
+  model_config.model_impl("native");
+  EXPECT_FALSE(validate_model_cp(options,
+                                 EngineType::LLM,
+                                 "glm_moe_dsa",
+                                 /*global_world_size=*/8)
+                   .has_value());
+}
+
 TEST(NpuCpCapabilityTest, PythonCpAllowsAclGraphAndRejectsCompileBackends) {
   ExecutionConfig& execution_config = ExecutionConfig::get_instance();
   ModelConfig& model_config = ModelConfig::get_instance();
@@ -174,7 +225,8 @@ TEST(NpuCpCapabilityTest, PythonCpPreservesQwenAndRestrictsGlm) {
                               /*global_world_size=*/16),
             std::optional<std::string>(
                 "Python model-side CP does not support MTP speculative "
-                "verification; run MTP on a cp_size=1 Decode instance"));
+                "verification; use the native model executor for GLM MTP on "
+                "a cp_size=1 Decode instance"));
 
   options.speculative_algorithm("DSpark");
   EXPECT_EQ(validate_model_cp(options,
