@@ -130,6 +130,16 @@ ModelOutput XliteExecutorImpl::run(const torch::Tensor& tokens,
   // GLM-5.x DSA uses only freqsCis[0]). Wrap the single set here.
   std::vector<::XTensor> freqs_cis = {x_freqs};
 #if defined(USE_NPU)
+  // Hierarchy host-cache restore (host_blocks_factor > 1) installs
+  // parallel.layer_wise_load_synchronizer while per-layer H2D copies are in
+  // flight; the monolithic forward consumes every layer's KV at once, so wait
+  // for all load events first. synchronize_layer() no-ops when no
+  // synchronizer is installed.
+  for (uint32_t layer = 0; layer < holder->xlite_config().nLayers; ++layer) {
+    CHECK(params.synchronize_layer(layer))
+        << "Hierarchy KV cache layer load failed; layer " << layer
+        << " not ready.";
+  }
   aclrtStream ext = c10_npu::getCurrentNPUStream(device_.index()).stream();
   rt.EventWaitCurrStream(ext);
   xlite_model.Forward(
