@@ -18,6 +18,7 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <xlite/xlite.h>
 
 #include <vector>
@@ -43,7 +44,17 @@ class XliteExecutorImpl : public BaseExecutorImpl {
       : BaseExecutorImpl(model, args, device, options),
         model_(model),
         device_(device),
-        options_(options) {}
+        options_(options) {
+    // Sleep mode check lives here rather than XliteCausalLMBase's
+    // CheckSupportedConfig because ModelContext does not carry runtime
+    // Options. Both sleep paths are rejected: the RL SleepableAllocator path
+    // never covers xlite weights, and the xtensor path requires the
+    // lazy_load_model / free_model_weights lifecycle xlite does not
+    // implement.
+    CHECK(!options_.enable_sleep_mode())
+        << "Sleep mode is not supported by xlite backend; disable "
+           "--enable_sleep_mode or use a non-xlite backend.";
+  }
 
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,

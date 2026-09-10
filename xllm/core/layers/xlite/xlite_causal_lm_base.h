@@ -27,6 +27,12 @@ limitations under the License.
 
 #include <xlite/xlite.h>
 
+#include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_input_params.h"
@@ -86,6 +92,7 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
         parallel_(context.get_parallel_args()),
         adapter_(std::move(adapter)),
         ready_(false) {
+    CheckSupportedConfig();
     cfg_ = adapter_->BuildConfig(context);
     // ParallelArgs::tp_size() is not populated; derive from world_size/dp_size.
     const uint32_t tp = XliteTpSize(parallel_);
@@ -122,6 +129,18 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
+    // Reload path (WorkerImpl::update_weights re-enters load_model on the
+    // same instance). XModel::Init is not idempotent (leaks its device
+    // buffers on re-entry), so rebuild the model for fresh state; the runtime
+    // (streams / HCCL comms / tensor pool) is weight-independent and reused
+    // (InitTensorPool no-ops once inited). Old weights are released by
+    // dropping their torch refs.
+    if (ready_) {
+      LOG(INFO) << "xlite load_model: reloading weights";
+      weight_storages_.clear();
+      model_ = std::make_unique<XModel>(
+          cfg_, static_cast<uint32_t>(parallel_.rank()));
+    }
     auto& state_dicts = loader->get_state_dicts();
     // Load once over merged shards, then Init once (not idempotent).
     std::vector<const StateDict*> dicts;
@@ -191,8 +210,20 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
 
   torch::Device device() const override { return device_; }
   const torch::TensorOptions& options() const override { return options_; }
-  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
-  void update_expert_weight(int32_t) override {}
+  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {
+    LOG(FATAL) << "EPLB is not supported by xlite backend.";
+  }
+  void update_expert_weight(int32_t) override {
+    LOG(FATAL) << "EPLB is not supported by xlite backend.";
+  }
+  void lazy_load_model(std::unique_ptr<ModelLoader>) override {
+    LOG(FATAL) << "Rolling load / sleep mode (lazy_load_model) is not "
+                  "supported by xlite backend.";
+  }
+  void free_model_weights() override {
+    LOG(FATAL) << "Sleep mode (free_model_weights) is not supported by "
+                  "xlite backend.";
+  }
 
   xlite::XliteModelHolder* get_xlite_holder() override { return this; }
 
@@ -208,6 +239,35 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
     return output_buf_.slice(0, 0, n);
   }
   bool xlite_ready() const override { return ready_; }
+
+ private:
+  // Fail fast on configurations the xlite backend does not implement. Each
+  // check names the user-facing flag to disable.
+  static void CheckSupportedConfig() {
+    CHECK(!::xllm::EPLBConfig::get_instance().enable_eplb())
+        << "EPLB is not supported by xlite backend; disable --enable_eplb"
+           " or use a non-xlite backend.";
+    CHECK(!::xllm::LoadConfig::get_instance().enable_rolling_load())
+        << "Rolling load is not supported by xlite backend; disable "
+           "--enable_rolling_load or use a non-xlite backend.";
+    CHECK_LE(::xllm::SpeculativeConfig::get_instance().num_speculative_tokens(),
+             0)
+        << "Speculative decoding is not supported by xlite backend; set "
+           "--num_speculative_tokens=0 or use a non-xlite backend.";
+    CHECK_LE(::xllm::ParallelConfig::get_instance().layerwise_split_size(), 1)
+        << "Layerwise split is not supported by xlite backend; set "
+           "--layerwise_split_size=1 or use a non-xlite backend.";
+    CHECK_LE(::xllm::ParallelConfig::get_instance().cp_size(), 1)
+        << "Context parallelism is not supported by xlite backend; set "
+           "--cp_size=1 or use a non-xlite backend.";
+    CHECK(!::xllm::BeamSearchConfig::get_instance().enable_beam_search_kernel())
+        << "Beam search is not supported by xlite backend; disable "
+           "--enable_beam_search_kernel or use a non-xlite backend.";
+    CHECK_NE(::xllm::KVCacheConfig::get_instance().indexer_cache_dtype(),
+             "int8")
+        << "INT8 indexer cache is not supported by xlite backend; set "
+           "--indexer_cache_dtype=auto or use a non-xlite backend.";
+  }
 
  protected:
   torch::TensorOptions options_;

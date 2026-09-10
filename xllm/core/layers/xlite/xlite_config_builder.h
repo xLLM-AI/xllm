@@ -131,6 +131,15 @@ class XliteConfigBuilder {
     const ModelArgs& a = context.get_model_args();
     const ParallelArgs& p = context.get_parallel_args();
 
+    // The xlite layout is "dense prefix + all-MoE tail" (nDenseLayers); the
+    // per-layer is_moe_layer() masks (ATB qwen3_moe_decoder_layer.cpp) are
+    // not representable, so reject non-contiguous MoE placements.
+    CHECK_EQ(a.decoder_sparse_step(), 1)
+        << "Non-contiguous MoE layers (decoder_sparse_step > 1) are not "
+           "supported by xlite backend; use another backend.";
+    CHECK(a.mlp_only_layers().empty())
+        << "mlp_only_layers is not supported by xlite backend; use another "
+           "backend.";
     c.nDenseLayers = static_cast<uint32_t>(a.first_k_dense_replace());
     c.nRoutedExperts = static_cast<uint32_t>(a.num_experts());
     c.nSharedExperts = 0;
@@ -170,6 +179,14 @@ class XliteConfigBuilder {
     c.softmaxScale = 1.0f / std::sqrt(qkHeadDim);
     int64_t origSeqLen = a.rope_scaling_original_max_position_embeddings();
     if (origSeqLen > 0 && static_cast<int64_t>(c.maxSeqLen) > origSeqLen) {
+      // DeepSeek YaRN uses two factors: the global softmax scale
+      // (mscale_all_dim) and the rotary magnitude (mscale / mscale_all_dim).
+      // Only the equal-factors case is supported (official checkpoints set
+      // both to 1.0); differing factors change the no-PE/RoPE relative
+      // weighting and are rejected.
+      CHECK_EQ(a.rope_scaling_mscale(), a.rope_scaling_mscale_all_dim())
+          << "rope_scaling mscale != mscale_all_dim is not supported by "
+             "xlite backend; use another backend.";
       float mscale =
           0.1f * a.rope_scaling_mscale() * std::log(a.rope_scaling_factor()) +
           1.0f;
