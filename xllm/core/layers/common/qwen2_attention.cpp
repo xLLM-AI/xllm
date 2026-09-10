@@ -26,7 +26,8 @@ namespace {
 inline bool is_qwen3_model(const std::string& model_type) {
   static const std::unordered_set<std::string> qwen3_type_set = {
       "qwen3", "qwen3_vl", "qwen3_moe", "qwen3_vl_moe", "oxygenvlm"};
-  return qwen3_type_set.contains(model_type);
+  return qwen3_type_set.contains(model_type) ||
+         xllm::is_dflash2_draft_model_type(model_type);
 }
 
 #if defined(USE_CUDA) || defined(USE_DCU)
@@ -193,11 +194,34 @@ torch::Tensor Qwen2AttentionImpl::forward(
 }
 
 void Qwen2AttentionImpl::load_state_dict(const StateDict& state_dict) {
+  q_proj_weight_seen_ = q_proj_weight_seen_ || state_dict.has("q_proj.weight");
+  k_proj_weight_seen_ = k_proj_weight_seen_ || state_dict.has("k_proj.weight");
+  v_proj_weight_seen_ = v_proj_weight_seen_ || state_dict.has("v_proj.weight");
   qkv_proj_->load_state_dict(state_dict, {"q_proj.", "k_proj.", "v_proj."});
   o_proj_->load_state_dict(state_dict.get_dict_with_prefix("o_proj."));
   if (is_qwen3_style_) {
     q_norm_->load_state_dict(state_dict.get_dict_with_prefix("q_norm."));
     k_norm_->load_state_dict(state_dict.get_dict_with_prefix("k_norm."));
+  }
+}
+
+void Qwen2AttentionImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  if (!qkv_proj_->is_weight_loaded()) {
+    CHECK(q_proj_weight_seen_)
+        << "weight is not loaded for " << prefix + "q_proj.weight";
+    CHECK(k_proj_weight_seen_)
+        << "weight is not loaded for " << prefix + "k_proj.weight";
+    CHECK(v_proj_weight_seen_)
+        << "weight is not loaded for " << prefix + "v_proj.weight";
+  }
+  CHECK(qkv_proj_->is_weight_loaded()) << "weight is not loaded for " << prefix
+                                       << "{q_proj,k_proj,v_proj}.weight";
+  CHECK(o_proj_->is_weight_loaded())
+      << "weight is not loaded for " << prefix + "o_proj.weight";
+  if (is_qwen3_style_) {
+    q_norm_->verify_loaded_weights(prefix + "q_norm.");
+    k_norm_->verify_loaded_weights(prefix + "k_norm.");
   }
 }
 

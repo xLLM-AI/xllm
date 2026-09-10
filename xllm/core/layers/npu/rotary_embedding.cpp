@@ -161,6 +161,30 @@ std::tuple<torch::Tensor, torch::Tensor> RotaryEmbeddingGeneric::forward(
                          torch::cat({key_rotary, key_pass}, /*dim=*/-1));
 }
 
+torch::Tensor RotaryEmbeddingGeneric::forward_key(
+    const torch::Tensor& key,       // [num_tokens, n_kv_heads, head_dim]
+    const torch::Tensor& positions  // [num_tokens]
+) const {
+  DCHECK_GE(key.size(-1), rotary_dim_);
+  auto key_rotary = key.index({"...", ISlice(0, rotary_dim_)});
+  auto key_pass = key.index({"...", ISlice(rotary_dim_, None)});
+
+  namespace F = torch::nn::functional;
+  auto cos_sin = F::embedding(positions, cos_sin_cache_);
+  // add a new dimension for n_heads
+  cos_sin = cos_sin.unsqueeze(1);
+  const auto chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
+  torch::Tensor key_embed;
+  if (interleaved_) {
+    key_embed =
+        (key_rotary * chunks[0]) + (rotate_every_two(key_rotary) * chunks[1]);
+  } else {
+    key_embed =
+        (key_rotary * chunks[0]) + (rotate_half(key_rotary) * chunks[1]);
+  }
+  return torch::cat({key_embed, key_pass}, /*dim=*/-1);
+}
+
 RotaryEmbeddingDeepseekYarn::RotaryEmbeddingDeepseekYarn(
     float scaling_factor,
     int64_t rotary_dim,

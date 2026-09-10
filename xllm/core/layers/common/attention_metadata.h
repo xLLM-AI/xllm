@@ -221,6 +221,11 @@ struct AttentionMetadata {
   torch::Tensor paged_attention_tiling_data;
   // Pre-computed attention mask for npu_fused_infer_attention.
   torch::Tensor fia_attn_mask;
+  // Optional FIA band-mode overrides. Negative values retain the default
+  // causal/full-attention behavior selected by AttentionImpl.
+  int64_t fia_sparse_mode = -1;
+  int64_t fia_pre_tokens = -1;
+  int64_t fia_next_tokens = -1;
   // Host vectors for npu_fused_infer_attention (kernel requires host memory).
   std::vector<int64_t> q_cu_seq_lens_host_vec;
   std::vector<int64_t> kv_cu_seq_lens_host_vec;

@@ -1154,15 +1154,16 @@ void WorkerImpl::prepare_dp_ep_padding(ModelInputParams& input_params) {
   if (graph_decode) {
     const int32_t max_token_size =
         *std::max_element(token_sizes.begin(), token_sizes.end());
-    graph_token_size = static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
-        max_token_size,
-        ::xllm::ExecutionConfig::get_instance()
-            .enable_graph_mode_decode_no_padding()));
-    use_graph_padding = std::any_of(
-        token_sizes.begin(), token_sizes.end(),
-        [graph_token_size](int32_t token_count) {
-          return token_count != graph_token_size;
-        });
+    graph_token_size =
+        static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
+            max_token_size,
+            ::xllm::ExecutionConfig::get_instance()
+                .enable_graph_mode_decode_no_padding()));
+    use_graph_padding = std::any_of(token_sizes.begin(),
+                                    token_sizes.end(),
+                                    [graph_token_size](int32_t token_count) {
+                                      return token_count != graph_token_size;
+                                    });
   }
   std::vector<int32_t> graph_padded_token_sizes;
   const std::vector<int32_t>* padded_token_sizes = &token_sizes;
@@ -1327,6 +1328,13 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
+    // SpeculativeWorkerImpl carries the target model context but delegates
+    // target/draft execution to its inner workers and therefore owns no KV
+    // cache itself.  In particular, a Qwen3.5/3.8 target advertises linear
+    // attention while the outer DFlash worker's kv_caches_ is empty.  Let the
+    // inner target worker (which owns the recurrent cache) perform preparation
+    // and restore; attempting it here would treat target cache operations as
+    // draft operations and fail discover_num_slots().
     if (!kv_caches_.empty() &&
         has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(input_params);
@@ -1973,8 +1981,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
-  auto tokenizer = model_loader->tokenizer();
-  CHECK(tokenizer != nullptr);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1982,10 +1988,16 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  // Only the target engine reconciles tokenizer and model vocab sizes. Draft
-  // engines do not detokenize output, but worker-local JSON grammar state
-  // restoration still requires retaining the tokenizer below.
+  // A draft engine is fed token ids and detokenized by the target, so it owns
+  // no tokenizer (its weights dir may not even ship tokenizer files, e.g. the
+  // DFlash / DSpark draft checkpoints). Only the target worker builds one and
+  // reconciles vocab sizes; its JSON grammar restoration below is target-only
+  // and never runs on a draft.
+  std::unique_ptr<Tokenizer> tokenizer;
   if (!options_.is_draft_engine()) {
+    tokenizer = model_loader->tokenizer();
+    CHECK(tokenizer != nullptr);
+
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
     // use tokenizer vocab size if model vocab size is not set
@@ -2003,7 +2015,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   const std::string& speculative_algorithm = options_.speculative_algorithm();
   const bool is_block_diffusion =
-      speculative_algorithm == "DFlash" || speculative_algorithm == "DSpark";
+      SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
 
 #if defined(USE_NPU)
   if (options_.enable_speculative_decode() &&
@@ -2017,8 +2029,13 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       const bool is_dspark = speculative_algorithm == "DSpark";
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      std::string draft_model_type =
-          is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+      std::string draft_model_type = "DFlashDraftModel";
+      if (is_dspark) {
+        draft_model_type = "DSparkDraftModel";
+      } else if (SpeculativeConfig::is_dflash2_algorithm(
+                     speculative_algorithm)) {
+        draft_model_type = std::string(kDFlash2DraftModelType);
+      }
       if (is_deepseek_v4_dspark) {
         draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
       }
@@ -2133,12 +2150,16 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   // Warm JSON grammars off the forward path so the first constrained request
   // does not pay tokenizer.decode over the full vocab under the step lock.
-  if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
-    LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
-  }
-  if (ensure_json_object_grammar(/*reasoning_enabled=*/true) == nullptr) {
-    LOG(WARNING)
-        << "JSON reasoning grammar warmup failed; will retry lazily on demand";
+  // Draft-engine workers own no tokenizer and never serve constrained requests
+  // (the target does), so skip the warmup for them.
+  if (!options_.is_draft_engine()) {
+    if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
+      LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
+    }
+    if (ensure_json_object_grammar(/*reasoning_enabled=*/true) == nullptr) {
+      LOG(WARNING) << "JSON reasoning grammar warmup failed; will retry lazily "
+                      "on demand";
+    }
   }
 
   int32_t tp_world_size = parallel_args_.world_size();

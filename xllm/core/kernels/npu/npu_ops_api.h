@@ -72,7 +72,9 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     int64_t sparse_mode,
     const std::string& input_layout,
     bool softmax_lse_flag = false,
-    bool is_causal = true);
+    bool is_causal = true,
+    int64_t pre_tokens = -1,
+    int64_t next_tokens = -1);
 
 torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
     const torch::Tensor& query,

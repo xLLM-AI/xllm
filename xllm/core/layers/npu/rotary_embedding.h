@@ -59,6 +59,14 @@ class RotaryEmbeddingGeneric : public NpuRotaryEmbedding {
       const torch::Tensor& positions  // [num_tokens]
   ) const override;
 
+  // Key-only variant: callers that only need the rotated key (e.g. the
+  // DFlash2 context projection) skip the query half instead of passing the
+  // key as the query and discarding that result.
+  torch::Tensor forward_key(
+      const torch::Tensor& key,       // [num_tokens, n_kv_heads, head_dim]
+      const torch::Tensor& positions  // [num_tokens]
+  ) const;
+
   torch::Tensor get_cos_sin_cache() override { return cos_sin_cache_; }
 
  private:

@@ -171,6 +171,10 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
 }
 
 void DenseMLPImpl::load_state_dict(const StateDict& state_dict) {
+  gate_proj_weight_seen_ =
+      gate_proj_weight_seen_ || state_dict.has("gate_proj.weight");
+  up_proj_weight_seen_ =
+      up_proj_weight_seen_ || state_dict.has("up_proj.weight");
   gate_up_proj_->load_state_dict(state_dict, {"gate_proj.", "up_proj."});
   down_proj_->load_state_dict(state_dict.get_dict_with_prefix("down_proj."));
 }
@@ -180,13 +184,35 @@ void DenseMLPImpl::load_state_dict(const StateDict& state_dict,
                                    const std::string& down_name) {
   if (is_gated_) {
     CHECK_EQ(gate_up_name.size(), 2);
+    gate_proj_weight_seen_ =
+        gate_proj_weight_seen_ || state_dict.has(gate_up_name[0] + "weight");
+    up_proj_weight_seen_ =
+        up_proj_weight_seen_ || state_dict.has(gate_up_name[1] + "weight");
     gate_up_proj_->load_state_dict(state_dict, gate_up_name);
   } else {
     CHECK_EQ(gate_up_name.size(), 1);
+    up_proj_weight_seen_ =
+        up_proj_weight_seen_ || state_dict.has(gate_up_name[0] + "weight");
     gate_up_proj_->load_state_dict(
         state_dict.get_dict_with_prefix(gate_up_name[0]));
   }
   down_proj_->load_state_dict(state_dict.get_dict_with_prefix(down_name));
+}
+
+void DenseMLPImpl::verify_loaded_weights(const std::string& prefix) const {
+  if (!gate_up_proj_->is_weight_loaded()) {
+    if (is_gated_) {
+      CHECK(gate_proj_weight_seen_)
+          << "weight is not loaded for " << prefix + "gate_proj.weight";
+    }
+    CHECK(up_proj_weight_seen_)
+        << "weight is not loaded for " << prefix + "up_proj.weight";
+  }
+  CHECK(gate_up_proj_->is_weight_loaded())
+      << "weight is not loaded for " << prefix
+      << (is_gated_ ? "{gate_proj,up_proj}.weight" : "up_proj.weight");
+  CHECK(down_proj_->is_weight_loaded())
+      << "weight is not loaded for " << prefix + "down_proj.weight";
 }
 
 std::optional<torch::Tensor> DenseMLPImpl::get_fp8_input_scale() const {

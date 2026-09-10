@@ -74,9 +74,8 @@ bool has_active_dp_tokens(const ForwardInput& input) {
   });
 }
 
-MtpTopkStatePtr select_followup_topk_state(
-    const MtpTopkStatePtr& state,
-    int32_t num_sequences) {
+MtpTopkStatePtr select_followup_topk_state(const MtpTopkStatePtr& state,
+                                           int32_t num_sequences) {
   if (state == nullptr) {
     return nullptr;
   }
@@ -399,8 +398,7 @@ void prepare_stable_draft_input(ForwardInput& input,
                                 const Device& device) {
   // Keep the prelaunch input address stable. The previous draft writes the
   // sampled token into this buffer before the next graph is submitted.
-  input.token_ids =
-      torch::empty({num_sequences}, token_options.device(device));
+  input.token_ids = torch::empty({num_sequences}, token_options.device(device));
   input.token_ids_host = torch::Tensor();
   // Avoid unpacking schedule-overlap placeholders after installing the stable
   // device token buffer.
@@ -1248,10 +1246,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
   }
   const bool use_prelaunched_first_draft =
       input.input_params.meta.batch_forward_type.is_decode() &&
-      schedule.use_combined_draft &&
-      pending_draft_context_matches(input);
-  if (!pending_draft_context_.drafts.empty() &&
-      !use_prelaunched_first_draft) {
+      schedule.use_combined_draft && pending_draft_context_matches(input);
+  if (!pending_draft_context_.drafts.empty() && !use_prelaunched_first_draft) {
     retire_pending_first_draft("empty_batch_mismatch");
   }
   flush_pending_target_context();
@@ -1307,20 +1303,18 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
       if (use_prelaunched_first_draft &&
           static_cast<size_t>(i) < pending_draft_context_.drafts.size()) {
-        draft_outputs.emplace_back(
-            std::move(
-                pending_draft_context_.drafts[static_cast<size_t>(i)].output));
-        draft_step_prepared[i] = std::move(
-            pending_draft_context_.drafts[static_cast<size_t>(i)]
-                .prepared_input);
+        draft_outputs.emplace_back(std::move(
+            pending_draft_context_.drafts[static_cast<size_t>(i)].output));
+        draft_step_prepared[i] =
+            std::move(pending_draft_context_.drafts[static_cast<size_t>(i)]
+                          .prepared_input);
       } else {
-        draft_outputs.emplace_back(
-            run_llm_no_sync_impl(*draft_impl_,
-                                 input,
-                                 *prepare_stream_,
-                                 *compute_stream_,
-                                 draft_step_prepared[i])
-                .value());
+        draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
+                                                        input,
+                                                        *prepare_stream_,
+                                                        *compute_stream_,
+                                                        draft_step_prepared[i])
+                                       .value());
       }
     }
     if (use_prelaunched_first_draft) {
@@ -1348,8 +1342,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     clear_all_output_embeddings(output);
     finalize_output_on_stream(
         output, *compute_stream_, enable_schedule_overlap());
-    const bool prelaunch_next_first_draft =
-        schedule.prelaunch_next_first_draft;
+    const bool prelaunch_next_first_draft = schedule.prelaunch_next_first_draft;
     if (prelaunch_next_first_draft) {
       ForwardInput next_first_draft_input = input;
       for (int32_t& token_num :
@@ -1366,8 +1359,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
       const int32_t followup_draft_count =
           prelaunch_followup_draft_count(input);
       if (followup_draft_count > 1) {
-        submit_pending_empty_followup_drafts(
-            input, followup_draft_count);
+        submit_pending_empty_followup_drafts(input, followup_draft_count);
       }
       publish_pending_draft_cache_fence(output);
     }
@@ -1489,10 +1481,10 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
-  input_params.embedding.linear_state_ids.clear();
-  input_params.embedding.linear_state_indices = torch::Tensor();
-  input_params.linear_state_cache_ops.clear();
-  input_params.linear_state_validity_mask.clear();
+  // The Qwen draft is a pure full-attention model; without this cleanup the
+  // target's recurrent slot metadata makes MTP prefill enter a stateful path
+  // it has neither a validity mask nor a recurrent cache for.
+  input_params.clear_linear_attention_state();
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;
@@ -1563,8 +1555,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       pending_target_context_.base_kv_seq_lens;
   const StreamEventPtr target_context_ready_event =
       pending_target_context_.ready_event;
-  if (!pending_draft_context_.drafts.empty() &&
-      !use_prelaunched_first_draft) {
+  if (!pending_draft_context_.drafts.empty() && !use_prelaunched_first_draft) {
     retire_pending_first_draft("decode_batch_mismatch");
   }
   const auto mark_device_target_context_ready = [&]() {
@@ -1749,7 +1740,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     const ForwardInput& combined_draft_input =
         use_prelaunched_first_draft
             ? pending_draft_context_.drafts.front().prepared_input
-                                    : current_draft_input;
+            : current_draft_input;
     const int64_t batch_size = input.input_params.meta.num_sequences;
     CHECK_EQ(combined_draft_input.positions.numel(), batch_size * 2)
         << "combined draft positions must contain [repair,current] rows";
@@ -1826,7 +1817,14 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
           pending_draft_context_.drafts[static_cast<size_t>(draft_idx)]
               .prepared_input);
       pending_output_consumed = true;
-      if (draft_idx + 1 == num_speculative_tokens) {
+      // Clear once the last prelaunched draft is consumed. GLM prelaunches
+      // every draft (drafts.size() == num_speculative_tokens), while the
+      // Qwen3.5 paged-attention path prelaunches only the first draft
+      // (drafts.size() == 1); keying the clear on num_speculative_tokens
+      // would leak the consumed context and trip submit_pending_first_draft's
+      // not-consumed check on the next prelaunch.
+      if (static_cast<size_t>(draft_idx) + 1 ==
+          pending_draft_context_.drafts.size()) {
         pending_draft_context_ = PendingDraftContext();
       }
     } else {
@@ -2909,8 +2907,7 @@ MTPWorkerImpl::CombinedDraftSchedule MTPWorkerImpl::combined_draft_schedule(
 int32_t MTPWorkerImpl::prelaunch_followup_draft_count(
     const ForwardInput& input) const {
   if (combined_draft_execution_path_ !=
-          mtp_async::CombinedDraftExecutionPath::
-              GLM_MOE_DSA_SPARSE_ATTENTION ||
+          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION ||
       !input.json_object_states.empty()) {
     return 0;
   }
@@ -3049,13 +3046,10 @@ void MTPWorkerImpl::enqueue_next_first_draft(
       options_.block_size());
 
   submit_pending_first_draft(input, std::move(combined_input));
-  const int32_t followup_draft_count =
-      prelaunch_followup_draft_count(input);
+  const int32_t followup_draft_count = prelaunch_followup_draft_count(input);
   if (followup_draft_count > 1) {
-    submit_pending_followup_drafts(input,
-                                   base_positions,
-                                   base_kv_seq_lens,
-                                   followup_draft_count);
+    submit_pending_followup_drafts(
+        input, base_positions, base_kv_seq_lens, followup_draft_count);
   }
   if (rebuild_prelaunch_metadata) {
     prelaunch_metadata_embedding_ids_ =
@@ -3089,22 +3083,20 @@ void MTPWorkerImpl::submit_pending_first_draft(
       static_cast<size_t>(options_.num_speculative_tokens()));
   const bool all_greedy_sample = draft_input.sampling_params.all_greedy_sample;
   ForwardInput prepared_input;
-  std::optional<ForwardOutput> output =
-      run_llm_no_sync_impl(*draft_impl_,
-                           draft_input,
-                           *compute_stream_,
-                           *compute_stream_,
-                           prepared_input);
+  std::optional<ForwardOutput> output = run_llm_no_sync_impl(*draft_impl_,
+                                                             draft_input,
+                                                             *compute_stream_,
+                                                             *compute_stream_,
+                                                             prepared_input);
   CHECK(output.has_value()) << "failed to prelaunch next MTP first draft";
-  pending_draft_context_.drafts.push_back(
-      PendingDraftContext::PreparedDraft{std::move(prepared_input),
-                                          std::move(output.value())});
+  pending_draft_context_.drafts.push_back(PendingDraftContext::PreparedDraft{
+      std::move(prepared_input), std::move(output.value())});
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     PendingDraftContext::PreparedDraft& draft =
         pending_draft_context_.drafts.back();
-    broadcast_and_process_draft_sample(
-        draft.output.sample_output, all_greedy_sample);
+    broadcast_and_process_draft_sample(draft.output.sample_output,
+                                       all_greedy_sample);
   }
   finalize_pending_draft_submission();
 }
@@ -3126,13 +3118,12 @@ void MTPWorkerImpl::submit_pending_followup_drafts(
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     wait_metadata_ready_event(next_input, *compute_stream_);
     clear_ready_events(next_input);
-    mtp_async::prepare_later_draft_from_device_base(
-        next_input,
-        batch_identity_input,
-        base_positions,
-        base_kv_seq_lens,
-        draft_idx,
-        options_.block_size());
+    mtp_async::prepare_later_draft_from_device_base(next_input,
+                                                    batch_identity_input,
+                                                    base_positions,
+                                                    base_kv_seq_lens,
+                                                    draft_idx,
+                                                    options_.block_size());
     const SampleOutput& previous_output =
         pending_draft_context_.drafts.back().output.sample_output;
     if (layer::is_mtp_dsa_topk_reuse_enabled(
@@ -3140,34 +3131,31 @@ void MTPWorkerImpl::submit_pending_followup_drafts(
       const MtpTopkStatePtr& previous_topk_state =
           pending_draft_context_.drafts.back().output.mtp_topk_state;
       if (draft_idx == 1) {
-        next_input.input_params.mtp_topk_state =
-            select_followup_topk_state(
-                previous_topk_state,
-                batch_identity_input.input_params.meta.num_sequences);
+        next_input.input_params.mtp_topk_state = select_followup_topk_state(
+            previous_topk_state,
+            batch_identity_input.input_params.meta.num_sequences);
       } else {
         next_input.input_params.mtp_topk_state = previous_topk_state;
       }
     }
     set_token_ids_device_tensor(next_input,
-                                 previous_output.next_tokens,
-                                 next_input.token_ids.options(),
-                                 *compute_stream_,
-                                 /*preserve_address=*/true);
+                                previous_output.next_tokens,
+                                next_input.token_ids.options(),
+                                *compute_stream_,
+                                /*preserve_address=*/true);
     if (previous_output.embeddings.defined()) {
       next_input.input_params.embedding.input_embedding =
           previous_output.embeddings;
     }
     ForwardInput prepared_input;
-    std::optional<ForwardOutput> output =
-        run_llm_no_sync_impl(*draft_impl_,
-                             next_input,
-                             *compute_stream_,
-                             *compute_stream_,
-                             prepared_input);
+    std::optional<ForwardOutput> output = run_llm_no_sync_impl(*draft_impl_,
+                                                               next_input,
+                                                               *compute_stream_,
+                                                               *compute_stream_,
+                                                               prepared_input);
     CHECK(output.has_value()) << "failed to prelaunch MTP follow-up draft";
-    pending_draft_context_.drafts.push_back(
-        PendingDraftContext::PreparedDraft{std::move(prepared_input),
-                                            std::move(output.value())});
+    pending_draft_context_.drafts.push_back(PendingDraftContext::PreparedDraft{
+        std::move(prepared_input), std::move(output.value())});
     SampleOutput& sample_output =
         pending_draft_context_.drafts.back().output.sample_output;
     broadcast_and_process_draft_sample(
@@ -3177,23 +3165,22 @@ void MTPWorkerImpl::submit_pending_followup_drafts(
 }
 
 void MTPWorkerImpl::submit_pending_empty_followup_drafts(
-    const ForwardInput& input, int32_t num_drafts) {
+    const ForwardInput& input,
+    int32_t num_drafts) {
   CHECK_EQ(input.input_params.meta.num_sequences, 0);
   CHECK_EQ(pending_draft_context_.drafts.size(), 1U);
 
   for (int32_t draft_idx = 1; draft_idx < num_drafts; ++draft_idx) {
     ForwardInput prepared_input;
-    std::optional<ForwardOutput> output =
-        run_llm_no_sync_impl(*draft_impl_,
-                             input,
-                             *compute_stream_,
-                             *compute_stream_,
-                             prepared_input);
+    std::optional<ForwardOutput> output = run_llm_no_sync_impl(*draft_impl_,
+                                                               input,
+                                                               *compute_stream_,
+                                                               *compute_stream_,
+                                                               prepared_input);
     CHECK(output.has_value())
         << "failed to prelaunch empty MTP follow-up draft";
-    pending_draft_context_.drafts.push_back(
-        PendingDraftContext::PreparedDraft{std::move(prepared_input),
-                                            std::move(output.value())});
+    pending_draft_context_.drafts.push_back(PendingDraftContext::PreparedDraft{
+        std::move(prepared_input), std::move(output.value())});
   }
   finalize_pending_draft_submission();
 }
@@ -3235,9 +3222,8 @@ torch::Tensor MTPWorkerImpl::stop_token_ids_for(const torch::Tensor& tokens) {
   const std::unordered_set<int32_t>& stop_tokens =
       context_.get_model_args().stop_token_ids();
   std::vector<int32_t> stop_ids(stop_tokens.begin(), stop_tokens.end());
-  stop_token_ids_device_ = torch::tensor(
-      stop_ids,
-      tokens.options().dtype(tokens.scalar_type()));
+  stop_token_ids_device_ =
+      torch::tensor(stop_ids, tokens.options().dtype(tokens.scalar_type()));
   return stop_token_ids_device_;
 }
 
@@ -3264,8 +3250,7 @@ void MTPWorkerImpl::retire_pending_first_draft(const char* reason) {
       last_step_output_.cache_ownership_event == completion_event &&
       !last_step_output_.requires_cache_ownership_fence;
   if (!completion_event_already_synchronized) {
-    CHECK(completion_event == nullptr ||
-          completion_event->synchronize())
+    CHECK(completion_event == nullptr || completion_event->synchronize())
         << "failed to retire stale MTP draft prelaunch, reason=" << reason;
   }
   if (last_step_output_.cache_ownership_event == completion_event) {
@@ -4381,10 +4366,8 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
   if (use_combined_draft) {
     CHECK(input.token_ids.defined())
         << "draft input token_ids must be defined for graph dispatch";
-    prepare_stable_draft_input(draft_input,
-                               num_sequences,
-                               input.token_ids.options(),
-                               device_);
+    prepare_stable_draft_input(
+        draft_input, num_sequences, input.token_ids.options(), device_);
   } else {
     draft_input.device_tensors_ready = false;
   }
