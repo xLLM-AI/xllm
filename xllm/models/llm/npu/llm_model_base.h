@@ -23,6 +23,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <typeinfo>
+#include <utility>
 #include <vector>
 
 #include "core/common/global_flags.h"
@@ -469,6 +470,12 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) {
+    load_model(std::move(loader), std::move(prefix), "lm_head.");
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> loader,
+                  std::string prefix,
+                  std::string lm_head_prefix) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       // The same model_type may come from checkpoints with different top-level
       // weight prefixes. Try these candidate prefixes in order to improve
@@ -486,7 +493,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                   prefix + "embed_tokens.", "embed_tokens."}));
         } else {
           npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
+              state_dict->get_dict_with_prefix(lm_head_prefix));
         }
       }
     }
@@ -497,7 +504,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
       if (tie_word_embeddings) {
         npu_lm_head_->verify_loaded_weights("embed_tokens.");
       } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
+        npu_lm_head_->verify_loaded_weights(lm_head_prefix);
       }
     }
 
