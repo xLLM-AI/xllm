@@ -164,6 +164,7 @@ void WorkerClient::transfer_kv_blocks(
 
 folly::SemiFuture<bool> WorkerClient::sleep_async(MasterStatus master_status) {
   LOG(FATAL) << "WorkerClient Method sleep is UnImplemented.";
+  return folly::makeSemiFuture(false);
 }
 
 folly::SemiFuture<bool> WorkerClient::wakeup_async(
@@ -174,6 +175,7 @@ folly::SemiFuture<bool> WorkerClient::wakeup_async(
 folly::SemiFuture<bool> WorkerClient::update_weights_async(
     const std::string& /*weights_path*/) {
   LOG(FATAL) << "WorkerClient Method update_weights is UnImplemented.";
+  return folly::makeSemiFuture(false);
 }
 
 folly::SemiFuture<bool> WorkerClient::start_profile_async() {

@@ -174,6 +174,7 @@ torch::ScalarType convert_rec_type_to_torch(proto::DataType data_type) {
     default:
       LOG(FATAL) << "Unsupported data type: " << static_cast<int>(data_type);
   }
+  return torch::kFloat;
 }
 
 torch::Tensor convert_rec_tensor_to_torch(
@@ -242,6 +243,7 @@ torch::Tensor convert_rec_tensor_to_torch(
       LOG(FATAL) << "Unhandled data type conversion for: "
                  << static_cast<int>(dtype);
   }
+  return torch::Tensor();
 }
 
 torch::ScalarType datatype_proto_to_torch(const std::string& proto_datatype) {

@@ -122,6 +122,7 @@ std::unique_ptr<KVCacheImpl> create_host_kv_cache_impl(
       LOG(FATAL) << "Unsupported non-DSV4 host block type: "
                  << static_cast<int32_t>(type);
   }
+  return nullptr;
 }
 
 std::string int32_vector_string(const std::vector<int32_t>& values) {
