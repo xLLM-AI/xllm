@@ -83,6 +83,44 @@ def test_full_world_ep_partitions_glm_experts() -> None:
     assert moe.experts_w2.shape == (2, 16, 8)
 
 
+def test_proper_divisor_ep_partitions_experts_and_moe_intermediate() -> None:
+    values = _config(ep_size=2, ep_rank=1, moe_tp_size=2, moe_tp_rank=1)
+    cfg = Glm52Config.from_dict(values)
+
+    cfg.validate()
+    model = Glm52ForCausalLM(values)
+    moe = model.model.layers[0].mlp
+
+    assert moe.local_expert_start == 4
+    assert moe.local_expert_end == 8
+    assert moe.num_local_experts == 4
+    assert moe.inter_local == 4
+
+    moe.allocate_experts_w13_for_loading()
+    moe.allocate_experts_w2_for_loading()
+    assert moe.experts_w13.shape == (4, 8, 16)
+    assert moe.experts_w2.shape == (4, 16, 4)
+
+
+def test_glm_ep8_moe_tp2_topology_is_valid() -> None:
+    cfg = Glm52Config.from_dict(
+        _config(
+            num_attention_heads=64,
+            n_routed_experts=256,
+            moe_intermediate_size=2048,
+            tp_size=8,
+            dp_size=2,
+            world_size=16,
+            ep_size=8,
+            ep_rank=7,
+            moe_tp_size=2,
+            moe_tp_rank=1,
+        )
+    )
+
+    cfg.validate()
+
+
 def test_glm_parallel_world_size_defaults_to_tp_dp_product() -> None:
     values = _config()
     values.pop("world_size")
@@ -128,7 +166,8 @@ def test_glm_layerwise_split_cannot_overlap_context_parallel() -> None:
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"ep_size": 2}, "ep_size must be 1 or world_size"),
+        ({"ep_size": 3}, "ep_size must divide world_size"),
+        ({"ep_size": 2}, r"moe_tp_size \* ep_size"),
         ({"world_size": 8}, r"world_size must equal tp_size \* dp_size \* cp_size"),
         ({"cp_rank": 2}, "cp_rank must be in"),
         ({"n_routed_experts": 10}, "n_routed_experts must be divisible by ep_size"),
@@ -204,3 +243,22 @@ def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch) -> None:
     assert loader.tp_size == 2
     assert loader.tp_rank == 0
     assert loader.shared_shards == [("model.layers.0.mlp.shared_experts.", 1, 0)]
+
+
+def test_glm_weight_loader_shards_proper_divisor_ep_with_moe_tp(monkeypatch) -> None:
+    values = _config(ep_size=2, ep_rank=1, moe_tp_size=2, moe_tp_rank=1)
+    model = Glm52ForCausalLM(values)
+    model.model.layers[0].self_attn.process_weights_after_loading = MagicMock()
+    model.model.layers[0].mlp.process_experts_w13_after_loading = MagicMock()
+    model.model.layers[0].mlp.process_experts_w2_after_loading = MagicMock()
+    model.model.layers[0].mlp.shared_experts.process_weights_after_loading = MagicMock()
+    monkeypatch.setattr(glm5_2, "W8A8WeightLoader", _RecordingLoader)
+
+    model.load_weights([], tp_rank=0, tp_size=2)
+
+    loader = _RecordingLoader.latest
+    assert loader is not None
+    expert_names = [name for name in loader.loaded if ".mlp.experts." in name]
+    assert expert_names
+    assert all(any(f".experts.{expert}." in name for expert in range(4, 8)) for name in expert_names)
+    assert loader.shared_shards == [("model.layers.0.mlp.shared_experts.", 2, 1)]

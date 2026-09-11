@@ -262,8 +262,8 @@ class Glm52Config:
             raise ValueError("parallel sizes must be positive")
         if self.tp_size * self.dp_size * self.cp_size != self.world_size:
             raise ValueError("world_size must equal tp_size * dp_size * cp_size")
-        if self.ep_size not in (1, self.world_size):
-            raise ValueError(f"ep_size must be 1 or world_size ({self.world_size})")
+        if self.world_size % self.ep_size:
+            raise ValueError(f"ep_size must divide world_size: ep_size={self.ep_size}, world_size={self.world_size}")
         if self.ep_size > 1:
             if self.n_routed_experts % self.ep_size:
                 raise ValueError("n_routed_experts must be divisible by ep_size")
