@@ -230,7 +230,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `enable_customize_mla_kernel` | `bool` | `false` | 是否启用自定义 MLA kernel。 |
-| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`ATB`、`TORCH`。 |
+| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`ATB`、`TORCH`、`XLITE`。 |
 | `enable_intralayer_addnorm` | `bool` | `false` | 是否启用 fused intralayer addnorm ops。 |
 | `enable_fused_mc2` | `int32` | `-1` | NPU 的 Fused MC2 模式；`-1` 使用自动默认值，`0` 禁用 fused MC2，正值启用 dense matmul-allreduce，`1` 对 MoE 使用 DispatchFFNCombine，`2` 对 MoE 使用 DispatchGmmCombineDecode。 |
 | `enable_interlayer_addnorm` | `bool` | `false` | 是否启用 fused interlayer addnorm ops。 |
