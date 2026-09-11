@@ -187,6 +187,8 @@ def _apply_vision_rotary(
     Args:
         q, k: ``(total_tokens, num_heads, head_dim)``.
         cos_full, sin_full: ``(1, total_tokens, 1, head_dim)``.
+            If torchair backend and head_dim < 128, these should be
+            pre-padded to 128 in the forward pass to avoid repeated padding.
     """
     q_embed = kernels.vision_rotary_mul(q, cos_full, sin_full)
     k_embed = kernels.vision_rotary_mul(k, cos_full, sin_full)
@@ -200,7 +202,6 @@ def _apply_vision_rotary(
 
 class Qwen3VLVisionPatchMerger(nn.Module):
     """Patch merger: norm → reshape → linear_fc1 → GELU → linear_fc2.
-
     When ``use_postshuffle_norm`` is ``False`` (main merger), the LayerNorm
     is applied *before* the spatial-merge reshape (per-patch norm).
     When ``True`` (deepstack mergers), the norm is applied *after* the
@@ -487,6 +488,7 @@ class Qwen3VLVisionTransformer(nn.Module):
 
         return torch.stack([hpos_ids, wpos_ids], dim=-1)
 
+    @torch.compiler.disable
     def _compute_rot_pos_emb(self, grid_thw_list: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
         max_grid_size = max(max(h, w) for _, h, w in grid_thw_list)
         pos_ids = []
@@ -499,6 +501,7 @@ class Qwen3VLVisionTransformer(nn.Module):
         cos, sin = self.rotary_pos_emb(pos_ids)
         return cos, sin
 
+    @torch.compiler.disable
     def _fast_pos_embed_interpolate(self, grid_thw_list: list[list[int]]) -> torch.Tensor:
         """Bilinearly interpolate the learned pos_embed to each image's grid."""
         num_grid = self.num_grid_per_side
@@ -507,8 +510,8 @@ class Qwen3VLVisionTransformer(nn.Module):
 
         outputs = []
         for t, h, w in grid_thw_list:
-            h_idxs = torch.linspace(0, num_grid - 1, h, dtype=torch.float32, device=self.device)
-            w_idxs = torch.linspace(0, num_grid - 1, w, dtype=torch.float32, device=self.device)
+            h_idxs = torch.linspace(float(0), float(num_grid - 1), h, dtype=torch.float32, device=self.device)
+            w_idxs = torch.linspace(float(0), float(num_grid - 1), w, dtype=torch.float32, device=self.device)
 
             h_floor = h_idxs.to(torch.long)
             w_floor = w_idxs.to(torch.long)
@@ -711,6 +714,7 @@ class Qwen3VLModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        print("Start execute Qwen3VLModel")
         if self._inputs_embeds is not None:
             hidden = self._inputs_embeds
             self._inputs_embeds = None
@@ -742,6 +746,7 @@ class Qwen3VLModel(nn.Module):
         hidden, _ = self.norm(hidden, residual)
         # Clear deepstack embeds after use.
         self.deepstack_input_embeds = None
+        print("End execute Qwen3VLModel")
         return hidden
 
 
@@ -828,6 +833,17 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         # Vision tower
         self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device)
 
+        # ViT executor (supports eager/torchair/inductor backends)
+        from xllm.python.model_executor.vit_executor import ViTExecutor
+        compile_kwargs = {"dynamic": True}
+        backend="torchair"
+        print(f"Construct vit executor: backend: {backend}, compile option: {compile_kwargs}")
+        self.vit_executor = ViTExecutor(
+            self.vision_model,
+            backend=backend,
+            compile_kwargs=compile_kwargs,
+        )
+
         # LLM (self.model is required by PyModelBase / the executor runner)
         self.model = Qwen3VLModel(text_cfg, dtype=dtype, device=device)
 
@@ -864,7 +880,8 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         """
         pixel_values = pixel_values.to(dtype=self.vision_model.dtype, device=self.vision_model.device)
         grid_thw = grid_thw.to(dtype=torch.int32, device=self.vision_model.device)
-        image_embeds = self.vision_model(pixel_values, grid_thw)
+        print(f"start execute qwen3 vl encode with torchair, pixel_values: {pixel_values}, grid_thw: {grid_thw}")
+        image_embeds = self.vit_executor.execute(pixel_values, grid_thw)
         return image_embeds
 
     def get_input_embeddings(

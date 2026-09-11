@@ -42,7 +42,8 @@ def vision_fusion_attention(
     scale: float,
     input_layout: str = "TND",
 ) -> torch.Tensor:
-    """Run fused self-attention for ViT blocks via ``torch_npu.npu_fusion_attention``.
+    """
+    Run fused self-attention for ViT blocks via ``torch_npu.npu_fusion_attention``.
 
     Args:
         q, k, v: Query/key/value in the layout specified by ``input_layout``.
@@ -52,11 +53,22 @@ def vision_fusion_attention(
         scale: Attention scaling factor.
         input_layout: Tensor layout (default ``"TND"``).
 
-    Returns:
+    Returns:doc
         Attention output with same shape as ``q``.
     """
     import torch_npu
-
+    return torch_npu.npu_fused_infer_attention_score_v2(
+        q,
+        k,
+        v,
+        actual_seq_qlen=actual_seq_qlen,
+        actual_seq_kvlen=actual_seq_kvlen,
+        num_query_heads=num_heads,
+        num_key_value_heads=num_heads,
+        softmax_scale=scale,
+        input_layout=input_layout,
+    )[0]
+    '''
     return torch_npu.npu_fusion_attention(
         q,
         k,
@@ -67,7 +79,7 @@ def vision_fusion_attention(
         scale=scale,
         input_layout=input_layout,
     )[0]
-
+    '''
 
 def batch_matmul_transpose(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Project MLA values with the dedicated NPU transposed-BMM kernel."""
