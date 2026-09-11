@@ -71,6 +71,11 @@ limitations under the License.
 #include "vlm/qwen3_5.h"                                 // IWYU pragma: keep
 #include "vlm/qwen3_vl.h"                                // IWYU pragma: keep
 
+// xlite backend models.
+#if defined(USE_XLITE)
+#include "llm/xlite/register_all.h"  // IWYU pragma: keep
+#endif
+
 #elif defined(USE_MLU)
 #include "dit/pipelines/pipeline_flux.h"          // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_control.h"  // IWYU pragma: keep

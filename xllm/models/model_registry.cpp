@@ -69,6 +69,7 @@ namespace {
 constexpr char kAutoBackend[] = "AUTO";
 constexpr char kAtbBackend[] = "ATB";
 constexpr char kTorchBackend[] = "TORCH";
+constexpr char kXliteBackend[] = "XLITE";
 
 bool is_torch_only_model_type(const std::string& model_type) {
   static const std::unordered_set<std::string> kTorchOnlyModelTypes = {
@@ -108,10 +109,10 @@ bool resolve_model_registration(const std::string& model_type,
                                   ? kAutoBackend
                                   : requested_npu_kernel_backend;
   if (backend != kAutoBackend && backend != kAtbBackend &&
-      backend != kTorchBackend) {
+      backend != kTorchBackend && backend != kXliteBackend) {
     if (error_message != nullptr) {
       *error_message = "Unsupported --npu_kernel_backend=" + backend +
-                       ". Supported values: AUTO, ATB, TORCH.";
+                       ". Supported values: AUTO, ATB, TORCH, XLITE.";
     }
     return false;
   }
@@ -120,6 +121,32 @@ bool resolve_model_registration(const std::string& model_type,
   if (backend == kAutoBackend) {
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
+  } else if (backend == kXliteBackend) {
+#if defined(USE_XLITE)
+    // Reject torch-only model types
+    if (is_torch_only_model_type(model_type)) {
+      if (error_message != nullptr) {
+        *error_message =
+            "Model type " + model_type + " only supports TORCH, not XLITE.";
+      }
+      return false;
+    }
+    // Reject non-xlite model types
+    if (!xllm::xlite::is_xlite_model_type(model_type)) {
+      if (error_message != nullptr) {
+        *error_message = "Model type " + model_type +
+                         " has no XLITE implementation; use ATB or TORCH"
+                         " backend instead.";
+      }
+      return false;
+    }
+#else
+    if (error_message != nullptr) {
+      *error_message =
+          "XLITE backend is not compiled; please build with USE_XLITE=ON.";
+    }
+    return false;
+#endif
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
              model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
              model_type == "qwen3_vl" || model_type == "deepseek_v32_mtp") {
@@ -145,7 +172,9 @@ bool resolve_model_registration(const std::string& model_type,
   if (effective_npu_kernel_backend != nullptr) {
     *effective_npu_kernel_backend = effective_backend;
   }
-  if (model_type == "qwen3" && effective_backend == kAtbBackend) {
+  if (backend == kXliteBackend) {
+    *resolved_name = model_type + "_xlite";
+  } else if (model_type == "qwen3" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_atb";
   } else if (model_type == "qwen3_moe" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_moe_atb";

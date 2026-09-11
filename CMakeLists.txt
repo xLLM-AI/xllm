@@ -9,6 +9,7 @@ option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
 option(ENABLE_HA "Enable Mooncake etcd-based high availability support" OFF)
+option(USE_XLITE "Enable xlite backend (NPU only)" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -22,6 +23,12 @@ list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
 if(ENABLE_HA)
   set(USE_ETCD ON)
   message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
+endif()
+
+# xlite is an NPU-only backend; enabling it implies NPU support.
+if(USE_XLITE)
+  set(USE_NPU ON CACHE BOOL "Enable NPU support" FORCE)
+  message(STATUS "USE_XLITE=ON, NPU support enabled")
 endif()
 
 if(DEVICE_ARCH STREQUAL "ARM")
@@ -492,6 +499,12 @@ if(USE_NPU)
   # set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
   set(CMAKE_VERBOSE_MAKEFILE ON)
   add_definitions(-DTORCH_HIGHER_THAN_PTA6)
+
+  if (USE_XLITE)
+    add_definitions(-DUSE_XLITE)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/xlite.cmake)
+    message(STATUS "USE_XLITE is ON")
+  endif()
 
   # Use vcpkg header files as the first priority search directory,
   #-> because the scope of third-party software managed by vcpkg is used throughout the entire xllm.
