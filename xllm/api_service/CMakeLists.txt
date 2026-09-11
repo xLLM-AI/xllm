@@ -11,6 +11,7 @@ cc_library(
     request_id.h
     chat_json_parser.h
     completion_json_parser.h
+    json_fast_path.h
     completion_service_impl.h
     rec_completion_service_impl.h
     chat_service_impl.h
@@ -37,6 +38,7 @@ cc_library(
     api_service.cpp
     chat_json_parser.cpp
     completion_json_parser.cpp
+    json_fast_path.cpp
     service_impl_factory.cpp
     call.cpp
     request_id.cpp

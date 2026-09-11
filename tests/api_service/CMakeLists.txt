@@ -61,6 +61,17 @@ cc_test(
 
 cc_test(
   NAME
+    json_fast_path_test
+  SRCS
+    json_fast_path_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME
     request_id_test
   SRCS
     request_id_test.cpp

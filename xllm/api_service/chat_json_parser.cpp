@@ -19,6 +19,8 @@ limitations under the License.
 
 #include <nlohmann/json.hpp>
 
+#include "api_service/json_fast_path.h"
+
 namespace xllm {
 namespace {
 
@@ -132,6 +134,14 @@ std::pair<Status, std::string> VlmChatJsonParser::preprocess(
 
 std::pair<Status, std::string> LlmChatJsonParser::preprocess(
     std::string json_str) const {
+  // Array-valued content, an object tool_choice and a non-object message are
+  // the only shapes handled below. Answering that from the bytes avoids
+  // building a DOM the common path throws away; the parse below stays
+  // authoritative for every body the scan cannot account for.
+  if (llm_chat_fast_path(json_str) == JsonFastPath::SKIP_PREPROCESS) {
+    return {Status(), std::move(json_str)};
+  }
+
   try {
     auto json = nlohmann::json::parse(json_str);
     bool modified = false;

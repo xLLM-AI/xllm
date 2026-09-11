@@ -21,10 +21,19 @@ limitations under the License.
 #include <limits>
 #include <nlohmann/json.hpp>
 
+#include "api_service/json_fast_path.h"
+
 namespace xllm {
 
 std::pair<Status, std::string> preprocess_completion_prompt(
     std::string json_str) {
+  // Only an array prompt is rewritten below. Answering that from the bytes
+  // avoids building a DOM the common path throws away; the parse below stays
+  // authoritative for every body the scan cannot account for.
+  if (completion_prompt_fast_path(json_str) == JsonFastPath::SKIP_PREPROCESS) {
+    return {Status(), std::move(json_str)};
+  }
+
   try {
     auto json = nlohmann::json::parse(json_str);
     if (!json.contains("prompt") || !json["prompt"].is_array()) {
