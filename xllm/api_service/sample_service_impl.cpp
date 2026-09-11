@@ -63,6 +63,13 @@ void set_choice_logprobs(proto::Choice* choice,
   auto* proto_logprobs = choice->mutable_logprobs();
   if (sampled_logprob.top_logprobs.has_value() &&
       !sampled_logprob.top_logprobs->empty()) {
+    // Bounded by the requested top_logprobs, which verify_params caps well
+    // above the point where repeated growth starts re-copying.
+    const int num_top_logprobs =
+        static_cast<int>(sampled_logprob.top_logprobs->size());
+    proto_logprobs->mutable_tokens()->Reserve(num_top_logprobs);
+    proto_logprobs->mutable_token_ids()->Reserve(num_top_logprobs);
+    proto_logprobs->mutable_token_logprobs()->Reserve(num_top_logprobs);
     for (const auto& top_logprob : sampled_logprob.top_logprobs.value()) {
       proto_logprobs->add_tokens(top_logprob.token);
       proto_logprobs->add_token_ids(top_logprob.token_id);

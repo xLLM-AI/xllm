@@ -171,6 +171,10 @@ void set_logprobs(proto::Choice* choice,
     return;
   }
   auto* proto_logprobs = choice->mutable_logprobs();
+  const int num_logprobs = static_cast<int>(logprobs->size());
+  proto_logprobs->mutable_tokens()->Reserve(num_logprobs);
+  proto_logprobs->mutable_token_ids()->Reserve(num_logprobs);
+  proto_logprobs->mutable_token_logprobs()->Reserve(num_logprobs);
   for (const auto& logprob : *logprobs) {
     proto_logprobs->add_tokens(logprob.token);
     proto_logprobs->add_token_ids(logprob.token_id);

@@ -75,6 +75,12 @@ void set_logprobs(proto::Choice* choice,
   }
 
   auto* proto_logprobs = choice->mutable_logprobs();
+  // One entry per generated token, so the three parallel fields would otherwise
+  // grow from empty and re-copy themselves O(log n) times per response.
+  const int num_logprobs = static_cast<int>(logprobs.value().size());
+  proto_logprobs->mutable_tokens()->Reserve(num_logprobs);
+  proto_logprobs->mutable_token_ids()->Reserve(num_logprobs);
+  proto_logprobs->mutable_token_logprobs()->Reserve(num_logprobs);
   for (const auto& logprob : logprobs.value()) {
     proto_logprobs->add_tokens(logprob.token);
     proto_logprobs->add_token_ids(logprob.token_id);
