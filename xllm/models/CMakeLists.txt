@@ -39,6 +39,6 @@ cc_library(
     Python::Python
 )
 
-if(USE_NPU AND USE_XLITE)
+if(USE_XLITE)
   xllm_link_xlite(models)
 endif()

@@ -127,7 +127,7 @@ if(USE_MUSA)
   )
 endif()
 
-if (USE_NPU AND USE_XLITE)
+if (USE_XLITE)
   xllm_link_xlite(xllm)
 endif()
 # install xllm

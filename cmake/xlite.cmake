@@ -1,7 +1,7 @@
 # xlite: auto pip install the submodule into site-packages at configure time,
 # then find_package + link. Same git-HEAD marker pattern as xllm_ops.
 
-if(USE_NPU AND USE_XLITE)
+if(USE_XLITE)
   execute_process(
     COMMAND git -c "safe.directory=${CMAKE_SOURCE_DIR}/third_party/GVirt"
              -C "${CMAKE_SOURCE_DIR}/third_party/GVirt" rev-parse HEAD
@@ -56,7 +56,7 @@ if(USE_NPU AND USE_XLITE)
 endif()
 
 function(xllm_link_xlite target)
-  if(NOT USE_NPU OR NOT USE_XLITE)
+  if(NOT USE_XLITE)
     return()
   endif()
 
