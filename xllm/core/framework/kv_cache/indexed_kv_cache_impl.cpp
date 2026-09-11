@@ -93,11 +93,13 @@ IndexedKVCacheImpl::IndexedKVCacheImpl(
         &value_cache_shape_);
   }
   if (kv_cache_shape.has_index_cache_shape()) {
-    // Mirror the device index dtype: INT8 when indexer cache is quantized (see
-    // create_indexed_kv_cache_tensors), otherwise the model dtype.
+    // Mirror the device index dtype: raw FP8 bytes, INT8, or the model dtype.
     const torch::ScalarType index_dtype =
-        create_options.enable_indexer_cache_quant() ? torch::kChar
-                                                    : create_options.dtype();
+        create_options.indexer_cache_dtype() == "fp8_e4m3"
+            ? torch::kByte
+            : (create_options.enable_indexer_cache_quant()
+                   ? torch::kChar
+                   : create_options.dtype());
     create_host_tensor(
         build_host_group_tensor_shape(kv_cache_shape.index_cache_shape(),
                                       create_options.host_blocks_factor(),
@@ -108,6 +110,7 @@ IndexedKVCacheImpl::IndexedKVCacheImpl(
   }
   // Keep INT8 per-token scales with their values during offload/reload.
   if (create_options.enable_indexer_cache_quant() &&
+      create_options.indexer_cache_dtype() != "fp8_e4m3" &&
       kv_cache_shape.has_index_cache_scale_shape()) {
     torch::Tensor index_scale;
     const torch::ScalarType index_scale_dtype =
@@ -214,8 +217,7 @@ void IndexedKVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
       torch::index_select(index_cache_, 0, src_tensor);
   index_cache_.index_copy_(0, dst_tensor, selected_index);
 
-  // INT8 indexer cache keeps a per-token fp32 scale that must move with the
-  // int8 values, otherwise dequantization reads mismatched coefficients.
+  // INT8 indexer cache scales move with their quantized values.
   if (index_cache_scale_.has_value() && has_data(index_cache_scale_.value())) {
     torch::Tensor selected_index_scales =
         torch::index_select(index_cache_scale_.value(), 0, src_tensor);

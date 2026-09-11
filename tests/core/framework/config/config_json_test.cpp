@@ -305,30 +305,51 @@ TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {
 
   config.indexer_cache_dtype("int8");
   config.validate();
+
+#if defined(USE_NPU)
+  config.indexer_cache_dtype("fp8_e4m3");
+  config.validate();
+#endif
 }
 
 TEST(KVCacheConfigValidationTest, RejectsUnsupportedIndexerCacheDtypes) {
+#if defined(USE_NPU)
+  constexpr const char* kSupportedIndexerCacheDtypes =
+      "indexer_cache_dtype.*auto.*int8.*fp8_e4m3";
+#else
+  constexpr const char* kSupportedIndexerCacheDtypes =
+      "indexer_cache_dtype.*auto.*int8";
+#endif
+#if !defined(USE_NPU)
+  EXPECT_DEATH(
+      {
+        KVCacheConfig config;
+        config.indexer_cache_dtype("fp8_e4m3");
+        config.validate();
+      },
+      kSupportedIndexerCacheDtypes);
+#endif
   EXPECT_DEATH(
       {
         KVCacheConfig config;
         config.indexer_cache_dtype("fp8");
         config.validate();
       },
-      "indexer_cache_dtype.*auto.*int8");
+      kSupportedIndexerCacheDtypes);
   EXPECT_DEATH(
       {
         KVCacheConfig config;
         config.indexer_cache_dtype("INT8");
         config.validate();
       },
-      "indexer_cache_dtype.*auto.*int8");
+      kSupportedIndexerCacheDtypes);
   EXPECT_DEATH(
       {
         KVCacheConfig config;
         config.indexer_cache_dtype(" int8 ");
         config.validate();
       },
-      "indexer_cache_dtype.*auto.*int8");
+      kSupportedIndexerCacheDtypes);
 }
 
 TEST(ConfigJsonTest, ParallelConfigReadsContextParallelSize) {

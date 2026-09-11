@@ -53,9 +53,14 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
     int64_t layer_id) {
   CHECK_GE(layer_id, 0) << "KV cache layer_id must be non-negative.";
 
-#if !defined(USE_MLU)
+#if !defined(USE_MLU) && !defined(USE_NPU)
   CHECK(!create_options.enable_kv_cache_quant())
-      << "KV cache quantization is only supported on MLU backend.";
+      << "KV cache quantization is unsupported on this backend.";
+#elif defined(USE_NPU)
+  CHECK(!create_options.enable_kv_cache_quant() ||
+        (create_options.model_type() == "glm_moe_dsa" &&
+         create_options.kv_cache_dtype() == "fp8_e4m3"))
+      << "NPU quantized KV cache only supports PyTorch GLM-5.2.";
 #endif
 
   const bool is_linear_layer =

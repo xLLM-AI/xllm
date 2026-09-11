@@ -67,8 +67,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `block_size` | `int32` | `128` | Number of slots per KV Cache block. |
 | `max_cache_size` | `int64` | `0` | Maximum GPU memory size for KV Cache. `0` means calculated from available memory. |
 | `max_memory_utilization` | `double` | `0.8` | Fraction of GPU memory used for model inference, including model weights and KV Cache. |
-| `kv_cache_dtype` | `string` | `"auto"` | KV Cache dtype for quantization. `auto` aligns with model dtype and disables quantization. `int8` enables INT8 quantization and is only supported on the MLU backend. |
-| `indexer_cache_dtype` | `string` | `"auto"` | Indexer cache dtype for models with an indexer cache. Supported values are `auto` and `int8`. `auto` aligns with model dtype and disables indexer cache quantization. `int8` enables INT8 indexer cache quantization. |
+| `kv_cache_dtype` | `string` | `"auto"` | KV Cache dtype for quantization. `auto` aligns with model dtype and disables quantization. `int8` enables INT8 quantization on MLU. `fp8_e4m3` stores PyTorch GLM-5.2 NPU caches as raw E4M3 bytes; supported decode shapes use fused MLA, and other shapes dequantize to BF16 before attention. |
+| `indexer_cache_dtype` | `string` | `"auto"` | Indexer cache dtype for models with an indexer cache. `auto` disables quantization, `int8` enables INT8 quantization, and `fp8_e4m3` stores the PyTorch GLM-5.2 NPU index cache in E4M3 format and dequantizes it to BF16 for index attention. |
 | `enable_prefix_cache` | `bool` | `true` | Whether to enable prefix cache in the block manager. See [Prefix Cache](/en/features/prefix_cache/). |
 | `enable_in_batch_prefix_cache` | `bool` | `false` | Whether to cache admitted prefill full blocks into the prefix cache so that later requests in the same batch can share them. |
 | `max_linear_state_cache_slots` | `int64` | `0` | Maximum number of active linear-attention state cache slots. `0` derives an automatic capacity from the available KV Cache budget. |

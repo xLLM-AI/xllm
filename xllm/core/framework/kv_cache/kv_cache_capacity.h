@@ -32,6 +32,8 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, index_slot_size) = 0;
   PROPERTY(int64_t, num_indexer_layers) = 0;
   PROPERTY(bool, enable_indexer_cache_quant) = false;
+  // Quantized index caches keep scales by default; raw FP8 needs none.
+  PROPERTY(bool, enable_indexer_cache_scale) = true;
 
   // for kv cache quantization scale cache
   PROPERTY(int64_t, scale_slot_size) = 0;

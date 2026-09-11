@@ -82,11 +82,13 @@ struct KVCacheCreateOptions {
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
+  PROPERTY(std::string, kv_cache_dtype) = "auto";
   PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
 #if defined(USE_NPU)
   PROPERTY(bool, enable_kv_cache_huge_page_allocator) = false;
 #endif
   PROPERTY(bool, enable_indexer_cache_quant) = false;
+  PROPERTY(std::string, indexer_cache_dtype) = "auto";
 
   // DeepSeek V4 cache allocation metadata.
   PROPERTY(int64_t, block_size) = 0;

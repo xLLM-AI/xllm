@@ -747,6 +747,125 @@ TEST_F(NpuXllmOpsTest,
            /*block_table_width=*/kNumPhysicalBlocks);
 }
 
+TEST_F(NpuXllmOpsTest, Fp8CacheUpdatesPreserveBytesAndSkipPadding) {
+  py::gil_scoped_acquire gil;
+  py::exec(R"PY(
+import torch
+from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+
+cache = torch.full((2, 2, 1, 128), 42, dtype=torch.uint8, device="npu:0")
+updates = (torch.arange(384) + 128).reshape(3, 128).remainder(256).to(torch.uint8)
+slots = torch.tensor([0, -1, 3], dtype=torch.int64, device="npu:0")
+NpuPagedAttentionBackend._update_paged_cache(cache, slots, updates.to("npu:0"))
+expected = torch.full((4, 128), 42, dtype=torch.uint8)
+expected[0] = updates[0]
+expected[3] = updates[2]
+assert torch.equal(cache.view(4, 128).cpu(), expected)
+
+# The same fixed-size graph must follow updated slots, including padding.
+values = updates.to("npu:0")
+stream = torch.npu.Stream()
+stream.wait_stream(torch.npu.current_stream())
+with torch.npu.stream(stream):
+    NpuPagedAttentionBackend._update_paged_cache(cache, slots, values)
+stream.synchronize()
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph, stream=stream):
+    NpuPagedAttentionBackend._update_paged_cache(cache, slots, values)
+slots.copy_(torch.tensor([-1, 1, 2], dtype=torch.int64, device="npu:0"))
+values.fill_(199)
+graph.replay()
+torch.npu.synchronize()
+expected[1:3] = 199
+assert torch.equal(cache.view(4, 128).cpu(), expected)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Fp8DequantizationReplaysWithinMemoryBudget) {
+  py::gil_scoped_acquire gil;
+  py::exec(R"PY(
+import torch
+from xllm.python.attention.fp8_cache import dequantize_e4m3
+
+raw_cpu = torch.arange(256, dtype=torch.int32).to(torch.uint8).reshape(16, 16).T
+raw = raw_cpu.to("npu:0")
+for dtype in (torch.bfloat16, torch.float16, torch.float32):
+    expected = dequantize_e4m3(raw_cpu, dtype)
+    actual = dequantize_e4m3(raw, dtype)
+    assert torch.equal(actual.cpu(), expected)
+
+# Large-cache conversion must not retain full-sized arithmetic intermediates.
+raw = raw_cpu.contiguous().repeat(1024, 16).to("npu:0")
+torch.npu.synchronize()
+torch.npu.reset_peak_memory_stats()
+allocated = torch.npu.memory_allocated()
+out = dequantize_e4m3(raw)
+torch.npu.synchronize()
+extra_peak = torch.npu.max_memory_allocated() - allocated
+assert extra_peak < raw.numel() * 8, extra_peak
+
+stream = torch.npu.Stream()
+stream.wait_stream(torch.npu.current_stream())
+with torch.npu.stream(stream):
+    out = dequantize_e4m3(raw)
+stream.synchronize()
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph, stream=stream):
+    out = dequantize_e4m3(raw)
+raw.fill_(188)
+graph.replay()
+torch.npu.synchronize()
+assert torch.all(out.cpu() == -1.5)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Fp8SparseMlaMatchesReferenceAcrossPageBoundary) {
+  py::gil_scoped_acquire gil;
+  py::exec(R"PY(
+import torch
+from xllm.python.attention.fp8_cache import (
+    create_e4m3_decode_table, dequantize_e4m3, quantize_e4m3,
+)
+from xllm.python.kernels_npu.sparse_attention import glm52_fp8_sparse_mla_attention_out
+
+torch.manual_seed(20260910)
+device = torch.device("npu:0")
+nope_raw = quantize_e4m3(torch.randn(4, 128, 1, 512).bfloat16() * 0.25)
+rope_raw = quantize_e4m3(torch.randn(4, 128, 1, 64).bfloat16() * 0.25)
+nope = nope_raw.to(device)
+rope = rope_raw.to(device)
+decode_table = create_e4m3_decode_table(device)
+block_table = torch.tensor([[2, 0], [1, 3]], dtype=torch.int32, device=device)
+lengths = torch.tensor([127, 129], dtype=torch.int32, device=device)
+indices = torch.full((2, 1, 2048), -1, dtype=torch.int32)
+indices[:, 0, :130] = torch.arange(130, dtype=torch.int32)
+topk = indices.to(device)
+workspaces = (
+    torch.empty((24, 64, 512), dtype=torch.bfloat16, device=device),
+    torch.empty((24, 64, 64), dtype=torch.bfloat16, device=device),
+    torch.empty((24, 16, 64), dtype=torch.float32, device=device),
+    torch.empty((24, 16, 64), dtype=torch.bfloat16, device=device),
+    torch.empty((24, 16, 512), dtype=torch.float32, device=device),
+    torch.empty((24, 16, 512), dtype=torch.bfloat16, device=device),
+    torch.empty((24, 16, 64), dtype=torch.bfloat16, device=device),
+)
+for heads in (4, 8, 16):
+    q = (torch.randn(heads, 2, 512).bfloat16() * 0.25).to(device).transpose(0, 1)
+    q_rope = (torch.randn(heads, 2, 64).bfloat16() * 0.25).to(device).transpose(0, 1)
+    out = torch.empty((2, heads, 512), dtype=torch.bfloat16, device=device)
+    glm52_fp8_sparse_mla_attention_out(
+        q, q_rope, nope, rope, topk, block_table, lengths, decode_table,
+        out, *workspaces, 0.0625,
+    )
+    for row, length, pages in ((0, 127, [2, 0]), (1, 129, [1, 3])):
+        keys = dequantize_e4m3(nope_raw[pages], torch.float32).reshape(-1, 512)[:length]
+        rope_keys = dequantize_e4m3(rope_raw[pages], torch.float32).reshape(-1, 64)[:length]
+        scores = (q[row].cpu().float() @ keys.T + q_rope[row].cpu().float() @ rope_keys.T) * 0.0625
+        expected = torch.softmax(scores, -1) @ keys
+        torch.testing.assert_close(out[row].cpu().float(), expected, atol=2e-3, rtol=2e-2)
+)PY");
+}
+
 TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_FullAttentionMatchesReference) {
   py::gil_scoped_acquire gil;
   if (!is_ascend950_device()) {

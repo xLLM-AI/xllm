@@ -283,6 +283,7 @@ struct Options {
   // KV cache data type for quantization.
   // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
   // "int8": Enables INT8 quantization. Only supported on MLU backend.
+  // "fp8_e4m3": Enables raw E4M3 cache storage for PyTorch GLM-5.2 on NPU.
   PROPERTY(std::string, kv_cache_dtype) = "auto";
 
   // max concurrency for rec worker

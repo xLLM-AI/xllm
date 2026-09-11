@@ -39,6 +39,51 @@ namespace xllm {
 
 namespace {
 
+void fp8_cache_write_npu(const torch::Tensor& slots,
+                         const torch::Tensor& values,
+                         torch::Tensor& cache) {
+  xllm::kernel::npu::tilelang::fp8_cache_write(slots, values, cache);
+}
+
+torch::Tensor glm52_fp8_sparse_mla_attention_out_npu(
+    const torch::Tensor& q_latent,
+    const torch::Tensor& q_rope,
+    const torch::Tensor& nope_cache,
+    const torch::Tensor& rope_cache,
+    const torch::Tensor& topk_indices,
+    const torch::Tensor& block_table,
+    const torch::Tensor& actual_seq_lengths_kv,
+    const torch::Tensor& e4m3_decode_table,
+    torch::Tensor& output,
+    torch::Tensor& workspace_k,
+    torch::Tensor& workspace_k_rope,
+    torch::Tensor& workspace_scores,
+    torch::Tensor& workspace_probs,
+    torch::Tensor& workspace_output,
+    torch::Tensor& workspace_q,
+    torch::Tensor& workspace_q_rope,
+    double softmax_scale) {
+  xllm::kernel::npu::tilelang::glm52_fp8_sparse_mla_attention(
+      q_latent,
+      q_rope,
+      nope_cache,
+      rope_cache,
+      topk_indices,
+      block_table,
+      actual_seq_lengths_kv,
+      e4m3_decode_table,
+      output,
+      workspace_k,
+      workspace_k_rope,
+      workspace_scores,
+      workspace_probs,
+      workspace_output,
+      workspace_q,
+      workspace_q_rope,
+      static_cast<float>(softmax_scale));
+  return output;
+}
+
 torch::Tensor rms_norm_npu(const torch::Tensor& input,
                            const torch::Tensor& weight,
                            double eps) {
@@ -481,6 +526,15 @@ void ensure_xllm_ops_registered() {
 // Schema declarations (device-agnostic). Identical to cuda_ops_library.cpp —
 // compiled only under USE_NPU (mutually exclusive with USE_CUDA).
 TORCH_LIBRARY(xllm_ops, m) {
+  m.def("fp8_cache_write(Tensor slots, Tensor values, Tensor(a!) cache) -> ()");
+  m.def(
+      "glm52_fp8_sparse_mla_attention_out(Tensor q_latent, Tensor q_rope, "
+      "Tensor nope_cache, Tensor rope_cache, Tensor topk_indices, Tensor "
+      "block_table, Tensor actual_seq_lengths_kv, Tensor e4m3_decode_table, "
+      "Tensor(a!) output, Tensor(b!) workspace_k, Tensor(c!) "
+      "workspace_k_rope, Tensor(d!) workspace_scores, Tensor(e!) "
+      "workspace_probs, Tensor(f!) workspace_output, Tensor(g!) workspace_q, "
+      "Tensor(h!) workspace_q_rope, float softmax_scale) -> Tensor(a!)");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
@@ -688,6 +742,9 @@ TORCH_LIBRARY(xllm_ops, m) {
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
+  m.impl("fp8_cache_write", TORCH_FN(xllm::fp8_cache_write_npu));
+  m.impl("glm52_fp8_sparse_mla_attention_out",
+         TORCH_FN(xllm::glm52_fp8_sparse_mla_attention_out_npu));
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("rms_norm_gated", TORCH_FN(xllm::rms_norm_gated_npu));
   m.impl("l2_norm", TORCH_FN(xllm::l2_norm_npu));

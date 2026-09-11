@@ -133,6 +133,16 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
+  NAME fp8_cache_write
+  WRAPPER_SRCS fp8_cache_write_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME glm52_fp8_sparse_mla_attention
+  WRAPPER_SRCS glm52_fp8_sparse_mla_attention_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
   NAME spec_verify_attention_tiling_update
   WRAPPER_SRCS spec_verify_attention_tiling_update_wrapper.cpp
 )

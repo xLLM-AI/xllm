@@ -55,6 +55,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -511,23 +512,38 @@ bool WorkerImpl::allocate_kv_cache_storage(
   std::vector<bool> indexer_cache_enabled_layers =
       resolve_indexer_cache_enabled_layers(args, num_layers);
 
-  // Check if KV cache quantization is enabled
-  // "auto" (default): cache dtype aligns with model dtype (no quantization)
-  // "int8": enables INT8 quantization
-  const bool enable_kv_cache_quant = options_.kv_cache_dtype() == "int8";
-
+  const std::string& kv_cache_dtype = options_.kv_cache_dtype();
+  const std::string& indexer_cache_dtype =
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
+#if defined(USE_NPU)
+  const bool enable_kv_cache_quant =
+      kv_cache_dtype == "int8" || kv_cache_dtype == "fp8_e4m3";
   const bool enable_indexer_cache_quant =
-      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8";
+      indexer_cache_dtype == "int8" || indexer_cache_dtype == "fp8_e4m3";
+#else
+  const bool enable_kv_cache_quant = kv_cache_dtype == "int8";
+  const bool enable_indexer_cache_quant = indexer_cache_dtype == "int8";
+#endif
+#if defined(USE_NPU)
+  const bool supports_npu_python_glm52_cache_quant =
+      args.model_type() == "glm_moe_dsa" &&
+      ModelConfig::is_python_model_impl(context_.get_model_impl());
+  CHECK(!enable_kv_cache_quant ||
+        (kv_cache_dtype == "fp8_e4m3" && supports_npu_python_glm52_cache_quant))
+      << "NPU quantized KV cache only supports PyTorch GLM-5.2.";
+  CHECK(indexer_cache_dtype != "fp8_e4m3" ||
+        supports_npu_python_glm52_cache_quant)
+      << "NPU quantized indexer cache only supports PyTorch GLM-5.2.";
+#endif
   if (enable_lighting_indexer) {
     CHECK_EQ(kv_cache_shape.has_index_cache_scale_shape(),
-             enable_indexer_cache_quant)
+             indexer_cache_dtype == "int8")
         << "Indexer cache shape and worker quantization config must agree.";
   }
 
   if (enable_kv_cache_quant) {
-#if !defined(USE_MLU)
-    LOG(FATAL) << "KV Cache quantization is only supported on MLU backend. "
-               << "Current backend does not support this feature.";
+#if !defined(USE_MLU) && !defined(USE_NPU)
+    LOG(FATAL) << "KV Cache quantization is unsupported on this backend.";
 #endif
     // Check for unsupported scenarios
     if (options_.backend() == "vlm") {
@@ -561,7 +577,9 @@ bool WorkerImpl::allocate_kv_cache_storage(
       .layer_cache_owned(std::move(layer_cache_owned))
       .indexer_cache_enabled_layers(std::move(indexer_cache_enabled_layers))
       .enable_kv_cache_quant(enable_kv_cache_quant)
+      .kv_cache_dtype(kv_cache_dtype)
       .enable_indexer_cache_quant(enable_indexer_cache_quant)
+      .indexer_cache_dtype(indexer_cache_dtype)
       .tensor_allocator(std::move(tensor_allocator))
       .block_size(options_.block_size())
       .head_dim(args.head_dim())

@@ -331,7 +331,55 @@ def sparse_flash_attention_lse(
     )
 
 
+def fp8_cache_write(slots: torch.Tensor, values: torch.Tensor, cache: torch.Tensor) -> None:
+    """Write raw FP8 rows without synchronizing or overwriting padding slots."""
+    torch.ops.xllm_ops.fp8_cache_write(slots, values, cache)
+
+
+def glm52_fp8_sparse_mla_attention_out(
+    q_latent: torch.Tensor,
+    q_rope: torch.Tensor,
+    nope_cache: torch.Tensor,
+    rope_cache: torch.Tensor,
+    topk_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    actual_seq_lengths_kv: torch.Tensor,
+    e4m3_decode_table: torch.Tensor,
+    output: torch.Tensor,
+    workspace_k: torch.Tensor,
+    workspace_k_rope: torch.Tensor,
+    workspace_scores: torch.Tensor,
+    workspace_probs: torch.Tensor,
+    workspace_output: torch.Tensor,
+    workspace_q: torch.Tensor,
+    workspace_q_rope: torch.Tensor,
+    softmax_scale: float,
+) -> torch.Tensor:
+    """Run decode-only GLM-5.2 sparse MLA on raw E4M3 paged caches."""
+    return torch.ops.xllm_ops.glm52_fp8_sparse_mla_attention_out(
+        q_latent,
+        q_rope,
+        nope_cache,
+        rope_cache,
+        topk_indices,
+        block_table,
+        actual_seq_lengths_kv,
+        e4m3_decode_table,
+        output,
+        workspace_k,
+        workspace_k_rope,
+        workspace_scores,
+        workspace_probs,
+        workspace_output,
+        workspace_q,
+        workspace_q_rope,
+        softmax_scale,
+    )
+
+
 __all__ = [
+    "fp8_cache_write",
+    "glm52_fp8_sparse_mla_attention_out",
     "lightning_indexer",
     "lightning_indexer_out",
     "quant_lightning_indexer",

@@ -37,6 +37,11 @@ from xllm.python.attention.backend import (
 from xllm.python.attention.expanded_decode_metadata import (
     resolve_expanded_decode_metadata,
 )
+from xllm.python.attention.fp8_cache import (
+    create_e4m3_decode_table,
+    dequantize_e4m3,
+    quantize_e4m3,
+)
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
@@ -57,6 +62,18 @@ if TYPE_CHECKING:
 #    only aligns when q_len == kv_len and would misalign on a cache hit).
 _SPARSE_MODE_NONE = 0
 _SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
+
+_GLM52_FP8_ATTN_CORE_NUM = 24
+_GLM52_FP8_ATTN_HEAD_TILE = 16
+_GLM52_FP8_ATTN_KV_TILE = 64
+_GLM52_FP8_ATTN_LATENT_DIM = 512
+_GLM52_FP8_ATTN_ROPE_DIM = 64
+_GLM52_FP8_ATTN_TOPK = 2048
+_GLM52_FP8_ATTN_BLOCK_SIZE = 128
+_GLM52_FP8_ATTN_MAX_QUERIES = 1024
+_GLM52_FP8_ATTN_MAX_CACHE_BLOCKS = 32768
+_GLM52_FP8_ATTN_MAX_BLOCK_TABLE_LEN = 32768
+_GLM52_FP8_ATTN_HEAD_COUNTS = (4, 8, 16)
 
 _HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and hasattr(
     torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace"
@@ -560,7 +577,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
             if not cache_is_preprocessed:
                 if k_latent_3d is None or k_pe_3d is None:
                     raise RuntimeError("MLA cache inputs are required")
-                torch.ops.xllm_ops.reshape_paged_cache(
+                self._update_mla_cache(
                     metadata.slot_mapping,
                     k_latent_3d,
                     k_pe_3d,
@@ -598,7 +615,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         global_rope = cp_gather_kv(k_pe_3d, cp_context).contiguous()
         cache_slots = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
         assert cache_slots is not None
-        torch.ops.xllm_ops.reshape_paged_cache(
+        self._update_mla_cache(
             cache_slots,
             global_latent,
             global_rope,
@@ -648,6 +665,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         kv_cache, rope_cache = layer_cache.key, layer_cache.value
         if kv_cache is None or rope_cache is None:
             raise RuntimeError(f"MLA latent cache is missing for layer {layer.layer_id}")
+        if kv_cache.dtype == torch.uint8:
+            return None
         return MlaPreprocessContext(
             kv_cache=kv_cache,
             rope_cache=rope_cache,
@@ -729,6 +748,46 @@ class NpuPagedAttentionBackend(AttentionBackend):
         return metadata
 
     @staticmethod
+    def _update_paged_cache(
+        cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        values: torch.Tensor,
+    ) -> None:
+        """Write raw E4M3 bytes, skipping CP and graph padding slots."""
+        slots = slot_mapping.reshape(-1)
+        if cache.device.type != "cpu":
+            kernels.fp8_cache_write(
+                slots.to(torch.int64).contiguous(),
+                values.reshape(slots.numel(), cache.size(-1)).contiguous(),
+                cache.view(-1, cache.size(-1)),
+            )
+            return
+        valid_rows = torch.nonzero(slots >= 0, as_tuple=False).flatten()
+        if valid_rows.numel() == 0:
+            return
+        # ScatterNdUpdateV2 has no uint8 specialization. index_copy_ preserves
+        # every encoded bit, including bytes with the high bit set.
+        cache.view(-1, cache.size(-1)).index_copy_(
+            0,
+            slots.index_select(0, valid_rows).to(torch.int64),
+            values.reshape(slots.numel(), cache.size(-1)).index_select(0, valid_rows),
+        )
+
+    @staticmethod
+    def _update_mla_cache(
+        slot_mapping: torch.Tensor,
+        k_latent: torch.Tensor,
+        k_rope: torch.Tensor,
+        nope_cache: torch.Tensor,
+        rope_cache: torch.Tensor,
+    ) -> None:
+        if nope_cache.dtype == torch.uint8:
+            NpuPagedAttentionBackend._update_paged_cache(nope_cache, slot_mapping, quantize_e4m3(k_latent))
+            NpuPagedAttentionBackend._update_paged_cache(rope_cache, slot_mapping, quantize_e4m3(k_rope))
+            return
+        torch.ops.xllm_ops.reshape_paged_cache(slot_mapping, k_latent, k_rope, nope_cache, rope_cache)
+
+    @staticmethod
     def _update_mla_index_cache(
         index_cache: torch.Tensor,
         index_cache_scale: torch.Tensor | None,
@@ -736,6 +795,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         values: torch.Tensor,
         scales: torch.Tensor | None,
     ) -> None:
+        if index_cache.dtype == torch.uint8:
+            NpuPagedAttentionBackend._update_paged_cache(index_cache, slot_mapping, values)
+            return
         if slot_mapping.numel() == 0:
             return
         cache_view = index_cache.view(-1, index_cache.size(-1))
@@ -835,6 +897,28 @@ class NpuPagedAttentionBackend(AttentionBackend):
             actual_seq_q = self._mla_actual_seq_q
         if actual_seq_kv is None:
             actual_seq_kv = self._mla_actual_seq_kv
+        if nope_cache.dtype == torch.uint8 and self._can_use_glm52_fp8_sparse_mla(
+            q_latent,
+            q_pe,
+            nope_cache,
+            rope_cache,
+            topk,
+            block_table,
+            actual_seq_kv,
+        ):
+            return self._glm52_fp8_sparse_mla(
+                q_latent,
+                q_pe,
+                nope_cache,
+                rope_cache,
+                topk,
+                block_table,
+                actual_seq_kv,
+                layer_id,
+            )
+        if nope_cache.dtype == torch.uint8:
+            nope_cache = dequantize_e4m3(nope_cache, torch.bfloat16)
+            rope_cache = dequantize_e4m3(rope_cache, torch.bfloat16)
         out = get_execution_buffer(
             ("SFA_OUTPUT", layer_id) + tuple(q_latent.shape),
             lambda: torch.empty_like(q_latent),
@@ -856,6 +940,168 @@ class NpuPagedAttentionBackend(AttentionBackend):
             3,
             out,
         )  # [T, H, kv_lora]
+
+    def _can_use_glm52_fp8_sparse_mla(
+        self,
+        q_latent: torch.Tensor,
+        q_pe: torch.Tensor,
+        nope_cache: torch.Tensor,
+        rope_cache: torch.Tensor,
+        topk: torch.Tensor,
+        block_table: torch.Tensor,
+        actual_seq_kv: torch.Tensor,
+    ) -> bool:
+        metadata = getattr(self, "_metadata", None)
+        num_queries = q_latent.size(0)
+        return (
+            metadata is not None
+            and not metadata.is_prefill
+            and not metadata.is_chunked_prefill
+            and not metadata.is_mixed
+            and not metadata.is_spec_verify
+            and nope_cache.dtype == torch.uint8
+            and rope_cache.dtype == torch.uint8
+            and 0 < num_queries <= _GLM52_FP8_ATTN_MAX_QUERIES
+            and q_latent.dim() == 3
+            and q_latent.dtype == torch.bfloat16
+            and q_latent.size(1) in _GLM52_FP8_ATTN_HEAD_COUNTS
+            and q_latent.size(2) == _GLM52_FP8_ATTN_LATENT_DIM
+            and q_latent.stride(2) == 1
+            and q_pe.shape
+            == (
+                num_queries,
+                q_latent.size(1),
+                _GLM52_FP8_ATTN_ROPE_DIM,
+            )
+            and q_pe.dtype == torch.bfloat16
+            and q_pe.stride(2) == 1
+            and nope_cache.dim() == 4
+            and nope_cache.is_contiguous()
+            and nope_cache.size(0) <= _GLM52_FP8_ATTN_MAX_CACHE_BLOCKS
+            and nope_cache.shape[1:]
+            == (
+                _GLM52_FP8_ATTN_BLOCK_SIZE,
+                1,
+                _GLM52_FP8_ATTN_LATENT_DIM,
+            )
+            and rope_cache.dim() == 4
+            and rope_cache.is_contiguous()
+            and rope_cache.shape
+            == (
+                nope_cache.size(0),
+                _GLM52_FP8_ATTN_BLOCK_SIZE,
+                1,
+                _GLM52_FP8_ATTN_ROPE_DIM,
+            )
+            and topk.is_contiguous()
+            and topk.dtype == torch.int32
+            and topk.shape == (num_queries, 1, _GLM52_FP8_ATTN_TOPK)
+            and block_table.is_contiguous()
+            and block_table.dtype == torch.int32
+            and block_table.dim() == 2
+            and block_table.size(0) == num_queries
+            and block_table.size(1) <= _GLM52_FP8_ATTN_MAX_BLOCK_TABLE_LEN
+            and actual_seq_kv is not None
+            and actual_seq_kv.is_contiguous()
+            and actual_seq_kv.dtype == torch.int32
+            and actual_seq_kv.shape == (num_queries,)
+        )
+
+    def _glm52_fp8_sparse_mla(
+        self,
+        q_latent: torch.Tensor,
+        q_pe: torch.Tensor,
+        nope_cache: torch.Tensor,
+        rope_cache: torch.Tensor,
+        topk: torch.Tensor,
+        block_table: torch.Tensor,
+        actual_seq_kv: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        decode_table = getattr(self, "_fp8_e4m3_decode_table", None)
+        if decode_table is None or decode_table.device != q_latent.device:
+            decode_table = create_e4m3_decode_table(q_latent.device)
+            self._fp8_e4m3_decode_table = decode_table
+
+        workspaces = getattr(self, "_fp8_mla_workspaces", None)
+        if workspaces is None or workspaces[0].device != q_latent.device:
+            bf16 = torch.bfloat16
+            fp32 = torch.float32
+            device = q_latent.device
+            workspaces = (
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_KV_TILE,
+                    _GLM52_FP8_ATTN_LATENT_DIM,
+                    dtype=bf16,
+                    device=device,
+                ),
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_KV_TILE,
+                    _GLM52_FP8_ATTN_ROPE_DIM,
+                    dtype=bf16,
+                    device=device,
+                ),
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_HEAD_TILE,
+                    _GLM52_FP8_ATTN_KV_TILE,
+                    dtype=fp32,
+                    device=device,
+                ),
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_HEAD_TILE,
+                    _GLM52_FP8_ATTN_KV_TILE,
+                    dtype=bf16,
+                    device=device,
+                ),
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_HEAD_TILE,
+                    _GLM52_FP8_ATTN_LATENT_DIM,
+                    dtype=fp32,
+                    device=device,
+                ),
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_HEAD_TILE,
+                    _GLM52_FP8_ATTN_LATENT_DIM,
+                    dtype=bf16,
+                    device=device,
+                ),
+                torch.empty(
+                    _GLM52_FP8_ATTN_CORE_NUM,
+                    _GLM52_FP8_ATTN_HEAD_TILE,
+                    _GLM52_FP8_ATTN_ROPE_DIM,
+                    dtype=bf16,
+                    device=device,
+                ),
+            )
+            self._fp8_mla_workspaces = workspaces
+
+        output = get_execution_buffer(
+            ("GLM52_FP8_SFA_OUTPUT", layer_id) + tuple(q_latent.shape),
+            lambda: torch.empty(
+                q_latent.shape,
+                dtype=q_latent.dtype,
+                device=q_latent.device,
+            ),
+        )
+        return kernels.glm52_fp8_sparse_mla_attention_out(
+            q_latent,
+            q_pe,
+            nope_cache,
+            rope_cache,
+            topk,
+            block_table,
+            actual_seq_kv,
+            decode_table,
+            output,
+            *workspaces,
+            self.scale,
+        )
 
     def _mla_dense_fia_v2_out(
         self,
@@ -910,6 +1156,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         layer_id: int,
     ) -> torch.Tensor:
         """Run dense absorbed MLA with FIA v2 and separate RoPE caches."""
+        if nope_cache.dtype == torch.uint8:
+            nope_cache = dequantize_e4m3(nope_cache, torch.bfloat16)
+            rope_cache = dequantize_e4m3(rope_cache, torch.bfloat16)
         if not self._use_fia_v2:
             raise RuntimeError("dense MLA requires FIA v2 support")
         if self._mla_actual_seq_q_host is None:

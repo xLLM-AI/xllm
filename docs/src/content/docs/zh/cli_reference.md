@@ -67,8 +67,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `block_size` | `int32` | `128` | 每个 KV Cache block 的 slot 数。 |
 | `max_cache_size` | `int64` | `0` | KV Cache 可使用的 GPU 显存大小；`0` 表示根据可用显存自动计算。 |
 | `max_memory_utilization` | `double` | `0.8` | 模型推理可使用的 GPU 显存比例，包括模型权重和 KV Cache。 |
-| `kv_cache_dtype` | `string` | `"auto"` | KV Cache 量化数据类型；`auto` 表示与模型 dtype 对齐且不量化，`int8` 表示启用 INT8 量化，仅 MLU 后端支持。 |
-| `indexer_cache_dtype` | `string` | `"auto"` | 带 indexer cache 的模型所使用的 indexer cache 数据类型。支持 `auto` 和 `int8`；`auto` 表示与模型 dtype 对齐且不量化，`int8` 表示启用 INT8 indexer cache 量化。 |
+| `kv_cache_dtype` | `string` | `"auto"` | KV Cache 量化数据类型；`auto` 表示与模型 dtype 对齐且不量化，`int8` 仅支持 MLU，`fp8_e4m3` 将 NPU PyTorch GLM-5.2 cache 存储为 E4M3 原始字节；受支持的 decode 形状使用融合 MLA，其余形状先反量化为 BF16 再计算 attention。 |
+| `indexer_cache_dtype` | `string` | `"auto"` | 带 indexer cache 的模型所使用的数据类型；`auto` 表示不量化，`int8` 表示启用 INT8 量化，`fp8_e4m3` 将 NPU PyTorch GLM-5.2 index cache 存储为 E4M3 格式，并在 index attention 计算前反量化为 BF16。 |
 | `enable_prefix_cache` | `bool` | `true` | 是否在 block manager 中启用 prefix cache；详见 [Prefix Cache](/zh/features/prefix_cache/)。 |
 | `enable_in_batch_prefix_cache` | `bool` | `false` | 是否将已准入的 prefill 完整 block 缓存进 prefix cache，使同一 batch 内的后续请求可以共享。 |
 | `max_linear_state_cache_slots` | `int64` | `0` | linear-attention state cache 的最大活跃槽位数；`0` 表示根据可用 KV Cache 预算自动推导容量。 |

@@ -39,6 +39,7 @@ import torch.nn as nn
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import MlaIndexContext
+from xllm.python.attention.fp8_cache import dequantize_e4m3, quantize_e4m3
 
 # The AICPU tiling of ``aclnnQuantLightningIndexer`` requires
 # ``num_heads_q / num_heads_k == 64``. GLM-5.2 uses ``index_n_heads=32`` and
@@ -682,8 +683,12 @@ class Glm52Indexer(nn.Module):
                 cmp_ratio,
             )
         else:
+            if index_cache.dtype == torch.uint8:
+                k = quantize_e4m3(k)
             ctx.update_index_cache(k, None)
             index_cache, _, block_table = ctx.materialize_index_cache()
+            if index_cache.dtype == torch.uint8:
+                index_cache = dequantize_e4m3(index_cache, torch.bfloat16)
             topk = kernels.lightning_indexer(
                 q,
                 index_cache,

@@ -225,8 +225,11 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
                                            create_options);
 #elif defined(USE_NPU)
   const torch::ScalarType index_dtype =
-      create_options.enable_indexer_cache_quant() ? torch::kChar
-                                                  : create_options.dtype();
+      create_options.indexer_cache_dtype() == "fp8_e4m3"
+          ? torch::kByte
+          : (create_options.enable_indexer_cache_quant()
+                 ? torch::kChar
+                 : create_options.dtype());
   const aclFormat npu_format_type =
       get_npu_kv_cache_format(create_options.model_type());
   if (create_options.enable_kv_cache_huge_page_allocator()) {
@@ -243,7 +246,8 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
       kv_cache_shape.index_cache_shape(),
       torch::dtype(create_options.dtype()).device(create_options.device()));
 #endif
-  if (create_options.enable_indexer_cache_quant()) {
+  if (create_options.enable_indexer_cache_quant() &&
+      create_options.indexer_cache_dtype() != "fp8_e4m3") {
 #if !defined(USE_MLU) && !defined(USE_NPU)
     CHECK(false) << "Indexer cache INT8 is unsupported on this backend.";
 #endif
@@ -285,6 +289,18 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
 QuantizedKVCacheTensors create_quantized_kv_cache_tensors(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& create_options) {
+#if defined(USE_NPU)
+  CHECK_EQ(create_options.model_type(), "glm_moe_dsa")
+      << "NPU FP8 KV cache only supports PyTorch GLM-5.2.";
+  CHECK_EQ(create_options.kv_cache_dtype(), "fp8_e4m3")
+      << "NPU KV cache quantization only supports fp8_e4m3.";
+  KVCacheCreateOptions fp8_options = create_options;
+  fp8_options.dtype(torch::kByte);
+  QuantizedKVCacheTensors tensors;
+  tensors.kv_cache_tensors =
+      create_kv_cache_tensors(kv_cache_shape, fp8_options);
+  return tensors;
+#else
 #if !defined(USE_MLU)
   CHECK(!create_options.enable_kv_cache_quant())
       << "KV cache quantization is only supported on MLU backend.";
@@ -319,6 +335,7 @@ QuantizedKVCacheTensors create_quantized_kv_cache_tensors(
   }
 
   return tensors;
+#endif
 }
 
 LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(

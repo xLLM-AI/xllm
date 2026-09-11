@@ -1032,6 +1032,50 @@ def _sfa_dcp_remap_out_fake(
     return out
 
 
+def _glm52_fp8_sparse_mla_attention_out_fake(
+    q_latent: torch.Tensor,
+    q_rope: torch.Tensor,
+    nope_cache: torch.Tensor,
+    rope_cache: torch.Tensor,
+    topk_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    actual_seq_lengths_kv: torch.Tensor,
+    e4m3_decode_table: torch.Tensor,
+    output: torch.Tensor,
+    workspace_k: torch.Tensor,
+    workspace_k_rope: torch.Tensor,
+    workspace_scores: torch.Tensor,
+    workspace_probs: torch.Tensor,
+    workspace_output: torch.Tensor,
+    workspace_q: torch.Tensor,
+    workspace_q_rope: torch.Tensor,
+    softmax_scale: float,
+) -> torch.Tensor:
+    del (
+        q_latent,
+        q_rope,
+        nope_cache,
+        rope_cache,
+        topk_indices,
+        block_table,
+        actual_seq_lengths_kv,
+        e4m3_decode_table,
+        workspace_k,
+        workspace_k_rope,
+        workspace_scores,
+        workspace_probs,
+        workspace_output,
+        workspace_q,
+        workspace_q_rope,
+        softmax_scale,
+    )
+    return output
+
+
+def _fp8_cache_write_fake(slots: torch.Tensor, values: torch.Tensor, cache: torch.Tensor) -> None:
+    del slots, values, cache
+
+
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
 register_fake("xllm_ops::l2_norm", _l2_norm_fake)
@@ -1080,3 +1124,8 @@ register_fake("xllm_ops::sparse_attn_sharedkv", _sparse_attn_sharedkv_fake)
 register_fake("xllm_ops::sparse_attn_sharedkv_metadata", _sparse_attn_sharedkv_metadata_fake)
 register_fake("xllm_ops::sparse_flash_attention_lse", _sparse_flash_attention_lse_fake)
 register_fake("xllm_ops::sfa_dcp_remap_out", _sfa_dcp_remap_out_fake)
+
+
+register_fake("xllm_ops::glm52_fp8_sparse_mla_attention_out", _glm52_fp8_sparse_mla_attention_out_fake)
+
+register_fake("xllm_ops::fp8_cache_write", _fp8_cache_write_fake)

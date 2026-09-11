@@ -32,7 +32,7 @@ class QuantizedKVCacheImpl final : public KVCacheImpl {
                    torch::Tensor& dst_tensor) override;
 
  private:
-  // scale tensors for quantized KV cache (int8)
+  // Scale tensors are defined for INT8 cache formats and absent for FP8.
   torch::Tensor key_cache_scale_;
   torch::Tensor value_cache_scale_;
 };

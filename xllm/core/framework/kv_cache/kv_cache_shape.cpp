@@ -91,7 +91,8 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
 
   apply_device_layout(model_args);
 
-  if (enable_lighting_indexer && kv_cache_cap.enable_indexer_cache_quant()) {
+  if (enable_lighting_indexer && kv_cache_cap.enable_indexer_cache_quant() &&
+      kv_cache_cap.enable_indexer_cache_scale()) {
     init_index_cache_scale_shape();
   }
 }

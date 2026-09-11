@@ -28,6 +28,32 @@ namespace xllm::kernel::npu::tilelang {
 
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
 
+// Copy contiguous byte rows to paged cache slots; negative slots are padding.
+void fp8_cache_write(const torch::Tensor& slots,
+                     const torch::Tensor& values,
+                     torch::Tensor& cache);
+
+// Compute GLM-5.2 decode-only sparse MLA attention directly from raw E4M3
+// paged latent and RoPE caches. All output and workspace tensors are caller
+// owned to keep graph capture allocation-free.
+void glm52_fp8_sparse_mla_attention(const torch::Tensor& q_latent,
+                                    const torch::Tensor& q_rope,
+                                    const torch::Tensor& nope_cache,
+                                    const torch::Tensor& rope_cache,
+                                    const torch::Tensor& topk_indices,
+                                    const torch::Tensor& block_table,
+                                    const torch::Tensor& actual_seq_lengths_kv,
+                                    const torch::Tensor& e4m3_decode_table,
+                                    torch::Tensor& output,
+                                    torch::Tensor& workspace_k,
+                                    torch::Tensor& workspace_k_rope,
+                                    torch::Tensor& workspace_scores,
+                                    torch::Tensor& workspace_probs,
+                                    torch::Tensor& workspace_output,
+                                    torch::Tensor& workspace_q,
+                                    torch::Tensor& workspace_q_rope,
+                                    float softmax_scale);
+
 // Take the first token from each row of an existing row-major int32 verify
 // buffer and pack it with `spec_width - 1` proposer columns into graph-owned
 // row-major int32 storage on the current NPU stream. `spec_width` equals

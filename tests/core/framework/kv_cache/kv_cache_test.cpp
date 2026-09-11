@@ -857,6 +857,61 @@ TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {
 
 #endif
 
+#if defined(USE_NPU)
+TEST(KVCacheTest, NpuGlm52Fp8CachesUseRawBytesWithoutScales) {
+  constexpr int64_t kBlockCount = 2;
+  constexpr int64_t kBlockSize = 16;
+  constexpr int64_t kKvLoraRank = 512;
+  constexpr int64_t kRopeHeadDim = 64;
+  constexpr int64_t kIndexHeadDim = 128;
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kBlockCount)
+      .block_size(kBlockSize)
+      .enable_indexer_cache_quant(true)
+      .enable_indexer_cache_scale(false);
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(64)
+      .n_kv_heads(1)
+      .head_dim(kKvLoraRank)
+      .kv_lora_rank(kKvLoraRank)
+      .qk_rope_head_dim(kRopeHeadDim)
+      .index_n_heads(1)
+      .index_head_dim(kIndexHeadDim);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device("npu:0"))
+      .dtype(torch::kBFloat16)
+      .num_layers(2)
+      .model_type("glm_moe_dsa")
+      .enable_lighting_indexer(true)
+      .indexer_cache_enabled_layers({true, false})
+      .enable_kv_cache_quant(true)
+      .kv_cache_dtype("fp8_e4m3")
+      .enable_indexer_cache_quant(true)
+      .indexer_cache_dtype("fp8_e4m3");
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  ASSERT_EQ(caches.size(), 2U);
+  EXPECT_EQ(caches[0].get_k_cache().scalar_type(), torch::kByte);
+  EXPECT_EQ(caches[0].get_v_cache().scalar_type(), torch::kByte);
+  EXPECT_EQ(caches[0].get_index_cache().scalar_type(), torch::kByte);
+  EXPECT_FALSE(caches[0].get_k_cache_scale().has_value());
+  EXPECT_FALSE(caches[0].get_v_cache_scale().has_value());
+  EXPECT_FALSE(caches[0].get_indexer_cache_scale().has_value());
+  EXPECT_EQ(caches[1].get_k_cache().scalar_type(), torch::kByte);
+  EXPECT_EQ(caches[1].get_v_cache().scalar_type(), torch::kByte);
+  EXPECT_FALSE(caches[1].get_index_cache().defined());
+  EXPECT_FALSE(caches[1].get_k_cache_scale().has_value());
+  EXPECT_FALSE(caches[1].get_v_cache_scale().has_value());
+}
+#endif
+
 TEST_F(HostKVCacheTest, HostKVCacheNormalLayoutAddsLayerDim) {
   constexpr int64_t kNumBlocks = 16;
   constexpr int64_t kBlockSize = 128;

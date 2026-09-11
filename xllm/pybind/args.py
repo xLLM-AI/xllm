@@ -213,7 +213,10 @@ class ArgumentParser:
             "--kv_cache_dtype",
             type=str,
             default="auto",
-            help='KV cache data type. "auto" (default) aligns with model dtype, "int8" enables INT8 quantization (MLU only).',
+            help=(
+                'KV cache data type. "auto" aligns with model dtype, "int8" enables INT8 quantization on MLU, '
+                'and "fp8_e4m3" enables E4M3 cache storage for PyTorch GLM-5.2 on NPU.'
+            ),
         )
         self.parser.add_argument(
             "--use_cpp_chat_template",
