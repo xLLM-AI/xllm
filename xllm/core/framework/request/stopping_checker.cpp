@@ -32,8 +32,8 @@ StoppingChecker::StoppingChecker(
     size_t max_context_len,
     int32_t eos_token,
     bool ignore_eos,
-    const std::unordered_set<int32_t>& stop_tokens,
-    const std::vector<std::vector<int32_t>>& stop_sequences)
+    std::unordered_set<int32_t> stop_tokens,
+    std::vector<std::vector<int32_t>> stop_sequences)
     : max_generated_tokens_(max_generated_tokens),
       max_context_len_(max_context_len),
       eos_token_(eos_token),

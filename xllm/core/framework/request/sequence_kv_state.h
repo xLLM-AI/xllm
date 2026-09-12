@@ -124,11 +124,10 @@ class KVCacheState {
 
   Slice<Block> src_blocks() const { return src_blocks_; };
 
-  void set_src_blocks(const std::vector<Block>& src_blocks,
-                      bool need_swap = false) {
+  void set_src_blocks(std::vector<Block> src_blocks, bool need_swap = false) {
     src_blocks_ = std::move(src_blocks);
     need_swap_ = need_swap;
-  };
+  }
 
   bool need_swap() const { return need_swap_; }
 

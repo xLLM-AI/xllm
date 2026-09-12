@@ -112,7 +112,7 @@ class RequestState final {
                const std::string& decode_address = "");
 
   // for profiling run, only provide prompt tokens
-  RequestState(const std::vector<int32_t>& prompt_tokens);
+  RequestState(std::vector<int32_t> prompt_tokens);
 
   // RequestState owns the heavy request payload (prompt, prompt_tokens,
   // mm_data, sample_slots, callbacks). An implicit copy is almost always an

@@ -32,8 +32,8 @@ class StoppingChecker {
                   size_t max_context_len,
                   int32_t eos_token,
                   bool ignore_eos,
-                  const std::unordered_set<int32_t>& stop_tokens,
-                  const std::vector<std::vector<int32_t>>& stop_sequences);
+                  std::unordered_set<int32_t> stop_tokens,
+                  std::vector<std::vector<int32_t>> stop_sequences);
 
   FinishReason check(const Slice<int32_t>& token_ids,
                      size_t num_prompt_tokens,
@@ -61,14 +61,13 @@ class StoppingChecker {
 
   inline constexpr bool get_ignore_eos() const { return ignore_eos_; }
 
-  inline void set_stop_tokens(const std::unordered_set<int32_t>& tokens) {
+  inline void set_stop_tokens(std::unordered_set<int32_t> tokens) {
     stop_tokens_ = std::move(tokens);
   }
 
   inline std::unordered_set<int32_t>& get_stop_tokens() { return stop_tokens_; }
 
-  inline void set_stop_sequences(
-      const std::vector<std::vector<int32_t>>& sequences) {
+  inline void set_stop_sequences(std::vector<std::vector<int32_t>> sequences) {
     stop_sequences_ = std::move(sequences);
   }
 

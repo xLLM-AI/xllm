@@ -109,13 +109,13 @@ Sequence::Sequence(size_t index,
                    const std::vector<int32_t>& prompt_token_ids,
                    torch::Tensor input_embedding,
                    const MMData& mm_data,
-                   const IncrementalDecoder& decoder,
+                   IncrementalDecoder decoder,
                    const SequenceParams& seq_params)
     : index_(index),
       mm_data_(mm_data),
       latest_generate_time_(absl::Now()),
       sequence_params_(seq_params),
-      decoder_(decoder),
+      decoder_(std::move(decoder)),
       stream_output_token_offset_(decoder_.output_offset()) {
   init_request_state();
 

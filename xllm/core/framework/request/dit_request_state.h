@@ -187,8 +187,8 @@ struct DiTRequestState {
  public:
   DiTRequestState(DiTInputParams& input_params,
                   DiTGenerationParams& generation_params,
-                  const DiTOutputFunc& output_func,
-                  const DiTOutputsFunc& outputs_func,
+                  DiTOutputFunc output_func,
+                  DiTOutputsFunc outputs_func,
                   DiTRequestKind request_kind,
                   std::optional<Call*> call = std::nullopt)
       : input_params_(std::move(input_params)),

@@ -135,7 +135,7 @@ class Sequence {
            const std::vector<int32_t>& prompt_token_ids,
            torch::Tensor input_embedding,
            const MMData& mm_data,
-           const IncrementalDecoder& incremental_decoder,
+           IncrementalDecoder incremental_decoder,
            const SequenceParams& seq_params);
 
   Sequence(const Sequence& other);
