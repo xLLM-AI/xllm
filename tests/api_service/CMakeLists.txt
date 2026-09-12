@@ -61,6 +61,19 @@ cc_test(
 
 cc_test(
   NAME
+    chat_request_decoder_test
+  SRCS
+    chat_request_decoder_test.cpp
+  DEPS
+    api_service
+    proto::xllm_proto
+    GTest::gtest_main
+  ENVIRONMENT
+    "${_api_json_test_env}"
+)
+
+cc_test(
+  NAME
     json_fast_path_test
   SRCS
     json_fast_path_test.cpp

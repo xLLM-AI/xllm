@@ -23,7 +23,12 @@ limitations under the License.
 //   * BM_ApiService_CompletionJsonToProto   - preprocess_completion_prompt +
 //                                             json2pb::JsonToProtoMessage
 //   * BM_ApiService_ChatJsonToProto         - LlmChatJsonParser::preprocess +
-//                                             protobuf JsonStringToMessage
+//                                             decode_chat_request
+//   * BM_ApiService_ChatToolsJsonToProto    - same, on a tool-calling body
+//                                             whose Struct members the decoder
+//                                             carves out
+//   * BM_ApiService_ChatToolsJsonToMessageOnly - that body through the
+//                                             reference parser, for the A/B
 //   * BM_ApiService_RequestParamsFromCompletion - proto -> RequestParams
 //   * BM_ApiService_RequestParamsFromChat       - proto -> RequestParams
 //
@@ -66,6 +71,7 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/chat_json_parser.h"
+#include "api_service/chat_request_decoder.h"
 #include "api_service/completion_json_parser.h"
 #include "api_service/serving_mode.h"
 #include "chat.pb.h"
@@ -108,6 +114,36 @@ std::string make_chat_json(size_t num_messages) {
     json += R"("})";
   }
   json += R"(],"max_tokens":128,"temperature":0.7,"stream":true})";
+  return json;
+}
+
+// Four messages plus `num_tools` function tools with a realistic parameter
+// schema each, and chat_template_kwargs -- the two Struct-typed members.
+std::string make_chat_tools_json(size_t num_tools) {
+  std::string json = R"({"model":"bench-model","messages":[)";
+  json += R"({"role":"system","content":"You are a helpful assistant."},)";
+  json += R"({"role":"user","content":"What is the weather in Paris?"},)";
+  json += R"({"role":"assistant","content":null,"tool_calls":[{"id":"call_1",)";
+  json += R"("type":"function","function":{"name":"get_weather_0",)";
+  json += R"("arguments":"{\"city\":\"Paris\"}"}}]},)";
+  json += R"({"role":"tool","tool_call_id":"call_1","content":"18C, cloudy"})";
+  json += R"(],"tools":[)";
+  for (size_t i = 0; i < num_tools; ++i) {
+    if (i > 0) {
+      json += ",";
+    }
+    json += R"({"type":"function","function":{"name":"get_weather_)";
+    json += std::to_string(i);
+    json += R"(","description":"Get the current weather for a city.",)";
+    json += R"("parameters":{"type":"object","properties":{)";
+    json += R"("city":{"type":"string","description":"City name"},)";
+    json += R"("unit":{"type":"string","enum":["celsius","fahrenheit"]},)";
+    json += R"("days":{"type":"integer","minimum":1,"maximum":14}},)";
+    json += R"("required":["city"],"additionalProperties":false}}})";
+  }
+  json += R"(],"tool_choice":"auto",)";
+  json += R"("chat_template_kwargs":{"enable_thinking":false},)";
+  json += R"("max_tokens":128,"temperature":0.7,"stream":true})";
   return json;
 }
 
@@ -230,12 +266,50 @@ void BM_ApiService_ChatJsonToProto(benchmark::State& state) {
   for (auto _ : state) {
     auto [status, processed_json] = parser.preprocess(body);
     request.Clear();
+    const Status decode_status =
+        decode_chat_request(std::move(processed_json), &request);
+    do_not_optimize(decode_status.ok());
+    do_not_optimize(request.messages_size());
+  }
+  state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
+                          static_cast<int64_t>(body.size()));
+}
+
+// The tool-calling shape: every tool carries a google.protobuf.Struct schema
+// the decoder has to carve out, plus chat_template_kwargs.
+void BM_ApiService_ChatToolsJsonToProto(benchmark::State& state) {
+  const std::string body =
+      make_chat_tools_json(static_cast<size_t>(state.range(0)));
+  const ChatJsonParser& parser = ChatJsonParser::get(ServingMode::LLM);
+  proto::ChatRequest request;
+
+  for (auto _ : state) {
+    auto [status, processed_json] = parser.preprocess(body);
+    request.Clear();
+    const Status decode_status =
+        decode_chat_request(std::move(processed_json), &request);
+    do_not_optimize(decode_status.ok());
+    do_not_optimize(request.tools_size());
+  }
+  state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
+                          static_cast<int64_t>(body.size()));
+}
+
+// The same tool-calling body through the reference parser alone, for the A/B
+// against the carve-out.
+void BM_ApiService_ChatToolsJsonToMessageOnly(benchmark::State& state) {
+  const std::string body =
+      make_chat_tools_json(static_cast<size_t>(state.range(0)));
+  proto::ChatRequest request;
+
+  for (auto _ : state) {
+    request.Clear();
     google::protobuf::util::JsonParseOptions options;
     options.ignore_unknown_fields = true;
-    const auto parse_status = google::protobuf::util::JsonStringToMessage(
-        processed_json, &request, options);
+    const auto parse_status =
+        google::protobuf::util::JsonStringToMessage(body, &request, options);
     do_not_optimize(parse_status.ok());
-    do_not_optimize(request.messages_size());
+    do_not_optimize(request.tools_size());
   }
   state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
                           static_cast<int64_t>(body.size()));
@@ -476,6 +550,15 @@ BENCHMARK(BM_ApiService_CompletionJsonToProto)
 BENCHMARK(BM_ApiService_ChatJsonToProto)
     ->RangeMultiplier(4)
     ->Range(1, 64)
+    ->Unit(benchmark::kMicrosecond);
+// Number of tools, each with a parameter schema.
+BENCHMARK(BM_ApiService_ChatToolsJsonToProto)
+    ->RangeMultiplier(4)
+    ->Range(1, 16)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_ApiService_ChatToolsJsonToMessageOnly)
+    ->RangeMultiplier(4)
+    ->Range(1, 16)
     ->Unit(benchmark::kMicrosecond);
 // Same ranges as the combined benchmarks above so the numbers line up.
 BENCHMARK(BM_ApiService_CompletionPreprocessOnly)

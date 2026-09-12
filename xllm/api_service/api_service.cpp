@@ -23,6 +23,7 @@ limitations under the License.
 #include <filesystem>
 
 #include "api_service/chat_json_parser.h"
+#include "api_service/chat_request_decoder.h"
 #include "api_service/completion_json_parser.h"
 #include "api_service/request_id.h"
 #include "api_service/rpc_request_metrics.h"
@@ -365,13 +366,10 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
     return;
   }
 
-  google::protobuf::util::JsonParseOptions options;
-  options.ignore_unknown_fields = true;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      processed_json, req_pb, options);
+  const Status status = decode_chat_request(std::move(processed_json), req_pb);
   if (!status.ok()) {
-    ctrl->SetFailed(status.ToString());
-    LOG(ERROR) << "parse json to proto failed: " << status.ToString();
+    ctrl->SetFailed(status.message());
+    LOG(ERROR) << "parse json to proto failed: " << status.message();
     return;
   }
 

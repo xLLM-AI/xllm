@@ -10,8 +10,11 @@ cc_library(
     call.h
     request_id.h
     chat_json_parser.h
+    chat_request_decoder.h
+    chat_struct_spans.h
     completion_json_parser.h
     json_fast_path.h
+    json_scan.h
     completion_service_impl.h
     rec_completion_service_impl.h
     chat_service_impl.h
@@ -37,8 +40,11 @@ cc_library(
   SRCS
     api_service.cpp
     chat_json_parser.cpp
+    chat_request_decoder.cpp
+    chat_struct_spans.cpp
     completion_json_parser.cpp
     json_fast_path.cpp
+    json_scan.cpp
     service_impl_factory.cpp
     call.cpp
     request_id.cpp
