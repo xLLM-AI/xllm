@@ -625,7 +625,11 @@ void DeekseekV32DecoderLoader::process_general_weights(
     tmp_tensor = tensor.to(target_device());
   }
 
-  correct_tensor_dtype(tmp_tensor, name);
+  if (absl::EndsWith(name, "e_score_correction_bias")) {
+    tmp_tensor = tmp_tensor.to(torch::kFloat32);
+  } else {
+    correct_tensor_dtype(tmp_tensor, name);
+  }
   if (use_quant_weight_mapping() && absl::StartsWith(name, "self_attn.") &&
       absl::EndsWith(name, "weight_scale")) {
     tmp_tensor = prefill_isBF16_ ? tmp_tensor.to(torch::kBFloat16)
