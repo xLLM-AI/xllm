@@ -50,6 +50,9 @@ class XliteModelAdapter {
   // EP=1 -> tp_size; EP>1 -> 1 (experts sharded by EP). Dense returns 1.
   virtual uint32_t MoeTpSize(const ParallelArgs& pa) const { return 1; }
 
+  // Whether the embedding pooler L2-normalizes outputs (Qwen3 family).
+  virtual bool l2_normalize_embeddings() const { return false; }
+
   virtual std::string Name() const { return ""; }
 };
 

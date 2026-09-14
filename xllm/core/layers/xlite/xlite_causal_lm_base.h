@@ -80,6 +80,9 @@ class XliteModelHolder {
   virtual const torch::Tensor& xlite_freqs_cis() const = 0;
   virtual torch::Tensor xlite_output_buf(int64_t num_tokens) = 0;
   virtual bool xlite_ready() const = 0;
+  // Whether the embedding pooler L2-normalizes outputs (Qwen3 family does,
+  // matching the reference QWen3 pooler; GLM/DeepSeek return raw rows).
+  virtual bool l2_normalize_embeddings() const = 0;
 };
 
 class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
@@ -210,6 +213,18 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
 
   torch::Device device() const override { return device_; }
   const torch::TensorOptions& options() const override { return options_; }
+  torch::Tensor pooler(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes) override {
+    auto h = hidden_states;
+    if (seleted_idxes.defined()) {
+      h = h.index_select(/*dim=*/0, seleted_idxes);
+    }
+    if (l2_normalize_embeddings()) {
+      namespace F = torch::nn::functional;
+      return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
+    }
+    return h;
+  }
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {
     LOG(FATAL) << "EPLB is not supported by xlite backend.";
   }
@@ -239,6 +254,9 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
     return output_buf_.slice(0, 0, n);
   }
   bool xlite_ready() const override { return ready_; }
+  bool l2_normalize_embeddings() const override {
+    return adapter_->l2_normalize_embeddings();
+  }
 
  private:
   // Fail fast on configurations the xlite backend does not implement. Each

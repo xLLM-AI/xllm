@@ -38,6 +38,9 @@ class Qwen3Adapter : public XliteModelAdapter {
   }
 
   std::string Name() const override { return "Qwen3Adapter"; }
+
+  // Matches the reference QWen3 pooler (L2-normalized embeddings).
+  bool l2_normalize_embeddings() const override { return true; }
 };
 
 }  // namespace xllm::xlite
