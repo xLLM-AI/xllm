@@ -117,7 +117,8 @@ SlotScatterPlan prepare_slot_scatter_plan(const torch::Tensor& slot_mapping,
 
 // Scatter a row-major tensor into a flattened cache according to slot ids.
 // Each valid slot in `slot_mapping` selects the destination row for the same
-// row in `value`; negative slots are treated as padding and ignored.
+// row in `value`; invalid slots (negative padding or >= cache_rows) are
+// rerouted to the padding row 0 and never touch a real cache row.
 void scatter_rows_by_prepared_slot(torch::Tensor& cache,
                                    const SlotScatterPlan& plan,
                                    const torch::Tensor& value) {
@@ -142,13 +143,43 @@ void scatter_rows_by_prepared_slot(torch::Tensor& cache,
       value_2d.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
 
   if (!cache.device().is_cpu()) {
-    torch::Tensor safe_indices =
-        plan.safe_indices.defined()
-            ? plan.safe_indices.slice(/*dim=*/0,
-                                      /*start=*/0,
-                                      /*end=*/update_rows)
-            : slots_slice.clamp_min(0).reshape({-1, 1});
-    xllm::kernel::npu::scatter_nd_update(cache_2d, safe_indices, value_slice);
+    // Same fail-safe guard as scatter_by_slot in
+    // deepseek_sparse_attention.cpp: invalid slots (negative padding or
+    // >= cache_rows) are routed to row 0, never clamped onto a real row.
+    // Clamping to cache_rows - 1 would alias the last REAL row — when a legal
+    // slot in the same batch also targets it, ScatterNdUpdateV2 (xllm_ops)
+    // dedups the duplicate index and the no-op writeback may survive instead
+    // of the legal update, leaving stale KV. Row 0 belongs to block 0, the
+    // reserved padding block (BlockManagerImpl allocates it at startup and
+    // free() never returns it); legal slots are block_id * block_size +
+    // offset with block_id >= 1, so no legal write can reach row 0, and the
+    // negative-padding slots are already routed there by clamp_min(0) in
+    // prepare_slot_scatter_plan. Keeping every index inside [0, cache_rows)
+    // also keeps index_select/scatter_nd away from the GatherV3 device assert
+    // (which poisons the device). No host-side .item() CHECK and no
+    // boolean-mask compaction here — per-layer hot path, and the compaction's
+    // data-dependent shape cannot be captured by the ACL graph; the known
+    // producer of bad ids is guarded at startup by
+    // check_dsa_group_export_alignment.
+    const int64_t cache_rows = cache_2d.size(0);
+    torch::Tensor safe_slots =
+        (plan.safe_indices.defined()
+             ? plan.safe_indices.slice(/*dim=*/0,
+                                       /*start=*/0,
+                                       /*end=*/update_rows)
+             : slots_slice.clamp_min(0).reshape({-1, 1}))
+            .reshape({-1});
+    // safe_slots is already >= 0 (clamp_min in the plan); reroute the
+    // out-of-range tail onto the padding row so it cannot alias a real row.
+    safe_slots = torch::where(
+        slots_slice.lt(cache_rows), safe_slots, torch::zeros_like(safe_slots));
+    torch::Tensor valid_mask =
+        slots_slice.ge(0).logical_and(slots_slice.lt(cache_rows)).unsqueeze(1);
+    torch::Tensor old_values = cache_2d.index_select(/*dim=*/0, safe_slots);
+    torch::Tensor safe_values =
+        torch::where(valid_mask, value_slice, old_values);
+    xllm::kernel::npu::scatter_nd_update(
+        cache_2d, safe_slots.reshape({-1, 1}), safe_values);
     return;
   }
 

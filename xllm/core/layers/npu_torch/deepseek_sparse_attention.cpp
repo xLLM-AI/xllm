@@ -227,10 +227,32 @@ void scatter_by_slot(torch::Tensor& cache,
                           << cache.sizes();
 
   if (!cache.device().is_cpu()) {
-    auto safe_slots = slots_slice.clamp_min(0);
-    auto valid_mask = slots_slice.ge(0).unsqueeze(1);
+    // Route invalid slots (negative padding or >= cache_rows) to row 0 rather
+    // than clamping them onto a real row. An out-of-range slot id in
+    // index_select/scatter_nd fires the GatherV3 device assert ("Index N out
+    // of range", vector core exception 507035) which poisons the whole device;
+    // and clamping to cache_rows - 1 would alias the last REAL row — when a
+    // legal slot in the same batch also targets it, ScatterNdUpdateV2
+    // (xllm_ops) dedups the duplicate index and the no-op writeback may
+    // survive instead of the legal update, leaving stale KV. Row 0 belongs to
+    // block 0, the reserved padding block (BlockManagerImpl allocates it at
+    // startup and free() never returns it), and legal slots are
+    // block_id * block_size + offset with block_id >= 1 — so no legal write
+    // can ever reach row 0, and the rerouted invalid rows only collide with
+    // each other, each writing back row 0's own content. We deliberately do
+    // NOT do a host-side CHECK_LT(max_slot, cache_rows) here like the CPU path
+    // below: .item() would add a device sync on this per-layer-per-step hot
+    // path, and boolean-mask compaction (index({valid})) has a data-dependent
+    // shape the ACL graph cannot capture. The known producer of out-of-range
+    // ids — DSA group/table order misalignment — is guarded by
+    // check_dsa_group_export_alignment at startup.
+    auto valid_slots =
+        slots_slice.ge(0).logical_and(slots_slice.lt(cache_rows));
+    auto safe_slots =
+        torch::where(valid_slots, slots_slice, torch::zeros_like(slots_slice));
     auto old_values = cache_2d.index_select(/*dim=*/0, safe_slots);
-    auto safe_values = torch::where(valid_mask, value_slice, old_values);
+    auto safe_values =
+        torch::where(valid_slots.unsqueeze(1), value_slice, old_values);
     xllm::kernel::npu::scatter_nd_update(
         cache_2d, safe_slots.reshape({-1, 1}), safe_values);
     return;

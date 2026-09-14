@@ -348,6 +348,8 @@ inline void deepseek_v4_build_cache_specs(
     std::vector<DSAGroupInfo>& group_infos) {
   const auto& compress_ratios = model_args.compress_ratios();
   const int32_t window_size = model_args.window_size();
+  // TODO: Wire runtime block_size into model metadata so this stays aligned
+  // with the DSv4 KV cache and block manager when the default changes.
   const int32_t base_block_size = 128;
   CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
       << "DeepSeek V4 currently only supports block_size=128.";
@@ -367,12 +369,26 @@ inline void deepseek_v4_build_cache_specs(
   };
 
   register_group(DSACacheType::SLIDING_WINDOW, 1, window_size);
-  for (const int32_t ratio : compress_ratios) {
-    const int32_t cr = deepseek_v4_normalize_compress_ratio(ratio);
-    if (cr == 4 || cr == 128) {
+  // Register TOKEN groups in the FIXED order C4 -> C128 (kMultiBlockExport
+  // order), NOT in config first-seen order. DeepSeek-V4-Pro's config lists
+  // 128 before 4, so first-seen order builds [SWA, C128, C4] and the index
+  // pairing in DSAMetadataBuilder (tables[m] <-> group_infos[m]) then feeds
+  // the C128 group the C4 pool's block table. See the comment on
+  // check_dsa_group_export_alignment for the full failure chain.
+  auto has_compress_ratio = [&](int32_t want) {
+    for (const int32_t ratio : compress_ratios) {
+      if (deepseek_v4_normalize_compress_ratio(ratio) == want) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const int32_t cr : {4, 128}) {
+    if (has_compress_ratio(cr)) {
       register_group(DSACacheType::TOKEN, cr, base_block_size);
     }
   }
+  check_dsa_group_export_alignment(group_infos);
 
   caches_info.resize(model_args.n_layers());
   for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
@@ -520,88 +536,12 @@ class DeepseekV4ModelImpl
       layers_.push_back(layer);
     }
 
-    // Build DSA caches_info from compress_ratios
-    const auto& compress_ratios = model_args.compress_ratios();
-    const int32_t window_size = model_args.window_size();
-    // TODO: Wire runtime block_size into model metadata so this stays aligned
-    // with the DSv4 KV cache and block manager when the default changes.
-    const int32_t base_block_size = 128;  // default block size
-    CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
-        << "DeepSeek V4 currently only supports block_size=128.";
-
-    std::unordered_map<DSAGroupKey, int32_t, DSAGroupKeyHash> group_key_map;
-    auto register_group =
-        [&](DSACacheType type, int32_t ratio, int32_t block_size) -> int32_t {
-      DSAGroupKey key{ratio, type, block_size};
-      auto it = group_key_map.find(key);
-      if (it != group_key_map.end()) {
-        return it->second;
-      }
-      const int32_t gid = static_cast<int32_t>(group_infos_.size());
-      group_key_map.emplace(key, gid);
-      group_infos_.push_back({type, ratio, block_size});
-      return gid;
-    };
-
-    // Keep DSA group ids consistent with BlockManagerPool manager order:
-    // 1) sliding-window manager first
-    // 2) token managers in first-seen compress_ratio order
-    register_group(DSACacheType::SLIDING_WINDOW, 1, window_size);
-    for (const auto ratio : compress_ratios) {
-      const int32_t cr = deepseek_v4_normalize_compress_ratio(ratio);
-      if (cr == 4 || cr == 128) {
-        register_group(DSACacheType::TOKEN, cr, base_block_size);
-      }
-    }
-
-    caches_info_.resize(model_args.n_layers());
-
-    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
-      int32_t cr = (layer_id < static_cast<int32_t>(compress_ratios.size()))
-                       ? compress_ratios[layer_id]
-                       : 1;
-      cr = deepseek_v4_normalize_compress_ratio(cr);
-      // Build per-layer cache specs based on compress_ratio
-      struct CacheEntry {
-        DSACacheType type;
-        int32_t ratio;
-        int32_t block_size;
-      };
-      std::vector<CacheEntry> layer_caches;
-
-      if (cr == 1) {
-        // C1: 1 cache (swa)
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-      } else if (cr == 4) {
-        // C4: 8 caches
-        // compress_kv(TOKEN,4,128), compress_index(TOKEN,4,128),
-        // swa(SW,1,window), kv_state(SW,1,window), score_state(SW,1,window),
-        // idx_kv_state(SW,1,window), idx_score_state(SW,1,window),
-        // indexer_scale(TOKEN,4,128)
-        layer_caches.push_back({DSACacheType::TOKEN, 4, base_block_size});
-        layer_caches.push_back({DSACacheType::TOKEN, 4, base_block_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::TOKEN, 4, base_block_size});
-      } else if (cr == 128) {
-        // C128: 4 caches
-        // compress_kv(TOKEN,128,128), swa(SW,1,window),
-        // kv_state(SW,1,window), score_state(SW,1,window)
-        layer_caches.push_back({DSACacheType::TOKEN, 128, base_block_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-      }
-
-      for (const auto& ce : layer_caches) {
-        const int32_t gid = register_group(ce.type, ce.ratio, ce.block_size);
-        caches_info_[layer_id].push_back(
-            {gid, ce.type, ce.ratio, ce.block_size});
-      }
-    }
+    // Build DSA caches_info from compress_ratios. Single source of truth: the
+    // registration order is kMultiBlockExportOrder-sensitive, so call
+    // deepseek_v4_build_cache_specs (also used by MTP) instead of keeping an
+    // inline copy — check_dsa_group_export_alignment inside it fails at
+    // startup if the order ever drifts.
+    deepseek_v4_build_cache_specs(model_args, caches_info_, group_infos_);
 
     // Locate the first SWA cache so build_dspark_swa_metadata doesn't rescan
     // caches_info_ on every model forward.
@@ -1257,6 +1197,25 @@ class DeepseekV4ModelImpl
     return metadata;
   }
 
+  // Dummy sequences need enough block-table slots for EVERY group: the DSA
+  // kernels (QuantLightningIndexer & metadata) resolve kv blocks via
+  // block_table[seq][block_idx], and groups carry different block sizes — SWA
+  // registers with block_size = window_size, which can be smaller than the KV
+  // base block size — so divide by the smallest group block size and every
+  // dummy table covers ceil(dummy_kv_len / block_size). A too-narrow table
+  // with a padded kv length reads past the table end and raises an AICore MTE
+  // fault.
+  int32_t dsa_dummy_block_num(int32_t dummy_kv_len) const {
+    int32_t min_block_size =
+        static_cast<int32_t>(KVCacheConfig::get_instance().block_size());
+    for (const DSAGroupInfo& group : group_infos_) {
+      min_block_size =
+          std::min<int32_t>(min_block_size, std::max(group.block_size, 1));
+    }
+    return std::max<int32_t>(
+        (dummy_kv_len + min_block_size - 1) / min_block_size, 1);
+  }
+
   void fill_empty_dp_rank_input_params(
       ModelInputParams& params,
       const std::vector<KVCache>* kv_caches = nullptr) const {
@@ -1275,6 +1234,9 @@ class DeepseekV4ModelImpl
     // dummy kv length so it can hold the configured sparse top-k and window.
     const int32_t dummy_kv_len =
         static_cast<int32_t>(std::max<int64_t>({index_topk_, window_size_, 1}));
+    // The block table must cover the padded dummy kv length (see
+    // dsa_dummy_block_num).
+    const int32_t dummy_block_num = dsa_dummy_block_num(dummy_kv_len);
     params.meta.num_sequences = 1;
     params.meta.actual_num_sequences = 1;
     params.meta.kv_max_seq_len =
@@ -1298,7 +1260,7 @@ class DeepseekV4ModelImpl
     params.attention.device.new_cache_slots =
         torch::tensor({0}, cpu_int_options);
     params.attention.device.block_tables =
-        torch::zeros({1, 1}, cpu_int_options);
+        torch::zeros({1, dummy_block_num}, cpu_int_options);
 
     if (!params.multi_block_tables.empty()) {
       return;
@@ -1312,7 +1274,9 @@ class DeepseekV4ModelImpl
         block_num = empty_dp_rank_cache_blocks_for_group(manager_id,
                                                          kv_caches->front());
       }
-      block_num = std::max<int64_t>(block_num, 1);
+      // Without live kv caches fall back to the dummy padding width, never a
+      // 1-wide table (see dummy_block_num above).
+      block_num = std::max<int64_t>(block_num, dummy_block_num);
       params.multi_block_tables.emplace_back(
           torch::zeros({1, block_num}, cpu_int_options));
     }
@@ -1325,9 +1289,12 @@ class DeepseekV4ModelImpl
         std::max<int64_t>(params.meta.num_sequences, 1);
     // See fill_empty_dp_rank_input_params: the dummy kv length must be able to
     // hold the configured sparse top-k / sliding window, otherwise the DSA
-    // metadata AICPU kernels reject cmp_topk/sparse_count > kv_len.
+    // metadata AICPU kernels reject cmp_topk/sparse_count > kv_len. The dummy
+    // block tables must also cover that kv length, or the same kernels read
+    // past the table.
     const int32_t dummy_kv_len =
         static_cast<int32_t>(std::max<int64_t>({index_topk_, window_size_, 1}));
+    const int32_t dummy_block_num = dsa_dummy_block_num(dummy_kv_len);
     params.meta.num_sequences = static_cast<int32_t>(metadata_batch_size);
     params.meta.kv_max_seq_len =
         std::max<int32_t>(params.meta.kv_max_seq_len, dummy_kv_len);
@@ -1350,7 +1317,8 @@ class DeepseekV4ModelImpl
     if (has_full_multi_block_tables) {
       for (const auto& block_table : params.multi_block_tables) {
         if (!block_table.defined() || block_table.dim() != 2 ||
-            block_table.size(0) < metadata_batch_size) {
+            block_table.size(0) < metadata_batch_size ||
+            block_table.size(1) < dummy_block_num) {
           has_full_multi_block_tables = false;
           break;
         }
@@ -1367,8 +1335,8 @@ class DeepseekV4ModelImpl
     params.multi_block_tables.clear();
     params.multi_block_tables.reserve(manager_num);
     for (int32_t manager_id = 0; manager_id < manager_num; ++manager_id) {
-      params.multi_block_tables.emplace_back(
-          torch::zeros({metadata_batch_size, 1}, cpu_int_options));
+      params.multi_block_tables.emplace_back(torch::zeros(
+          {metadata_batch_size, dummy_block_num}, cpu_int_options));
     }
   }
 

@@ -460,6 +460,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     group_infos_ = {{DSACacheType::SLIDING_WINDOW, 1, window_size},
                     {DSACacheType::TOKEN, 4, kBaseBlockSize},
                     {DSACacheType::TOKEN, 128, kBaseBlockSize}};
+    check_dsa_group_export_alignment(group_infos_);
     caches_info_.assign(static_cast<size_t>(model_args_.n_layers()), {});
     for (int32_t layer_id = 0; layer_id < model_args_.n_layers(); ++layer_id) {
       const int32_t cr = deepseek_v4_normalize_compress_ratio(

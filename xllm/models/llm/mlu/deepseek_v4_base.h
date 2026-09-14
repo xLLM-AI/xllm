@@ -302,13 +302,29 @@ class DeepseekV4Base {
       return group_id;
     };
 
+    // Keep DSA group ids consistent with the worker-side multi_block_tables
+    // export order (kMultiBlockExportOrder): sliding window first, then token
+    // groups in FIXED order C4 -> C128 — never config first-seen order. The
+    // MLU metadata builder pairs tables[m] with group_infos_[m] by index, so
+    // a mismatched order feeds every group the wrong pool's block table (the
+    // NPU side of this bug crashed GatherV3 on DeepSeek-V4-Pro; see the
+    // comment on check_dsa_group_export_alignment). The CHECK below fails at
+    // startup if this invariant is ever broken.
     register_group(DSACacheType::SLIDING_WINDOW, 1, base_block_size);
-    for (const int32_t raw_ratio : compress_ratios) {
-      const int32_t ratio = normalize_compress_ratio(raw_ratio);
-      if (ratio == 4 || ratio == 128) {
+    auto has_compress_ratio = [&compress_ratios](int32_t want) {
+      for (const int32_t raw_ratio : compress_ratios) {
+        if (normalize_compress_ratio(raw_ratio) == want) {
+          return true;
+        }
+      }
+      return false;
+    };
+    for (const int32_t ratio : {4, 128}) {
+      if (has_compress_ratio(ratio)) {
         register_group(DSACacheType::TOKEN, ratio, base_block_size);
       }
     }
+    check_dsa_group_export_alignment(group_infos_);
 
     caches_info_.resize(static_cast<size_t>(model_args.n_layers()));
     cache_mappings_.resize(static_cast<size_t>(model_args.n_layers()));

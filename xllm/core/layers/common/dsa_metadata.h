@@ -15,11 +15,15 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "core/framework/block/block.h"
 
 namespace xllm {
 
@@ -44,6 +48,59 @@ struct DSAGroupInfo {
   int32_t ratio;
   int32_t block_size;
 };
+
+// DSA group registration order MUST match the worker-side multi_block_tables
+// export order (kMultiBlockExportOrder in core/framework/block/block.h, with
+// absent groups skipped): sliding window first, then token groups C4 before
+// C128. The metadata builders (NPU and MLU) pair tables[m] with
+// group_infos[m] BY INDEX, so any other registration order silently feeds
+// every group the wrong pool's block ids. On DeepSeek-V4-Pro (config lists
+// compress_ratios 128-first) the old first-seen order produced
+// [SWA, C128, C4]: the C128 group read the C4 block table, so c128 slots
+// resolved to c4_block_id * 128 + offset, which overflows the 7680-row C128
+// cache once C4 block ids pass 59 under cache pressure and crashes GatherV3
+// ("Index 7808 out of range [0, 7680)", vector core exception 507035) —
+// while ids below 60 silently corrupt other sequences' C128 rows. Fail at
+// startup instead.
+inline void check_dsa_group_export_alignment(
+    const std::vector<DSAGroupInfo>& group_infos) {
+  auto group_block_type = [](const DSAGroupInfo& g, BlockType* out) -> bool {
+    if (g.type == DSACacheType::SLIDING_WINDOW) {
+      *out = BlockType::SWA;
+      return true;
+    }
+    if (g.type == DSACacheType::TOKEN) {
+      *out = g.ratio == 4 ? BlockType::C4 : BlockType::C128;
+      return true;
+    }
+    return false;  // SEQUENCE (and future types) have no export-order slot.
+  };
+  std::vector<BlockType> registered;
+  registered.reserve(group_infos.size());
+  for (const auto& g : group_infos) {
+    BlockType bt;
+    CHECK(group_block_type(g, &bt))
+        << "deepseek_v4 group with type " << static_cast<int32_t>(g.type)
+        << " has no slot in kMultiBlockExportOrder";
+    registered.push_back(bt);
+  }
+  std::vector<BlockType> expected;
+  expected.reserve(registered.size());
+  for (const BlockType bt : kMultiBlockExportOrder) {
+    if (std::find(registered.begin(), registered.end(), bt) !=
+        registered.end()) {
+      expected.push_back(bt);
+    }
+  }
+  CHECK_EQ(registered.size(), expected.size());
+  for (size_t i = 0; i < registered.size(); ++i) {
+    CHECK_EQ(static_cast<int32_t>(registered[i]),
+             static_cast<int32_t>(expected[i]))
+        << "DSA group registration order does not match the fixed "
+        << "multi_block_tables export order (kMultiBlockExportOrder); "
+        << "group " << i << " would read the wrong pool's block table.";
+  }
+}
 
 namespace layer {
 

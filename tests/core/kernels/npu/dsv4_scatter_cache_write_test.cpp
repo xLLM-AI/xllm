@@ -79,8 +79,15 @@ void xllm_scatter_by_slot_mirror(torch::Tensor& cache,
       slots.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
   torch::Tensor value_slice =
       value_2d.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
-  torch::Tensor safe_slots = slots_slice.clamp_min(0);
-  torch::Tensor valid_mask = slots_slice.ge(0).unsqueeze(1);
+  // Mirrors the NPU path of scatter_by_slot: invalid slots (negative padding
+  // or >= cache_rows) are rerouted to the padding row 0, never clamped onto a
+  // real row.
+  const int64_t cache_rows = cache_2d.size(0);
+  torch::Tensor valid =
+      slots_slice.ge(0).logical_and(slots_slice.lt(cache_rows));
+  torch::Tensor safe_slots =
+      torch::where(valid, slots_slice, torch::zeros_like(slots_slice));
+  torch::Tensor valid_mask = valid.unsqueeze(1);
   torch::Tensor old_values = cache_2d.index_select(/*dim=*/0, safe_slots);
   torch::Tensor safe_values = torch::where(valid_mask, value_slice, old_values);
   cache_2d.index_copy_(/*dim=*/0, safe_slots, safe_values);
@@ -171,8 +178,12 @@ void verify_cache_write_case_with_padding_slot(
       slots.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
   torch::Tensor value_slice =
       update_2d.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
-  torch::Tensor safe_slots = slots_slice.clamp_min(0);
-  torch::Tensor valid_mask = slots_slice.ge(0).unsqueeze(1);
+  const int64_t cache_rows = actual_cache_2d.size(0);
+  torch::Tensor valid =
+      slots_slice.ge(0).logical_and(slots_slice.lt(cache_rows));
+  torch::Tensor safe_slots =
+      torch::where(valid, slots_slice, torch::zeros_like(slots_slice));
+  torch::Tensor valid_mask = valid.unsqueeze(1);
   torch::Tensor old_values =
       actual_cache_2d.index_select(/*dim=*/0, safe_slots);
   torch::Tensor safe_values = torch::where(valid_mask, value_slice, old_values);
@@ -182,6 +193,81 @@ void verify_cache_write_case_with_padding_slot(
   EXPECT_TRUE(
       torch::allclose(expected_cache, actual_cache, /*rtol=*/0, /*atol=*/0))
       << "padding slot cache write mismatch for " << test_case.name;
+}
+
+// Regression case for the duplicate scatter index hazard: a slot one past the
+// end (cache_rows) and a legal slot on the last real row (cache_rows - 1) in
+// the same batch must never alias after the safety rerouting — the legal
+// write has to survive, and only the padding row may absorb the invalid ones.
+void verify_cache_write_case_boundary_slot(const CacheWriteCase& test_case) {
+  const int64_t cache_rows = test_case.num_blocks * test_case.block_size;
+  ASSERT_GT(test_case.num_tokens, 3);
+  ASSERT_GT(cache_rows, test_case.num_tokens + 2);
+
+  const torch::Device npu_device("npu:0");
+  const torch::TensorOptions bf16_options =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(npu_device);
+
+  torch::manual_seed(20260914);
+  torch::Tensor base_cache = torch::randn({test_case.num_blocks,
+                                           test_case.block_size,
+                                           test_case.num_kv_heads,
+                                           test_case.head_dim},
+                                          bf16_options);
+  torch::Tensor update =
+      test_case.keep_update_head_dim
+          ? torch::randn({test_case.num_tokens,
+                          test_case.num_kv_heads,
+                          test_case.head_dim},
+                         bf16_options)
+          : torch::randn({test_case.num_tokens, test_case.head_dim},
+                         bf16_options);
+
+  // token 0 -> cache_rows - 1 (legal write to the last REAL row),
+  // token 1 -> cache_rows (one past the end), token 2 -> -1 (padding),
+  // token t -> t (distinct legal rows; row 0 is never targeted).
+  torch::Tensor slot_mapping = torch::arange(
+      test_case.num_tokens, torch::TensorOptions().dtype(torch::kLong));
+  slot_mapping.index_put_({0}, cache_rows - 1);
+  slot_mapping.index_put_({1}, cache_rows);
+  slot_mapping.index_put_({2}, -1);
+  slot_mapping = slot_mapping.to(npu_device);
+
+  torch::Tensor expected_cache = base_cache.clone();
+  xllm_scatter_by_slot_mirror(expected_cache, slot_mapping, update);
+
+  torch::Tensor actual_cache = base_cache.clone();
+  torch::Tensor update_2d = flatten_updates_for_case(update);
+  torch::Tensor actual_cache_2d = actual_cache.view({-1, update_2d.size(1)});
+  ASSERT_EQ(actual_cache_2d.size(0), cache_rows);
+  torch::Tensor slots = slot_mapping.reshape({-1}).to(torch::kLong);
+  const int64_t update_rows = std::min(slots.size(0), update_2d.size(0));
+  torch::Tensor slots_slice =
+      slots.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
+  torch::Tensor value_slice =
+      update_2d.slice(/*dim=*/0, /*start=*/0, /*end=*/update_rows);
+  torch::Tensor valid =
+      slots_slice.ge(0).logical_and(slots_slice.lt(cache_rows));
+  torch::Tensor safe_slots =
+      torch::where(valid, slots_slice, torch::zeros_like(slots_slice));
+  torch::Tensor valid_mask = valid.unsqueeze(1);
+  torch::Tensor old_values =
+      actual_cache_2d.index_select(/*dim=*/0, safe_slots);
+  torch::Tensor safe_values = torch::where(valid_mask, value_slice, old_values);
+  xllm::kernel::npu::scatter_nd_update(
+      actual_cache_2d, safe_slots.reshape({-1, 1}), safe_values);
+
+  EXPECT_TRUE(
+      torch::allclose(expected_cache, actual_cache, /*rtol=*/0, /*atol=*/0))
+      << "boundary slot cache write mismatch for " << test_case.name;
+  // The legal write to the last real row must survive the rerouted invalid
+  // write that shares the same scatter call.
+  EXPECT_TRUE(torch::allclose(actual_cache_2d.select(/*dim=*/0, cache_rows - 1),
+                              update_2d.select(/*dim=*/0, 0),
+                              /*rtol=*/0,
+                              /*atol=*/0))
+      << "legal write to the last real row was swallowed for "
+      << test_case.name;
 }
 
 }  // namespace
@@ -253,4 +339,15 @@ TEST_F(Dsv4ScatterCacheWriteTest, DISABLED_PaddingSlotIsIgnored) {
                                     .head_dim = 576,
                                     .keep_update_head_dim = false};
   verify_cache_write_case_with_padding_slot(test_case);
+}
+
+TEST_F(Dsv4ScatterCacheWriteTest, DISABLED_BoundarySlotKeepsLegalWrite) {
+  const CacheWriteCase test_case = {.name = "cmp_decode_boundary_slot",
+                                    .num_tokens = 8,
+                                    .num_blocks = 16,
+                                    .block_size = 128,
+                                    .num_kv_heads = 1,
+                                    .head_dim = 576,
+                                    .keep_update_head_dim = false};
+  verify_cache_write_case_boundary_slot(test_case);
 }
