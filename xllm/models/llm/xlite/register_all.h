@@ -60,7 +60,7 @@ XLITE_REGISTER_MODEL(qwen3, Qwen3Adapter, [&] {
 
   // xlite-specific fields for XliteConfigBuilder.
   LOAD_ARG_OR(use_qk_norm, "use_qk_norm", true);
-  LOAD_ARG_OR(qkv_bias, "qkv_bias", false);
+  LOAD_ARG_OR(qkv_bias, "attention_bias", false);
   SET_ARG(enable_mla, false);
   SET_ARG(use_moe, false);
   SET_ARG(first_k_dense_replace, 0);
@@ -253,7 +253,7 @@ XLITE_REGISTER_MODEL(qwen3_moe, Qwen3MoeAdapter, [&] {
 
   // xlite-specific fields for XliteConfigBuilder.
   LOAD_ARG_OR(use_qk_norm, "use_qk_norm", true);
-  LOAD_ARG_OR(qkv_bias, "qkv_bias", false);
+  LOAD_ARG_OR(qkv_bias, "attention_bias", false);
   SET_ARG(enable_mla, false);
   SET_ARG(use_moe, true);
 
