@@ -385,6 +385,7 @@ class ExtBuild(build_ext):
             f"-DDEVICE_ARCH={self.arch.upper()}",
             f"-DENABLE_HA={'ON' if self.enable_ha else 'OFF'}",
             f"-DUSE_ETCD={'ON' if self.enable_ha else 'OFF'}",
+            f"-DSTORE_USE_ETCD={'ON' if self.enable_ha else 'OFF'}",
             f"-DXLLM_ATB_LAYERS_SOURCE_DIR={os.path.join(self.base_dir, 'third_party', 'xllm_atb_layers')}",
             f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
@@ -523,8 +524,12 @@ class ExtBuild(build_ext):
         subprocess.check_call([cmake_cmd, self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
 
         base_build_args = build_args
-        # add build target to speed up the build process
-        build_args += ["--target", ext.name, "xllm"]
+        # Build every native executable shipped in the wheel so stale Mooncake
+        # binaries cannot be reused from a previous build directory.
+        build_targets = [ext.name, "mooncake_master", "mooncake_client"]
+        if self.enable_ha:
+            build_targets.append("stage_mooncake_ha_runtime")
+        build_args += ["--target", *build_targets]
         subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
 
         server_output_dir = os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/")
