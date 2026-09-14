@@ -22,9 +22,18 @@ if(USE_XLITE)
     set(XLITE_GIT_HEAD_CACHED "$ENV{XLITE_GIT_HEAD_CACHED}")
   endif()
 
+  # The site-packages install is shared across build directories; the marker
+  # records the revision actually installed there. Compare its contents so
+  # another worktree's install is not skipped by our stale CMake cache.
+  set(XLITE_INSTALLED_HEAD "")
+  if(EXISTS "${XLITE_MARKER_PATH}")
+    file(READ "${XLITE_MARKER_PATH}" XLITE_INSTALLED_HEAD)
+    string(STRIP "${XLITE_INSTALLED_HEAD}" XLITE_INSTALLED_HEAD)
+  endif()
+
   if(NOT DEFINED XLITE_GIT_HEAD_CACHED
      OR NOT XLITE_GIT_HEAD STREQUAL XLITE_GIT_HEAD_CACHED
-     OR NOT EXISTS "${XLITE_MARKER_PATH}")
+     OR NOT XLITE_GIT_HEAD STREQUAL XLITE_INSTALLED_HEAD)
     message(STATUS "xlite git HEAD changed; pip installing from submodule into ${_XLITE_PLATLIB}")
     execute_process(
       COMMAND ${Python3_EXECUTABLE} -m pip install --no-deps --no-build-isolation
