@@ -80,6 +80,8 @@ class XliteModelHolder {
   virtual const torch::Tensor& xlite_freqs_cis() const = 0;
   virtual torch::Tensor xlite_output_buf(int64_t num_tokens) = 0;
   virtual bool xlite_ready() const = 0;
+  // Worker-local ParallelArgs.
+  virtual const ParallelArgs& parallel() const = 0;
   // Whether the embedding pooler L2-normalizes outputs (Qwen3 family does,
   // matching the reference QWen3 pooler; GLM/DeepSeek return raw rows).
   virtual bool l2_normalize_embeddings() const = 0;
@@ -257,6 +259,7 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
   bool l2_normalize_embeddings() const override {
     return adapter_->l2_normalize_embeddings();
   }
+  const ParallelArgs& parallel() const override { return parallel_; }
 
  private:
   // Fail fast on configurations the xlite backend does not implement. Each
