@@ -79,10 +79,6 @@ XLITE_REGISTER_MODEL(deepseek_v3, DeepseekV3Adapter, [&] {
   LOAD_ARG_OR(n_layers, "num_hidden_layers", 61);
   LOAD_ARG_OR(n_heads, "num_attention_heads", 128);
   LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 128);  // MLA: = n_heads
-  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
-    return args->qk_nope_head_dim() +
-           args->qk_rope_head_dim();  // MLA: nope+rope
-  });
   LOAD_ARG_OR(intermediate_size, "intermediate_size", 18432);
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 163840);
   LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-6);
@@ -100,6 +96,12 @@ XLITE_REGISTER_MODEL(deepseek_v3, DeepseekV3Adapter, [&] {
   LOAD_ARG_OR(v_head_dim, "v_head_dim", 128);
   LOAD_ARG_OR(q_lora_rank, "q_lora_rank", 1536);
   LOAD_ARG_OR(kv_lora_rank, "kv_lora_rank", 512);
+  // head_dim required by KV cache estimation; derive after the MLA fields so
+  // the fallback sees the loaded component dims.
+  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
+    return args->qk_nope_head_dim() +
+           args->qk_rope_head_dim();  // MLA: nope+rope
+  });
 
   // MoE fields
   LOAD_ARG_OR(first_k_dense_replace, "first_k_dense_replace", 3);
@@ -146,10 +148,6 @@ XLITE_REGISTER_MODEL(glm_moe_dsa, Glm5MoeAdapter, [&] {
   LOAD_ARG_OR(n_kv_heads,
               "num_key_value_heads",
               64);  // MLA: c.nKvHeads=1 (MQA); framework uses this
-  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
-    return args->qk_nope_head_dim() +
-           args->qk_rope_head_dim();  // MLA: nope+rope
-  });
   LOAD_ARG_OR(intermediate_size, "intermediate_size", 12288);
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 202752);
   LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
@@ -173,6 +171,12 @@ XLITE_REGISTER_MODEL(glm_moe_dsa, Glm5MoeAdapter, [&] {
   LOAD_ARG_OR(v_head_dim, "v_head_dim", 256);
   LOAD_ARG_OR(q_lora_rank, "q_lora_rank", 2048);
   LOAD_ARG_OR(kv_lora_rank, "kv_lora_rank", 512);
+  // head_dim required by KV cache estimation; derive after the MLA fields so
+  // the fallback sees the loaded component dims.
+  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
+    return args->qk_nope_head_dim() +
+           args->qk_rope_head_dim();  // MLA: nope+rope
+  });
 
   // DSA indexer fields
   LOAD_ARG_OR(index_head_dim, "index_head_dim", 128);

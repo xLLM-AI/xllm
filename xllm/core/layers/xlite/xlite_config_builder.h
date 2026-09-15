@@ -170,6 +170,10 @@ class XliteConfigBuilder {
     c.nopeHeadDim = static_cast<uint32_t>(a.qk_nope_head_dim());
     c.ropeHeadDim = static_cast<uint32_t>(a.qk_rope_head_dim());
     c.vHeadDim = static_cast<uint32_t>(a.v_head_dim());
+    // qk head_dim = nope + rope; FromQwen3 fell back to hidden_size / n_heads
+    // when the checkpoint omits head_dim, unused by the MLA forward path but
+    // kept consistent.
+    c.headDim = c.nopeHeadDim + c.ropeHeadDim;
     // MLA MQA: nKvHeads=1 (kv_lora_rank shared across heads); matches xlite ref
     // + framework KVCacheShape.
     c.nKvHeads = 1;
