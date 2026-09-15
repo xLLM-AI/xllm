@@ -121,7 +121,12 @@ ModelOutput XliteExecutorImpl::run(const torch::Tensor& tokens,
     xlite::InitXTensor(kv_buf_[i][0], kv_caches[i].get_k_cache());
     xlite::InitXTensor(kv_buf_[i][1], kv_caches[i].get_v_cache());
     if (is_dsa) {
-      xlite::InitXTensor(kv_buf_[i][2], kv_caches[i].get_index_cache());
+      // Shared DSA layers elide index-cache pages (reuse prev full layer's
+      // top-k); GVirt reads [2] only on full indexer layers.
+      torch::Tensor index_cache = kv_caches[i].get_index_cache();
+      if (index_cache.defined()) {
+        xlite::InitXTensor(kv_buf_[i][2], index_cache);
+      }
     }
   }
 
