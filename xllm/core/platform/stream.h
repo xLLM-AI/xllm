@@ -65,7 +65,7 @@ class Stream {
 
   Stream(const Stream&) = delete;
   Stream& operator=(const Stream&) = delete;
-  Stream(Stream&&) = default;
+  Stream(Stream&&) noexcept = default;
   Stream& operator=(Stream&&) = default;
 
   explicit Stream(PlatformStream stream, const int32_t timeout = -1);
