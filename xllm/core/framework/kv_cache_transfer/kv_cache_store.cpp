@@ -36,22 +36,10 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
   config_ = config;
   host_kv_caches_ = host_kv_caches;
 
-  std::optional<std::string> device_names = std::nullopt;
-  if (config_.protocol == "rdma") {
-    const char* configured_devices = std::getenv("DEVICE_NAMES");
-    if (configured_devices != nullptr) {
-      device_names = configured_devices;
-      LOG(INFO) << "Mooncake RDMA device_names: " << device_names.value();
-    } else {
-      LOG(WARNING) << "DEVICE_NAMES is not set; falling back to TCP.";
-      config_.protocol = "tcp";
-    }
-  }
-
   auto client = mooncake::Client::Create(config_.localhost_name,
                                          config_.metadata_server,
                                          config_.protocol,
-                                         device_names,
+                                         std::nullopt,
                                          config_.master_server_address);
   if (!client.has_value()) {
     LOG(ERROR) << "Failed to create Mooncake Store client for "

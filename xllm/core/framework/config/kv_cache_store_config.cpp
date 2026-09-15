@@ -57,6 +57,10 @@ DEFINE_bool(enable_control_h2d_block_num,
             false,
             "Whether to control h2d copy block num.");
 
+DEFINE_string(store_rdma_devices,
+              "",
+              "Comma-separated RDMA HCAs for the embedded Store client.");
+
 namespace xllm {
 
 void KVCacheStoreConfig::from_flags() {
