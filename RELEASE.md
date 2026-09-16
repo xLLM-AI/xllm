@@ -2,13 +2,28 @@
 
 ## **Major Features and Improvements**
 
+### Highlights
+
+- **DeepSeek-V4 end-to-end hardening on NPU**: PD disaggregation with prefill context parallelism, FlashComm1 sequence parallelism with schedule overlap, host/device prefix cache spanning SWA + C4 + C128 units, DSpark decoding, and EPLB integrated with the fused MoE / MC2 path. MLU gained its own DeepSeek-V4 attention, MoE, PD transfer, and decode-path optimizations.
+- **DeepSeek-V3.2 and GLM-5.2** move onto the Python model stack: expert-parallel (EP) support for DeepSeek-V3.2, DeepSeek-V3.2 MTP under ACL graph, and GLM-5.2 EPLv2 with shared-expert overlap, on top of existing W8A8 PyTorch adaptation, DSA top-k sharing, cache elision, and Mooncake PD.
+- **Qwen3.5 / Qwen3.6 / Qwen3.8** round out with a CUDA Python model implementation, optional FIA (fused-infer-attention) decode, Qwen3.8-27B chat templates, context-parallel sequence sharding, NPU Python ACL-graph data-parallel decode, and a new Qwen3-VL-dense Python backend with ViT + deepstack + mRoPE — alongside the existing MegaMoE kernel, MegaChunkGDN fused operator, FlashComm1+MMRS fusion, and heterogeneous PD disaggregation.
+- **Speculative decoding grows an adaptive layer**: adaptive speculative decoding for DFlash and DSpark on NPU, extended to graph mode and per-sequence validate pruning, plus JSON-object constrained decoding integrated with MTP verification.
+- **KV cache gets a new sharding and offload story**: layerwise split KV cache sharding (shard persistent KV by static layer owner so PD cache ids stay aligned across prefill/decode/spec-verify), asynchronous host KV cache transfers, Mooncake Store as a host-cache backend, and host KV offload wired through PD and MTP.
+- **Context parallelism lands on MLU**: foundational decode context-parallel (DCP) support with dedicated attention-merge and decode-context kernels for MLU DeepSeek-V2/GLM-5.2.
+- **Multimodal / diffusion**: Flux2 text encoder, DiT, and VAE on NPU; Wan2.2 pipeline with distilled I2V, laser attention, RainFusion sparse attention, fused RoPE/norm operators, and single-NPU rolling weight load; QwenImageEditPlus, joy-image-edit-plus, and DFlash block-diffusion speculative decoding.
+- **Multi-hardware breadth**: MUSA (Moore Threads) gains a graph executor, FP8/MoE/sampling kernels, Qwen3.5 dense-model layers, standalone builds, and a dedicated runtime-integration refactor; DCU adds DeepSeek-V2/V3 FP8 W8A8, MiniMax-M2.7 Channel FP8, MiMo-MTP, Qwen3.5, Flux image generation, Mooncake PD, and PD-OOC.
+- **Developer experience**: the Python executor tree is now linted and formatted with ruff + codespell, and platform-specific typing/dispatch code was consolidated into a single torch-based module.
+- A large wave of **MTP / PD / SWA correctness fixes** stabilizes speculative decoding and disaggregated serving under sustained, high-concurrency load — see [Bugfix](#bugfix) below.
+
 ### Model Support
 
 #### NPU
-- Support DeepSeek-V4 PD disaggregation, prefill context parallelism, FlashComm1 sequence parallelism, and host/device prefix cache (SWA + C4 + C128).
-- Support DeepSeek-V3.2 and GLM-5.2 W8A8 PyTorch adaptation, GLM-5.2 DSA top-k sharing, cache elision, and Mooncake PD.
+- Support DeepSeek-V4 PD disaggregation, prefill context parallelism, FlashComm1 sequence parallelism with schedule overlap, and host/device prefix cache (SWA + C4 + C128).
+- Support DeepSeek-V4 DSpark decoding and integrate DeepSeek-V4 EPLB with NPU fused MoE and MC2.
+- Support DeepSeek-V3.2 and GLM-5.2 W8A8 PyTorch adaptation, GLM-5.2 DSA top-k sharing, cache elision, and Mooncake PD; add expert-parallel (EP) support for the DeepSeek-V3.2 Python model and DeepSeek-V3.2 Python MTP under ACL graph; enable GLM-5.2 EPLv2 and shared-expert overlap.
 - Support KIMI-K25 W4A8 with ACL graph.
-- Support Qwen3.5 / Qwen3.6 with MegaMoE kernel, MegaChunkGDN fused operator, FlashComm1 + MMRS fusion, gated-delta layers, and heterogeneous PD disaggregation.
+- Support Qwen3.5 / Qwen3.6 with MegaMoE kernel, MegaChunkGDN fused operator, FlashComm1 + MMRS fusion, gated-delta layers, and heterogeneous PD disaggregation; add a Qwen3.5 Python CUDA-parity model implementation, optional FIA decode, context-parallel sequence sharding, and NPU Python ACL-graph data-parallel decode for dense Qwen3.
+- Support Qwen3.8-27B chat templates and add Qwen3-VL-dense to the Python model backend with ViT, deepstack, and mRoPE.
 - Support Ascend950 attention, paged KV cache, TileLang, and causal convolution.
 - Support Flux2 text encoder, DiT, and VAE, and W8A8 dynamic quantization for QwenImageEdit / Wan2.2 DiT models.
 - Support Wan2.2 pipeline with distill I2V, laser attention, RainFusion sparse attention, fused RoPE / norm operators, and single-NPU rolling weight load.
@@ -19,11 +34,12 @@
 - Support Cola-DLM model.
 - Support MiMo-MTP model and DeepSeek / Qwen3.5 Triton kernels.
 - Support embedded-python model executor for Qwen3.
+- Add a Qwen3.5 Python model CUDA implementation; the DeepSeek-V3.2 EP work also lands CUDA-side MoE kernel plumbing.
 
 #### MLU
-- Support DeepSeek-V4 attention layers, MoE, selected-MoE DP path, and MTP.
+- Support DeepSeek-V4 attention layers, MoE, selected-MoE DP path, and MTP; add DeepSeek-V4 PD transfer and optimize DeepSeek-V4 MLU decode paths.
 - Support Qwen3.5 gated-delta layers, kernels, Triton JIT, MTP, and prefill context parallelism for GLM-5.2.
-- Support linear prefix cache and host KV cache transfer primitives.
+- Support linear prefix cache and host KV cache transfer primitives; add foundational decode context-parallel (DCP) support with attention-merge and decode-context kernels for DeepSeek-V2 and GLM-5.2.
 
 #### DCU
 - Support DeepSeek-V2, DeepSeek-V3 FP8 W8A8, MiniMax-M2.7 Channel FP8, MiMo-MTP, and Qwen3.5.
@@ -31,36 +47,94 @@
 
 #### MUSA
 - Support Moore Threads MUSA platform, including graph executor, FP8 / MoE / sampling kernels, and Qwen3.5 dense-model layers.
+- Support standalone MUSA builds, and refactor MUSA runtime integration and layer code style for maintainability.
 
 ### Feature
-- Add embedded-python model executor with NPU aclgraph backend, TP, and ProcessGroupHCCL, plus separated platform backends.
+
+#### Speculative Decoding
+- Add adaptive speculative decoding for DFlash and DSpark on NPU, extend it to graph mode, and add per-sequence validate pruning.
+- Add JSON-object constrained decoding integrated with MTP draft/verify state.
+- Add speculative-decoding per-token latency metrics and MTP support across NPU / MLU / DCU / CUDA.
+- Move non-worker speculative/MTP files from `runtime/` into `framework/speculative/`, and extract `AuxHiddenCapture` for spec-draft hidden states.
+- Improve speculative decoding by overlapping MTP graph updates, eliminating validate-to-draft bubbles, skipping greedy token broadcasts, and optimizing GLM MTP scheduler overlap.
+
+#### KV Cache & Offload
+- Add layerwise split KV cache sharding: shard persistent KV by static layer owner with one shared scratch layer so PD cache ids stay aligned across prefill, decode, and spec-verify; reject incompatible `layerwise_split_size` configs at startup.
+- Add asynchronous host KV cache transfers and Mooncake Store support for the host cache.
+- Support host KV offload for PD and MTP.
+- Add a linear-state prefix cache subsystem (hash primitives, block manager, scheduler plumbing, restore, and capacity estimation) with VLM linear-state prefix cache support.
+- Add in-batch prefix cache, PD-aware / DP-aware graph warmup, and device prefix cache in PD-disaggregated mode for DSV4 and Qwen3.5.
+
+#### Parallelism
+- Add foundational decode context-parallel (DCP) support for MLU and context-parallel sequence sharding for the Qwen3 Python model.
+- Support DeepSeek-V4 prefill context parallelism in PD disaggregation, and DeepSeek-V4 FlashComm1 + PCP + schedule-overlap.
+- Add DiT SP+TP parallelism, CFG parallelism, VAE parallelism, and configurable QwenImageEdit VAE size.
+
+#### Platform, Config & Serving
+- Add embedded-python model executor with NPU ACL-graph backend, TP, and ProcessGroupHCCL, plus separated platform backends; simplify Python model platform support and consolidate platform typing into a single torch-based module.
 - Add auto-tuning xLLM server configuration, an enhanced command-line interface, and an experimental unified launch method for online and offline services.
 - Add CLI-over-JSON gflags precedence, JSON config import/export, and config-struct-based flag initialization.
-- Add EPLB expert rebalancing with reliable runtime lifecycle, load aggregation, and configurable placement policies.
+- Add EPLB expert rebalancing with reliable runtime lifecycle, load aggregation, and configurable placement policies; integrate DeepSeek-V4 EPLB with NPU fused MoE and MC2, and enable GLM-5.2 EPLv2 with shared-expert overlap.
 - Support `trace_id` as `x-request-id`, request-ID propagation through inference paths, and asynchronous verbose request-trace logging.
 - Support `include_stop_str_in_output` and OpenAI-style integer-array prompts for completions.
-- Add in-batch prefix cache, PD-aware / DP-aware graph warmup, and device prefix cache in PD-disaggregated mode for DSV4 and Qwen3.5.
-- Add a linear-state prefix cache subsystem (hash primitives, block manager, scheduler plumbing, restore, and capacity estimation) with VLM linear-state prefix cache support.
+- Manage request rate-limit slots via RAII lifetime.
 - Add multimodal processor cache, custom headers for the multimodal downloader, and VLM embedding support in offline inference.
 - Add RL deep-sleep for co-located training and pause/resume for fully async RL.
-- Add speculative-decoding per-token latency metrics and MTP support across NPU / MLU / DCU / CUDA.
-- Add DiT SP+TP parallelism, CFG parallelism, VAE parallelism, and configurable QwenImageEdit VAE size.
-- Improve speculative decoding by overlapping MTP graph updates, eliminating validate-to-draft bubbles, and skipping greedy token broadcasts.
+- Add Python linting and formatting with ruff + codespell across the Python executor tree.
+
+#### Performance
 - Optimize NPU execution with GammaAddRmsNorm / fused LayerNorm integration, HCCL AIV small-tensor communication, cached device-side scalars, and H2D sync-bubble elimination.
-- Optimize Qwen3.5 causal-conv1d, MegaChunkGDN, prefill projection, and MoE all-reduce overhead.
+- Optimize Qwen3.5 causal-conv1d, MegaChunkGDN, prefill projection, and MoE all-reduce overhead; adapt Qwen W8A8 quantization for FlashComm.
+- Optimize GLM MTP scheduler overlap and DeepSeek-V4 MLU decode paths.
 - Support CANN aclnn operators for ATB layers, ACL-graph decode double buffering, and event-driven recommendation scheduling.
 - Add MaCa and additional platform-compatibility layers, and promote `xllm_atb_layers` to main.
 
 ### Bugfix
+
+#### Speculative Decoding
 - Fix MTP correctness under asynchronous execution, including cross-TP-rank state divergence, TPOT latency accounting, DP synchronization, overlap input preparation, and acceptance-rate regressions.
 - Fix DeepSeek-V4 MTP hidden-state flow, schedule-overlap, and multi-device MTP input handling.
-- Fix Qwen3.5 DP empty-shard crashes, causal-conv decode, W8A8 weight loading, and quant weight loading on MLU.
+- Restructure MTP step prelaunch scheduling and fix `glm_moe_dsa` draft prelaunch.
+- Cover ACL MTP decode graph buckets in graph warmup — a bucket ladder gated to MLU left NPU ACL executors capturing graphs mid-serving for shapes like DSV4 + DSpark at `dp_size=4`, contributing to an OOM cascade under high load; NPU now shares the same bucket-coverage helper as the executor.
+- Preserve raw hidden states across NPU MTP drafts and keep the true `num_accepted_tokens` for the Qwen3.5 GDN spec-verify checkpoint.
+- Skip metadata rebuild for prelaunched MTP drafts, retain no-sync inputs until validation completes, and pass `block_size` into `build_expanded_spec_verify_graph_input` on the chunked-prefill path.
+- Enable speculative decode under DP4 when some DP ranks are idle, and enable draft-engine `n_layers` reduction on NPU for KV-cache estimation — the draft engine previously sized its KV cache off the full model's layer count instead of `num_nextn_predict_layers`, costing roughly 80% of the intended KV blocks on NPU.
+- Support DFlash2 for Qwen3.8-series.
+
+#### PD Disaggregation
+- Fix a Prefill-Decode disaggregation schedule bug, align `pd_link_cluster` with kv-split owners, and fix kv-split chunked-prefill alignment.
 - Fix prefix-cache propagation across PD, prefix-cached block skipping during KV transfer, and KV-cache completion guards.
+- Fix Mooncake PD SSM/conv state transfer for hybrid MTP models by remapping state block ids using the checkpoint stride, and fix PD+MTP correctness for Qwen3.5-35B-A3B (linear-state slot mapping, speculative-wrapper restore skip, and schedule-overlap stopping check).
+- Honor Mooncake Store transport selection, and fix PD decode latency stats after a prefetch timeout.
+
+#### Memory, KV Cache & Capacity
+- Align DSV4 SWA capacity and prefix cache with C128 units, correct SWA sizing and balance DP cache allocation, bound DSV4 SWA allocation during host-cache restore, and retain all SWA blocks covering the decode window.
+- Fix two memory-capacity defects for hybrid models with MTP + graph mode and reject prompts exceeding decode KV capacity.
+- Build the attention mask for the chunked-prefill stage, avoid linear-state H2D copies during graph capture, and skip the canonical validity mask for placeholder-only linear state.
+
+#### Graph Capture & Execution
 - Fix graph-capture issues including padded decode CUDA-graph metadata, MLU graph linear-state padding, and graph-prepare stream waits.
+- Fix A5 TileLang and mRoPE support, after reverting an earlier attempt that regressed correctness.
+- Fix MLU attention multi-device setup and the Qwen3.5 VLM SmoothQuant MLU vision path.
+- Disable dense FIA warmup capture that was producing garbled decode output, and fall back uneven Qwen3.5 DP graph steps to eager execution.
+- Fix Qwen3.5 DP empty-shard crashes, causal-conv decode, W8A8 weight loading, and quant weight loading on MLU.
+- Move `torch_npu` calls from `models/` into `kernels_npu/` to keep the architectural boundary clean.
+
+#### Multimodal
 - Fix multimodal data races in parallel batch building, DiT image precision during resize, and Qwen2.5-VL M-RoPE handling.
-- Fix NPU Python runtime device pinning and initialization for standalone C++ tests, and multi-node worker address selection.
-- Fix build and CI issues around CUDA 13, recursive submodule checks, Mooncake dependencies, and `bdist_wheel` packaging.
+
+#### Service, API & Reliability
 - Fix service and API reliability including empty tool-call omission, OpenAI named tool choice, streaming, `ignore_eos` behavior, and health-report responses.
+- Add missing Anthropic reasoning request fields, and always close the GLM-4.7 streaming tool-call root JSON object.
+- Fix a bug from mixed usage of the common / ATB model namespace registries, and fix control-reaches-end in profile start/stop.
+- Guard a `size_t` underflow in request log statistics when a cancelled request produced zero tokens (previously logged as `18446744073709551615`).
+- Fix the executor test match pattern after ACL-graph support landed, and remove a redundant/useless test (from the layerwise-split follow-up work).
+
+#### Build & CI
+- Fix NPU Python runtime device pinning and initialization for standalone C++ tests, and multi-node worker address selection.
+- Support standalone MUSA builds, and bump `xllm_atb_layers` to include the merged layerwise-split KV cache sharding and its follow-up bugfix.
+- Fix build and CI issues around CUDA 13, recursive submodule checks, Mooncake dependencies, and `bdist_wheel` packaging.
+
 
 # Release xllm 0.10.0
 
@@ -225,7 +299,7 @@
 - Support dp+ep moe and all2all computation on mlu device.
 - Support parallelized shared experts in fused moe on mlu device.
 - Support qwen3 0.6B model on iluvatar device.
-- Add rec proto,serivce and utils for rec framework
+- Add rec proto,service and utils for rec framework
 - Support C api for llm inference.
 - Add constrained decoding for generative recommendation.
 - Add rec scheduler master and engine for rec framework.
@@ -234,11 +308,11 @@
 - Add qwen3/LlmRec support in rec framework.
 
 ### Bugfix
-- Reslove core dump of stream chat completion request when backend is VLM.
+- Resolve core dump of stream chat completion request when backend is VLM.
 - Resolve duplicate content in multi-turn tool call conversations.
 - Fix core dump issue triggered by client disconnection.
 - Fix the memory leak issue in the completions interface.
-- Fix wrong positons of validate input when enable MTP.
+- Fix wrong positions of validate input when enable MTP.
 - Resolve kv_cache_num mismatch in ChunkedPrefill due to H2D block copy.
 - Fix the missing index shape in the allocate kv cache transfer.
 - Fix MiMo-VL weights loading crash on NPU device.
