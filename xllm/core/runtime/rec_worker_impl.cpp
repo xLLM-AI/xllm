@@ -25,10 +25,8 @@ limitations under the License.
 #include <vector>
 
 #include "common/device_monitor.h"
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "common/types.h"
-#include "core/common/global_flags.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
@@ -3085,21 +3083,6 @@ void RecWorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
   }
 
   LOG(INFO) << "Loaded weights for all " << work_pipelines_.size() << " models";
-}
-
-bool RecWorkerImpl::init_onerec_model(ModelContext& context) {
-  CHECK(model_ == nullptr) << "Model is already initialized.";
-  device_.set_device();
-
-  model_ = create_rec_model(context);
-  CHECK(model_ != nullptr) << "Failed to create rec model.";
-  model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_model_args(), device_, options_);
-
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
-  }
-  return true;
 }
 
 ForwardInput RecWorkerImpl::prepare_inputs(Batch& batch) {

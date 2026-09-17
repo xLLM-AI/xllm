@@ -52,8 +52,6 @@ class RecWorkerImpl : public LLMWorkerImpl {
 
   void load_model(std::unique_ptr<ModelLoader> loader) override;
 
-  bool init_onerec_model(ModelContext& context);
-
   ForwardInput prepare_inputs(Batch& batch) override;
 
   void prepare_work_before_execute(const ForwardInput& inputs,
@@ -201,15 +199,6 @@ class RecWorkerImpl : public LLMWorkerImpl {
     int32_t max_seqs_per_batch_ = 0;
     int32_t beam_width_ = 1;
     int32_t max_decode_step_ = 0;
-  };
-
-  class LlmRecWithMmDataWorkPipeline final : public RecWorkPipeline {
-   public:
-    explicit LlmRecWithMmDataWorkPipeline(RecPipelineRuntime& runtime)
-        : RecWorkPipeline(runtime) {}
-
-    void prepare_work_before_execute(const ForwardInput& inputs,
-                                     ForwardInput& processed_inputs) override;
   };
 
   class LlmRecMultiRoundPipeline final : public RecWorkPipeline {
@@ -373,11 +362,6 @@ class RecWorkerImpl : public LLMWorkerImpl {
   static std::unique_ptr<RecWorkPipeline> create_pipeline(
       RecPipelineType type,
       RecPipelineRuntime& runtime);
-
-  torch::Tensor merge_embeddings_by_indices(
-      const torch::Tensor& input_tokens_embedding,
-      const torch::Tensor& input_embedding,
-      const std::vector<int64_t>& input_indices);
 
   void prepare_multi_modal_data(ForwardInput& processed_inputs);
 
