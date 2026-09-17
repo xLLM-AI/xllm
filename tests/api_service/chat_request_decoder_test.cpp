@@ -240,12 +240,19 @@ TEST(ChatRequestDecoderTest, MismatchedScalarDefersToTheReferenceParser) {
   proto::ChatRequest decoded;
   ASSERT_TRUE(decode_chat_request(body, &decoded).ok());
   EXPECT_EQ(decoded.max_tokens(), 128U);
+
+  expect_matches_reference<proto::ChatRequest>(
+      R"({"messages":[{"role":"user","content":"Hi"}],"stream":"yes"})",
+      ExpectedPath::FAST);
+  expect_matches_reference<proto::ChatRequest>(
+      R"({"messages":[{"role":"user","content":"Hi"}],"stream":"no"})",
+      ExpectedPath::FAST);
 }
 
 TEST(ChatRequestDecoderTest, RejectedBodiesCarryTheReferenceParserMessage) {
   const std::vector<std::string> bodies = {
       // Rejected by both parsers: the message must be the reference one.
-      R"({"messages":[{"role":"user","content":"Hi"}],"stream":"yes"})",
+      R"({"messages":[{"role":"user","content":"Hi"}],"stream":{}})",
       R"({"messages":[{"role":"user","content":"Hi"}],"max_tokens":1.5})",
       R"({"messages":"not an array"})",
       R"({"messages":[{"role":"user","content":"Hi"}]} trailing)",
