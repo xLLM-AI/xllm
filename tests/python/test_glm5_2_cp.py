@@ -17,6 +17,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -447,6 +448,7 @@ def test_glm_attention_reduces_o_projection_in_fp32_for_tensor_parallel() -> Non
 def test_glm_attention_reuse_updates_index_cache() -> None:
     attention = glm5_2.Glm52MLAAttention.__new__(glm5_2.Glm52MLAAttention)
     nn.Module.__init__(attention)
+    attention._use_fused_mla_decode = False
     attention.q_a_proj = nn.Identity()
     attention.q_a_layernorm = nn.Identity()
     attention.q_b_proj = nn.Identity()
@@ -512,13 +514,15 @@ def test_glm_attention_reuse_updates_index_cache() -> None:
 
 
 @pytest.mark.parametrize(
-    ("use_mlapo_v2", "num_tokens", "expect_mlapo_v2"),
+    ("use_mlapo_v2", "num_tokens", "reuse_topk_indices", "expect_mlapo_v2"),
     [
-        (False, 2, False),
-        (True, 2, True),
+        (False, 2, False, False),
+        (True, 2, False, True),
+        (True, 2, True, True),
         (
             True,
             glm5_2.kernels.MLA_PREPROCESS_V2_MAX_TOKENS + 1,
+            False,
             False,
         ),
     ],
@@ -526,13 +530,14 @@ def test_glm_attention_reuse_updates_index_cache() -> None:
 def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     use_mlapo_v2: bool,
     num_tokens: int,
+    reuse_topk_indices: bool,
     expect_mlapo_v2: bool,
 ) -> None:
     attention = glm5_2.Glm52MLAAttention.__new__(glm5_2.Glm52MLAAttention)
     nn.Module.__init__(attention)
     attention._use_fused_mla_decode = True
     attention._use_mlapo_v2 = use_mlapo_v2
-    attention.indexer = None
+    attention.indexer = MagicMock() if reuse_topk_indices else None
     attention.num_heads_local = 1
     attention.q_lora_rank = 2
     attention.qk_nope_head_dim = 1
@@ -579,6 +584,7 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
 
     hidden = torch.ones(num_tokens, 2)
     positions = torch.arange(num_tokens)
+    cos_sin_cache = torch.empty(0)
     previous_topk = torch.zeros(num_tokens, 1, dtype=torch.int64)
     q_c = torch.ones(num_tokens, 2)
     q_latent = torch.ones(num_tokens, 1, 1)
@@ -592,6 +598,7 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     )
     backend = MagicMock()
     backend.mla_preprocess_context.return_value = preprocess_context
+    backend.mla_index_context.return_value = MagicMock()
     backend.execute_mla.return_value = attn_out
 
     with (
@@ -628,7 +635,13 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
             create=True,
         ),
     ):
-        output, topk = attention(hidden, positions, torch.empty(0), previous_topk)
+        output, topk = attention(
+            hidden,
+            positions,
+            cos_sin_cache,
+            previous_topk,
+            reuse_topk_indices=reuse_topk_indices,
+        )
 
     attention.qkv_a_proj.forward_quantized.assert_not_called()
     selected_preprocess = mlapo_v2 if expect_mlapo_v2 else capturable_preprocess
@@ -649,5 +662,13 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
         topk=previous_topk,
         cache_is_preprocessed=True,
     )
+    if reuse_topk_indices:
+        attention.indexer._update_index_cache.assert_called_once_with(
+            hidden,
+            positions,
+            backend.mla_index_context.return_value,
+            cos_sin_cache,
+        )
+        attention.indexer.select_qli.assert_not_called()
     torch.testing.assert_close(output, projected.reshape(num_tokens, 2))
     assert topk is previous_topk

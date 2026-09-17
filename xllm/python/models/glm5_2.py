@@ -588,6 +588,7 @@ class Glm52MLAAttention(Attention):
         backend: AttentionBackend,
         context: MlaPreprocessContext,
         prev_topk_indices: torch.Tensor | None,
+        reuse_topk_indices: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         qkv_proj = getattr(self, "qkv_a_proj", None)
         qkv_input_scale = qkv_proj.input_scale if qkv_proj is not None else self.kv_a_proj_with_mqa.input_scale
@@ -650,7 +651,19 @@ class Glm52MLAAttention(Attention):
                 self.kv_a_layernorm.eps,
             )
 
-        if self.indexer is not None:
+        if reuse_topk_indices:
+            if prev_topk_indices is None:
+                raise ValueError("MTP DSA top-k reuse requires indices from the previous draft step")
+            if self.indexer is not None:
+                index_context = backend.mla_index_context(self)
+                self.indexer._update_index_cache(
+                    hidden,
+                    positions,
+                    index_context,
+                    cos_sin_cache,
+                )
+            topk = prev_topk_indices
+        elif self.indexer is not None:
             index_context = backend.mla_index_context(self)
             topk = self.indexer.select_qli(
                 hidden,
@@ -782,13 +795,7 @@ class Glm52MLAAttention(Attention):
         layer_owner = self.layer_id % self.cfg.layerwise_split_size
         owns_layer_cache = self.cfg.layerwise_split_rank == layer_owner
         fused_mla_ready = getattr(self, "_fused_mla_ready", hasattr(self, "qkv_a_proj"))
-        if (
-            not reuse_topk_indices
-            and self._use_fused_mla_decode
-            and fused_mla_ready
-            and cp_context is None
-            and not layerwise
-        ):
+        if self._use_fused_mla_decode and fused_mla_ready and cp_context is None and not layerwise:
             preprocess_context = backend.mla_preprocess_context(self)
             if preprocess_context is not None:
                 cos, sin = _gather_interleave_cos_sin(cos_sin_cache, positions)
@@ -801,6 +808,7 @@ class Glm52MLAAttention(Attention):
                     backend,
                     preprocess_context,
                     prev_topk_indices,
+                    reuse_topk_indices,
                 )
 
         q_a_proj = getattr(self, "q_a_proj", None)
