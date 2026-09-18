@@ -1200,18 +1200,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     draft_outputs.reserve(options_.num_speculative_tokens());
 
     ForwardInput new_input = input;
-    for (int32_t& token_num :
-         new_input.input_params.parallel.dp_global_token_nums) {
-      token_num *= 2;
-    }
-    for (int32_t& token_num :
-         new_input.input_params.parallel.raw_dp_global_token_nums) {
-      token_num *= 2;
-    }
-    new_input.input_params.expert.eplb_decode_token_mask =
-        eplb::expand_decode_token_mask(
-            new_input.input_params.expert.eplb_decode_token_mask,
-            /*tokens_per_row=*/2);
+    scale_speculative_parallel_token_counts(new_input.input_params,
+                                            /*multiplier=*/2);
     if (use_prelaunched_first_draft) {
       draft_outputs.emplace_back(
           std::move(pending_draft_context_.output.value()));
@@ -1233,18 +1223,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     }
 
     new_input = input;
-    for (int32_t& token_num :
-         new_input.input_params.parallel.dp_global_token_nums) {
-      token_num *= options_.num_speculative_tokens() + 1;
-    }
-    for (int32_t& token_num :
-         new_input.input_params.parallel.raw_dp_global_token_nums) {
-      token_num *= options_.num_speculative_tokens() + 1;
-    }
-    new_input.input_params.expert.eplb_decode_token_mask =
-        eplb::expand_decode_token_mask(
-            new_input.input_params.expert.eplb_decode_token_mask,
-            options_.num_speculative_tokens() + 1);
+    scale_speculative_parallel_token_counts(
+        new_input.input_params, options_.num_speculative_tokens() + 1);
     // Deadlock-safety under DP: this rank's shard is empty but all peers
     // decode, so busy peers allgather their pruned validate counts before the
     // target forward. Join that allgather in lockstep with this rank's uniform
@@ -3233,14 +3213,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
       validate_sampling_params, num_val_tokens, total_num_val_tokens);
 #endif
 
-  for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
-    token_num *= num_val_tokens;
-  }
-  for (int32_t& token_num : input_params.parallel.raw_dp_global_token_nums) {
-    token_num *= num_val_tokens;
-  }
-  input_params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
-      input_params.expert.eplb_decode_token_mask, num_val_tokens);
+  scale_speculative_parallel_token_counts(input_params, num_val_tokens);
 
   std::vector<int32_t> accepted_prefix_lengths;
   if (use_chunked_prefill_spec_verify_path()) {
