@@ -18,7 +18,6 @@ limitations under the License.
 #include <algorithm>
 
 #include "common/metrics.h"
-#include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "framework/sampling/sampling_params.h"
 #include "util/slice.h"
@@ -85,13 +84,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     return output;
   } else {
     ForwardInput new_input = input;
-    for (auto& it : new_input.input_params.parallel.dp_global_token_nums) {
-      it *= options_.num_speculative_tokens() + 1;
-    }
-    new_input.input_params.expert.eplb_decode_token_mask =
-        eplb::expand_decode_token_mask(
-            new_input.input_params.expert.eplb_decode_token_mask,
-            options_.num_speculative_tokens() + 1);
+    scale_speculative_parallel_token_counts(
+        new_input.input_params, options_.num_speculative_tokens() + 1);
 
     auto future = impl_->step_async(new_input);
     ForwardOutput output = std::move(future).get().value();
