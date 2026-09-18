@@ -23,6 +23,8 @@
 
 # tests
 /Testing*
+tests/python/golden_cache/
+tests/python/msprof*/
 
 # rust
 Cargo.lock
