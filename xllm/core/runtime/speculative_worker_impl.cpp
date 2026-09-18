@@ -266,12 +266,7 @@ bool should_run_speculative_decode(const ModelInputParams& params) {
 
 void scale_speculative_parallel_token_counts(ModelInputParams& params,
                                              int32_t multiplier) {
-  for (int32_t& token_num : params.parallel.dp_global_token_nums) {
-    token_num *= multiplier;
-  }
-  for (int32_t& token_num : params.parallel.raw_dp_global_token_nums) {
-    token_num *= multiplier;
-  }
+  scale_parallel_token_counts(params.parallel, multiplier);
   params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
       params.expert.eplb_decode_token_mask, multiplier);
 }

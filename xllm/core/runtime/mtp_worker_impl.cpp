@@ -1240,14 +1240,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
         output, *compute_stream_, enable_schedule_overlap());
     if (can_prelaunch_next_first_draft(input)) {
       ForwardInput next_first_draft_input = input;
-      for (int32_t& token_num :
-           next_first_draft_input.input_params.parallel.dp_global_token_nums) {
-        token_num *= 2;
-      }
-      for (int32_t& token_num : next_first_draft_input.input_params.parallel
-                                    .raw_dp_global_token_nums) {
-        token_num *= 2;
-      }
+      scale_parallel_token_counts(next_first_draft_input.input_params.parallel,
+                                  /*multiplier=*/2);
       submit_pending_first_draft(input, std::move(next_first_draft_input));
     }
     return output;
@@ -3808,22 +3802,10 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
 
   if (!input_params.parallel.dp_global_token_nums.empty()) {
     if (use_chunked_prefill) {
-      for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
-        token_num *= 2;
-      }
-      for (int32_t& token_num :
-           input_params.parallel.raw_dp_global_token_nums) {
-        token_num *= 2;
-      }
+      scale_parallel_token_counts(input_params.parallel, /*multiplier=*/2);
     } else if (dp_enabled) {
       constexpr int32_t num_extend_tokens = 2;
-      for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
-        token_num *= num_extend_tokens;
-      }
-      for (int32_t& token_num :
-           input_params.parallel.raw_dp_global_token_nums) {
-        token_num *= num_extend_tokens;
-      }
+      scale_parallel_token_counts(input_params.parallel, num_extend_tokens);
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
       input_params.parallel.dp_global_token_nums[0] =
           static_cast<int32_t>(buf.out_positions.size());

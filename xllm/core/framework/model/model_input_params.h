@@ -904,6 +904,18 @@ struct ParallelInput {
   }
 };
 
+// EPLB mask growth is left to the caller: its factor is not always the
+// token-count multiplier.
+inline void scale_parallel_token_counts(ParallelInput& parallel,
+                                        int32_t multiplier) {
+  for (int32_t& token_num : parallel.dp_global_token_nums) {
+    token_num *= multiplier;
+  }
+  for (int32_t& token_num : parallel.raw_dp_global_token_nums) {
+    token_num *= multiplier;
+  }
+}
+
 using LinearStatePrefixHash = PrefixHash;
 using LinearStateValidityMask = std::vector<int64_t>;
 
