@@ -44,6 +44,7 @@ _EXPORTS = {
     "mla": (
         "MLA_PREPROCESS_V2_MAX_TOKENS",
         "deepseek_mla_preprocess_decode",
+        "deepseek_mla_preprocess_decode_dynamic",
         "deepseek_mla_preprocess_decode_v2",
         "has_mla_preprocess_v2",
         "prepare_mla_preprocess_v2_q_b",
@@ -141,6 +142,7 @@ __all__ = [
     "prepare_quant_weight",
     "MLA_PREPROCESS_V2_MAX_TOKENS",
     "deepseek_mla_preprocess_decode",
+    "deepseek_mla_preprocess_decode_dynamic",
     "deepseek_mla_preprocess_decode_v2",
     "has_mla_preprocess_v2",
     "prepare_mla_preprocess_v2_q_b",

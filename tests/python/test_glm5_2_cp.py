@@ -361,6 +361,7 @@ def test_glm_dense_mlp_unfused_path_reduces_in_fp32() -> None:
 def test_glm_attention_reduces_o_projection_in_fp32_for_tensor_parallel() -> None:
     attention = glm5_2.Glm52MLAAttention.__new__(glm5_2.Glm52MLAAttention)
     nn.Module.__init__(attention)
+    attention._use_fused_mla_decode = False
     attention.q_a_proj = nn.Identity()
     attention.q_a_layernorm = nn.Identity()
     attention.q_b_proj = nn.Identity()
@@ -537,6 +538,7 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     nn.Module.__init__(attention)
     attention._use_fused_mla_decode = True
     attention._use_mlapo_v2 = use_mlapo_v2
+    attention._dynamic_mla_ready = False
     attention.indexer = MagicMock() if reuse_topk_indices else None
     attention.num_heads_local = 1
     attention.q_lora_rank = 2
@@ -671,4 +673,115 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
         )
         attention.indexer.select_qli.assert_not_called()
     torch.testing.assert_close(output, projected.reshape(num_tokens, 2))
+    assert topk is previous_topk
+
+
+def test_glm_attention_dynamic_fused_decode_reuses_topk_after_cache_write() -> None:
+    attention = glm5_2.Glm52MLAAttention.__new__(glm5_2.Glm52MLAAttention)
+    nn.Module.__init__(attention)
+    attention._use_fused_mla_decode = True
+    attention._use_mlapo_v2 = False
+    attention._fused_mla_ready = True
+    attention._dynamic_mla_ready = True
+    attention.indexer = MagicMock()
+    attention.num_heads_local = 1
+    attention.q_lora_rank = 2
+    attention.qk_nope_head_dim = 1
+    attention.qk_rope_head_dim = 1
+    attention.kv_lora_rank = 1
+    attention.v_head_dim = 2
+    attention.layer_id = 0
+    attention.cfg = SimpleNamespace(
+        tp_size=1,
+        layerwise_split_size=1,
+        layerwise_split_rank=0,
+    )
+    attention._dynamic_qkv_weight = torch.empty(0)
+    attention._dynamic_qkv_weight_scale = torch.empty(0)
+    attention.q_a_layernorm = SimpleNamespace(weight=torch.ones(2), eps=1e-5)
+    attention.q_b_proj = SimpleNamespace(weight=torch.empty(0), weight_scale=torch.empty(0))
+    attention.kv_a_layernorm = SimpleNamespace(weight=torch.ones(1), eps=1e-5)
+    attention.W_UK = torch.ones(1, 1, 1)
+    attention.W_UV = torch.ones(1, 1, 2)
+    attention.o_proj = nn.Identity()
+
+    hidden = torch.ones(2, 2)
+    positions = torch.arange(2)
+    cos_sin_cache = torch.empty(0)
+    previous_topk = torch.zeros(2, 1, dtype=torch.int64)
+    q_c = torch.ones(2, 2)
+    q_latent = torch.ones(2, 1, 1)
+    q_pe = torch.ones(2, 1, 1)
+    projected = torch.ones(2, 1, 2)
+    preprocess_context = glm5_2.MlaPreprocessContext(
+        kv_cache=torch.empty(2, 1, 1),
+        rope_cache=torch.empty(2, 1, 1),
+        slot_mapping=torch.arange(3),
+    )
+    backend = MagicMock()
+    backend.mla_preprocess_context.return_value = preprocess_context
+    backend.mla_index_context.return_value = MagicMock()
+    backend.execute_mla.return_value = torch.ones(2, 1, 1)
+
+    with (
+        patch.object(
+            glm5_2,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attention_backend=backend,
+                cp_context=None,
+                metadata=SimpleNamespace(is_prefill=False, is_chunked_prefill=False),
+            ),
+        ),
+        patch.object(
+            glm5_2,
+            "_gather_interleave_cos_sin",
+            return_value=(torch.empty(0), torch.empty(0)),
+        ),
+        patch.object(
+            glm5_2.kernels,
+            "deepseek_mla_preprocess_decode_dynamic",
+            return_value=(q_c, q_latent, q_pe),
+            create=True,
+        ) as dynamic_preprocess,
+        patch.object(
+            glm5_2.kernels,
+            "deepseek_mla_preprocess_decode",
+            create=True,
+        ) as static_preprocess,
+        patch.object(
+            glm5_2.kernels,
+            "batch_matmul_transpose",
+            return_value=projected,
+            create=True,
+        ),
+    ):
+        output, topk = attention(
+            hidden,
+            positions,
+            cos_sin_cache,
+            previous_topk,
+            reuse_topk_indices=True,
+        )
+
+    dynamic_preprocess.assert_called_once()
+    static_preprocess.assert_not_called()
+    torch.testing.assert_close(dynamic_preprocess.call_args.args[10], torch.arange(2))
+    attention.indexer._update_index_cache.assert_called_once_with(
+        hidden,
+        positions,
+        backend.mla_index_context.return_value,
+        cos_sin_cache,
+    )
+    attention.indexer.select_qli.assert_not_called()
+    backend.execute_mla.assert_called_once_with(
+        q_latent,
+        q_pe,
+        None,
+        None,
+        attention,
+        topk=previous_topk,
+        cache_is_preprocessed=True,
+    )
+    torch.testing.assert_close(output, projected.reshape(2, 2))
     assert topk is previous_topk

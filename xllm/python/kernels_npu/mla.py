@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import torch_npu
 
 from .normalization import rms_norm
-from .quantization import quant_matmul, quantize_per_tensor
+from .quantization import dynamic_quant, quant_matmul, quantize_per_tensor
 
 _FRACTAL_NZ_FORMAT = 29
 _KROPE_CTKV_CACHE_MODE = 1
@@ -381,6 +381,133 @@ def deepseek_mla_preprocess_decode(
     return q_c, q_latent, q_pe
 
 
+@torch.library.custom_op(
+    "xllm_python::deepseek_mla_preprocess_decode_dynamic",
+    mutates_args={"kv_cache", "rope_cache"},
+)
+def deepseek_mla_preprocess_decode_dynamic(
+    hidden: torch.Tensor,
+    qkv_weight: torch.Tensor,
+    qkv_weight_scale: torch.Tensor,
+    q_norm_weight: torch.Tensor,
+    q_b_weight: torch.Tensor,
+    q_b_weight_scale: torch.Tensor,
+    w_uk: torch.Tensor,
+    kv_norm_weight: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    rope_cache: torch.Tensor,
+    kv_lora_rank: int,
+    q_lora_rank: int,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    q_norm_epsilon: float,
+    kv_norm_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run capturable dynamic-W8A8 MLA preprocessing and cache writes."""
+    hidden_int8, hidden_scale = dynamic_quant(hidden)
+    qkv_a = quant_matmul(
+        hidden_int8,
+        qkv_weight,
+        False,
+        qkv_weight_scale,
+        None,
+        hidden_scale,
+        None,
+        torch.bfloat16,
+    )
+    kv_dim = kv_lora_rank + qk_rope_head_dim
+    kv, q_a = qkv_a.split([kv_dim, q_lora_rank], dim=-1)
+    q_c = rms_norm(q_a, q_norm_weight, q_norm_epsilon)
+    q_c_int8, q_c_scale = dynamic_quant(q_c)
+    q = quant_matmul(
+        q_c_int8,
+        q_b_weight,
+        False,
+        q_b_weight_scale,
+        None,
+        q_c_scale,
+        None,
+        torch.bfloat16,
+    ).view(
+        hidden.shape[0],
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+    )
+    q_nope, q_rope = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+    q_latent = torch.bmm(q_nope.transpose(0, 1), w_uk).transpose(0, 1)
+    num_tokens = hidden.shape[0]
+    q_pe = torch_npu.npu_interleave_rope(
+        q_rope.view(num_tokens, num_heads, 1, qk_rope_head_dim),
+        rope_cos,
+        rope_sin,
+    ).view(num_tokens, num_heads, qk_rope_head_dim)
+    _write_mla_kv_cache(
+        kv,
+        kv_norm_weight,
+        rope_cos,
+        rope_sin,
+        slot_mapping,
+        kv_cache,
+        rope_cache,
+        kv_lora_rank,
+        qk_rope_head_dim,
+        kv_norm_epsilon,
+    )
+    return q_c, q_latent, q_pe
+
+
+@deepseek_mla_preprocess_decode_dynamic.register_fake
+def _deepseek_mla_preprocess_decode_dynamic_fake(
+    hidden: torch.Tensor,
+    qkv_weight: torch.Tensor,
+    qkv_weight_scale: torch.Tensor,
+    q_norm_weight: torch.Tensor,
+    q_b_weight: torch.Tensor,
+    q_b_weight_scale: torch.Tensor,
+    w_uk: torch.Tensor,
+    kv_norm_weight: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    rope_cache: torch.Tensor,
+    kv_lora_rank: int,
+    q_lora_rank: int,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    q_norm_epsilon: float,
+    kv_norm_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del (
+        qkv_weight,
+        qkv_weight_scale,
+        q_norm_weight,
+        q_b_weight,
+        q_b_weight_scale,
+        kv_norm_weight,
+        rope_cos,
+        rope_sin,
+        slot_mapping,
+        kv_cache,
+        rope_cache,
+        kv_lora_rank,
+        qk_nope_head_dim,
+        q_norm_epsilon,
+        kv_norm_epsilon,
+    )
+    num_tokens = hidden.shape[0]
+    return (
+        hidden.new_empty((num_tokens, q_lora_rank)),
+        hidden.new_empty((num_tokens, num_heads, w_uk.shape[-1])),
+        hidden.new_empty((num_tokens, num_heads, qk_rope_head_dim)),
+    )
+
+
 @deepseek_mla_preprocess_decode.register_fake
 def _deepseek_mla_preprocess_decode_fake(
     hidden: torch.Tensor,
@@ -443,6 +570,7 @@ def _deepseek_mla_preprocess_decode_fake(
 __all__ = [
     "MLA_PREPROCESS_V2_MAX_TOKENS",
     "deepseek_mla_preprocess_decode",
+    "deepseek_mla_preprocess_decode_dynamic",
     "deepseek_mla_preprocess_decode_v2",
     "has_mla_preprocess_v2",
     "prepare_mla_preprocess_v2_q_b",

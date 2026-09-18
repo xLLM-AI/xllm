@@ -16,7 +16,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -345,6 +346,56 @@ def test_compatible_attention_loader_allocates_only_selected_quantization(dynami
         assert projection.quant_bias.numel() == projection.out_features
         assert projection.input_scale.numel() == 1
         assert projection.input_offset.numel() == 1
+
+
+def test_dynamic_attention_prepares_one_fused_qkv_projection() -> None:
+    attention = glm5_2.Glm52MLAAttention.__new__(glm5_2.Glm52MLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention._use_fused_mla_decode = True
+    attention._use_mlapo_v2 = False
+    attention._fused_mla_ready = False
+    attention._dynamic_mla_ready = False
+
+    q_weight = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int8)
+    kv_weight = torch.tensor([[7, 8, 9], [10, 11, 12]], dtype=torch.int8)
+    q_scale = torch.tensor([[0.1], [0.2]])
+    kv_scale = torch.tensor([[0.3], [0.4]])
+
+    def dynamic_projection(weight: torch.Tensor, scale: torch.Tensor) -> SimpleNamespace:
+        return SimpleNamespace(
+            _dynamic_activation=True,
+            weight=SimpleNamespace(data=weight),
+            weight_scale=scale,
+            process_weights_after_loading=MagicMock(),
+        )
+
+    attention.q_a_proj = dynamic_projection(q_weight, q_scale)
+    attention.kv_a_proj_with_mqa = dynamic_projection(kv_weight, kv_scale)
+    attention.q_b_proj = dynamic_projection(torch.empty(2, 2, dtype=torch.int8), torch.ones(2, 1))
+    attention.o_proj = SimpleNamespace(process_weights_after_loading=MagicMock())
+    attention.kv_b_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.ones(3, 1)))
+    attention.num_heads_local = 1
+    attention.qk_nope_head_dim = 1
+    attention.v_head_dim = 2
+    attention.kv_lora_rank = 1
+    attention.W_UK = torch.empty(1, 1, 1)
+    attention.W_UV = torch.empty(1, 1, 2)
+    attention.indexer = None
+
+    with patch.object(
+        glm5_2.kernels,
+        "prepare_quant_weight",
+        side_effect=lambda weight: weight.transpose(0, 1).contiguous(),
+        create=True,
+    ):
+        attention.process_weights_after_loading()
+
+    expected_weight = torch.cat((kv_weight, q_weight), dim=0).transpose(0, 1).contiguous()
+    expected_scale = torch.cat((kv_scale.flatten(), q_scale.flatten()))
+    torch.testing.assert_close(attention._dynamic_qkv_weight, expected_weight)
+    torch.testing.assert_close(attention._dynamic_qkv_weight_scale, expected_scale)
+    assert attention._dynamic_mla_ready is True
+    assert attention._fused_mla_ready is True
 
 
 def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch) -> None:
