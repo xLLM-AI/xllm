@@ -243,7 +243,8 @@ inline std::string get_model_repository_name(
 
 inline std::string get_model_backend(const std::filesystem::path& model_path) {
   JsonReader reader;
-  std::filesystem::path model_index_json_path = model_path / "model_index.json";
+  const std::filesystem::path model_index_json_path =
+      model_path / "model_index.json";
 
   if (std::filesystem::exists(model_index_json_path)) {
     reader.parse(model_index_json_path);
@@ -259,6 +260,21 @@ inline std::string get_model_backend(const std::filesystem::path& model_path) {
                << model_path << ", it should contain _diffusers_version key.";
   }
 
+  // Resolve from the top-level config.json first when it is present. This
+  // short-circuits DiT sub-directory discovery for LLM/VLM/REC models whose
+  // sibling folders (e.g. MTP draft weights) contain their own config.json
+  // and safetensors, which would otherwise be mis-detected as DiT components.
+  const std::filesystem::path config_json_path = model_path / "config.json";
+  if (std::filesystem::exists(config_json_path)) {
+    const std::string resolved_backend =
+        ModelRegistry::get_model_backend(get_model_type(model_path));
+    if (!resolved_backend.empty()) {
+      return resolved_backend;
+    }
+    // model_type is not registered; fall through to component discovery below
+    // to support legacy layouts that only expose component-level metadata.
+  }
+
   // Component-subdirectory layout (e.g. Cola-DLM with cola_dit/cola_vae).
   if (auto components = discover_dit_components(model_path)) {
     if (!components->empty()) {
@@ -266,6 +282,8 @@ inline std::string get_model_backend(const std::filesystem::path& model_path) {
     }
   }
 
+  // No top-level config.json and no DiT components; get_model_type will
+  // LOG(FATAL) if it cannot resolve a model_type from the path.
   return ModelRegistry::get_model_backend(get_model_type(model_path));
 }
 
