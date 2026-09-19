@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -226,6 +226,10 @@ def test_empty_query_rank_still_populates_index_cache(quantized: bool) -> None:
         segment_kv_seq_lens_tensor=empty.to(torch.int32),
     )
     indexer = _indexer()
+    indexer._q_stream = MagicMock()
+    indexer._weights_stream = MagicMock()
+    indexer._q_stream.wait_for_current.side_effect = AssertionError("empty Q must not fork")
+    indexer._weights_stream.wait_for_current.side_effect = AssertionError("empty weights must not fork")
     backend, metadata, cache = _backend_and_metadata(quantized)
     metadata.slot_mapping = torch.tensor([0])
     metadata.kv_seq_lens = torch.tensor([1])

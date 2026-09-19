@@ -49,6 +49,7 @@ class KernelConfig final {
          "enable_aclnn_matmul",
          "enable_aclnn_swiglu",
          "enable_mega_moe",
+         "enable_dsa_multi_stream",
          "enable_dspark_native_sas",
          "enable_flashcomm1",
          "flashcomm1_min_prefill_tokens",
@@ -56,6 +57,8 @@ class KernelConfig final {
          "mmrs_comm_mode"}};
     return kOptionCategory;
   }
+
+  PROPERTY(bool, enable_dsa_multi_stream) = false;
 
 #if defined(USE_NPU)
   PROPERTY(bool, enable_customize_mla_kernel) = false;

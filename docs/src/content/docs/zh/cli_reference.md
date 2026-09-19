@@ -237,6 +237,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_split_rmsnorm_rope` | `bool` | `false` | 是否启用 fused split rmsnorm rope ops。 |
 | `enable_aclnn_matmul` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN matmul 后端。 |
 | `enable_aclnn_swiglu` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN SwiGLU 后端。 |
+| `enable_dsa_multi_stream` | `bool` | `false` | 为 Python GLM indexer 启用 SGLang NPU 风格的局部并行：weights 投影在辅助流执行；indexer 使用非 interleaved RoPE 时，额外并行 Q 投影/RoPE 与 K 准备。主 attention 准备完成后才执行 indexer。要求模型后端和设备流能力均受支持。 |
 | `enable_dspark_native_sas` | `bool` | `false` | 启用 NPU DSpark 原生 SparseAttnSharedkv 语义。旧版算子若不接受非空 `ori_sparse_indices`，可能在 tiling 阶段终止进程；请保持关闭以使用 q_len=1 兼容模式。 |
 
 ## DiTConfig

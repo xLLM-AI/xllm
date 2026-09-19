@@ -21,6 +21,11 @@ limitations under the License.
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/eplb_config.h"
 
+DEFINE_bool(enable_dsa_multi_stream,
+            false,
+            "Overlap projections within the Python GLM DSA indexer using "
+            "SGLang NPU-style stream scheduling.");
+
 #if defined(USE_NPU)
 DEFINE_bool(enable_customize_mla_kernel, false, "enable customize mla kernel");
 
@@ -106,6 +111,7 @@ int32_t resolve_fused_mc2_mode(int32_t mode) {
 }  // namespace
 
 void KernelConfig::from_flags() {
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dsa_multi_stream);
 #if defined(USE_NPU)
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_customize_mla_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(npu_kernel_backend);
@@ -125,6 +131,7 @@ void KernelConfig::from_flags() {
 }
 
 void KernelConfig::from_json(const JsonReader& json) {
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dsa_multi_stream);
 #if defined(USE_NPU)
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_customize_mla_kernel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(npu_kernel_backend);
@@ -148,8 +155,10 @@ void KernelConfig::from_json(const JsonReader& json) {
 
 void KernelConfig::append_config_json(
     nlohmann::ordered_json& config_json) const {
-#if defined(USE_NPU)
   const KernelConfig default_config;
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_dsa_multi_stream);
+#if defined(USE_NPU)
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_customize_mla_kernel);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -56,6 +56,26 @@ inline constexpr std::string_view kMalformedConfig = R"json({
   "block_size":
 })json";
 
+TEST(KernelConfigTest, EnablesDsaMultiStreamFromJson) {
+  JsonReader json_config =
+      config::parse_json_string(R"json({"enable_dsa_multi_stream":true})json");
+  KernelConfig kernel_config;
+
+  kernel_config.from_json(json_config);
+
+  EXPECT_TRUE(kernel_config.enable_dsa_multi_stream());
+}
+TEST(KernelConfigTest, SerializesDsaMultiStreamOnlyWhenEnabled) {
+  KernelConfig kernel_config;
+  nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
+  kernel_config.append_config_json(serialized);
+  EXPECT_FALSE(serialized.contains("enable_dsa_multi_stream"));
+
+  kernel_config.enable_dsa_multi_stream(true);
+  kernel_config.append_config_json(serialized);
+  EXPECT_EQ(serialized.at("enable_dsa_multi_stream"), true);
+}
+
 #if !defined(USE_NPU)
 TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
   JsonReader json_config =

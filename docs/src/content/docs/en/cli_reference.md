@@ -237,6 +237,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_split_rmsnorm_rope` | `bool` | `false` | Whether to enable fused split rmsnorm rope ops. |
 | `enable_aclnn_matmul` | `bool` | `false` | Whether to enable the ACLNN matmul backend for supported NPU ATB layers. |
 | `enable_aclnn_swiglu` | `bool` | `false` | Whether to enable the ACLNN SwiGLU backend for supported NPU ATB layers. |
+| `enable_dsa_multi_stream` | `bool` | `false` | Use SGLang NPU-style local overlap in the Python GLM indexer: weights projection runs on a side stream; non-interleaved indexer RoPE additionally overlaps Q projection/RoPE with K preparation. Main attention preparation finishes before the indexer. Requires a supported model backend and stream-capable device. |
 | `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig

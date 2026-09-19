@@ -399,6 +399,8 @@ DECLARE_bool(dit_laser_attention_enabled);
 DECLARE_bool(use_audio_in_video);
 
 // --- kernel config ---
+DECLARE_bool(enable_dsa_multi_stream);
+
 #if defined(USE_NPU)
 DECLARE_bool(enable_customize_mla_kernel);
 
