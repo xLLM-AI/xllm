@@ -39,6 +39,13 @@ struct PythonObjectHolder final {
 
 }  // namespace
 
+PythonAttentionMetadata::PythonAttentionMetadata(py::object value)
+    : object_holder_(std::make_shared<PythonObjectHolder>(std::move(value))) {}
+
+py::object PythonAttentionMetadata::value() const {
+  return std::static_pointer_cast<PythonObjectHolder>(object_holder_)->value;
+}
+
 void register_attention_metadata_views(py::module_& module) {
   py::class_<PyExpandedDecodeMetadataView>(module, "ExpandedDecodeMetadataView")
       .def_property_readonly("enabled", &PyExpandedDecodeMetadataView::enabled)
@@ -63,6 +70,9 @@ void register_attention_metadata_views(py::module_& module) {
           &PyExpandedDecodeMetadataView::kv_seq_lens_host_values);
 
   py::class_<PyAttentionMetadataView>(module, "AttentionMetadataView")
+      .def_property("prepared_attention_state",
+                    &PyAttentionMetadataView::prepared_attention_state,
+                    &PyAttentionMetadataView::set_prepared_attention_state)
       .def_property_readonly("slot_mapping",
                              &PyAttentionMetadataView::slot_mapping)
       .def_property_readonly("local_slot_mapping",
@@ -82,6 +92,9 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly("qo_indptr", &PyAttentionMetadataView::qo_indptr)
       .def_property_readonly("q_cu_seq_lens",
                              &PyAttentionMetadataView::q_cu_seq_lens)
+      .def_property_readonly(
+          "q_cu_seq_lens_host_values",
+          &PyAttentionMetadataView::q_cu_seq_lens_host_values)
       .def_property_readonly("kv_cu_seq_lens",
                              &PyAttentionMetadataView::kv_cu_seq_lens)
       .def_property_readonly("kv_seq_lens_host",
@@ -265,6 +278,11 @@ py::object PyAttentionMetadataView::q_cu_seq_lens() const {
   return optional_tensor(metadata_->q_cu_seq_lens);
 }
 
+const std::vector<int64_t>& PyAttentionMetadataView::q_cu_seq_lens_host_values()
+    const {
+  return metadata_->q_cu_seq_lens_host_vec;
+}
+
 py::object PyAttentionMetadataView::kv_cu_seq_lens() const {
   return optional_tensor(metadata_->kv_cu_seq_lens);
 }
@@ -335,6 +353,24 @@ int64_t PyAttentionMetadataView::max_query_len() const {
 
 int64_t PyAttentionMetadataView::max_seq_len() const {
   return metadata_->max_seq_len;
+}
+
+py::object PyAttentionMetadataView::prepared_attention_state() const {
+  if (!prepared_attention_holder_) {
+    return py::none();
+  }
+  return std::static_pointer_cast<PythonObjectHolder>(
+             prepared_attention_holder_)
+      ->value;
+}
+
+void PyAttentionMetadataView::set_prepared_attention_state(py::object value) {
+  if (value.is_none()) {
+    prepared_attention_holder_.reset();
+    return;
+  }
+  prepared_attention_holder_ =
+      std::make_shared<PythonObjectHolder>(std::move(value));
 }
 
 py::object PyAttentionMetadataView::dsa_metadata() const {

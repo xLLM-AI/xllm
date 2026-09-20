@@ -94,6 +94,7 @@ def normalize_layer_caches(caches: Sequence[LayerCacheInput]) -> list[LayerCache
 
 
 class AttentionMetadata(Protocol):
+    prepared_attention_state: object | None
     slot_mapping: torch.Tensor
     paged_kv_indptr: torch.Tensor
     paged_kv_indices: torch.Tensor
@@ -192,6 +193,14 @@ class CsaIndexContext:
 
 
 class AttentionBackend(ABC):
+    @property
+    def supports_prepared_metadata(self) -> bool:
+        return False
+
+    def prepare_metadata(self, metadata: AttentionMetadata) -> object:
+        """Build private Host metadata without changing an active forward."""
+        raise NotImplementedError("attention backend does not support private prepared metadata")
+
     def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
         """Reset request-owned state before a model attaches current inputs."""
         del metadata

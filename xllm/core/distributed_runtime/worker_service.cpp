@@ -252,7 +252,8 @@ void WorkerService::step(
   speculative_token_stats.clear();
   const bool use_default_stream =
       !options_.enable_schedule_overlap() && options_.backend() == "llm";
-  if (options_.enable_schedule_overlap()) {
+  const bool task_pipeline = options_.enable_task_pipeline();
+  if (options_.enable_schedule_overlap() && !task_pipeline) {
     stabilize_schedule_overlap_host_views(fwd_input);
   }
   // execute model
@@ -344,16 +345,18 @@ void WorkerService::step(
                         /*non_blocking=*/true);
           }
         };
-        if (use_default_stream) {
+        if (task_pipeline) {
+          // The pipeline Future completes after Consume produces CPU results.
           copy_output_to_host();
         } else {
-          c10::StreamGuard stream_guard = stream_->set_stream_guard();
-          copy_output_to_host();
-        }
-        if (use_default_stream) {
-          device_.synchronize_default_stream();
-        } else {
-          stream_->synchronize();
+          if (use_default_stream) {
+            copy_output_to_host();
+            device_.synchronize_default_stream();
+          } else {
+            c10::StreamGuard stream_guard = stream_->set_stream_guard();
+            copy_output_to_host();
+            stream_->synchronize();
+          }
         }
         speculative_token_stats = record_speculative_metrics_from_output(
             next_tokens,
@@ -362,14 +365,22 @@ void WorkerService::step(
       }
     }
   } else {
+    if (task_pipeline) {
+      // Never publish placeholders before the Worker accepts and owns input.
+      const auto ack = std::move(future).get();
+      CHECK(!ack.has_value()) << "Two-Slot Step must return PrepareAck.";
+    }
     auto int_options = torch::TensorOptions().device(torch::kCPU);
     if (worker_->is_driver()) {
       // construct fake output tensor
       int32_t num_decode_seqs =
           get_num_decode_seqs_for_schedule_overlap(fwd_input);
+      // Negative values identify rows in the previous sampling output.
       next_tokens = torch::arange(
           -1, -1 * (num_decode_seqs + 1), -1, int_options.dtype(torch::kInt32));
-      std::move(future).deferValue([](auto&&) {});
+      if (!task_pipeline) {
+        std::move(future).deferValue([](auto&&) {});
+      }
     }
     expert_load_data = torch::zeros({1, 1}, int_options.dtype(torch::kInt64));
   }
@@ -390,7 +401,9 @@ void WorkerService::create_polling_shm_thread(
           // the SHM polling thread. Keep scheduler overlap, but defer device
           // materialization to WorkerImpl's ordered prepare stream.
           const InputDeviceMaterializationPolicy materialization_policy =
-              options_.enable_schedule_overlap() && options_.enable_graph()
+              options_.enable_task_pipeline() ||
+                      (options_.enable_schedule_overlap() &&
+                       options_.enable_graph())
                   ? InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE
                   : InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
           input_shm_manager->input_read(
@@ -904,6 +917,7 @@ void WorkerService::GetLastStepResult(
         const bool use_default_stream =
             !options_.enable_schedule_overlap() && options_.backend() == "llm";
 
+        const bool task_pipeline = options_.enable_task_pipeline();
         auto future = worker_->get_last_step_result_async();
         auto forward_outputs = std::move(future).get();
         if (forward_outputs) {
@@ -924,7 +938,7 @@ void WorkerService::GetLastStepResult(
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           auto copy_output_to_host = [&]() {
-            if (options_.enable_schedule_overlap()) {
+            if (options_.enable_schedule_overlap() && !task_pipeline) {
               CHECK(stream_->wait_event(forward_output.ready_event))
                   << "failed to wait forward output ready event";
             }
@@ -982,24 +996,29 @@ void WorkerService::GetLastStepResult(
             }
           };
 
-          if (use_default_stream) {
+          if (task_pipeline) {
+            // The pipeline Future completes after Consume produces CPU results.
             copy_output_to_host();
           } else {
-            c10::StreamGuard stream_guard = stream_->set_stream_guard();
-            if (forward_outputs.value().ready_event != nullptr) {
-              CHECK(stream_->wait_event(forward_outputs.value().ready_event))
-                  << "wait forward output ready event failed.";
+            if (use_default_stream) {
+              copy_output_to_host();
+            } else {
+              c10::StreamGuard stream_guard = stream_->set_stream_guard();
+              if (forward_outputs.value().ready_event != nullptr) {
+                CHECK(stream_->wait_event(forward_outputs.value().ready_event))
+                    << "wait forward output ready event failed.";
+              }
+              copy_output_to_host();
             }
-            copy_output_to_host();
-          }
-          if (use_default_stream) {
-            device_.synchronize_default_stream();
-          } else {
-            stream_->synchronize();
+            if (use_default_stream) {
+              device_.synchronize_default_stream();
+            } else {
+              stream_->synchronize();
 #if defined(USE_NPU)
-            DeviceMonitor::get_instance().update_active_activation_memory(
-                device_.index());
+              DeviceMonitor::get_instance().update_active_activation_memory(
+                  device_.index());
 #endif
+            }
           }
           speculative_token_stats = record_speculative_metrics_from_output(
               next_tokens,

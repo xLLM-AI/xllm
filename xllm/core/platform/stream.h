@@ -77,6 +77,8 @@ class Stream {
   const PlatformStream* get_stream() const { return &stream_; }
   void wait_stream(const Stream& other_stream);
   StreamEventPtr record_event() const;
+  // Records an existing event. Its prior use must finish before re-recording.
+  void record_event(StreamEvent& event) const;
   StreamEventPtr record_event_or_sync() const;
   bool wait_event(const StreamEventPtr& event) const;
 

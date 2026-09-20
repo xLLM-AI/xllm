@@ -18,6 +18,13 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
+DEFINE_bool(enable_task_pipeline,
+            false,
+            "Enable the task execution pipeline. Uses two slots with "
+            "scheduler overlap and one slot without it. "
+            "Python eager models with prepared attention metadata; "
+            "DP/CP/layerwise split are unsupported.");
+
 DEFINE_bool(
     enable_graph,
     false,
@@ -104,6 +111,7 @@ DEFINE_bool(
 namespace xllm {
 
 void ExecutionConfig::from_flags() {
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_task_pipeline);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_double_buffer);
@@ -122,6 +130,7 @@ void ExecutionConfig::from_flags() {
 }
 
 void ExecutionConfig::from_json(const JsonReader& json) {
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_task_pipeline);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph);
   XLLM_CONFIG_ASSIGN_FROM_JSON(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_double_buffer);
@@ -142,6 +151,8 @@ void ExecutionConfig::from_json(const JsonReader& json) {
 void ExecutionConfig::append_config_json(
     nlohmann::ordered_json& config_json) const {
   const ExecutionConfig default_config;
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_task_pipeline);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_graph);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

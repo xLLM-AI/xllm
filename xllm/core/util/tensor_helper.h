@@ -20,15 +20,33 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <optional>
 #include <source_location>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace xllm {
+
+inline bool is_cpu_int_tensor(const torch::Tensor& tensor, int32_t dimensions) {
+  return tensor.defined() && tensor.device().is_cpu() &&
+         tensor.scalar_type() == torch::kInt32 && tensor.dim() == dimensions &&
+         tensor.is_contiguous();
+}
+
+// Borrows flattened CPU int32 storage; the caller validates dtype and layout.
+// Undefined or empty tensors produce an empty view.
+inline std::span<const int32_t> int_span(const torch::Tensor& tensor) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return {};
+  }
+  return {tensor.const_data_ptr<int32_t>(),
+          static_cast<uint64_t>(tensor.numel())};
+}
 
 template <typename T>
 inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T> >& vec,

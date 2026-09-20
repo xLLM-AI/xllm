@@ -50,6 +50,7 @@ limitations under the License.
 #include "util/tensor_helper.h"
 
 namespace xllm {
+class PythonAttentionMetadata;
 namespace npu {
 struct AclGraphTaskUpdateContext;
 }  // namespace npu
@@ -1268,6 +1269,10 @@ struct ModelInputParams {
   // Optional attention metadata, built by executor
   // Using shared_ptr with forward declaration to avoid circular dependency
   std::shared_ptr<layer::AttentionMetadata> attn_metadata;
+
+  // Slot-owned Python attention view, assembled on Prepare. Copying to a new
+  // device deliberately drops it; all readers must retire before Slot reuse.
+  std::shared_ptr<PythonAttentionMetadata> python_attention_metadata;
 
   // Flag for graph capture/replay mode.
   bool enable_graph = false;

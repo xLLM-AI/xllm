@@ -134,6 +134,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       options_.max_seqs_per_batch(),
       options_.num_decoding_tokens(),
       ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
+  supports_prepared_metadata_ =
+      py_executor_.attr("supports_prepared_metadata").cast<bool>();
 }
 
 PyExecutorImpl::~PyExecutorImpl() {
@@ -144,38 +146,13 @@ PyExecutorImpl::~PyExecutorImpl() {
 }
 
 ForwardInput PyExecutorImpl::prepare_inputs(Batch& batch) {
-  return batch.prepare_forward_input(
-      options_.num_decoding_tokens(), 0, args_, options_.cp_size());
+  return batch.prepare_forward_input(options_.num_decoding_tokens(),
+                                     /*min_decoding_batch_size=*/0,
+                                     args_,
+                                     options_.cp_size());
 }
 
-ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
-                                const torch::Tensor& positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelInputParams& params) {
-  torch::NoGradGuard no_grad;
-  COUNTER_INC(num_model_execution_total_eager);
-  active_py_causal_lm = py_causal_lm_;
-
-  // Build or reuse attention metadata.
-  std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      params.attn_metadata;
-  if (!attn_metadata) {
-    attn_metadata = std::make_shared<layer::AttentionMetadata>(
-        layer::AttentionMetadataBuilder::build(
-            params, enable_mla_, std::nullopt, device_));
-  }
-  if (enable_mla_ && py_causal_lm_->cp_size() > 1 &&
-      py_causal_lm_->kv_split_size() > 1 &&
-      (attn_metadata->is_prefill || attn_metadata->is_chunked_prefill)) {
-    const KVShardLayout layout(options_.block_size(),
-                               py_causal_lm_->kv_split_size(),
-                               py_causal_lm_->kv_split_rank());
-    attn_metadata->kv_shard_batch_metadata =
-        layer::build_kv_shard_batch_metadata(*attn_metadata, layout);
-  }
-
-  py::gil_scoped_acquire gil;
-
+void PyExecutorImpl::bind_kv_caches(std::vector<KVCache>& kv_caches) {
   // Lazy bind KV caches on first call.
   int64_t num_layers = static_cast<int64_t>(kv_caches.size());
   if (!kv_bound_) {
@@ -201,13 +178,99 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     py_executor_.attr("bind_kv_caches")(kv_caches_py);
     kv_bound_ = true;
     kv_layer_count_ = num_layers;
+    if (options_.enable_task_pipeline()) {
+      prepared_kv_bindings_.reserve(4 * kv_caches.size());
+      for (const auto& kv : kv_caches) {
+        prepared_kv_bindings_.emplace_back(kv.get_k_cache());
+        prepared_kv_bindings_.emplace_back(kv.get_v_cache());
+        prepared_kv_bindings_.emplace_back(kv.get_index_cache());
+        prepared_kv_bindings_.emplace_back(
+            kv.get_indexer_cache_scale().value_or(torch::Tensor()));
+      }
+    }
   } else {
     CHECK_EQ(num_layers, kv_layer_count_)
         << "KV cache layer count changed after initial bind";
+    if (options_.enable_task_pipeline()) {
+      size_t index = 0;
+      for (const auto& kv : kv_caches) {
+        for (const auto& current :
+             {kv.get_k_cache(),
+              kv.get_v_cache(),
+              kv.get_index_cache(),
+              kv.get_indexer_cache_scale().value_or(torch::Tensor())}) {
+          const auto& bound = prepared_kv_bindings_[index++];
+          CHECK_EQ(current.defined(), bound.defined())
+              << "Prepared executor KV binding presence changed.";
+          if (!current.defined()) {
+            continue;
+          }
+          CHECK(current.data_ptr() == bound.data_ptr() &&
+                current.sizes() == bound.sizes() &&
+                current.strides() == bound.strides() &&
+                current.scalar_type() == bound.scalar_type() &&
+                current.device() == bound.device())
+              << "Prepared executor KV binding changed after initialization.";
+        }
+      }
+    }
+  }
+}
+
+void PyExecutorImpl::prepare_attention_metadata(std::vector<KVCache>& kv_caches,
+                                                ModelInputParams& params) {
+  CHECK(supports_prepared_metadata_);
+  CHECK(params.attn_metadata != nullptr);
+  py::gil_scoped_acquire gil;
+  bind_kv_caches(kv_caches);
+  py::object metadata =
+      py::cast(PyAttentionMetadataView(params.attn_metadata, params));
+  py_executor_.attr("prepare_metadata")(metadata);
+  params.python_attention_metadata =
+      std::make_shared<PythonAttentionMetadata>(std::move(metadata));
+}
+
+ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
+                                const torch::Tensor& positions,
+                                std::vector<KVCache>& kv_caches,
+                                const ModelInputParams& params) {
+  torch::NoGradGuard no_grad;
+  COUNTER_INC(num_model_execution_total_eager);
+  active_py_causal_lm = py_causal_lm_;
+
+  // Build or reuse attention metadata.
+  std::shared_ptr<layer::AttentionMetadata> attn_metadata =
+      params.attn_metadata;
+  if (params.python_attention_metadata) {
+    CHECK(supports_prepared_metadata_);
+    CHECK(attn_metadata != nullptr);
+  }
+  if (!attn_metadata) {
+    attn_metadata = std::make_shared<layer::AttentionMetadata>(
+        layer::AttentionMetadataBuilder::build(
+            params, enable_mla_, std::nullopt, device_));
+  }
+  if (enable_mla_ && py_causal_lm_->cp_size() > 1 &&
+      py_causal_lm_->kv_split_size() > 1 &&
+      (attn_metadata->is_prefill || attn_metadata->is_chunked_prefill)) {
+    const KVShardLayout layout(options_.block_size(),
+                               py_causal_lm_->kv_split_size(),
+                               py_causal_lm_->kv_split_rank());
+    attn_metadata->kv_shard_batch_metadata =
+        layer::build_kv_shard_batch_metadata(*attn_metadata, layout);
+  }
+
+  py::gil_scoped_acquire gil;
+
+  // Prepared input already bound and checked KV caches during Prepare.
+  if (!params.python_attention_metadata) {
+    bind_kv_caches(kv_caches);
   }
 
   py::object py_metadata =
-      py::cast(PyAttentionMetadataView(attn_metadata, params));
+      params.python_attention_metadata
+          ? params.python_attention_metadata->value()
+          : py::cast(PyAttentionMetadataView(attn_metadata, params));
   py::object input_embedding =
       optional_tensor(params.embedding.input_embedding);
   py::object mtp_topk_indices = py::none();

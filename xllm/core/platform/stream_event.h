@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <c10/core/DeviceType.h>
+
 #include <memory>
 
 #if defined(USE_NPU)
@@ -29,6 +31,9 @@ namespace xllm {
 
 class StreamEvent final {
  public:
+  // Creates an unrecorded event for repeated use on the selected backend.
+  explicit StreamEvent(c10::DeviceType device_type);
+
 #if defined(USE_NPU)
   explicit StreamEvent(aclrtEvent event) : npu_event_(event) {}
 
@@ -40,8 +45,6 @@ class StreamEvent final {
 
   aclrtEvent npu_event() const { return npu_event_; }
 #else
-  explicit StreamEvent(c10::DeviceType device_type) : c10_event_(device_type) {}
-
   c10::Event& c10_event() { return c10_event_; }
 #endif
 

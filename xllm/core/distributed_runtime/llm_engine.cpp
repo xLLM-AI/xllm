@@ -1219,7 +1219,10 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // because the experts on each worker are different,
   // and the tokens load of all experts needs to be returned to engine.
   // so we can not skip any worker.
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  // Each pipeline worker retains its completed Slot until the result is taken,
+  // including non-drivers. Retire every worker's Slot before the next submit.
+  if (::xllm::EPLBConfig::get_instance().enable_eplb() ||
+      options_.enable_task_pipeline()) {
     stride = 1;
   }
 
@@ -1230,6 +1233,10 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   }
   // wait for the all future to complete
   auto last_step_results = folly::collectAll(futures).get();
+  for (const auto& result : last_step_results) {
+    CHECK(result.hasValue() && result.value().has_value())
+        << "Failed to get last step results, result has no value";
+  }
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     process_eplb_data(last_step_results, completed_activation_token);
@@ -1237,12 +1244,8 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
 
   for (auto worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += dp_local_size_) {
-    auto result = last_step_results[worker_rank / stride].value();
-    if (result.has_value()) {
-      raw_forward_outputs.emplace_back(std::move(result.value()));
-    } else {
-      LOG(FATAL) << "Failed to get last step results, result has no value";
-    }
+    auto& result = last_step_results[worker_rank / stride].value();
+    raw_forward_outputs.emplace_back(std::move(result.value()));
   }
 
   for (auto i = 0; i < last_batch.size(); i++) {

@@ -21,6 +21,8 @@ limitations under the License.
 #include <memory>
 #include <ostream>
 
+#include "core/platform/platform.h"
+
 namespace xllm {
 
 namespace {
@@ -54,6 +56,18 @@ PlatformStream get_stream_from_pool(const c10::Device& device) {
 }
 
 }  // namespace
+
+StreamEvent::StreamEvent(c10::DeviceType device_type)
+#if !defined(USE_NPU)
+    : c10_event_(device_type)
+#endif
+{
+#if defined(USE_NPU)
+  CHECK_EQ(device_type, Platform::type_torch());
+  CHECK_EQ(aclrtCreateEventExWithFlag(&npu_event_, ACL_EVENT_SYNC), ACL_SUCCESS)
+      << "Failed to create reusable stream event.";
+#endif
+}
 
 bool StreamEvent::synchronize() {
 #if defined(USE_NPU)
@@ -149,6 +163,15 @@ StreamEventPtr Stream::record_event() const {
     LOG(ERROR) << "Failed to record stream event: unknown exception";
   }
   return nullptr;
+#endif
+}
+
+void Stream::record_event(StreamEvent& event) const {
+#if defined(USE_NPU)
+  CHECK_EQ(aclrtRecordEvent(event.npu_event(), stream_.stream()), ACL_SUCCESS)
+      << "Failed to record NPU stream event.";
+#else
+  event.c10_event().record(to_c10_stream(stream_));
 #endif
 }
 

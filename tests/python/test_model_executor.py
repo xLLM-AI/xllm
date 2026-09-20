@@ -1342,3 +1342,103 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
     )
     assert result is graph_runner.execute.return_value
     executor.eager_runner.execute.assert_not_called()
+
+
+class _PreparedStubAttentionBackend(StubAttentionBackend):
+    @property
+    def supports_prepared_metadata(self) -> bool:
+        return True
+
+    def prepare_metadata(self, metadata: AttentionMetadata) -> object:
+        return SimpleNamespace(source=metadata.q_cu_seq_lens_host_values)
+
+
+def test_executor_prepares_private_metadata_after_cache_binding() -> None:
+    backend = _PreparedStubAttentionBackend()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), {"model_type": "qwen3", "kv_split_size": 0}, max_seqs_per_batch=2)
+    assert executor.supports_prepared_metadata
+    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
+    with pytest.raises(RuntimeError, match="initialized"):
+        executor.prepare_metadata(metadata)
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    executor.prepare_metadata(metadata)
+    assert metadata.prepared_attention_state.source == [1, 2]
+    assert not backend._prepared
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [{"dp_size": 2}, {"cp_size": 2}, {"kv_split_size": 2}, {"model_type": "llama"}],
+)
+def test_executor_rejects_unsupported_prepared_metadata(unsupported: dict[str, object]) -> None:
+    backend = _PreparedStubAttentionBackend()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), {"model_type": "qwen3", **unsupported}, max_seqs_per_batch=2)
+    assert not executor.supports_prepared_metadata
+    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
+    with pytest.raises(RuntimeError, match="supported Qwen3 or GLM"):
+        executor.prepare_metadata(metadata)
+    assert not hasattr(metadata, "prepared_attention_state")
+    assert not backend._prepared
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])
+@pytest.mark.parametrize(
+    "tp,rank,ep,moe_tp",
+    [(1, 0, 1, 1), (2, 0, 1, 2), (2, 1, 1, 2), (2, 1, 2, 1), (16, 15, 16, 1), (16, 15, 1, 16)],
+)
+def test_executor_accepts_prepared_tensor_and_expert_parallel(
+    model_type: str, tp: int, rank: int, ep: int, moe_tp: int
+) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {
+        "model_type": model_type,
+        "tp_size": tp,
+        "tp_rank": rank,
+        "ep_size": ep,
+        "moe_tp_size": moe_tp,
+        "world_size": tp,
+        "kv_split_size": 0,
+        "dp_size": 1,
+        "cp_size": 1,
+    }
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert executor.supports_prepared_metadata
+    cache = torch.empty(2, 4, 1, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
+    executor.prepare_metadata(metadata)
+    assert metadata.prepared_attention_state.source == [1, 2]
+
+
+@pytest.mark.parametrize("split", ["dp_size", "cp_size", "kv_split_size", "layerwise_split_size"])
+def test_executor_rejects_prepared_glm_split_topologies(split: str) -> None:
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        config = {"model_type": "glm_moe_dsa", "kv_split_size": 1, split: 2}
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert not executor.supports_prepared_metadata
+
+
+def test_prepared_executor_rejects_mtp_state_before_model_execution() -> None:
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(_FakeModel(), {"model_type": "glm_moe_dsa"}, max_seqs_per_batch=2)
+    cache = torch.empty(2, 4, 1, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = SimpleNamespace(
+        q_cu_seq_lens_host_values=[1, 2],
+        is_prefill=False,
+        is_chunked_prefill=False,
+    )
+    executor.prepare_metadata(metadata)
+    executor.eager_runner = MagicMock()
+    executor.decode_graph_runner = MagicMock()
+    with pytest.raises(ValueError, match="MTP top-k"):
+        executor.execute(torch.zeros(2), torch.zeros(2), metadata, mtp_topk_indices=torch.zeros(2))
+    executor.eager_runner.execute.assert_not_called()

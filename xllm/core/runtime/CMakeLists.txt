@@ -11,6 +11,8 @@ cc_library(
     dit_forward_params.h
     params_utils.h
     executor.h
+    task_execution_pipeline.h
+    slot_buffer.h
     executor_impl.h
     executor_impl_factory.h
     vlm_executor_impl.h
@@ -49,6 +51,8 @@ cc_library(
   SRCS
     decode_graph_bucket.cpp
     executor.cpp
+    task_execution_pipeline.cpp
+    slot_buffer.cpp
     executor_impl_factory.cpp
     base_executor_impl.cpp
     vlm_executor_impl.cpp

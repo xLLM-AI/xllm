@@ -128,8 +128,9 @@ class Worker {
   virtual std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info);
 
-  // Run the model on the given input. async call
-  // the future returns a successful status with no meaningful value
+  // Run the model asynchronously. Task pipeline with overlap returns an
+  // empty PrepareAck; without overlap, successful completion returns
+  // independent CPU results that are ready to read.
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs);
 
@@ -137,6 +138,8 @@ class Worker {
 
   const torch::Device& device() const;
 
+  // Task pipeline completes this Future after Consume finishes D2H and
+  // returns independent CPU results that are ready to read.
   folly::SemiFuture<std::optional<ForwardOutput>> get_last_step_result_async();
 
   int64_t get_active_activation_memory();
@@ -144,7 +147,10 @@ class Worker {
   folly::SemiFuture<int64_t> get_active_activation_memory_async();
 
  private:
+  bool initialize_task_pipeline();
+  bool enable_task_pipeline_ = false;
   WorkerImpl* impl_ = nullptr;
+  std::unique_ptr<TaskExecutionPipeline> task_pipeline_;
   ThreadPool threadpool_{/*num_threads=*/1,
                          /*cpu_binding=*/false,
                          /*pool_name=*/"Worker.async"};

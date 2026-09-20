@@ -328,6 +328,14 @@ std::shared_ptr<Request> LLMRequestFactory::create(
     return nullptr;
   }
   const bool json_object = sampling_param.json_object;
+  if (json_object && options_->enable_task_pipeline()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "response_format=json_object is not supported with "
+                        "enable_task_pipeline",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
+    return nullptr;
+  }
   SchedulerParam scheduler_param = sp.to_scheduler_param();
 
   std::optional<StoppingChecker> stopping_checker = build_stopping_checker(

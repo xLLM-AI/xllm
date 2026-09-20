@@ -104,6 +104,11 @@ struct Fa3AttentionMetadata {
 // AttentionMetadataBuilder to build instances from ModelInputParams.
 struct AttentionMetadata {
   torch::Tensor q_cu_seq_lens;
+  // Optional Host metadata retained for asynchronous attention preparation.
+  torch::Tensor q_seq_lens_host;
+  torch::Tensor kv_seq_lens_host;
+  // Matches q_cu_seq_lens; consumers account for any leading zero.
+  std::vector<int64_t> q_cu_seq_lens_host_vec;
   torch::Tensor kv_cu_seq_lens;
   torch::Tensor kv_seq_lens;
   torch::Tensor q_seq_lens;
@@ -215,8 +220,6 @@ struct AttentionMetadata {
 #if defined(USE_NPU)
   // for npu
   std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
-  torch::Tensor q_seq_lens_host;
-  torch::Tensor kv_seq_lens_host;
   // For ACL graph execution - fixed-address device tiling data for
   // CustomPagedAttention replay.
   torch::Tensor paged_attention_tiling_data;
@@ -228,7 +231,6 @@ struct AttentionMetadata {
   int64_t fia_pre_tokens = -1;
   int64_t fia_next_tokens = -1;
   // Host vectors for npu_fused_infer_attention (kernel requires host memory).
-  std::vector<int64_t> q_cu_seq_lens_host_vec;
   std::vector<int64_t> kv_cu_seq_lens_host_vec;
   // Non-cumulative per-sequence lengths for chunked_prefill mode.
   std::vector<int64_t> kv_seq_lens_host_vec;

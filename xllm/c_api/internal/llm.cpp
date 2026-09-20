@@ -112,6 +112,8 @@ XLLM_CAPI_EXPORT bool xllm_llm_initialize(
         .is_local(true)
         .server_idx(xllm_init_options.server_idx);
 
+    options.enable_task_pipeline(
+        ::xllm::ExecutionConfig::get_instance().enable_task_pipeline());
     options.enable_graph(
         ::xllm::ExecutionConfig::get_instance().enable_graph());
 

@@ -48,6 +48,12 @@ class ExecutorImpl {
 
   virtual ForwardInput prepare_inputs(Batch& batch) = 0;
 
+  virtual bool supports_prepared_attention_metadata() const { return false; }
+  virtual void prepare_attention_metadata(std::vector<KVCache>& /*kv_caches*/,
+                                          ModelInputParams& /*params*/) {
+    LOG(FATAL) << "Executor does not support prepared attention metadata.";
+  }
+
   // tokens: vector size is dp_size, each element is [num_tokens/dp_size]
   // positions: vector size is dp_size, each element is [num_tokens/dp_size]
   // token pos in the sequence returns: ModelOutput

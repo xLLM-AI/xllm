@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/message.h"
 #include "core/common/types.h"
 #include "framework/chat_template/chat_template.h"
+#include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
@@ -116,9 +117,17 @@ OutputCallback make_capture_callback(CallbackCapture* capture) {
 class LLMRequestFactoryTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    previous_json_object_output_ =
+        ServiceConfig::get_instance().enable_json_object_output();
+    ServiceConfig::get_instance().enable_json_object_output(true);
     // Simulate the caller (service entry) having acquired a rate-limit slot.
     rate_limiter_.is_limited();
     ASSERT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+  }
+
+  void TearDown() override {
+    ServiceConfig::get_instance().enable_json_object_output(
+        previous_json_object_output_);
   }
 
   std::unique_ptr<LLMRequestFactory> make_factory(
@@ -148,6 +157,7 @@ class LLMRequestFactoryTest : public ::testing::Test {
   ModelArgs model_args_;
   Options options_;
   RateLimiter rate_limiter_;
+  bool previous_json_object_output_ = true;
 };
 
 TEST_F(LLMRequestFactoryTest, RejectsEmptyPromptAndReleasesRateLimitSlot) {
@@ -262,6 +272,95 @@ TEST_F(LLMRequestFactoryTest,
   // On success the slot stays held; it is later released when the request is
   // completed/destroyed by the scheduler, not by the factory.
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+}
+
+TEST_F(LLMRequestFactoryTest, TaskPipelineRejectsJsonObjectBeforeGrammarSetup) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(true);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.response_format = ResponseFormatType::JSON_OBJECT;
+
+  auto request = factory->create(
+      /*prompt=*/"hello world",
+      /*prompt_tokens=*/std::nullopt,
+      sp,
+      /*call=*/std::nullopt,
+      make_capture_callback(&capture),
+      ChatTemplateGenerationMode::UNKNOWN);
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(
+      capture.status->message(),
+      "response_format=json_object is not supported with enable_task_pipeline");
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(LLMRequestFactoryTest,
+       TaskPipelineRejectsJsonObjectChatAndReleasesSlot) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(true);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.response_format = ResponseFormatType::JSON_OBJECT;
+  const std::vector<Message> messages = {Message("user", std::string("hi"))};
+
+  auto request = factory->create(messages,
+                                 /*prompt_tokens=*/std::nullopt,
+                                 sp,
+                                 /*call=*/std::nullopt,
+                                 make_capture_callback(&capture));
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(
+      capture.status->message(),
+      "response_format=json_object is not supported with enable_task_pipeline");
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(LLMRequestFactoryTest, TaskPipelineAcceptsOrdinaryRequest) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(true);
+  CallbackCapture capture;
+  RequestParams sp;
+
+  auto request = factory->create(/*prompt=*/"hello world",
+                                 /*prompt_tokens=*/std::nullopt,
+                                 sp,
+                                 /*call=*/std::nullopt,
+                                 make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+}
+
+TEST_F(LLMRequestFactoryTest, LegacyJsonObjectReachesGrammarValidation) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(false);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.response_format = ResponseFormatType::JSON_OBJECT;
+
+  auto request = factory->create(
+      /*prompt=*/"hello world",
+      /*prompt_tokens=*/std::nullopt,
+      sp,
+      /*call=*/std::nullopt,
+      make_capture_callback(&capture),
+      ChatTemplateGenerationMode::UNKNOWN);
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(
+      capture.status->message(),
+      "JSON object constraint requires a recognizable chat generation mode");
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
 }
 
 // verify_params only knows the model-agnostic 2000 cap; the factory knows the

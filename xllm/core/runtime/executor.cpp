@@ -46,6 +46,15 @@ ForwardInput Executor::prepare_inputs(Batch& batch) {
   return impl_->prepare_inputs(batch);
 }
 
+bool Executor::supports_prepared_attention_metadata() const {
+  return impl_->supports_prepared_attention_metadata();
+}
+
+void Executor::prepare_attention_metadata(std::vector<KVCache>& kv_caches,
+                                          ModelInputParams& params) {
+  impl_->prepare_attention_metadata(kv_caches, params);
+}
+
 ModelOutput Executor::forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,

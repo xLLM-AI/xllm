@@ -41,7 +41,8 @@ class ExecutionConfig final {
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
         "EXECUTION OPTIONS",
-        {"enable_graph",
+        {"enable_task_pipeline",
+         "enable_graph",
          "disable_graph_warmup",
          "enable_graph_double_buffer",
          "enable_graph_mode_decode_no_padding",
@@ -58,6 +59,9 @@ class ExecutionConfig final {
          "enable_fia_decode"}};
     return kOptionCategory;
   }
+
+  // Enable the task pipeline; scheduler overlap determines the slot count.
+  PROPERTY(bool, enable_task_pipeline) = false;
 
   PROPERTY(bool, enable_graph) = false;
 

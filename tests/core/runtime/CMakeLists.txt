@@ -9,7 +9,28 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME task_execution_pipeline_input_test
+  SRCS task_execution_pipeline_input_test.cpp
+  DEPS :runtime GTest::gtest_main
+)
+target_link_options(task_execution_pipeline_input_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")
+
 if(USE_NPU)
+  cc_test(
+    NAME slot_buffer_test
+    SRCS slot_buffer_test.cpp
+    DEPS :runtime GTest::gtest_main
+  )
+  target_link_libraries(slot_buffer_test PRIVATE nnopbase)
+  target_link_options(slot_buffer_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+
   cc_test(
     NAME
       mtp_decode_metadata_test

@@ -64,6 +64,22 @@ _HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and h
 
 
 @dataclass(frozen=True, slots=True)
+class _PreparedMlaAttention:
+    # Keep final input views and private Host values for one eager Slot.
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    actual_seq_q: torch.Tensor
+    actual_seq_kv: torch.Tensor
+    query_ends: list[int]
+    kv_lengths: list[int]
+    max_query_len: int
+    max_seq_len: int
+    is_prefill: bool
+    is_chunked_prefill: bool
+    has_kv_shard: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class _SfaPageLayout:
     source_page_ids: torch.Tensor
     target_page_ids: torch.Tensor
@@ -128,6 +144,14 @@ def _build_stable_sfa_page_layout(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedPagedAttention:
+    block_table: torch.Tensor | None
+    query_ends: list[int] | None
+    actual_seq_q: list[int]
+    actual_seq_kv: list[int]
+
+
 class NpuPagedAttentionBackend(AttentionBackend):
     """NPU attention backend dispatching to npu_fused_infer_attention_score."""
 
@@ -156,7 +180,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._kv_caches: list[LayerCache] = []
         self._num_kv_blocks: int | None = None
         self._page_size: int | None = None
-        self._metadata: AttentionMetadata | None = None
+        self._metadata: AttentionMetadata | _PreparedMlaAttention | None = None
         self._graph_workspace: torch.Tensor | None = None
         self._graph_outputs: dict[int, torch.Tensor] = {}
         self._graph_lses: dict[int, torch.Tensor] = {}
@@ -247,12 +271,116 @@ class NpuPagedAttentionBackend(AttentionBackend):
             "sequence or a leading zero plus one value per sequence"
         )
 
+    @property
+    def supports_prepared_metadata(self) -> bool:
+        return True
+
+    def prepare_metadata(self, metadata: AttentionMetadata) -> _PreparedPagedAttention | _PreparedMlaAttention:
+        """Prepare one ordinary Slot without Device work or active-state writes."""
+        expanded = getattr(metadata, "expanded_decode_metadata", None)
+        if (
+            getattr(metadata, "is_spec_verify", False)
+            or getattr(metadata, "has_kv_shard", False)
+            or (expanded is not None and expanded.enabled)
+        ):
+            raise ValueError("prepared paged metadata requires ordinary unsharded attention")
+        q_lens = metadata.q_seq_lens
+        if q_lens is None:
+            raise ValueError("prepared paged metadata requires query lengths")
+        batch_size = q_lens.numel()
+        query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
+        if query_ends is None:
+            raise ValueError("prepared paged metadata requires Host query ends")
+        if len(query_ends) == batch_size + 1 and query_ends[0] == 0:
+            query_ends = query_ends[1:]
+        if len(query_ends) != batch_size:
+            raise ValueError("prepared Host query ends must match the batch")
+        block_table = metadata.block_table
+        actual_seq_q: list[int] = []
+        actual_seq_kv: list[int] = []
+        if block_table is not None:
+            if block_table.dtype != torch.int32 or not block_table.is_contiguous():
+                raise ValueError("prepared block table must already be contiguous int32")
+            if block_table.shape[0] != batch_size:
+                raise ValueError("prepared block table must match the batch")
+            kv_lengths = metadata.kv_seq_lens_host_values
+            if kv_lengths is None or len(kv_lengths) != batch_size:
+                raise ValueError("prepared Host KV lengths must match the batch")
+            actual_seq_q = list(range(1, batch_size + 1))
+            actual_seq_kv = list(kv_lengths)
+        if self._is_mla:
+            if block_table is None:
+                raise ValueError("prepared MLA requires a block table for every forward type")
+            query_tensor = metadata.q_cu_seq_lens
+            kv_tensor = metadata.kv_seq_lens
+            slot_mapping = metadata.slot_mapping
+            for tensor in (query_tensor, kv_tensor, slot_mapping):
+                if (
+                    tensor is None
+                    or tensor.dtype != torch.int32
+                    or tensor.ndim != 1
+                    or not tensor.is_contiguous()
+                    or tensor.device != block_table.device
+                ):
+                    raise ValueError("prepared MLA requires contiguous int32 final input views")
+            if query_tensor.numel() != batch_size or kv_tensor.numel() != batch_size:
+                raise ValueError("prepared MLA lengths must have one entry per sequence")
+            if not query_ends or query_ends[-1] != slot_mapping.numel():
+                raise ValueError("prepared MLA query ends must describe all input tokens")
+            query_lengths = [end - start for start, end in zip([0, *query_ends[:-1]], query_ends)]
+            return _PreparedMlaAttention(
+                block_table=block_table,
+                slot_mapping=slot_mapping,
+                actual_seq_q=query_tensor,
+                actual_seq_kv=kv_tensor,
+                query_ends=list(query_ends),
+                kv_lengths=actual_seq_kv,
+                max_query_len=max(query_lengths, default=0),
+                max_seq_len=max(actual_seq_kv, default=0),
+                is_prefill=metadata.is_prefill,
+                is_chunked_prefill=metadata.is_chunked_prefill,
+            )
+        return _PreparedPagedAttention(block_table, list(query_ends), actual_seq_q, actual_seq_kv)
+
     def prepare(
         self,
         metadata: AttentionMetadata,
         *,
         graph_mode: bool = False,
     ) -> None:
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if prepared is not None and graph_mode:
+            raise ValueError("prepared attention metadata requires eager execution")
+        if isinstance(prepared, _PreparedMlaAttention):
+            if not self._is_mla:
+                raise ValueError("prepared MLA state requires MLA attention")
+            self._metadata = prepared
+            self._use_expanded_decode = False
+            self._block_table_i32 = prepared.block_table
+            self._actual_seq_lens = None
+            self._actual_seq_q = []
+            self._actual_seq_kv = []
+            self._mla_actual_seq_q = prepared.actual_seq_q
+            self._mla_actual_seq_kv = prepared.actual_seq_kv
+            self._mla_actual_seq_q_host = prepared.query_ends if self.requires_host_kv_lengths else None
+            self._mla_actual_seq_kv_host = prepared.kv_lengths if self.requires_host_kv_lengths else None
+            self._mla_max_seqlen_q = prepared.max_query_len
+            self._mla_max_seqlen_k = prepared.max_seq_len
+            self._mla_quant_indexer_metadata.clear()
+            self._kv_owner_representatives = None
+            self._materialized_block_table = None
+            self._sfa_page_layout = None
+            return
+        if prepared is not None:
+            if self._is_mla or not isinstance(prepared, _PreparedPagedAttention):
+                raise ValueError("prepared paged state requires ordinary attention")
+            self._metadata = metadata
+            self._use_expanded_decode = False
+            self._block_table_i32 = prepared.block_table
+            self._actual_seq_lens = prepared.query_ends
+            self._actual_seq_q = prepared.actual_seq_q
+            self._actual_seq_kv = prepared.actual_seq_kv
+            return
         self._metadata = metadata
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
         self._use_expanded_decode = expanded is not None
@@ -281,11 +409,19 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 batch_size = metadata.block_table.shape[0]
             else:
                 batch_size = max(metadata.q_cu_seq_lens.numel() - 1, 0)
-            q_seq_ends = self._query_sequence_ends(
-                metadata.q_cu_seq_lens,
-                batch_size,
-            )
-            self._actual_seq_lens = q_seq_ends.cpu().tolist()
+            host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
+            if host_query_ends:
+                if len(host_query_ends) == batch_size + 1 and host_query_ends[0] == 0:
+                    host_query_ends = host_query_ends[1:]
+                if len(host_query_ends) != batch_size:
+                    raise RuntimeError("host query ends must have one entry per sequence")
+                self._actual_seq_lens = host_query_ends
+            else:
+                q_seq_ends = self._query_sequence_ends(
+                    metadata.q_cu_seq_lens,
+                    batch_size,
+                )
+                self._actual_seq_lens = q_seq_ends.cpu().tolist()
         else:
             self._actual_seq_lens = None
 

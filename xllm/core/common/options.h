@@ -214,6 +214,9 @@ class Options {
   PROPERTY(bool, disable_ttft_profiling) = false;
   // true if enable forward interruption
   PROPERTY(bool, enable_forward_interruption) = false;
+  // Enable the task pipeline; scheduler overlap determines the slot count.
+  PROPERTY(bool, enable_task_pipeline) = false;
+
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
   // enable graph-mode decode without padding

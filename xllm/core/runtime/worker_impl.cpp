@@ -25,6 +25,7 @@ limitations under the License.
 #include <algorithm>
 
 #include "core/runtime/json_object_output_rows.h"
+#include "core/runtime/task_execution_pipeline.h"
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -1904,6 +1905,58 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   return true;
 }
 #endif
+
+::xllm::Status WorkerImpl::create_task_pipeline(
+    std::unique_ptr<TaskExecutionPipeline>& output) {
+  if (status_ != Status::LOADED || model_ == nullptr ||
+      model_executor_ == nullptr) {
+    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
+                          "Task pipeline requires loaded model weights.");
+  }
+  const auto& args = context_.get_model_args();
+  const int64_t positions = args.max_position_embeddings();
+  const int64_t vocab = args.vocab_size();
+  if (positions <= 0 || positions > std::numeric_limits<int32_t>::max() ||
+      vocab <= 0 || vocab > std::numeric_limits<int32_t>::max() ||
+      options_.block_size() <= 0 || options_.max_tokens_per_batch() <= 0 ||
+      options_.max_seqs_per_batch() <= 0) {
+    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
+                          "Invalid fixed task pipeline capacity.");
+  }
+  LlmTaskCapacity capacity;
+  capacity.slot_count = options_.enable_schedule_overlap() ? 2U : 1U;
+  capacity.model = {
+      static_cast<uint32_t>(options_.max_tokens_per_batch()),
+      static_cast<uint32_t>(options_.max_seqs_per_batch()),
+      static_cast<uint32_t>((positions + options_.block_size() - 1) /
+                            options_.block_size())};
+  capacity.max_kv_seq_len = static_cast<uint32_t>(positions);
+  capacity.max_positions = static_cast<uint32_t>(positions);
+  capacity.block_size = static_cast<uint32_t>(options_.block_size());
+  capacity.vocab_size = static_cast<uint32_t>(vocab);
+  capacity.max_unique_tokens =
+      static_cast<uint32_t>(std::min(positions, vocab));
+  capacity.max_top_logprobs =
+      static_cast<uint32_t>(std::min<int64_t>(/*a=*/2000, vocab));
+  // Ordinary SHM materializes builder FP32 sampling tensors before Worker
+  // prepare, while RPC normalizes them to the model dtype. Preserve both
+  // existing contracts when staging directly into the Slot.
+  capacity.parameter_dtype = options_.enable_shm() ? torch::kFloat32 : dtype_;
+  capacity.enable_mla = args.enable_mla();
+  ::xllm::Status status = TaskExecutionPipeline::create(
+      threadpool_, *model_, *model_executor_, kv_caches_, capacity, output);
+  if (!status.ok()) {
+    return status;
+  }
+  LOG(INFO) << "Task execution pipeline: slots=" << capacity.slot_count
+            << ", tokens=" << capacity.model.max_tokens
+            << ", sequences=" << capacity.model.max_sequences
+            << ", sampling_dtype=" << capacity.parameter_dtype
+            << ", positions=" << positions
+            << ", pinned_bytes=" << output->pinned_bytes()
+            << ", device_bytes=" << output->device_bytes();
+  return status;
+}
 
 // initialize model, cache manager. async call
 bool WorkerImpl::init_model(const std::string& model_weights_path,

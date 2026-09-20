@@ -38,6 +38,12 @@ class Executor final {
 
   ForwardInput prepare_inputs(Batch& batch);
 
+  bool supports_prepared_attention_metadata() const;
+  // Called on Prepare after binding Slot-owned tensor and native metadata.
+  // No model computation; the supported backend must not mutate active state.
+  void prepare_attention_metadata(std::vector<KVCache>& kv_caches,
+                                  ModelInputParams& params);
+
   // tokens: vector size is dp_size, each element is [num_tokens/dp_size]
   // positions: vector size is dp_size, each element is [num_tokens/dp_size]
   // token pos in the sequence returns: ModelOutput

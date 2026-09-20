@@ -45,12 +45,21 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
 
   ForwardInput prepare_inputs(Batch& batch) override;
 
+  bool supports_prepared_attention_metadata() const override {
+    return supports_prepared_metadata_;
+  }
+  void prepare_attention_metadata(std::vector<KVCache>& kv_caches,
+                                  ModelInputParams& params) override;
+
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,
                   std::vector<KVCache>& kv_caches,
                   const ModelInputParams& params) override;
 
  private:
+  // Caller holds the GIL. First binding occurs on Prepare for pipeline input.
+  void bind_kv_caches(std::vector<KVCache>& kv_caches);
+
   PyCausalLM* py_causal_lm_;
   ModelArgs args_;
   torch::Device device_;
@@ -58,8 +67,10 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   bool enable_mla_ = false;
 
   pybind11::object py_executor_;
+  bool supports_prepared_metadata_ = false;
   bool kv_bound_ = false;
   int64_t kv_layer_count_ = 0;
+  std::vector<torch::Tensor> prepared_kv_bindings_;
 };
 
 REGISTER_EXECUTOR("python", PyExecutorImpl);

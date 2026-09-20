@@ -233,6 +233,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_profile_kv_blocks(profile_config.enable_profile_kv_blocks())
       .disable_ttft_profiling(profile_config.disable_ttft_profiling())
       .enable_forward_interruption(profile_config.enable_forward_interruption())
+      .enable_task_pipeline(execution_config.enable_task_pipeline())
       .enable_graph(execution_config.enable_graph())
       .enable_graph_mode_decode_no_padding(
           execution_config.enable_graph_mode_decode_no_padding())
