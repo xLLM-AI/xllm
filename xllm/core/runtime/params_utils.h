@@ -27,6 +27,23 @@ namespace xllm {
 
 class Stream;
 
+// Selects per-sequence hidden for speculative decoding. Target prefill exposes
+// the full hidden as `embeddings` and the lm_head-aligned rows as
+// `selected_embeddings`; draft/decode steps expose only the selected rows as
+// `embeddings`. Under CP the draft/decode hidden is a local shard that cannot
+// be re-indexed by the all-gather-space lm_head idxes, so
+// `gathered_sample_hidden_states` is reused there instead of index_select.
+void output_spec_hidden_states(
+    SampleOutput& sample_output,
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& aux_hidden_states,
+    const torch::Tensor& lm_head_selected_token_idxes,
+    const torch::Tensor& gathered_sample_hidden_states,
+    bool is_target_prefill,
+    bool cp_enabled);
+
+void clear_all_output_embeddings(ForwardOutput& output);
+
 torch::Tensor choose_lm_head_selected_token_idxes(
     const torch::Tensor& selected_token_idxes,
     const ModelInputParams& input_params,

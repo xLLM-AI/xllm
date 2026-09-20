@@ -26,6 +26,62 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+
+namespace {
+
+void clear_selected_embeddings(ForwardOutput& output) {
+  output.sample_output.selected_embeddings = torch::Tensor();
+}
+
+}  // namespace
+
+void output_spec_hidden_states(
+    SampleOutput& sample_output,
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& aux_hidden_states,
+    const torch::Tensor& lm_head_selected_token_idxes,
+    const torch::Tensor& gathered_sample_hidden_states,
+    bool is_target_prefill,
+    bool cp_enabled) {
+  const bool has_aux = aux_hidden_states.defined();
+  const torch::Tensor& target_hidden_states =
+      has_aux ? aux_hidden_states : hidden_states;
+  torch::Tensor sample_hidden_states;
+  if (lm_head_selected_token_idxes.defined()) {
+    const bool must_use_gathered = cp_enabled && !is_target_prefill;
+    if (must_use_gathered) {
+      CHECK(gathered_sample_hidden_states.defined())
+          << "gathered selected hidden is required on the CP decode path";
+      sample_hidden_states = gathered_sample_hidden_states;
+    } else if (!has_aux && gathered_sample_hidden_states.defined()) {
+      // Reuse the LmHead-gathered rows instead of re-selecting.
+      sample_hidden_states = gathered_sample_hidden_states;
+    } else {
+      CHECK(target_hidden_states.defined())
+          << "speculative hidden states are undefined";
+      sample_hidden_states = target_hidden_states.index_select(
+          /*dim=*/0,
+          lm_head_selected_token_idxes.to(
+              torch::dtype(torch::kLong)
+                  .device(target_hidden_states.device())));
+    }
+    CHECK_EQ(sample_hidden_states.dim(), 2);
+    CHECK_EQ(sample_hidden_states.size(0), lm_head_selected_token_idxes.numel())
+        << "selected speculative hidden must follow lm_head rows";
+  }
+  if (is_target_prefill) {
+    sample_output.embeddings = target_hidden_states;
+    sample_output.selected_embeddings = sample_hidden_states;
+  } else {
+    sample_output.embeddings = sample_hidden_states;
+  }
+}
+
+void clear_all_output_embeddings(ForwardOutput& output) {
+  output.sample_output.embeddings = torch::Tensor();
+  clear_selected_embeddings(output);
+}
+
 torch::Tensor choose_lm_head_selected_token_idxes(
     const torch::Tensor& selected_token_idxes,
     const ModelInputParams& input_params,
