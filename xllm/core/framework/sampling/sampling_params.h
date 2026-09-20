@@ -208,13 +208,14 @@ struct SampleOutput {
   // [num_seq, ..., top_k] LongTensor
   torch::Tensor top_tokens;
 
-  // [num_seq, ..., embed_dim] FloatTensor
+  // [num_seq, ..., embed_dim] FloatTensor (full forward hidden on the
+  // speculative target-prefill path; see `selected_embeddings`).
   torch::Tensor embeddings;
 
-  // Per-sequence target-prefill hidden (one row per sequence, lm_head order).
-  // Separate from `embeddings` because under CP `embeddings` holds only the
-  // local shard, whose rows cannot be re-indexed per-sequence by the
-  // all-gather-space selected indices.
+  // Per-sequence target-prefill hidden: one row per sequence, in
+  // `logits_indices` order. Separate from `embeddings` because under CP
+  // `embeddings` holds only the local shard, whose rows cannot be re-indexed
+  // per-sequence by the all-gather-space `logits_indices`.
   torch::Tensor selected_embeddings;
 
   std::vector<std::vector<torch::Tensor>> mm_embeddings;

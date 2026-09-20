@@ -669,9 +669,10 @@ struct ForwardOutput {
   torch::Tensor logits;
   torch::Tensor embedding;
   // Selected hidden states matching `logits` layout: [num_selected,
-  // hidden_dim]. Populated when a speculative worker asks for the pre-lm_head
-  // hidden (e.g. DSpark's ConfidenceHead needs the draft-step hidden). Only
-  // computed when `input.return_selected_hidden` is true.
+  // hidden_dim]. Populated when a speculative worker requests the pre-lm_head
+  // hidden (e.g. DSpark's ConfidenceHead), or on the context-parallel
+  // speculative-decode path, where output_spec_hidden_states reuses it instead
+  // of re-selecting the local shard.
   torch::Tensor selected_hidden;
   // Backend-neutral state for the next MTP draft step.
   MtpTopkStatePtr mtp_topk_state;

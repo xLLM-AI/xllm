@@ -11,6 +11,7 @@ cc_library(
     mtp_async_input_builder.h
     mtp_async_state.h
     mtp_json_object_state.h
+    draft_extend_input.h
     embedding_cache.h
     spec_verify.h
   SRCS
@@ -20,6 +21,7 @@ cc_library(
     spec_input_builder.cpp
     mtp_async_input_builder.cpp
     mtp_async_state.cpp
+    draft_extend_input.cpp
     embedding_cache.cpp
     spec_verify.cpp
   DEPS

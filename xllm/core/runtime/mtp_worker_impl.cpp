@@ -47,6 +47,7 @@ limitations under the License.
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
 #include "core/framework/speculative/adaptive_pruning_helpers.h"
+#include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/spec_input_builder.h"
@@ -260,19 +261,6 @@ void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
       input_params, device, false, block_size);
 }
 #endif
-
-void clear_sample_embeddings(ForwardOutput& output) {
-  output.sample_output.embeddings = torch::Tensor();
-}
-
-void clear_selected_embeddings(ForwardOutput& output) {
-  output.sample_output.selected_embeddings = torch::Tensor();
-}
-
-void clear_all_output_embeddings(ForwardOutput& output) {
-  clear_sample_embeddings(output);
-  clear_selected_embeddings(output);
-}
 
 void clear_ready_events(ForwardInput& input) {
   input.metadata_ready_event.reset();
@@ -1315,30 +1303,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
 
   if (input.sampling_params.selected_token_idxes.defined()) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    // Prefer embeddings (global-real after CP merge); selected_embeddings is
-    // a fallback.
-    const torch::Tensor& target_hidden =
-        output.sample_output.selected_embeddings.defined()
-            ? output.sample_output.selected_embeddings
-            : embeddings;
-    torch::Tensor bootstrap_embeddings = target_hidden;
-    if (bootstrap_embeddings.size(0) !=
-        static_cast<int64_t>(
-            input.input_params.embedding.embedding_ids.size())) {
-      torch::Tensor bootstrap_idxes =
-          input.sampling_params.selected_token_idxes.to(
-              torch::dtype(torch::kLong).device(bootstrap_embeddings.device()));
-      bootstrap_embeddings =
-          bootstrap_embeddings.index_select(/*dim=*/0, bootstrap_idxes);
-    }
-    output.sample_output.embeddings = bootstrap_embeddings.detach();
-    embedding_cache_->write_prefill_target_context(
-        input.input_params.embedding.embedding_ids,
-        input.input_params.embedding.request_ids,
-        output.sample_output.next_tokens,
-        target_hidden,
-        input.sampling_params.selected_token_idxes);
-    clear_selected_embeddings(output);
+    prepare_first_draft_inputs(*embedding_cache_, input, output);
   } else {
     clear_all_output_embeddings(output);
   }

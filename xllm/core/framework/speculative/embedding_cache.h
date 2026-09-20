@@ -66,12 +66,11 @@ class EmbeddingCache final {
 
   // Writes target prefill output after target model generates the first token.
   // Draft prefill output is intentionally ignored and must not be written here.
-  void write_prefill_target_context(
-      const std::vector<int32_t>& embedding_ids,
-      const std::vector<std::string>& request_ids,
-      const torch::Tensor& next_tokens,
-      const torch::Tensor& embeddings,
-      const torch::Tensor& selected_token_idxes = torch::Tensor());
+  // embeddings must already contain one selected hidden row per sequence.
+  void write_prefill_target_context(const std::vector<int32_t>& embedding_ids,
+                                    const std::vector<std::string>& request_ids,
+                                    const torch::Tensor& next_tokens,
+                                    const torch::Tensor& embeddings);
 
   // Writes PD handoff bootstrap target context for the first MTP decode step.
   void write_mtp_bootstrap_context(int32_t embedding_id,

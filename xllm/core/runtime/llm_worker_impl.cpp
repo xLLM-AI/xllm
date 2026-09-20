@@ -37,6 +37,7 @@ limitations under the License.
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
 #include "layers/cuda/flashinfer_workspace.h"
 #endif
+#include "core/framework/speculative/draft_extend_input.h"
 #include "models/model_registry.h"
 #include "runtime/executor.h"
 #include "runtime/params_utils.h"

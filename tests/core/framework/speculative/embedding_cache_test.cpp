@@ -69,26 +69,26 @@ TEST(EmbeddingCacheTest, WritePrefillTargetContextAndClear) {
   EXPECT_FALSE(states[1].embedding.defined());
 }
 
-TEST(EmbeddingCacheTest, WritePrefillTargetContextSelectsEmbeddings) {
-  EmbeddingCache cache(/*total_nums=*/4);
+TEST(EmbeddingCacheTest, WritePrefillTargetContextClonesEmbeddingRows) {
+  EmbeddingCache cache(/*total_nums=*/2);
 
-  std::vector<int32_t> ids = {1, 2};
+  std::vector<int32_t> ids = {0, 1};
   std::vector<std::string> request_ids = {"req_0", "req_1"};
   torch::Tensor target_tokens = torch::tensor({51, 61}, torch::kInt);
-  torch::Tensor full_embeddings =
-      torch::tensor({{1.0f, 1.1f}, {2.0f, 2.1f}, {3.0f, 3.1f}});
-  torch::Tensor selected_idxes = torch::tensor({2, 0}, torch::kInt);
+  torch::Tensor embeddings = torch::tensor({{3.0f, 4.0f}, {5.0f, 6.0f}});
 
   cache.write_prefill_target_context(
-      ids, request_ids, target_tokens, full_embeddings, selected_idxes);
+      ids, request_ids, target_tokens, embeddings);
+  // Mutating the source after the write must not affect the stored copy.
+  embeddings.fill_(0.0f);
 
   std::vector<EmbeddingCache::DecodeState> states =
       cache.read_decode_states(ids, request_ids);
   ASSERT_EQ(states.size(), ids.size());
   EXPECT_EQ(states[0].token_id, 51);
-  EXPECT_TRUE(tensor_equal(states[0].embedding, full_embeddings[2]));
+  EXPECT_TRUE(tensor_equal(states[0].embedding, torch::tensor({3.0f, 4.0f})));
   EXPECT_EQ(states[1].token_id, 61);
-  EXPECT_TRUE(tensor_equal(states[1].embedding, full_embeddings[0]));
+  EXPECT_TRUE(tensor_equal(states[1].embedding, torch::tensor({5.0f, 6.0f})));
 }
 
 TEST(EmbeddingCacheTest, WriteValidateTargetContext) {

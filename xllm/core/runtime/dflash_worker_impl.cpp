@@ -43,6 +43,7 @@ limitations under the License.
 #include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #endif
+#include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/platform/platform.h"
@@ -133,15 +134,6 @@ void repeat_sampling_params(SamplingParameters& sampling_params,
   repeat_sampling_tensor(sampling_params.unique_token_counts, repeats);
   repeat_sampling_tensor(sampling_params.unique_token_ids_lens, repeats);
   repeat_sampling_tensor(sampling_params.do_sample, repeats);
-}
-
-void clear_selected_embeddings(ForwardOutput& output) {
-  output.sample_output.selected_embeddings = torch::Tensor();
-}
-
-void clear_all_output_embeddings(ForwardOutput& output) {
-  output.sample_output.embeddings = torch::Tensor();
-  clear_selected_embeddings(output);
 }
 
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
@@ -734,28 +726,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
   }
 
   if (input.sampling_params.selected_token_idxes.defined()) {
-    embedding_cache_->write_prefill_target_context(
-        input.input_params.embedding.embedding_ids,
-        input.input_params.embedding.request_ids,
-        output.sample_output.next_tokens,
-        embeddings,
-        input.sampling_params.selected_token_idxes);
-    // PD handoff: the decode instance requires get_mtp_bootstrap_embedding()
-    // defined before it accepts the request (disagg_pd_scheduler). Compress the
-    // full prefill hidden to one row per sequence, as
-    // write_prefill_target_context stores it.
-    torch::Tensor bootstrap_embeddings = embeddings;
-    if (bootstrap_embeddings.size(0) !=
-        static_cast<int64_t>(
-            input.input_params.embedding.embedding_ids.size())) {
-      torch::Tensor bootstrap_idxes =
-          input.sampling_params.selected_token_idxes.to(
-              torch::dtype(torch::kLong).device(bootstrap_embeddings.device()));
-      bootstrap_embeddings =
-          bootstrap_embeddings.index_select(/*dim=*/0, bootstrap_idxes);
-    }
-    output.sample_output.embeddings = bootstrap_embeddings.detach();
-    clear_selected_embeddings(output);
+    prepare_first_draft_inputs(*embedding_cache_, input, output);
   } else {
     clear_all_output_embeddings(output);
   }

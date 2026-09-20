@@ -47,8 +47,7 @@ void EmbeddingCache::write_prefill_target_context(
     const std::vector<int32_t>& ids,
     const std::vector<std::string>& request_ids,
     const torch::Tensor& next_tokens,
-    const torch::Tensor& embeddings,
-    const torch::Tensor& selected_token_idxes) {
+    const torch::Tensor& embeddings) {
   CHECK(next_tokens.defined()) << "prefill target tokens are undefined";
   CHECK(embeddings.defined()) << "prefill target embeddings are undefined";
   CHECK_EQ(next_tokens.dim(), 1) << "prefill target tokens should be [batch]";
@@ -58,19 +57,7 @@ void EmbeddingCache::write_prefill_target_context(
       << "prefill target token count mismatch";
   CHECK(request_ids.empty() || request_ids.size() == ids.size())
       << "prefill target request id count mismatch";
-
-  torch::Tensor target_embeddings = embeddings;
-  if (target_embeddings.size(0) != static_cast<int64_t>(ids.size())) {
-    CHECK(selected_token_idxes.defined())
-        << "prefill target embedding selection index is undefined";
-    CHECK_EQ(selected_token_idxes.numel(), static_cast<int64_t>(ids.size()))
-        << "prefill target embedding selection count mismatch";
-    torch::Tensor embedding_idxes = selected_token_idxes.to(
-        torch::dtype(torch::kLong).device(target_embeddings.device()));
-    target_embeddings =
-        target_embeddings.index_select(/*dim=*/0, embedding_idxes);
-  }
-  CHECK_EQ(target_embeddings.size(0), static_cast<int64_t>(ids.size()))
+  CHECK_EQ(embeddings.size(0), static_cast<int64_t>(ids.size()))
       << "prefill target embedding count mismatch";
 
   torch::Tensor next_tokens_cpu = to_cpu_int64_contiguous(next_tokens);
@@ -90,8 +77,8 @@ void EmbeddingCache::write_prefill_target_context(
     state.all_draft_accepted = false;
     state.token_id = static_cast<int32_t>(token);
     state.position_offset = 0;
-    state.embedding = clone_contiguous_detached_tensor(
-        target_embeddings.select(/*dim=*/0, i));
+    state.embedding =
+        clone_contiguous_detached_tensor(embeddings.select(/*dim=*/0, i));
 
     DecodeState& tail = mutable_tail(ids[i]);
     tail = std::move(state);
