@@ -35,6 +35,13 @@ limitations under the License.
 //   * BM_ChatTemplate_MinjaBuiltins        - constructing minja's builtin
 //                                            globals, which apply does per
 //                                            render
+//   * BM_ChatTemplate_MessagesToJson       - the ChatMessages -> ordered_json
+//                                            conversion alone
+//   * BM_ChatTemplate_MinjaRenderCachedBuiltins - the render alone on a
+//                                            pre-built document and cached
+//                                            builtins (render_native's core)
+//   * BM_ChatTemplate_AllocatorControl     - eight small malloc/free pairs, the
+//                                            allocator floor under all of it
 //
 // Build & run (example):
 //   python setup.py test --test-name chat_template_benchmark
@@ -44,6 +51,8 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <iterator>
 #include <memory>
 #include <minja/chat-template.hpp>
 #include <nlohmann/json.hpp>
@@ -279,6 +288,87 @@ void BM_ChatTemplate_MinjaBuiltins(benchmark::State& state) {
   }
 }
 
+// --------------------------------------------------------------------------
+// Attribution of JinjaRender against MinjaApply
+//
+// JinjaRender = ChatMessages -> ordered_json conversion + needs_polyfills scan
+//             + render on the cached builtins. The two below time the first
+// and last term on their own, so the difference to MinjaApply can be placed.
+// --------------------------------------------------------------------------
+
+// The per-message ChatMessages -> ordered_json conversion, as
+// JinjaChatTemplate::apply performs it for text-only messages.
+void BM_ChatTemplate_MessagesToJson(benchmark::State& state) {
+  const ChatMessages messages =
+      make_messages(static_cast<size_t>(state.range(0)));
+
+  for (auto _ : state) {
+    nlohmann::ordered_json messages_json = nlohmann::json::array();
+    for (const auto& message : messages) {
+      nlohmann::ordered_json message_json;
+      message_json["role"] = message.role;
+      message_json["content"] = std::get<std::string>(message.content);
+      messages_json.emplace_back(std::move(message_json));
+    }
+    do_not_optimize(messages_json.size());
+  }
+  state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
+                          static_cast<int64_t>(content_bytes(messages)));
+}
+
+// The render alone on a pre-built messages document: parsed root plus cached
+// builtins, i.e. what JinjaChatTemplate::render_native does after the
+// conversion. Comparable one-to-one with MinjaApply.
+void BM_ChatTemplate_MinjaRenderCachedBuiltins(benchmark::State& state) {
+  const std::shared_ptr<minja::TemplateNode> root =
+      minja::Parser::parse(kQwen25ChatTemplate,
+                           {/*trim_blocks=*/true,
+                            /*lstrip_blocks=*/true,
+                            /*keep_trailing_newline=*/false});
+  const std::shared_ptr<minja::Context> builtins = minja::Context::builtins();
+  const ChatMessages messages =
+      make_messages(static_cast<size_t>(state.range(0)));
+  nlohmann::ordered_json messages_json = nlohmann::ordered_json::array();
+  for (const auto& message : messages) {
+    messages_json.push_back(
+        {{"role", message.role},
+         {"content", std::get<std::string>(message.content)}});
+  }
+  const nlohmann::ordered_json tools = nlohmann::ordered_json::array();
+
+  for (auto _ : state) {
+    minja::Value values = minja::Value::object();
+    values.set("messages", minja::Value(messages_json));
+    values.set("add_generation_prompt", minja::Value(true));
+    auto context = minja::Context::make(std::move(values), builtins);
+    context->set("bos_token", minja::Value(""));
+    context->set("eos_token", minja::Value("<|im_end|>"));
+    context->set("tools", minja::Value(tools));
+    std::string prompt = root->render(context);
+    do_not_optimize(prompt.data());
+  }
+  state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
+                          static_cast<int64_t>(content_bytes(messages)));
+}
+
+// Control: the allocator every number above is built on. One iteration is
+// the eight small allocations a message conversion costs, freed in reverse.
+// A healthy malloc lands at a few hundred nanoseconds per iteration; anything
+// in the microseconds says the allocator, not the template code, is the cost.
+void BM_ChatTemplate_AllocatorControl(benchmark::State& state) {
+  constexpr size_t kSizes[] = {32, 48, 64, 96, 128, 192, 256, 320};
+  for (auto _ : state) {
+    void* blocks[std::size(kSizes)];
+    for (size_t i = 0; i < std::size(kSizes); ++i) {
+      blocks[i] = std::malloc(kSizes[i]);
+      do_not_optimize(blocks[i]);
+    }
+    for (size_t i = std::size(kSizes); i-- > 0;) {
+      std::free(blocks[i]);
+    }
+  }
+}
+
 // Conversation length in messages.
 BENCHMARK(BM_ChatTemplate_JinjaRender)
     ->RangeMultiplier(4)
@@ -294,6 +384,15 @@ BENCHMARK(BM_ChatTemplate_MinjaApply)
     ->Range(1, 64)
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK(BM_ChatTemplate_MinjaBuiltins)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_ChatTemplate_MessagesToJson)
+    ->RangeMultiplier(4)
+    ->Range(1, 64)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_ChatTemplate_MinjaRenderCachedBuiltins)
+    ->RangeMultiplier(4)
+    ->Range(1, 64)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_ChatTemplate_AllocatorControl)->Unit(benchmark::kNanosecond);
 
 }  // namespace
 }  // namespace xllm
