@@ -1145,8 +1145,6 @@ class Glm52Indexer(nn.Module):
                 cmp_ratio,
             )
         else:
-            ctx.update_index_cache(k, None)
-            index_cache, _, block_table = ctx.materialize_index_cache()
             # Prefer the native Lightning Indexer when available; keep the
             # xLLM operator as a capability-gated fallback.
             topk = kernels.lightning_indexer(
