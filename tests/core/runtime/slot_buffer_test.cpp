@@ -309,6 +309,89 @@ TEST_F(SlotBufferTest, DpMetadataStaysPrivateAcrossSlotPreparationAndReuse) {
   expect_device_input(active);
 }
 
+TEST_F(SlotBufferTest, GraphPaddingKeepsLogicalSamplingAndPreviousRows) {
+  InputData data =
+      make_input(std::vector<int32_t>{1, 1}, std::vector<int32_t>{7, 9});
+  data.tokens[0] = -1;
+  auto input = make_forward_input(data, BatchForwardType::DECODE, 2);
+  input.input_params.parallel.dp_global_token_nums = {2, 3};
+  input.input_params.parallel.dp_is_decode = {1, 1};
+  input.sampling_params.selected_token_idxes =
+      torch::tensor({0, 1}, torch::kInt32);
+  input.sampling_params.sample_idxes = torch::tensor({0, 1}, torch::kInt32);
+  input.sampling_params.do_sample = torch::zeros({2}, torch::kBool);
+  ASSERT_TRUE(binding_->validate(input, /*previous_rows=*/1, *transfer_).ok());
+  binding_->prepare(input, *transfer_, /*padded_batch_size=*/4);
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  const void* address = binding_->tokens().data_ptr();
+  const auto& params = binding_->model_params();
+  EXPECT_EQ(params.meta.num_sequences, 4);
+  EXPECT_EQ(params.meta.actual_num_sequences, 2);
+  EXPECT_EQ(params.parallel.dp_global_token_nums, (std::vector<int32_t>{4, 4}));
+  EXPECT_EQ(params.parallel.raw_dp_global_token_nums,
+            (std::vector<int32_t>{2, 3}));
+  EXPECT_EQ(params.attention.host.kv_seq_lens,
+            (std::vector<int32_t>{7, 9, 1, 1}));
+  EXPECT_EQ(params.attention.host.new_cache_slots,
+            (std::vector<int32_t>{301, 302, -1, -1}));
+  EXPECT_EQ(binding_->sampling_params().sample_idxes.numel(), 2);
+  EXPECT_EQ(binding_->device_result().tokens.numel(), 2);
+  {
+    auto guard = consumer_->set_stream_guard();
+    binding_->patch_previous_tokens(
+        torch::tensor({777, 0, 0, 0}, torch::kInt64).to(device_));
+    EXPECT_TRUE(torch::equal(binding_->tokens().cpu(),
+                             torch::tensor({777, 102, 1, 1}, torch::kInt32)));
+  }
+  InputData empty;
+  empty.width = 0;
+  input = make_forward_input(empty, BatchForwardType::DECODE, 0);
+  input.input_params.parallel.dp_global_token_nums = {0, 3};
+  input.input_params.parallel.dp_is_decode = {0, 1};
+  ASSERT_TRUE(binding_->validate(input, 0, *transfer_).ok());
+  binding_->prepare(input, *transfer_, /*padded_batch_size=*/4);
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  EXPECT_EQ(binding_->tokens().data_ptr(), address);
+  EXPECT_EQ(params.meta.actual_num_sequences, 0);
+  EXPECT_EQ(params.parallel.dp_is_decode, (std::vector<int32_t>{1, 1}));
+  EXPECT_FALSE(binding_->has_previous_tokens());
+  EXPECT_FALSE(binding_->device_result().tokens.defined());
+  EXPECT_TRUE(torch::equal(params.attention.device.new_cache_slots.cpu(),
+                           torch::full({4}, -1, torch::kInt32)));
+  EXPECT_EQ(params.attention.device.block_tables.cpu()
+                .count_nonzero()
+                .item<int64_t>(),
+            0);
+}
+
+TEST_F(SlotBufferTest, GraphAndEagerReuseResetPhysicalAndLogicalMetadata) {
+  InputData data = make_input(std::vector<int32_t>{1}, std::vector<int32_t>{9});
+  auto input = make_forward_input(data, BatchForwardType::DECODE, 1);
+  input.input_params.parallel.dp_global_token_nums = {1, 3};
+  input.input_params.parallel.dp_is_decode = {1, 1};
+  binding_->prepare(input, *transfer_, /*padded_batch_size=*/4);
+  EXPECT_TRUE(binding_->model_params().enable_graph);
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  const void* address = binding_->tokens().data_ptr();
+  const void* blocks =
+      binding_->model_params().attention.device.block_tables.data_ptr();
+  data = make_input(std::vector<int32_t>{2}, std::vector<int32_t>{2});
+  input = make_forward_input(data, BatchForwardType::PREFILL, 1);
+  input.input_params.parallel.dp_global_token_nums = {2, 1};
+  input.input_params.parallel.dp_is_decode = {0, 1};
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  EXPECT_FALSE(binding_->model_params().enable_graph);
+  expect_device_input(data);
+  EXPECT_EQ(binding_->tokens().data_ptr(), address);
+  EXPECT_EQ(binding_->model_params().attention.device.block_tables.data_ptr(),
+            blocks);
+  EXPECT_TRUE(
+      binding_->model_params().parallel.raw_dp_global_token_nums.empty());
+  EXPECT_EQ(binding_->model_params().parallel.dp_global_token_nums,
+            (std::vector<int32_t>{2, 1}));
+  EXPECT_EQ(binding_->model_params().meta.num_sequences, 1);
+}
+
 TEST_F(SlotBufferTest, MixedBatchKeepsActualAndPaddingRowsDistinct) {
   InputData input = make_input({2, 1, 0}, {5, 7, 0});
   ASSERT_TRUE(

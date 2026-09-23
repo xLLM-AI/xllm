@@ -46,6 +46,8 @@ struct LlmTaskCapacity {
   bool enable_mla = false;
   uint32_t dp_size = 1;
   uint32_t dp_rank = 0;
+  // DP-local Graph batch limit; zero disables Graph execution.
+  uint32_t max_graph_batch_size = 0;
 };
 
 struct TaskSubmission {
@@ -59,11 +61,11 @@ struct TaskResult {
   uint64_t task_id = 0;
 };
 
-// One or two Slots with prepared eager execution. State calls serialize
-// Prepare/Consume; the Launch thread submits model work in task order.
-// Prepare/Consume may overlap Launch for another Slot. The state executor,
-// model, executor and KV vector outlive the pipeline; the owner prevents
-// external calls racing with destruction.
+// One or two Slots with prepared eager or ACL graph execution. State calls
+// serialize Prepare/Consume; the Launch thread submits model work in task
+// order. Prepare/Consume may overlap Launch for another Slot. The state
+// executor, model, executor and KV vector outlive the pipeline; the owner
+// prevents external calls racing with destruction.
 class TaskExecutionPipeline final {
  public:
   static Status create(ThreadPool& state_executor,
@@ -96,6 +98,12 @@ class TaskExecutionPipeline final {
   friend class TaskExecutionPipelineInputTest;
   static Status validate_input(const ForwardInput& input,
                                const LlmTaskCapacity& capacity);
+  static std::vector<int64_t> graph_batch_sizes(
+      const LlmTaskCapacity& capacity);
+  static uint32_t graph_batch_size(const ForwardInput& input,
+                                   std::span<const int64_t> batch_sizes);
+  Status warmup_slot_graphs(const ForwardInput& input,
+                            uint32_t padded_batch_size);
 
   struct Step {
     uint64_t id = 0;
@@ -154,6 +162,10 @@ class TaskExecutionPipeline final {
   Step accepted_tail_;
   Step published_tail_;
   std::vector<std::unique_ptr<Slot>> slots_;
+  std::vector<int64_t> graph_batch_sizes_;
+  // Sorted buckets captured for every Slot through ordinary warmup Tasks.
+  // Only these buckets are eligible for serving on every DP rank.
+  std::vector<int64_t> captured_graph_batch_sizes_;
 
   ThreadPool& state_executor_;
   ConcurrentQueue<SlotTicket> execution_;

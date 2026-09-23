@@ -54,9 +54,14 @@ class ExecutorImpl {
     LOG(FATAL) << "Executor does not support prepared attention metadata.";
   }
 
-  // tokens: vector size is dp_size, each element is [num_tokens/dp_size]
-  // positions: vector size is dp_size, each element is [num_tokens/dp_size]
-  // token pos in the sequence returns: ModelOutput
+  // Regular warmup Tasks capture final Slot inputs before serving uses them.
+  virtual void warmup_prepared_graph(const torch::Tensor& /*tokens*/,
+                                     const torch::Tensor& /*positions*/,
+                                     std::vector<KVCache>& /*kv_caches*/,
+                                     const ModelInputParams& /*params*/) {
+    LOG(FATAL) << "Executor does not support prepared graph capture.";
+  }
+
   virtual ModelOutput run(const torch::Tensor& tokens,
                           const torch::Tensor& positions,
                           std::vector<KVCache>& kv_caches,

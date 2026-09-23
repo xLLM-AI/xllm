@@ -71,7 +71,12 @@ class SlotBuffer final {
   // padding row for peer collectives, without an actual sequence or sample.
   // All caller storage is released after Prepare; only Slot-owned copies
   // remain.
-  void prepare(const ForwardInput& input, const Stream& stream);
+  // Nonzero padded_batch_size pads ordinary decode to a common captured bucket.
+  // Zero keeps the eager input shape.
+  // Sampling and previous-token mappings retain their logical row counts.
+  void prepare(const ForwardInput& input,
+               const Stream& stream,
+               uint32_t padded_batch_size = 0);
   bool has_previous_tokens() const { return gather_count_ != 0; }
   void patch_previous_tokens(const torch::Tensor& previous_tokens);
 
@@ -152,7 +157,8 @@ class SlotBuffer final {
   Status validate_previous_tokens(const ModelInputHostView& model,
                                   uint32_t previous_rows) const;
   void prepare_model(const ModelInputHostView& model,
-                     const BatchInputMeta& batch);
+                     const BatchInputMeta& batch,
+                     uint32_t padded_batch_size = 0);
   void prepare_sampling(const SamplingParameters& sampling);
   void prepare_result();
   void prepare_previous_tokens(const ModelInputHostView& model);

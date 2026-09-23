@@ -62,8 +62,18 @@ Worker::Worker(const ParallelArgs& parallel_args,
     CHECK(ModelConfig::is_python_model_impl(
         ModelConfig::get_instance().model_impl()))
         << "Task pipeline requires the Python model implementation.";
+    const auto& execution = ExecutionConfig::get_instance();
+    const std::string& graph_backend = execution.python_graph_backend();
+    CHECK(graph_backend.empty() || graph_backend == "off" ||
+          graph_backend == "none" || graph_backend == "0" ||
+          graph_backend == "aclgraph")
+        << "Task pipeline supports only the Python ACL graph backend.";
+    CHECK(graph_backend != "aclgraph" || options.enable_graph())
+        << "Task pipeline ACL graphs require enable_graph.";
+    CHECK(!options.enable_graph() || !execution.disable_graph_warmup())
+        << "Task pipeline ACL graphs require initialization warmup.";
     CHECK(worker_type == WorkerType::LLM && options.task_type() == "generate" &&
-          !options.enable_graph() && !options.enable_speculative_decode() &&
+          !options.enable_speculative_decode() &&
           !options.enable_prefill_piecewise_graph() &&
           !options.enable_disagg_pd() && options.host_blocks_factor() <= 1.0 &&
           !options.enable_kvcache_store() &&

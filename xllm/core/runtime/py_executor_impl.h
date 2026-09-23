@@ -51,6 +51,11 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   void prepare_attention_metadata(std::vector<KVCache>& kv_caches,
                                   ModelInputParams& params) override;
 
+  void warmup_prepared_graph(const torch::Tensor& tokens,
+                             const torch::Tensor& positions,
+                             std::vector<KVCache>& kv_caches,
+                             const ModelInputParams& params) override;
+
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,
                   std::vector<KVCache>& kv_caches,

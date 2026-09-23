@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 import torch
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         AttentionMetadata,
         LayerCache,
     )
+    from xllm.python.attention.npu_paged_attention import PagedAttentionGraphState
 
 
 class LayerSynchronizer(Protocol):
@@ -53,9 +54,10 @@ class AclGraphTask:
 
 @dataclass(slots=True)
 class AclGraphExecutionState:
-    """Persistent tensors owned by one model-execution graph entry."""
+    """Persistent resources owned by one model-execution graph entry."""
 
-    persistent_buffers: dict[tuple[object, ...], object]
+    persistent_buffers: dict[tuple[object, ...], torch.Tensor]
+    paged_attention: dict[int, PagedAttentionGraphState] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

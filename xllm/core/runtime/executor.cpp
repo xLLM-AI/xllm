@@ -55,6 +55,13 @@ void Executor::prepare_attention_metadata(std::vector<KVCache>& kv_caches,
   impl_->prepare_attention_metadata(kv_caches, params);
 }
 
+void Executor::warmup_prepared_graph(const torch::Tensor& tokens,
+                                     const torch::Tensor& positions,
+                                     std::vector<KVCache>& kv_caches,
+                                     const ModelInputParams& params) {
+  impl_->warmup_prepared_graph(tokens, positions, kv_caches, params);
+}
+
 ModelOutput Executor::forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,

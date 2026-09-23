@@ -31,8 +31,6 @@ logic:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -45,67 +43,13 @@ from xllm.python.attention.expanded_decode_metadata import (
     resolve_expanded_decode_metadata,
 )
 from xllm.python.model_executor.forward_context import (
-    AclGraphCaptureContext,
     AclGraphExecutionState,
-    AclGraphTask,
-    ForwardContext,
-    forward_context,
 )
-from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOutput
+from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
+from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.decode_cuda_graph import (
-    _CAPTURE_WARMUP_STEPS,
     _decode_bucket,
 )
-
-
-@dataclass(slots=True)
-class _StaticAttentionMetadata:
-    slot_mapping: torch.Tensor
-    paged_kv_indptr: torch.Tensor
-    paged_kv_indices: torch.Tensor
-    paged_kv_last_page_len: torch.Tensor
-    qo_indptr: torch.Tensor | None = None
-    q_cu_seq_lens: torch.Tensor | None = None
-    kv_cu_seq_lens: torch.Tensor | None = None
-    kv_seq_lens_host: torch.Tensor | None = None
-    kv_seq_lens_host_values: list[int] | None = None
-    paged_kv_indptr_host: torch.Tensor | None = None
-    paged_kv_last_page_len_host: torch.Tensor | None = None
-    block_table: torch.Tensor | None = None
-    kv_seq_lens: torch.Tensor | None = None
-    linear_state_indices: torch.Tensor | None = None
-    has_initial_state: torch.Tensor | None = None
-    dp_execution_token_counts: tuple[int, ...] = ()
-    dp_global_sequence_nums: tuple[int, ...] = ()
-    dp_is_decode: tuple[int, ...] = ()
-    q_seq_lens: torch.Tensor | None = None
-    expanded_decode_metadata: ExpandedDecodeMetadata | None = None
-    is_prefill: bool = False
-    is_chunked_prefill: bool = False
-    is_mixed: bool = False
-    is_spec_verify: bool = False
-    local_slot_mapping: torch.Tensor | None = None
-    kv_split_size: int = 1
-    kv_split_rank: int = 0
-    has_kv_shard: bool = False
-
-
-class _DecodeGraphEntry:
-    __slots__ = (
-        "batch_size",
-        "graph",
-        "static_output",
-        "static_input_ids",
-        "static_positions",
-        "static_input_embedding",
-        "static_mtp_topk_indices",
-        "static_metadata",
-        "kv_seq_lens_delta",
-        "graph_tasks",
-        "execution_state",
-        "replay_logged",
-    )
-
 
 _GraphKey = tuple[
     int,
@@ -120,8 +64,12 @@ _GraphKey = tuple[
 ]
 
 
-class DecodeAclGraphRunner(BaseRunner):
-    """Decode graph runner for NPU (Ascend) using ACL graph capture/replay."""
+class DecodeAclGraphRunner(AclGraphRunner):
+    """Owns static inputs and lazily captures decode graphs on a private stream.
+
+    Inputs are copied into entry-owned storage; returned outputs are detached
+    from replay buffers. Slot-bound execution uses PreparedAclGraphRunner.
+    """
 
     def __init__(
         self,
@@ -143,13 +91,11 @@ class DecodeAclGraphRunner(BaseRunner):
         self.decode_batch_size_limit = None if decode_batch_size_limit is None else max(1, int(decode_batch_size_limit))
         self.num_decoding_tokens = max(1, int(num_decoding_tokens))
         self._batch_limit_warning_logged = False
-        self._graphs: dict[_GraphKey, _DecodeGraphEntry] = {}
+        self._graphs: dict[_GraphKey, AclGraphEntry] = {}
         self._dp_graph_variants: dict[_GraphKey, int] = {}
         self._paged_kv_indices_buffer: torch.Tensor | None = None
         self._max_blocks_per_sequence: int = 0
         self._stream: torch.npu.Stream | None = None
-        self._update_stream: torch.npu.Stream | None = None
-        self._replay_done_event: torch.npu.Event | None = None
         self._update_done_event: torch.npu.Event | None = None
         self._update_done_recorded = False
 
@@ -435,20 +381,6 @@ class DecodeAclGraphRunner(BaseRunner):
         if paged_kv_indices.dim() != 1 or paged_kv_indices.numel() == 0:
             raise RuntimeError("decode paged_kv_indices must be a non-empty flat page list")
 
-    @staticmethod
-    def _validate_decode_token_layout(
-        input_ids: torch.Tensor,
-        positions: torch.Tensor | None,
-        slot_mapping: torch.Tensor,
-        metadata_row_count: int,
-    ) -> None:
-        if input_ids.dim() != 1 or input_ids.numel() != metadata_row_count:
-            raise RuntimeError("ACL graph decode input_ids must contain one token per metadata row")
-        if slot_mapping.dim() != 1 or slot_mapping.numel() != metadata_row_count:
-            raise RuntimeError("ACL graph decode slot_mapping must contain one slot per token")
-        if positions is not None and (positions.dim() != 1 or positions.numel() != metadata_row_count):
-            raise RuntimeError("ACL graph decode positions must contain one value per token")
-
     def _has_compatible_decode_metadata(
         self,
         input_ids: torch.Tensor,
@@ -661,13 +593,8 @@ class DecodeAclGraphRunner(BaseRunner):
             )
             entry.replay_logged = True
 
-        with torch.npu.stream(self._update_stream):
-            self._update_stream.wait_event(self._replay_done_event)
-            self._update_graph_tasks(self._update_stream, entry.graph_tasks)
-            assert self._update_done_event is not None
-            self._update_done_event.record(self._update_stream)
-
-        self._replay_done_event.record(self._stream)
+        assert self._update_done_event is not None
+        self._update_after_replay(entry, self._stream, self._update_done_event)
         self._update_done_recorded = True
 
         torch.npu.current_stream().wait_stream(self._stream)
@@ -716,7 +643,7 @@ class DecodeAclGraphRunner(BaseRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         graph_key: _GraphKey | None = None,
-    ) -> _DecodeGraphEntry:
+    ) -> AclGraphEntry:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
@@ -743,11 +670,7 @@ class DecodeAclGraphRunner(BaseRunner):
 
         if self._stream is None:
             self._stream = torch.npu.Stream(device=input_ids.device)
-            self._update_stream = torch.npu.Stream(
-                device=input_ids.device,
-                priority=-1,
-            )
-            self._replay_done_event = torch.npu.Event()
+            self._initialize_task_updates()
             self._update_done_event = torch.npu.Event()
 
         # The previous replay may still be reading the capture buffers on the
@@ -777,21 +700,10 @@ class DecodeAclGraphRunner(BaseRunner):
             mtp_topk_indices,
         )
 
-        prepare_context = ForwardContext(
-            self.attention_backend,
-            self.device,
-            entry.static_metadata,
-            self.layer_caches,
-            execution_state=entry.execution_state,
-        )
-        with forward_context(prepare_context):
-            self.attention_backend.prepare(
-                entry.static_metadata,
-                graph_mode=True,
-            )
+        self._prepare_attention(entry, entry.static_metadata)
 
         if first_capture:
-            self._capture(entry)
+            self._capture(entry, self._stream)
         return entry
 
     @staticmethod
@@ -831,7 +743,7 @@ class DecodeAclGraphRunner(BaseRunner):
         positions: torch.Tensor,
         metadata: AttentionMetadata,
         mtp_topk_indices: torch.Tensor | None = None,
-    ) -> _DecodeGraphEntry:
+    ) -> AclGraphEntry:
         device = input_ids.device
         (
             _,
@@ -860,7 +772,7 @@ class DecodeAclGraphRunner(BaseRunner):
             device=device,
         )
 
-        entry = _DecodeGraphEntry()
+        entry = AclGraphEntry()
         entry.batch_size = padded_batch_size
         entry.graph = None
         entry.static_output = None
@@ -877,7 +789,7 @@ class DecodeAclGraphRunner(BaseRunner):
                 dtype=mtp_topk_indices.dtype,
                 device=mtp_topk_indices.device,
             )
-        entry.static_metadata = _StaticAttentionMetadata(
+        entry.static_metadata = StaticGraphAttentionMetadata(
             slot_mapping=torch.zeros(
                 padded_batch_size,
                 dtype=metadata.slot_mapping.dtype,
@@ -941,7 +853,7 @@ class DecodeAclGraphRunner(BaseRunner):
 
     def _fill_entry(
         self,
-        entry: _DecodeGraphEntry,
+        entry: AclGraphEntry,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
@@ -1075,7 +987,7 @@ class DecodeAclGraphRunner(BaseRunner):
 
     def _fill_host_metadata(
         self,
-        entry: _DecodeGraphEntry,
+        entry: AclGraphEntry,
         kv_seq_lens: list[int] | None,
         batch_size: int,
     ) -> None:
@@ -1098,81 +1010,3 @@ class DecodeAclGraphRunner(BaseRunner):
         static_kv_seq_lens[:batch_size] = kv_seq_lens
         if padded_batch_size > batch_size:
             static_kv_seq_lens[batch_size:] = [1] * (padded_batch_size - batch_size)
-
-    def _capture(self, entry: _DecodeGraphEntry) -> None:
-        assert self._stream is not None
-        logger.info(
-            "Python ACL graph capture start: model=%s bucket=%d mtp_topk=%s",
-            type(self.model).__name__,
-            entry.batch_size,
-            entry.static_mtp_topk_indices is not None,
-        )
-        # Input copies and backend metadata preparation run on the caller's
-        # stream. A new bucket's eager warmup must observe those writes before
-        # reading token IDs or page tables, just like an existing graph replay.
-        self._stream.wait_stream(torch.npu.current_stream())
-        context = ForwardContext(
-            self.attention_backend,
-            self.device,
-            entry.static_metadata,
-            self.layer_caches,
-            execution_state=entry.execution_state,
-        )
-        with forward_context(context), torch.npu.stream(self._stream):
-            for _ in range(_CAPTURE_WARMUP_STEPS):
-                self._forward_static(entry)
-        torch.npu.synchronize()
-        entry.graph = torch.npu.NPUGraph()
-        capture_context = AclGraphCaptureContext(self._stream, [])
-        context = ForwardContext(
-            self.attention_backend,
-            self.device,
-            entry.static_metadata,
-            self.layer_caches,
-            acl_graph=capture_context,
-            execution_state=entry.execution_state,
-        )
-        with forward_context(context), torch.npu.graph(entry.graph, stream=self._stream):
-            entry.static_output = self._forward_static(entry)
-        entry.graph_tasks = capture_context.tasks
-        logger.info(
-            "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",
-            type(self.model).__name__,
-            entry.batch_size,
-            entry.static_mtp_topk_indices is not None,
-            len(entry.graph_tasks),
-        )
-
-    def _forward_static(self, entry: _DecodeGraphEntry) -> ModelExecutionOutput:
-        if entry.static_input_embedding is None:
-            if entry.static_mtp_topk_indices is None:
-                return self.model(entry.static_input_ids, entry.static_positions)
-            return self.model(
-                entry.static_input_ids,
-                entry.static_positions,
-                None,
-                entry.static_mtp_topk_indices,
-            )
-        if entry.static_mtp_topk_indices is None:
-            return self.model(
-                entry.static_input_ids,
-                entry.static_positions,
-                entry.static_input_embedding,
-            )
-        return self.model(
-            entry.static_input_ids,
-            entry.static_positions,
-            entry.static_input_embedding,
-            entry.static_mtp_topk_indices,
-        )
-
-    @staticmethod
-    def _update_graph_tasks(
-        stream: torch.npu.Stream,
-        graph_tasks: list[AclGraphTask],
-    ) -> None:
-        for task in graph_tasks:
-            torch.npu.graph_task_update_begin(stream, task.handle)
-            task.update()
-            torch.npu.graph_task_update_end(stream)
-            task.event.record(stream)

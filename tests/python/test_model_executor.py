@@ -1452,3 +1452,33 @@ def test_executor_accepts_prepared_data_parallel(model_type: str) -> None:
     ):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
     assert executor.supports_prepared_metadata
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])
+@pytest.mark.parametrize("dp_size", [1, 2])
+@pytest.mark.parametrize("pipeline", [False, True])
+def test_executor_selects_acl_graph_input_owner(model_type: str, dp_size: int, pipeline: bool) -> None:
+    config = {
+        "model_type": model_type,
+        "dp_size": dp_size,
+        "dp_rank": dp_size - 1,
+        "python_graph_backend": "aclgraph",
+        "enable_task_pipeline": pipeline,
+        "max_position_embeddings": 128,
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4 * dp_size)
+    assert executor.supports_prepared_metadata
+    if pipeline:
+        assert executor.decode_graph_runner is None
+        assert executor.prepared_graph_runner.dp_size == dp_size
+        assert executor.prepared_graph_runner.max_batch == 4
+    else:
+        assert executor.prepared_graph_runner is None
+        assert executor.decode_graph_runner.dp_size == dp_size
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
+    assert len(runner.layer_caches) == 2

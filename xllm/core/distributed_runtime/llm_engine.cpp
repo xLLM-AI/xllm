@@ -1428,8 +1428,11 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
     }
   }
 
+  // Empty ranks must participate in the same warmup capture as active ranks.
+  const bool is_graph_warmup = contains_graph_warmup(batched_inputs);
   // update dp_global_token_nums and batch_forward_type
   for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+    batched_inputs[dp_rank].input_params.meta.is_graph_warmup = is_graph_warmup;
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.dp_global_sequence_nums =

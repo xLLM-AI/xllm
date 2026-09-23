@@ -1929,6 +1929,16 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   capacity.dp_size = parallel_args_.dp_size();
   capacity.dp_rank = parallel_args_.rank() /
                      (parallel_args_.world_size() / parallel_args_.dp_size());
+  if (options_.enable_graph()) {
+    const int64_t local_batch_size =
+        (static_cast<int64_t>(options_.max_seqs_per_batch()) +
+         capacity.dp_size - 1) /
+        capacity.dp_size;
+    const int64_t graph_limit = std::max<int64_t>(
+        1, ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
+    capacity.max_graph_batch_size =
+        static_cast<uint32_t>(std::min(local_batch_size, graph_limit));
+  }
   ::xllm::Status status = TaskExecutionPipeline::create(
       threadpool_, *model_, *model_executor_, kv_caches_, capacity, output);
   if (!status.ok()) {

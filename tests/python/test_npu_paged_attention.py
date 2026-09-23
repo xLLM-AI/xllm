@@ -24,6 +24,7 @@ pytest.importorskip("torch_npu", reason="NPU paged-attention tests require torch
 from xllm.python.attention.backend import LayerCache  # noqa: E402
 from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     NpuPagedAttentionBackend,
+    PagedAttentionGraphState,
 )
 
 
@@ -261,7 +262,7 @@ def test_prepared_mla_rejects_invalid_views_before_activation(invalid: str) -> N
 
 
 @pytest.mark.parametrize("is_mla", [False, True])
-@pytest.mark.parametrize("prefill,chunked", [(True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("prefill,chunked", [(True, False), (False, True)])
 def test_prepared_graph_rejection_preserves_active_slot(is_mla: bool, prefill: bool, chunked: bool) -> None:
     backend = _mla_backend() if is_mla else _ordinary_backend()
     active = _mla_metadata()
@@ -269,18 +270,55 @@ def test_prepared_graph_rejection_preserves_active_slot(is_mla: bool, prefill: b
     backend.prepare(active)
     active_state = backend._metadata
     backend._mla_quant_indexer_metadata["active_slot"] = object()
-    # Even a warmed graph must not accept prepared eager metadata.
-    backend._graph_workspace = object()
-    backend._graph_outputs[2] = object()
-    backend._graph_lses[2] = object()
+    # A warmed decode graph must not accept prepared prefill metadata.
+    graph_state = object()
+    backend._paged_graph_state = graph_state
     metadata = _mla_metadata(prefill=prefill, chunked=chunked)
     metadata.prepared_attention_state = backend.prepare_metadata(metadata)
 
-    with pytest.raises(ValueError, match="requires eager execution"):
+    with pytest.raises(ValueError, match="requires.*decode"):
         backend.prepare(metadata, graph_mode=True)
 
     assert backend._metadata is active_state
     assert backend._block_table_i32 is active.block_table
     assert "active_slot" in backend._mla_quant_indexer_metadata
-    assert backend._current_graph_output is None
-    assert backend._current_graph_lse is None
+    assert backend._paged_graph_state is graph_state
+
+
+@pytest.mark.parametrize("is_mla", [False, True])
+def test_prepared_decode_uses_warmed_graph_state(is_mla: bool) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState, ForwardContext, forward_context
+
+    backend = _mla_backend() if is_mla else _ordinary_backend()
+    metadata = _mla_metadata()
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+    state = PagedAttentionGraphState(
+        torch.empty(1), torch.empty(2, 8, 64), torch.empty(0), metadata.block_table, [], []
+    )
+    execution = AclGraphExecutionState({}, {2: state})
+    with forward_context(ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=execution)):
+        backend.prepare(metadata, graph_mode=True)
+    assert backend._block_table_i32 is metadata.block_table
+    if is_mla:
+        assert backend._metadata is metadata.prepared_attention_state
+        assert backend._mla_actual_seq_q is metadata.q_cu_seq_lens
+        assert backend._mla_actual_seq_kv is metadata.kv_seq_lens
+        assert backend._mla_max_seqlen_k == metadata.block_table.shape[1] * backend.page_size
+    else:
+        assert backend._metadata is None
+        assert backend._paged_graph_state is state
+        assert state.kv == metadata.kv_seq_lens_host_values
+        assert backend._actual_seq_lens is None
+
+
+def test_paged_graph_requires_an_execution_owner() -> None:
+    from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+
+    backend = _ordinary_backend()
+    metadata = _mla_metadata()
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+    with (
+        forward_context(ForwardContext(backend, torch.device("cpu"), metadata, [])),
+        pytest.raises(RuntimeError, match="execution entry"),
+    ):
+        backend.prepare(metadata, graph_mode=True)

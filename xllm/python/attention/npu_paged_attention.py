@@ -152,6 +152,18 @@ class _PreparedPagedAttention:
     actual_seq_kv: list[int]
 
 
+@dataclass(frozen=True, slots=True)
+class PagedAttentionGraphState:
+    """One entry's paged attention buffers and captured Host parameter lists."""
+
+    workspace: torch.Tensor
+    output: torch.Tensor
+    lse: torch.Tensor
+    block_table: torch.Tensor
+    query: list[int]
+    kv: list[int]
+
+
 class NpuPagedAttentionBackend(AttentionBackend):
     """NPU attention backend dispatching to npu_fused_infer_attention_score."""
 
@@ -181,11 +193,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._num_kv_blocks: int | None = None
         self._page_size: int | None = None
         self._metadata: AttentionMetadata | _PreparedMlaAttention | None = None
-        self._graph_workspace: torch.Tensor | None = None
-        self._graph_outputs: dict[int, torch.Tensor] = {}
-        self._graph_lses: dict[int, torch.Tensor] = {}
-        self._current_graph_output: torch.Tensor | None = None
-        self._current_graph_lse: torch.Tensor | None = None
+        self._paged_graph_state: PagedAttentionGraphState | None = None
         self._use_expanded_decode = False
         self._block_table_i32: torch.Tensor | None = None
         self._actual_seq_lens: list[int] | None = None
@@ -349,11 +357,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         graph_mode: bool = False,
     ) -> None:
         prepared = getattr(metadata, "prepared_attention_state", None)
-        if prepared is not None and graph_mode:
-            raise ValueError("prepared attention metadata requires eager execution")
         if isinstance(prepared, _PreparedMlaAttention):
-            if not self._is_mla:
-                raise ValueError("prepared MLA state requires MLA attention")
+            if not self._is_mla or (graph_mode and (prepared.is_prefill or prepared.is_chunked_prefill)):
+                raise ValueError("prepared MLA graph state requires decode")
             self._metadata = prepared
             self._use_expanded_decode = False
             self._block_table_i32 = prepared.block_table
@@ -365,7 +371,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
             self._mla_actual_seq_q_host = prepared.query_ends if self.requires_host_kv_lengths else None
             self._mla_actual_seq_kv_host = prepared.kv_lengths if self.requires_host_kv_lengths else None
             self._mla_max_seqlen_q = prepared.max_query_len
-            self._mla_max_seqlen_k = prepared.max_seq_len
+            self._mla_max_seqlen_k = (
+                _mla_graph_max_seqlen_k(prepared.block_table, self.page_size) if graph_mode else prepared.max_seq_len
+            )
             self._mla_quant_indexer_metadata.clear()
             self._kv_owner_representatives = None
             self._materialized_block_table = None
@@ -374,12 +382,18 @@ class NpuPagedAttentionBackend(AttentionBackend):
         if prepared is not None:
             if self._is_mla or not isinstance(prepared, _PreparedPagedAttention):
                 raise ValueError("prepared paged state requires ordinary attention")
-            self._metadata = metadata
+            if graph_mode and (metadata.is_prefill or metadata.is_chunked_prefill):
+                raise ValueError("prepared graph attention requires decode")
+            # Graph task-update closures retain this backend. Retaining the
+            # selected entry here would create an ownership cycle.
+            self._metadata = None if graph_mode else metadata
             self._use_expanded_decode = False
             self._block_table_i32 = prepared.block_table
-            self._actual_seq_lens = prepared.query_ends
+            self._actual_seq_lens = None if graph_mode else prepared.query_ends
             self._actual_seq_q = prepared.actual_seq_q
             self._actual_seq_kv = prepared.actual_seq_kv
+            if graph_mode:
+                self._prepare_paged_graph()
             return
         self._metadata = metadata
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
@@ -440,50 +454,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
             self._actual_seq_kv = []
 
         if graph_mode and self._block_table_i32 is not None and not self._is_mla:
-            graph_batch_size = self._block_table_i32.shape[0]
-            graph_state = get_forward_context().execution_state
-            if graph_state is None:
-                if self._graph_workspace is None:
-                    self._graph_workspace = self._allocate_graph_workspace(
-                        graph_batch_size,
-                        self._block_table_i32,
-                    )
-                self._current_graph_output = self._graph_outputs.setdefault(
-                    graph_batch_size,
-                    torch.empty(
-                        graph_batch_size,
-                        self.num_heads,
-                        self.head_dim,
-                        dtype=self.dtype,
-                        device=self.device,
-                    ),
-                )
-                self._current_graph_lse = self._graph_lses.setdefault(
-                    graph_batch_size,
-                    torch.empty(0, dtype=self.dtype, device=self.device),
-                )
-            else:
-                self._graph_workspace = get_execution_buffer(
-                    ("FIA_WORKSPACE", graph_batch_size),
-                    lambda: self._allocate_graph_workspace(
-                        graph_batch_size,
-                        self._block_table_i32,
-                    ),
-                )
-                self._current_graph_output = get_execution_buffer(
-                    ("FIA_OUTPUT", graph_batch_size),
-                    lambda: torch.empty(
-                        graph_batch_size,
-                        self.num_heads,
-                        self.head_dim,
-                        dtype=self.dtype,
-                        device=self.device,
-                    ),
-                )
-                self._current_graph_lse = get_execution_buffer(
-                    ("FIA_LSE", graph_batch_size),
-                    lambda: torch.empty(0, dtype=self.dtype, device=self.device),
-                )
+            self._prepare_paged_graph()
 
         # Pre-cache MLA (sparse SFA) seq-lens once per step; shared by
         # execute_mla / mla_index_context instead of re-derived per layer.
@@ -562,6 +533,34 @@ class NpuPagedAttentionBackend(AttentionBackend):
             self._mla_max_seqlen_k = 0
 
         self._prepare_kv_shard_materialization(metadata)
+
+    def _prepare_paged_graph(self) -> None:
+        if self._block_table_i32 is None:
+            raise ValueError("paged graph attention requires a block table")
+        graph_batch_size = self._block_table_i32.shape[0]
+        graph_state = get_forward_context().execution_state
+        if graph_state is None:
+            raise RuntimeError("paged graph attention requires an execution entry")
+        state = graph_state.paged_attention.get(graph_batch_size)
+        if state is None:
+            state = PagedAttentionGraphState(
+                workspace=self._allocate_graph_workspace(graph_batch_size, self._block_table_i32),
+                output=torch.empty(
+                    graph_batch_size, self.num_heads, self.head_dim, dtype=self.dtype, device=self.device
+                ),
+                lse=torch.empty(0, dtype=self.dtype, device=self.device),
+                block_table=self._block_table_i32,
+                query=[],
+                kv=[],
+            )
+            graph_state.paged_attention[graph_batch_size] = state
+        # Replace values, not list identities: capture-time task closures hold
+        # these exact objects, including when another Slot prepares this backend.
+        state.query[:] = self._actual_seq_q
+        state.kv[:] = self._actual_seq_kv
+        self._paged_graph_state = state
+        self._actual_seq_q = state.query
+        self._actual_seq_kv = state.kv
 
     def _allocate_graph_workspace(
         self,
@@ -1432,23 +1431,15 @@ class NpuPagedAttentionBackend(AttentionBackend):
         v: torch.Tensor,
         block_size: int,
         *,
-        actual_seq_q: list[int] | torch.Tensor | None = None,
-        actual_seq_kv: list[int] | torch.Tensor | None = None,
-        block_table: torch.Tensor | None = None,
-        workspace: torch.Tensor | None = None,
-        output: torch.Tensor | None = None,
-        lse: torch.Tensor | None = None,
+        actual_seq_q: list[int] | torch.Tensor,
+        actual_seq_kv: list[int] | torch.Tensor,
+        block_table: torch.Tensor,
+        workspace: torch.Tensor,
+        output: torch.Tensor,
+        lse: torch.Tensor,
     ) -> None:
-        # Graph-task updates can run after another graph entry has prepared the
-        # same backend.  Resolve all mutable per-entry state before launching
-        # the operator so the deferred update cannot write into that entry's
-        # buffers with the next entry's metadata.
-        actual_seq_q = self._actual_seq_q if actual_seq_q is None else actual_seq_q
-        actual_seq_kv = self._actual_seq_kv if actual_seq_kv is None else actual_seq_kv
-        block_table = self._block_table_i32 if block_table is None else block_table
-        workspace = self._graph_workspace if workspace is None else workspace
-        output = self._current_graph_output if output is None else output
-        lse = self._current_graph_lse if lse is None else lse
+        # Every mutable argument belongs to the captured entry. A deferred
+        # update never resolves parameters through the backend's active state.
         if self._use_fia_v2:
             torch.ops.npu.npu_fused_infer_attention_score_v2.out(
                 q,
@@ -1507,14 +1498,15 @@ class NpuPagedAttentionBackend(AttentionBackend):
 
         graph_context = get_forward_context().acl_graph
         if graph_context is not None:
-            if self._current_graph_output is None:
+            state = self._paged_graph_state
+            if state is None:
                 raise RuntimeError("ACL graph output buffer is not prepared")
-            actual_seq_q = self._actual_seq_q
-            actual_seq_kv = self._actual_seq_kv
-            block_table = self._block_table_i32
-            workspace = self._graph_workspace
-            output = self._current_graph_output
-            lse = self._current_graph_lse
+            actual_seq_q = state.query
+            actual_seq_kv = state.kv
+            block_table = state.block_table
+            workspace = state.workspace
+            output = state.output
+            lse = state.lse
             stream = graph_context.stream
             event = torch.npu.ExternalEvent()
             event.wait(stream)

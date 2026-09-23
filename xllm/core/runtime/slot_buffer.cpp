@@ -197,8 +197,8 @@ BatchInputMeta batch_input_meta(const ForwardInput& input) {
     batch.actual_num_sequences = static_cast<int32_t>(
         input.input_params.attention.host.q_seq_lens.size());
   }
-  // ProfileManager uses this as an output marker. Slot execution remains eager;
-  // the pipeline preserves the caller's marker in its detached response.
+  // ProfileManager uses this as an output marker. Graphs are captured before
+  // admission; the pipeline preserves the marker in its detached response.
   batch.is_graph_warmup = false;
   return batch;
 }
@@ -692,14 +692,26 @@ Status SlotBuffer::validate(const ForwardInput& input,
   return validate_previous_tokens(model, previous_rows);
 }
 
-void SlotBuffer::prepare(const ForwardInput& input, const Stream& stream) {
+void SlotBuffer::prepare(const ForwardInput& input,
+                         const Stream& stream,
+                         uint32_t padded_batch_size) {
   CHECK(!copy_submitted_) << "Pending result prevents Slot reuse.";
   const ModelInputHostView model = model_input_view(input);
-  const BatchInputMeta batch = batch_input_meta(input);
+  BatchInputMeta batch = batch_input_meta(input);
+  if (padded_batch_size != 0) {
+    CHECK_LE(padded_batch_size, capacity_.model.max_sequences);
+    CHECK_LE(padded_batch_size, capacity_.model.max_tokens);
+    CHECK_GE(padded_batch_size, model.token_ids.size());
+    CHECK_EQ(model.token_ids.size(), model.q_seq_lens.size());
+    CHECK(model.token_ids.empty() || batch.batch_forward_type.is_decode());
+    batch.batch_forward_type = BatchForwardType::DECODE;
+  }
   // The caller validated all inputs before this first staging write.
   auto guard = stream.set_stream_guard();
   prepare_previous_tokens(model);
-  if (model.token_ids.empty() && !batch.batch_forward_type.is_empty()) {
+  if (padded_batch_size != 0) {
+    prepare_model(model, batch, padded_batch_size);
+  } else if (model.token_ids.empty() && !batch.batch_forward_type.is_empty()) {
     const std::array<int32_t, 1> zero{0};
     const std::array<int32_t, 1> one{1};
     // Block zero is reserved for padding by the block manager. The inherited
@@ -709,21 +721,34 @@ void SlotBuffer::prepare(const ForwardInput& input, const Stream& stream) {
   } else {
     prepare_model(model, batch);
   }
-  // Eager collectives only need logical token counts and phases. Copy into
-  // this Slot's retained vectors; graph/speculative summaries are unused.
+  model_params_.enable_graph = padded_batch_size != 0;
+  // Graph collectives use common physical rows; keep logical counts separate.
   auto& target = model_params_.parallel;
   const auto& parallel = input.input_params.parallel;
   target.dp_global_token_nums = parallel.dp_global_token_nums;
   target.dp_is_decode = parallel.dp_is_decode;
+  target.raw_dp_global_token_nums.clear();
+  if (padded_batch_size != 0 && !target.dp_global_token_nums.empty()) {
+    target.raw_dp_global_token_nums = target.dp_global_token_nums;
+    std::fill(target.dp_global_token_nums.begin(),
+              target.dp_global_token_nums.end(),
+              padded_batch_size);
+    std::fill(target.dp_is_decode.begin(), target.dp_is_decode.end(), 1);
+  }
   prepare_sampling(input.sampling_params);
   prepare_result();
 }
 
 void SlotBuffer::prepare_model(const ModelInputHostView& input,
-                               const BatchInputMeta& batch) {
+                               const BatchInputMeta& batch,
+                               uint32_t padded_batch_size) {
   const Layout& layout = layout_;
-  const uint32_t token_count = static_cast<uint32_t>(input.token_ids.size());
-  const uint32_t rows = static_cast<uint32_t>(input.q_seq_lens.size());
+  const uint32_t actual_rows = static_cast<uint32_t>(input.q_seq_lens.size());
+  const uint32_t token_count =
+      padded_batch_size != 0 ? padded_batch_size
+                             : static_cast<uint32_t>(input.token_ids.size());
+  const uint32_t rows =
+      padded_batch_size != 0 ? padded_batch_size : actual_rows;
   int32_t* host_data = host_buffer_.data_ptr<int32_t>();
   const std::array<std::span<const int32_t>, 6> sources = {
       input.token_ids,
@@ -739,13 +764,25 @@ void SlotBuffer::prepare_model(const ModelInputHostView& input,
                                          layout.kv_seq_lens,
                                          layout.q_cu_seq_lens};
   for (uint32_t i = 0; i < sources.size(); ++i) {
-    if (sources[i].empty()) {
+    const uint32_t count = i < 3 ? token_count : rows;
+    if (count == 0) {
       continue;
     }
     const uint64_t offset = regions[i].offset / sizeof(int32_t);
-    std::memcpy(host_data + offset, sources[i].data(), sources[i].size_bytes());
-    device_buffer_.narrow(/*dim=*/0, offset, sources[i].size())
-        .copy_(host_buffer_.narrow(/*dim=*/0, offset, sources[i].size()),
+    if (padded_batch_size != 0) {
+      // Padding uses reserved block zero and never writes live KV slots.
+      const int32_t padding = i == 2 ? -1 : (i == 1 ? 0 : 1);
+      std::fill_n(host_data + offset, count, padding);
+      if (i == 5) {
+        std::iota(host_data + offset, host_data + offset + count, 1);
+      }
+    }
+    if (!sources[i].empty()) {
+      std::memcpy(
+          host_data + offset, sources[i].data(), sources[i].size_bytes());
+    }
+    device_buffer_.narrow(/*dim=*/0, offset, count)
+        .copy_(host_buffer_.narrow(/*dim=*/0, offset, count),
                /*non_blocking=*/true);
   }
   if (rows != 0) {
@@ -754,11 +791,11 @@ void SlotBuffer::prepare_model(const ModelInputHostView& input,
     const uint64_t width =
         static_cast<uint64_t>(input.block_table_width) * sizeof(int32_t);
     const uint64_t bytes = stride * rows;
-    if (width == stride) {
+    if (width == stride && actual_rows == rows) {
       std::memcpy(host_data + offset, input.block_tables.data(), bytes);
     } else {
       std::memset(host_data + offset, 0, bytes);
-      for (uint32_t row = 0; row < rows; ++row) {
+      for (uint32_t row = 0; row < actual_rows; ++row) {
         std::memcpy(host_data + offset +
                         static_cast<uint64_t>(row) *
                             layout.capacity.max_blocks_per_sequence,

@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/block/block_manager_pool.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/request/incremental_decoder.h"
 #include "core/framework/request/sequence.h"
@@ -84,13 +85,14 @@ runtime::DecodeGraphExecutionShape make_decode_graph_execution_shape(
 
 class RecordingProfileEngine final : public Engine {
  public:
-  RecordingProfileEngine() {
+  explicit RecordingProfileEngine(bool overlap = false) : overlap_(overlap) {
     BlockManagerPool::Options options;
     options.num_blocks(/*num_blocks=*/64)
         .block_size(/*block_size=*/4)
         .enable_prefix_cache(/*enable_prefix_cache=*/false)
         .max_seqs_per_batch(/*max_seqs_per_batch=*/8);
     block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
+    observed_batches_.reserve(options.max_seqs_per_batch());
     model_args_.vocab_size(128)
         .eos_token_id(2)
         .max_position_embeddings(16)
@@ -98,17 +100,25 @@ class RecordingProfileEngine final : public Engine {
   }
 
   ForwardOutput step(std::vector<Batch>& batches) override {
+    EXPECT_EQ(pending_steps_, 0);
+    int32_t sequence_count = 0;
     for (Batch& batch : batches) {
       for (Sequence* sequence : batch.get_sequences()) {
+        ++sequence_count;
         all_requests_marked_ =
             all_requests_marked_ && sequence->is_graph_warmup();
       }
     }
+    observed_batches_.emplace_back(sequence_count);
+    pending_steps_ += overlap_ ? 1 : 0;
     return ForwardOutput();
   }
 
   void update_last_step_result(std::vector<Batch>& batches) override {
     (void)batches;
+    EXPECT_EQ(pending_steps_, 1);
+    EXPECT_GT(block_manager_->num_used_blocks().front(), 0);
+    --pending_steps_;
   }
 
   BlockManagerPool* block_manager_pool() const override {
@@ -124,11 +134,18 @@ class RecordingProfileEngine final : public Engine {
   void reset_profile_markers() { all_requests_marked_ = true; }
 
   bool all_requests_marked() const { return all_requests_marked_; }
+  int32_t pending_steps() const { return pending_steps_; }
+  const std::vector<int32_t>& observed_batches() const {
+    return observed_batches_;
+  }
 
  private:
   std::unique_ptr<BlockManagerPool> block_manager_;
   ModelArgs model_args_;
   bool all_requests_marked_ = true;
+  bool overlap_ = false;
+  int32_t pending_steps_ = 0;
+  std::vector<int32_t> observed_batches_;
 };
 
 TEST(GraphWarmupTest, BuildsCanonicalBuckets) {
@@ -455,6 +472,40 @@ TEST(GraphWarmupTest, MarksOrdinaryProfileRequestsAsSyntheticLoad) {
   profile_manager.run_request(/*token_length=*/4, /*prefix_length=*/0);
 
   EXPECT_TRUE(engine.all_requests_marked());
+}
+
+TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
+  auto& config = ExecutionConfig::get_instance();
+  const bool previous_graph = config.enable_graph();
+  const bool previous_disabled = config.disable_graph_warmup();
+  const int32_t previous_limit = config.acl_graph_decode_batch_size_limit();
+  config.enable_graph(true);
+  config.disable_graph_warmup(false);
+  config.acl_graph_decode_batch_size_limit(4);
+  for (bool overlap : {false, true}) {
+    RecordingProfileEngine engine(overlap);
+    const auto used_blocks = engine.block_manager_pool()->num_used_blocks();
+    ProfileManager::Options options;
+    options.max_tokens_per_batch(4)
+        .max_seqs_per_batch(4)
+        .dp_size(1)
+        .enable_schedule_overlap(overlap)
+        .enable_profile_step_time(false)
+        .enable_profile_kv_blocks(false)
+        .instance_role(InstanceRole::DECODE);
+    ProfileManager profile_manager(&engine, options);
+    EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{4, 2, 1}));
+    EXPECT_EQ(engine.pending_steps(), 0);
+    EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(), used_blocks);
+    EXPECT_TRUE(engine.all_requests_marked());
+  }
+  config.enable_graph(previous_graph);
+  config.disable_graph_warmup(previous_disabled);
+  config.acl_graph_decode_batch_size_limit(previous_limit);
+#else
+  GTEST_SKIP() << "Startup graph warmup is disabled on this platform.";
+#endif
 }
 
 }  // namespace

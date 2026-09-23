@@ -230,6 +230,7 @@ class ModelExecutor:
         if self.layerwise_split_size > 1 and config.get("model_type") != "glm_moe_dsa":
             raise NotImplementedError("Python layerwise split is supported only for GLM5.2")
         self.decode_graph_runner = None
+        self.prepared_graph_runner = None
         self.inductor_runner = None
 
         if self.layerwise_split_size > 1 and graph_backend not in ("", "off", "none", "0"):
@@ -243,7 +244,7 @@ class ModelExecutor:
             self.attention_backend.supports_prepared_metadata
             and config.get("model_type") in ("qwen3", "glm_moe_dsa")
             and int(config.get("kv_split_size", 1)) in (0, 1)
-            and graph_backend in ("", "off", "none", "0")
+            and graph_backend in ("", "off", "none", "0", "aclgraph")
             and all(int(config.get(key, 1)) == 1 for key in ("cp_size", "layerwise_split_size"))
         )
         if dp_size > 1 and graph_backend not in (
@@ -290,17 +291,26 @@ class ModelExecutor:
                 )
             # The runner accepts a global token capacity and divides it by DP.
             max_graph_tokens = local_graph_sequence_capacity * max_decode_rows_per_request * dp_size
-            self.decode_graph_runner = DecodeAclGraphRunner(
-                execution_model,
-                self.attention_backend,
-                device,
-                max_graph_tokens,
-                int(config["max_position_embeddings"]),
-                dp_size,
-                dp_rank,
-                decode_batch_size_limit,
-                num_decoding_tokens,
-            )
+            if config.get("enable_task_pipeline", False):
+                from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
+
+                if not self._supports_prepared_metadata or max_decode_rows_per_request != 1:
+                    raise ValueError("prepared ACL graphs require supported ordinary decode")
+                self.prepared_graph_runner = PreparedAclGraphRunner(
+                    execution_model, self.attention_backend, device, max_graph_tokens, dp_size, dp_rank
+                )
+            else:
+                self.decode_graph_runner = DecodeAclGraphRunner(
+                    execution_model,
+                    self.attention_backend,
+                    device,
+                    max_graph_tokens,
+                    int(config["max_position_embeddings"]),
+                    dp_size,
+                    dp_rank,
+                    decode_batch_size_limit,
+                    num_decoding_tokens,
+                )
         else:
             if self.layerwise_split_size > 1:
                 raise NotImplementedError(
@@ -337,6 +347,13 @@ class ModelExecutor:
             raise RuntimeError("prepared metadata requires an initialized supported Qwen3 or GLM executor")
         metadata.prepared_attention_state = self.attention_backend.prepare_metadata(metadata)
 
+    def warmup_prepared_graph(
+        self, input_ids: torch.Tensor, positions: torch.Tensor, metadata: AttentionMetadata
+    ) -> None:
+        if self.prepared_graph_runner is None:
+            raise RuntimeError("prepared ACL graph runner is not enabled")
+        self.prepared_graph_runner.warmup_prepared(input_ids, positions, metadata)
+
     def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:
         layer_caches = normalize_layer_caches(kv_caches)
         required_layers = max(layer.layer_id for layer in self.model.modules() if isinstance(layer, Attention)) + 1
@@ -348,6 +365,8 @@ class ModelExecutor:
         self.eager_runner.bind_layer_caches(layer_caches)
         if self.decode_graph_runner is not None:
             self.decode_graph_runner.bind_layer_caches(layer_caches)
+        if self.prepared_graph_runner is not None:
+            self.prepared_graph_runner.bind_layer_caches(layer_caches)
         if self.inductor_runner is not None:
             self.inductor_runner.bind_layer_caches(layer_caches)
         self._kv_bound = True
@@ -361,6 +380,7 @@ class ModelExecutor:
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        enable_graph: bool = False,
     ) -> ModelExecutionOutput:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
@@ -371,6 +391,12 @@ class ModelExecutor:
         if getattr(metadata, "prepared_attention_state", None) is not None:
             if mtp_topk_indices is not None:
                 raise ValueError("prepared metadata does not support MTP top-k state")
+            if enable_graph:
+                if self.prepared_graph_runner is None:
+                    raise RuntimeError("prepared ACL graph runner is not enabled")
+                return self.prepared_graph_runner.execute(
+                    input_ids, positions, metadata, input_embedding, layer_synchronizer
+                )
             return self.eager_runner.execute(input_ids, positions, metadata, input_embedding, layer_synchronizer)
         graph_kwargs = {}
         if mtp_topk_indices is not None:

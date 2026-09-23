@@ -21,6 +21,7 @@ limitations under the License.
 #include <limits>
 
 #include "core/platform/platform.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
@@ -79,6 +80,9 @@ Status TaskExecutionPipeline::create(
   auto pipeline =
       std::unique_ptr<TaskExecutionPipeline>(new TaskExecutionPipeline(
           state_executor, model, executor, kv_caches, capacity));
+  pipeline->graph_batch_sizes_ = graph_batch_sizes(capacity);
+  pipeline->captured_graph_batch_sizes_.reserve(
+      pipeline->graph_batch_sizes_.size());
   const uint32_t rows = capacity.model.max_sequences;
   if (capacity.slot_count == 2) {
     pipeline->previous_tokens_ = torch::empty(
@@ -101,6 +105,7 @@ Status TaskExecutionPipeline::create(
     }
     auto& parallel = slot->buffer->model_params().parallel;
     parallel.dp_global_token_nums.reserve(capacity.dp_size);
+    parallel.raw_dp_global_token_nums.reserve(capacity.dp_size);
     parallel.dp_is_decode.reserve(capacity.dp_size);
     slot->input_ready = std::make_shared<StreamEvent>(model.device().type());
     slot->output_ready = std::make_shared<StreamEvent>(model.device().type());
@@ -243,6 +248,90 @@ Status TaskExecutionPipeline::validate_input(const ForwardInput& source,
            static_cast<int32_t>(meta.batch_forward_type.is_decode()))) {
     return invalid("Task requires aligned unpadded DP counts and phases.");
   }
+  return Status();
+}
+
+std::vector<int64_t> TaskExecutionPipeline::graph_batch_sizes(
+    const LlmTaskCapacity& capacity) {
+  const int64_t max_batch_size = std::min({capacity.max_graph_batch_size,
+                                           capacity.model.max_sequences,
+                                           capacity.model.max_tokens});
+  std::vector<int64_t> sizes;
+  sizes.reserve(max_batch_size / 16 + 5);
+  for (int64_t size = 1; size <= max_batch_size;) {
+    const int64_t bucket = std::min(runtime::get_decode_graph_token_bucket(
+                                        size, /*enable_no_padding=*/false),
+                                    max_batch_size);
+    sizes.emplace_back(bucket);
+    size = bucket + 1;
+  }
+  return sizes;
+}
+
+uint32_t TaskExecutionPipeline::graph_batch_size(
+    const ForwardInput& input,
+    std::span<const int64_t> batch_sizes) {
+  const auto& parallel = input.input_params.parallel;
+  int64_t rows = 0;
+  if (parallel.dp_global_token_nums.empty()) {
+    if (input.input_params.meta.batch_forward_type.is_decode() &&
+        input.host_token_ids().defined()) {
+      rows = input.host_token_ids().numel();
+    }
+  } else {
+    // Input validation already checked count/phase sizes and local agreement.
+    for (uint32_t rank = 0; rank < parallel.dp_global_token_nums.size();
+         ++rank) {
+      const int32_t count = parallel.dp_global_token_nums[rank];
+      if (count != 0 && parallel.dp_is_decode[rank] == 0) {
+        return 0;
+      }
+      rows = std::max(rows, static_cast<int64_t>(count));
+    }
+  }
+  if (rows == 0) {
+    return 0;
+  }
+  const auto bucket =
+      std::lower_bound(batch_sizes.begin(), batch_sizes.end(), rows);
+  return bucket == batch_sizes.end() ? 0 : static_cast<uint32_t>(*bucket);
+}
+
+Status TaskExecutionPipeline::warmup_slot_graphs(const ForwardInput& input,
+                                                 uint32_t padded_batch_size) {
+  CHECK(input.input_params.meta.is_graph_warmup);
+  const auto bucket = std::lower_bound(captured_graph_batch_sizes_.begin(),
+                                       captured_graph_batch_sizes_.end(),
+                                       padded_batch_size);
+  if (bucket != captured_graph_batch_sizes_.end() &&
+      *bucket == padded_batch_size) {
+    return Status();
+  }
+  if (!accepted_.empty()) {
+    return invalid("Drain pending Tasks before capturing a warmup batch.");
+  }
+  const auto tokens = int_span(input.host_token_ids());
+  if (std::any_of(tokens.begin(), tokens.end(), [](int32_t token) {
+        return token < 0;
+      })) {
+    return invalid("Graph warmup requires materialized token IDs.");
+  }
+  c10::DeviceGuard device_guard(device_.unwrap());
+  auto guard = task_stream_.set_stream_guard();
+  // The upper warmup supplies this batch and owns its temporary KV blocks.
+  // No Task is in flight, so each Slot can capture the same input serially.
+  for (auto& slot : slots_) {
+    slot->buffer->prepare(input, prepare_stream_, padded_batch_size);
+    CHECK_EQ(prepare_stream_.synchronize(), 0);
+    executor_.prepare_attention_metadata(kv_caches_,
+                                         slot->buffer->model_params());
+    executor_.warmup_prepared_graph(slot->buffer->tokens(),
+                                    slot->buffer->positions(),
+                                    kv_caches_,
+                                    slot->buffer->model_params());
+  }
+  CHECK_EQ(task_stream_.synchronize(), 0);
+  captured_graph_batch_sizes_.insert(bucket, padded_batch_size);
   return Status();
 }
 
@@ -456,7 +545,18 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
     return status;
   }
   c10::DeviceGuard guard(device_.unwrap());
-  slot.buffer->prepare(input, prepare_stream_);
+  // Upper warmup and profiling use the regular Task path. Capture both Slots
+  // before admitting a new bucket; serving never captures with Tasks in flight.
+  const uint32_t padded_batch_size = graph_batch_size(
+      input,
+      meta.is_graph_warmup ? graph_batch_sizes_ : captured_graph_batch_sizes_);
+  if (padded_batch_size != 0 && meta.is_graph_warmup) {
+    const Status warmup_status = warmup_slot_graphs(input, padded_batch_size);
+    if (!warmup_status.ok()) {
+      return warmup_status;
+    }
+  }
+  slot.buffer->prepare(input, prepare_stream_, padded_batch_size);
   if (slot.buffer->tokens().numel() != 0) {
     executor_.prepare_attention_metadata(kv_caches_,
                                          slot.buffer->model_params());

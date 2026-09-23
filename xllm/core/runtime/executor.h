@@ -44,9 +44,12 @@ class Executor final {
   void prepare_attention_metadata(std::vector<KVCache>& kv_caches,
                                   ModelInputParams& params);
 
-  // tokens: vector size is dp_size, each element is [num_tokens/dp_size]
-  // positions: vector size is dp_size, each element is [num_tokens/dp_size]
-  // token pos in the sequence returns: ModelOutput
+  // Regular warmup Tasks capture final Slot views before serving uses them.
+  void warmup_prepared_graph(const torch::Tensor& tokens,
+                             const torch::Tensor& positions,
+                             std::vector<KVCache>& kv_caches,
+                             const ModelInputParams& params);
+
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,

@@ -128,6 +128,12 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["num_speculative_tokens"] = options_.num_speculative_tokens();
   executor_config["speculative_algorithm"] = options_.speculative_algorithm();
   executor_config["is_draft_engine"] = options_.is_draft_engine();
+  executor_config["enable_task_pipeline"] = options_.enable_task_pipeline();
+  if (options_.enable_task_pipeline()) {
+    executor_config["enable_graph"] = options_.enable_graph();
+    executor_config["python_graph_backend"] =
+        options_.enable_graph() ? "aclgraph" : "off";
+  }
   py_executor_ = executor_module.attr("ModelExecutor")(
       py_causal_lm_->python_model(),
       executor_config,
@@ -230,12 +236,23 @@ void PyExecutorImpl::prepare_attention_metadata(std::vector<KVCache>& kv_caches,
       std::make_shared<PythonAttentionMetadata>(std::move(metadata));
 }
 
+void PyExecutorImpl::warmup_prepared_graph(const torch::Tensor& tokens,
+                                           const torch::Tensor& positions,
+                                           std::vector<KVCache>& kv_caches,
+                                           const ModelInputParams& params) {
+  CHECK(params.python_attention_metadata != nullptr);
+  py::gil_scoped_acquire gil;
+  bind_kv_caches(kv_caches);
+  active_py_causal_lm = py_causal_lm_;
+  py_executor_.attr("warmup_prepared_graph")(
+      tokens, positions, params.python_attention_metadata->value());
+}
+
 ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                 const torch::Tensor& positions,
                                 std::vector<KVCache>& kv_caches,
                                 const ModelInputParams& params) {
   torch::NoGradGuard no_grad;
-  COUNTER_INC(num_model_execution_total_eager);
   active_py_causal_lm = py_causal_lm_;
 
   // Build or reuse attention metadata.
@@ -271,6 +288,19 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
       params.python_attention_metadata
           ? params.python_attention_metadata->value()
           : py::cast(PyAttentionMetadataView(attn_metadata, params));
+  const bool prepared_graph =
+      params.python_attention_metadata && params.enable_graph;
+  if (params.python_attention_metadata) {
+    VLOG(1) << "Task pipeline model path="
+            << (prepared_graph ? "aclgraph" : "eager")
+            << ", batch_id=" << params.meta.batch_id
+            << ", model_type=" << args_.model_type()
+            << ", tokens=" << tokens.numel();
+  }
+  if (!prepared_graph) {
+    COUNTER_INC(num_model_execution_total_eager);
+  }
+
   py::object input_embedding =
       optional_tensor(params.embedding.input_embedding);
   py::object mtp_topk_indices = py::none();
@@ -375,7 +405,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                                        py_metadata,
                                                        input_embedding,
                                                        py_sync,
-                                                       mtp_topk_indices);
+                                                       mtp_topk_indices,
+                                                       prepared_graph);
   if (py::isinstance<py::tuple>(hidden_obj)) {
     py::tuple output = hidden_obj.cast<py::tuple>();
     CHECK(output.size() == 2 || output.size() == 3)

@@ -26,6 +26,14 @@ class TaskExecutionPipelineInputTest : public ::testing::Test {
                                const LlmTaskCapacity& capacity = {}) {
     return TaskExecutionPipeline::validate_input(input, capacity);
   }
+  static uint32_t padded_batch_size(const ForwardInput& input,
+                                    std::span<const int64_t> sizes) {
+    return TaskExecutionPipeline::graph_batch_size(input, sizes);
+  }
+  static std::vector<int64_t> graph_batch_sizes(
+      const LlmTaskCapacity& capacity) {
+    return TaskExecutionPipeline::graph_batch_sizes(capacity);
+  }
 };
 namespace {
 
@@ -57,6 +65,75 @@ ForwardInput ordinary_input(int32_t num_tokens = 3,
   input.sampling_params.selected_token_idxes =
       torch::tensor({num_tokens - 1}, torch::kInt32);
   return input;
+}
+
+TEST_F(TaskExecutionPipelineInputTest,
+       GraphBucketsRespectCapacityAndGraphLimit) {
+  LlmTaskCapacity capacity;
+  capacity.model.max_sequences = 40;
+  capacity.model.max_tokens = 40;
+  EXPECT_TRUE(graph_batch_sizes(capacity).empty());
+  capacity.max_graph_batch_size = 35;
+  EXPECT_EQ(graph_batch_sizes(capacity),
+            (std::vector<int64_t>{1, 2, 4, 8, 16, 32, 35}));
+  capacity.model.max_tokens = 5;
+  EXPECT_EQ(graph_batch_sizes(capacity), (std::vector<int64_t>{1, 2, 4, 5}));
+  capacity.model.max_sequences = 3;
+  EXPECT_EQ(graph_batch_sizes(capacity), (std::vector<int64_t>{1, 2, 3}));
+  capacity.max_graph_batch_size = 1;
+  EXPECT_EQ(graph_batch_sizes(capacity), (std::vector<int64_t>{1}));
+}
+
+TEST_F(TaskExecutionPipelineInputTest, GraphBucketsPadSingleRankDecodeOnly) {
+  const std::vector<int64_t> buckets{1, 2, 4, 5};
+  EXPECT_EQ(
+      padded_batch_size(ordinary_input(3, BatchForwardType::DECODE), buckets),
+      4);
+  EXPECT_EQ(
+      padded_batch_size(ordinary_input(5, BatchForwardType::DECODE), buckets),
+      5);
+  EXPECT_EQ(
+      padded_batch_size(ordinary_input(6, BatchForwardType::DECODE), buckets),
+      0);
+  EXPECT_EQ(padded_batch_size(ordinary_input(), buckets), 0);
+  EXPECT_EQ(padded_batch_size(ForwardInput{}, buckets), 0);
+  EXPECT_EQ(padded_batch_size(ordinary_input(1, BatchForwardType::DECODE), {}),
+            0);
+}
+
+TEST_F(TaskExecutionPipelineInputTest, GraphBucketsUseAllActiveDpRanks) {
+  const std::vector<int64_t> buckets{1, 2, 4};
+  auto input = ordinary_input(1, BatchForwardType::DECODE);
+  auto& parallel = input.input_params.parallel;
+  parallel.dp_global_token_nums = {1, 3};
+  parallel.dp_is_decode = {1, 1};
+  EXPECT_EQ(padded_batch_size(input, buckets), 4);
+  parallel.dp_global_token_nums = {1, 5};
+  EXPECT_EQ(padded_batch_size(input, buckets), 0);
+  parallel.dp_global_token_nums = {1, 2};
+  parallel.dp_is_decode = {1, 0};
+  EXPECT_EQ(padded_batch_size(input, buckets), 0);
+  input = ordinary_input(0, BatchForwardType::DECODE);
+  input.input_params.parallel.dp_global_token_nums = {0, 3};
+  input.input_params.parallel.dp_is_decode = {0, 1};
+  EXPECT_EQ(padded_batch_size(input, buckets), 4);
+  input.input_params.parallel.dp_global_token_nums = {0, 0};
+  EXPECT_EQ(padded_batch_size(input, buckets), 0);
+}
+
+TEST_F(TaskExecutionPipelineInputTest,
+       ServingUsesCapturedBucketsAcrossUnevenAndEmptyDpRanks) {
+  // The completed warmup can cover fewer buckets than configured capacity.
+  const std::vector<int64_t> buckets{2, 4};
+  for (int32_t local_count : {0, 1, 3}) {
+    auto input = ordinary_input(local_count, BatchForwardType::DECODE);
+    input.input_params.parallel.dp_global_token_nums = {0, 1, 3};
+    input.input_params.parallel.dp_is_decode = {0, 1, 1};
+    EXPECT_EQ(padded_batch_size(input, buckets), 4);
+    EXPECT_EQ(padded_batch_size(input, {}), 0);
+    input.input_params.parallel.dp_global_token_nums = {0, 1, 5};
+    EXPECT_EQ(padded_batch_size(input, buckets), 0);
+  }
 }
 
 TEST_F(TaskExecutionPipelineInputTest,
