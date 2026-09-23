@@ -275,8 +275,8 @@ TEST_F(LLMRequestFactoryTest,
 }
 
 TEST_F(LLMRequestFactoryTest, TaskPipelineRejectsJsonObjectBeforeGrammarSetup) {
-  auto factory = make_factory();
   options_.enable_task_pipeline(true);
+  auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
   sp.response_format = ResponseFormatType::JSON_OBJECT;
@@ -300,8 +300,8 @@ TEST_F(LLMRequestFactoryTest, TaskPipelineRejectsJsonObjectBeforeGrammarSetup) {
 
 TEST_F(LLMRequestFactoryTest,
        TaskPipelineRejectsJsonObjectChatAndReleasesSlot) {
-  auto factory = make_factory();
   options_.enable_task_pipeline(true);
+  auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
   sp.response_format = ResponseFormatType::JSON_OBJECT;
@@ -323,8 +323,8 @@ TEST_F(LLMRequestFactoryTest,
 }
 
 TEST_F(LLMRequestFactoryTest, TaskPipelineAcceptsOrdinaryRequest) {
-  auto factory = make_factory();
   options_.enable_task_pipeline(true);
+  auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
 
@@ -340,8 +340,8 @@ TEST_F(LLMRequestFactoryTest, TaskPipelineAcceptsOrdinaryRequest) {
 }
 
 TEST_F(LLMRequestFactoryTest, LegacyJsonObjectReachesGrammarValidation) {
-  auto factory = make_factory();
   options_.enable_task_pipeline(false);
+  auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
   sp.response_format = ResponseFormatType::JSON_OBJECT;

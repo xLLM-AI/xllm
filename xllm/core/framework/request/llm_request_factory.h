@@ -47,8 +47,10 @@ class Tokenizer;
 //
 // The factory holds non-owning references to model configuration owned by
 // LLMMaster (tokenizer, chat template, model args, options, rate limiter); the
-// owner must outlive the factory. Only the JSON-object grammar cache is owned
-// here since it is built lazily and used solely during request creation.
+// owner must outlive the factory. Option-dependent limits and the service-
+// routing callback are derived once in the constructor so create() does not
+// re-branch on process-start flags. Only the JSON-object grammar cache is
+// owned here since it is built lazily and used solely during request creation.
 class LLMRequestFactory final {
  public:
   // Turns a batch of request outputs into an xllm-service RPC response.
@@ -62,7 +64,7 @@ class LLMRequestFactory final {
                     const ModelArgs* model_args,
                     const Options* options,
                     RateLimiter* rate_limiter,
-                    std::string task_type,
+                    const std::string& task_type,
                     RpcResponseHandler rpc_response_handler);
 
   // completion / encode: prompt carries text and/or pre-tokenized tokens.
@@ -89,7 +91,6 @@ class LLMRequestFactory final {
   std::optional<std::vector<int>> encode_and_validate_prompt(
       const std::string& prompt,
       std::optional<std::vector<int>> prompt_tokens,
-      int32_t max_context_len,
       const RequestParams& sp,
       const OutputCallback& callback);
 
@@ -102,7 +103,6 @@ class LLMRequestFactory final {
   std::optional<StoppingChecker> build_stopping_checker(
       const RequestParams& sp,
       uint32_t effective_max_tokens,
-      int32_t max_context_len,
       const OutputCallback& callback);
 
   // Rejects a prompt that already ends in a stop condition (skipped for
@@ -129,8 +129,15 @@ class LLMRequestFactory final {
   const ModelArgs* model_args_ = nullptr;
   const Options* options_ = nullptr;
   RateLimiter* rate_limiter_ = nullptr;
-  std::string task_type_;
-  RpcResponseHandler rpc_response_handler_;
+
+  // Derived from Options / ModelArgs / task_type at construction. These fold
+  // the process-start branches (chunked prefill, speculative tokens, overlap,
+  // embed tasks, service routing) so create() only applies the numbers.
+  int32_t prompt_token_limit_ = 0;
+  int32_t max_generated_context_len_ = 0;
+  size_t seq_capacity_extra_ = 0;
+  bool skip_prompt_finish_check_ = false;
+  OutputsFunc batch_callback_;
 
   std::mutex json_object_grammar_mutex_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;

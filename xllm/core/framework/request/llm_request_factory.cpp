@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -53,6 +54,8 @@ bool get_enable_thinking(const nlohmann::json& chat_template_kwargs) {
   return enabled;
 }
 
+constexpr uint32_t kDefaultMaxTokens = 5120;
+
 }  // namespace
 
 LLMRequestFactory::LLMRequestFactory(const Tokenizer* tokenizer,
@@ -60,20 +63,46 @@ LLMRequestFactory::LLMRequestFactory(const Tokenizer* tokenizer,
                                      const ModelArgs* model_args,
                                      const Options* options,
                                      RateLimiter* rate_limiter,
-                                     std::string task_type,
+                                     const std::string& task_type,
                                      RpcResponseHandler rpc_response_handler)
     : tokenizer_(tokenizer),
       chat_template_(chat_template),
       model_args_(model_args),
       options_(options),
-      rate_limiter_(rate_limiter),
-      task_type_(std::move(task_type)),
-      rpc_response_handler_(std::move(rpc_response_handler)) {
+      rate_limiter_(rate_limiter) {
   CHECK(tokenizer_ != nullptr);
   CHECK(chat_template_ != nullptr);
   CHECK(model_args_ != nullptr);
   CHECK(options_ != nullptr);
   CHECK(rate_limiter_ != nullptr);
+
+  const int32_t max_context_len =
+      static_cast<int32_t>(model_args_->max_position_embeddings());
+  prompt_token_limit_ = max_context_len;
+  if (!options_->enable_chunked_prefill()) {
+    prompt_token_limit_ =
+        std::min(prompt_token_limit_, options_->max_tokens_per_batch());
+  }
+  const int32_t num_speculative_tokens = options_->num_speculative_tokens();
+  max_generated_context_len_ = max_context_len - num_speculative_tokens;
+  seq_capacity_extra_ =
+      static_cast<size_t>(num_speculative_tokens) + /*bonus_token*/ 1;
+  if (options_->enable_schedule_overlap()) {
+    seq_capacity_extra_ += static_cast<size_t>(num_speculative_tokens) + 1;
+  }
+  skip_prompt_finish_check_ = task_type == "embed" || task_type == "mm_embed";
+  if (options_->enable_service_routing()) {
+    // Capture the handler by move rather than the factory: the callback is
+    // stored in RequestState and drained by the scheduler during shutdown,
+    // which happens after this factory is destroyed.
+    batch_callback_ = [handler = std::move(rpc_response_handler)](
+                          const std::vector<RequestOutput>& req_outputs) {
+      for (const auto& req_output : req_outputs) {
+        req_output.log_request_status();
+      }
+      return handler(req_outputs);
+    };
+  }
 }
 
 std::shared_ptr<const JsonObjectGrammar>
@@ -97,7 +126,6 @@ LLMRequestFactory::get_json_object_grammar(bool reasoning_enabled,
 std::optional<std::vector<int>> LLMRequestFactory::encode_and_validate_prompt(
     const std::string& prompt,
     std::optional<std::vector<int>> prompt_tokens,
-    int32_t max_context_len,
     const RequestParams& sp,
     const OutputCallback& callback) {
   // A request is valid as long as it carries either text or pre-tokenized
@@ -146,12 +174,7 @@ std::optional<std::vector<int>> LLMRequestFactory::encode_and_validate_prompt(
     }
   }
 
-  int32_t prompt_token_limit = max_context_len;
-  if (!options_->enable_chunked_prefill()) {
-    prompt_token_limit =
-        std::min(prompt_token_limit, options_->max_tokens_per_batch());
-  }
-  if (local_prompt_tokens.size() >= prompt_token_limit) {
+  if (local_prompt_tokens.size() >= static_cast<size_t>(prompt_token_limit_)) {
     LOG(ERROR) << "Prompt is too long: " << local_prompt_tokens.size();
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Prompt is too long",
@@ -182,19 +205,21 @@ RequestSamplingParam LLMRequestFactory::build_sampling_param(
 std::optional<StoppingChecker> LLMRequestFactory::build_stopping_checker(
     const RequestParams& sp,
     uint32_t effective_max_tokens,
-    int32_t max_context_len,
     const OutputCallback& callback) {
   std::unordered_set<int32_t> stop_tokens;
   if (sp.stop_token_ids.has_value()) {
     const auto& stop_token_ids = sp.stop_token_ids.value();
+    stop_tokens.reserve(stop_token_ids.size());
     stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
   } else {
     stop_tokens = model_args_->stop_token_ids();
   }
   std::vector<std::vector<int32_t>> stop_sequences;
   if (sp.stop.has_value()) {
-    for (const auto& s : sp.stop.value()) {
-      std::vector<int> tmp_tokens;
+    const auto& stops = sp.stop.value();
+    stop_sequences.reserve(stops.size());
+    for (const auto& s : stops) {
+      std::vector<int32_t> tmp_tokens;
       if (!tokenizer_->encode(s, &tmp_tokens)) {
         CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                             "Failed to encode stop sequence",
@@ -208,7 +233,7 @@ std::optional<StoppingChecker> LLMRequestFactory::build_stopping_checker(
   }
 
   return StoppingChecker(effective_max_tokens,
-                         max_context_len - options_->num_speculative_tokens(),
+                         max_generated_context_len_,
                          model_args_->eos_token_id(),
                          sp.ignore_eos,
                          std::move(stop_tokens),
@@ -220,7 +245,7 @@ bool LLMRequestFactory::validate_prompt_not_finished(
     const std::vector<int>& prompt_tokens,
     const RequestParams& sp,
     const OutputCallback& callback) const {
-  if (task_type_ == "embed" || task_type_ == "mm_embed") {
+  if (skip_prompt_finish_check_) {
     return true;
   }
   auto finish_reason =
@@ -287,10 +312,8 @@ std::shared_ptr<Request> LLMRequestFactory::create(
   xllm::ScopeGuard rate_limit_guard(
       [this] { rate_limiter_->decrease_one_request(); });
 
-  const int32_t max_context_len = model_args_->max_position_embeddings();
-
   std::optional<std::vector<int>> encoded = encode_and_validate_prompt(
-      prompt, std::move(prompt_tokens), max_context_len, sp, callback);
+      prompt, std::move(prompt_tokens), sp, callback);
   if (!encoded.has_value()) {
     return nullptr;
   }
@@ -298,7 +321,6 @@ std::shared_ptr<Request> LLMRequestFactory::create(
 
   uint32_t max_tokens = sp.max_tokens;
   if (max_tokens == 0) {
-    const uint32_t kDefaultMaxTokens = 5120;
     max_tokens = kDefaultMaxTokens;
   }
   uint32_t effective_max_tokens = max_tokens;
@@ -312,11 +334,8 @@ std::shared_ptr<Request> LLMRequestFactory::create(
 
   // allocate enough capacity for prompt tokens, max tokens, and speculative
   // tokens
-  size_t capacity = local_prompt_tokens.size() + effective_max_tokens +
-                    options_->num_speculative_tokens() + /*bouns_token*/ 1;
-  if (options_->enable_schedule_overlap()) {
-    capacity += options_->num_speculative_tokens() + 1;
-  }
+  const size_t capacity =
+      local_prompt_tokens.size() + effective_max_tokens + seq_capacity_extra_;
 
   const size_t best_of = sp.best_of.value_or(sp.n);
   RequestSamplingParam sampling_param = build_sampling_param(sp, best_of);
@@ -338,8 +357,8 @@ std::shared_ptr<Request> LLMRequestFactory::create(
   }
   SchedulerParam scheduler_param = sp.to_scheduler_param();
 
-  std::optional<StoppingChecker> stopping_checker = build_stopping_checker(
-      sp, effective_max_tokens, max_context_len, callback);
+  std::optional<StoppingChecker> stopping_checker =
+      build_stopping_checker(sp, effective_max_tokens, callback);
   if (!stopping_checker.has_value()) {
     return nullptr;
   }
@@ -348,26 +367,8 @@ std::shared_ptr<Request> LLMRequestFactory::create(
     return nullptr;
   }
 
-  bool stream = sp.streaming;
   // results cannot be streamed when best_of != n
-  if (best_of != sp.n) {
-    stream = false;
-  }
-
-  OutputsFunc batch_callback = nullptr;
-  if (options_->enable_service_routing()) {
-    // Capture a copy of the handler rather than `this`: the callback is stored
-    // in RequestState and drained by the scheduler during shutdown, which
-    // happens after this factory is destroyed. Copying keeps the callback
-    // self-contained and avoids a use-after-free on the factory.
-    batch_callback = [handler = rpc_response_handler_](
-                         const std::vector<RequestOutput>& req_outputs) {
-      for (const auto& req_output : req_outputs) {
-        req_output.log_request_status();
-      }
-      return handler(req_outputs);
-    };
-  }
+  const bool stream = sp.streaming && best_of == sp.n;
 
   RequestState req_state(std::move(prompt),
                          std::move(local_prompt_tokens),
@@ -383,7 +384,7 @@ std::shared_ptr<Request> LLMRequestFactory::create(
                          sp.skip_special_tokens,
                          options_->enable_schedule_overlap(),
                          callback,
-                         batch_callback,
+                         batch_callback_,
                          sp.decode_address,
                          call);
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
@@ -438,7 +439,7 @@ std::shared_ptr<Request> LLMRequestFactory::create(
                 std::move(prompt_tokens),
                 sp,
                 call,
-                callback,
+                std::move(callback),
                 render_result->generation_mode);
 }
 
