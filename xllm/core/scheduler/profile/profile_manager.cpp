@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "profile_manager.h"
+#include "scheduler/profile/profile_manager.h"
 
 #include <absl/time/time.h>
 #include <gflags/gflags.h>
@@ -35,7 +35,6 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/model/mtp_utils.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
@@ -925,14 +924,10 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
       generated_token == eos_token_id ? generated_token + 1 : generated_token;
   sequence->append_token(generated_token);
 
-  // With MTP speculative decoding the worker's decode path requires a valid
-  // decode state written via the MTP bootstrap channel before validating the
-  // per-token decode state. Inject a placeholder bootstrap embedding so the
-  // synthetic warmup/profile request takes the same bootstrap path as a real
-  // disagg PD decode request instead of reading stale recycled decode state.
-  const int64_t bootstrap_width = mtp_hidden_state_width(model_args);
-  prepare_warmup_decode_sequence(
-      sequence, bootstrap_width, num_speculative_tokens);
+  // Synthetic decode requests must carry the same bootstrap geometry as real
+  // requests, including the concatenated Target layers consumed by block
+  // drafts.
+  prepare_warmup_decode_sequence(sequence, model_args, num_speculative_tokens);
 
   CHECK(sequence->stage() == SequenceStage::DECODE)
       << "Decode profiling request is not in DECODE stage. total_length: "

@@ -67,6 +67,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
+  ::xllm::Status create_task_pipeline(
+      std::unique_ptr<TaskExecutionPipeline>& output) override;
+  bool task_models_loaded() const override;
+
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;

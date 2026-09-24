@@ -61,6 +61,18 @@ TEST(KVCacheEstimationTest, EstimatesStandardAttentionBlocks) {
   EXPECT_EQ(capacity.n_blocks(), 128);
 }
 
+TEST(KVCacheEstimationTest, EmbeddingContextSharesTheAvailableMemoryBudget) {
+  ModelArgs model_args = make_standard_args();
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.embedding_context_bytes_per_block = 2048;
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(capacity.n_blocks(), 102);
+  EXPECT_LE(capacity.n_blocks() * (8192 + 2048), options.cache_size_in_bytes);
+  EXPECT_GT((capacity.n_blocks() + 1) * (8192 + 2048),
+            options.cache_size_in_bytes);
+}
+
 TEST(KVCacheEstimationTest, IgnoresLinearStateSlotsWithoutLinearAttention) {
   ModelArgs model_args = make_standard_args();
   KVCacheEstimateOptions options = make_estimate_options();

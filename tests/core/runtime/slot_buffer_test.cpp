@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
+#include "tests/core/runtime/task_pipeline_test_peer.h"
 
 namespace xllm {
 namespace {
@@ -1032,7 +1033,8 @@ TEST_P(SlotSamplingInputTest,
       8 * (16 + 5 * float_bytes) + 8 * 16 * 12 + 8 * 5;
   // Seven model regions occupy 256 bytes; mapping uses 2x8 int64 indices
   // plus int64/int32 gather temporaries on device. These feed KV budgeting.
-  const uint64_t result_bytes = 8 * (1 + 8) * (sizeof(int64_t) + sizeof(float));
+  const uint64_t result_bytes =
+      8 * (1 + 8) * (sizeof(int64_t) + sizeof(float)) + 8 * sizeof(int32_t);
   EXPECT_EQ(binding_->pinned_bytes(),
             256 + sampling_bytes + result_bytes + 128);
   EXPECT_EQ(binding_->device_bytes(),
@@ -1358,6 +1360,134 @@ TEST_F(SlotBufferResultTest, DiscardAndDestructionRetireUnclaimedCopies) {
     }
     expect_producer_complete();
   }
+}
+
+TEST(SlotBufferModelOnlyTest,
+     AccountsOnlyModelStorageUntilSamplingIsConfigured) {
+  const torch::Device device(torch::kPrivateUse1, 0);
+  std::unique_ptr<SlotBuffer> buffer;
+  ASSERT_TRUE(SlotBuffer::create({8, 2, 2}, true, device, buffer).ok());
+  // Three 32-byte token regions, three aligned 16-byte sequence regions,
+  // and one 16-byte block table; no history, result, or previous-token mapping.
+  EXPECT_EQ(buffer->pinned_bytes(), 160U);
+  EXPECT_EQ(buffer->device_bytes(), 160U);
+  EXPECT_FALSE(buffer->sampling_params().selected_token_idxes.defined());
+  EXPECT_FALSE(buffer->device_result().tokens.defined());
+
+  SlotBufferCapacity capacity{{8, 2, 2}, 8, 128, 0};
+  capacity.max_selected_rows = 4;
+  capacity.max_sample_rows = 2;
+  capacity.max_result_width = 0;
+  ASSERT_TRUE(buffer->configure_sampling(capacity).ok());
+  EXPECT_EQ(buffer->pinned_bytes(), 160U + 4 * 36 + 4 * 8 * 12 + 2 * 5);
+  EXPECT_EQ(buffer->device_bytes(), buffer->pinned_bytes());
+  SamplingParameters parameters;
+  parameters.selected_token_idxes = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+  parameters.sample_idxes = torch::tensor({1, 3}, torch::kInt32);
+  parameters.do_sample = torch::tensor({false, true}, torch::kBool);
+  Stream prepare(device);
+  ASSERT_TRUE(buffer->prepare_sampling(parameters, 4, prepare).ok());
+  parameters.selected_token_idxes.fill_(7);
+  ASSERT_EQ(prepare.synchronize(), 0);
+  EXPECT_TRUE(torch::equal(buffer->sampling_params().selected_token_idxes.cpu(),
+                           torch::tensor({0, 1, 2, 3}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(buffer->copy_cpu_do_sample(),
+                           torch::tensor({false, true}, torch::kBool)));
+  EXPECT_FALSE(buffer->device_result().tokens.defined());
+}
+
+class SlotBufferSpeculativeResultTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    SlotBufferCapacity capacity{{8, 2, 2}, 8, 128, 2};
+    capacity.max_result_width = 4;
+    ASSERT_TRUE(SlotBuffer::create(capacity, device_, result_).ok());
+    ASSERT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
+  }
+
+  void TearDown() override {
+    EXPECT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
+    if (result_) {
+      result_->discard_result();
+    }
+  }
+
+  torch::Device device_{torch::kPrivateUse1, 0};
+  std::unique_ptr<SlotBuffer> result_;
+};
+
+TEST_F(SlotBufferSpeculativeResultTest,
+       AcceptedPrefixesHaveIndependentCpuOwnershipAfterReuse) {
+  ASSERT_TRUE(result_->bind_result(2, 4, 2, true).ok());
+  Stream producer(device_);
+  Stream consumer(device_);
+  StreamEventPtr ready;
+  const void* storage = result_->device_result().tokens.data_ptr();
+  {
+    auto guard = producer.set_stream_guard();
+    const auto& output = result_->device_result();
+    output.tokens.copy_(
+        torch::tensor({{10, 11, 12, 13}, {20, 21, 22, 23}}, torch::kInt64));
+    output.lengths.copy_(torch::tensor({1, 3}, torch::kInt32));
+    output.logprobs.fill_(-0.5);
+    output.top_tokens.fill_(99);
+    output.top_logprobs.fill_(-1.0);
+    ready = producer.record_event();
+  }
+  ASSERT_TRUE(result_->copy_result_to_host(consumer, ready).ok());
+  const auto output = result_->take_result();
+  EXPECT_TRUE(output.tokens.device().is_cpu());
+  EXPECT_FALSE(output.tokens.is_pinned());
+  EXPECT_TRUE(torch::equal(
+      output.tokens,
+      torch::tensor({{10, -1, -1, -1}, {20, 21, 22, -1}}, torch::kInt64)));
+  EXPECT_TRUE(
+      torch::equal(output.lengths, torch::tensor({1, 3}, torch::kInt32)));
+  EXPECT_EQ(output.top_tokens[0][0][0].item<int64_t>(), 99);
+  EXPECT_EQ(output.top_tokens[0][1][0].item<int64_t>(), -1);
+  EXPECT_EQ(output.logprobs[0][1].item<float>(),
+            -std::numeric_limits<float>::infinity());
+
+  ASSERT_TRUE(result_->bind_result(1, 1, 0, false).ok());
+  EXPECT_EQ(result_->device_result().tokens.data_ptr(), storage);
+  {
+    auto guard = producer.set_stream_guard();
+    result_->device_result().tokens.fill_(777);
+    result_->device_result().lengths.fill_(1);
+    ready = producer.record_event();
+  }
+  ASSERT_TRUE(result_->copy_result_to_host(consumer, ready).ok());
+  const auto reused = result_->take_result();
+  EXPECT_EQ(reused.tokens.item<int64_t>(), 777);
+  EXPECT_EQ(output.tokens[0][0].item<int64_t>(), 10);
+  EXPECT_EQ(output.tokens[1][2].item<int64_t>(), 22);
+}
+
+TEST_F(SlotBufferSpeculativeResultTest,
+       PendingResultRejectsRebindAndEmptyOutputStillRetiresProducer) {
+  ASSERT_TRUE(result_->bind_result(0, 0, 0, false).ok());
+  auto marker = torch::zeros(
+      {1}, torch::TensorOptions().device(device_).dtype(torch::kInt32));
+  ASSERT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
+  Stream producer(device_);
+  Stream consumer(device_);
+  StreamEventPtr ready;
+  {
+    auto guard = producer.set_stream_guard();
+    marker.fill_(42);
+    ready = producer.record_event();
+  }
+  ASSERT_TRUE(result_->copy_result_to_host(consumer, ready).ok());
+  EXPECT_FALSE(result_->bind_result(1, 1, 0, false).ok());
+  EXPECT_FALSE(result_->device_result().tokens.defined());
+  const auto output = result_->take_result();
+  EXPECT_FALSE(output.tokens.defined());
+  aclrtEventRecordedStatus event_status = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+  ASSERT_EQ(aclrtQueryEventStatus(ready->npu_event(), &event_status),
+            ACL_SUCCESS);
+  EXPECT_EQ(event_status, ACL_EVENT_RECORDED_STATUS_COMPLETE);
+  EXPECT_EQ(marker.cpu().item<int32_t>(), 42);
+  EXPECT_TRUE(result_->bind_result(1, 1, 0, false).ok());
 }
 
 }  // namespace

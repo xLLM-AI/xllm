@@ -1349,8 +1349,8 @@ class _PreparedStubAttentionBackend(StubAttentionBackend):
     def supports_prepared_metadata(self) -> bool:
         return True
 
-    def prepare_metadata(self, metadata: AttentionMetadata) -> object:
-        return SimpleNamespace(source=metadata.q_cu_seq_lens_host_values)
+    def prepare_metadata(self, metadata: AttentionMetadata, *, device_kv_lengths: bool = False) -> object:
+        return SimpleNamespace(source=metadata.q_cu_seq_lens_host_values, device_kv_lengths=device_kv_lengths)
 
 
 def test_executor_prepares_private_metadata_after_cache_binding() -> None:
@@ -1452,6 +1452,99 @@ def test_executor_accepts_prepared_data_parallel(model_type: str) -> None:
     ):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
     assert executor.supports_prepared_metadata
+
+
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_prepared_mtp_preserves_hidden_and_topk(dp_size: int) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {"model_type": "glm_moe_dsa_mtp", "dp_size": dp_size, "enable_task_pipeline": True}
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert executor.supports_prepared_metadata
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
+    executor.prepare_metadata(metadata)
+    tokens = torch.tensor([13, 17], dtype=torch.int32)
+    positions = torch.tensor([7, 19], dtype=torch.int32)
+    hidden = torch.arange(8, dtype=torch.float32).view(2, 4)
+    topk = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+    executor.eager_runner = MagicMock()
+    result = executor.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk)
+    executor.eager_runner.execute.assert_called_once_with(tokens, positions, metadata, hidden, None, topk)
+    assert result is executor.eager_runner.execute.return_value
+    with pytest.raises(RuntimeError, match="runner is not enabled"):
+        executor.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk, enable_graph=True)
+
+
+@pytest.mark.parametrize("model_type", ["DFlashDraftModel", "DFlash2DraftModel"])
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_prepared_block_draft_uses_device_lengths(model_type: str, dp_size: int) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {"model_type": model_type, "dp_size": dp_size, "enable_task_pipeline": True}
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4)
+    assert executor.supports_prepared_metadata
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    first = SimpleNamespace(q_cu_seq_lens_host_values=[4], dp_execution_token_counts=(4, 8))
+    second = SimpleNamespace(q_cu_seq_lens_host_values=[4, 8], dp_execution_token_counts=(8, 4))
+    executor.prepare_metadata(first)
+    executor.prepare_metadata(second)
+    assert first.prepared_attention_state.device_kv_lengths
+    assert first.prepared_attention_state.source == [4]
+    assert first.dp_execution_token_counts == (4, 8)
+    assert second.prepared_attention_state.source == [4, 8]
+    assert not backend._prepared
+
+
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_prepared_mtp_graph_receives_bound_hidden_and_topk(dp_size: int) -> None:
+    config = {
+        "model_type": "glm_moe_dsa_mtp",
+        "dp_size": dp_size,
+        "dp_rank": 0,
+        "enable_task_pipeline": True,
+        "python_graph_backend": "aclgraph",
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
+    assert executor.supports_prepared_metadata
+    assert executor.prepared_graph_runner.max_batch == min((5 + dp_size - 1) // dp_size, 4) * 2
+    assert executor.decode_graph_runner is None
+    executor._kv_bound = True
+    executor.prepared_graph_runner = MagicMock()
+    tokens = torch.tensor([13, 17], dtype=torch.int32)
+    positions = torch.tensor([7, 19], dtype=torch.int32)
+    hidden = torch.zeros(2, 4)
+    topk = torch.zeros(2, 1, 8, dtype=torch.int32)
+    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, prepared_attention_state=object())
+    executor.warmup_prepared_graph(tokens, positions, metadata, hidden, topk)
+    executor.prepared_graph_runner.warmup_prepared.assert_called_once_with(tokens, positions, metadata, hidden, topk)
+    executor.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk, enable_graph=True)
+    executor.prepared_graph_runner.execute.assert_called_once_with(tokens, positions, metadata, hidden, None, topk)
+
+
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: int) -> None:
+    config = {
+        "model_type": "glm_moe_dsa",
+        "dp_size": dp_size,
+        "dp_rank": 0,
+        "enable_task_pipeline": True,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(
+            _FakeModel(), config, max_seqs_per_batch=5, num_decoding_tokens=4, acl_graph_decode_batch_size_limit=4
+        )
+    assert executor.prepared_graph_runner.max_batch == min((5 + dp_size - 1) // dp_size, 4) * 4
+    assert executor.decode_graph_runner is None
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])

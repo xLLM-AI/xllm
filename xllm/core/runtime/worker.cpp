@@ -73,7 +73,13 @@ Worker::Worker(const ParallelArgs& parallel_args,
     CHECK(!options.enable_graph() || !execution.disable_graph_warmup())
         << "Task pipeline ACL graphs require initialization warmup.";
     CHECK(worker_type == WorkerType::LLM && options.task_type() == "generate" &&
-          !options.enable_speculative_decode() &&
+          (!options.enable_speculative_decode() ||
+           ((SpeculativeConfig::is_mtp_algorithm(
+                 options.speculative_algorithm()) ||
+             options.speculative_algorithm() == "DFlash" ||
+             SpeculativeConfig::is_dflash2_algorithm(
+                 options.speculative_algorithm())) &&
+            !options.enable_adaptive_speculative_decode())) &&
           !options.enable_prefill_piecewise_graph() &&
           !options.enable_disagg_pd() && options.host_blocks_factor() <= 1.0 &&
           !options.enable_kvcache_store() &&
@@ -84,7 +90,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
           parallel_args.cp_size() == 1 &&
           ParallelConfig::get_instance().kv_split_size_effective() == 1 &&
           ParallelConfig::get_instance().layerwise_split_size() == 1)
-        << "Task pipeline requires ordinary Python LLM with CP/KV/layerwise "
+        << "Task pipeline requires Python LLM or fixed MTP/DFlash/DFlash2 with "
+           "CP/KV/layerwise "
            "splits of one, without offload or disaggregation.";
   }
   if (options.enable_speculative_decode()) {
@@ -142,6 +149,9 @@ Worker::~Worker() {
 
 bool Worker::initialize_task_pipeline() {
   if (!enable_task_pipeline_) {
+    return true;
+  }
+  if (!impl_->task_models_loaded()) {
     return true;
   }
   CHECK(task_pipeline_ == nullptr);

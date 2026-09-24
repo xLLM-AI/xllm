@@ -2694,6 +2694,8 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   forward_input.input_params.attention.host.block_tables =
       forward_input.input_params.attention.device.block_tables;
   forward_input.input_params.embedding.linear_state_ids = {4, 6};
+  forward_input.input_params.embedding.embedding_ids = {2, 7};
+  forward_input.input_params.embedding.request_ids = {"mtp-a", "mtp-b"};
 
   TransferKVInfo transfer_info;
   transfer_info.request_id = "dsv4-round-trip";
@@ -2722,6 +2724,10 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   reader_manager.input_read(from_shm, torch::Device(torch::kCPU));
   EXPECT_EQ(from_shm.input_params.embedding.linear_state_ids,
             std::vector<int32_t>({4, 6}));
+  EXPECT_EQ(from_shm.input_params.embedding.embedding_ids,
+            std::vector<int32_t>({2, 7}));
+  EXPECT_EQ(from_shm.input_params.embedding.request_ids,
+            (std::vector<std::string>{"mtp-a", "mtp-b"}));
   ASSERT_EQ(from_shm.transfer_kv_infos.size(), 1u);
   EXPECT_EQ(from_shm.transfer_kv_infos[0].request_id, "dsv4-round-trip");
   EXPECT_TRUE(from_shm.transfer_kv_infos[0].rank_local_mapping);

@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -47,6 +48,7 @@ limitations under the License.
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/platform/platform.h"
+#include "core/runtime/task_execution_pipeline.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/json_reader.h"
 #include "util/model_config_utils.h"
@@ -96,6 +98,9 @@ runtime::Options draft_options(const runtime::Options& options) {
       .num_decoding_tokens(1)
       .num_speculative_tokens(draft_num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
+  if (options.enable_task_pipeline()) {
+    opts.enable_graph(false);
+  }
   return opts;
 }
 
@@ -381,6 +386,69 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
     adaptive_spec_controller_ =
         std::make_unique<AdaptiveSpeculativeController>(options);
   }
+}
+
+bool DFlashWorkerImpl::task_models_loaded() const {
+  return impl_ != nullptr && draft_impl_ != nullptr &&
+         impl_->get_status() == WorkerImpl::Status::LOADED &&
+         draft_impl_->get_status() == WorkerImpl::Status::LOADED;
+}
+
+::xllm::Status DFlashWorkerImpl::create_task_pipeline(
+    std::unique_ptr<TaskExecutionPipeline>& output) {
+  if (impl_ == nullptr || draft_impl_ == nullptr ||
+      options_.enable_adaptive_speculative_decode() ||
+      options_.num_speculative_tokens() <= 0 || target_is_hybrid_recurrent_) {
+    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
+                          "Block task pipeline requires fixed-width, "
+                          "full-attention Target/Draft models.");
+  }
+  SpeculativeTaskCapacity capacity;
+  ::xllm::Status status = impl_->task_capacity(options_, capacity.common);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!capacity.common.enable_mla) {
+    return ::xllm::Status(
+        StatusCode::INVALID_ARGUMENT,
+        "Block task pipeline currently requires a GLM DSA target; "
+        "dense target attention needs a device-length prepared contract.");
+  }
+  const auto& draft_args = draft_impl_->context_.get_model_args();
+  if (draft_args.hidden_size() != capacity.common.hidden_size ||
+      draft_args.vocab_size() != capacity.common.vocab_size ||
+      expected_context_hidden_size_ <= 0 ||
+      expected_context_hidden_size_ > std::numeric_limits<int32_t>::max()) {
+    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
+                          "Block task model hidden/vocabulary or captured "
+                          "context geometry mismatch.");
+  }
+  capacity.kind =
+      SpeculativeConfig::is_dflash2_algorithm(options_.speculative_algorithm())
+          ? SpeculativeTaskKind::DFLASH2
+          : SpeculativeTaskKind::DFLASH;
+  capacity.num_speculative_tokens = options_.num_speculative_tokens();
+  capacity.context_hidden_size =
+      static_cast<uint32_t>(expected_context_hidden_size_);
+  capacity.mask_token_id = mask_token_id_;
+  capacity.selector_top_k = draft_args.dflash2_selector_top_k();
+  capacity.sampling_group = spec_broadcast_group(parallel_args_);
+  capacity.draft_sampling_mode = draft_sampling_mode_;
+  capacity.fused_rejection = enable_fused_kernel_;
+  status = TaskExecutionPipeline::create(threadpool_,
+                                         impl_->task_model(),
+                                         draft_impl_->task_model(),
+                                         capacity,
+                                         output);
+  if (!status.ok()) {
+    return status;
+  }
+  LOG(INFO) << options_.speculative_algorithm()
+            << " task execution pipeline: slots=" << capacity.common.slot_count
+            << ", speculative_tokens=" << capacity.num_speculative_tokens
+            << ", pinned_bytes=" << output->pinned_bytes()
+            << ", device_bytes=" << output->device_bytes();
+  return ::xllm::Status();
 }
 
 bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,

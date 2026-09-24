@@ -44,6 +44,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/platform/platform.h"
+#include "core/util/model_config_utils.h"
 #include "framework/block/block_utils.h"
 #include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/kv_cache/kv_cache_estimation.h"
@@ -233,6 +234,15 @@ bool LLMEngine::init_model(MasterStatus master_status) {
 
   args_ = model_loader->model_args();
   quant_args_ = model_loader->quant_args();
+  if (!options_.is_draft_engine() &&
+      SpeculativeConfig::is_block_diffusion_algorithm(
+          options_.speculative_algorithm())) {
+    CHECK(options_.draft_model_path().has_value())
+        << "Block-diffusion Target requires a draft checkpoint.";
+    // Scheduler warmup must use the same auxiliary-state width as the workers.
+    args_.layers_to_capture(
+        util::read_capture_layer_ids(options_.draft_model_path().value()));
+  }
 
   // A draft engine is fed token ids and detokenized by the target, so it
   // shares the target vocabulary and loads no tokenizer of its own.
@@ -536,6 +546,24 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       options_.is_draft_engine()
           ? 1
           : ParallelConfig::get_instance().layerwise_split_size();
+
+  if (options_.enable_task_pipeline() &&
+      options_.num_speculative_tokens() > 0 && !options_.is_draft_engine()) {
+    // Every speculative context retains the current token, position and KV
+    // length. Block drafts publish auxiliary hidden states directly to draft
+    // KV; only MTP also needs the previous token, two hidden rows and repair.
+    estimate_options.embedding_context_bytes_per_block =
+        sizeof(int64_t) + 2 * sizeof(int32_t);
+    if (!SpeculativeConfig::is_block_diffusion_algorithm(
+            options_.speculative_algorithm())) {
+      CHECK_GT(args_.hidden_size(), 0);
+      const int64_t element_bytes =
+          static_cast<int64_t>(torch::scalarTypeToTypeMeta(dtype_).itemsize());
+      estimate_options.embedding_context_bytes_per_block +=
+          sizeof(int64_t) + 2 * args_.hidden_size() * element_bytes +
+          sizeof(bool);
+    }
+  }
 
   KVCacheCapacity kv_cache_cap =
       ::xllm::estimate_kv_cache_capacity(args_, estimate_options);

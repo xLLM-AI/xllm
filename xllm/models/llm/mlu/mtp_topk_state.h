@@ -61,6 +61,10 @@ class MluMtpTopkState final : public ::xllm::MtpTopkState {
 
   const LayerStates& layer_states() const { return layer_states_; }
 
+  std::optional<torch::Tensor> as_tensor() const override {
+    return std::nullopt;
+  }
+
   int64_t num_rows() const override { return num_rows_; }
 
   torch::Device device() const override { return device_; }

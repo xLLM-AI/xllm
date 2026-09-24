@@ -34,6 +34,9 @@ struct KVCacheEstimateOptions {
   std::string kv_cache_dtype = "auto";
   std::string indexer_cache_dtype = "auto";
   int64_t cache_size_in_bytes = 0;
+  // Derived storage cost for the existing embedding row paired with each KV
+  // block id. Internal accounting only; this is not a user configuration.
+  int64_t embedding_context_bytes_per_block = 0;
   int64_t block_size = 0;
   int64_t world_size = 1;
   int64_t n_local_kv_heads = 0;

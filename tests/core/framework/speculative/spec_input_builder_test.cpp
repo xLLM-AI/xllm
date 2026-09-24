@@ -19,9 +19,9 @@ limitations under the License.
 
 #include <vector>
 
+#include "core/framework/model/mtp_topk_state.h"
 #include "framework/model/model_input_params.h"
 #include "models/llm/mlu/mtp_topk_state.h"
-#include "models/llm/npu/mtp_topk_state.h"
 #include "runtime/forward_params.h"
 
 namespace xllm {
@@ -611,26 +611,22 @@ TEST(SpecDecodeInputBuilderTest, MakeDecodeRowContextRejectsEmptyBlockTables) {
 TEST(SpecMtpTopkInputBuilderTest, SelectsSampledRowsForNextDraftStep) {
   const torch::Tensor topk_indices =
       torch::tensor({{0, 1}, {2, 3}, {4, 5}, {6, 7}}, torch::kInt32);
-  const MtpTopkStatePtr state =
-      std::make_shared<npu::model::NpuMtpTopkState>(topk_indices);
+  const MtpTopkStatePtr state = MtpTopkState::from_tensor(topk_indices);
   SamplingParameters sampling_params;
   sampling_params.selected_token_idxes = torch::tensor({1, 3}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(state, sampling_params);
 
-  const auto npu_state =
-      std::dynamic_pointer_cast<const npu::model::NpuMtpTopkState>(selected);
-  ASSERT_NE(npu_state, nullptr);
+  ASSERT_TRUE(selected->as_tensor().has_value());
   const torch::Tensor expected = torch::tensor({{2, 3}, {6, 7}}, torch::kInt32);
-  EXPECT_TRUE(torch::equal(npu_state->topk_indices(), expected));
+  EXPECT_TRUE(torch::equal(*selected->as_tensor(), expected));
 }
 
 TEST(SpecMtpTopkInputBuilderTest, KeepsRowsWhenAlreadyMatchedToDraftBatch) {
   const torch::Tensor topk_indices =
       torch::tensor({{0, 1}, {2, 3}}, torch::kInt32);
-  const MtpTopkStatePtr state =
-      std::make_shared<npu::model::NpuMtpTopkState>(topk_indices);
+  const MtpTopkStatePtr state = MtpTopkState::from_tensor(topk_indices);
   SamplingParameters sampling_params;
   sampling_params.selected_token_idxes = torch::tensor({0, 1}, torch::kInt32);
 
@@ -638,6 +634,30 @@ TEST(SpecMtpTopkInputBuilderTest, KeepsRowsWhenAlreadyMatchedToDraftBatch) {
       select_mtp_topk_state_for_next_step(state, sampling_params);
 
   EXPECT_EQ(selected.get(), state.get());
+}
+
+TEST(SpecMtpTopkInputBuilderTest, TensorBindingKeepsStorageAcrossUpdates) {
+  torch::Tensor storage = torch::full({4, 1, 3}, -1, torch::kInt32);
+  torch::Tensor binding = storage.narrow(/*dim=*/0, /*start=*/1, /*length=*/2);
+  const MtpTopkStatePtr state = MtpTopkState::from_tensor(binding);
+  const auto tensor = state->as_tensor();
+  ASSERT_TRUE(tensor.has_value());
+  const torch::Tensor captured_input = *tensor;
+  EXPECT_EQ(captured_input.data_ptr(), binding.data_ptr());
+  EXPECT_EQ(captured_input.strides(), binding.strides());
+  EXPECT_EQ(state->num_rows(), 2);
+
+  torch::Tensor next_topk = torch::arange(6, torch::kInt32).view({2, 1, 3});
+  binding.copy_(next_topk);
+  EXPECT_TRUE(torch::equal(captured_input, next_topk));
+
+  next_topk.add_(10);
+  binding.copy_(next_topk);
+  EXPECT_EQ(state->as_tensor()->data_ptr(), captured_input.data_ptr());
+  EXPECT_TRUE(torch::equal(captured_input, next_topk));
+  const torch::Tensor padding = torch::full({1, 3}, -1, torch::kInt32);
+  EXPECT_TRUE(torch::equal(storage.select(/*dim=*/0, /*index=*/0), padding));
+  EXPECT_TRUE(torch::equal(storage.select(/*dim=*/0, /*index=*/3), padding));
 }
 
 TEST(SpecMtpTopkInputBuilderTest, KeepsUndefinedStateUndefined) {
@@ -661,12 +681,14 @@ TEST(SpecMtpTopkInputBuilderTest, SelectsMluRowsWithoutMixingLayerState) {
       torch::tensor({40, 50, 60}, torch::kInt32)));
   const MtpTopkStatePtr state =
       std::make_shared<mlu::model::MluMtpTopkState>(std::move(states));
+  EXPECT_FALSE(state->as_tensor().has_value());
   SamplingParameters sampling_params;
   sampling_params.selected_token_idxes = torch::tensor({2, 0}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(state, sampling_params);
 
+  EXPECT_FALSE(selected->as_tensor().has_value());
   const auto mlu_state =
       std::dynamic_pointer_cast<const mlu::model::MluMtpTopkState>(selected);
   ASSERT_NE(mlu_state, nullptr);
@@ -701,24 +723,21 @@ TEST(SpecMtpTopkInputBuilderTest, KeepsMluStateWhenRowsAlreadyMatchDraftBatch) {
   EXPECT_EQ(selected.get(), state.get());
 }
 
-TEST(SpecMtpTopkInputBuilderTest, MovesNpuStateWithModelInputParams) {
+TEST(SpecMtpTopkInputBuilderTest, MovesTensorStateWithModelInputParams) {
   ModelInputParams params;
   const torch::Tensor topk_indices =
       torch::tensor({{0, 1}, {2, 3}}, torch::kInt32);
-  params.mtp_topk_state =
-      std::make_shared<npu::model::NpuMtpTopkState>(topk_indices);
+  params.mtp_topk_state = MtpTopkState::from_tensor(topk_indices);
 
   const torch::Device target_device("meta");
   const ModelInputParams converted = params.to(target_device);
 
-  const auto converted_state =
-      std::dynamic_pointer_cast<const npu::model::NpuMtpTopkState>(
-          converted.mtp_topk_state);
-  ASSERT_NE(converted_state, nullptr);
-  EXPECT_EQ(converted_state->device(), target_device);
-  EXPECT_EQ(converted_state->topk_indices().sizes(), topk_indices.sizes());
-  EXPECT_EQ(converted_state->topk_indices().scalar_type(),
-            topk_indices.scalar_type());
+  ASSERT_NE(converted.mtp_topk_state, nullptr);
+  const auto converted_indices = converted.mtp_topk_state->as_tensor();
+  ASSERT_TRUE(converted_indices.has_value());
+  EXPECT_EQ(converted_indices->device(), target_device);
+  EXPECT_EQ(converted_indices->sizes(), topk_indices.sizes());
+  EXPECT_EQ(converted_indices->scalar_type(), topk_indices.scalar_type());
   EXPECT_TRUE(topk_indices.device().is_cpu());
 }
 

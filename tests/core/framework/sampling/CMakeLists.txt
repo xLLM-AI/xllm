@@ -4,6 +4,7 @@ cc_test(
   NAME
     sampler_test
   SRCS
+    dflash2_sampling_test.cpp
     gumbel_sampling_test.cpp
     rejection_sampler_test.cpp
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/sampling/rejection_sampler.cpp"

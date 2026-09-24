@@ -242,6 +242,7 @@ def test_prepare_keeps_previous_graph_metadata_independent(runner: PreparedAclGr
 def test_prepared_executor_obeys_admission_and_propagates_replay_failure(runner: PreparedAclGraphRunner) -> None:
     executor = object.__new__(ModelExecutor)
     executor._kv_bound = True
+    executor._prepared_mtp = False
     executor.layerwise_split_size = 1
     executor.decode_graph_runner = None
     executor.prepared_graph_runner = runner
@@ -435,3 +436,122 @@ def test_capture_failure_propagates_without_publishing_a_graph(runner: PreparedA
         runner.warmup_prepared(tokens, positions, metadata)
     assert not runner._prepared_graphs
     assert runner.prepared_replays == 0
+
+
+@pytest.mark.parametrize("reuse_topk", [False, True])
+def test_mtp_capture_binds_hidden_and_topk_without_copying(runner: PreparedAclGraphRunner, reuse_topk: bool) -> None:
+    tokens = torch.arange(2, dtype=torch.int32)
+    positions = torch.zeros_like(tokens)
+    metadata = _metadata(2)
+    hidden = torch.zeros(2, 4)
+    topk = torch.zeros(2, 1, 8, dtype=torch.int32) if reuse_topk else None
+    runner.warmup_prepared(tokens, positions, metadata, hidden, topk)
+    entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata, hidden, topk)]
+    assert entry.static_input_embedding is hidden
+    assert entry.static_mtp_topk_indices is topk
+    runner.model = Mock(return_value=(hidden, topk))
+    runner._forward_static(entry)
+    if reuse_topk:
+        runner.model.assert_called_once_with(tokens, positions, hidden, topk)
+    else:
+        runner.model.assert_called_once_with(tokens, positions, hidden)
+    runner.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk)
+    runner.attention_backend.prepare.reset_mock()
+    with pytest.raises(RuntimeError, match="warmed Slot binding"):
+        runner.execute(tokens, positions, metadata, hidden.clone(), mtp_topk_indices=topk)
+    with pytest.raises(RuntimeError, match="warmed Slot binding"):
+        runner.execute(tokens, positions, metadata, hidden.as_strided((2, 4), (1, 2)), mtp_topk_indices=topk)
+    if reuse_topk:
+        with pytest.raises(RuntimeError, match="warmed Slot binding"):
+            runner.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk.clone())
+        with pytest.raises(RuntimeError, match="warmed Slot binding"):
+            runner.execute(tokens, positions, metadata, hidden)
+    runner.attention_backend.prepare.assert_not_called()
+    assert runner._capture.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "hidden,topk",
+    [
+        (torch.zeros(1, 4), None),
+        (torch.zeros(2), None),
+        (torch.zeros(2, 4), torch.zeros(1, 1, 8, dtype=torch.int32)),
+        (None, torch.zeros(2, 1, 8, dtype=torch.int32)),
+    ],
+)
+def test_mtp_invalid_input_is_rejected_before_capture(
+    runner: PreparedAclGraphRunner, hidden: torch.Tensor | None, topk: torch.Tensor | None
+) -> None:
+    with pytest.raises(ValueError, match="hidden state|MTP top-k"):
+        runner.warmup_prepared(torch.zeros(2), torch.zeros(2), _metadata(2), hidden, topk)
+    runner._capture.assert_not_called()
+    runner.attention_backend.prepare.assert_not_called()
+
+
+@pytest.mark.parametrize("reuse_topk", [False, True])
+@pytest.mark.parametrize("dp_size", [1, 2])
+@torch.inference_mode()
+def test_mtp_real_graph_replays_live_inputs_across_slots(reuse_topk: bool, dp_size: int) -> None:
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("requires an NPU")
+    from xllm.python.model_executor.forward_context import get_forward_context
+
+    class MtpModel(torch.nn.Module):
+        def forward(
+            self,
+            tokens: torch.Tensor,
+            positions: torch.Tensor,
+            hidden: torch.Tensor,
+            topk: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            kv = get_forward_context().metadata.kv_seq_lens
+            indices = positions.view(-1, 1, 1) + 1 if topk is None else topk + 1
+            output = hidden + (tokens + kv).to(hidden.dtype).view(-1, 1)
+            return output + indices.sum(dim=(1, 2)).to(hidden.dtype).view(-1, 1), indices
+
+    device = torch.device("npu:0")
+    backend = SimpleNamespace(prepare=lambda *args, **kwargs: None, is_mla=False)
+    runner = PreparedAclGraphRunner(MtpModel(), backend, device, 4 * dp_size, dp_size)
+    task_stream = torch.npu.Stream(device=device)
+    inputs = []
+    # Two Slots, each with the first repair/current call and two subsequent
+    # calls. Every invocation has its own persistent hidden/TopK input.
+    for _ in range(2):
+        for step, rows in enumerate((4, 2, 2)):
+            tokens = torch.zeros(rows, dtype=torch.int32, device=device)
+            positions = torch.zeros_like(tokens)
+            hidden = torch.zeros(rows, 4, device=device)
+            topk = torch.zeros(rows, 1, 2, dtype=torch.int32, device=device) if step and reuse_topk else None
+            metadata = _metadata(rows)
+            for name in ("slot_mapping", "block_table", "q_seq_lens", "q_cu_seq_lens", "kv_seq_lens"):
+                setattr(metadata, name, getattr(metadata, name).to(device))
+            metadata.dp_execution_token_counts = (rows,) * dp_size
+            metadata.dp_is_decode = (1,) * dp_size
+            task_stream.wait_stream(torch.npu.current_stream(device))
+            with torch.npu.stream(task_stream):
+                runner.warmup_prepared(tokens, positions, metadata, hidden, topk)
+            inputs.append((tokens, positions, metadata, hidden, topk))
+    assert len(runner._prepared_graphs) == 6
+    for round_id, index in enumerate((0, 1, 2, 3, 4, 5, 0, 4, 1)):
+        tokens, positions, metadata, hidden, topk = inputs[index]
+        tokens.fill_(round_id + 1)
+        positions.fill_(round_id + 3)
+        hidden.fill_(round_id + 5)
+        # Host upper bounds stay unchanged while the accepted Device lengths
+        # and previous draft outputs arrive immediately before replay.
+        metadata.kv_seq_lens.fill_(round_id + 7)
+        if topk is not None:
+            topk.fill_(round_id + 9)
+        task_stream.wait_stream(torch.npu.current_stream(device))
+        with torch.npu.stream(task_stream):
+            output, indices = runner.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk)
+        torch.npu.current_stream(device).wait_stream(task_stream)
+        expected_indices = positions.view(-1, 1, 1) + 1 if topk is None else topk + 1
+        expected = hidden + (tokens + metadata.kv_seq_lens).to(hidden.dtype).view(-1, 1)
+        expected += expected_indices.sum(dim=(1, 2)).to(hidden.dtype).view(-1, 1)
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(indices, expected_indices)
+        assert metadata.kv_seq_lens_host_values == [1] * tokens.numel()
+    assert len(runner._prepared_graphs) == 6
+    assert runner.prepared_replays == 9

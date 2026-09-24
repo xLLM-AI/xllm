@@ -311,6 +311,119 @@ def test_prepared_decode_uses_warmed_graph_state(is_mla: bool) -> None:
         assert backend._actual_seq_lens is None
 
 
+@pytest.mark.parametrize("width", [4, 8])
+@pytest.mark.parametrize("window", [None, 32])
+def test_block_attention_reads_accepted_device_lengths(width: int, window: int | None) -> None:
+    if not torch.npu.is_available():
+        pytest.skip("requires an NPU")
+    device = torch.device("npu:0")
+    backend = NpuPagedAttentionBackend(
+        num_heads=4,
+        num_kv_heads=2,
+        head_dim=128,
+        scale=128**-0.5,
+        sliding_window=0,
+        is_mla=False,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(1234)
+    cache = torch.randn(4, 128, 2, 128, device=device, dtype=torch.bfloat16)
+    values = torch.randn_like(cache)
+    backend.bind_kv_caches([LayerCache(key=cache, value=values)])
+    query = torch.randn(2 * width, 4, 128, device=device, dtype=torch.bfloat16)
+    metadata = SimpleNamespace(
+        q_seq_lens=torch.full((2,), width, device=device, dtype=torch.int32),
+        q_cu_seq_lens_host_values=[width, 2 * width],
+        block_table=torch.tensor([[0, 1], [2, 3]], device=device, dtype=torch.int32),
+        kv_seq_lens=torch.tensor([137, 143], device=device, dtype=torch.int32),
+        kv_seq_lens_host_values=[137, 143],
+        is_prefill=False,
+        is_chunked_prefill=True,
+        is_spec_verify=False,
+        has_kv_shard=False,
+        expanded_decode_metadata=None,
+    )
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    # Acceptance arrives after Prepare; the bound view must observe the new
+    # device lengths while Host upper bounds remain unchanged.
+    metadata.kv_seq_lens.copy_(torch.tensor([130, 139], device=device, dtype=torch.int32))
+    assert metadata.prepared_attention_state.actual_seq_kv == [137, 143]
+    layer = SimpleNamespace(
+        causal=False,
+        fia_use_attention_mask=False,
+        fia_sparse_mode=None,
+        fia_pre_tokens=2147483647,
+        fia_next_tokens=0,
+    )
+    if window is not None:
+        layer.fia_use_attention_mask = True
+        layer.fia_sparse_mode = 4
+        layer.fia_pre_tokens = window - 1
+        layer.fia_next_tokens = width - 1
+    backend.prepare(metadata)
+    actual = backend._prefill(query, query, query, cache, values, metadata, 2 * width, layer)
+    metadata.kv_seq_lens_host_values = [130, 139]
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+    backend.prepare(metadata)
+    expected = backend._prefill(query, query, query, cache, values, metadata, 2 * width, layer)
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+def test_block_attention_shares_masks_per_forward_and_refreshes_device_lengths(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _ordinary_backend()
+    metadata = _ordinary_metadata(paged=True)
+    metadata.q_seq_lens = torch.tensor([2, 2], dtype=torch.int32)
+    metadata.q_cu_seq_lens_host_values = [2, 4]
+    metadata.block_table = torch.tensor([[0, 2], [1, 3]], dtype=torch.int32)
+    metadata.is_chunked_prefill = True
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    query = torch.zeros(4, 8, 64)
+    cache = torch.zeros(4, 128, 2, 64)
+    calls: list[dict[str, object]] = []
+
+    def attention(
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **kwargs: object
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        calls.append(kwargs)
+        return query.clone(), torch.empty(0)
+
+    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention)
+    full = SimpleNamespace(causal=False, fia_use_attention_mask=False, fia_sparse_mode=None)
+    window = SimpleNamespace(
+        causal=False, fia_use_attention_mask=True, fia_sparse_mode=4, fia_pre_tokens=2, fia_next_tokens=1
+    )
+    metadata.kv_seq_lens.copy_(torch.tensor([5, 3], dtype=torch.int32))
+    backend.prepare(metadata)
+    backend._prefill(query, query, query, cache, cache, metadata, 4, full)
+    # Preparing another Slot is Host-only and must not alter the active
+    # forward's mask or block table while its decoder layers are launching.
+    backend.prepare_metadata(_ordinary_metadata(paged=True))
+    for layer in (full, window, window):
+        backend._prefill(query, query, query, cache, cache, metadata, 4, layer)
+    assert calls[0]["atten_mask"] is calls[1]["atten_mask"]
+    assert calls[2]["atten_mask"] is calls[3]["atten_mask"]
+    assert calls[0]["atten_mask"] is not calls[2]["atten_mask"]
+    assert all(call["block_table"] is calls[0]["block_table"] for call in calls)
+    torch.testing.assert_close(calls[0]["block_table"], torch.tensor([[0], [1]], dtype=torch.int32))
+    assert (~calls[0]["atten_mask"]).sum(dim=-1).tolist() == [[[5, 5]], [[3, 3]]]
+    assert torch.where(~calls[2]["atten_mask"][0, 0, 0])[0].tolist() == [1, 2, 3, 4]
+    assert torch.where(~calls[2]["atten_mask"][0, 0, 1])[0].tolist() == [2, 3, 4]
+
+    # The same Slot metadata retains its Host upper bounds, but a new forward
+    # must use the latest accepted Device lengths rather than cached masks.
+    metadata.kv_seq_lens.copy_(torch.tensor([4, 2], dtype=torch.int32))
+    backend.prepare(metadata)
+    for layer in (full, window):
+        backend._prefill(query, query, query, cache, cache, metadata, 4, layer)
+    assert calls[4]["atten_mask"] is not calls[0]["atten_mask"]
+    assert calls[5]["atten_mask"] is not calls[2]["atten_mask"]
+    assert (~calls[4]["atten_mask"]).sum(dim=-1).tolist() == [[[4, 4]], [[2, 2]]]
+    assert torch.where(~calls[5]["atten_mask"][0, 0, 0])[0].tolist() == [0, 1, 2, 3]
+    assert torch.where(~calls[5]["atten_mask"][0, 0, 1])[0].tolist() == [1, 2, 3]
+    assert metadata.kv_seq_lens_host_values == [6, 4]
+
+
 def test_paged_graph_requires_an_execution_owner() -> None:
     from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 

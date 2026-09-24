@@ -430,9 +430,17 @@ Master::Master(const Options& options, EngineType type)
       engine_type_(type),
       master_status_(options.master_status()) {
   if (options_.enable_task_pipeline()) {
-    CHECK(type == EngineType::LLM && options_.task_type() == "generate" &&
+    const std::string& algorithm = options_.speculative_algorithm();
+    const bool supported_speculation =
+        SpeculativeConfig::is_mtp_algorithm(algorithm) ||
+        algorithm == "DFlash" ||
+        SpeculativeConfig::is_dflash2_algorithm(algorithm);
+    CHECK((type == EngineType::LLM ||
+           (type == EngineType::SSM && supported_speculation)) &&
+          options_.task_type() == "generate" &&
           !options_.enable_offline_inference())
-        << "Task pipeline currently requires online ordinary LLM generation.";
+        << "Task pipeline requires online LLM, MTP, DFlash or DFlash2 "
+           "generation.";
     CHECK(master_status_ == MasterStatus::WAKEUP)
         << "Task pipeline must start with loaded weights.";
   }

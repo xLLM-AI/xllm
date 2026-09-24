@@ -23,6 +23,7 @@ limitations under the License.
 #include <iomanip>
 #include <sstream>
 
+#include "core/framework/model/mtp_utils.h"
 #include "framework/request/sequence.h"
 
 namespace xllm {
@@ -80,13 +81,18 @@ std::string next_warmup_request_id() {
 }
 
 void prepare_warmup_decode_sequence(Sequence* sequence,
-                                    int64_t embedding_width,
+                                    const ModelArgs& model_args,
                                     int32_t num_speculative_tokens) {
   CHECK(sequence != nullptr);
   if (num_speculative_tokens <= 0) {
     return;
   }
 
+  const int64_t embedding_width =
+      model_args.layers_to_capture().empty()
+          ? mtp_hidden_state_width(model_args)
+          : model_args.hidden_size() *
+                static_cast<int64_t>(model_args.layers_to_capture().size());
   CHECK_GT(embedding_width, 0);
   // Placeholder bootstrap hidden states; the worker converts dtype/device and
   // only the [1, embedding_width] shape matters for the batch input builder.

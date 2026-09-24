@@ -95,6 +95,7 @@ class ContinuousScheduler : public Scheduler {
 
     // the maximum number of sequences per batch
     PROPERTY(int32_t, max_seqs_per_batch) = 256;
+    PROPERTY(bool, enable_task_pipeline) = false;
 
     // the max tokens per chunk for request in prefill stage.
     PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);

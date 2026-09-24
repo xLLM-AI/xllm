@@ -240,9 +240,14 @@ class ModelExecutor:
             )
         dp_rank = int(config.get("dp_rank", 0))
         self.dp_size = dp_size
+        self._prepared_mtp = config.get("model_type") == "glm_moe_dsa_mtp"
+        self._prepared_block_draft = config.get("model_type") in ("DFlashDraftModel", "DFlash2DraftModel")
         self._supports_prepared_metadata = (
             self.attention_backend.supports_prepared_metadata
-            and config.get("model_type") in ("qwen3", "glm_moe_dsa")
+            and (
+                config.get("model_type") in ("qwen3", "glm_moe_dsa", "glm_moe_dsa_mtp")
+                or (self._prepared_block_draft and graph_backend in ("", "off", "none", "0"))
+            )
             and int(config.get("kv_split_size", 1)) in (0, 1)
             and graph_backend in ("", "off", "none", "0", "aclgraph")
             and all(int(config.get(key, 1)) == 1 for key in ("cp_size", "layerwise_split_size"))
@@ -294,8 +299,8 @@ class ModelExecutor:
             if config.get("enable_task_pipeline", False):
                 from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
 
-                if not self._supports_prepared_metadata or max_decode_rows_per_request != 1:
-                    raise ValueError("prepared ACL graphs require supported ordinary decode")
+                if not self._supports_prepared_metadata or self._prepared_block_draft:
+                    raise ValueError("prepared ACL graphs require a supported target or MTP model")
                 self.prepared_graph_runner = PreparedAclGraphRunner(
                     execution_model, self.attention_backend, device, max_graph_tokens, dp_size, dp_rank
                 )
@@ -345,14 +350,24 @@ class ModelExecutor:
     def prepare_metadata(self, metadata: AttentionMetadata) -> None:
         if not self._supports_prepared_metadata or not self._kv_bound:
             raise RuntimeError("prepared metadata requires an initialized supported Qwen3 or GLM executor")
-        metadata.prepared_attention_state = self.attention_backend.prepare_metadata(metadata)
+        if self._prepared_block_draft:
+            metadata.prepared_attention_state = self.attention_backend.prepare_metadata(
+                metadata, device_kv_lengths=True
+            )
+        else:
+            metadata.prepared_attention_state = self.attention_backend.prepare_metadata(metadata)
 
     def warmup_prepared_graph(
-        self, input_ids: torch.Tensor, positions: torch.Tensor, metadata: AttentionMetadata
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
+        mtp_topk_indices: torch.Tensor | None = None,
     ) -> None:
         if self.prepared_graph_runner is None:
             raise RuntimeError("prepared ACL graph runner is not enabled")
-        self.prepared_graph_runner.warmup_prepared(input_ids, positions, metadata)
+        self.prepared_graph_runner.warmup_prepared(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
 
     def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:
         layer_caches = normalize_layer_caches(kv_caches)
@@ -389,13 +404,17 @@ class ModelExecutor:
 
         graph_runner = self.decode_graph_runner
         if getattr(metadata, "prepared_attention_state", None) is not None:
-            if mtp_topk_indices is not None:
+            if mtp_topk_indices is not None and not self._prepared_mtp:
                 raise ValueError("prepared metadata does not support MTP top-k state")
             if enable_graph:
                 if self.prepared_graph_runner is None:
                     raise RuntimeError("prepared ACL graph runner is not enabled")
                 return self.prepared_graph_runner.execute(
-                    input_ids, positions, metadata, input_embedding, layer_synchronizer
+                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices
+                )
+            if self._prepared_mtp:
+                return self.eager_runner.execute(
+                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices
                 )
             return self.eager_runner.execute(input_ids, positions, metadata, input_embedding, layer_synchronizer)
         graph_kwargs = {}

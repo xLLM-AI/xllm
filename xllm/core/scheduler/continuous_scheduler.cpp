@@ -485,13 +485,35 @@ void ContinuousScheduler::step_with_schedule_overlap(
     return;
   }
 
+  const bool previous_pending = !is_first_step_ && !last_batch_all_empty;
+  bool needs_prefill_state = false;
+  if (options_.enable_task_pipeline() &&
+      options_.num_speculative_tokens() > 0) {
+    // Speculative pipelines use accepted device state during pure
+    // Decode. Prefill, including mixed DP phases, requires concrete Host tokens
+    // and lengths before preparing the target/draft inputs. Retire the previous
+    // result at this transition; defer response processing until after Step so
+    // the already scheduled batch keeps its Sequence and KV ownership.
+    for (auto& peer : batch) {
+      for (uint64_t row = 0; row < peer.size(); ++row) {
+        needs_prefill_state =
+            needs_prefill_state || peer[row]->is_prefill_stage();
+      }
+    }
+  }
+  const bool consumed_before_step = previous_pending && needs_prefill_state;
+  if (consumed_before_step) {
+    engine_->update_last_step_result(last_batch_);
+  }
   if (!cur_batch_all_empty) {
     engine_->step(batch);
   }
 
   // producer-consumer mode, make sure only one step is scheduled in advance
-  if (!is_first_step_ && !last_batch_all_empty) {
-    engine_->update_last_step_result(last_batch_);
+  if (previous_pending) {
+    if (!consumed_before_step) {
+      engine_->update_last_step_result(last_batch_);
+    }
     process_batch_output(true);
   }
   last_batch_ = std::move(batch);

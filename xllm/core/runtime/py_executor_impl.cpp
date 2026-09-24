@@ -26,6 +26,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/kv_cache/kv_shard_layout.h"
+#include "core/framework/model/mtp_topk_state.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/kv_shard_batch_metadata.h"
@@ -36,7 +37,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
-#include "models/llm/npu/mtp_topk_state.h"
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
 
@@ -46,6 +46,16 @@ namespace xllm {
 namespace {
 
 thread_local PyCausalLM* active_py_causal_lm = nullptr;
+
+py::object mtp_topk_indices(const ModelInputParams& params) {
+  if (params.mtp_topk_state != nullptr) {
+    const auto tensor = params.mtp_topk_state->as_tensor();
+    CHECK(tensor.has_value())
+        << "Python model requires a single-tensor MTP top-k state";
+    return py::cast(*tensor);
+  }
+  return py::none();
+}
 
 void register_xllm_runtime_module(py::module_& m) {
   register_attention_metadata_views(m);
@@ -245,7 +255,11 @@ void PyExecutorImpl::warmup_prepared_graph(const torch::Tensor& tokens,
   bind_kv_caches(kv_caches);
   active_py_causal_lm = py_causal_lm_;
   py_executor_.attr("warmup_prepared_graph")(
-      tokens, positions, params.python_attention_metadata->value());
+      tokens,
+      positions,
+      params.python_attention_metadata->value(),
+      optional_tensor(params.embedding.input_embedding),
+      mtp_topk_indices(params));
 }
 
 ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
@@ -303,20 +317,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   py::object input_embedding =
       optional_tensor(params.embedding.input_embedding);
-  py::object mtp_topk_indices = py::none();
-#if defined(USE_NPU)
-  if (params.mtp_topk_state != nullptr) {
-    const auto state =
-        std::dynamic_pointer_cast<const npu::model::NpuMtpTopkState>(
-            params.mtp_topk_state);
-    CHECK(state != nullptr)
-        << "Python NPU model received an incompatible MTP top-k state";
-    mtp_topk_indices = py::cast(state->topk_indices());
-  }
-#else
-  CHECK(params.mtp_topk_state == nullptr)
-      << "Python MTP top-k state is supported only on NPU";
-#endif
+  py::object topk_indices = mtp_topk_indices(params);
 
   // --- VLM: vision encode + embedding merge on image/video prefill steps ---
   // On steps carrying multimodal input, ``params.multimodal.mm_data`` holds the
@@ -405,7 +406,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                                        py_metadata,
                                                        input_embedding,
                                                        py_sync,
-                                                       mtp_topk_indices,
+                                                       topk_indices,
                                                        prepared_graph);
   if (py::isinstance<py::tuple>(hidden_obj)) {
     py::tuple output = hidden_obj.cast<py::tuple>();
@@ -418,13 +419,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
       model_output.aux_hidden_states = output[1].cast<torch::Tensor>();
     }
     if (output.size() == 3 && !output[2].is_none()) {
-#if defined(USE_NPU)
       model_output.mtp_topk_state =
-          std::make_shared<npu::model::NpuMtpTopkState>(
-              output[2].cast<torch::Tensor>());
-#else
-      LOG(FATAL) << "Python MTP top-k output is supported only on NPU";
-#endif
+          MtpTopkState::from_tensor(output[2].cast<torch::Tensor>());
     }
     return model_output;
   }

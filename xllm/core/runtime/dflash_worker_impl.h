@@ -88,6 +88,10 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
 
+  bool task_models_loaded() const override;
+  ::xllm::Status create_task_pipeline(
+      std::unique_ptr<TaskExecutionPipeline>& output) override;
+
  protected:
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
 

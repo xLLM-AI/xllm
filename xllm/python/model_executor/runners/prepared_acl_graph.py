@@ -55,6 +55,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
+        mtp_topk_indices: torch.Tensor | None = None,
     ) -> tuple[object, ...]:
         tensors = (
             input_ids,
@@ -64,6 +66,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
             metadata.q_seq_lens,
             getattr(metadata, "q_cu_seq_lens", None),
             metadata.kv_seq_lens,
+            input_embedding,
+            mtp_topk_indices,
         )
         addresses = tuple(
             None
@@ -99,6 +103,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
+        mtp_topk_indices: torch.Tensor | None = None,
     ) -> None:
         batch_size = input_ids.numel()
         if not 0 < batch_size <= self.max_batch:
@@ -114,6 +120,13 @@ class PreparedAclGraphRunner(AclGraphRunner):
         self._validate_decode_token_layout(input_ids, positions, metadata.slot_mapping, block_table.shape[0])
         if metadata.q_seq_lens.numel() != batch_size or metadata.kv_seq_lens.numel() != batch_size:
             raise ValueError("prepared ACL graph requires query and KV lengths per metadata row")
+        for name, tensor in (("hidden state", input_embedding), ("MTP top-k", mtp_topk_indices)):
+            if tensor is not None and (
+                tensor.dim() < 2 or tensor.shape[0] != batch_size or tensor.device != input_ids.device
+            ):
+                raise ValueError(f"prepared ACL graph requires {name} on the input device with one row per token")
+        if mtp_topk_indices is not None and input_embedding is None:
+            raise ValueError("prepared MTP top-k requires hidden state")
 
     @torch.inference_mode()
     def warmup_prepared(
@@ -121,9 +134,11 @@ class PreparedAclGraphRunner(AclGraphRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
+        mtp_topk_indices: torch.Tensor | None = None,
     ) -> None:
-        self._validate_prepared_input(input_ids, positions, metadata)
-        binding = self._prepared_binding(input_ids, positions, metadata)
+        self._validate_prepared_input(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
+        binding = self._prepared_binding(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
         if binding in self._prepared_graphs:
             return
         self._initialize_task_updates()
@@ -133,8 +148,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
         entry.static_output = None
         entry.static_input_ids = input_ids
         entry.static_positions = positions
-        entry.static_input_embedding = None
-        entry.static_mtp_topk_indices = None
+        entry.static_input_embedding = input_embedding
+        entry.static_mtp_topk_indices = mtp_topk_indices
         entry.graph_tasks = []
         entry.execution_state = AclGraphExecutionState({})
         # Retain the exact views independently of the mutable native Slot
@@ -166,11 +181,14 @@ class PreparedAclGraphRunner(AclGraphRunner):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
+        mtp_topk_indices: torch.Tensor | None = None,
     ) -> ModelExecutionOutput:
-        if input_embedding is not None or layer_synchronizer is not None:
-            raise ValueError("prepared ACL replay requires ordinary decode")
-        self._validate_prepared_input(input_ids, positions, metadata)
-        entry = self._prepared_graphs.get(self._prepared_binding(input_ids, positions, metadata))
+        if layer_synchronizer is not None:
+            raise ValueError("prepared ACL replay does not support layer synchronization")
+        self._validate_prepared_input(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
+        entry = self._prepared_graphs.get(
+            self._prepared_binding(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
+        )
         if entry is None:
             # Native admission already selected a captured bucket for every
             # rank. A missing Slot binding is an error, never a local fallback.

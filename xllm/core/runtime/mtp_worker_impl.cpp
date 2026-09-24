@@ -55,6 +55,7 @@ limitations under the License.
 #include "core/framework/speculative/spec_verify.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
+#include "core/runtime/task_execution_pipeline.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/pretty_print.h"
 #include "util/slice.h"
@@ -787,6 +788,55 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
 }
 
 MTPWorkerImpl::~MTPWorkerImpl() = default;
+
+bool MTPWorkerImpl::task_models_loaded() const {
+  return impl_ != nullptr && draft_impl_ != nullptr &&
+         impl_->get_status() == WorkerImpl::Status::LOADED &&
+         draft_impl_->get_status() == WorkerImpl::Status::LOADED;
+}
+
+::xllm::Status MTPWorkerImpl::create_task_pipeline(
+    std::unique_ptr<TaskExecutionPipeline>& output) {
+  if (impl_ == nullptr || draft_impl_ == nullptr ||
+      options_.enable_adaptive_speculative_decode() ||
+      options_.num_speculative_tokens() <= 0 ||
+      draft_impl_->context_.get_model_args().model_type() !=
+          "glm_moe_dsa_mtp") {
+    return ::xllm::Status(
+        StatusCode::INVALID_ARGUMENT,
+        "MTP task pipeline requires fixed-width GLM DSA Target/Draft models.");
+  }
+  SpeculativeTaskCapacity capacity;
+  ::xllm::Status status = impl_->task_capacity(options_, capacity.common);
+  if (!status.ok()) {
+    return status;
+  }
+  const auto& args = draft_impl_->context_.get_model_args();
+  capacity.num_speculative_tokens = options_.num_speculative_tokens();
+  capacity.index_topk = args.index_topk();
+  capacity.reuse_topk = args.index_share_for_mtp_iteration();
+  if (get_optimization_config().enable_spec_token_broadcast) {
+    capacity.sampling_group = parallel_args_.tp_group_ != nullptr
+                                  ? parallel_args_.tp_group_
+                                  : parallel_args_.process_group_;
+  }
+  capacity.draft_sampling_mode = draft_sampling_mode_;
+  capacity.fused_rejection = enable_fused_kernel_;
+  status = TaskExecutionPipeline::create(threadpool_,
+                                         impl_->task_model(),
+                                         draft_impl_->task_model(),
+                                         capacity,
+                                         output);
+  if (!status.ok()) {
+    return status;
+  }
+  LOG(INFO) << "MTP task execution pipeline: slots="
+            << capacity.common.slot_count
+            << ", speculative_tokens=" << capacity.num_speculative_tokens
+            << ", pinned_bytes=" << output->pinned_bytes()
+            << ", device_bytes=" << output->device_bytes();
+  return ::xllm::Status();
+}
 
 bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
                                int32_t random_seed,

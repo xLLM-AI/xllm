@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "core/runtime/json_object_output_rows.h"
 #include "core/runtime/task_execution_pipeline.h"
+#include "core/util/model_config_utils.h"
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -152,40 +153,6 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_ = 0;
   bool active_ = false;
 };
-
-std::vector<int32_t> read_capture_layer_ids(
-    const std::string& model_weights_path) {
-  JsonReader reader;
-  const std::string config_path = model_weights_path + "/config.json";
-  CHECK(reader.parse(config_path))
-      << "Failed to parse block-diffusion draft config: " << config_path;
-
-  // Legacy xLLM/vLLM draft configs already use 0-based post-layer output
-  // indices, which match ModelArgs::layers_to_capture directly.
-  std::vector<int32_t> capture_layer_ids =
-      reader.value_or<std::vector<int32_t>>(
-          std::vector<std::string>{"dspark_target_layer_ids",
-                                   "target_layer_ids",
-                                   "dflash_config.target_layer_ids"},
-          std::vector<int32_t>{});
-  if (!capture_layer_ids.empty()) {
-    return capture_layer_ids;
-  }
-
-  // Speculators uses hidden-state boundary indices (0=embedding, N=after
-  // decoder N-1); shift to xLLM's 0-based post-layer capture contract.
-  capture_layer_ids = reader.value_or<std::vector<int32_t>>(
-      "aux_hidden_state_layer_ids", std::vector<int32_t>{});
-  for (int32_t& layer_id : capture_layer_ids) {
-    --layer_id;
-  }
-  CHECK(!capture_layer_ids.empty())
-      << "Block-diffusion draft config requires dspark_target_layer_ids, "
-         "target_layer_ids, dflash_config.target_layer_ids, or "
-         "aux_hidden_state_layer_ids: "
-      << config_path;
-  return capture_layer_ids;
-}
 
 #if defined(USE_NPU)
 int32_t read_block_size(const std::string& model_weights_path) {
@@ -1889,8 +1856,8 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
 }
 #endif
 
-::xllm::Status WorkerImpl::create_task_pipeline(
-    std::unique_ptr<TaskExecutionPipeline>& output) {
+::xllm::Status WorkerImpl::task_capacity(const runtime::Options& options,
+                                         LlmTaskCapacity& output) const {
   if (status_ != Status::LOADED || model_ == nullptr ||
       model_executor_ == nullptr) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
@@ -1901,45 +1868,75 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   const int64_t vocab = args.vocab_size();
   if (positions <= 0 || positions > std::numeric_limits<int32_t>::max() ||
       vocab <= 0 || vocab > std::numeric_limits<int32_t>::max() ||
-      options_.block_size() <= 0 || options_.max_tokens_per_batch() <= 0 ||
-      options_.max_seqs_per_batch() <= 0) {
+      args.hidden_size() <= 0 ||
+      args.hidden_size() > std::numeric_limits<int32_t>::max() ||
+      options.block_size() <= 0 || options.max_tokens_per_batch() <= 0 ||
+      options.max_seqs_per_batch() <= 0) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
                           "Invalid fixed task pipeline capacity.");
   }
   LlmTaskCapacity capacity;
-  capacity.slot_count = options_.enable_schedule_overlap() ? 2U : 1U;
+  capacity.slot_count = options.enable_schedule_overlap() ? 2U : 1U;
   capacity.model = {
-      static_cast<uint32_t>(options_.max_tokens_per_batch()),
-      static_cast<uint32_t>(options_.max_seqs_per_batch()),
-      static_cast<uint32_t>((positions + options_.block_size() - 1) /
-                            options_.block_size())};
+      static_cast<uint32_t>(options.max_tokens_per_batch()),
+      static_cast<uint32_t>(options.max_seqs_per_batch()),
+      static_cast<uint32_t>((positions + options.block_size() - 1) /
+                            options.block_size())};
   capacity.max_kv_seq_len = static_cast<uint32_t>(positions);
   capacity.max_positions = static_cast<uint32_t>(positions);
-  capacity.block_size = static_cast<uint32_t>(options_.block_size());
+  capacity.block_size = static_cast<uint32_t>(options.block_size());
   capacity.vocab_size = static_cast<uint32_t>(vocab);
   capacity.max_unique_tokens =
       static_cast<uint32_t>(std::min(positions, vocab));
   capacity.max_top_logprobs =
       static_cast<uint32_t>(std::min<int64_t>(/*a=*/2000, vocab));
+  capacity.hidden_size = static_cast<uint32_t>(args.hidden_size());
   // Ordinary SHM materializes builder FP32 sampling tensors before Worker
   // prepare, while RPC normalizes them to the model dtype. Preserve both
   // existing contracts when staging directly into the Slot.
-  capacity.parameter_dtype = options_.enable_shm() ? torch::kFloat32 : dtype_;
+  capacity.parameter_dtype = options.enable_shm() ? torch::kFloat32 : dtype_;
+  capacity.chunked_prefill = options.enable_chunked_prefill();
   capacity.enable_mla = args.enable_mla();
   capacity.dp_size = parallel_args_.dp_size();
   capacity.dp_rank = parallel_args_.rank() /
                      (parallel_args_.world_size() / parallel_args_.dp_size());
-  if (options_.enable_graph()) {
-    const int64_t local_batch_size =
-        (static_cast<int64_t>(options_.max_seqs_per_batch()) +
-         capacity.dp_size - 1) /
+  if (options.enable_graph()) {
+    const int64_t local_sequences =
+        (static_cast<int64_t>(options.max_seqs_per_batch()) + capacity.dp_size -
+         1) /
         capacity.dp_size;
-    const int64_t graph_limit = std::max<int64_t>(
+    const int64_t limit = std::max<int64_t>(
         1, ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
-    capacity.max_graph_batch_size =
-        static_cast<uint32_t>(std::min(local_batch_size, graph_limit));
+    const int64_t decode_width =
+        options.enable_speculative_decode()
+            ? static_cast<int64_t>(options.num_speculative_tokens()) + 1
+            : 1;
+    const int64_t tokens = std::min(local_sequences, limit) * decode_width;
+    if (tokens > std::numeric_limits<int32_t>::max()) {
+      return ::xllm::Status(
+          StatusCode::INVALID_ARGUMENT,
+          "Expanded speculative graph capacity exceeds int32.");
+    }
+    capacity.max_graph_batch_size = static_cast<uint32_t>(tokens);
   }
-  ::xllm::Status status = TaskExecutionPipeline::create(
+  output = capacity;
+  return ::xllm::Status();
+}
+
+TaskModel WorkerImpl::task_model() {
+  CHECK(status_ == Status::LOADED || status_ == Status::READY);
+  CHECK(model_ != nullptr && model_executor_ != nullptr);
+  return {*model_, *model_executor_, kv_caches_};
+}
+
+::xllm::Status WorkerImpl::create_task_pipeline(
+    std::unique_ptr<TaskExecutionPipeline>& output) {
+  LlmTaskCapacity capacity;
+  ::xllm::Status status = task_capacity(options_, capacity);
+  if (!status.ok()) {
+    return status;
+  }
+  status = TaskExecutionPipeline::create(
       threadpool_, *model_, *model_executor_, kv_caches_, capacity, output);
   if (!status.ok()) {
     return status;
@@ -1948,7 +1945,7 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
             << ", tokens=" << capacity.model.max_tokens
             << ", sequences=" << capacity.model.max_sequences
             << ", sampling_dtype=" << capacity.parameter_dtype
-            << ", positions=" << positions
+            << ", positions=" << capacity.max_positions
             << ", pinned_bytes=" << output->pinned_bytes()
             << ", device_bytes=" << output->device_bytes();
   return status;
@@ -2037,7 +2034,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
       args.layers_to_capture(
-          read_capture_layer_ids(options_.draft_model_path().value()));
+          util::read_capture_layer_ids(options_.draft_model_path().value()));
     }
   } else if (options_.enable_speculative_decode() &&
              ::xllm::SpeculativeConfig::get_instance()
@@ -2082,7 +2079,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
       args.layers_to_capture(
-          read_capture_layer_ids(options_.draft_model_path().value()));
+          util::read_capture_layer_ids(options_.draft_model_path().value()));
     }
     // When running speculative decoding, the draft worker reuses the same
     // checkpoint as the target model. The draft worker needs to instantiate

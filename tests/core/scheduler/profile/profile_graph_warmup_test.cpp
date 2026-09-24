@@ -396,8 +396,10 @@ TEST(GraphWarmupTest, FormatsCompletedWarmupProgress) {
 TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
+  ModelArgs model_args;
+  model_args.hidden_size(128);
   prepare_warmup_decode_sequence(&sequence,
-                                 /*embedding_width=*/128,
+                                 model_args,
                                  /*num_speculative_tokens=*/3);
 
   const torch::Tensor embedding = sequence.get_mtp_bootstrap_embedding();
@@ -405,6 +407,22 @@ TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
   EXPECT_EQ(embedding.dim(), 2);
   EXPECT_EQ(embedding.size(0), 1);
   EXPECT_EQ(embedding.size(1), 128);
+}
+
+TEST(GraphWarmupTest, BlockDraftBootstrapIncludesEveryCapturedTargetLayer) {
+  Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
+  ModelArgs model_args;
+  model_args.hidden_size(6144).layers_to_capture({5, 19, 33, 47, 61, 75});
+
+  prepare_warmup_decode_sequence(&sequence,
+                                 model_args,
+                                 /*num_speculative_tokens=*/7);
+
+  const torch::Tensor embedding = sequence.get_mtp_bootstrap_embedding();
+  ASSERT_TRUE(embedding.defined());
+  EXPECT_TRUE(embedding.device().is_cpu());
+  EXPECT_EQ(embedding.sizes(), (torch::IntArrayRef{1, 36864}));
+  EXPECT_EQ(embedding.count_nonzero().item<int64_t>(), 0);
 }
 
 TEST(GraphWarmupTest, DeepseekV4MtpUsesFlattenedHyperConnectionWidth) {
@@ -428,8 +446,10 @@ TEST(GraphWarmupTest, OtherMtpModelsUseDenseHiddenWidth) {
 TEST(GraphWarmupTest, SkipsBootstrapEmbeddingWhenSpeculativeDisabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
+  ModelArgs model_args;
+  model_args.hidden_size(128);
   prepare_warmup_decode_sequence(&sequence,
-                                 /*embedding_width=*/128,
+                                 model_args,
                                  /*num_speculative_tokens=*/0);
 
   EXPECT_FALSE(sequence.get_mtp_bootstrap_embedding().defined());

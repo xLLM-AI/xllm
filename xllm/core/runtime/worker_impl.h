@@ -54,6 +54,8 @@ namespace xllm {
 
 class WorkerRendezvous;
 class TaskExecutionPipeline;
+struct LlmTaskCapacity;
+struct TaskModel;
 
 class WorkerImpl {
  public:
@@ -71,8 +73,12 @@ class WorkerImpl {
 
   // Call outside the state executor, after weights load and before KV
   // budgeting.
-  ::xllm::Status create_task_pipeline(
+  virtual ::xllm::Status create_task_pipeline(
       std::unique_ptr<TaskExecutionPipeline>& output);
+  virtual bool task_models_loaded() const { return status_ == Status::LOADED; }
+  ::xllm::Status task_capacity(const runtime::Options& options,
+                               LlmTaskCapacity& output) const;
+  TaskModel task_model();
 
   // initialize model, cache manager. blocking call
   virtual bool init_model(ModelContext& context) = 0;

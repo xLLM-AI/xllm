@@ -116,6 +116,19 @@ class FakeEngine : public Engine {
   ModelArgs model_args_;
 };
 
+class PipelinePhaseEngine final : public FakeEngine {
+ public:
+  PipelinePhaseEngine() : FakeEngine(/*num_blocks=*/128, /*block_size=*/4) {}
+  ForwardOutput step(std::vector<Batch>& /*batch*/) override {
+    calls.emplace_back("step");
+    return {};
+  }
+  void update_last_step_result(std::vector<Batch>& /*batch*/) override {
+    calls.emplace_back("consume");
+  }
+  std::vector<std::string> calls;
+};
+
 class TestableContinuousScheduler final : public ContinuousScheduler {
  public:
   TestableContinuousScheduler(Engine* engine, const Options& options)
@@ -151,6 +164,10 @@ class TestableContinuousScheduler final : public ContinuousScheduler {
   size_t scheduler_queue_size() { return request_queue_.size(); }
 
   void wait_for_responses() { response_processor_->wait_completion(); }
+  void seed_pending_batch(Sequence* sequence) {
+    last_batch_ = {Batch(sequence)};
+    is_first_step_ = false;
+  }
 };
 
 template <typename T>
@@ -455,6 +472,32 @@ TEST(ContinuousSchedulerTest,
     scheduler.wait_for_responses();
     EXPECT_EQ(engine.block_manager_pool()->num_free_blocks(),
               initial_free_blocks);
+  }
+}
+
+TEST(ContinuousSchedulerTest,
+     SpeculativePipelineConsumesBeforePrefillTransitionOnly) {
+  for (bool stateful_pipeline : {false, true}) {
+    for (bool decode : {false, true}) {
+      auto options = create_scheduler_options(64, 4, 2, 64, 1);
+      options.enable_schedule_overlap(true);
+      options.enable_task_pipeline(stateful_pipeline);
+      PipelinePhaseEngine engine;
+      TestableContinuousScheduler scheduler(&engine, options);
+      auto pending = generate_request_with_prompt_tokens({1, 2}, 16, 256);
+      auto request = generate_request_with_prompt_tokens({3, 4}, 16, 256);
+      if (decode) {
+        make_request_decode_ready(request);
+      }
+      scheduler.seed_pending_batch(pending->sequences()[0].get());
+      ASSERT_TRUE(scheduler.add_request(request));
+      scheduler.step(absl::ZeroDuration());
+      const std::vector<std::string> expected =
+          stateful_pipeline && !decode
+              ? std::vector<std::string>{"consume", "step"}
+              : std::vector<std::string>{"step", "consume"};
+      EXPECT_EQ(engine.calls, expected);
+    }
   }
 }
 

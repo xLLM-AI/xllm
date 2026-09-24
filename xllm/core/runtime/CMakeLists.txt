@@ -13,6 +13,7 @@ cc_library(
     executor.h
     task_execution_pipeline.h
     slot_buffer.h
+    task_execution_pipeline_speculative.h
     executor_impl.h
     executor_impl_factory.h
     vlm_executor_impl.h
@@ -53,6 +54,7 @@ cc_library(
     executor.cpp
     task_execution_pipeline.cpp
     slot_buffer.cpp
+    task_execution_pipeline_speculative.cpp
     executor_impl_factory.cpp
     base_executor_impl.cpp
     vlm_executor_impl.cpp

@@ -150,6 +150,9 @@ class _PreparedPagedAttention:
     query_ends: list[int] | None
     actual_seq_q: list[int]
     actual_seq_kv: list[int]
+    device_kv_lengths: torch.Tensor | None = None
+    kv_capacity: int = 0
+    query_lengths: list[int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +199,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._paged_graph_state: PagedAttentionGraphState | None = None
         self._use_expanded_decode = False
         self._block_table_i32: torch.Tensor | None = None
+        self._block_attention_masks: dict[tuple[int, int] | None, torch.Tensor] = {}
         self._actual_seq_lens: list[int] | None = None
         self._actual_seq_q: list[int] | torch.Tensor = []
         self._actual_seq_kv: list[int] | torch.Tensor = []
@@ -283,7 +287,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
     def supports_prepared_metadata(self) -> bool:
         return True
 
-    def prepare_metadata(self, metadata: AttentionMetadata) -> _PreparedPagedAttention | _PreparedMlaAttention:
+    def prepare_metadata(
+        self, metadata: AttentionMetadata, *, device_kv_lengths: bool = False
+    ) -> _PreparedPagedAttention | _PreparedMlaAttention:
         """Prepare one ordinary Slot without Device work or active-state writes."""
         expanded = getattr(metadata, "expanded_decode_metadata", None)
         if (
@@ -348,6 +354,27 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 is_prefill=metadata.is_prefill,
                 is_chunked_prefill=metadata.is_chunked_prefill,
             )
+        if device_kv_lengths:
+            lengths = metadata.kv_seq_lens
+            if (
+                block_table is None
+                or lengths is None
+                or lengths.numel() != batch_size
+                or lengths.ndim != 1
+                or lengths.dtype != torch.int32
+                or lengths.device != block_table.device
+                or not lengths.is_contiguous()
+            ):
+                raise ValueError("prepared block attention requires device KV lengths and a block table")
+            widths = [end - start for start, end in zip([0, *query_ends[:-1]], query_ends)]
+            if not widths or widths[0] <= 0 or any(width != widths[0] for width in widths):
+                raise ValueError("block draft queries must have a fixed positive width")
+            kv_capacity = ((max(actual_seq_kv, default=0) + self.page_size - 1) // self.page_size) * self.page_size
+            if kv_capacity == 0 or kv_capacity > block_table.shape[1] * self.page_size:
+                raise ValueError("prepared block attention exceeds block-table capacity")
+            return _PreparedPagedAttention(
+                block_table, list(query_ends), actual_seq_q, actual_seq_kv, lengths, kv_capacity, widths
+            )
         return _PreparedPagedAttention(block_table, list(query_ends), actual_seq_q, actual_seq_kv)
 
     def prepare(
@@ -356,6 +383,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         *,
         graph_mode: bool = False,
     ) -> None:
+        # Device KV lengths can change between forwards while the prepared
+        # Slot binding stays the same. Masks are shared only within a forward.
+        self._block_attention_masks.clear()
         prepared = getattr(metadata, "prepared_attention_state", None)
         if isinstance(prepared, _PreparedMlaAttention):
             if not self._is_mla or (graph_mode and (prepared.is_prefill or prepared.is_chunked_prefill)):
@@ -389,6 +419,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
             self._metadata = None if graph_mode else metadata
             self._use_expanded_decode = False
             self._block_table_i32 = prepared.block_table
+            if prepared.device_kv_lengths is not None:
+                self._block_table_i32 = prepared.block_table[:, : prepared.kv_capacity // self.page_size].contiguous()
             self._actual_seq_lens = None if graph_mode else prepared.query_ends
             self._actual_seq_q = prepared.actual_seq_q
             self._actual_seq_kv = prepared.actual_seq_kv
@@ -1269,6 +1301,22 @@ class NpuPagedAttentionBackend(AttentionBackend):
     # Prefill: packed TND with causal mask
     # ------------------------------------------------------------------
 
+    def _block_attention_mask(self, prepared: _PreparedPagedAttention, layer: Attention) -> torch.Tensor:
+        policy = (layer.fia_pre_tokens, layer.fia_next_tokens) if layer.fia_sparse_mode == 4 else None
+        mask = self._block_attention_masks.get(policy)
+        if mask is None:
+            width = prepared.query_lengths[0]
+            lengths = prepared.device_kv_lengths.view(-1, 1, 1, 1)
+            keys = torch.arange(prepared.kv_capacity, device=lengths.device).view(1, 1, 1, -1)
+            mask = keys >= lengths
+            if policy is not None:
+                query_positions = lengths - width
+                query_positions = query_positions + torch.arange(width, device=lengths.device).view(1, 1, -1, 1)
+                mask = mask | (keys < query_positions - policy[0]) | (keys > query_positions + policy[1])
+            mask = mask.expand(-1, 1, width, -1).contiguous()
+            self._block_attention_masks[policy] = mask
+        return mask
+
     def _prefill(
         self,
         q_3d: torch.Tensor,
@@ -1297,6 +1345,38 @@ class NpuPagedAttentionBackend(AttentionBackend):
             block_size = k_cache.size(1)
             k_flat = k_cache.view(k_cache.size(0), block_size, -1)
             v_flat = v_cache.view(v_cache.size(0), block_size, -1)
+            prepared = getattr(metadata, "prepared_attention_state", None)
+            if isinstance(prepared, _PreparedPagedAttention) and prepared.device_kv_lengths is not None:
+                if layer.causal:
+                    raise ValueError("device-length block attention requires a non-causal draft")
+                # Host lengths are safe upper bounds prepared before the prior
+                # Slot accepts its prefix. Mask that bounded tail using the
+                # exact device lengths; never read acceptance back to Host.
+                widths = prepared.query_lengths
+                atten_mask = self._block_attention_mask(prepared, layer)
+                # CANN's TND split-fuse interface only accepts compressed
+                # causal masks. BNSD supports the explicit non-causal tail
+                # mask and the same paged KV without a Host length readback.
+                query = q_3d.view(len(widths), widths[0], self.num_heads, self.head_dim)
+                output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                    query.transpose(1, 2).contiguous(),
+                    k_flat,
+                    v_flat,
+                    atten_mask=atten_mask,
+                    block_table=self._block_table_i32,
+                    actual_seq_lengths=widths,
+                    actual_seq_lengths_kv=prepared.actual_seq_kv,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    scale=self.scale,
+                    input_layout="BNSD",
+                    block_size=block_size,
+                    sparse_mode=_SPARSE_MODE_NONE,
+                    pre_tokens=2147483647,
+                    next_tokens=2147483647,
+                    softmax_lse_flag=False,
+                )
+                return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
             output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                 q_3d,
                 k_flat,

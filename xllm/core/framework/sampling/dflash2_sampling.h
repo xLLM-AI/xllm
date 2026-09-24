@@ -15,26 +15,23 @@ limitations under the License.
 
 #pragma once
 
-#include "runtime/dflash_worker_impl.h"
+#include "core/framework/model/causal_lm.h"
+#include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
 
-class ProcessGroup;
-
-class DFlash2WorkerImpl final : public DFlashWorkerImpl {
- public:
-  DFlash2WorkerImpl(const ParallelArgs& parallel_args,
-                    const torch::Device& device,
-                    const runtime::Options& options);
-
-  ~DFlash2WorkerImpl() override = default;
-
- protected:
-  DraftBlock run_decode_draft(const ForwardInput& input,
-                              ForwardInput& validate_input) override;
-
- private:
-  ProcessGroup* sampling_process_group_ = nullptr;
+struct DFlash2SampleOutput {
+  torch::Tensor token_ids;
+  torch::Tensor dense_probs;
 };
+
+// Walk the trained selector path. Dense proposal probabilities preserve exact
+// rejection recovery for random rows; greedy rows remain delta proposals.
+DFlash2SampleOutput sample_dflash2_path(
+    const DFlash2CandidateOutput& candidates,
+    const SamplingParameters& sampling_params,
+    const torch::Tensor& gumbel_noise,
+    int64_t vocab_size,
+    bool need_dense_probs);
 
 }  // namespace xllm

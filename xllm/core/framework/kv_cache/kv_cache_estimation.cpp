@@ -564,8 +564,10 @@ void init_standard_counts(const ModelArgs& model_args,
     kv_cache_cap->num_indexer_layers(num_indexer_layers);
   }
 
+  CHECK_GE(options.embedding_context_bytes_per_block, 0);
   const int64_t full_cache_block_size_in_bytes =
-      standard_full_cache_block_size_in_bytes(*kv_cache_cap);
+      standard_full_cache_block_size_in_bytes(*kv_cache_cap) +
+      options.embedding_context_bytes_per_block;
   kv_cache_cap->num_linear_state_blocks(
       calculate_linear_state_blocks(kv_cache_cap->cache_size_in_bytes(),
                                     kv_cache_cap->num_linear_attention_layers(),
@@ -603,7 +605,7 @@ void init_standard_counts(const ModelArgs& model_args,
                                     options.layerwise_split_size,
                                     *kv_cache_cap,
                                     available_full_cache_size_in_bytes,
-                                    /*additional_block_bytes=*/0));
+                                    options.embedding_context_bytes_per_block));
   } else {
     kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
                            full_cache_block_size_in_bytes);

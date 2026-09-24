@@ -16,15 +16,21 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace xllm {
 
 class JsonReader;
 
 namespace util {
+
+// Returns zero-based post-layer capture indices from a block draft checkpoint.
+std::vector<int32_t> read_capture_layer_ids(
+    const std::string& model_weights_path);
 
 std::string get_model_type(const JsonReader& reader,
                            const std::filesystem::path& model_path,

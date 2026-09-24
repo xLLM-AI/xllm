@@ -14,13 +14,13 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
-
 #include <folly/futures/Future.h>
 
 #include <deque>
 #include <optional>
 
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/sampling/draft_sampling_mode.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/platform/device.h"
 #include "core/runtime/executor.h"
@@ -31,7 +31,7 @@ limitations under the License.
 
 namespace xllm {
 
-// Model contracts established before task admission. Persistent
+// The owner establishes these model contracts before admission. Persistent
 // storage is allocated before KV budgeting; KV may be populated afterwards.
 struct LlmTaskCapacity {
   uint32_t slot_count = 1;
@@ -42,13 +42,43 @@ struct LlmTaskCapacity {
   uint32_t vocab_size = 0;
   uint32_t max_unique_tokens = 0;
   uint32_t max_top_logprobs = 0;
+  uint32_t hidden_size = 0;
   torch::ScalarType parameter_dtype = torch::kFloat32;
+  bool chunked_prefill = false;
   bool enable_mla = false;
   uint32_t dp_size = 1;
   uint32_t dp_rank = 0;
-  // DP-local Graph batch limit; zero disables Graph execution.
+  // DP-local expanded target token limit; zero disables Graph execution.
   uint32_t max_graph_batch_size = 0;
 };
+
+// Borrowed resources outlive the pipeline.
+struct TaskModel {
+  CausalLM& model;
+  Executor& executor;
+  std::vector<KVCache>& kv_caches;
+};
+
+class ProcessGroup;
+
+enum class SpeculativeTaskKind : uint8_t { MTP, DFLASH, DFLASH2 };
+
+struct SpeculativeTaskCapacity {
+  LlmTaskCapacity common;
+  SpeculativeTaskKind kind = SpeculativeTaskKind::MTP;
+  uint32_t num_speculative_tokens = 0;
+  uint32_t context_hidden_size = 0;
+  int32_t mask_token_id = -1;
+  uint32_t selector_top_k = 0;
+  ProcessGroup* sampling_group = nullptr;  // Borrowed from the owning Worker.
+  uint32_t index_topk = 0;
+  bool reuse_topk = false;
+  DraftSamplingMode draft_sampling_mode = DraftSamplingMode::GREEDY;
+  bool fused_rejection = false;
+};
+
+struct MtpContextStorage;
+struct MtpContextView;
 
 struct TaskSubmission {
   Status status;
@@ -61,7 +91,10 @@ struct TaskResult {
   uint64_t task_id = 0;
 };
 
-// One or two Slots with prepared eager or ACL graph execution. State calls
+// One or two Slots with ordinary or speculative eager/ACL graph execution.
+// Both modes share one queue, launch thread and prepare/task/result stream set.
+// Cross-round speculative context belongs to this pipeline, not a retiring
+// Slot. State calls
 // serialize Prepare/Consume; the Launch thread submits model work in task
 // order. Prepare/Consume may overlap Launch for another Slot. The state
 // executor, model, executor and KV vector outlive the pipeline; the owner
@@ -74,6 +107,12 @@ class TaskExecutionPipeline final {
                        std::vector<KVCache>& kv_caches,
                        const LlmTaskCapacity& capacity,
                        std::unique_ptr<TaskExecutionPipeline>& output);
+  static Status create(ThreadPool& state_executor,
+                       TaskModel target,
+                       TaskModel draft,
+                       const SpeculativeTaskCapacity& capacity,
+                       std::unique_ptr<TaskExecutionPipeline>& output);
+
   ~TaskExecutionPipeline();
   TaskExecutionPipeline(const TaskExecutionPipeline&) = delete;
   TaskExecutionPipeline& operator=(const TaskExecutionPipeline&) = delete;
@@ -95,9 +134,55 @@ class TaskExecutionPipeline final {
   uint64_t device_bytes() const;
 
  private:
+  friend struct TaskPipelineTestPeer;
+  friend class SlotBuffer;
+  static Status context_create(MtpContextStorage& pool,
+                               uint32_t capacity,
+                               std::unique_ptr<MtpContextView>& output);
+  static Status context_prepare(MtpContextView& view,
+                                std::span<const int32_t> embedding_ids,
+                                std::span<const std::string> request_ids,
+                                bool read_published_state,
+                                const Stream& stream);
+  static Status context_prepare_prefill(
+      MtpContextView& view,
+      std::span<const int32_t> embedding_ids,
+      std::span<const std::string> request_ids,
+      std::span<const int32_t> extra_token_ids,
+      std::span<const uint32_t> published_sequence_rows,
+      const Stream& stream);
+  static Status context_prepare_decode(MtpContextView& view,
+                                       std::span<const int32_t> embedding_ids,
+                                       std::span<const std::string> request_ids,
+                                       std::span<const int32_t> bootstrap_rows,
+                                       const Stream& stream);
+  static Status context_prepare_impl(
+      MtpContextView& view,
+      std::span<const int32_t> embedding_ids,
+      std::span<const std::string> request_ids,
+      std::span<const uint32_t> published_sequence_rows,
+      bool read_published_state,
+      const Stream& stream,
+      std::span<const int32_t> bootstrap_rows);
+  static void context_gather(MtpContextView& view);
+  static void context_publish(MtpContextView& view);
+  static void context_advance(MtpContextView& view,
+                              const torch::Tensor& accepted_tokens,
+                              const torch::Tensor& accepted_lengths,
+                              const torch::Tensor& target_hidden);
+  static void context_release(MtpContextView& view);
+  static uint64_t context_device_bytes(const MtpContextView& view);
+
+  static Status create_mtp_context(uint32_t capacity,
+                                   uint32_t hidden_size,
+                                   torch::ScalarType dtype,
+                                   const torch::Device& device,
+                                   std::unique_ptr<MtpContextStorage>& output);
+  static uint64_t mtp_context_bytes(const MtpContextStorage& cache);
   friend class TaskExecutionPipelineInputTest;
   static Status validate_input(const ForwardInput& input,
-                               const LlmTaskCapacity& capacity);
+                               const LlmTaskCapacity& capacity,
+                               bool speculative = false);
   static std::vector<int64_t> graph_batch_sizes(
       const LlmTaskCapacity& capacity);
   static uint32_t graph_batch_size(const ForwardInput& input,
@@ -110,6 +195,12 @@ class TaskExecutionPipeline final {
     uint32_t sample_rows = 0;
   };
 
+  struct SpeculativeSlot;
+  struct Sampling {
+    SamplingParameters params;
+    SampleOutput output;
+    SampleOutput sampled;
+  };
   struct Slot {
     Step step;
     Step expected_producer;
@@ -117,6 +208,7 @@ class TaskExecutionPipeline final {
     StreamEventPtr input_ready;
     StreamEventPtr output_ready;
     std::unique_ptr<SlotBuffer> buffer;
+    std::unique_ptr<SpeculativeSlot> speculative;
     // Retain sampler inputs and outputs until the result fence completes.
     SamplingParameters sampling;
     SampleOutput sample_output;
@@ -143,9 +235,50 @@ class TaskExecutionPipeline final {
   folly::Future<TaskResult> take_result_impl(
       std::optional<uint64_t> expected_task_id);
   void launch_loop();
+  void start();
   SlotTicket wait_completed_front();
   void check_external_thread() const;
 
+  Status initialize_speculative();
+  Status warmup_speculative_graphs(const ForwardInput& input);
+  Status prepare_speculative(uint32_t slot_id, const ForwardInput& input);
+  void launch_speculative(uint32_t slot_id);
+  ForwardOutput consume_speculative(uint32_t slot_id);
+  void discard_speculative(uint32_t slot_id);
+  uint64_t speculative_pinned_bytes() const;
+  uint64_t speculative_device_bytes() const;
+  const SampleOutput& sample(Sampling& sampling, torch::Tensor& logits);
+  Status validate_input(SpeculativeSlot& slot, const ForwardInput& input);
+  Status plan_sampling(SpeculativeSlot& slot, const ForwardInput& input);
+  Status validate_bootstrap(const ForwardInput& input) const;
+  void prepare_bootstrap(SpeculativeSlot& slot, const ForwardInput& input);
+  void apply_bootstrap(SpeculativeSlot& slot);
+  void warmup_draft_graphs(const ForwardInput& input);
+  void prepare_draft_state(SpeculativeSlot& slot, uint32_t step, bool warmup);
+  void prepare_empty_shard(SpeculativeSlot& slot, uint64_t batch_id);
+  void launch_empty_shard(SpeculativeSlot& slot);
+  void launch_prefill(SpeculativeSlot& slot);
+  void launch_decode(SpeculativeSlot& slot);
+  void launch_block_draft(SpeculativeSlot& slot);
+  void write_block_context(SpeculativeSlot& slot, bool prefill);
+  void synchronize_samples(const TokenResultTensors& result);
+  void synchronize_tokens(torch::Tensor& tokens, bool all_greedy);
+  static Status plan_parallel(const ParallelInput& input,
+                              uint32_t dp_size,
+                              uint32_t dp_rank,
+                              uint32_t local_tokens,
+                              bool local_decode,
+                              ParallelInput& output,
+                              bool& run_models,
+                              bool& decode);
+  bool block_draft() const;
+  uint32_t context_hidden_size() const;
+  void release_outputs(SpeculativeSlot& slot);
+
+  std::unique_ptr<SpeculativeTaskCapacity> speculative_capacity_;
+  std::unique_ptr<TaskModel> draft_;
+  torch::ScalarType hidden_dtype_ = torch::kFloat32;
+  std::unique_ptr<MtpContextStorage> context_;
   CausalLM& model_;
   Executor& executor_;
   std::vector<KVCache>& kv_caches_;

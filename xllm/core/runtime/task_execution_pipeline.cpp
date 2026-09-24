@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
+#include "core/runtime/task_execution_pipeline_speculative.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
@@ -114,17 +115,20 @@ Status TaskExecutionPipeline::create(
   // Initialization is outside serving. Complete allocation-stream writes
   // before handing storage to either execution thread.
   CHECK_EQ(pipeline->device_.current_stream()->synchronize(), 0);
+  pipeline->start();
+  output = std::move(pipeline);
+  return Status();
+}
+
+void TaskExecutionPipeline::start() {
   // Start execution only after every Slot and initialization write is ready.
   folly::Promise<std::thread::id> promise;
   auto future = promise.getFuture();
-  state_executor.schedule([promise = std::move(promise)]() mutable {
+  state_executor_.schedule([promise = std::move(promise)]() mutable {
     promise.setValue(std::this_thread::get_id());
   });
-  pipeline->state_thread_id_ = std::move(future).get();
-  pipeline->launch_thread_ =
-      std::thread([runtime = pipeline.get()] { runtime->launch_loop(); });
-  output = std::move(pipeline);
-  return Status();
+  state_thread_id_ = std::move(future).get();
+  launch_thread_ = std::thread([this] { launch_loop(); });
 }
 
 void TaskExecutionPipeline::check_external_thread() const {
@@ -133,7 +137,8 @@ void TaskExecutionPipeline::check_external_thread() const {
 }
 
 Status TaskExecutionPipeline::validate_input(const ForwardInput& source,
-                                             const LlmTaskCapacity& capacity) {
+                                             const LlmTaskCapacity& capacity,
+                                             bool speculative) {
   const auto& params = source.input_params;
   const auto& host = params.attention.host;
   const auto& meta = params.meta;
@@ -150,17 +155,12 @@ Status TaskExecutionPipeline::validate_input(const ForwardInput& source,
       params.prefill_without_cache || !params.linear_state_cache_ops.empty() ||
       !params.linear_state_validity_mask.empty() ||
       !params.multi_block_tables.empty() || params.mtp_topk_state != nullptr ||
-      params.mtp_shifted_token_ids.defined() ||
       params.num_accepted_tokens.defined() ||
       !params.num_accepted_tokens_host.empty() ||
       !std::holds_alternative<std::monostate>(params.rec_params) ||
-      embedding.input_embedding.defined() ||
-      embedding.mtp_shifted_token_ids.defined() ||
-      !embedding.mtp_bootstrap_row_idxes.empty() ||
-      embedding.mtp_bootstrap_embeddings.defined() ||
-      !copy.swap_blocks.empty() || copy.src_block_indices.defined() ||
-      copy.dst_block_indices.defined() || copy.cum_sum.defined() ||
-      params.multimodal.mm_data.valid() ||
+      embedding.input_embedding.defined() || !copy.swap_blocks.empty() ||
+      copy.src_block_indices.defined() || copy.dst_block_indices.defined() ||
+      copy.cum_sum.defined() || params.multimodal.mm_data.valid() ||
       !params.multimodal.deep_stacks.empty() ||
       params.parallel.cp_plan.enabled() ||
       params.parallel.layer_wise_load_synchronizer != nullptr ||
@@ -169,8 +169,14 @@ Status TaskExecutionPipeline::validate_input(const ForwardInput& source,
       params.expert.eplb_decode_token_mask.defined() ||
       !host.ring_cur_seqlen.empty() || !host.ring_cache_seqlen.empty()) {
     return Status(StatusCode::INVALID_ARGUMENT,
-                  "Task pipeline requires ordinary CPU LLM input without "
-                  "speculative, structured, transfer or recurrent state.");
+                  "Task pipeline requires CPU input without pre-expanded, "
+                  "structured, transfer or recurrent state.");
+  }
+  if (!speculative && (params.mtp_shifted_token_ids.defined() ||
+                       embedding.mtp_shifted_token_ids.defined() ||
+                       !embedding.mtp_bootstrap_row_idxes.empty() ||
+                       embedding.mtp_bootstrap_embeddings.defined())) {
+    return invalid("Ordinary task input cannot carry MTP state.");
   }
   // Full-attention rows use -1 to keep this transport field row-aligned.
   // Only those inactive sentinels may be omitted from the prepared program.
@@ -214,6 +220,9 @@ Status TaskExecutionPipeline::validate_input(const ForwardInput& source,
   const int64_t rows = static_cast<int64_t>(host.q_seq_lens.size());
   if (meta.num_sequences < 0 || meta.actual_num_sequences < 0 ||
       meta.num_sequences != rows ||
+      (speculative &&
+       (embedding.embedding_ids.size() > static_cast<uint64_t>(rows) ||
+        embedding.request_ids.size() != embedding.embedding_ids.size())) ||
       (meta.actual_num_sequences != 0 && meta.actual_num_sequences != rows) ||
       (empty && rows != 0) ||
       (!empty && (!is_cpu_int_tensor(tokens, /*dimensions=*/1) ||
@@ -229,6 +238,19 @@ Status TaskExecutionPipeline::validate_input(const ForwardInput& source,
   const int64_t local_tokens = empty ? 0 : tokens.numel();
   if (local_tokens > std::numeric_limits<int32_t>::max()) {
     return invalid("Invalid task DP token count.");
+  }
+  if (speculative) {
+    for (const auto* shifted :
+         {&params.mtp_shifted_token_ids, &embedding.mtp_shifted_token_ids}) {
+      if (shifted->defined() &&
+          (!is_cpu_int_tensor(*shifted, /*dimensions=*/1) ||
+           shifted->numel() != local_tokens)) {
+        return invalid("MTP shifted input must be aligned CPU int32.");
+      }
+    }
+    // Bootstrap geometry and DP phase agreement are validated by the
+    // speculative program before it prepares any persistent Slot state.
+    return Status();
   }
   const auto& counts = params.parallel.dp_global_token_nums;
   const auto& phases = params.parallel.dp_is_decode;
@@ -344,7 +366,8 @@ TaskSubmission TaskExecutionPipeline::submit(const ForwardInput& input) {
         input, device_.unwrap(), unpacked));
     source = &unpacked;
   }
-  const Status status = validate_input(*source, capacity_);
+  const bool speculative = speculative_capacity_ != nullptr;
+  const Status status = validate_input(*source, capacity_, speculative);
   if (!status.ok()) {
     return TaskSubmission{status, 0};
   }
@@ -529,6 +552,18 @@ Status TaskExecutionPipeline::validate(const Slot& slot,
 
 Status TaskExecutionPipeline::prepare(uint32_t slot_id,
                                       const ForwardInput& input) {
+  if (speculative_capacity_) {
+    if (input.input_params.meta.is_graph_warmup) {
+      if (!accepted_.empty()) {
+        return invalid("Drain pending Tasks before speculative graph warmup.");
+      }
+      const Status status = warmup_speculative_graphs(input);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    return prepare_speculative(slot_id, input);
+  }
   if (slot_id >= slots_.size()) {
     return invalid("Invalid LLM Slot index.");
   }
@@ -582,6 +617,10 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
 }
 
 void TaskExecutionPipeline::launch(uint32_t slot_id) {
+  if (speculative_capacity_) {
+    launch_speculative(slot_id);
+    return;
+  }
   CHECK_LT(slot_id, slots_.size());
   Slot& slot = *slots_[slot_id];
   c10::DeviceGuard device_guard(device_.unwrap());
@@ -636,6 +675,9 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
 }
 
 ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
+  if (speculative_capacity_) {
+    return consume_speculative(slot_id);
+  }
   CHECK_LT(slot_id, slots_.size());
   Slot& slot = *slots_[slot_id];
   c10::DeviceGuard guard(device_.unwrap());
@@ -655,6 +697,10 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
 }
 
 void TaskExecutionPipeline::discard(uint32_t slot_id) {
+  if (speculative_capacity_) {
+    discard_speculative(slot_id);
+    return;
+  }
   CHECK_LT(slot_id, slots_.size());
   Slot& slot = *slots_[slot_id];
   c10::DeviceGuard guard(device_.unwrap());
@@ -670,6 +716,9 @@ void TaskExecutionPipeline::release_outputs(Slot& slot) {
 }
 
 uint64_t TaskExecutionPipeline::pinned_bytes() const {
+  if (speculative_capacity_) {
+    return speculative_pinned_bytes();
+  }
   uint64_t bytes = 0;
   for (const auto& slot : slots_) {
     bytes += slot->buffer->pinned_bytes();
@@ -678,6 +727,9 @@ uint64_t TaskExecutionPipeline::pinned_bytes() const {
 }
 
 uint64_t TaskExecutionPipeline::device_bytes() const {
+  if (speculative_capacity_) {
+    return speculative_device_bytes();
+  }
   uint64_t bytes = previous_tokens_.defined() ? previous_tokens_.nbytes() : 0;
   for (const auto& slot : slots_) {
     bytes += slot->buffer->device_bytes();
