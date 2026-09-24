@@ -24,11 +24,9 @@ limitations under the License.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
-#include <sstream>
 #include <vector>
 
 #include "common/metrics.h"
@@ -508,7 +506,6 @@ void ContinuousScheduler::step(const absl::Duration& timeout) {
 
   if (!options_.enable_schedule_overlap()) {
     // get a new batch of requests
-    last_batch_lengths_.clear();
     std::vector<Batch> batch = schedule_request(timeout);
     bool all_empty =
         std::all_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
@@ -518,11 +515,7 @@ void ContinuousScheduler::step(const absl::Duration& timeout) {
       return;
     }
 
-    if (!options_.enable_pd_ooc()) {
-      engine_->step(batch);
-    } else {
-      step_with_pd_ooc(batch);
-    }
+    engine_->step(batch);
 
     // process request output in batch
     process_batch_output(false);
@@ -785,32 +778,6 @@ void ContinuousScheduler::update_memory_metrics(
       }
     }
   }
-}
-
-void ContinuousScheduler::step_with_pd_ooc(std::vector<Batch>& batch) {
-  for (size_t i = 0; i < batch.size(); i++) {
-    for (size_t j = 0; j < batch[i].size(); j++) {
-      last_batch_lengths_.push_back(batch[i][j]->num_tokens());
-    }
-  }
-
-  auto start = std::chrono::high_resolution_clock::now();
-  engine_->step(batch);
-  auto end = std::chrono::high_resolution_clock::now();
-  double duration_ms =
-      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
-          .count() /
-      1000.0;
-
-  std::stringstream ss;
-  ss << "bs=" << last_batch_lengths_.size() << " - [";
-  for (size_t i = 0; i < last_batch_lengths_.size(); ++i) {
-    ss << last_batch_lengths_[i];
-    if (i != last_batch_lengths_.size() - 1) ss << ", ";
-  }
-  ss << "]";
-  VLOG(1) << "PERF - " << ss.str() << " - " << std::fixed
-          << std::setprecision(3) << duration_ms << " ms";
 }
 
 bool ContinuousScheduler::try_complete_pause() {

@@ -535,12 +535,8 @@ std::optional<std::string> validate_host_cache_options(
     violations.emplace_back(
         "prefix caching is disabled; set --enable_prefix_cache=true");
   }
-  if (options.enable_disagg_pd) {
-    if (options.enable_pd_ooc) {
-      violations.emplace_back(
-          "disaggregated host offload does not support PD-OOC");
-    }
-  } else if (options.instance_role != InstanceRole::DEFAULT) {
+  if (!options.enable_disagg_pd &&
+      options.instance_role != InstanceRole::DEFAULT) {
     violations.emplace_back(
         "host offload outside disaggregated serving requires the DEFAULT "
         "instance role");

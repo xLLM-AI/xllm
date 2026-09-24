@@ -126,7 +126,6 @@ struct HostCacheValidationOptions {
   bool supports_host_kv_offload = false;
   bool enable_prefix_cache = true;
   bool enable_disagg_pd = false;
-  bool enable_pd_ooc = false;
   bool enable_kvcache_store = false;
   InstanceRole instance_role = InstanceRole::DEFAULT;
   bool has_key_cache_shape = true;

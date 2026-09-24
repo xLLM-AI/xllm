@@ -28,8 +28,7 @@ namespace xllm {
 enum class SchedulerKind : int8_t {
   CONTINUOUS = 0,
   ZERO_EVICTION = 4,
-  DISAGG_PD = 5,
-  PD_OOC = 7
+  DISAGG_PD = 5
 };
 
 SchedulerKind select_scheduler_kind(

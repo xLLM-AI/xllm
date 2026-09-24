@@ -16,7 +16,6 @@ limitations under the License.
 #include "disagg_pd_service.h"
 
 #include <brpc/closure_guard.h>
-#include <glog/logging.h>
 
 namespace xllm {
 
@@ -44,22 +43,6 @@ void DisaggPDService::FirstGeneration(
   // Receive first token from Prefill, schedule the request to running queue
   brpc::ClosureGuard done_guard(done);
   disagg_pd_service_impl_->decode_recv_first_generation(request, response);
-}
-
-void DisaggPDService::MultiGenerations(
-    ::google::protobuf::RpcController* controller,
-    const proto::DisaggGenerationsRequests* request,
-    proto::Status* response,
-    ::google::protobuf::Closure* done) {
-  LOG(FATAL) << "MultiGenerations is not supported in DisaggPDService";
-}
-
-void DisaggPDService::SendPullSignal(
-    ::google::protobuf::RpcController* controller,
-    const proto::PullSignal* request,
-    proto::Status* response,
-    ::google::protobuf::Closure* done) {
-  LOG(FATAL) << "SendPullSignal is not supported in DisaggPDService";
 }
 
 void DisaggPDService::LinkInstance(

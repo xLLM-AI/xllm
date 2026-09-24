@@ -18,7 +18,6 @@ limitations under the License.
 #include "api_service/api_service.h"
 #include "core/distributed_runtime/collective_service.h"
 #include "core/distributed_runtime/disagg_pd_service.h"
-#include "core/distributed_runtime/pd_ooc_service.h"
 #include "core/distributed_runtime/worker_service.h"
 #include "core/framework/xtensor/xtensor_dist_service.h"
 
@@ -31,7 +30,6 @@ class XllmServer final {
 
   bool start(std::unique_ptr<APIService> api_service);
   bool start(std::unique_ptr<DisaggPDService> disagg_pd_service);
-  bool start(std::unique_ptr<PDOOCService> pd_ooc_service);
   bool start(std::shared_ptr<CollectiveService> service,
              const std::string& addr,
              const std::string& server_name);

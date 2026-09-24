@@ -115,7 +115,6 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
         .instance_name(xllm_init_options.instance_name)
         .enable_disagg_pd(xllm_init_options.enable_disagg_pd)
         .enable_schedule_overlap(xllm_init_options.enable_schedule_overlap)
-        .enable_pd_ooc(xllm_init_options.enable_pd_ooc)
         .kv_cache_transfer_mode(xllm_init_options.kv_cache_transfer_mode)
         .enable_shm(xllm_init_options.enable_shm)
         .is_local(true)

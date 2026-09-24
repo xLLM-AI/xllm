@@ -28,11 +28,6 @@ DEFINE_bool(enable_disagg_pd,
             false,
             "Whether to enable disaggregated prefill and decode execution.");
 
-DEFINE_bool(
-    enable_pd_ooc,
-    false,
-    "Whether to enable online-offline co-location in disaggregated PD mode.");
-
 DEFINE_int32(disagg_pd_port, 7777, "Port for brpc disagg pd server.");
 
 DEFINE_string(instance_role,
@@ -54,7 +49,6 @@ namespace xllm {
 
 void DisaggPDConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_disagg_pd);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_pd_ooc);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disagg_pd_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(instance_role);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_transfer_mode);
@@ -64,7 +58,6 @@ void DisaggPDConfig::from_flags() {
 
 void DisaggPDConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_disagg_pd);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_pd_ooc);
   XLLM_CONFIG_ASSIGN_FROM_JSON(disagg_pd_port);
   // instance role is different for prefill and decode instances, so we don't
   // need to assign it from json XLLM_CONFIG_ASSIGN_FROM_JSON(instance_role);
@@ -77,8 +70,6 @@ void DisaggPDConfig::append_config_json(
   const DisaggPDConfig default_config;
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_disagg_pd);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_pd_ooc);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, disagg_pd_port);
   // we don't need to append it to config json for prefill and decode instances
@@ -115,11 +106,6 @@ void DisaggPDConfig::normalize_mlu(KVCacheConfig& kv_cache_config,
                  << "forcing enable_schedule_overlap=false.";
     scheduler_config.enable_schedule_overlap(false);
   }
-  if (enable_pd_ooc()) {
-    LOG(WARNING) << "MLU disaggregated PD does not support pd_ooc; "
-                 << "forcing enable_pd_ooc=false.";
-    enable_pd_ooc(false);
-  }
 }
 
 void DisaggPDConfig::normalize_dcu(SchedulerConfig& scheduler_config) {
@@ -128,11 +114,6 @@ void DisaggPDConfig::normalize_dcu(SchedulerConfig& scheduler_config) {
     LOG(WARNING) << "DCU disaggregated PD supports "
                  << "kv_cache_transfer_mode=PUSH or PULL; forcing from "
                  << kv_cache_transfer_mode() << " to PUSH.";
-    kv_cache_transfer_mode("PUSH");
-  }
-  if (enable_pd_ooc() && kv_cache_transfer_mode() == "PULL") {
-    LOG(WARNING) << "DCU disaggregated PD with pd_ooc only supports "
-                 << "kv_cache_transfer_mode=PUSH; forcing from PULL to PUSH.";
     kv_cache_transfer_mode("PUSH");
   }
   if (scheduler_config.enable_schedule_overlap()) {

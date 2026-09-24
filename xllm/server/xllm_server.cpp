@@ -205,26 +205,6 @@ bool XllmServer::start(std::unique_ptr<DisaggPDService> service) {
   return true;
 }
 
-bool XllmServer::start(std::unique_ptr<PDOOCService> service) {
-  std::string addr("");
-  if (!::xllm::ServiceConfig::get_instance().host().empty()) {
-    addr =
-        ::xllm::ServiceConfig::get_instance().host() + ":" +
-        std::to_string(::xllm::DisaggPDConfig::get_instance().disagg_pd_port());
-  }
-  if (!create_server((google::protobuf::Service*)(service.get()),
-                     addr,
-                     ::xllm::DisaggPDConfig::get_instance().disagg_pd_port(),
-                     "PD OOC")) {
-    return false;
-  }
-
-  has_initialized_ = true;
-  // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
-  server_->Join();
-  return true;
-}
-
 bool XllmServer::start(std::shared_ptr<CollectiveService> service,
                        const std::string& addr,
                        const std::string& server_name) {

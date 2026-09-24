@@ -124,7 +124,7 @@ class FakeEngine final : public Engine {
 class TestDisaggPDScheduler final : public DisaggPDScheduler {
  public:
   TestDisaggPDScheduler(Engine* engine, const Options& options)
-      : DisaggPDScheduler(engine, options) {}
+      : DisaggPDScheduler(engine, options, SkipRuntimeStart{}) {}
 
   void cache_prefill_blocks_for_test(Request* request) {
     cache_prefill_blocks(request);
@@ -146,8 +146,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
 
 DisaggPDScheduler::Options make_options() {
   DisaggPDScheduler::Options options;
-  options.enable_pd_ooc(true)
-      .enable_disagg_pd(true)
+  options.enable_disagg_pd(true)
       .enable_schedule_overlap(false)
       .instance_role(InstanceRole::PREFILL)
       .max_tokens_per_batch(32)

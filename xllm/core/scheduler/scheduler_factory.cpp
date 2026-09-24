@@ -22,7 +22,6 @@ limitations under the License.
 #include "scheduler/disagg_pd_scheduler.h"
 #include "scheduler/dit_scheduler.h"
 #include "scheduler/fixed_steps_scheduler.h"
-#include "scheduler/pd_ooc_scheduler.h"
 #include "scheduler/zero_eviction_scheduler.h"
 
 namespace xllm {
@@ -30,9 +29,6 @@ namespace xllm {
 SchedulerKind select_scheduler_kind(
     const ContinuousScheduler::Options& options) {
   if (options.enable_disagg_pd()) {
-    if (options.enable_pd_ooc()) {
-      return SchedulerKind::PD_OOC;
-    }
     return SchedulerKind::DISAGG_PD;
   }
 
@@ -47,8 +43,6 @@ std::unique_ptr<ContinuousScheduler> create_continuous_scheduler(
     Engine* engine,
     ContinuousScheduler::Options options) {
   switch (select_scheduler_kind(options)) {
-    case SchedulerKind::PD_OOC:
-      return std::make_unique<PDOOCScheduler>(engine, options);
     case SchedulerKind::DISAGG_PD:
       return std::make_unique<DisaggPDScheduler>(engine, options);
     case SchedulerKind::ZERO_EVICTION:

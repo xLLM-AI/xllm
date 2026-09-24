@@ -168,7 +168,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `enable_disagg_pd` | `bool` | `false` | Whether to enable disaggregated prefill and decode execution. See [P-D Separation](/en/features/disagg_pd/). |
-| `enable_pd_ooc` | `bool` | `false` | Whether to enable online-offline co-location in disaggregated PD mode. |
 | `disagg_pd_port` | `int32` | `7777` | Listening port for the disaggregated PD bRPC server. |
 | `instance_role` | `string` | `"DEFAULT"` | Instance role, for example `DEFAULT`, `PREFILL`, `DECODE`, or `MIX`. |
 | `kv_cache_transfer_mode` | `string` | `"PUSH"` | KV Cache transfer mode, for example `PUSH` or `PULL`. |

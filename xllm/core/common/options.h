@@ -161,8 +161,6 @@ class Options {
 
   PROPERTY(bool, enable_disagg_pd) = false;
 
-  PROPERTY(bool, enable_pd_ooc) = false;
-
   PROPERTY(bool, enable_schedule_overlap) = true;
 
   PROPERTY(InstanceRole, instance_role) = InstanceRole::DEFAULT;

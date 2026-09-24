@@ -69,7 +69,6 @@ std::string Options::to_string() const {
      << ", nnodes: " << nnodes() << ", node_rank: " << node_rank()
      << ", enable_schedule_overlap: " << enable_schedule_overlap()
      << ", enable_disagg_pd: " << enable_disagg_pd()
-     << ", enable_pd_ooc: " << enable_pd_ooc()
      << ", disable_log_stats: " << disable_log_stats()
      << ", kv_cache_dtype: " << kv_cache_dtype()
      << ", kv_cache_transfer_mode: " << kv_cache_transfer_mode()

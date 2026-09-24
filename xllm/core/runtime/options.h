@@ -175,9 +175,6 @@ struct Options {
   // enable disaggregated prefill-decode mode.
   PROPERTY(bool, enable_disagg_pd) = false;
 
-  // enable online-offline co-location in disaggregated prefill-decode mode.
-  PROPERTY(bool, enable_pd_ooc) = false;
-
   // instance role, support `DEFAULT`, `PREFILL`, `DECODE`, `MIX`
   PROPERTY(InstanceRole, instance_role) = InstanceRole::DEFAULT;
 

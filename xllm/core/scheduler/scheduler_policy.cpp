@@ -846,7 +846,7 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
 bool SchedulerPolicy::should_wait_for_decode_restore(
     const std::shared_ptr<Request>& request,
     const SchedulerState& state) const {
-  if (!state.options.enable_disagg_pd() || state.options.enable_pd_ooc() ||
+  if (!state.options.enable_disagg_pd() ||
       !state.options.instance_role().has_value() ||
       state.options.instance_role().value() != InstanceRole::DECODE ||
       !state.enable_prefix_cache || state.options.enable_schedule_overlap() ||

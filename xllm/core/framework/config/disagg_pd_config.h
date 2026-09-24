@@ -47,7 +47,6 @@ class DisaggPDConfig final {
     static const OptionCategory kOptionCategory = {
         "DISAGGREGATED PREFILL-DECODE OPTIONS",
         {"enable_disagg_pd",
-         "enable_pd_ooc",
          "disagg_pd_port",
          "instance_role",
          "kv_cache_transfer_mode",
@@ -56,8 +55,6 @@ class DisaggPDConfig final {
   }
 
   PROPERTY(bool, enable_disagg_pd) = false;
-
-  PROPERTY(bool, enable_pd_ooc) = false;
 
   PROPERTY(int32_t, disagg_pd_port) = 7777;
 

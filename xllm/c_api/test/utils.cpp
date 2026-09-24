@@ -38,7 +38,6 @@ DEFINE_string(backend,
 DEFINE_bool(enable_chunked_prefill, false, "");
 DEFINE_bool(enable_prefix_cache, false, "");
 DEFINE_bool(enable_disagg_pd, false, "");
-DEFINE_bool(enable_pd_ooc, false, "");
 DEFINE_bool(enable_schedule_overlap, false, "");
 DEFINE_bool(enable_shm, false, "");
 
@@ -145,7 +144,6 @@ void ApplyGflagsToXllmInitOptions(XLLM_InitOptions* o) {
   o->enable_chunked_prefill = FLAGS_enable_chunked_prefill;
   o->enable_prefix_cache = FLAGS_enable_prefix_cache;
   o->enable_disagg_pd = FLAGS_enable_disagg_pd;
-  o->enable_pd_ooc = FLAGS_enable_pd_ooc;
   o->enable_schedule_overlap = FLAGS_enable_schedule_overlap;
   o->enable_shm = FLAGS_enable_shm;
 

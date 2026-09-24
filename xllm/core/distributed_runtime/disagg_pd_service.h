@@ -39,17 +39,6 @@ class DisaggPDService : public proto::DisaggPDService {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
-  // for decode recv multiple tokens from prefill
-  void MultiGenerations(::google::protobuf::RpcController* controller,
-                        const proto::DisaggGenerationsRequests* request,
-                        proto::Status* response,
-                        ::google::protobuf::Closure* done) override;
-
-  void SendPullSignal(::google::protobuf::RpcController* controller,
-                      const proto::PullSignal* request,
-                      proto::Status* response,
-                      ::google::protobuf::Closure* done) override;
-
   void LinkInstance(::google::protobuf::RpcController* controller,
                     const proto::InstanceClusterInfo* request,
                     proto::Status* response,

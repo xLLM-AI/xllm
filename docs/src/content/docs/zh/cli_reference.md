@@ -168,7 +168,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `enable_disagg_pd` | `bool` | `false` | 是否启用 Prefill-Decode 分离执行；详见 [PD 分离](/zh/features/disagg_pd/)。 |
-| `enable_pd_ooc` | `bool` | `false` | 是否在 PD 分离模式下启用在线/离线混部。 |
 | `disagg_pd_port` | `int32` | `7777` | PD 分离 bRPC server 的监听端口。 |
 | `instance_role` | `string` | `"DEFAULT"` | 当前实例角色，例如 `DEFAULT`、`PREFILL`、`DECODE`、`MIX`。 |
 | `kv_cache_transfer_mode` | `string` | `"PUSH"` | KV Cache 传输模式，例如 `PUSH`、`PULL`。 |

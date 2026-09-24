@@ -614,20 +614,9 @@ TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillUsesDisaggPD) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 2, 1024, 1);
   opt.enable_disagg_pd() = true;
-  opt.enable_pd_ooc() = false;
   opt.enable_chunked_prefill() = true;
 
   EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::DISAGG_PD);
-}
-
-TEST(SchedulerFactoryTest, DisaggPDOOCKeepsPDOOCKind) {
-  ContinuousScheduler::Options opt =
-      create_scheduler_options(10000, 256, 0, 1024, 1);
-  opt.enable_disagg_pd() = true;
-  opt.enable_pd_ooc() = true;
-  opt.enable_chunked_prefill() = true;
-
-  EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::PD_OOC);
 }
 
 TEST(ContinuousSchedulerTest, BeamStrictNoPartialScheduling) {

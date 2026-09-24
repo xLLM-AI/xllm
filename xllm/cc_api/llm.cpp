@@ -99,7 +99,6 @@ bool LLM::Initialize(const std::string& model_path,
         .instance_name(init_options.instance_name)
         .enable_disagg_pd(init_options.enable_disagg_pd)
         .enable_schedule_overlap(init_options.enable_schedule_overlap)
-        .enable_pd_ooc(init_options.enable_pd_ooc)
         .kv_cache_transfer_mode(init_options.kv_cache_transfer_mode)
         .disable_ttft_profiling(init_options.disable_ttft_profiling)
         .enable_forward_interruption(init_options.enable_forward_interruption)

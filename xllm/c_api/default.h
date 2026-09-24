@@ -27,7 +27,6 @@ const XLLM_InitOptions XLLM_INIT_LLM_OPTIONS_DEFAULT = {
     .cp_size = 1,
     .enable_prefix_cache = false,
     .enable_disagg_pd = false,
-    .enable_pd_ooc = false,
     .enable_schedule_overlap = false,
     .enable_shm = false,
 
@@ -88,7 +87,6 @@ const XLLM_InitOptions XLLM_INIT_REC_OPTIONS_DEFAULT = {
     .cp_size = 1,
     .enable_prefix_cache = false,
     .enable_disagg_pd = false,
-    .enable_pd_ooc = false,
     .enable_schedule_overlap = false,
     .enable_shm = false,
     .enable_graph = true,

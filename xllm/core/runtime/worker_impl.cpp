@@ -484,10 +484,6 @@ bool WorkerImpl::allocate_kv_cache_storage(
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
   const bool has_grouped_cache = kv_cache_shape.has_grouped_cache_layout();
-  if (has_grouped_cache && options_.enable_disagg_pd()) {
-    CHECK(!options_.enable_pd_ooc())
-        << "Grouped KV cache PD does not support PD-OOC yet.";
-  }
   if (has_grouped_cache) {
     CHECK(!::xllm::KVCacheConfig::get_instance().enable_xtensor())
         << "Grouped KV cache layout does not support XTensor cache.";

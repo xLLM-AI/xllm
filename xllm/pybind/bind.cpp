@@ -83,7 +83,6 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("ep_size", &Options::ep_size_)
       .def_readwrite("instance_name", &Options::instance_name_)
       .def_readwrite("enable_disagg_pd", &Options::enable_disagg_pd_)
-      .def_readwrite("enable_pd_ooc", &Options::enable_pd_ooc_)
       .def_readwrite("enable_schedule_overlap",
                      &Options::enable_schedule_overlap_)
       .def_readwrite("instance_role", &Options::instance_role_)

@@ -180,8 +180,6 @@ DECLARE_string(xtensor_master_node_addr);
 // --- disaggregated prefill and decode config ---
 DECLARE_bool(enable_disagg_pd);
 
-DECLARE_bool(enable_pd_ooc);
-
 DECLARE_int32(disagg_pd_port);
 
 DECLARE_string(instance_role);

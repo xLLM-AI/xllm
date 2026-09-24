@@ -200,7 +200,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
           static_cast<int32_t>(parallel_config.text_encoder_tp_size()))
       .instance_name(instance_name)
       .enable_disagg_pd(disagg_pd_config.enable_disagg_pd())
-      .enable_pd_ooc(disagg_pd_config.enable_pd_ooc())
       .enable_schedule_overlap(scheduler_config.enable_schedule_overlap())
       .kv_cache_transfer_mode(disagg_pd_config.kv_cache_transfer_mode())
       .etcd_addr(distributed_config.etcd_addr())

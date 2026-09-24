@@ -62,15 +62,15 @@ class DisaggPDScheduler : public ContinuousScheduler {
   void step(const absl::Duration& timeout) override;
 
   // prefill-1: for prefill send new request to decode
-  virtual void dispatch_requests();
+  void dispatch_requests();
   // prefill-2: for prefill send first token to decode
-  virtual void prefill_send_first_generation();
+  void prefill_send_first_generation();
 
   // decode-1: for decode recveive new request from prefill
-  virtual bool decode_schedule(std::shared_ptr<Request>& request,
-                               const std::string& prefill_instance_name);
+  bool decode_schedule(std::shared_ptr<Request>& request,
+                       const std::string& prefill_instance_name);
   // decode-2: for decode receive first token from prefill
-  virtual bool decode_recv_first_generation(
+  bool decode_recv_first_generation(
       const std::string& req_id,
       int64_t token_id,
       bool has_logprob,
@@ -116,6 +116,11 @@ class DisaggPDScheduler : public ContinuousScheduler {
                        const int32_t src_kv_split_size);
 
  protected:
+  // Skips dispatch and RPC startup. Unit tests construct through this so they
+  // do not block in initialize_rpc_server.
+  struct SkipRuntimeStart {};
+  DisaggPDScheduler(Engine* engine, const Options& options, SkipRuntimeStart);
+
   void do_permanent_rejection(const std::shared_ptr<Request>& request);
 
   bool enqueue_ready_request(std::shared_ptr<Request> request) override;
@@ -140,7 +145,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
   proto::DisaggPDService_Stub* create_rpc_channel(
       const std::string& instance_name);
 
-  virtual void start_rpc_server();
+  void start_rpc_server();
 
   // Initialize RPC server and xservice client
   // This method waits for the RPC server to be initialized and sets up the
@@ -181,7 +186,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
                                  /*cpu_binding=*/false,
                                  /*pool_name=*/"DisaggPDScheduler.prefill"};
 
-  // related decode instance name(ID) list (used by PDOOCScheduler override)
+  // related decode instance name(ID) list
   std::vector<std::string> decode_inst_names_;
   // TODO later
   // std::vector<std::string> updated_decode_inst_names;

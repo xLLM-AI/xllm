@@ -134,14 +134,6 @@ class ArgumentParser:
             help="Enable disaggregated prefill and decode execution.",
         )
         self.parser.add_argument(
-            "--enable_pd_ooc",
-            nargs="?",
-            const=True,
-            default=False,
-            type=_str_to_bool,
-            help="Enable online-offline co-location in disaggregated prefill-decoding mode.",
-        )
-        self.parser.add_argument(
             "--enable_schedule_overlap",
             nargs="?",
             const=True,

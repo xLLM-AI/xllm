@@ -55,9 +55,6 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
   /** Whether to enable disaggregated prefill and decode execution */
   bool enable_disagg_pd;
 
-  /** Whether to enable online-offline co-location in disaggregated PD mode */
-  bool enable_pd_ooc;
-
   /** Whether to enable schedule overlap for parallel execution */
   bool enable_schedule_overlap;
 

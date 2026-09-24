@@ -601,8 +601,6 @@ Master::Master(const Options& options, EngineType type)
     if (type == EngineType::VLMSSM) {
       CHECK(!options_.enable_disagg_pd())
           << "VLM speculative decoding does not support disaggregated PD";
-      CHECK(!options_.enable_pd_ooc())
-          << "VLM speculative decoding does not support PD OOC";
       CHECK(!options_.enable_service_routing())
           << "VLM speculative decoding does not support service routing";
       CHECK(!options_.enable_adaptive_speculative_decode())
@@ -667,7 +665,6 @@ Master::Master(const Options& options, EngineType type)
         .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
         .transfer_listen_port(options_.transfer_listen_port())
         .enable_disagg_pd(options_.enable_disagg_pd())
-        .enable_pd_ooc(options_.enable_pd_ooc())
         .enable_service_routing(options_.enable_service_routing())
         .enable_schedule_overlap(options_.enable_schedule_overlap())
         .enable_offline_inference(options_.enable_offline_inference())

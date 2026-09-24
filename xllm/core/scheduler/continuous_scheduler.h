@@ -113,8 +113,6 @@ class ContinuousScheduler : public Scheduler {
     // enable disaggregated PD mode.
     PROPERTY(bool, enable_disagg_pd) = false;
 
-    PROPERTY(bool, enable_pd_ooc) = false;
-
     // for master service, current instance name(ID).
     PROPERTY(std::optional<std::string>, instance_name);
 
@@ -243,8 +241,6 @@ class ContinuousScheduler : public Scheduler {
                            std::vector<int64_t>& tbt) override {}
 
   const InstanceInfo& get_instance_info() override { return instance_info_; }
-
-  std::vector<int> last_batch_lengths_;
 
   // Async RL training support: pause/resume
   enum class PauseState {
@@ -429,8 +425,6 @@ class ContinuousScheduler : public Scheduler {
   void process_batch_output(bool enable_schedule_overlap);
 
   void step_with_schedule_overlap(const absl::Duration& timeout);
-
-  void step_with_pd_ooc(std::vector<Batch>& batch);
 
   void refresh_sequences_from_requests(
       const std::vector<std::shared_ptr<Request>>& requests,
