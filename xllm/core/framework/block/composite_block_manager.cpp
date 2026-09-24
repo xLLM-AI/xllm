@@ -958,12 +958,6 @@ void CompositeBlockManager::cache(const std::vector<Block>& /*blocks*/) {
   NOT_IMPLEMENTED();
 }
 
-void CompositeBlockManager::reset_prefix_cache() {
-  for (auto& [type, entry] : leaves_) {
-    entry.leaf->reset_prefix_cache();
-  }
-}
-
 size_t CompositeBlockManager::num_blocks_in_prefix_cache() const {
   size_t total = 0;
   for (const auto& [type, entry] : leaves_) {

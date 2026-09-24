@@ -16,7 +16,6 @@ cc_library(
     vmm_api.h
     shared_vmm_allocator.h
     vmm_torch_allocator.h
-    sleepable_allocator.h
     batch_memcpy.h
     layer_synchronizer.h
     $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.h>
@@ -38,7 +37,6 @@ cc_library(
     device_name_utils.cpp
     vmm_api.cpp
     shared_vmm_allocator.cpp
-    sleepable_allocator.cpp
     batch_memcpy.cpp
     layer_synchronizer.cpp
     $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.cpp>

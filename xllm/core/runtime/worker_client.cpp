@@ -171,11 +171,6 @@ folly::SemiFuture<bool> WorkerClient::wakeup_async(
   return worker_->wakeup_async(options);
 }
 
-folly::SemiFuture<bool> WorkerClient::update_weights_async(
-    const std::string& /*weights_path*/) {
-  LOG(FATAL) << "WorkerClient Method update_weights is UnImplemented.";
-}
-
 folly::SemiFuture<bool> WorkerClient::start_profile_async() {
   return worker_->start_profile_async();
 }

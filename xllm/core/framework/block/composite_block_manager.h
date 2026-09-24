@@ -122,9 +122,6 @@ class CompositeBlockManager : public BlockManager {
              const Slice<XXH3Key>& block_hashes = {}) override;
   void cache(const std::vector<Block>& blocks) override;
 
-  // RL sleep/wakeup: fan out to every leaf (non-prefix leaves are a no-op).
-  void reset_prefix_cache() override;
-
   // Stats reported from the single capacity leaf (see capacity_leaf()).
   size_t num_blocks_in_prefix_cache() const override;
   size_t num_free_blocks() const override;

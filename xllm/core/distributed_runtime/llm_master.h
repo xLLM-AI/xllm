@@ -94,17 +94,9 @@ class LLMMaster : public Master {
 
   bool wakeup(const WakeupOptions& options) override;
 
-  bool update_weights(const std::string& weights_path) override;
-
   bool link_p2p(const std::vector<std::string>& remote_addrs) override;
 
   bool unlink_p2p(const std::vector<std::string>& remote_addrs) override;
-
-  // Async RL training support: pause/resume.
-  // mode: "keep" (default), "abort", or "wait" — see ContinuousScheduler.
-  void pause_scheduler(const std::string& mode = "keep");
-  void resume_scheduler();
-  bool is_scheduler_paused() const;
 
  private:
   XServiceClient* xservice_client_ = nullptr;

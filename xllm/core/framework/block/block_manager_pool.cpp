@@ -354,15 +354,6 @@ uint32_t BlockManagerPool::num_blocks() const { return options_.num_blocks(); }
 
 int32_t BlockManagerPool::block_size() const { return options_.block_size(); }
 
-void BlockManagerPool::reset_prefix_cache() {
-  if (!options_.enable_prefix_cache()) {
-    return;
-  }
-  for (auto& block_manager : block_managers_) {
-    block_manager->reset_prefix_cache();
-  }
-}
-
 std::vector<size_t> BlockManagerPool::num_blocks_in_prefix_cache() const {
   std::vector<size_t> num_blocks_in_prefix_cache(block_managers_.size());
   if (!options_.enable_prefix_cache()) {

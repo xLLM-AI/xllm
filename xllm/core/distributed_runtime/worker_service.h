@@ -132,11 +132,6 @@ class WorkerService : public proto::DistributeWorker {
                                  proto::ActivationMemory* resp,
                                  ::google::protobuf::Closure* done) override;
 
-  void UpdateWeights(::google::protobuf::RpcController* controller,
-                     const proto::UpdateWeightsRequest* req,
-                     proto::Status* resp,
-                     ::google::protobuf::Closure* done);
-
   void Sleep(::google::protobuf::RpcController* controller,
              const proto::SleepRequest* req,
              proto::Status* resp,

@@ -67,27 +67,6 @@ message P2PLinkRequest {
   repeated string remote_addrs = 2;
 }
 
-// Async RL training support: pause/resume
-message PauseRequest {
-  // How to handle in-flight requests: "keep" (default), "abort", or "wait".
-  //  - keep:  preempt running requests, free KV cache, re-prefill on resume.
-  //  - abort: cancel running requests; clients must retry.
-  //  - wait:  let running requests finish naturally, then pause.
-  string mode = 1;
-}
-
-message PauseResponse {
-  string status = 1;  // "paused" or "error: ..."
-}
-
-message ResumeRequest {
-  // Empty for now - simple resume semantics
-}
-
-message ResumeResponse {
-  string status = 1;  // "running" or "error: ..."
-}
-
 service XllmAPIService {
   rpc Completions (CompletionRequest) returns (CompletionResponse);
   rpc CompletionsHttp (HttpRequest) returns (HttpResponse);
@@ -140,10 +119,4 @@ service XllmAPIService {
 
   rpc UnlinkP2P (P2PLinkRequest) returns (Status);
   rpc UnlinkP2PHttp (HttpRequest) returns (HttpResponse);
-
-  // Async RL training support: pause/resume
-  rpc Pause (PauseRequest) returns (PauseResponse);
-  rpc PauseHttp (HttpRequest) returns (HttpResponse);
-  rpc Resume (ResumeRequest) returns (ResumeResponse);
-  rpc ResumeHttp (HttpRequest) returns (HttpResponse);
 }; 

@@ -124,11 +124,6 @@ void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq,
   inner_->release_out_of_window(seq, kv_state);
 }
 
-void ConcurrentBlockManagerImpl::reset_prefix_cache() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  inner_->reset_prefix_cache();
-}
-
 size_t ConcurrentBlockManagerImpl::num_blocks_in_prefix_cache() const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return inner_->num_blocks_in_prefix_cache();

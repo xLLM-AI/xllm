@@ -1466,37 +1466,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   return batched_inputs;
 }
 
-bool LLMEngine::rl_sleep_mode() const {
-  // RL sleep mode (SleepableAllocator) is mutually exclusive with the
-  // xtensor-based sleep path: it does not require xtensor and does not touch
-  // PageAllocator. When xtensor is on, RL sleep mode is disabled so the xtensor
-  // path is preserved.
-  return options_.enable_sleep_mode() &&
-         !::xllm::KVCacheConfig::get_instance().enable_xtensor();
-}
-
-bool LLMEngine::rl_sleep(MasterStatus master_status) {
-  LOG(INFO) << "Starting RL sleep. Worker clients count: "
-            << worker_clients_num_;
-  if (worker_clients_.empty()) {
-    LOG(ERROR) << "No worker clients available to sleep.";
-    return false;
-  }
-
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.push_back(worker->sleep_async(master_status));
-  }
-
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      LOG(ERROR) << "RL sleep failed.";
-      return false;
-    }
-  }
-  return true;
+bool LLMEngine::sleep(MasterStatus master_status) {
+  return xtensor_sleep(master_status);
 }
 
 bool LLMEngine::xtensor_sleep(MasterStatus master_status) {
@@ -1533,38 +1504,6 @@ bool LLMEngine::xtensor_sleep(MasterStatus master_status) {
   for (const auto& result : results) {
     if (!result.value()) {
       LOG(ERROR) << "Sleep failed.";
-      return false;
-    }
-  }
-  return true;
-}
-
-bool LLMEngine::sleep(MasterStatus master_status) {
-  if (rl_sleep_mode()) {
-    return rl_sleep(master_status);
-  }
-  return xtensor_sleep(master_status);
-}
-
-bool LLMEngine::update_weights(const std::string& weights_path) {
-  LOG(INFO) << "Updating weights on " << worker_clients_num_
-            << " worker(s) from: "
-            << (weights_path.empty() ? "<original path>" : weights_path);
-  if (worker_clients_.empty()) {
-    LOG(ERROR) << "No worker clients available to update weights.";
-    return false;
-  }
-
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.emplace_back(worker->update_weights_async(weights_path));
-  }
-
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.hasValue() || !result.value()) {
-      LOG(ERROR) << "UpdateWeights failed on a worker.";
       return false;
     }
   }
@@ -1616,30 +1555,6 @@ bool LLMEngine::stop_profile() {
     }
   }
 
-  return true;
-}
-
-bool LLMEngine::rl_wakeup(const WakeupOptions& options) {
-  LOG(INFO) << "Starting RL wakeup. Worker clients count: "
-            << worker_clients_num_;
-  if (worker_clients_.empty()) {
-    LOG(ERROR) << "No worker clients available to wakeup.";
-    return false;
-  }
-
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.push_back(worker->wakeup_async(options));
-  }
-
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      LOG(ERROR) << "RL wakeup failed.";
-      return false;
-    }
-  }
   return true;
 }
 
@@ -1704,9 +1619,6 @@ bool LLMEngine::xtensor_wakeup(const WakeupOptions& options) {
 }
 
 bool LLMEngine::wakeup(const WakeupOptions& options) {
-  if (rl_sleep_mode()) {
-    return rl_wakeup(options);
-  }
   return xtensor_wakeup(options);
 }
 

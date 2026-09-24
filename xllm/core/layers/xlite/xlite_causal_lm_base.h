@@ -134,12 +134,10 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
-    // Reload path (WorkerImpl::update_weights re-enters load_model on the
-    // same instance). XModel::Init is not idempotent (leaks its device
-    // buffers on re-entry), so rebuild the model for fresh state; the runtime
-    // (streams / HCCL comms / tensor pool) is weight-independent and reused
-    // (InitTensorPool no-ops once inited). Old weights are released by
-    // dropping their torch refs.
+    // XModel::Init is not idempotent (leaks its device buffers on re-entry),
+    // so rebuild the model for fresh state; the runtime (streams / HCCL comms /
+    // tensor pool) is weight-independent and reused (InitTensorPool no-ops
+    // once inited). Old weights are released by dropping their torch refs.
     if (ready_) {
       LOG(INFO) << "xlite load_model: reloading weights";
       weight_storages_.clear();

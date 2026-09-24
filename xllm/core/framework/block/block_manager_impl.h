@@ -69,12 +69,6 @@ class BlockManagerImpl : public BlockManager {
     return 0;
   }
 
-  void reset_prefix_cache() override {
-    if (options_.enable_prefix_cache() && prefix_cache_) {
-      prefix_cache_->evict(prefix_cache_->num_blocks());
-    }
-  }
-
   // free blocks num
   size_t num_free_blocks() const override { return num_free_blocks_; }
 

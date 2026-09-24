@@ -54,8 +54,6 @@ constexpr const char* kApiServiceRoutes =
     "wakeup => WakeupHttp,"
     "start_profile => StartProfileHttp,"
     "stop_profile => StopProfileHttp,"
-    "pause => PauseHttp,"
-    "resume => ResumeHttp,"
     "link_p2p => LinkP2PHttp,"
     "unlink_p2p => UnlinkP2PHttp";
 

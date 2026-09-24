@@ -125,8 +125,6 @@ class LLMEngine : public Engine {
 
   bool wakeup(const WakeupOptions& options) override;
 
-  bool update_weights(const std::string& weights_path) override;
-
   bool start_profile() override;
 
   bool stop_profile() override;
@@ -140,13 +138,6 @@ class LLMEngine : public Engine {
           layer_offsets) override;
 
  private:
-  // ---- RL deep-sleep path (SleepableAllocator), isolated from the xtensor
-  // ---- (PageAllocator) sleep/wakeup path. ----
-  // True when the engine uses the RL SleepableAllocator path (enable_sleep_mode
-  // with xtensor disabled) rather than the xtensor PageAllocator path.
-  bool rl_sleep_mode() const;
-  bool rl_sleep(MasterStatus master_status);
-  bool rl_wakeup(const WakeupOptions& options);
   bool xtensor_sleep(MasterStatus master_status);
   bool xtensor_wakeup(const WakeupOptions& options);
 

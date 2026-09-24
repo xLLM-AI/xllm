@@ -53,8 +53,6 @@ class Worker {
 
   bool wakeup(const WakeupOptions& options);
 
-  bool update_weights(const std::string& weights_path);
-
   folly::SemiFuture<bool> wakeup_async(const WakeupOptions& options);
 
   // Start/stop online timeline profiling on this worker's device.

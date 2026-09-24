@@ -69,9 +69,6 @@ struct KVCacheCreateOptions {
   PROPERTY(std::string, model_id);
   PROPERTY(std::string, model_type);
   PROPERTY(bool, enable_xtensor) = false;
-  // RL deep-sleep mode: build KV cache over a VMM-backed SleepableAllocator
-  // region so it can be released/re-acquired by sleep()/wake_up().
-  PROPERTY(bool, enable_sleep_mode) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
   // Empty keeps the legacy full allocation. Otherwise false means that the

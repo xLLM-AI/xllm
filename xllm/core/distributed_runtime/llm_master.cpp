@@ -346,14 +346,7 @@ bool LLMMaster::sleep() { return engine_->sleep(master_status_); }
 bool LLMMaster::wakeup() {
   WakeupOptions options;
   options.master_status = master_status_;
-  const bool ok = engine_->wakeup(options);
-  // RL deep sleep discards the KV cache; on wake the physical memory is
-  // re-mapped but its contents are garbage. Drop all prefix-cache entries so a
-  // subsequent request never reuses a stale (now-garbage) cached prefix.
-  if (ok && options_.enable_sleep_mode() && scheduler_ != nullptr) {
-    scheduler_->reset_prefix_cache();
-  }
-  return ok;
+  return engine_->wakeup(options);
 }
 
 bool LLMMaster::wakeup(const WakeupOptions& options) {
@@ -362,69 +355,12 @@ bool LLMMaster::wakeup(const WakeupOptions& options) {
   return engine_->wakeup(opts);
 }
 
-bool LLMMaster::update_weights(const std::string& weights_path) {
-  return engine_->update_weights(weights_path);
-}
-
 bool LLMMaster::link_p2p(const std::vector<std::string>& remote_addrs) {
   return engine_->link_p2p(remote_addrs);
 }
 
 bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
   return engine_->unlink_p2p(remote_addrs);
-}
-
-// ============== Async RL training support: Pause/Resume ==============
-void LLMMaster::pause_scheduler(const std::string& mode) {
-  LOG(INFO) << "LLMMaster: pausing scheduler (mode=" << mode << ")";
-
-  auto* continuous_scheduler =
-      dynamic_cast<ContinuousScheduler*>(scheduler_.get());
-  if (!continuous_scheduler) {
-    LOG(ERROR) << "Scheduler is not a ContinuousScheduler";
-    return;
-  }
-
-  ContinuousScheduler::PauseMode pause_mode =
-      ContinuousScheduler::PauseMode::KEEP;
-  if (mode == "abort") {
-    pause_mode = ContinuousScheduler::PauseMode::ABORT;
-  } else if (mode == "wait") {
-    pause_mode = ContinuousScheduler::PauseMode::WAIT;
-  } else if (mode != "keep" && !mode.empty()) {
-    LOG(WARNING) << "Unknown pause mode '" << mode << "', defaulting to keep";
-  }
-
-  continuous_scheduler->pause(pause_mode);
-
-  // Block until the scheduler loop thread has actually reached PAUSED, so that
-  // when this call returns it is safe to update weights (KEEP/ABORT: running
-  // requests handled and KV cache freed; WAIT: all in-flight requests done).
-  continuous_scheduler->wait_until_paused();
-  LOG(INFO) << "LLMMaster: scheduler fully paused (mode=" << mode << ")";
-}
-
-void LLMMaster::resume_scheduler() {
-  LOG(INFO) << "LLMMaster: resuming scheduler";
-
-  auto* continuous_scheduler =
-      dynamic_cast<ContinuousScheduler*>(scheduler_.get());
-  if (!continuous_scheduler) {
-    LOG(ERROR) << "Scheduler is not a ContinuousScheduler";
-    return;
-  }
-
-  continuous_scheduler->resume();
-}
-
-bool LLMMaster::is_scheduler_paused() const {
-  auto* continuous_scheduler =
-      dynamic_cast<ContinuousScheduler*>(scheduler_.get());
-  if (!continuous_scheduler) {
-    return false;
-  }
-
-  return continuous_scheduler->is_paused();
 }
 
 }  // namespace xllm

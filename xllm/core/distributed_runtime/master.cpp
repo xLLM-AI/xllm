@@ -748,7 +748,6 @@ Master::Master(const Options& options, EngineType type)
         .enable_prefill_piecewise_graph(
             options_.enable_prefill_piecewise_graph())
         .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
-        .enable_sleep_mode(options_.enable_sleep_mode())
         .model_id(options_.model_id());
     apply_runtime_kv_cache_options(options_, eng_options);
 

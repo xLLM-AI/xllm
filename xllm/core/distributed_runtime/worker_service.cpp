@@ -757,17 +757,6 @@ void WorkerService::UnlinkP2P(::google::protobuf::RpcController* controller,
   return;
 }
 
-void WorkerService::UpdateWeights(::google::protobuf::RpcController* controller,
-                                  const proto::UpdateWeightsRequest* req,
-                                  proto::Status* resp,
-                                  ::google::protobuf::Closure* done) {
-  threadpool_->schedule([this, controller, req, resp, done]() mutable {
-    brpc::ClosureGuard done_guard(done);
-    bool status = worker_->update_weights(req->weights_path());
-    resp->set_ok(status);
-  });
-}
-
 void WorkerService::Sleep(::google::protobuf::RpcController* controller,
                           const proto::SleepRequest* req,
                           proto::Status* resp,

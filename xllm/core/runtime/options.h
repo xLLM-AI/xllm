@@ -231,11 +231,6 @@ struct Options {
   // start with offline inference, default is false
   PROPERTY(bool, enable_offline_inference) = false;
 
-  // enable RL sleep/wakeup memory mode (SleepableAllocator). Propagated from
-  // the user-facing Options so that the engine and worker route the offline
-  // sleep()/wake_up() to the VMM-backed allocator instead of xtensor.
-  PROPERTY(bool, enable_sleep_mode) = false;
-
   // disable per-request statistic logs.
   PROPERTY(bool, disable_log_stats) = false;
 

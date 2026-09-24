@@ -374,20 +374,6 @@ bool CommChannel::sleep(MasterStatus master_status) {
   return true;
 }
 
-bool CommChannel::update_weights(const std::string& weights_path) {
-  proto::UpdateWeightsRequest req;
-  proto::Status s;
-  brpc::Controller cntl;
-
-  req.set_weights_path(weights_path);
-  stub_->UpdateWeights(&cntl, &req, &s, nullptr);
-  if (cntl.Failed() || !s.ok()) {
-    LOG(ERROR) << "UpdateWeights failed: " << cntl.ErrorText();
-    return false;
-  }
-  return true;
-}
-
 bool CommChannel::wakeup(const WakeupOptions& options) {
   proto::Status s;
   brpc::Controller cntl;

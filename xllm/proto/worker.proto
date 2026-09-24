@@ -89,12 +89,6 @@ message WakeupWeightSegmentList {
   repeated WakeupWeightSegment segments = 1;
 }
 
-// RL deep-sleep weight update: reload weights in place from disk.
-message UpdateWeightsRequest {
-  // Checkpoint path to reload from. Empty means reuse the original model path.
-  string weights_path = 1;
-}
-
 message P2PLinkWorkerRequest {
   string remote_addr = 1; 
 }
@@ -426,7 +420,6 @@ service DistributeWorker {
   rpc PrefetchFromStorage(BlockTransferInfos) returns (Status) {}
   rpc Sleep (SleepRequest)  returns (Status);
   rpc Wakeup (WakeupRequest) returns (Status);
-  rpc UpdateWeights (UpdateWeightsRequest) returns (Status);
   rpc StartProfile (Empty) returns (Status);
   rpc StopProfile (Empty) returns (Status);
 }

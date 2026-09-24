@@ -51,9 +51,6 @@ class WorkerClient {
 
   virtual folly::SemiFuture<bool> wakeup_async(const WakeupOptions& options);
 
-  virtual folly::SemiFuture<bool> update_weights_async(
-      const std::string& weights_path);
-
   // Start/stop online timeline profiling on the underlying worker.
   virtual folly::SemiFuture<bool> start_profile_async();
 

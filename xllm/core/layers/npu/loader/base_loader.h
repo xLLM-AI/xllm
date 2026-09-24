@@ -271,10 +271,6 @@ class BaseLoader {
   void* host_pinned_storage_ = nullptr;
   void* device_storage_ = nullptr;
   uint64_t storage_size_ = 0;
-  // Byte size of the VMM-backed WEIGHTS region reserved for this loader (RL
-  // sleep mode). Used to guard against a reload (update_weights) whose layout
-  // is larger than the originally reserved region.
-  uint64_t sleep_region_size_ = 0;
   std::vector<WeightSlice> weight_slices_;
   std::unordered_set<int> nz_indices_;
   std::shared_ptr<RollingWeightBuffer> rolling_buffer_ = nullptr;

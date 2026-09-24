@@ -96,8 +96,7 @@ void create_phy_mem_handle(PhyMemHandle& phy_mem_handle, int32_t device_id);
 
 // create a physical memory handle of an explicit size (must be a multiple of
 // the device allocation granularity). Unlike the granularity-sized overload
-// above, this does NOT mutate any global KV cache config, so it is safe to use
-// for large (chunked) allocations such as the RL sleep/wakeup regions.
+// above, this does NOT mutate any global KV cache config.
 void create_phy_mem_handle(PhyMemHandle& phy_mem_handle,
                            int32_t device_id,
                            size_t size);

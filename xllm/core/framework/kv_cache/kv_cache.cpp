@@ -17,9 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <functional>
 #include <map>
-#include <numeric>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -40,7 +38,6 @@ limitations under the License.
 #include "framework/kv_cache/linear_attention_kv_cache_impl.h"
 #include "framework/kv_cache/quantized_kv_cache_impl.h"
 #include "framework/xtensor/xtensor_allocator.h"
-#include "platform/sleepable_allocator.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
 
@@ -135,69 +132,6 @@ std::string int32_vector_string(const std::vector<int32_t>& values) {
   }
   oss << "]";
   return oss.str();
-}
-
-// Allocate standard key/value KV cache for all layers on a single VMM-backed
-// SleepableAllocator region (RL deep-sleep mode). Each layer's K/V tensor is a
-// view into the region at aligned offsets, so sleep()/wake_up() release and
-// re-acquire the whole region's physical HBM at once.
-void allocate_sleepable_kv_caches(std::vector<KVCache>& kv_caches,
-                                  const KVCacheShape& kv_cache_shape,
-                                  const KVCacheCreateOptions& create_options) {
-  CHECK(!create_options.enable_xtensor())
-      << "enable_sleep_mode is incompatible with xtensor mode.";
-  CHECK(kv_cache_shape.has_key_cache_shape() &&
-        kv_cache_shape.has_value_cache_shape())
-      << "Sleep mode requires key and value cache shapes.";
-  CHECK(!kv_cache_shape.has_index_cache_shape() &&
-        !kv_cache_shape.has_conv_cache_shape() &&
-        !kv_cache_shape.has_ssm_cache_shape())
-      << "Sleep mode only supports standard key/value KV cache.";
-  CHECK(!create_options.enable_linear_attention() &&
-        !create_options.enable_lighting_indexer() &&
-        !create_options.enable_kv_cache_quant())
-      << "Sleep mode does not support linear/indexer/quantized KV cache.";
-
-  const int64_t num_layers = create_options.num_layers();
-  const std::vector<int64_t>& k_shape = kv_cache_shape.key_cache_shape();
-  const std::vector<int64_t>& v_shape = kv_cache_shape.value_cache_shape();
-  const size_t elt_size = torch::elementSize(create_options.dtype());
-
-  auto numel_of = [](const std::vector<int64_t>& shape) {
-    return std::accumulate(
-        shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
-  };
-  constexpr size_t kTensorAlign = 512;
-  auto align_up = [](size_t v, size_t a) { return (v + a - 1) / a * a; };
-  const size_t k_stride = align_up(numel_of(k_shape) * elt_size, kTensorAlign);
-  const size_t v_stride = align_up(numel_of(v_shape) * elt_size, kTensorAlign);
-  const size_t total_bytes =
-      (k_stride + v_stride) * static_cast<size_t>(num_layers);
-
-  // Map the (large) KV region in 1 GiB physical chunks rather than a single
-  // huge handle: a single multi-GiB aclrtMallocPhysical is more failure-prone
-  // under HBM fragmentation than several smaller chunks.
-  constexpr size_t kKvChunkBytes = 1ULL << 30;  // 1 GiB
-  void* base = SleepableAllocator::get_instance().reserve_and_map(
-      MemTag::KV_CACHE, create_options.device(), total_bytes, kKvChunkBytes);
-
-  uintptr_t addr = reinterpret_cast<uintptr_t>(base);
-  for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-    torch::Tensor k_tensor = get_tensor_from_blob(
-        k_shape, create_options.dtype(), reinterpret_cast<void*>(addr));
-    addr += k_stride;
-    torch::Tensor v_tensor = get_tensor_from_blob(
-        v_shape, create_options.dtype(), reinterpret_cast<void*>(addr));
-    addr += v_stride;
-#if defined(USE_NPU)
-    k_tensor = at_npu::native::npu_format_cast(k_tensor, ACL_FORMAT_ND);
-    v_tensor = at_npu::native::npu_format_cast(v_tensor, ACL_FORMAT_ND);
-#endif
-    kv_caches.emplace_back(KVCacheTensors{k_tensor, v_tensor});
-  }
-
-  LOG(INFO) << "Allocated sleepable KV cache: num_layers=" << num_layers
-            << ", total_bytes=" << total_bytes << ", base=" << base;
 }
 
 // One scratch layer for non-owners. Empty indexer mask exposes the superset
@@ -375,13 +309,6 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
       LOG(INFO) << "[DSV4][KVCacheInit] cr_" << summary.first
                 << " shapes: " << summary.second;
     }
-    return;
-  }
-
-  if (create_options.enable_sleep_mode()) {
-    CHECK(layer_cache_owned.empty())
-        << "Sleep mode does not support layerwise split.";
-    allocate_sleepable_kv_caches(kv_caches, kv_cache_shape, create_options);
     return;
   }
 

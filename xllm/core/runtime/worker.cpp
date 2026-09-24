@@ -66,7 +66,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
           !options.enable_graph() && !options.enable_speculative_decode() &&
           !options.enable_prefill_piecewise_graph() &&
           !options.enable_disagg_pd() && options.host_blocks_factor() <= 1.0 &&
-          !options.enable_kvcache_store() && !options.enable_sleep_mode() &&
+          !options.enable_kvcache_store() &&
           !options.enable_offline_inference() &&
           !EPLBConfig::get_instance().enable_eplb() &&
           !KVCacheConfig::get_instance().enable_xtensor() &&
@@ -75,7 +75,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
           ParallelConfig::get_instance().kv_split_size_effective() == 1 &&
           ParallelConfig::get_instance().layerwise_split_size() == 1)
         << "Task pipeline requires ordinary Python LLM with CP/KV/layerwise "
-           "splits of one, without offload, disaggregation or sleep.";
+           "splits of one, without offload or disaggregation.";
   }
   if (options.enable_speculative_decode()) {
     const std::string& algorithm = options.speculative_algorithm();
@@ -344,14 +344,6 @@ bool Worker::wakeup(const WakeupOptions& options) {
     return false;
   }
   return impl_->wakeup(options);
-}
-
-bool Worker::update_weights(const std::string& weights_path) {
-  if (enable_task_pipeline_) {
-    LOG(ERROR) << "Task pipeline resource rebuild is not supported yet.";
-    return false;
-  }
-  return impl_->update_weights(weights_path);
 }
 
 folly::SemiFuture<bool> Worker::wakeup_async(const WakeupOptions& options) {

@@ -158,11 +158,6 @@ class Engine {
     return false;
   };
 
-  virtual bool update_weights(const std::string& weights_path) {
-    LOG(FATAL) << " update_weights is not implemented!";
-    return false;
-  }
-
   virtual bool wakeup(const WakeupOptions& options) {
     LOG(FATAL) << " wakeup is not implemented!";
     return false;

@@ -67,8 +67,6 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   void release_out_of_window(Sequence* seq) override;
   void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
-  void reset_prefix_cache() override;
-
   size_t num_blocks_in_prefix_cache() const override;
   size_t num_free_blocks() const override;
   size_t num_used_blocks() const override;

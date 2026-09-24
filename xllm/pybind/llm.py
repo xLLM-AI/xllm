@@ -134,7 +134,6 @@ class LLM:
         kv_cache_dtype: str = "auto",
         use_cpp_chat_template: bool = True,
         disable_log_stats: bool = True,
-        enable_sleep_mode: bool = False,
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -208,7 +207,6 @@ class LLM:
         options.output_shm_size = output_shm_size
         options.kv_cache_dtype = kv_cache_dtype
         options.disable_log_stats = disable_log_stats
-        options.enable_sleep_mode = enable_sleep_mode
         self._backend = backend
         if backend == "vlm":
             self.master = VLMMaster(options)
@@ -222,40 +220,6 @@ class LLM:
             utils.terminate_process(os.getpid())
         except Exception:
             pass
-
-    def sleep(self) -> None:
-        """Deep sleep: release device HBM (model weights + KV cache) for RL
-        training, returning the physical memory to the driver.
-
-        Contents are discarded; after ``wake_up`` weights are re-loaded and
-        KV cache is re-prefilled. Requires the engine to be created with
-        ``enable_sleep_mode=True``.
-        """
-        self.master.sleep()
-
-    def wake_up(self, tags: list[str] | None = None) -> None:
-        """Re-acquire device HBM previously released by ``sleep``.
-
-        ``tags`` is reserved for future fine-grained wake-up
-        (e.g. ["weights"] / ["kv_cache"]); the current version performs a
-        full wake-up regardless of ``tags``.
-        """
-        self.master.wake_up()
-
-    def is_sleeping(self) -> bool:
-        return self.master.is_sleeping()
-
-    def update_weights(self, checkpoint_path: str = "") -> None:
-        """Reload model weights in place from disk (vllm-ascend ``reload_weights``).
-
-        Typical level-2 RL flow:
-            llm.sleep()
-            llm.wake_up()                 # re-map empty weight + KV memory
-            llm.update_weights("/path/to/new_ckpt")  # reload weights in place
-        An empty ``checkpoint_path`` reuses the original model path.
-        Requires ``enable_sleep_mode=True``.
-        """
-        self.master.update_weights(checkpoint_path)
 
     def generate(
         self,

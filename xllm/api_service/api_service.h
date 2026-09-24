@@ -220,27 +220,6 @@ class APIService : public proto::XllmAPIService {
                      proto::HttpResponse* response,
                      ::google::protobuf::Closure* done) override;
 
-  // Async RL training support: pause/resume
-  void Pause(::google::protobuf::RpcController* controller,
-             const proto::PauseRequest* request,
-             proto::PauseResponse* response,
-             ::google::protobuf::Closure* done) override;
-
-  void PauseHttp(::google::protobuf::RpcController* controller,
-                 const proto::HttpRequest* request,
-                 proto::HttpResponse* response,
-                 ::google::protobuf::Closure* done) override;
-
-  void Resume(::google::protobuf::RpcController* controller,
-              const proto::ResumeRequest* request,
-              proto::ResumeResponse* response,
-              ::google::protobuf::Closure* done) override;
-
-  void ResumeHttp(::google::protobuf::RpcController* controller,
-                  const proto::HttpRequest* request,
-                  proto::HttpResponse* response,
-                  ::google::protobuf::Closure* done) override;
-
  private:
   using ChatHttpHandler = std::function<void(ClosureGuard&,
                                              brpc::Controller*,

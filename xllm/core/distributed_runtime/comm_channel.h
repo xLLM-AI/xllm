@@ -115,8 +115,6 @@ class CommChannel {
 
   virtual bool sleep(MasterStatus master_status);
 
-  virtual bool update_weights(const std::string& weights_path);
-
   virtual bool wakeup(const WakeupOptions& options);
 
   virtual bool start_profile();

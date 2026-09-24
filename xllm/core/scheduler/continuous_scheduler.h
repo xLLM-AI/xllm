@@ -20,7 +20,6 @@ limitations under the License.
 #include <folly/futures/Future.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <limits>
 #include <list>
@@ -242,54 +241,6 @@ class ContinuousScheduler : public Scheduler {
 
   const InstanceInfo& get_instance_info() override { return instance_info_; }
 
-  // Async RL training support: pause/resume
-  enum class PauseState {
-    RUNNING = 0,  // Normal operation
-    PAUSING = 1,  // Requested pause, transitioning to PAUSED
-    PAUSED = 2    // Fully paused
-  };
-
-  // How to handle in-flight requests when pausing (vLLM-compatible).
-  enum class PauseMode {
-    KEEP = 0,   // Preempt running requests, free KV cache, push back to waiting
-                // queue; recomputed (re-prefill) on resume. Default for RL.
-    ABORT = 1,  // Cancel all running requests; clients must retry.
-    WAIT = 2    // Stop admitting new requests; let running requests finish
-                // naturally, then pause. KV cache is not discarded.
-  };
-
-  // Pause the scheduler. See PauseMode for in-flight request handling.
-  void reset_prefix_cache() override;
-
-  void pause(PauseMode mode = PauseMode::KEEP);
-
-  // Block until the scheduler has fully transitioned to PAUSED (i.e. running
-  // requests have been handled per mode and it is safe to update weights).
-  // Returns true if paused, false if it timed out first.
-  bool wait_until_paused(int64_t timeout_ms = -1);
-
-  // Resume the scheduler.
-  void resume();
-
-  // Check if scheduler is paused or pausing
-  bool is_paused() const;
-
-  // for test only: directly trigger the preemption that step() performs when
-  // transitioning to PAUSED, without needing a real engine to drive step().
-  void preempt_all_running_requests_test() { preempt_all_running_requests(); }
-  void abort_all_running_requests_test() { abort_all_running_requests(); }
-
- private:
-  // Drive the PAUSING -> PAUSED transition from within step(). Returns true if
-  // the scheduler is paused (caller should skip normal scheduling).
-  bool try_complete_pause();
-
-  // KEEP mode: preempt all running requests, free KV cache, push to waiting.
-  void preempt_all_running_requests();
-
-  // ABORT mode: cancel all running requests; they are not rescheduled.
-  void abort_all_running_requests();
-
  protected:
   void clear_mtp_bootstrap(Request* request);
   void drain_prefetched_requests();
@@ -397,16 +348,6 @@ class ContinuousScheduler : public Scheduler {
   std::vector<std::shared_ptr<Request>> last_running_requests_;
   std::vector<Sequence*> last_running_sequences_;
   bool is_first_step_ = true;
-
-  // Pause state (atomic for thread-safe access)
-  std::atomic<PauseState> pause_state_{PauseState::RUNNING};
-  // How to handle in-flight requests for the current pause. Only read while
-  // pause_state_ != RUNNING; written by pause() before publishing the state.
-  std::atomic<PauseMode> pause_mode_{PauseMode::KEEP};
-  // Signals the PAUSING -> PAUSED transition to callers blocked in
-  // wait_until_paused(). Notified by the scheduler loop thread.
-  std::mutex pause_mutex_;
-  std::condition_variable pause_cv_;
 
  private:
   // Construct a SchedulerState snapshot for the policy.

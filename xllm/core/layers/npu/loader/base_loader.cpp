@@ -18,7 +18,6 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/platform/sleepable_allocator.h"
 #include "framework/xtensor/xtensor_allocator.h"
 #include "rolling_weight_buffer.h"
 
@@ -426,30 +425,6 @@ void BaseLoader::allocate_device_storage() {
         << "RollingWeightBuffer slot is null for layer " << layer_index_;
     return;
   }
-  // RL deep-sleep: allocate this layer's contiguous weight buffer as a
-  // VMM-backed region so sleep()/wake_up() can release / re-acquire it. On a
-  // reload (update_weights) the region is reused -- its physical memory was
-  // re-mapped to the same virtual address by wake_up(), so we just copy into
-  // it.
-  if (SleepableAllocator::get_instance().weights_enabled()) {
-    if (device_storage_ != nullptr) {
-      // Reload (update_weights) reuses the region re-mapped by wake_up(). The
-      // new weight layout must fit the originally reserved region, otherwise
-      // copy_weights_to_device would overflow it.
-      CHECK_LE(storage_size_, sleep_region_size_)
-          << "update_weights weight layout (" << storage_size_
-          << " B) exceeds the reserved sleep region (" << sleep_region_size_
-          << " B); reloading a larger/different model is not supported in "
-             "sleep mode.";
-      return;
-    }
-    device_storage_ = SleepableAllocator::get_instance().reserve_and_map(
-        MemTag::WEIGHTS, device_, static_cast<size_t>(storage_size_));
-    CHECK(device_storage_ != nullptr)
-        << "SleepableAllocator::reserve_and_map failed, size=" << storage_size_;
-    sleep_region_size_ = storage_size_;
-    return;
-  }
   if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
     auto& allocator = XTensorAllocator::get_instance();
     bool ok =
@@ -606,11 +581,10 @@ void BaseLoader::release_device_storage() {
   if (device_storage_ == nullptr) {
     return;
   }
-  // Memory owned by xtensor / rolling buffer / the VMM-backed WEIGHTS region is
-  // released by those owners, not by aclrtFree here.
+  // Memory owned by xtensor / rolling buffer is released by those owners, not
+  // by aclrtFree here.
   if (!::xllm::KVCacheConfig::get_instance().enable_xtensor() &&
-      !rolling_buffer_ &&
-      !SleepableAllocator::get_instance().weights_enabled()) {
+      !rolling_buffer_) {
     auto ret = aclrtFree(device_storage_);
     if (ret != ACL_SUCCESS) {
       LOG(ERROR) << "aclrtFree failed for BaseLoader, ret=" << ret;

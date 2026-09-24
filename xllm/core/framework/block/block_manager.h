@@ -140,11 +140,6 @@ class BlockManager {
   virtual size_t num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
 
-  // Evict all entries from the prefix cache (returning their blocks to the free
-  // pool). Used by RL sleep/wakeup: after deep sleep the KV physical memory is
-  // discarded, so any cached prefix would point to garbage and must be dropped.
-  virtual void reset_prefix_cache() {}
-
   // get the options for the block manager
   const Options& options() const { return options_; }
 

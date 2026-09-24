@@ -235,12 +235,6 @@ class Options {
   // for offline inference: start with offline inference, default is false
   PROPERTY(bool, enable_offline_inference) = false;
 
-  // Enable the RL sleep/wakeup memory mode (SleepableAllocator). When set, the
-  // offline Python sleep()/wake_up() interface releases / re-acquires physical
-  // HBM via the VMM-backed allocator (vllm-ascend style), independent of the
-  // xtensor-based online sleep/wakeup path.
-  PROPERTY(bool, enable_sleep_mode) = false;
-
   // disable per-request statistic logs.
   PROPERTY(bool, disable_log_stats) = false;
   // for offline inference: the path to spawn worker binary
