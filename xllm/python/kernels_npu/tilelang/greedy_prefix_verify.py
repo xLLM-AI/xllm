@@ -29,8 +29,18 @@ GREEDY_PREFIX_VERIFY_PASS_CONFIGS = {
 }
 
 
+def select_greedy_prefix_verify_task_count(batch_size: int, vec_core_num: int = DEFAULT_TASK_COUNT) -> int:
+    """Select an even row grid; callers skip the launch for an empty batch."""
+    if not 0 <= batch_size <= (1 << 31) - 1:
+        raise ValueError(f"batch_size must fit nonnegative int32, got {batch_size}")
+    if not 0 < vec_core_num <= (1 << 31) - 1 or vec_core_num % VEC_NUM != 0:
+        raise ValueError(f"vec_core_num must fit positive int32 and be divisible by {VEC_NUM}, got {vec_core_num}")
+    aligned_rows = max(VEC_NUM, ((batch_size + VEC_NUM - 1) // VEC_NUM) * VEC_NUM)
+    return min(aligned_rows, vec_core_num)
+
+
 def build_greedy_prefix_verify_kernel(
-    task_count: int = DEFAULT_TASK_COUNT,
+    task_count: int,
     draft_bits: int = 64,
     target_bits: int = 64,
     bonus_bits: int = 64,
@@ -111,6 +121,8 @@ def build_greedy_prefix_verify_kernel(
             masked_ub = T.alloc_ub((TILE_IDS,), "int32")
             draft_i32_ub = T.alloc_ub((TILE_IDS,), "int32")
             offsets_ub = T.alloc_ub((TILE_IDS,), "uint32")
+            indices_ub = T.alloc_ub((TILE_IDS,), "int32")
+            offsets_i32_ub = T.alloc_ub((TILE_IDS,), "int32")
             rejected_ub = T.alloc_ub((TILE_IDS,), "int32")
             full_u16_ub = T.alloc_ub((TILE_IDS * 2,), "uint16")
             rejected_u16_ub = T.alloc_ub((TILE_IDS * 2,), "uint16")
@@ -119,6 +131,11 @@ def build_greedy_prefix_verify_kernel(
             bonus_native_ub = T.alloc_ub((8,), bonus_dtype)
             bonus_i32_ub = T.alloc_ub((8,), "int32")
             rejected = T.alloc_var("int32")
+            first_reject = T.alloc_var("int32")
+            equal_byte = T.alloc_var("int32")
+            prefix_index = T.alloc_var("int32")
+            T.tile.createvecindex(indices_ub, 0)
+            T.pipe_barrier("v")
 
             for row_local in T.serial(valid_rows):
                 row = row_start + row_local
@@ -147,19 +164,26 @@ def build_greedy_prefix_verify_kernel(
                                 target[target_offset : target_offset + target_span],
                                 window_i32_ub,
                             )
-                        for index in T.serial(TILE_IDS):
-                            if index < target_count:
-                                offsets_ub[index] = T.Cast("uint32", index * target_stride1 * 4)
-                            else:
-                                offsets_ub[index] = T.uint32(0)
-                        T.set_flag("mte2", "v", 0)
-                        T.wait_flag("mte2", "v", 0)
-                        T.set_flag("s", "v", 0)
-                        T.wait_flag("s", "v", 0)
                         if target_bits == 64:
-                            T.tile.cast(window_i32_ub, target_native_ub, "CAST_NONE", target_span)
+                            if target_stride1 == 1:
+                                T.set_flag("mte2", "v", 0)
+                                T.wait_flag("mte2", "v", 0)
+                                T.tile.cast(full_ub, target_native_ub, "CAST_NONE", target_count)
+                        if (target_stride1 != 1) | (target_bits == 32):
+                            # Padded lanes reuse the last valid ID within the window.
+                            T.tile.min(offsets_i32_ub, indices_ub, target_count - 1)
                             T.pipe_barrier("v")
-                        T.tile.gather(full_ub, window_i32_ub, offsets_ub, 0)
+                            T.tile.mul(offsets_i32_ub, offsets_i32_ub, target_stride1)
+                            T.pipe_barrier("v")
+                            T.tile.mul(offsets_i32_ub, offsets_i32_ub, 4)
+                            T.pipe_barrier("v")
+                            T.reinterpretcast(offsets_ub, offsets_i32_ub, "uint32_t")
+                            T.set_flag("mte2", "v", 0)
+                            T.wait_flag("mte2", "v", 0)
+                            if target_bits == 64:
+                                T.tile.cast(window_i32_ub, target_native_ub, "CAST_NONE", target_span)
+                                T.pipe_barrier("v")
+                            T.tile.gather(full_ub, window_i32_ub, offsets_ub, 0)
 
                         if mask_enabled != 0:
                             T.set_flag("v", "mte2", 0)
@@ -178,19 +202,27 @@ def build_greedy_prefix_verify_kernel(
                                     draft[draft_offset : draft_offset + draft_span],
                                     window_i32_ub,
                                 )
-                            for index in T.serial(TILE_IDS):
-                                if index < target_count:
-                                    offsets_ub[index] = T.Cast("uint32", index * draft_stride1 * 4)
-                                else:
-                                    offsets_ub[index] = T.uint32(0)
-                            T.set_flag("mte2", "v", 0)
-                            T.wait_flag("mte2", "v", 0)
-                            T.set_flag("s", "v", 0)
-                            T.wait_flag("s", "v", 0)
                             if draft_bits == 64:
-                                T.tile.cast(window_i32_ub, draft_native_ub, "CAST_NONE", draft_span)
+                                if draft_stride1 == 1:
+                                    T.set_flag("mte2", "v", 0)
+                                    T.wait_flag("mte2", "v", 0)
+                                    # Compare reads all 64 lanes, including short-tile padding.
+                                    T.tile.fill(draft_i32_ub, 0)
+                                    T.tile.cast(draft_i32_ub, draft_native_ub, "CAST_NONE", target_count)
+                            if (draft_stride1 != 1) | (draft_bits == 32):
+                                T.tile.min(offsets_i32_ub, indices_ub, target_count - 1)
                                 T.pipe_barrier("v")
-                            T.tile.gather(draft_i32_ub, window_i32_ub, offsets_ub, 0)
+                                T.tile.mul(offsets_i32_ub, offsets_i32_ub, draft_stride1)
+                                T.pipe_barrier("v")
+                                T.tile.mul(offsets_i32_ub, offsets_i32_ub, 4)
+                                T.pipe_barrier("v")
+                                T.reinterpretcast(offsets_ub, offsets_i32_ub, "uint32_t")
+                                T.set_flag("mte2", "v", 0)
+                                T.wait_flag("mte2", "v", 0)
+                                if draft_bits == 64:
+                                    T.tile.cast(window_i32_ub, draft_native_ub, "CAST_NONE", draft_span)
+                                    T.pipe_barrier("v")
+                                T.tile.gather(draft_i32_ub, window_i32_ub, offsets_ub, 0)
                             T.pipe_barrier("v")
                             T.tile.compare(equal_bits_ub, draft_i32_ub, full_ub, "EQ")
 
@@ -213,15 +245,25 @@ def build_greedy_prefix_verify_kernel(
                     T.set_flag("v", "s", 0)
                     T.wait_flag("v", "s", 0)
                     if mask_enabled != 0:
-                        for index in T.serial(valid_count):
-                            # Keep the first rejected target as replacement.
-                            rejected_ub[index] = -rejected
-                            if index < target_count:
-                                equal_bit = (equal_bits_ub[index // 8] >> (index % 8)) & 1
-                                if equal_bit == 0:
-                                    rejected = 1
+                        first_reject = valid_count
+                        if rejected != 0:
+                            first_reject = -1
+                        prefix_index = 0
+                        while (prefix_index < target_count) & (rejected == 0):
+                            if prefix_index % 8 == 0:
+                                equal_byte = T.Cast("int32", equal_bits_ub[prefix_index // 8])
+                            equal_bit = (equal_byte >> (prefix_index % 8)) & 1
+                            if equal_bit == 0:
+                                first_reject = prefix_index
+                                rejected = 1
+                            prefix_index = prefix_index + 1
                         T.set_flag("s", "v", 0)
                         T.wait_flag("s", "v", 0)
+                        # Keep the first rejected target as replacement.
+                        T.tile.add(rejected_ub, indices_ub, -first_reject)
+                        T.tile.max(rejected_ub, rejected_ub, 0)
+                        T.tile.min(rejected_ub, rejected_ub, 1)
+                        T.tile.mul(rejected_ub, rejected_ub, -1)
                         # Or operates on 16-bit lanes; preserve all INT32 bits.
                         T.reinterpretcast(full_u16_ub, full_ub, "uint16_t")
                         T.reinterpretcast(rejected_u16_ub, rejected_ub, "uint16_t")
