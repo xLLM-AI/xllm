@@ -47,4 +47,5 @@ cc_library(
     torch
     :kernels
     $<$<BOOL:${USE_NPU}>:xllm_ops>
+    $<$<BOOL:${USE_NPU}>:tilelang_kernels>
 )

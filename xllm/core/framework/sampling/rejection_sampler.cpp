@@ -26,6 +26,12 @@ limitations under the License.
 #include "kernels/ops_api.h"
 #include "sampler.h"
 
+#if defined(USE_NPU)
+#include <c10/core/DeviceType.h>
+
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#endif
+
 namespace xllm {
 
 namespace {
@@ -361,6 +367,15 @@ RejectionSampler::greedy_sample_from_token_ids(
     bool mask_out_rejected_tokens) {
   CHECK_EQ(target_token_ids.sizes(), draft_token_ids.sizes())
       << "target and draft token shapes must match";
+#if defined(USE_NPU)
+  if (target_token_ids.device().type() == c10::DeviceType::PrivateUse1) {
+    return kernel::npu::tilelang::greedy_prefix_verify(
+        draft_token_ids,
+        target_token_ids,
+        bonus_token_ids,
+        mask_out_rejected_tokens);
+  }
+#endif
   // [batch_size, n_speculative_tokens + 1]
   torch::Tensor accepted_token_ids =
       torch::cat({target_token_ids, bonus_token_ids}, /*dim=*/-1);

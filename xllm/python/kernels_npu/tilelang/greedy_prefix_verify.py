@@ -133,7 +133,6 @@ def build_greedy_prefix_verify_kernel(
             rejected = T.alloc_var("int32")
             first_reject = T.alloc_var("int32")
             equal_byte = T.alloc_var("int32")
-            prefix_index = T.alloc_var("int32")
             T.tile.createvecindex(indices_ub, 0)
             T.pipe_barrier("v")
 
@@ -248,15 +247,14 @@ def build_greedy_prefix_verify_kernel(
                         first_reject = valid_count
                         if rejected != 0:
                             first_reject = -1
-                        prefix_index = 0
-                        while (prefix_index < target_count) & (rejected == 0):
-                            if prefix_index % 8 == 0:
-                                equal_byte = T.Cast("int32", equal_bits_ub[prefix_index // 8])
-                            equal_bit = (equal_byte >> (prefix_index % 8)) & 1
-                            if equal_bit == 0:
-                                first_reject = prefix_index
-                                rejected = 1
-                            prefix_index = prefix_index + 1
+                        for index in T.serial(valid_count):
+                            if index < target_count:
+                                if index % 8 == 0:
+                                    equal_byte = T.Cast("int32", equal_bits_ub[index // 8])
+                                equal_bit = (equal_byte >> (index % 8)) & 1
+                                if equal_bit == 0:
+                                    first_reject = T.min(first_reject, index)
+                                    rejected = 1
                         T.set_flag("s", "v", 0)
                         T.wait_flag("s", "v", 0)
                         # Keep the first rejected target as replacement.

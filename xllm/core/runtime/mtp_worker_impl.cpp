@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #if defined(USE_NPU)
 #include <acl/acl.h>
+#include <c10/core/DeviceType.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #endif
 
@@ -3998,6 +3999,9 @@ SampleOutput MTPWorkerImpl::validate(
   CHECK_EQ(num_target_tokens % num_val_tokens, 0);
   const int32_t batch_size = num_target_tokens / num_val_tokens;
   const int32_t vocab_size = target_output.logits.size(/*dim=*/-1);
+  const bool use_greedy_token_ids = !requires_probability_based_validation() &&
+                                    sampling_params.all_greedy_sample &&
+                                    !target_output.logprobs;
 
   using torch::indexing::None;
   using ISlice = torch::indexing::Slice;
@@ -4035,15 +4039,25 @@ SampleOutput MTPWorkerImpl::validate(
           .view({-1, 1});
 
   SampleOutput sample_output;
-  if (!requires_probability_based_validation() &&
-      sampling_params.all_greedy_sample && !target_output.logprobs) {
+  if (use_greedy_token_ids) {
     torch::Tensor target_token_ids =
         target_next_tokens.view({batch_size, num_val_tokens});
     torch::Tensor target_draft_token_ids = target_token_ids.slice(
         /*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1);
+    torch::Tensor draft_token_ids = draft_proposal.token_ids();
+    // Keep the original target ID block and let the verifier convert IDs in UB.
+    // Target and bonus remain views of the same production storage.
+#if defined(USE_NPU)
+    if (target_draft_token_ids.device().type() !=
+        c10::DeviceType::PrivateUse1) {
+      draft_token_ids = draft_token_ids.to(target_draft_token_ids);
+    }
+#else
+    draft_token_ids = draft_token_ids.to(target_draft_token_ids);
+#endif
     auto [accepted_token_ids, masked_accepted_token_ids] =
         RejectionSampler::greedy_sample_from_token_ids(
-            draft_proposal.token_ids().to(target_draft_token_ids),
+            draft_token_ids,
             target_draft_token_ids,
             bonus_token_ids,
             /*mask_out_rejected_tokens=*/true);

@@ -133,6 +133,11 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
+  NAME greedy_prefix_verify
+  WRAPPER_SRCS greedy_prefix_verify_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
   NAME spec_verify_attention_tiling_update
   WRAPPER_SRCS spec_verify_attention_tiling_update_wrapper.cpp
 )

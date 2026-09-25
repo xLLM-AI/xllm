@@ -19,6 +19,7 @@ from xllm.python.kernels_npu.tilelang import utils as tilelang_utils
 from xllm.python.kernels_npu.tilelang.greedy_prefix_verify import (
     DEFAULT_TASK_COUNT,
     GREEDY_PREFIX_VERIFY_PASS_CONFIGS,
+    VEC_NUM,
     build_greedy_prefix_verify_kernel,
 )
 
@@ -43,7 +44,7 @@ class GreedyPrefixVerifyKernel(TilelangKernel):
             "target_bits": target_bits,
             "bonus_bits": bonus_bits,
         }
-        for task_count in sorted({2, DEFAULT_TASK_COUNT})
+        for task_count in range(VEC_NUM, DEFAULT_TASK_COUNT + 1, VEC_NUM)
         for draft_bits in (32, 64)
         for target_bits in (32, 64)
         for bonus_bits in (32, 64)
