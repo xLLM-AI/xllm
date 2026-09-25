@@ -95,6 +95,7 @@ _EXPORTS = {
         "sparse_flash_attention",
         "sparse_flash_attention_out",
         "sparse_flash_attention_lse",
+        "supports_torch_npu_lightning_indexer",
     ),
     "dsa": (
         "compressor",
@@ -160,6 +161,7 @@ __all__ = [
     "sparse_flash_attention",
     "sparse_flash_attention_out",
     "sparse_flash_attention_lse",
+    "supports_torch_npu_lightning_indexer",
     "causal_conv1d_decode",
     "compressor",
     "dequant_swiglu_quant",
