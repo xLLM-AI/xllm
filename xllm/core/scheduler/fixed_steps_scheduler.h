@@ -46,7 +46,7 @@ struct ScheduleResult {
   std::vector<Sequence*> sequences;
 };
 
-class FixedStepsScheduler final : public ContinuousScheduler {
+class FixedStepsScheduler : public ContinuousScheduler {
  public:
   FixedStepsScheduler(Engine* engine, const Options& options);
   ~FixedStepsScheduler() override = default;

@@ -343,8 +343,4 @@ class ContinuousScheduler : public Scheduler {
   void create_queues(const Options& options);
 };
 
-// Resolves the BatchMode from the scheduler options and global configs.
-// Maps the old scheduler-selection logic (factory) to a BatchMode value.
-BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options);
-
 }  // namespace xllm

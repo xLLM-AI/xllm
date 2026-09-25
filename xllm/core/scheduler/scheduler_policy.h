@@ -298,6 +298,10 @@ class UnifiedPolicy : public SchedulerPolicy {
                         const SchedulerState& state);
 };
 
+// Builds the BatchMode that selects the scheduler policy. Constraints
+// (chunked prefill, CP/MTP, PD PREFILL) override the raw options.
+BatchMode create_batch_mode(const ContinuousScheduler::Options& options);
+
 // Factory function: creates the appropriate policy based on BatchMode.
 std::unique_ptr<SchedulerPolicy> create_scheduler_policy(
     const BatchMode& mode,

@@ -589,7 +589,8 @@ TEST(ContinuousSchedulerFactoryTest,
   opt.cp_size() = 2;  // CP > 1 forces exclusive batch (no mix)
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
-  auto scheduler = create_continuous_scheduler(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   ASSERT_NE(scheduler.get(), nullptr);
 
   auto requests = generate_request({2, 10},
