@@ -49,6 +49,8 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
         def pick(reflected_name: str, nested_name: str) -> int:
             value = d.get(reflected_name)
             if value is None:
+                value = d.get(nested_name)
+            if value is None:
                 value = dflash_config.get(nested_name, 0)
             return int(value)
 

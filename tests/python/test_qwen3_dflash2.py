@@ -93,11 +93,31 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
     nested = DFlash2Qwen3Config.from_dict(nested_values)
     nested.validate()
 
+    speculators_values = _config_dict(
+        dflash2_block_size=None,
+        dflash2_conv_group_size=None,
+        dflash2_conv_kernel_size=None,
+        dflash2_selector_rank=None,
+        dflash2_selector_top_k=None,
+        block_size=4,
+        conv_group_size=2,
+        conv_kernel_size=2,
+        selector_rank=2,
+        selector_top_k=2,
+    )
+    speculators = DFlash2Qwen3Config.from_dict(speculators_values)
+    speculators.validate()
+
     assert nested.block_size == reflected.block_size
     assert nested.conv_group_size == reflected.conv_group_size
     assert nested.conv_kernel_size == reflected.conv_kernel_size
     assert nested.selector_rank == reflected.selector_rank
     assert nested.selector_top_k == reflected.selector_top_k
+    assert speculators.block_size == reflected.block_size
+    assert speculators.conv_group_size == reflected.conv_group_size
+    assert speculators.conv_kernel_size == reflected.conv_kernel_size
+    assert speculators.selector_rank == reflected.selector_rank
+    assert speculators.selector_top_k == reflected.selector_top_k
 
 
 @pytest.mark.parametrize(

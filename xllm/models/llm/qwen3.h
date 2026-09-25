@@ -318,11 +318,23 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
   LOAD_ARG_OR(
       confidence_head_with_markov, "confidence_head_with_markov", false);
-  LOAD_ARG_OR(dflash2_block_size, "dflash_config.block_size", 0);
-  LOAD_ARG_OR(dflash2_conv_group_size, "dflash_config.conv_group_size", 0);
-  LOAD_ARG_OR(dflash2_conv_kernel_size, "dflash_config.conv_kernel_size", 0);
-  LOAD_ARG_OR(dflash2_selector_rank, "dflash_config.selector_rank", 0);
-  LOAD_ARG_OR(dflash2_selector_top_k, "dflash_config.selector_top_k", 0);
+  LOAD_ARG_OR_FUNC(dflash2_block_size, "dflash_config.block_size", [&] {
+    return json.value_or<int32_t>("block_size", 0);
+  });
+  LOAD_ARG_OR_FUNC(
+      dflash2_conv_group_size, "dflash_config.conv_group_size", [&] {
+        return json.value_or<int32_t>("conv_group_size", 0);
+      });
+  LOAD_ARG_OR_FUNC(
+      dflash2_conv_kernel_size, "dflash_config.conv_kernel_size", [&] {
+        return json.value_or<int32_t>("conv_kernel_size", 0);
+      });
+  LOAD_ARG_OR_FUNC(dflash2_selector_rank, "dflash_config.selector_rank", [&] {
+    return json.value_or<int32_t>("selector_rank", 0);
+  });
+  LOAD_ARG_OR_FUNC(dflash2_selector_top_k, "dflash_config.selector_top_k", [&] {
+    return json.value_or<int32_t>("selector_top_k", 0);
+  });
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();
