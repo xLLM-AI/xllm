@@ -55,6 +55,9 @@ class FixedStepsScheduler final : public ContinuousScheduler {
   // may get blocked if there are no requests to process
   void step(const absl::Duration& timeout) override;
 
+ protected:
+  std::vector<Batch> prepare_batch() override;
+
  private:
   // Scheduler pipeline for different rec types
   class SchedulerPipeline {
@@ -114,9 +117,6 @@ class FixedStepsScheduler final : public ContinuousScheduler {
       bool is_rec_multi_round);
 
   ScheduleResult schedule_request(const absl::Duration& timeout);
-
-  // build a batch of requests from the priority queue
-  std::vector<Batch> prepare_batch() override;
 
   void handle_prefill_requests(
       size_t& remaining_token_budget,

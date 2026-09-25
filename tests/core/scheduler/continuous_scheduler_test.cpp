@@ -115,10 +115,26 @@ class FakeEngine : public Engine {
   ModelArgs model_args_;
 };
 
-class TestContinuousScheduler final : public ContinuousScheduler {
+class TestableContinuousScheduler final : public ContinuousScheduler {
  public:
-  TestContinuousScheduler(Engine* engine, const Options& options)
+  TestableContinuousScheduler(Engine* engine, const Options& options)
       : ContinuousScheduler(engine, options) {}
+
+  std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+
+  void process_batch_output_test(bool enable_schedule_overlap) {
+    process_batch_output(enable_schedule_overlap);
+  }
+
+  std::vector<std::shared_ptr<Request>> get_running_requests() {
+    return running_requests_;
+  }
+
+  std::vector<size_t> get_running_sequences_budgets() {
+    return running_sequences_budgets_;
+  }
+
+  using ContinuousScheduler::num_prefetch_pending_requests;
 
   void reject_stream(const std::shared_ptr<Request>& request) {
     response_processor_->process_stream_request(request);
@@ -371,7 +387,7 @@ TEST(ContinuousSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
         create_scheduler_options(32, 1, num_speculative_tokens, 2, 1);
     options.enable_chunked_prefill(true).enable_schedule_overlap(true);
     FakeEngine engine(/*num_blocks=*/16, /*block_size=*/4);
-    TestContinuousScheduler scheduler(&engine, options);
+    TestableContinuousScheduler scheduler(&engine, options);
     std::shared_ptr<Request> request =
         generate_request_with_prompt_tokens({1, 2, 3, 4},
                                             /*max_tokens=*/8,
@@ -447,7 +463,7 @@ TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
   auto engine = std::make_unique<FakeEngine>(64, 32);
   engine->set_prefetch_ready(false);
   auto scheduler =
-      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
   std::shared_ptr<Request> request =
       generate_request({8},
                        {4},
@@ -486,7 +502,7 @@ TEST(ContinuousSchedulerTest,
   auto engine = std::make_unique<FakeEngine>(64, 32);
   engine->set_prefetch_ready(false);
   auto scheduler =
-      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
   std::shared_ptr<Request> request =
       generate_request({8},
                        {4},
@@ -521,7 +537,7 @@ TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
       create_scheduler_options(64, 4, 0, 64, 1);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto scheduler =
-      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
   std::vector<std::shared_ptr<Request>> requests =
       generate_request({8, 8},
                        {4, 4},
@@ -623,7 +639,8 @@ TEST(ContinuousSchedulerTest, BeamStrictNoPartialScheduling) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(2, 8, 0, 1024, 1, "fcfs");
   auto engine = std::make_unique<FakeEngine>(64, 32);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   EXPECT_TRUE(scheduler != nullptr);
 
   auto req1 = generate_request({64},
@@ -716,7 +733,8 @@ TEST(ContinuousSchedulerTest,
                                /*num_speculative_tokens=*/0,
                                /*max_tokens_per_chunk_for_prefill=*/8,
                                /*dp_size=*/1);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), options);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
 
   auto scheduled_request =
       generate_request_with_prompt_tokens({1, 2, 3, 4, 5, 6, 7, 8}, 1, 30000);
@@ -753,7 +771,8 @@ TEST(ContinuousSchedulerTest,
       create_scheduler_options(1024, 16, 0, 1024, 1);
   auto engine =
       std::make_unique<FakeEngine>(32, 4, /*enable_prefix_cache=*/true);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
 
   constexpr size_t kBestOf = 4;
@@ -805,7 +824,8 @@ TEST(ContinuousSchedulerTest, PDDecodeBestOfOneSkipsExpansionAndShares) {
   // blocks into the prefix-cache table instead of the free list.
   auto engine =
       std::make_unique<FakeEngine>(32, 4, /*enable_prefix_cache=*/false);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
 
   ASSERT_TRUE(block_manager_pool->try_allocate(seq0));
@@ -831,7 +851,8 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
       create_scheduler_options(1024, 16, 0, 1024, 1);
   opt.enable_schedule_overlap() = false;
   auto engine = std::make_unique<FakeEngine>(32, 4);
-  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
   const size_t initial_free_blocks =
       util::max(block_manager_pool->num_free_blocks());
@@ -873,7 +894,8 @@ TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
       create_scheduler_options(1024, 16, 0, 1024, 1);
   opt.enable_schedule_overlap() = false;
   auto engine = std::make_unique<FakeEngine>(32, 4);
-  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
   request->state().stream = true;
   make_request_decode_ready(request);
@@ -914,7 +936,8 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
       create_scheduler_options(1024, 16, 0, 1024, 1);
   opt.enable_schedule_overlap() = false;
   auto engine = std::make_unique<FakeEngine>(32, 4);
-  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
 
   std::vector<std::shared_ptr<Request>> requests =
@@ -983,7 +1006,8 @@ TEST(ContinuousSchedulerTest,
         create_scheduler_options(1024, 16, 0, 1024, 1);
     auto engine =
         std::make_unique<FakeEngine>(32, 4, /*enable_prefix_cache=*/true);
-    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler =
+        std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
 
     auto first_request =
         generate_request_with_prompt_tokens({1, 2, 3, 4, 5, 6, 7, 8}, 1, 30000);
@@ -1052,7 +1076,8 @@ TEST(ContinuousSchedulerTest, InBatchCacheReusesPartialPrefixWithinSameBatch) {
         create_scheduler_options(1024, 16, 0, 1024, 1);
     auto engine =
         std::make_unique<FakeEngine>(64, 4, /*enable_prefix_cache=*/true);
-    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler =
+        std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
 
     auto first_request =
         generate_request_with_prompt_tokens(prompt_a, 1, 30000);
@@ -1141,7 +1166,8 @@ TEST(ContinuousSchedulerTest,
   // gives enable_mix_batch=false + enable_chunked_prefill=true.
   ContinuousScheduler::Options opt = create_scheduler_options(
       kMaxTokensPerBatch, 256, /*num_speculative_tokens=*/5, 1024, 1);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   ASSERT_TRUE(scheduler != nullptr);
 
   std::vector<int32_t> prefix_token_ids;

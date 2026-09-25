@@ -171,6 +171,17 @@ std::vector<std::shared_ptr<Request>> GenRequests(
   return requests;
 }
 
+class TestableFixedStepsScheduler final : public FixedStepsScheduler {
+ public:
+  using FixedStepsScheduler::FixedStepsScheduler;
+
+  std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+
+  std::vector<std::shared_ptr<Request>> get_running_requests() {
+    return running_requests_;
+  }
+};
+
 }  // namespace
 
 TEST(FixedStepsSchedulerTest, AddRequestSuccess) {
@@ -187,9 +198,8 @@ TEST(FixedStepsSchedulerTest, PrepareBatchEmptyWhenNoRequests) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto opt = CreateOptions();
-  FixedStepsScheduler scheduler(engine.get(), opt);
-  ContinuousScheduler* base = &scheduler;
-  std::vector<Batch> batches = base->prepare_batch_test();
+  TestableFixedStepsScheduler scheduler(engine.get(), opt);
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
   EXPECT_FALSE(batches.empty());
   EXPECT_TRUE(batches[0].empty());
 }
@@ -203,13 +213,12 @@ TEST(FixedStepsSchedulerTest, PrepareBatchOneRecSchedulesRequest) {
       1.0);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto opt = CreateOptions(10000, 256);
-  FixedStepsScheduler scheduler(engine.get(), opt);
+  TestableFixedStepsScheduler scheduler(engine.get(), opt);
   auto requests = GenRequests({64, 64}, {10, 10}, RecType::kOneRec);
   for (auto& req : requests) {
     scheduler.add_request(req);
   }
-  ContinuousScheduler* base = &scheduler;
-  std::vector<Batch> batches = base->prepare_batch_test();
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
   EXPECT_FALSE(batches.empty());
   bool has_non_empty = false;
   for (const auto& b : batches) {
@@ -219,7 +228,7 @@ TEST(FixedStepsSchedulerTest, PrepareBatchOneRecSchedulesRequest) {
     }
   }
   EXPECT_TRUE(has_non_empty);
-  EXPECT_EQ(base->get_running_requests().size(), 2u);
+  EXPECT_EQ(scheduler.get_running_requests().size(), 2u);
 }
 
 TEST(FixedStepsSchedulerTest, PrepareBatchRespectsTokenBudget) {
@@ -231,14 +240,13 @@ TEST(FixedStepsSchedulerTest, PrepareBatchRespectsTokenBudget) {
       1.0);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto opt = CreateOptions(50, 1);
-  FixedStepsScheduler scheduler(engine.get(), opt);
+  TestableFixedStepsScheduler scheduler(engine.get(), opt);
   auto requests = GenRequests({40, 40}, {10, 10}, RecType::kOneRec);
   for (auto& req : requests) {
     scheduler.add_request(req);
   }
-  ContinuousScheduler* base = &scheduler;
-  base->prepare_batch_test();
-  EXPECT_LE(base->get_running_requests().size(), 1u);
+  scheduler.prepare_batch_test();
+  EXPECT_LE(scheduler.get_running_requests().size(), 1u);
 }
 
 TEST(FixedStepsSchedulerTest, StepCompletesWithRequest) {

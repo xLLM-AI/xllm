@@ -125,6 +125,12 @@ class BenchContinuousScheduler final : public ContinuousScheduler {
   BenchContinuousScheduler(Engine* engine, const Options& options)
       : ContinuousScheduler(engine, options) {}
 
+  std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+
+  void process_batch_output_test(bool enable_schedule_overlap) {
+    process_batch_output(enable_schedule_overlap);
+  }
+
   void wait_for_responses() { response_processor_->wait_completion(); }
 };
 

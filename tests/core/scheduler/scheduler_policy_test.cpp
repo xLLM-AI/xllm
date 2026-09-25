@@ -462,6 +462,24 @@ void update_requests(std::vector<std::shared_ptr<Request>> requests) {
   }
 }
 
+class TestableContinuousScheduler final : public ContinuousScheduler {
+ public:
+  TestableContinuousScheduler(Engine* engine, const Options& options)
+      : ContinuousScheduler(engine, options) {}
+
+  std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+
+  std::vector<std::shared_ptr<Request>> get_running_requests() {
+    return running_requests_;
+  }
+
+  std::vector<size_t> get_running_sequences_budgets() {
+    return running_sequences_budgets_;
+  }
+
+  ProfileManager* get_profile_manager() { return profile_manager_.get(); }
+};
+
 }  // namespace
 
 // TEST-1:
@@ -477,7 +495,8 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
         create_scheduler_options(10000, 256, 0, 1024, 1);
     auto engine =
         std::make_unique<FakeEngine>(num_blocks[idx], block_size[idx]);
-    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler =
+        std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
 
     // create requests
@@ -524,7 +543,8 @@ TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
   engine->block_manager_pool()->cache(cached_sequence);
   engine->block_manager_pool()->deallocate(cached_sequence);
 
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   auto requests =
       generate_request({kPromptTokens}, {1}, std::nullopt, std::nullopt, 10000);
   scheduler->add_request(requests[0]);
@@ -1191,7 +1211,8 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     ContinuousScheduler::Options opt =
         create_scheduler_options(1, 256, 0, 1024, 1);
     auto engine = std::make_unique<FakeEngine>(16, 16);
-    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler =
+        std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
 
     // request prompt len: 100
@@ -1211,7 +1232,8 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
         create_scheduler_options(1000, 256, 0, 1024, 1);
     // free block slot: 1
     auto engine = std::make_unique<FakeEngine>(2, 8);
-    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler =
+        std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
 
     // request prompt len: 1000
@@ -1239,7 +1261,8 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   ContinuousScheduler::Options opt = create_scheduler_options(
       10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   EXPECT_TRUE(scheduler != nullptr);
 
   // 1. schedule some new prefill requests
@@ -1326,7 +1349,8 @@ TEST(SchedulerPolicyTest, PreemptSchedule) {
   ContinuousScheduler::Options opt = create_scheduler_options(
       10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   EXPECT_TRUE(scheduler != nullptr);
 
   std::vector<std::shared_ptr<Request>> running_requests;
@@ -1386,7 +1410,8 @@ TEST(SchedulerPolicyTest, PrioritySchedule) {
   ContinuousScheduler::Options opt = create_scheduler_options(
       10000, 256, 0, max_tokens_per_chunk_for_prefill, 1, "priority");
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   EXPECT_TRUE(scheduler != nullptr);
 
   std::vector<std::shared_ptr<Request>> running_requests;
@@ -1456,7 +1481,8 @@ TEST(SchedulerPolicyTest, LatencySchedule) {
                                350,
                                150);
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   EXPECT_TRUE(scheduler != nullptr);
 
   // manually created profile data for y=0.5x^2+10x
@@ -1530,7 +1556,8 @@ TEST(SchedulerPolicyTest, FullFootprintAdmissionGate) {
   opt.instance_role() = InstanceRole::PREFILL;
 
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   ASSERT_NE(scheduler.get(), nullptr);
 
   // A (8 tokens = 2 blocks footprint), B (32 tokens = 8 blocks footprint).
@@ -1566,7 +1593,8 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
   opt.instance_role() = InstanceRole::PREFILL;
 
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   ASSERT_NE(scheduler.get(), nullptr);
 
   auto requests =
