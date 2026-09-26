@@ -25,8 +25,8 @@ GLM-5.2 structural deltas live here:
     indexer uses half-rotate only.
   * per-layer MLP type comes from ``mlp_layer_types`` (not a single
     ``first_k_dense_replace`` threshold).
-  * the YaRN ``cos_sin_cache`` is built once at the model level and threaded
-    through ``forward`` (no per-layer rotary module).
+  * YaRN coefficients are prepared once per model forward and shared across
+    attention and indexer consumers (no per-layer rotary module).
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ from xllm.python.layers import (
     RMSNorm,
 )
 from xllm.python.model_executor.cp_utils import (
+    CpContext,
     cp_gather_kv,
     cp_merge_rows,
     cp_shard_positions,
@@ -70,9 +71,8 @@ from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP,
     DeepseekV3MoE,
-    _apply_half_rope,
+    _apply_half_rope_with_angles,
     _create_hadamard_matrix,
-    _gather_interleave_cos_sin,
     _interleave_rope_with,
     _swiglu_with_clamp,
     _tp_rank_from_device,
@@ -89,6 +89,38 @@ from xllm.python.models.weight_utils import W8A8WeightLoader, effective_moe_tp, 
 # shapes; other gSize values are neither exposed nor tested. GLM-5.2 is 32/1 and pads Q
 # up to 64 heads at the caller (see Glm52Indexer._pad_q_heads_to_kernel_gsize).
 _QLI_KERNEL_GSIZE = 64
+
+
+def _indexer_query_rope(
+    interleaved: bool,
+    half_rope_cos: torch.Tensor,
+    half_rope_sin: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    cp_context: CpContext | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select compact CP query rows once; cache K keeps the padded local rows."""
+    cos, sin = (rope_cos, rope_sin) if interleaved else (half_rope_cos, half_rope_sin)
+    if cp_context is not None:
+        return cos.index_select(0, cp_context.query_index), sin.index_select(0, cp_context.query_index)
+    return cos, sin
+
+
+def _validate_rope_angles(
+    angles: tuple[torch.Tensor, torch.Tensor],
+    value: torch.Tensor,
+    rope_dim: int,
+    interleaved: bool,
+    consumer: str,
+) -> None:
+    """Check tensor metadata without synchronizing captured device values."""
+    expected = (value.shape[0], 1, 1, rope_dim) if interleaved else (value.shape[0], rope_dim // 2)
+    for name, angle in zip(("cos", "sin"), angles):
+        if angle.shape != expected or angle.dtype != value.dtype or angle.device != value.device:
+            raise ValueError(
+                f"{consumer} {name}: expected shape={expected}, dtype={value.dtype}, device={value.device}; "
+                f"got shape={tuple(angle.shape)}, dtype={angle.dtype}, device={angle.device}"
+            )
 
 
 def _can_use_mlapo_v2(cfg: Glm52Config, device: torch.device) -> bool:
@@ -593,10 +625,10 @@ class Glm52MLAAttention(Attention):
     def _forward_fused_mla_decode(
         self,
         hidden: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
+        indexer_query_rope: tuple[torch.Tensor, torch.Tensor],
+        indexer_cache_rope: tuple[torch.Tensor, torch.Tensor],
         backend: AttentionBackend,
         context: MlaPreprocessContext,
         prev_topk_indices: torch.Tensor | None,
@@ -694,9 +726,8 @@ class Glm52MLAAttention(Attention):
                 index_context = backend.mla_index_context(self)
                 self.indexer._update_index_cache(
                     hidden,
-                    positions,
                     index_context,
-                    cos_sin_cache,
+                    indexer_cache_rope,
                 )
             topk = prev_topk_indices
         elif self.indexer is not None:
@@ -704,9 +735,9 @@ class Glm52MLAAttention(Attention):
             topk = self.indexer.select_qli(
                 hidden,
                 q_c,
-                positions,
                 index_context,
-                cos_sin_cache,
+                indexer_query_rope,
+                indexer_cache_rope,
             )
         else:
             if prev_topk_indices is None:
@@ -836,12 +867,19 @@ class Glm52MLAAttention(Attention):
     def forward(
         self,
         hidden: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        indexer_query_rope: tuple[torch.Tensor, torch.Tensor],
         prev_topk_indices: torch.Tensor | None = None,
         reuse_topk_indices: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = hidden.shape[0]
+        _validate_rope_angles((rope_cos, rope_sin), hidden, self.qk_rope_head_dim, True, "attention")
+        indexer_cache_rope = (
+            (rope_cos, rope_sin) if self.cfg.indexer_rope_interleave else (half_rope_cos, half_rope_sin)
+        )
         forward_ctx = get_forward_context()
         backend = forward_ctx.attention_backend
         cp_context = forward_ctx.cp_context
@@ -854,13 +892,12 @@ class Glm52MLAAttention(Attention):
         if self._use_fused_mla_decode and fused_mla_ready and cp_context is None and not layerwise:
             preprocess_context = backend.mla_preprocess_context(self)
             if preprocess_context is not None:
-                cos, sin = _gather_interleave_cos_sin(cos_sin_cache, positions)
                 return self._forward_fused_mla_decode(
                     hidden,
-                    positions,
-                    cos_sin_cache,
-                    cos,
-                    sin,
+                    rope_cos,
+                    rope_sin,
+                    indexer_query_rope,
+                    indexer_cache_rope,
                     backend,
                     preprocess_context,
                     prev_topk_indices,
@@ -893,11 +930,10 @@ class Glm52MLAAttention(Attention):
         )
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_latent = kernels.atb_matmul_ein_sum(q_nope, self.W_UK)
-        cos, sin = _gather_interleave_cos_sin(cos_sin_cache, positions)
-        q_pe = _interleave_rope_with(q_rope, cos, sin)
+        q_pe = _interleave_rope_with(q_rope, rope_cos, rope_sin)
         k_latent_raw, k_rope_raw = kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_latent = self.kv_a_layernorm(k_latent_raw)
-        k_pe = _interleave_rope_with(k_rope_raw.unsqueeze(1), cos, sin)
+        k_pe = _interleave_rope_with(k_rope_raw.unsqueeze(1), rope_cos, rope_sin)
         k_latent_3d = k_latent.view(num_tokens, 1, self.kv_lora_rank)
         k_pe_3d = k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
 
@@ -907,13 +943,13 @@ class Glm52MLAAttention(Attention):
             if self.indexer is not None:
                 ctx = backend.mla_index_context(self)
                 if not layerwise or owns_layer_cache:
-                    self.indexer._update_index_cache(hidden, positions, ctx, cos_sin_cache)
+                    self.indexer._update_index_cache(hidden, ctx, indexer_cache_rope)
             topk = prev_topk_indices
         elif self.indexer is not None:
             ctx = backend.mla_index_context(self)
             if layerwise:
                 if owns_layer_cache:
-                    topk = self.indexer.select_qli(hidden, q_c, positions, ctx, cos_sin_cache)
+                    topk = self.indexer.select_qli(hidden, q_c, ctx, indexer_query_rope, indexer_cache_rope)
                 else:
                     topk = torch.empty(
                         (num_tokens, ctx.index_cache.size(2), self.cfg.index_topk),
@@ -922,7 +958,7 @@ class Glm52MLAAttention(Attention):
                     )
                 distributed.broadcast_(topk, layer_owner, "layerwise")
             elif cp_context is None:
-                topk = self.indexer.select_qli(hidden, q_c, positions, ctx, cos_sin_cache)
+                topk = self.indexer.select_qli(hidden, q_c, ctx, indexer_query_rope, indexer_cache_rope)
             else:
                 # Indexer queries are packed to real CP-owned rows.  The key
                 # side is all-gathered inside the indexer so the paged index
@@ -931,11 +967,10 @@ class Glm52MLAAttention(Attention):
                 topk = self.indexer.select_qli(
                     hidden.index_select(0, query_index),
                     q_c.index_select(0, query_index),
-                    positions.index_select(0, query_index),
                     ctx,
-                    cos_sin_cache,
+                    indexer_query_rope,
+                    indexer_cache_rope,
                     cache_hidden=hidden,
-                    cache_positions=positions,
                 )
         else:
             if prev_topk_indices is None:
@@ -1100,13 +1135,10 @@ class Glm52Indexer(nn.Module):
     def _apply_interleaved_rope(
         self,
         value: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        rope_angles: tuple[torch.Tensor, torch.Tensor] | None = None,
+        rope_angles: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         """Apply indexer RoPE in place without materializing split tensors."""
-        if rope_angles is None:
-            rope_angles = _gather_interleave_cos_sin(cos_sin_cache, positions)
+        _validate_rope_angles(rope_angles, value, self.rope_dim, True, "interleaved indexer")
         cos, sin = rope_angles
         cos = cos.view(-1, self.rope_dim)
         sin = sin.view(-1, self.rope_dim)
@@ -1120,19 +1152,18 @@ class Glm52Indexer(nn.Module):
     def _update_index_cache(
         self,
         cache_hidden: torch.Tensor,
-        cache_positions: torch.Tensor,
         ctx: MlaIndexContext,
-        cos_sin_cache: torch.Tensor,
+        rope_angles: tuple[torch.Tensor, torch.Tensor],
         projected_k: torch.Tensor | None = None,
-        rope_angles: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         k = self.wk(cache_hidden) if projected_k is None else projected_k
         k = self.k_norm(k)
         if self.indexer_rope_interleave:
-            k = self._apply_interleaved_rope(k, cache_positions, cos_sin_cache, rope_angles)
+            k = self._apply_interleaved_rope(k, rope_angles)
         else:
+            _validate_rope_angles(rope_angles, k, self.rope_dim, False, "indexer cache K")
             k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-            k_pe = _apply_half_rope(cos_sin_cache, k_pe.unsqueeze(1), cache_positions).squeeze(1)
+            k_pe = _apply_half_rope_with_angles(k_pe.unsqueeze(1), *rope_angles).squeeze(1)
             k = torch.cat([k_pe, k_nope], dim=-1)
         if ctx.cp_context is not None:
             # Only the padded K rows obey the equal-size CP gather contract.
@@ -1153,38 +1184,31 @@ class Glm52Indexer(nn.Module):
     def _project_query(
         self,
         qr: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        rope_angles: tuple[torch.Tensor, torch.Tensor] | None = None,
+        rope_angles: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         q = self.wq_b(qr).view(-1, self.n_head, self.head_dim)
         if self.indexer_rope_interleave:
-            return self._apply_interleaved_rope(q, positions, cos_sin_cache, rope_angles)
+            return self._apply_interleaved_rope(q, rope_angles)
+        _validate_rope_angles(rope_angles, q, self.rope_dim, False, "indexer query")
         q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-        q_pe = _apply_half_rope(cos_sin_cache, q_pe, positions)
+        q_pe = _apply_half_rope_with_angles(q_pe, *rope_angles)
         return torch.cat([q_pe, q_nope], dim=-1)
 
     def select_qli(
         self,
         hidden: torch.Tensor,
         qr: torch.Tensor,
-        positions: torch.Tensor,
         ctx: MlaIndexContext,
-        cos_sin_cache: torch.Tensor,
+        query_rope: tuple[torch.Tensor, torch.Tensor],
+        cache_rope: tuple[torch.Tensor, torch.Tensor],
         cache_hidden: torch.Tensor | None = None,
-        cache_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         actual_seq_q = ctx.actual_seq_q
         actual_seq_kv = ctx.actual_seq_kv
-        cache_positions_are_query_positions = cache_positions is None or cache_positions is positions
         cache_hidden = hidden if cache_hidden is None else cache_hidden
-        cache_positions = positions if cache_positions is None else cache_positions
         # Empty CP ranks still update/gather K without launching empty Q or
         # weights projections.
         has_queries = ctx.cp_context is None or ctx.cp_context.query_index.numel() != 0
-        shared_rope_angles = None
-        if self.indexer_rope_interleave and cache_positions_are_query_positions and has_queries:
-            shared_rope_angles = _gather_interleave_cos_sin(cos_sin_cache, positions)
         if has_queries:
             if self._weights_stream is not None:
                 self._weights_stream.wait_for_current()
@@ -1193,9 +1217,9 @@ class Glm52Indexer(nn.Module):
             if self._q_stream is not None:
                 self._q_stream.wait_for_current()
                 with self._q_stream.activate():
-                    q = self._project_query(qr, positions, cos_sin_cache, shared_rope_angles)
+                    q = self._project_query(qr, query_rope)
             elif self._weights_stream is not None:
-                q = self._project_query(qr, positions, cos_sin_cache, shared_rope_angles)
+                q = self._project_query(qr, query_rope)
             if self._weights_stream is not None:
                 # The fused projection also produces K; join before cache
                 # preparation consumes it, keeping the main-path fusion.
@@ -1206,11 +1230,9 @@ class Glm52Indexer(nn.Module):
             k = self.wk(cache_hidden)
         self._update_index_cache(
             cache_hidden,
-            cache_positions,
             ctx,
-            cos_sin_cache,
+            cache_rope,
             projected_k=k,
-            rope_angles=shared_rope_angles,
         )
         index_cache = ctx.index_cache
         index_cache_scale = ctx.index_cache_scale
@@ -1230,7 +1252,7 @@ class Glm52Indexer(nn.Module):
             self._q_stream.join()
             self._q_stream.record_on_current(q)
         elif self._weights_stream is None:
-            q = self._project_query(qr, positions, cos_sin_cache, shared_rope_angles)
+            q = self._project_query(qr, query_rope)
         if use_quant_indexer:
             rotation_scale = self.head_dim**-0.5
             q = torch.matmul(q, self.hadamard) * rotation_scale
@@ -1347,8 +1369,11 @@ class Glm52DecoderLayer(nn.Module):
         self,
         hidden: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        indexer_query_rope: tuple[torch.Tensor, torch.Tensor],
         prev_topk_indices: torch.Tensor | None = None,
         reuse_topk_indices: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1359,8 +1384,11 @@ class Glm52DecoderLayer(nn.Module):
             hidden, residual = self.input_layernorm(hidden, residual)
         hidden, topk_indices = self.self_attn(
             hidden,
-            positions,
-            cos_sin_cache,
+            half_rope_cos,
+            half_rope_sin,
+            rope_cos,
+            rope_sin,
+            indexer_query_rope,
             prev_topk_indices,
             reuse_topk_indices,
         )
@@ -1407,12 +1435,17 @@ class Glm52Model(nn.Module):
         if cp_context is not None:
             hidden = cp_shard_rows(hidden, cp_context)
             positions = cp_shard_positions(positions, cp_context).contiguous()
-        cos_sin_cache = self.rotary.cos_sin_cache
+        half_rope_cos, half_rope_sin, rope_cos, rope_sin = self.rotary(positions)
+        query_rope = _indexer_query_rope(
+            self.cfg.indexer_rope_interleave, half_rope_cos, half_rope_sin, rope_cos, rope_sin, cp_context
+        )
         residual: torch.Tensor | None = None
         prev_topk: torch.Tensor | None = None
         aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden)
         for layer_id, layer in enumerate(self.layers):
-            hidden, residual, prev_topk = layer(hidden, residual, positions, cos_sin_cache, prev_topk)
+            hidden, residual, prev_topk = layer(
+                hidden, residual, half_rope_cos, half_rope_sin, rope_cos, rope_sin, query_rope, prev_topk
+            )
             self.aux_hidden_capture.capture_layer(layer_id, hidden, residual, aux_hidden_buffer)
             record_layer_event(layer_id)
         hidden, _ = self.norm(hidden, residual)

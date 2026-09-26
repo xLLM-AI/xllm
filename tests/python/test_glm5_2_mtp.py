@@ -90,17 +90,23 @@ class _DecoderLayer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.reuse_flags: list[bool] = []
+        self.ropes: list[tuple[torch.Tensor, ...]] = []
 
     def forward(
         self,
         hidden: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        query_rope: tuple[torch.Tensor, torch.Tensor],
         topk_indices: torch.Tensor | None,
         reuse_topk: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        del residual, positions, cos_sin_cache
+        del residual
+        self.ropes.append((half_rope_cos, half_rope_sin, rope_cos, rope_sin))
+        assert query_rope[0] is rope_cos and query_rope[1] is rope_sin
         self.reuse_flags.append(reuse_topk)
         if not reuse_topk:
             topk_indices = torch.full((hidden.shape[0], 1, 2), 7, dtype=torch.int32)
@@ -111,7 +117,7 @@ class _DecoderLayer(nn.Module):
 def _mtp_body() -> tuple[glm5_2_mtp.Glm52MtpModel, _DecoderLayer]:
     body = glm5_2_mtp.Glm52MtpModel.__new__(glm5_2_mtp.Glm52MtpModel)
     nn.Module.__init__(body)
-    body.cfg = SimpleNamespace(index_share_for_mtp_iteration=True)
+    body.cfg = SimpleNamespace(index_share_for_mtp_iteration=True, indexer_rope_interleave=True)
     body.embed_tokens = _Embedding()
     body.eh_proj = _SelectTokenEmbedding()
     body.rot = nn.Identity()
@@ -119,7 +125,9 @@ def _mtp_body() -> tuple[glm5_2_mtp.Glm52MtpModel, _DecoderLayer]:
     body.hnorm = nn.Identity()
     layer = _DecoderLayer()
     body.layers = nn.ModuleList([layer])
-    body.rotary = SimpleNamespace(cos_sin_cache=torch.empty(0))
+    body.rotary = glm5_2_mtp.Glm52YarnRotaryEmbedding(
+        4, 16, 1.0, 10000.0, 32, 1, 1.0, 1.0, dtype=torch.float32, device=torch.device("cpu")
+    )
     body.enable_rot = False
     body._reuse_topk_by_layer = (True,)
     return body, layer
@@ -258,3 +266,26 @@ def test_mtp_topk_reuse_plan(pattern, expected: tuple[bool, ...]) -> None:
     )
 
     assert glm5_2_mtp._resolve_mtp_topk_reuse(cfg) == expected
+
+
+def test_mtp_prepares_fresh_coefficients_for_full_and_reuse_steps() -> None:
+    body, layer = _mtp_body()
+    input_ids = torch.tensor([3, 4])
+    topk = None
+    positions_by_step = [torch.tensor([0, 1]), torch.tensor([7, 7]), torch.tensor([15, 2])]
+    with (
+        patch.object(glm5_2_mtp, "get_forward_context", return_value=SimpleNamespace(cp_context=None)),
+        patch.object(glm5_2_mtp, "record_layer_event"),
+        patch.object(body.rotary, "forward", wraps=body.rotary.forward) as prepare,
+    ):
+        for positions in positions_by_step:
+            _, _, topk = body(input_ids, positions, mtp_topk_indices=topk)
+    assert prepare.call_count == 3
+    assert layer.reuse_flags == [False, True, True]
+    for positions, rope in zip(positions_by_step, layer.ropes):
+        expected = body.rotary.cos_sin_cache[positions]
+        torch.testing.assert_close(rope[0], expected[:, :2])
+        torch.testing.assert_close(rope[1], expected[:, 2:])
+        torch.testing.assert_close(rope[2].view(2, 4), torch.cat((expected[:, :2], expected[:, :2]), dim=-1))
+    assert layer.ropes[0][2].data_ptr() != layer.ropes[1][2].data_ptr()
+    assert not torch.equal(layer.ropes[0][2], layer.ropes[1][2])

@@ -39,7 +39,8 @@ class _DecoderLayer(nn.Module):
         super().__init__()
         self._layer_id = layer_id
         self._events = events
-        self.positions: torch.Tensor | None = None
+        self.rope: tuple[torch.Tensor, ...] | None = None
+        self.query_rope: tuple[torch.Tensor, torch.Tensor] | None = None
         self.prev_topk: torch.Tensor | None = None
         self.output_topk: torch.Tensor | None = None
 
@@ -47,12 +48,15 @@ class _DecoderLayer(nn.Module):
         self,
         hidden: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
+        half_rope_cos: torch.Tensor,
+        half_rope_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        query_rope: tuple[torch.Tensor, torch.Tensor],
         prev_topk: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        del cos_sin_cache
-        self.positions = positions
+        self.rope = (half_rope_cos, half_rope_sin, rope_cos, rope_sin)
+        self.query_rope = query_rope
         self.prev_topk = prev_topk
         self.output_topk = hidden[:, :1].clone()
         if residual is None:
@@ -77,16 +81,29 @@ class _Norm(nn.Module):
         return hidden + residual, residual
 
 
-class _Rotary(nn.Module):
+class _Rotary(glm5_2.Glm52YarnRotaryEmbedding):
     def __init__(self) -> None:
-        super().__init__()
-        self.register_buffer("cos_sin_cache", torch.empty(0), persistent=False)
+        nn.Module.__init__(self)
+        self.register_buffer("cos_sin_cache", torch.arange(64, dtype=torch.float32).view(16, 4), persistent=False)
+        self.positions: list[torch.Tensor] = []
+
+    def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        assert positions.dtype == torch.int64 and positions.is_contiguous()
+        self.positions.append(positions.clone())
+        return super().forward(positions)
+
+
+def _attention_rope(rows: int) -> tuple[object, ...]:
+    half_cos, half_sin = torch.empty(rows, 0), torch.empty(rows, 0)
+    cos, sin = torch.ones(rows, 1, 1, 1), torch.zeros(rows, 1, 1, 1)
+    return half_cos, half_sin, cos, sin, (cos, sin)
 
 
 def _make_model(events: list[str]) -> tuple[glm5_2.Glm52Model, list[_DecoderLayer]]:
     model = glm5_2.Glm52Model.__new__(glm5_2.Glm52Model)
     nn.Module.__init__(model)
     layers = [_DecoderLayer(layer_id, events) for layer_id in range(2)]
+    model.cfg = SimpleNamespace(indexer_rope_interleave=True)
     model.embed_tokens = _Embedding(events)
     model.layers = nn.ModuleList(layers)
     model.norm = _Norm(events)
@@ -98,7 +115,7 @@ def _make_model(events: list[str]) -> tuple[glm5_2.Glm52Model, list[_DecoderLaye
 def test_cp_model_loop_shards_local_rows_and_merges_after_norm() -> None:
     events: list[str] = []
     model, layers = _make_model(events)
-    cp_context = object()
+    cp_context = SimpleNamespace(query_index=torch.tensor([0]))
     merged_output = torch.tensor([[23.0], [43.0], [63.0], [83.0]])
 
     def shard_rows(hidden: torch.Tensor, context: object) -> torch.Tensor:
@@ -144,7 +161,12 @@ def test_cp_model_loop_shards_local_rows_and_merges_after_norm() -> None:
         "norm",
         "merge_rows",
     ]
-    torch.testing.assert_close(layers[0].positions, torch.tensor([3, 0]))
+    torch.testing.assert_close(model.rotary.positions[0], torch.tensor([3, 0]))
+    assert len(model.rotary.positions) == 1
+    assert all(first is second for first, second in zip(layers[0].rope, layers[1].rope))
+    assert layers[0].query_rope is layers[1].query_rope
+    torch.testing.assert_close(layers[0].rope[0], model.rotary.cos_sin_cache[[3, 0], :2])
+    torch.testing.assert_close(layers[0].query_rope[0], layers[0].rope[2][[0]])
     assert layers[1].prev_topk is layers[0].output_topk
     torch.testing.assert_close(layers[1].prev_topk, torch.tensor([[40.0], [10.0]]))
     torch.testing.assert_close(output, merged_output)
@@ -183,7 +205,10 @@ def test_cp_one_preserves_full_rows_without_shard_or_merge() -> None:
         "event_1",
         "norm",
     ]
-    torch.testing.assert_close(layers[0].positions, torch.tensor([0, 1, 2, 3]))
+    torch.testing.assert_close(model.rotary.positions[0], torch.tensor([0, 1, 2, 3]))
+    assert len(model.rotary.positions) == 1
+    assert layers[0].query_rope[0] is layers[0].rope[2]
+    assert layers[0].query_rope[1] is layers[0].rope[3]
     torch.testing.assert_close(output, torch.tensor([[23.0], [43.0], [63.0], [83.0]]))
 
 
@@ -381,6 +406,7 @@ def test_glm_attention_reduces_o_projection_in_fp32_for_tensor_parallel() -> Non
         tp_size=2,
         layerwise_split_size=1,
         layerwise_split_rank=0,
+        indexer_rope_interleave=True,
     )
     attention.W_UK = torch.ones(1, 1, 1)
     attention.W_UV = torch.ones(1, 1, 2)
@@ -411,11 +437,6 @@ def test_glm_attention_reduces_o_projection_in_fp32_for_tensor_parallel() -> Non
                 metadata=SimpleNamespace(is_prefill=False, is_chunked_prefill=False),
             ),
         ),
-        patch.object(
-            glm5_2,
-            "_gather_interleave_cos_sin",
-            return_value=(torch.empty(0), torch.empty(0)),
-        ),
         patch.object(glm5_2, "_interleave_rope_with", side_effect=lambda value, *_args: value),
         patch.object(
             glm5_2.kernels,
@@ -432,8 +453,7 @@ def test_glm_attention_reduces_o_projection_in_fp32_for_tensor_parallel() -> Non
     ):
         output, topk = attention(
             torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-            torch.tensor([0, 1]),
-            torch.empty(0),
+            *_attention_rope(2),
             previous_topk,
         )
 
@@ -467,13 +487,13 @@ def test_glm_attention_reuse_updates_index_cache() -> None:
         tp_size=1,
         layerwise_split_size=1,
         layerwise_split_rank=0,
+        indexer_rope_interleave=True,
     )
     attention.W_UK = torch.ones(1, 1, 1)
     attention.W_UV = torch.ones(1, 1, 2)
     attention.indexer = MagicMock()
     hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    positions = torch.tensor([0, 1])
-    cos_sin_cache = torch.empty(0)
+    rope = _attention_rope(2)
     previous_topk = torch.tensor([[0], [1]])
     projected = torch.tensor([[[5.0, 6.0]], [[7.0, 8.0]]])
     backend = MagicMock()
@@ -490,11 +510,6 @@ def test_glm_attention_reuse_updates_index_cache() -> None:
                 metadata=SimpleNamespace(is_prefill=False, is_chunked_prefill=False),
             ),
         ),
-        patch.object(
-            glm5_2,
-            "_gather_interleave_cos_sin",
-            return_value=(torch.empty(0), torch.empty(0)),
-        ),
         patch.object(glm5_2, "_interleave_rope_with", side_effect=lambda value, *_args: value),
         patch.object(
             glm5_2.kernels,
@@ -505,8 +520,7 @@ def test_glm_attention_reuse_updates_index_cache() -> None:
     ):
         _, topk = attention(
             hidden,
-            positions,
-            cos_sin_cache,
+            *rope,
             previous_topk,
             reuse_topk_indices=True,
         )
@@ -514,9 +528,9 @@ def test_glm_attention_reuse_updates_index_cache() -> None:
     attention.indexer._update_index_cache.assert_called_once()
     cache_args = attention.indexer._update_index_cache.call_args.args
     assert cache_args[0] is hidden
-    assert cache_args[1] is positions
-    assert cache_args[2] is backend.mla_index_context.return_value
-    assert cache_args[3] is cos_sin_cache
+    assert cache_args[1] is backend.mla_index_context.return_value
+    assert cache_args[2][0] is rope[2]
+    assert cache_args[2][1] is rope[3]
     assert topk is previous_topk
 
 
@@ -557,6 +571,7 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
         tp_size=1,
         layerwise_split_size=1,
         layerwise_split_rank=0,
+        indexer_rope_interleave=True,
     )
     attention.qkv_a_proj = SimpleNamespace(
         input_scale=torch.ones(1),
@@ -591,8 +606,7 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     attention.o_proj = nn.Identity()
 
     hidden = torch.ones(num_tokens, 2)
-    positions = torch.arange(num_tokens)
-    cos_sin_cache = torch.empty(0)
+    rope = _attention_rope(num_tokens)
     previous_topk = torch.zeros(num_tokens, 1, dtype=torch.int64)
     q_c = torch.ones(num_tokens, 2)
     q_latent = torch.ones(num_tokens, 1, 1)
@@ -620,11 +634,6 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
             ),
         ),
         patch.object(
-            glm5_2,
-            "_gather_interleave_cos_sin",
-            return_value=(torch.empty(0), torch.empty(0)),
-        ),
-        patch.object(
             glm5_2.kernels,
             "deepseek_mla_preprocess_decode",
             return_value=(q_c, q_latent, q_pe),
@@ -645,8 +654,7 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     ):
         output, topk = attention(
             hidden,
-            positions,
-            cos_sin_cache,
+            *rope,
             previous_topk,
             reuse_topk_indices=reuse_topk_indices,
         )
@@ -656,6 +664,9 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     unselected_preprocess = capturable_preprocess if expect_mlapo_v2 else mlapo_v2
     selected_preprocess.assert_called_once()
     unselected_preprocess.assert_not_called()
+    cos_arg = 16 if expect_mlapo_v2 else 14
+    assert selected_preprocess.call_args.args[cos_arg] is rope[2]
+    assert selected_preprocess.call_args.args[cos_arg + 1] is rope[3]
     slot_mapping_arg = 21 if expect_mlapo_v2 else 16
     torch.testing.assert_close(
         selected_preprocess.call_args.args[slot_mapping_arg],
@@ -673,9 +684,8 @@ def test_glm_attention_fused_decode_preprocesses_and_writes_cache_once(
     if reuse_topk_indices:
         attention.indexer._update_index_cache.assert_called_once_with(
             hidden,
-            positions,
             backend.mla_index_context.return_value,
-            cos_sin_cache,
+            rope[4],
         )
         attention.indexer.select_qli.assert_not_called()
     torch.testing.assert_close(output, projected.reshape(num_tokens, 2))
@@ -701,6 +711,7 @@ def test_glm_attention_dynamic_fused_decode_reuses_topk_after_cache_write() -> N
         tp_size=1,
         layerwise_split_size=1,
         layerwise_split_rank=0,
+        indexer_rope_interleave=True,
     )
     attention._dynamic_qkv_weight = torch.empty(0)
     attention._dynamic_qkv_weight_scale = torch.empty(0)
@@ -712,8 +723,7 @@ def test_glm_attention_dynamic_fused_decode_reuses_topk_after_cache_write() -> N
     attention.o_proj = nn.Identity()
 
     hidden = torch.ones(2, 2)
-    positions = torch.arange(2)
-    cos_sin_cache = torch.empty(0)
+    rope = _attention_rope(2)
     previous_topk = torch.zeros(2, 1, dtype=torch.int64)
     q_c = torch.ones(2, 2)
     q_latent = torch.ones(2, 1, 1)
@@ -740,11 +750,6 @@ def test_glm_attention_dynamic_fused_decode_reuses_topk_after_cache_write() -> N
             ),
         ),
         patch.object(
-            glm5_2,
-            "_gather_interleave_cos_sin",
-            return_value=(torch.empty(0), torch.empty(0)),
-        ),
-        patch.object(
             glm5_2.kernels,
             "deepseek_mla_preprocess_decode_dynamic",
             return_value=(q_c, q_latent, q_pe),
@@ -764,20 +769,20 @@ def test_glm_attention_dynamic_fused_decode_reuses_topk_after_cache_write() -> N
     ):
         output, topk = attention(
             hidden,
-            positions,
-            cos_sin_cache,
+            *rope,
             previous_topk,
             reuse_topk_indices=True,
         )
 
     dynamic_preprocess.assert_called_once()
+    assert dynamic_preprocess.call_args.args[8] is rope[2]
+    assert dynamic_preprocess.call_args.args[9] is rope[3]
     static_preprocess.assert_not_called()
     torch.testing.assert_close(dynamic_preprocess.call_args.args[10], torch.arange(2))
     attention.indexer._update_index_cache.assert_called_once_with(
         hidden,
-        positions,
         backend.mla_index_context.return_value,
-        cos_sin_cache,
+        rope[4],
     )
     attention.indexer.select_qli.assert_not_called()
     backend.execute_mla.assert_called_once_with(
@@ -791,3 +796,50 @@ def test_glm_attention_dynamic_fused_decode_reuses_topk_after_cache_write() -> N
     )
     torch.testing.assert_close(output, projected.reshape(2, 2))
     assert topk is previous_topk
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("query_rows", [[2, 0], [0, 2], []])
+def test_model_shares_coefficients_across_layers_for_packed_and_empty_queries(
+    interleaved: bool, query_rows: list[int]
+) -> None:
+    model, layers = _make_model([])
+    model.cfg.indexer_rope_interleave = interleaved
+    context = SimpleNamespace(query_index=torch.tensor(query_rows, dtype=torch.int64))
+    # A packed shard includes an interior padding row; query order need not be contiguous.
+    local_positions = torch.tensor([7, 0, 2, 0])
+    with (
+        patch.object(glm5_2, "get_forward_context", return_value=SimpleNamespace(cp_context=context)),
+        patch.object(glm5_2, "cp_shard_rows", side_effect=lambda hidden, _ctx: hidden),
+        patch.object(glm5_2, "cp_shard_positions", return_value=local_positions),
+        patch.object(glm5_2, "cp_merge_rows", side_effect=lambda hidden, _ctx: hidden),
+        patch.object(glm5_2, "record_layer_event"),
+        patch.object(glm5_2, "_indexer_query_rope", wraps=glm5_2._indexer_query_rope) as select_query,
+    ):
+        model(torch.arange(4), torch.arange(4))
+
+    assert len(model.rotary.positions) == select_query.call_count == 1
+    assert layers[0].query_rope is layers[1].query_rope
+    for first, second in zip(layers[0].rope, layers[1].rope):
+        assert first is second
+    expected_half = model.rotary.cos_sin_cache[local_positions]
+    torch.testing.assert_close(layers[0].rope[0], expected_half[:, :2])
+    torch.testing.assert_close(layers[0].rope[1], expected_half[:, 2:])
+    offset = 2 if interleaved else 0
+    for index, selected in enumerate(layers[0].query_rope):
+        torch.testing.assert_close(selected, layers[0].rope[offset + index][context.query_index])
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("invalid", ["rows", "width", "dtype", "device"])
+def test_rope_contract_rejects_inconsistent_metadata(interleaved: bool, invalid: str) -> None:
+    shape = [2, 1, 1, 4] if interleaved else [2, 2]
+    if invalid == "rows":
+        shape[0] = 1
+    if invalid == "width":
+        shape[-1] += 1
+    dtype = torch.bfloat16 if invalid == "dtype" else torch.float32
+    device = "meta" if invalid == "device" else "cpu"
+    angles = (torch.empty(shape, dtype=dtype, device=device),) * 2
+    with pytest.raises(ValueError, match="test consumer cos: expected shape=.*got shape="):
+        glm5_2._validate_rope_angles(angles, torch.empty(2, 8), 4, interleaved, "test consumer")

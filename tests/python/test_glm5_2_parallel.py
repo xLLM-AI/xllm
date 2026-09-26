@@ -322,11 +322,6 @@ def test_glm_dsa_projections_precede_indexer(monkeypatch: pytest.MonkeyPatch, mo
             metadata=SimpleNamespace(is_prefill=False, is_chunked_prefill=False),
         ),
     )
-    monkeypatch.setattr(
-        glm5_2,
-        "_gather_interleave_cos_sin",
-        lambda cache, _positions: (cache, cache),
-    )
     monkeypatch.setattr(glm5_2, "_interleave_rope_with", lambda tensor, _cos, _sin: tensor)
     monkeypatch.setattr(
         glm5_2.kernels,
@@ -335,7 +330,9 @@ def test_glm_dsa_projections_precede_indexer(monkeypatch: pytest.MonkeyPatch, mo
         raising=False,
     )
 
-    attention(hidden, torch.arange(num_tokens), model.model.rotary.cos_sin_cache)
+    rope = model.model.rotary(torch.arange(num_tokens))
+    query_rope = glm5_2._indexer_query_rope(attention.cfg.indexer_rope_interleave, *rope, cp_context)
+    attention(hidden, *rope, query_rope)
 
     assert call_order.index("q_b") < call_order.index("indexer")
     assert call_order.index("kv_a") < call_order.index("indexer")
@@ -452,7 +449,11 @@ def test_glm_indexer_projection_overlap_matches_serial(
     def _run(execution_state: AclGraphExecutionState | None = None) -> torch.Tensor:
         context = ForwardContext(MagicMock(), device, MagicMock(), [], execution_state=execution_state)
         with forward_context(context):
-            return indexer.select_qli(hidden, qr, positions, ctx, cos_sin)
+            from xllm.python.models.deepseek_v32 import _gather_half_rope_cos_sin, _gather_interleave_cos_sin
+
+            gather = _gather_interleave_cos_sin if interleave else _gather_half_rope_cos_sin
+            rope = gather(cos_sin, positions)
+            return indexer.select_qli(hidden, qr, ctx, rope, rope)
 
     expected = _run()
     if device_type == "npu":
