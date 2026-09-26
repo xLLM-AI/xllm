@@ -1499,51 +1499,54 @@ bool LLMEngine::xtensor_sleep(MasterStatus master_status) {
 }
 
 bool LLMEngine::start_profile() {
+  std::lock_guard<std::mutex> lock(profile_mutex_);
   LOG(INFO) << "Starting profiler on " << worker_clients_num_ << " worker(s).";
-  if (worker_clients_.empty()) {
-    LOG(ERROR) << "No worker clients available to start profiling.";
+  if (!profile_workers(/*is_start=*/true)) {
+    // A partially successful broadcast must not leave other workers tracing.
+    if (!profile_workers(/*is_start=*/false)) {
+      LOG(ERROR) << "Failed to clean up profiling on some workers. "
+                    "Retry /stop_profile.";
+    }
     return false;
   }
-
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.push_back(worker->start_profile_async());
-  }
-
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      LOG(ERROR) << "Start profile failed on a worker.";
-      return false;
-    }
-  }
-
   return true;
 }
 
 bool LLMEngine::stop_profile() {
+  std::lock_guard<std::mutex> lock(profile_mutex_);
   LOG(INFO) << "Stopping profiler on " << worker_clients_num_ << " worker(s).";
+  return profile_workers(/*is_start=*/false);
+}
+
+bool LLMEngine::profile_workers(bool is_start) {
   if (worker_clients_.empty()) {
-    LOG(ERROR) << "No worker clients available to stop profiling.";
+    LOG(ERROR) << "No worker clients available for profiling.";
     return false;
   }
 
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (auto& worker : worker_clients_) {
-    futures.push_back(worker->stop_profile_async());
+    futures.emplace_back(is_start ? worker->start_profile_async()
+                                  : worker->stop_profile_async());
   }
 
   auto results = folly::collectAll(futures).get();
+  bool success = true;
   for (const auto& result : results) {
+    if (result.hasException()) {
+      LOG(ERROR) << "Profiling worker RPC failed: "
+                 << result.exception().what();
+      success = false;
+      continue;
+    }
     if (!result.value()) {
-      LOG(ERROR) << "Stop profile failed on a worker.";
-      return false;
+      LOG(ERROR) << "Profiling failed on a worker (start=" << is_start << ").";
+      success = false;
     }
   }
 
-  return true;
+  return success;
 }
 
 bool LLMEngine::xtensor_wakeup(const WakeupOptions& options) {

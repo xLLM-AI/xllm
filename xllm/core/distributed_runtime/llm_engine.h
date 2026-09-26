@@ -23,6 +23,7 @@ limitations under the License.
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -138,6 +139,9 @@ class LLMEngine : public Engine {
           layer_offsets) override;
 
  private:
+  bool profile_workers(bool is_start);
+  std::mutex profile_mutex_;
+
   bool xtensor_sleep(MasterStatus master_status);
   bool xtensor_wakeup(const WakeupOptions& options);
 

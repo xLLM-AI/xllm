@@ -29,6 +29,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
+#include "torch_npu/csrc/core/npu/NPUFunctions.h"
 #elif defined(USE_MLU)
 #include <framework/core/caching_allocator.h>
 #elif defined(USE_CUDA) || defined(USE_ILU)
@@ -62,6 +63,7 @@ limitations under the License.
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
+#include "core/platform/npu/npu_profiler.h"
 #include "platform/npu/device_capture_lock.h"
 #elif defined(USE_CUDA) || defined(USE_DCU) || defined(USE_MUSA)
 #include "platform/torch_profiler.h"
@@ -1683,7 +1685,25 @@ bool WorkerImpl::sleep(MasterStatus master_status) {
 bool WorkerImpl::start_profile() {
   const auto& cfg = ProfileConfig::get_instance();
   LOG(INFO) << "Starting profiling with backend: " << cfg.profile_backend();
-#if defined(USE_CUDA)
+#if defined(USE_NPU)
+  if (cfg.profile_backend() != "ascend") {
+    LOG(ERROR) << "NPU profiling requires --profile_backend=ascend.";
+    return false;
+  }
+  const std::string profile_dir = cfg.profile_dir();
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, profile_dir, promise = std::move(promise)]() mutable {
+        promise.setWith([this, &profile_dir]() {
+          // Drain torch_npu's host dispatch queue as well as device streams.
+          c10_npu::device_synchronize();
+          return NpuProfiler::get_instance().start(profile_dir,
+                                                   device_.index());
+        });
+      });
+  return std::move(future).get();
+#elif defined(USE_CUDA)
   if (cfg.profile_backend() == "cuda") {
     // Capture-range only; requires the server to run under nsys.
     return CudaProfiler::get_instance().start();
@@ -1709,7 +1729,21 @@ bool WorkerImpl::start_profile() {
 bool WorkerImpl::stop_profile() {
   const auto& cfg = ProfileConfig::get_instance();
   LOG(INFO) << "Stopping profiling with backend: " << cfg.profile_backend();
-#if defined(USE_CUDA)
+#if defined(USE_NPU)
+  if (cfg.profile_backend() != "ascend") {
+    LOG(ERROR) << "NPU profiling requires --profile_backend=ascend.";
+    return false;
+  }
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
+    promise.setWith([this]() {
+      c10_npu::device_synchronize();
+      return NpuProfiler::get_instance().stop(device_.index());
+    });
+  });
+  return std::move(future).get();
+#elif defined(USE_CUDA)
   if (cfg.profile_backend() == "cuda") {
     return CudaProfiler::get_instance().stop();
   }

@@ -1,5 +1,18 @@
 include(cc_test)
 
+if(USE_NPU)
+  cc_test(
+    NAME
+      npu_profiler_test
+    SRCS
+      npu_profiler_test.cpp
+      ${PROJECT_SOURCE_DIR}/xllm/core/platform/npu/npu_profiler.cpp
+    DEPS
+      GTest::gtest_main
+      glog::glog
+  )
+endif()
+
 if(USE_NPU OR USE_CUDA OR USE_ILU OR USE_DCU)
   cc_test(
     NAME

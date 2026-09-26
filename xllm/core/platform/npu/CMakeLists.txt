@@ -8,12 +8,15 @@ cc_library(
     npu_batch_memcpy.h
     device_capture_lock.h
     acl_graph_task_update_context.h
+    npu_profiler.h
   SRCS
     npu_layer_synchronizer.cpp
     npu_batch_memcpy.cpp
+    npu_profiler.cpp
   DEPS
     torch_npu
     glog::glog
     torch
     ascendcl
+    msprofiler
 )

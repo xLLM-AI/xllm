@@ -55,22 +55,21 @@ DEFINE_bool(disable_ttft_profiling,
 DEFINE_bool(enable_online_profile,
             false,
             "Whether to enable the online timeline profiling endpoints "
-            "(/start_profile and /stop_profile). CUDA only for now; pair with "
-            "launching the server under nsys "
-            "--capture-range=cudaProfilerApi.");
+            "(/start_profile and /stop_profile).");
 
 DEFINE_string(
     profile_backend,
-    "torch",
+    xllm::kDefaultProfileBackend,
     "Online profiling backend: 1: 'torch' (default) records CPU+CUDA "
     "activities in-process and writes a Chrome trace on "
     "/stop_profile, no external profiler needed; 2: 'cuda' only toggles "
     "the CUDA profiler capture range and requires launching under "
-    "nsys --capture-range=cudaProfilerApi.");
+    "nsys --capture-range=cudaProfilerApi; 3: 'ascend' (default on NPU) "
+    "records CANN operator, API and communication data. Export with msprof.");
 
 DEFINE_string(profile_dir,
               "",
-              "Directory the 'torch' online profiling backend writes timeline "
+              "Directory the 'torch' and 'ascend' profiling backends write "
               "traces to. Empty means the current working directory.");
 
 namespace xllm {
