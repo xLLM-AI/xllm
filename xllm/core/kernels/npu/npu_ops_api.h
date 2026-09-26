@@ -492,4 +492,21 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     int64_t topo_type = 0,
     int64_t rank_num_per_server = 2);
 
+// Submit on the current NPU stream. Buffers must be dense, contiguous, nonempty
+// and in ND storage format. The caller owns the communicator (encoded as an
+// integer for Torch) and buffers, and must retain them through graph replay.
+// ACLGraph capture requires HCCL_OP_EXPANSION_MODE=AIV.
+// In-place SUM, preserving dtype.
+void all_reduce_on_current_stream(torch::Tensor& input, int64_t comm);
+
+// Out-of-place, rank-ordered concatenation: output.numel = W * input.numel.
+void all_gather_on_current_stream(const torch::Tensor& input,
+                                  torch::Tensor& output,
+                                  int64_t comm);
+
+// Out-of-place SUM of rank-ordered blocks: input.numel = W * output.numel.
+void reduce_scatter_on_current_stream(const torch::Tensor& input,
+                                      torch::Tensor& output,
+                                      int64_t comm);
+
 }  // namespace xllm::kernel::npu

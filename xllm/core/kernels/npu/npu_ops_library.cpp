@@ -687,6 +687,10 @@ TORCH_LIBRARY(xllm_ops, m) {
       "sfa_dcp_remap_out(Tensor topk_indices, int physical_block_size, int "
       "shard_size, int shard_rank, Tensor(a!) out, Tensor(b!) idx_scratch) -> "
       "Tensor(a!)");
+  // Current-stream collectives borrowing the caller's HCCL communicator.
+  m.def("npu_all_reduce(Tensor(a!) x, int comm) -> ()");
+  m.def("npu_all_gather(Tensor input, Tensor(a!) output, int comm) -> ()");
+  m.def("npu_reduce_scatter(Tensor input, Tensor(a!) output, int comm) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
@@ -741,6 +745,12 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("sparse_flash_attention_lse",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse));
   m.impl("sfa_dcp_remap_out", TORCH_FN(xllm::sfa_dcp_remap_out_npu));
+  m.impl("npu_all_reduce",
+         TORCH_FN(xllm::kernel::npu::all_reduce_on_current_stream));
+  m.impl("npu_all_gather",
+         TORCH_FN(xllm::kernel::npu::all_gather_on_current_stream));
+  m.impl("npu_reduce_scatter",
+         TORCH_FN(xllm::kernel::npu::reduce_scatter_on_current_stream));
 }
 
 // build_cp_context is pure host index math with no Tensor input, so the
