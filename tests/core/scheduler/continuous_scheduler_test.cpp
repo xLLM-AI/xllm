@@ -86,8 +86,20 @@ class FakeEngine : public Engine {
     fake_block_manager_ =
         std::make_unique<ControllablePrefetchBlockManagerPool>(opt);
   }
-  ForwardOutput step(std::vector<Batch>& batch) { return {}; }
-  void update_last_step_result(std::vector<Batch>& batch) { NOT_IMPLEMENTED(); }
+  ForwardOutput step(std::vector<Batch>& /*batch*/) override {
+    if (record_step_events_) {
+      step_events_.emplace_back("step");
+    }
+    return {};
+  }
+  void update_last_step_result(std::vector<Batch>& /*batch*/) override {
+    if (!record_step_events_) {
+      NOT_IMPLEMENTED();
+    }
+    step_events_.emplace_back("update");
+  }
+  void record_step_events() { record_step_events_ = true; }
+  const std::vector<std::string>& step_events() const { return step_events_; }
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
@@ -113,6 +125,8 @@ class FakeEngine : public Engine {
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<ControllablePrefetchBlockManagerPool> fake_block_manager_;
   ModelArgs model_args_;
+  bool record_step_events_ = false;
+  std::vector<std::string> step_events_;
 };
 
 class TestableContinuousScheduler final : public ContinuousScheduler {
@@ -122,8 +136,8 @@ class TestableContinuousScheduler final : public ContinuousScheduler {
 
   std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
 
-  void process_batch_output_test(bool enable_schedule_overlap) {
-    process_batch_output(enable_schedule_overlap);
+  void process_batch_output_test() {
+    process_batch_output(running_requests_, running_sequences_);
   }
 
   std::vector<std::shared_ptr<Request>> get_running_requests() {
@@ -417,10 +431,10 @@ TEST(ContinuousSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
     const int64_t itl_ms_count =
         HISTOGRAM_inter_token_latency_milliseconds.count();
 
-    // The existing hook selects the current running set; its sequences have
-    // the same shared state seen while consuming a delayed overlap output.
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
+    // The current running set has the same shared state seen while consuming
+    // a delayed overlap output.
+    scheduler.process_batch_output_test();
+    scheduler.process_batch_output_test();
     EXPECT_EQ(HISTOGRAM_time_to_first_token_latency_milliseconds.count(),
               ttft_count);
     EXPECT_EQ(HISTOGRAM_inter_token_latency_microseconds.count(), itl_count);
@@ -431,30 +445,67 @@ TEST(ContinuousSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
     sequence->update_last_step_token(Token(10), /*token_offset=*/0);
     ASSERT_TRUE(sequence->is_first_token());
     ASSERT_EQ(sequence->generated_tokens_since_latency(), 1u);
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
+    scheduler.process_batch_output_test();
     EXPECT_EQ(HISTOGRAM_time_to_first_token_latency_milliseconds.count(),
               ttft_count + 1);
     EXPECT_EQ(HISTOGRAM_inter_token_latency_microseconds.count(), itl_count);
     EXPECT_GE(sequence->time_to_first_token_latency_seconds(), 3.0);
     EXPECT_EQ(sequence->generated_tokens_since_latency(), 0u);
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
+    scheduler.process_batch_output_test();
     EXPECT_EQ(HISTOGRAM_time_to_first_token_latency_milliseconds.count(),
               ttft_count + 1);
 
     sequence->append_token(Token(-1));
     sequence->update_last_step_token(Token(11), /*token_offset=*/0);
     ASSERT_FALSE(sequence->is_first_token());
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
+    scheduler.process_batch_output_test();
     EXPECT_EQ(HISTOGRAM_inter_token_latency_microseconds.count(),
               itl_count + 1);
     EXPECT_EQ(HISTOGRAM_inter_token_latency_milliseconds.count(),
               itl_ms_count + 1);
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
+    scheduler.process_batch_output_test();
     EXPECT_EQ(HISTOGRAM_inter_token_latency_microseconds.count(),
               itl_count + 1);
     EXPECT_EQ(HISTOGRAM_inter_token_latency_milliseconds.count(),
               itl_ms_count + 1);
   }
+}
+
+TEST(ContinuousSchedulerTest, OverlapRetiresPreviousStepAfterNextSubmission) {
+  ContinuousScheduler::Options options =
+      create_scheduler_options(64, 1, 0, 64, 1);
+  options.enable_schedule_overlap(true);
+  FakeEngine engine(/*num_blocks=*/32, /*block_size=*/4);
+  engine.record_step_events();
+  TestableContinuousScheduler scheduler(&engine, options);
+
+  std::shared_ptr<Request> first =
+      generate_request_with_prompt_tokens({1, 2, 3, 4},
+                                          /*max_tokens=*/4,
+                                          /*max_context_len=*/32,
+                                          /*enable_schedule_overlap=*/true);
+  ASSERT_TRUE(scheduler.add_request(first));
+  scheduler.step(absl::ZeroDuration());
+  EXPECT_EQ(engine.step_events(), std::vector<std::string>({"step"}));
+
+  first->set_cancel();
+  std::shared_ptr<Request> second =
+      generate_request_with_prompt_tokens({5, 6, 7, 8},
+                                          /*max_tokens=*/4,
+                                          /*max_context_len=*/32,
+                                          /*enable_schedule_overlap=*/true);
+  ASSERT_TRUE(scheduler.add_request(second));
+  scheduler.step(absl::ZeroDuration());
+  EXPECT_EQ(engine.step_events(),
+            std::vector<std::string>({"step", "step", "update"}));
+
+  second->set_cancel();
+  scheduler.step(absl::ZeroDuration());
+  EXPECT_EQ(engine.step_events(),
+            std::vector<std::string>({"step", "step", "update", "update"}));
+  scheduler.step(absl::ZeroDuration());
+  EXPECT_EQ(engine.step_events(),
+            std::vector<std::string>({"step", "step", "update", "update"}));
 }
 
 TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
@@ -915,7 +966,7 @@ TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
 
   request->sequences()[0]->fail(
       Status(StatusCode::UNKNOWN, "json_object row mismatch"));
-  scheduler->process_batch_output_test(/*enable_schedule_overlap=*/false);
+  scheduler->process_batch_output_test();
   scheduler->wait_for_responses();
   EXPECT_EQ(callback_count, 0);
 

@@ -127,8 +127,8 @@ class BenchContinuousScheduler final : public ContinuousScheduler {
 
   std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
 
-  void process_batch_output_test(bool enable_schedule_overlap) {
-    process_batch_output(enable_schedule_overlap);
+  void process_batch_output_test() {
+    process_batch_output(running_requests_, running_sequences_);
   }
 
   void wait_for_responses() { response_processor_->wait_completion(); }
@@ -338,7 +338,7 @@ void BM_Scheduler_ProcessBatchOutput(benchmark::State& state) {
 
     // Stream requests are dispatched to the response thread pool here; the
     // dispatch is timed, the asynchronous decode + callback is not.
-    scheduler.process_batch_output_test(/*enable_schedule_overlap=*/false);
+    scheduler.process_batch_output_test();
 
     state.PauseTiming();
     scheduler.wait_for_responses();

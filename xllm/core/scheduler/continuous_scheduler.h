@@ -25,6 +25,7 @@ limitations under the License.
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 #include "async_response_processor.h"
@@ -213,7 +214,9 @@ class ContinuousScheduler : public Scheduler {
   size_t num_prefetch_pending_requests() const;
 
   // process the batch output
-  void process_batch_output(bool enable_schedule_overlap);
+  void process_batch_output(
+      const std::vector<std::shared_ptr<Request>>& requests,
+      std::vector<Sequence*>& sequences);
 
   const Options options_;
 
@@ -308,13 +311,15 @@ class ContinuousScheduler : public Scheduler {
 
   XServiceClient* xservice_client_ = nullptr;
 
-  // params for enable_schedule_overlap case
-  std::vector<Batch> last_batch_;
-  std::vector<std::shared_ptr<Request>> last_running_requests_;
-  std::vector<Sequence*> last_running_sequences_;
-  bool is_first_step_ = true;
-
  private:
+  struct PendingStep {
+    std::vector<Batch> batches;
+    std::vector<std::shared_ptr<Request>> requests;
+    std::vector<Sequence*> sequences;
+  };
+
+  std::optional<PendingStep> pending_step_;
+
   // Construct a SchedulerState snapshot for the policy.
   SchedulerState make_state();
 
