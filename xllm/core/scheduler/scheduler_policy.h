@@ -140,7 +140,7 @@ class SchedulerPolicy {
   void reset_batch_state(SchedulerState& state);
 
   // ===== Running request state update =====
-  void handle_running_requests(std::shared_ptr<Request> request,
+  void handle_running_requests(const std::shared_ptr<Request>& request,
                                SchedulerState& state);
 
   // Adjusts latency budget and reorders queues based on SLO urgency.
