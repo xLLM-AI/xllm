@@ -31,6 +31,11 @@ limitations under the License.
 //                                         decode batch.
 //   * BM_Scheduler_ProcessBatchOutput   - post-step bookkeeping over N running
 //                                         requests, stream on/off.
+//   * BM_Scheduler_DecodeWindow         - 16 consecutive decode scheduling
+//                                         rounds, with 1 or 4
+//                                         sequences/request.
+//   * BM_Scheduler_CollectFinished      - collect 0/50/100% finished requests
+//                                         and schedule any remaining decodes.
 //
 // Every request carries fresh token ids so the prefix cache never short-cuts
 // allocation, which is the common case for unrelated online requests.
@@ -156,7 +161,8 @@ class SchedulerFixture final {
         .max_tokens_per_chunk_for_prefill(kMaxTokensPerBatch)
         .num_speculative_tokens(0)
         .dp_size(1)
-        .enable_schedule_overlap(false);
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
     return options;
   }
 
@@ -183,7 +189,8 @@ std::vector<int32_t> next_prompt_tokens() {
 }
 
 std::shared_ptr<Request> make_request(int32_t max_generated_tokens,
-                                      bool stream) {
+                                      bool stream,
+                                      size_t sequences_per_request = 1) {
   StoppingChecker stopping_checker;
   stopping_checker.set_max_generated_tokens(max_generated_tokens);
   stopping_checker.set_max_context_len(kMaxContextLen);
@@ -194,9 +201,9 @@ std::shared_ptr<Request> make_request(int32_t max_generated_tokens,
                      RequestSamplingParam{},
                      SchedulerParam{},
                      std::move(stopping_checker),
-                     /*seq_capacity=*/kPromptTokens + 8,
-                     /*n=*/1,
-                     /*best_of=*/1,
+                     /*seq_capacity=*/kPromptTokens + max_generated_tokens + 1,
+                     /*n=*/sequences_per_request,
+                     /*best_of=*/sequences_per_request,
                      /*logprobs=*/false,
                      stream,
                      /*echo=*/false,
@@ -204,18 +211,25 @@ std::shared_ptr<Request> make_request(int32_t max_generated_tokens,
                      /*enable_schedule_overlap=*/false,
                      noop_output(),
                      OutputsFunc{});
-  return std::make_shared<Request>(
+  auto request = std::make_shared<Request>(
       "bench-req", "x-rid", "x-rtime", std::move(state), "");
+  // Start all sequences together so the decode window finishes them together.
+  // Lazy best_of expansion after prefill would leave new sequences one token
+  // behind the original sequence.
+  request->expand_sequences(/*share_prefix=*/false);
+  return request;
 }
 
 std::vector<std::shared_ptr<Request>> make_requests(
     size_t num_requests,
     int32_t max_generated_tokens,
-    bool stream = false) {
+    bool stream = false,
+    size_t sequences_per_request = 1) {
   std::vector<std::shared_ptr<Request>> requests;
   requests.reserve(num_requests);
   for (size_t i = 0; i < num_requests; ++i) {
-    requests.emplace_back(make_request(max_generated_tokens, stream));
+    requests.emplace_back(
+        make_request(max_generated_tokens, stream, sequences_per_request));
   }
   return requests;
 }
@@ -350,6 +364,98 @@ void BM_Scheduler_ProcessBatchOutput(benchmark::State& state) {
                           static_cast<int64_t>(num_requests));
 }
 
+// Time only prepare_batch(): request construction, simulated model output,
+// validation, and cleanup are excluded. Reported time is per 16-round window;
+// items/s counts scheduled sequences across all rounds, not just requests.
+void BM_Scheduler_DecodeWindow(benchmark::State& state) {
+  constexpr int32_t kDecodeSteps = 16;
+  const size_t num_requests = static_cast<size_t>(state.range(0));
+  const size_t sequences_per_request = static_cast<size_t>(state.range(1));
+  const size_t num_sequences = num_requests * sequences_per_request;
+  BenchContinuousScheduler& scheduler = SchedulerFixture::scheduler();
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    {
+      std::vector<std::shared_ptr<Request>> requests =
+          make_requests(num_requests,
+                        /*max_generated_tokens=*/kDecodeSteps + 2,
+                        /*stream=*/false,
+                        sequences_per_request);
+      add_requests(scheduler, requests);
+      (void)scheduler.prepare_batch_test();
+      append_one_token(requests);
+      // Allocate the initial decode blocks before measuring.
+      (void)scheduler.prepare_batch_test();
+      append_one_token(requests);
+
+      for (int32_t step = 0; step < kDecodeSteps; ++step) {
+        state.ResumeTiming();
+        std::vector<Batch> batches = scheduler.prepare_batch_test();
+        do_not_optimize(batches.data());
+        state.PauseTiming();
+
+        CHECK_EQ(batches.size(), 1u);
+        CHECK_EQ(batches.front().size(), num_sequences);
+        CHECK_EQ(batches.front().get_allowed_max_tokens().size(),
+                 num_sequences);
+        for (size_t token_budget : batches.front().get_allowed_max_tokens()) {
+          CHECK_EQ(token_budget, 1u);
+        }
+        append_one_token(requests);
+      }
+      retire_finished(scheduler);
+    }
+    state.ResumeTiming();
+  }
+  state.counters["decode_steps_per_iteration"] = kDecodeSteps;
+  state.counters["sequences_per_batch"] = static_cast<double>(num_sequences);
+  state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
+                          kDecodeSteps * static_cast<int64_t>(num_sequences));
+}
+
+// Includes completion dispatch, but excludes asynchronous response processing.
+// The 0% case provides a decode-only control for the same batch size.
+void BM_Scheduler_CollectFinished(benchmark::State& state) {
+  const size_t num_requests = static_cast<size_t>(state.range(0));
+  const size_t num_finished =
+      num_requests * static_cast<size_t>(state.range(1)) / 100;
+  BenchContinuousScheduler& scheduler = SchedulerFixture::scheduler();
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    {
+      std::vector<std::shared_ptr<Request>> requests;
+      requests.reserve(num_requests);
+      for (size_t i = 0; i < num_requests; ++i) {
+        requests.emplace_back(make_request(
+            /*max_generated_tokens=*/i < num_finished ? 1 : 2,
+            /*stream=*/false));
+      }
+      add_requests(scheduler, requests);
+      (void)scheduler.prepare_batch_test();
+      append_one_token(requests);
+      state.ResumeTiming();
+
+      std::vector<Batch> batches = scheduler.prepare_batch_test();
+      do_not_optimize(batches.data());
+
+      state.PauseTiming();
+      CHECK_EQ(batches.size(), 1u);
+      CHECK_EQ(batches.front().size(), num_requests - num_finished);
+      scheduler.wait_for_responses();
+      for (size_t i = num_finished; i < requests.size(); ++i) {
+        requests[i]->set_cancel();
+      }
+      retire_finished(scheduler);
+    }
+    state.ResumeTiming();
+  }
+  state.counters["finished_requests"] = static_cast<double>(num_finished);
+  state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
+                          static_cast<int64_t>(num_requests));
+}
+
 BENCHMARK(BM_Scheduler_AddRequest)
     ->RangeMultiplier(4)
     ->Range(1, 256)
@@ -364,6 +470,12 @@ BENCHMARK(BM_Scheduler_PrepareBatch_Decode)
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK(BM_Scheduler_ProcessBatchOutput)
     ->ArgsProduct({{16, 64, 256}, {0, 1}})
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Scheduler_DecodeWindow)
+    ->ArgsProduct({{1, 16, 64, 256}, {1, 4}})
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_Scheduler_CollectFinished)
+    ->ArgsProduct({{16, 64, 256}, {0, 50, 100}})
     ->Unit(benchmark::kMicrosecond);
 
 }  // namespace

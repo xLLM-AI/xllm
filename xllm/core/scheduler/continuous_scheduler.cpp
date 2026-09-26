@@ -540,7 +540,7 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
   std::vector<std::shared_ptr<Request>> stream_requests;
   stream_requests.reserve(to_be_processed_requests.size());
   // process request output in batch
-  for (auto request : to_be_processed_requests) {
+  for (const auto& request : to_be_processed_requests) {
     // ignore cancelled/finished requests when enable_schedule_overlap.
     if (options_.enable_schedule_overlap()) {
       if (request->state().stream) {

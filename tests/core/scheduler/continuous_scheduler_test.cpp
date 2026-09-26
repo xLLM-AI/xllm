@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <unordered_set>
 
 #include "core/common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -376,6 +377,85 @@ TEST(ContinuousSchedulerFactoryTest,
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
   EXPECT_NE(dynamic_cast<ContinuousScheduler*>(scheduler.get()), nullptr);
+}
+
+TEST(ContinuousSchedulerTest,
+     MixedSequenceCountsPreserveBatchesAcrossDecodeAndCancellation) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  for (bool enable_mix_batch : {false, true}) {
+    SCOPED_TRACE(enable_mix_batch);
+    ScopedConfigValue<bool> mix_batch(
+        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
+    ContinuousScheduler::Options options =
+        create_scheduler_options(64, 16, 0, 64, 1);
+    options.enable_chunked_prefill(true)
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
+    FakeEngine engine(/*num_blocks=*/64, /*block_size=*/4);
+    TestableContinuousScheduler scheduler(&engine, options);
+    const std::vector<size_t> initial_free_blocks =
+        engine.block_manager_pool()->num_free_blocks();
+
+    std::vector<std::shared_ptr<Request>> requests;
+    requests.reserve(3);
+    for (size_t width : {1u, 4u, 2u}) {
+      requests.emplace_back(
+          generate_request_with_best_of({1, 2, 3, 4},
+                                        /*max_tokens=*/3,
+                                        /*max_context_len=*/32,
+                                        /*n=*/width,
+                                        /*best_of=*/width));
+      requests.back()->state().output_func = [](const RequestOutput&) {
+        return true;
+      };
+      ASSERT_TRUE(scheduler.add_request(requests.back()));
+    }
+
+    for (int32_t round = 0; round < 3; ++round) {
+      SCOPED_TRACE(round);
+      std::vector<Batch> batches = scheduler.prepare_batch_test();
+      ASSERT_EQ(batches.size(), 1u);
+      const size_t expected_size = round == 2 ? 3u : 7u;
+      ASSERT_EQ(batches.front().size(), expected_size);
+      const auto& budgets = batches.front().get_allowed_max_tokens();
+      ASSERT_EQ(budgets.size(), expected_size);
+      std::unordered_set<Sequence*> expected;
+      expected.reserve(expected_size);
+      for (const auto& request : requests) {
+        if (request->cancelled()) {
+          continue;
+        }
+        for (const auto& sequence : request->sequences()) {
+          expected.insert(sequence.get());
+        }
+      }
+      for (size_t i = 0; i < expected_size; ++i) {
+        EXPECT_EQ(expected.erase(batches.front()[i]), 1u);
+        EXPECT_EQ(budgets[i], round == 0 ? 4u : 1u);
+      }
+      EXPECT_TRUE(expected.empty());
+
+      for (const auto& request : requests) {
+        if (request->cancelled()) {
+          continue;
+        }
+        for (const auto& sequence : request->sequences()) {
+          sequence->kv_state().set_kv_cache_tokens_num(sequence->num_tokens());
+          sequence->append_token(Token(/*id=*/1));
+        }
+      }
+      if (round == 1) {
+        requests[1]->set_cancel();
+      }
+    }
+    std::vector<Batch> batches = scheduler.prepare_batch_test();
+    ASSERT_EQ(batches.size(), 1u);
+    EXPECT_TRUE(batches.front().empty());
+    scheduler.wait_for_responses();
+    EXPECT_EQ(engine.block_manager_pool()->num_free_blocks(),
+              initial_free_blocks);
+  }
 }
 
 TEST(ContinuousSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {

@@ -210,7 +210,7 @@ std::vector<std::shared_ptr<Request>> SchedulerPolicy::collect_finished(
     if (*it == nullptr) {
       continue;
     }
-    std::shared_ptr<Request> request = *it;
+    const std::shared_ptr<Request>& request = *it;
     request->update_connection_status();
     if (request->finished() || request->cancelled()) {
       clear_mtp_bootstrap(request.get(), state);
@@ -247,6 +247,9 @@ void SchedulerPolicy::schedule_prefill_from_queue(
 
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
+  // Reuse scratch capacity across requests within this scheduling round.
+  std::vector<Sequence*> prefill_sequences;
+  std::vector<size_t> prefill_sequences_budget;
 
   while (!queue->empty() && budget.remaining_seq_budget > 0 &&
          budget.remaining_token_budget > 0 &&
@@ -303,8 +306,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     size_t allocated_seqs = 0;
     double allocated_estimate_latency = 0;
     bool can_schedule = true;
-    std::vector<Sequence*> prefill_sequences;
-    std::vector<size_t> prefill_sequences_budget;
+    prefill_sequences.clear();
+    prefill_sequences_budget.clear();
     prefill_sequences.reserve(request->sequences().size());
     prefill_sequences_budget.reserve(request->sequences().size());
 
@@ -606,6 +609,10 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
     return;
   }
 
+  // Keep scratch storage local to the call, but avoid allocating per request.
+  std::vector<Sequence*> candidate_sequences;
+  std::vector<size_t> candidate_token_budgets;
+  std::vector<Sequence*> active_sequences;
   while (!queue->empty() &&
          budget.remaining_token_budget >
              static_cast<size_t>(state.min_speculative_tokens_required) &&
@@ -614,8 +621,8 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
     std::shared_ptr<Request> request = queue->top();
 
     const size_t num_sequences = request->sequences().size();
-    std::vector<Sequence*> candidate_sequences;
-    std::vector<size_t> candidate_token_budgets;
+    candidate_sequences.clear();
+    candidate_token_budgets.clear();
     candidate_sequences.reserve(num_sequences);
     candidate_token_budgets.reserve(num_sequences);
 
@@ -627,7 +634,7 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
 
     if (request->check_beam_search()) {
       // Beam search path.
-      std::vector<Sequence*> active_sequences;
+      active_sequences.clear();
       active_sequences.reserve(num_sequences);
       for (auto& seq : request->sequences()) {
         if (!seq->finished()) {
@@ -986,8 +993,9 @@ void SchedulerPolicy::report_metrics(const SchedulerState& state,
 // Helpers
 // =============================================================================
 
-void SchedulerPolicy::handle_running_requests(std::shared_ptr<Request> request,
-                                              SchedulerState& state) {
+void SchedulerPolicy::handle_running_requests(
+    const std::shared_ptr<Request>& request,
+    SchedulerState& state) {
   if (request->finished() || request->cancelled()) {
     LOG(FATAL) << "Unknown error, finished/cancelled request should have been "
                   "handled before. request_id is "
