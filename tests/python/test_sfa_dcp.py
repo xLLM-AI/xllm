@@ -244,6 +244,9 @@ def test_glm_quant_indexer_without_cp_uses_materialized_scale() -> None:
     indexer.rope_dim = 0
     indexer.topk = 2
     indexer.indexer_rope_interleave = False
+    indexer._q_stream = None
+    indexer._weights_stream = None
+    indexer._wk_weights_proj_ready = False
     indexer.wq_b = MagicMock(return_value=torch.ones(2, 2))
     indexer.wk = MagicMock(return_value=torch.ones(2, 2))
     indexer.k_norm = nn.Identity()
