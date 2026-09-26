@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+
 #include "core/util/tensor_helper.h"
 
 namespace xllm {

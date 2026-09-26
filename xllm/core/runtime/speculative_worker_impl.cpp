@@ -16,11 +16,11 @@ limitations under the License.
 #include "speculative_worker_impl.h"
 
 #include "common/global_flags.h"
-#include "common/metrics.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/kv_cache/kv_cache_shape.h"
 #include "core/framework/speculative/spec_input_builder.h"
+#include "core/framework/speculative/verify_layout.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
 #include "util/slice.h"
@@ -169,6 +169,8 @@ std::optional<ForwardOutput> SpeculativeWorkerImpl<TargetInput>::step(
       input.token_ids.numel() == 0) {
     if (input.input_params.meta.batch_forward_type.is_decode() &&
         !run_speculative_decode) {
+      // Realign a non-speculative decode rank to EMPTY so every rank agrees
+      // on the batch type. Only this branch needs its own copy.
       TargetInput aligned_input = input.clone();
       aligned_input.input_params.meta.batch_forward_type =
           BatchForwardType::EMPTY;
@@ -244,6 +246,20 @@ SpeculativeWorkerImpl<TargetInput>::update_input_by_last_step_output(
   new_inputs.runtime.device_tensors_ready = true;
 
   return std::move(new_inputs);
+}
+
+ForwardOutput finalize_verify_output(
+    ForwardOutput target_output,
+    SampleOutput val_output,
+    const std::vector<int32_t>* pruned_prefix_lengths,
+    const std::vector<JsonObjectGrammarState>& json_object_states) {
+  target_output.spec_verify_layouts = make_verify_layouts(
+      val_output.next_tokens, pruned_prefix_lengths, json_object_states);
+  // The verify output replaces sample_output wholesale, so only its own
+  // embeddings need clearing.
+  val_output.embeddings = torch::Tensor();
+  target_output.sample_output = std::move(val_output);
+  return target_output;
 }
 
 template <typename TargetInput>

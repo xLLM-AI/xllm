@@ -135,6 +135,19 @@ void record_prefix_cache_hit_metrics(size_t prompt_tokens, size_t hit_tokens);
     }                                          \
   } while (false)
 
+namespace xllm {
+
+// Cached handles for one label of a multi-dimension counter/gauge pair,
+// resolved once so hot paths do not repeat the locked get_stats lookups or
+// allocate the label string per step. The MultiDimension never drops stats,
+// so cached pointers stay valid for the process lifetime.
+struct MultiCounterGaugeHandles {
+  bvar::Adder<double>* counter = nullptr;
+  bvar::Status<double>* gauge = nullptr;
+};
+
+}  // namespace xllm
+
 // declare gauge
 #define DECLARE_GAUGE(name) extern bvar::Status<double> GAUGE_##name;
 

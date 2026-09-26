@@ -357,8 +357,13 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
+  // Land the verify tokens on host once here, matching DFlash, so the metrics
+  // and serialization consumers never issue a second blocking D2H.
+  val_output.next_tokens = to_cpu_contiguous(val_output.next_tokens);
   return finalize_verify_output(std::move(target_output),
-                                std::move(val_output));
+                                std::move(val_output),
+                                /*pruned_prefix_lengths=*/nullptr,
+                                input.json_object_states);
 }
 
 SampleOutput SuffixWorkerImpl::validate(

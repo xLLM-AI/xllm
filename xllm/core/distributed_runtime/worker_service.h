@@ -153,8 +153,6 @@ class WorkerService : public proto::DistributeWorker {
                    ::google::protobuf::Closure* done) override;
 
  private:
-  friend class WorkerServiceTestPeer;
-
   void step(const DiTForwardInput& input,
             std::vector<torch::Tensor>& tensors,
             std::vector<std::string>& text_output);
@@ -177,15 +175,12 @@ class WorkerService : public proto::DistributeWorker {
             torch::Tensor& out_logprobs,
             std::vector<JsonObjectOutputError>& json_object_errors);
   std::vector<SpeculativeTokenStats> record_speculative_metrics_from_output(
-      const torch::Tensor& next_tokens,
-      const std::vector<SpeculativeTokenStats>& output_stats,
-      bool is_graph_warmup);
+      const ForwardOutput& forward_output);
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
  private:
   // runtime options
   runtime::Options options_;
-  std::vector<std::string> speculative_position_labels_;
 
   bool initialized_;
 

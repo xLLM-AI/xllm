@@ -31,6 +31,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/speculative/verify_layout.h"
 #include "framework/config/execution_config.h"
 #include "framework/model/llm_model_params.h"
 #include "framework/model/model_input_params.h"
@@ -601,6 +602,11 @@ struct ForwardOutput {
   // Optional CPU token snapshot, valid after ready_event. Device next_tokens
   // remains available for continuation; serializers can reuse this D2H copy.
   torch::Tensor next_tokens_host;
+  // Present only for speculative verification: per-row draft widths and
+  // JSON-constraint classification, request-ordered. A non-empty layout is
+  // the sole marker of a verify result (ordinary decode emits 1-D tokens);
+  // consumed before proto/shared-memory serialization.
+  std::vector<VerifyRowLayout> spec_verify_layouts;
   // The target sampler applies packed token masks in-place before returning
   // sampled tokens. MTP validation uses this local contract to avoid applying
   // the same mask to target logits a second time.

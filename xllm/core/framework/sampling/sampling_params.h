@@ -185,9 +185,7 @@ struct SamplingParameters {
 };
 
 // Draft proposals and acceptances executed by the verifier, before output
-// truncation. Accepted drafts exclude the target replacement/bonus
-// contribution; neither count can be inferred from the number of streamed
-// output chunks.
+// truncation. Accepted drafts exclude the target replacement/bonus token.
 struct SpeculativeTokenStats {
   int64_t accepted_tokens = 0;
   int64_t proposed_tokens = 0;
@@ -219,7 +217,6 @@ struct SampleOutput {
   torch::Tensor selected_embeddings;
 
   std::vector<std::vector<torch::Tensor>> mm_embeddings;
-  std::vector<SpeculativeTokenStats> speculative_token_stats;
 };
 
 }  // namespace xllm

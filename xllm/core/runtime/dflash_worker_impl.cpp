@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "runtime/dflash_worker_impl.h"
 
-#include <c10/util/SmallVector.h>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -352,13 +351,6 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
             return std::make_unique<LLMWorkerImpl>(
                 parallel_args, device, draft_options(options));
           }) {
-  speculative_position_labels_.reserve(
-      static_cast<size_t>(options.num_speculative_tokens()));
-  for (int32_t position = 0; position < options.num_speculative_tokens();
-       ++position) {
-    speculative_position_labels_.emplace_back(std::to_string(position));
-  }
-
   // Adaptive per-seq validate pruning. DP is supported: the worker gathers
   // each rank's true validate token count over the DP group before the target
   // forward (see sync_dp_global_token_nums_after_prune).
@@ -1006,19 +998,15 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   maybe_broadcast_spec_tokens(val_output.next_tokens);
   compute_stream_->synchronize();
   val_output.next_tokens = to_cpu_contiguous(val_output.next_tokens);
-  // Precise adaptive-aware metrics on the already-CPU tensor: static path
-  // passes an empty per_seq_val_tokens and every row counts full width;
-  // adaptive passes the per-seq widths so padded tail slots aren't counted
-  // as rejections. Zero extra device sync — we're already on CPU.
-  record_validate_metrics(
-      val_output, did_prune ? per_seq_val_tokens : std::vector<int32_t>{});
   write_target_context_to_cache(input, val_output);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
   return finalize_verify_output(std::move(target_output),
-                                std::move(val_output));
+                                std::move(val_output),
+                                did_prune ? &prefix_lengths : nullptr,
+                                input.json_object_states);
 }
 
 SampleOutput DFlashWorkerImpl::validate(
@@ -1501,75 +1489,6 @@ void DFlashWorkerImpl::apply_per_seq_varlen_prune(
   new_validate.input_params.embedding.input_embedding = torch::Tensor();
   record_metadata_ready_event(*prepare_stream_, new_validate);
   validate_input = std::move(new_validate);
-}
-
-void DFlashWorkerImpl::record_validate_metrics(
-    SampleOutput& val_output,
-    const std::vector<int32_t>& per_seq_val_tokens) const {
-  if (!val_output.next_tokens.defined() || val_output.next_tokens.dim() != 2 ||
-      val_output.next_tokens.numel() == 0) {
-    return;
-  }
-  const int32_t batch_size =
-      static_cast<int32_t>(val_output.next_tokens.size(0));
-  const int32_t width = static_cast<int32_t>(val_output.next_tokens.size(1));
-  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  if (num_speculative_tokens <= 0 || width < 2) {
-    return;
-  }
-  CHECK(val_output.next_tokens.device().is_cpu())
-      << "record_validate_metrics expects next_tokens already on CPU to avoid "
-         "a blocking device sync on the hot path";
-  const bool have_per_seq = !per_seq_val_tokens.empty();
-  if (have_per_seq) {
-    CHECK_EQ(per_seq_val_tokens.size(), static_cast<size_t>(batch_size))
-        << "per_seq_val_tokens size mismatch with next_tokens batch";
-  }
-
-  std::vector<int32_t> proposed_tokens(static_cast<size_t>(batch_size));
-  const torch::Tensor next_tokens_cpu =
-      to_cpu_contiguous(val_output.next_tokens, torch::kInt64);
-  const int64_t* token_data = next_tokens_cpu.const_data_ptr<int64_t>();
-  c10::SmallVector<int64_t, 8> accepted_per_position(
-      static_cast<size_t>(num_speculative_tokens), 0);
-  for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-    // Target validation width includes the anchor plus retained drafts.
-    int32_t seq_width = width;
-    if (have_per_seq) {
-      // A prefix of zero has width one; never invent a draft for it.
-      seq_width = std::clamp(per_seq_val_tokens[static_cast<size_t>(seq_id)],
-                             /*lo=*/1,
-                             /*hi=*/width);
-    }
-    proposed_tokens[static_cast<size_t>(seq_id)] = seq_width - 1;
-  }
-  val_output.speculative_token_stats =
-      calculate_contiguous_speculative_token_stats(next_tokens_cpu,
-                                                   proposed_tokens);
-  int64_t num_draft_tokens = 0;
-  int64_t accepted_count = 0;
-  for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-    const SpeculativeTokenStats& stats =
-        val_output.speculative_token_stats[static_cast<size_t>(seq_id)];
-    num_draft_tokens += stats.proposed_tokens;
-    accepted_count += stats.accepted_tokens;
-    // Per-position counts require a valid column-zero target token. The
-    // shared sequence stats intentionally start at column one.
-    if (token_data[static_cast<int64_t>(seq_id) * width] < 0) {
-      continue;
-    }
-    for (int32_t position = 0; position < stats.accepted_tokens; ++position) {
-      ++accepted_per_position[static_cast<size_t>(position)];
-    }
-  }
-  for (int32_t position = 0; position < num_speculative_tokens; ++position) {
-    MULTI_COUNTER_ADD(
-        speculative_num_accepted_tokens_per_pos,
-        speculative_position_labels_[static_cast<size_t>(position)],
-        accepted_per_position[static_cast<size_t>(position)]);
-  }
-  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total, accepted_count);
 }
 
 }  // namespace xllm

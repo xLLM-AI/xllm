@@ -2240,11 +2240,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
     target_output.retained_inputs.clear();
     val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
-    // Record adaptive-prune-aware draft/accept counts on the already-CPU
-    // next_tokens. Static path lets worker_service count on the async-handoff
-    // CPU tensor with no extra device sync.
-    record_validate_metrics(
-        val_output, num_speculative_tokens, pruned_prefix_lengths);
     write_target_context_to_cache(input, val_output, num_speculative_tokens);
 
     if (!enable_schedule_overlap() && !this->is_driver() &&
@@ -2252,7 +2247,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
       return std::nullopt;
     }
     return finalize_verify_output(std::move(target_output),
-                                  std::move(val_output));
+                                  std::move(val_output),
+                                  pruned_prefix_lengths,
+                                  input.json_object_states);
   }
 
   const int64_t num_val_tokens = options_.num_speculative_tokens() + 1;
@@ -2366,6 +2363,12 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
         << "MTP JSON errors must reference sampled rows in the current batch";
   }
   const bool has_failed_sequence_rows = !failed_sequence_rows.empty();
+  // Overlap mode hands the verify tokens back still on device (the device copy
+  // feeds the next step's input update); expose the staged host snapshot so
+  // metrics and serialization reuse it instead of issuing a second D2H.
+  if (enable_schedule_overlap()) {
+    target_output.next_tokens_host = accepted_tokens_host;
+  }
   stage_target_context_write(input,
                              val_output,
                              base_positions,
@@ -2405,7 +2408,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     return std::nullopt;
   }
   return finalize_verify_output(std::move(target_output),
-                                std::move(val_output));
+                                std::move(val_output),
+                                /*pruned_prefix_lengths=*/nullptr,
+                                input.json_object_states);
 }
 
 template <typename TargetInput>
@@ -2429,10 +2434,6 @@ void MTPWorkerImpl<TargetInput>::stage_target_context_write(
   context.accepted_embeddings = validate_output.embeddings;
   context.base_positions = std::move(base_positions);
   context.base_kv_seq_lens = std::move(base_kv_seq_lens);
-  context.json_constrained_rows.reserve(input.json_object_states.size());
-  for (const JsonObjectGrammarState& state : input.json_object_states) {
-    context.json_constrained_rows.emplace_back(state.initialized() ? 1U : 0U);
-  }
   context.failed_rows = std::move(failed_rows);
   context.ready_event = std::move(ready_event);
   context.allow_immutable_compact_view = allow_immutable_compact_view;
@@ -2527,98 +2528,6 @@ void MTPWorkerImpl<TargetInput>::flush_pending_target_context(
         << pending.generation;
     CHECK(embedding_cache_ != nullptr)
         << "embedding_cache_ must be initialized before target cache write";
-    const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-    const int32_t num_validation_tokens = num_speculative_tokens + 1;
-    const torch::Tensor accepted_tokens =
-        pending.accepted_tokens_host.contiguous();
-    CHECK_EQ(accepted_tokens.numel() % num_validation_tokens, 0)
-        << "MTP validation output width mismatch";
-    const torch::Tensor output_tokens =
-        accepted_tokens.view({-1, num_validation_tokens});
-    if (!pending.json_constrained_rows.empty()) {
-      CHECK_EQ(pending.json_constrained_rows.size(),
-               static_cast<size_t>(output_tokens.size(0)))
-          << "MTP JSON row metadata mismatch";
-    }
-    int64_t constrained_accepted = 0;
-    int64_t plain_accepted = 0;
-    int64_t constrained_draft = 0;
-    int64_t plain_draft = 0;
-    const torch::Tensor& accepted_count_host = pending.accepted_count_host;
-    if (accepted_count_host.defined()) {
-      CHECK(accepted_count_host.device().is_cpu())
-          << "accepted count host state must be on CPU";
-      CHECK_EQ(accepted_count_host.dim(), 1)
-          << "accepted count host state must be a vector";
-      CHECK_EQ(accepted_count_host.size(0), output_tokens.size(0))
-          << "accepted count host state batch mismatch";
-      CHECK(accepted_count_host.scalar_type() == torch::kInt ||
-            accepted_count_host.scalar_type() == torch::kLong)
-          << "accepted count host state must be int32 or int64";
-    }
-    const int32_t* counts_i32 =
-        accepted_count_host.defined() &&
-                accepted_count_host.scalar_type() == torch::kInt
-            ? accepted_count_host.const_data_ptr<int32_t>()
-            : nullptr;
-    const int64_t* counts_i64 =
-        accepted_count_host.defined() &&
-                accepted_count_host.scalar_type() == torch::kLong
-            ? accepted_count_host.const_data_ptr<int64_t>()
-            : nullptr;
-    const int64_t count_stride =
-        accepted_count_host.defined() ? accepted_count_host.stride(0) : 0;
-    CHECK(output_tokens.device().is_cpu());
-    CHECK(output_tokens.scalar_type() == torch::kLong ||
-          output_tokens.scalar_type() == torch::kInt);
-    const int64_t* tokens_i64 = output_tokens.scalar_type() == torch::kLong
-                                    ? output_tokens.const_data_ptr<int64_t>()
-                                    : nullptr;
-    const int32_t* tokens_i32 = output_tokens.scalar_type() == torch::kInt
-                                    ? output_tokens.const_data_ptr<int32_t>()
-                                    : nullptr;
-    for (int64_t sequence_idx = 0; sequence_idx < output_tokens.size(0);
-         ++sequence_idx) {
-      const bool constrained =
-          !pending.json_constrained_rows.empty() &&
-          pending.json_constrained_rows[static_cast<size_t>(sequence_idx)] !=
-              0U;
-      int64_t accepted = 0;
-      if (accepted_count_host.defined()) {
-        const int64_t offset = sequence_idx * count_stride;
-        accepted =
-            counts_i32 != nullptr ? counts_i32[offset] : counts_i64[offset];
-        CHECK_GE(accepted, 0);
-        CHECK_LE(accepted, num_speculative_tokens);
-      } else {
-        int64_t rejected = 0;
-        for (int32_t token_idx = 0; token_idx < num_validation_tokens;
-             ++token_idx) {
-          const int64_t offset =
-              sequence_idx * num_validation_tokens + token_idx;
-          const int64_t token =
-              tokens_i64 != nullptr ? tokens_i64[offset] : tokens_i32[offset];
-          if (token < 0) {
-            ++rejected;
-          }
-        }
-        accepted = num_speculative_tokens -
-                   std::min<int64_t>(rejected, num_speculative_tokens);
-      }
-      if (constrained) {
-        constrained_accepted += accepted;
-        constrained_draft += num_speculative_tokens;
-      } else {
-        plain_accepted += accepted;
-        plain_draft += num_speculative_tokens;
-      }
-    }
-    COUNTER_ADD(speculative_num_accepted_tokens_constrained_total,
-                constrained_accepted);
-    COUNTER_ADD(speculative_num_accepted_tokens_plain_total, plain_accepted);
-    COUNTER_ADD(speculative_num_draft_tokens_constrained_total,
-                constrained_draft);
-    COUNTER_ADD(speculative_num_draft_tokens_plain_total, plain_draft);
     if (pending.failed_rows.empty()) {
       embedding_cache_->write_target_context(
           pending.embedding_ids,
@@ -2890,49 +2799,6 @@ bool MTPWorkerImpl<TargetInput>::pending_draft_context_matches(
              input.input_params.parallel.raw_dp_global_token_nums &&
          pending_draft_context_.dp_global_batch_generations ==
              input.input_params.parallel.dp_global_batch_generations;
-}
-
-template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::record_validate_metrics(
-    SampleOutput& validate_output,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>* pruned_prefix_lengths) const {
-  CHECK(validate_output.next_tokens.defined())
-      << "validate output tokens are undefined";
-  CHECK_EQ(validate_output.next_tokens.dim(), 2)
-      << "validate output tokens should be [batch, width]";
-  const int32_t batch_size =
-      static_cast<int32_t>(validate_output.next_tokens.size(0));
-  CHECK_EQ(validate_output.next_tokens.size(1), num_speculative_tokens + 1)
-      << "validate output width mismatch";
-
-  CHECK(validate_output.next_tokens.device().is_cpu())
-      << "record_validate_metrics expects next_tokens already on CPU to avoid "
-         "a blocking device sync on the hot path";
-  std::vector<int32_t> proposed_tokens(static_cast<size_t>(batch_size),
-                                       num_speculative_tokens);
-  for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-    if (pruned_prefix_lengths != nullptr) {
-      CHECK_EQ(pruned_prefix_lengths->size(), static_cast<size_t>(batch_size))
-          << "adaptive pruning prefix length batch mismatch";
-      proposed_tokens[static_cast<size_t>(seq_id)] =
-          std::clamp((*pruned_prefix_lengths)[static_cast<size_t>(seq_id)],
-                     0,
-                     num_speculative_tokens);
-    }
-  }
-  validate_output.speculative_token_stats =
-      calculate_contiguous_speculative_token_stats(validate_output.next_tokens,
-                                                   proposed_tokens);
-  int64_t num_draft_tokens = 0;
-  int64_t accepted_count = 0;
-  for (const SpeculativeTokenStats& stats :
-       validate_output.speculative_token_stats) {
-    num_draft_tokens += stats.proposed_tokens;
-    accepted_count += stats.accepted_tokens;
-  }
-  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total, accepted_count);
 }
 
 template <typename TargetInput>

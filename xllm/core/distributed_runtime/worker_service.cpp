@@ -28,6 +28,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -37,12 +38,11 @@ limitations under the License.
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
-#include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/metrics.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
-#include "framework/speculative/spec_verify.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
 #include "runtime/rec_forward_params.h"
@@ -111,22 +111,6 @@ bool has_cpu_serialization_inputs(const ForwardOutput& output) {
          std::all_of(output.dit_forward_output.tensors.begin(),
                      output.dit_forward_output.tensors.end(),
                      on_cpu);
-}
-
-// Preformatted position tags for MULTI_COUNTER_ADD so the metrics loop does
-// not allocate a fresh std::string per step per position.
-std::vector<std::string> build_speculative_position_labels(
-    const runtime::Options& options) {
-  const int32_t num_speculative_tokens = options.num_speculative_tokens();
-  if (num_speculative_tokens <= 0) {
-    return {};
-  }
-  std::vector<std::string> labels;
-  labels.reserve(static_cast<size_t>(num_speculative_tokens));
-  for (int32_t position = 0; position < num_speculative_tokens; ++position) {
-    labels.emplace_back(std::to_string(position));
-  }
-  return labels;
 }
 
 class WorkerPrefetchSession final
@@ -314,10 +298,7 @@ class WorkerPrefetchSession final
 
 WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device)
-    : options_(options),
-      speculative_position_labels_(build_speculative_position_labels(options)),
-      initialized_(false),
-      device_(device) {
+    : options_(options), initialized_(false), device_(device) {
   device_.set_device();
   device_.init_device_context();
   stream_ = device_.get_stream_from_pool();
@@ -332,7 +313,6 @@ WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device,
                              std::unique_ptr<Worker> worker)
     : options_(options),
-      speculative_position_labels_(build_speculative_position_labels(options)),
       initialized_(true),
       device_(device),
       worker_(std::move(worker)) {
@@ -359,98 +339,28 @@ WorkerService::~WorkerService() {
 
 std::vector<SpeculativeTokenStats>
 WorkerService::record_speculative_metrics_from_output(
-    const torch::Tensor& next_tokens,
-    const std::vector<SpeculativeTokenStats>& output_stats,
-    bool is_graph_warmup) {
-  // Synthetic graph-warmup batches carry no real accept/reject signal; skip
-  // them so they do not pollute the cumulative acceptance stats.
-  if (is_graph_warmup || !options_.enable_speculative_decode()) {
+    const ForwardOutput& forward_output) {
+  if (forward_output.is_graph_warmup || !options_.enable_speculative_decode()) {
     return {};
   }
-  if (!output_stats.empty()) {
-    if (next_tokens.defined() && next_tokens.dim() == 2) {
-      CHECK_EQ(output_stats.size(), static_cast<size_t>(next_tokens.size(0)))
-          << "speculative token stats batch mismatch";
-    }
+  const torch::Tensor& next_tokens = forward_output.sample_output.next_tokens;
+  // A verify result is marked solely by a non-empty row layout; ordinary
+  // decode emits 1-D tokens.
+  if (forward_output.spec_verify_layouts.empty()) {
+    CHECK(!next_tokens.defined() || next_tokens.dim() != 2)
+        << "speculative verify output is missing row metadata";
+    return {};
   }
-  if (!next_tokens.defined() || next_tokens.dim() != 2 ||
-      next_tokens.numel() == 0) {
-    return output_stats;
-  }
-  // DFlash / DSpark record metrics inline in their own worker
-  // (DFlashWorkerImpl::record_validate_metrics) with precise per-seq widths,
-  // so this generic per-tensor count would double-count them.
-  if (SpeculativeConfig::is_block_diffusion_algorithm(
-          options_.speculative_algorithm())) {
-    return output_stats;
-  }
-
-  const int64_t batch_size = next_tokens.size(0);
-  const int64_t token_width = next_tokens.size(1);
-  const int64_t num_speculative_tokens = options_.num_speculative_tokens();
-  if (num_speculative_tokens <= 0 || token_width < 2) {
-    return output_stats;
-  }
-  // Adaptive pruning may hand back a narrower validate block, so accept any
-  // width in [2, N+1] and derive the actual draft count from token_width - 1.
-  if (token_width > num_speculative_tokens + 1) {
-    return output_stats;
-  }
-  const int64_t effective_speculative_tokens = token_width - 1;
-
-  SpeculativeOutputStats stats =
-      calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
-
-  const int64_t num_draft_tokens = batch_size * effective_speculative_tokens;
-  int64_t num_accepted_tokens = 0;
-  for (int64_t position = 0; position < effective_speculative_tokens;
-       ++position) {
-    const int64_t accepted =
-        stats.accepted_per_position[static_cast<size_t>(position)];
-    num_accepted_tokens += accepted;
-    MULTI_COUNTER_ADD(
-        speculative_num_accepted_tokens_per_pos,
-        speculative_position_labels_[static_cast<size_t>(position)],
-        accepted);
-  }
-  COUNTER_ADD(speculative_num_drafts_total, batch_size);
-  // Adaptive MTP records these totals inline using the actual per-sequence
-  // proposal widths. Still publish the remaining output metrics below.
-  if (output_stats.empty()) {
-    COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-    COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
-  }
-  COUNTER_ADD(speculative_num_committed_tokens_total, stats.committed_tokens);
-  // Derive from the global counters, not per-instance totals, so multi-DP
-  // writers converge on one aggregate instead of overwriting the gauge.
-  const double total_drafts = COUNTER_VALUE(speculative_num_drafts_total);
-  if (total_drafts > 0) {
-    GAUGE_SET(
-        speculative_mean_acceptance_length,
-        COUNTER_VALUE(speculative_num_committed_tokens_total) / total_drafts);
-  }
-  // Per-position conditional acceptance rate = P(accept position i | position
-  // i-1 accepted) = accepted_per_pos[i] / accepted_per_pos[i-1]; position 0
-  // divides by the total draft count. Read from the global counters so multi-DP
-  // writers converge on one aggregate.
-  double prev_accepted = total_drafts;
-  for (int64_t position = 0; position < effective_speculative_tokens;
-       ++position) {
-    const std::string& position_label =
-        speculative_position_labels_[static_cast<size_t>(position)];
-    const double cur_accepted = MULTI_COUNTER_VALUE(
-        speculative_num_accepted_tokens_per_pos, position_label);
-    if (prev_accepted > 0) {
-      MULTI_GAUGE_SET(speculative_conditional_acceptance_rate_per_pos,
-                      position_label,
-                      cur_accepted / prev_accepted);
-    }
-    prev_accepted = cur_accepted;
-  }
-  if (!output_stats.empty()) {
-    return output_stats;
-  }
-  return stats.sequence_stats;
+  // Schedule-overlap MTP hands back a device next_tokens (the device copy is
+  // consumed by the next step's input update) plus a host snapshot; prefer
+  // the snapshot so metrics never issue a second D2H of the same matrix.
+  const torch::Tensor& metric_tokens = forward_output.next_tokens_host.defined()
+                                           ? forward_output.next_tokens_host
+                                           : next_tokens;
+  SpecMetrics metrics =
+      make_spec_metrics(metric_tokens, forward_output.spec_verify_layouts);
+  record_spec_metrics(metrics);
+  return std::move(metrics.sequence_stats);
 }
 
 void WorkerService::set_worker(std::unique_ptr<Worker> worker) {
@@ -518,16 +428,15 @@ void WorkerService::step(
     // convert ForwardOutput to proto::ForwardOutput which contain Tokens.
     if (forward_outputs) {
       DCHECK(forward_outputs.has_value()) << "Failed to execute model";
-      const auto& sample_output = forward_outputs.value().sample_output;
-      const auto& beam_search_output =
-          forward_outputs.value().beam_search_output;
-      const auto& dit_forward_output =
-          forward_outputs.value().dit_forward_output;
-      expert_load_data = safe_to(forward_outputs.value().expert_load_data,
+      const ForwardOutput& forward_output = forward_outputs.value();
+      const auto& sample_output = forward_output.sample_output;
+      const auto& beam_search_output = forward_output.beam_search_output;
+      const auto& dit_forward_output = forward_output.dit_forward_output;
+      expert_load_data = safe_to(forward_output.expert_load_data,
                                  torch::kCPU,
                                  /*non_blocking=*/true);
-      prepared_token = forward_outputs.value().prepared_token;
-      json_object_errors = forward_outputs.value().json_object_errors;
+      prepared_token = forward_output.prepared_token;
+      json_object_errors = forward_output.json_object_errors;
 
       {
         auto copy_output_to_host = [&]() {
@@ -613,10 +522,8 @@ void WorkerService::step(
             stream_->synchronize();
           }
         }
-        speculative_token_stats = record_speculative_metrics_from_output(
-            next_tokens,
-            sample_output.speculative_token_stats,
-            forward_outputs.value().is_graph_warmup);
+        speculative_token_stats =
+            record_speculative_metrics_from_output(forward_output);
       }
     }
   } else {
@@ -1266,8 +1173,7 @@ void WorkerService::GetLastStepResult(
             for (auto image : forward_output.dit_forward_output.tensors) {
               dit_images.emplace_back(image);
             }
-            dit_text_output =
-                forward_outputs.value().dit_forward_output.text_output;
+            dit_text_output = forward_output.dit_forward_output.text_output;
 
             // [num_seq]
             next_tokens = safe_to(forward_output.next_tokens_host.defined()
@@ -1319,8 +1225,8 @@ void WorkerService::GetLastStepResult(
               copy_output_to_host();
             } else {
               c10::StreamGuard stream_guard = stream_->set_stream_guard();
-              if (forward_outputs.value().ready_event != nullptr) {
-                CHECK(stream_->wait_event(forward_outputs.value().ready_event))
+              if (forward_output.ready_event != nullptr) {
+                CHECK(stream_->wait_event(forward_output.ready_event))
                     << "wait forward output ready event failed.";
               }
               copy_output_to_host();
@@ -1335,10 +1241,8 @@ void WorkerService::GetLastStepResult(
 #endif
             }
           }
-          speculative_token_stats = record_speculative_metrics_from_output(
-              next_tokens,
-              sample_output.speculative_token_stats,
-              forward_output.is_graph_warmup);
+          speculative_token_stats =
+              record_speculative_metrics_from_output(forward_output);
 
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||

@@ -310,11 +310,6 @@ void BatchOutputHandler::process_sample_output(
       continue;
     }
 
-    if (output_idx < sample_output.speculative_token_stats.size()) {
-      seq->record_speculative_token_stats(
-          sample_output.speculative_token_stats[output_idx]);
-    }
-
     if (!target.from_sample_slot) {
       if (seq->finished()) {
         continue;

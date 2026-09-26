@@ -29,6 +29,8 @@ limitations under the License.
 
 namespace xllm {
 
+class JsonObjectGrammarState;
+
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.
 bool should_run_speculative_decode(const LlmModelParams& params);
@@ -39,6 +41,15 @@ void scale_speculative_parallel_token_counts(LlmModelParams& params,
                                              int32_t multiplier);
 void scale_speculative_parallel_token_counts(VlmModelParams& params,
                                              int32_t multiplier);
+
+// Shared tail of run_validate: marks the output as a speculative decode
+// verify result, attaches the row metadata, clears embeddings, and installs
+// the validation sample output.
+ForwardOutput finalize_verify_output(
+    ForwardOutput target_output,
+    SampleOutput val_output,
+    const std::vector<int32_t>* pruned_prefix_lengths,
+    const std::vector<JsonObjectGrammarState>& json_object_states);
 
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and

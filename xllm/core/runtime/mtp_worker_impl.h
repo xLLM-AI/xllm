@@ -262,7 +262,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
     torch::Tensor accepted_embeddings;
     torch::Tensor base_positions;
     torch::Tensor base_kv_seq_lens;
-    std::vector<uint8_t> json_constrained_rows;
     std::vector<size_t> failed_rows;
     StreamEventPtr ready_event;
   };
@@ -314,10 +313,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   void write_target_context_to_cache(const TargetInput& input,
                                      const SampleOutput& validate_output,
                                      int32_t num_speculative_tokens);
-  void record_validate_metrics(
-      SampleOutput& validate_output,
-      int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr) const;
   bool adaptive_enabled() const;
 
  protected:

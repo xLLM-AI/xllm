@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "common.pb.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "request_base.h"
 #include "request_state.h"
 #include "sequences_group.h"

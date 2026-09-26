@@ -82,6 +82,8 @@ cc_library(
     worker_service.cpp
   DEPS
     :request
+    :speculative
+    :common
     absl::strings
     glog::glog
     proto::xllm_proto

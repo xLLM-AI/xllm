@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/dflash2_sampling.h"
 #include "core/framework/sampling/gumbel_sampling.h"
+#include "core/framework/speculative/verify_layout.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -1634,6 +1635,9 @@ ForwardOutput TaskExecutionPipeline::consume_speculative(uint32_t slot_id) {
   if (tokens.tokens.defined()) {
     output.sample_output.next_tokens =
         prefill ? tokens.tokens.squeeze(1) : tokens.tokens;
+    if (!prefill) {
+      output.spec_verify_layouts = make_verify_layouts(tokens.tokens);
+    }
     if (tokens.logprobs.defined()) {
       output.logprobs = true;
       output.sample_output.logprobs =

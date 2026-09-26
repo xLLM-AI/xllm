@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
+#include "core/framework/speculative/verify_layout.h"
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/mtp_runtime_helpers.h"
 #include "core/runtime/py_executor_impl.h"
@@ -397,6 +398,12 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
+  // The committed-token matrix is a verify result; mark it with the shared row
+  // layout so the consumer records speculative metrics for this path.
+  target_output.spec_verify_layouts =
+      make_verify_layouts(target_output.sample_output.next_tokens,
+                          /*per_seq_draft_counts=*/nullptr,
+                          input.json_object_states);
   return target_output;
 #else
   (void)input;

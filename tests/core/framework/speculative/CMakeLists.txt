@@ -1,5 +1,16 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    spec_metrics_test
+  SRCS
+    spec_metrics_test.cpp
+  DEPS
+    :speculative
+    :sampler
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME

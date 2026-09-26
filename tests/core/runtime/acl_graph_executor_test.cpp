@@ -1626,17 +1626,6 @@ TEST(DSparkWorkerWeightsTest, DedicatedVocabularyOverridesFallbackInAnyOrder) {
   EXPECT_FALSE(dedicated_first.should_load(/*dedicated=*/true));
 }
 
-TEST(SpeculativeOutputMetricsTest, CountsCommittedAndAcceptedTokensFromOutput) {
-  // Row 0 accepts two draft tokens; row 1 accepts all five.
-  const torch::Tensor tokens = torch::tensor(
-      {{10, 11, 12, -1, -1, -1}, {20, 21, 22, 23, 24, 25}}, torch::kInt32);
-  const auto stats =
-      calculate_speculative_output_stats(tokens, /*num_speculative_tokens=*/5);
-
-  EXPECT_EQ(stats.committed_tokens, 9);
-  EXPECT_EQ(stats.accepted_per_position, (std::vector<int64_t>{2, 2, 1, 1, 1}));
-}
-
 TEST(SpeculativeWorkerDispatchTest, DecodeRequiresEveryDpRankToDecode) {
   LlmModelParams params;
   params.meta.batch_forward_type = BatchForwardType::DECODE;
