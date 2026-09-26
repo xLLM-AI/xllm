@@ -32,7 +32,15 @@ from torch.distributed import ProcessGroup
 
 from xllm.python.platform import current_platform
 
-if current_platform.is_npu():
+
+def _torch_all_gather(input: torch.Tensor, output: torch.Tensor, group: ProcessGroup) -> None:
+    dist.all_gather(list(output.unbind(0)), input, group=group)
+
+
+_all_gather = _torch_all_gather
+_USE_PYTHON_NPU_GROUPS = current_platform.is_npu()
+if _USE_PYTHON_NPU_GROUPS:
+    from xllm.python.distributed.npu import all_gather_on_current_stream as _all_gather
     from xllm.python.distributed.npu import all_reduce_on_current_stream as _all_reduce
 
     _cuda_collectives = None
@@ -254,8 +262,14 @@ def layerwise_rank(device: torch.device | str) -> int:
     return group.rank() if group is not None else 0
 
 
-def _native_runtime_op(name: str) -> object | None:
-    """Return an embedded C++ collective when running under PyExecutorImpl."""
+def _native_runtime_op(name: str, x: torch.Tensor, group_name: str) -> object | None:
+    """Use a model's explicitly initialized Python NPU group when present.
+
+    Native-only group configurations still use the embedded runtime bridge.
+    Selection precedes execution; errors in either implementation propagate.
+    """
+    if _USE_PYTHON_NPU_GROUPS and (group_name, str(x.device)) in _groups:
+        return None
     try:
         import xllm_runtime
     except ImportError:
@@ -264,7 +278,7 @@ def _native_runtime_op(name: str) -> object | None:
 
 
 def tp_all_reduce(x: torch.Tensor) -> None:
-    op = _native_runtime_op("tp_all_reduce")
+    op = _native_runtime_op("tp_all_reduce", x, "tp")
     if op is not None:
         op(x)
         return
@@ -272,14 +286,14 @@ def tp_all_reduce(x: torch.Tensor) -> None:
 
 
 def tp_all_gather(x: torch.Tensor, dim: int, world_size: int) -> torch.Tensor:
-    op = _native_runtime_op("tp_all_gather")
+    op = _native_runtime_op("tp_all_gather", x, "tp")
     if op is not None:
         return op(x, dim)
     return all_gather(x, dim, world_size, "tp")
 
 
 def moe_tp_all_reduce(x: torch.Tensor) -> None:
-    op = _native_runtime_op("moe_tp_all_reduce")
+    op = _native_runtime_op("moe_tp_all_reduce", x, "moe_tp")
     if op is not None:
         op(x)
         return
@@ -287,7 +301,7 @@ def moe_tp_all_reduce(x: torch.Tensor) -> None:
 
 
 def moe_ep_all_reduce(x: torch.Tensor) -> None:
-    op = _native_runtime_op("moe_ep_all_reduce")
+    op = _native_runtime_op("moe_ep_all_reduce", x, "moe_ep")
     if op is not None:
         op(x)
         return
@@ -331,9 +345,9 @@ def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp
     group = _require_group(x, group_name)
     if group.size() != world_size:
         raise RuntimeError(f"{group_name} world-size mismatch: expected {world_size}, got {group.size()}")
-    chunks = [torch.empty_like(x) for _ in range(world_size)]
-    dist.all_gather(chunks, x, group=group)
-    return torch.cat(chunks, dim=dim)
+    gathered = x.new_empty((world_size, *x.shape))
+    _all_gather(x.contiguous(), gathered, group=group)
+    return torch.cat(gathered.unbind(0), dim=dim)
 
 
 @all_gather.register_fake
@@ -369,9 +383,9 @@ def all_gather_variable(
     if local_tokens:
         padded[:local_tokens].copy_(x[:local_tokens])
 
-    chunks = [torch.empty_like(padded) for _ in token_counts]
-    dist.all_gather(chunks, padded, group=group)
-    valid_chunks = [chunk[:count] for chunk, count in zip(chunks, token_counts) if count]
+    gathered = padded.new_empty((len(token_counts), *padded.shape))
+    _all_gather(padded, gathered, group=group)
+    valid_chunks = [chunk[:count] for chunk, count in zip(gathered.unbind(0), token_counts) if count]
     if not valid_chunks:
         empty_shape = list(x.shape)
         empty_shape[0] = 0

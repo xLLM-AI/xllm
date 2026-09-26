@@ -261,6 +261,66 @@ def test_native_runtime_bridge_bypasses_python_process_groups(monkeypatch):
     python_gather.assert_not_called()
 
 
+@pytest.mark.parametrize("dim", [0, 1, -1])
+def test_npu_gather_preserves_rank_order_with_embedded_runtime(monkeypatch: pytest.MonkeyPatch, dim: int) -> None:
+    group = _FakeGroup(1, 3)
+    collectives._groups[("tp", "cpu")] = group
+    native_gather = MagicMock(side_effect=AssertionError("Python group was bypassed"))
+    monkeypatch.setitem(sys.modules, "xllm_runtime", SimpleNamespace(tp_all_gather=native_gather))
+    # A transposed local shard also checks the high-level layout contract.
+    peers = [torch.arange(6).reshape(3, 2).T + 100 * rank for rank in range(3)]
+
+    def gather(input: torch.Tensor, output: torch.Tensor, group: _FakeGroup) -> None:
+        assert group.rank() == 1 and group.size() == 3
+        assert input.is_contiguous()
+        torch.testing.assert_close(input, peers[1])
+        output.copy_(torch.stack(peers))
+
+    monkeypatch.setattr(collectives, "_all_gather", gather)
+    actual = collectives.tp_all_gather(peers[1], dim, 3)
+    torch.testing.assert_close(actual, torch.cat(peers, dim=dim), rtol=0, atol=0)
+    native_gather.assert_not_called()
+
+
+def test_npu_variable_gather_preserves_empty_rank_and_padding(monkeypatch: pytest.MonkeyPatch) -> None:
+    counts = [2, 0, 3]
+    group = _FakeGroup(0, 3)
+    collectives._groups[("dp", "cpu")] = group
+    peers = [torch.arange(6).reshape(3, 2) + 100 * rank for rank in range(3)]
+
+    def gather(input: torch.Tensor, output: torch.Tensor, group: _FakeGroup) -> None:
+        torch.testing.assert_close(input[:2], peers[0][:2])
+        assert input[2].count_nonzero() == 0
+        output.copy_(torch.stack(peers))
+
+    monkeypatch.setattr(collectives, "_all_gather", gather)
+    actual = collectives.all_gather_variable(peers[0][:2], counts, 0, "dp")
+    torch.testing.assert_close(actual, torch.cat((peers[0][:2], peers[2])), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("name", "group_name"),
+    [("tp_all_reduce", "tp"), ("moe_tp_all_reduce", "moe_tp"), ("moe_ep_all_reduce", "moe_ep")],
+)
+def test_npu_reduce_uses_owned_python_group(monkeypatch: pytest.MonkeyPatch, name: str, group_name: str) -> None:
+    group = _FakeGroup(0, 2)
+    collectives._groups[(group_name, "cpu")] = group
+    native_reduce = MagicMock(side_effect=AssertionError("Python group was bypassed"))
+    monkeypatch.setitem(sys.modules, "xllm_runtime", SimpleNamespace(**{name: native_reduce}))
+    selected_groups = []
+
+    def reduce(input: torch.Tensor, group: _FakeGroup) -> None:
+        selected_groups.append(group)
+        input.mul_(2)
+
+    monkeypatch.setattr(collectives, "_all_reduce", reduce)
+    actual = torch.tensor([3.0])
+    getattr(collectives, name)(actual)
+    assert selected_groups == [group]
+    torch.testing.assert_close(actual, torch.tensor([6.0]), rtol=0, atol=0)
+    native_reduce.assert_not_called()
+
+
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="Gloo backend is unavailable")
 def test_glm_ep1_tp_reduce_does_not_mix_cp_cohorts(tmp_path: Path) -> None:
     rendezvous_path = tmp_path / "glm-ep1-tp-reduce"
