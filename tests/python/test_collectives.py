@@ -29,13 +29,30 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from xllm.python import distributed
 from xllm.python.models import glm5_2
+from xllm.python.platform import current_platform
 
 _MODULE_PATH = Path(__file__).parents[2] / "xllm" / "python" / "distributed" / "collectives.py"
+# conftest supplies a lightweight distributed stub; expose the backend leaf
+# packages without executing the real distributed package initializer.
+distributed.__path__ = [str(_MODULE_PATH.parent)]
+from xllm.python.distributed import cuda as cuda_collectives  # noqa: E402
+
 _SPEC = importlib.util.spec_from_file_location("_xllm_collectives_under_test", _MODULE_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 collectives = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(collectives)
+# Exercise import-time NPU selection without requiring NPU hardware. The real
+# helper validates CPU inputs before reaching native ops; only its runtime
+# registration import is stubbed when torch_npu has not already been imported.
+with (
+    patch.object(current_platform, "is_npu", return_value=True),
+    pytest.MonkeyPatch.context() as module_patch,
+):
+    # Restore only torch_npu: patch.dict would also remove backend modules
+    # imported here, leaving the selected callable bound to an evicted module.
+    module_patch.setitem(sys.modules, "torch_npu", sys.modules.get("torch_npu", SimpleNamespace()))
+    _SPEC.loader.exec_module(collectives)
 
 
 class _FakeGroup:
@@ -56,8 +73,8 @@ def _clear_collective_state():
         collectives._groups.clear()
         collectives._group_ranks.clear()
         collectives._stores.clear()
-        collectives._symm_eligible.clear()
-        collectives._symm_buffers.clear()
+        cuda_collectives._symm_eligible.clear()
+        cuda_collectives._symm_buffers.clear()
         collectives._world_topology = None
         collectives._world_initialized = False
 
@@ -146,11 +163,16 @@ def _run_glm_ep1_tp_collective(global_rank: int, rendezvous_path: str) -> None:
             cfg=SimpleNamespace(tp_size=2),
         )
 
-        with patch.object(
-            glm5_2.distributed,
-            "all_reduce_",
-            collectives.all_reduce_,
-            create=True,
+        # This numerical fixture deliberately uses CPU/Gloo even on an NPU
+        # host; production dispatch is fixed by the platform, not the tensor.
+        with (
+            patch.object(collectives, "_all_reduce", dist.all_reduce),
+            patch.object(
+                glm5_2.distributed,
+                "all_reduce_",
+                collectives.all_reduce_,
+                create=True,
+            ),
         ):
             output = glm5_2.Glm52MoE._combine_expert_outputs(moe, routed, shared)
 
@@ -183,6 +205,23 @@ def test_parallel_groups_share_one_multitenant_tcp_store(monkeypatch):
         [0, 1],
         [0, 1],
     ]
+
+
+@pytest.mark.parametrize("group_name", ["tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp"])
+def test_npu_all_reduce_binding_applies_to_every_group(monkeypatch: pytest.MonkeyPatch, group_name: str) -> None:
+    from xllm.python.distributed.npu import all_reduce_on_current_stream
+
+    def unexpected_native_call(x: torch.Tensor, comm: int) -> None:
+        raise AssertionError("CPU input must be rejected before native execution")
+
+    # The Python helper resolves the native symbol before validating arguments.
+    monkeypatch.setattr(torch.ops.xllm_ops, "npu_all_reduce", unexpected_native_call, raising=False)
+    assert collectives._all_reduce is all_reduce_on_current_stream
+    collectives._groups[(group_name, "cpu")] = _FakeGroup(0, 2)
+    # The selected NPU implementation must reject a CPU tensor for every group,
+    # rather than silently routing non-TP groups back through c10d.
+    with pytest.raises(RuntimeError, match="HCCL requires an NPU tensor, got cpu"):
+        collectives.all_reduce_(torch.ones(1), group_name)
 
 
 def test_native_runtime_bridge_bypasses_python_process_groups(monkeypatch):
@@ -339,20 +378,20 @@ def test_tcp_store_master_is_global_rank_zero_not_group_rank_zero(monkeypatch):
     assert tcp_store.call_args.args[:4] == ("127.0.0.1", 46001, 4, False)
 
 
-def test_symmetric_memory_rejects_cross_host_group(monkeypatch):
-    collectives._world_topology = [
+def test_symmetric_memory_rejects_cross_host_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    topology = [
         {"hostname": "node-0", "device_index": 0},
         {"hostname": "node-1", "device_index": 0},
     ]
     can_access_peer = MagicMock(return_value=True)
     monkeypatch.setattr(torch.cuda, "can_device_access_peer", can_access_peer)
 
-    assert not collectives._supports_symmetric_memory(torch.device("cuda:0"), [0, 1])
+    assert not cuda_collectives._supports_symmetric_memory(torch.device("cuda:0"), [0, 1], topology)
     can_access_peer.assert_not_called()
 
 
-def test_symmetric_memory_rejects_incomplete_peer_domain(monkeypatch):
-    collectives._world_topology = [
+def test_symmetric_memory_rejects_incomplete_peer_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    topology = [
         {"hostname": "node-0", "device_index": 0},
         {"hostname": "node-0", "device_index": 1},
     ]
@@ -362,50 +401,73 @@ def test_symmetric_memory_rejects_incomplete_peer_domain(monkeypatch):
         lambda source, destination: (source, destination) != (1, 0),
     )
 
-    assert not collectives._supports_symmetric_memory(torch.device("cuda:0"), [0, 1])
+    assert not cuda_collectives._supports_symmetric_memory(torch.device("cuda:0"), [0, 1], topology)
+
+
+def _symmetric_tensor(dtype: torch.dtype = torch.float32, numel: int = 8) -> MagicMock:
+    tensor = MagicMock()
+    tensor.device = torch.device("cuda:0")
+    tensor.dtype = dtype
+    tensor.is_contiguous.return_value = True
+    tensor.numel.return_value = numel
+    tensor.element_size.return_value = torch.empty((), dtype=dtype).element_size()
+    return tensor
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])
-def test_symmetric_buffer_rejects_unsupported_dtype(monkeypatch, dtype):
-    group_name = "tp"
-    device = torch.device("cuda:0")
-    collectives._symm_eligible[(group_name, str(device))] = True
-    tensor = MagicMock()
-    tensor.device = device
-    tensor.dtype = dtype
-    tensor.is_contiguous.return_value = True
-    tensor.numel.return_value = 8
-    tensor.element_size.return_value = torch.empty((), dtype=dtype).element_size()
+def test_symmetric_buffer_rejects_unsupported_dtype(monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype) -> None:
+    group = _FakeGroup(0, 2)
+    tensor = _symmetric_tensor(dtype)
+    cuda_collectives._symm_eligible[(group, str(tensor.device))] = True
     empty = MagicMock()
     rendezvous = MagicMock()
-    monkeypatch.setattr(collectives.symm_mem, "empty", empty)
-    monkeypatch.setattr(collectives.symm_mem, "rendezvous", rendezvous)
+    monkeypatch.setattr(cuda_collectives.symm_mem, "empty", empty)
+    monkeypatch.setattr(cuda_collectives.symm_mem, "rendezvous", rendezvous)
 
-    assert collectives._symm_buffer(_FakeGroup(0, 2), group_name, tensor) is None
+    assert cuda_collectives._symm_buffer(group, tensor) is None
     empty.assert_not_called()
     rendezvous.assert_not_called()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_symmetric_buffer_accepts_supported_dtype(monkeypatch, dtype):
-    group_name = "tp"
-    device = torch.device("cuda:0")
-    collectives._symm_eligible[(group_name, str(device))] = True
-    tensor = MagicMock()
-    tensor.device = device
-    tensor.dtype = dtype
-    tensor.is_contiguous.return_value = True
-    tensor.numel.return_value = 8
-    tensor.element_size.return_value = torch.empty((), dtype=dtype).element_size()
+def test_symmetric_buffer_accepts_supported_dtype(monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype) -> None:
+    tensor = _symmetric_tensor(dtype)
     buffer = object()
     group = _FakeGroup(0, 2)
     group.group_name = "tp-group"
+    cuda_collectives._symm_eligible[(group, str(tensor.device))] = True
     empty = MagicMock(return_value=buffer)
     rendezvous = MagicMock()
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    monkeypatch.setattr(collectives.symm_mem, "empty", empty)
-    monkeypatch.setattr(collectives.symm_mem, "rendezvous", rendezvous)
+    monkeypatch.setattr(cuda_collectives.symm_mem, "empty", empty)
+    monkeypatch.setattr(cuda_collectives.symm_mem, "rendezvous", rendezvous)
 
-    assert collectives._symm_buffer(group, group_name, tensor) is buffer
-    empty.assert_called_once_with(8, dtype=dtype, device=device)
+    assert cuda_collectives._symm_buffer(group, tensor) is buffer
+    empty.assert_called_once_with(8, dtype=dtype, device=tensor.device)
     rendezvous.assert_called_once_with(buffer, "tp-group")
+
+    # The cache is keyed by element count, not shape, and remains usable during
+    # capture and after the allocation cap is reached.
+    tensor.shape = (2, 4)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    monkeypatch.setattr(cuda_collectives, "_SYMM_MEM_MAX_BUFFERS", 1)
+    assert cuda_collectives._symm_buffer(group, tensor) is buffer
+    empty.assert_called_once()
+
+
+@pytest.mark.parametrize("reason", ["ineligible", "noncontiguous", "too_large", "capturing", "cache_full"])
+def test_symmetric_buffer_rejects_ineligible_allocation(monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    group = _FakeGroup(0, 2)
+    tensor = _symmetric_tensor()
+    cuda_collectives._symm_eligible[(group, str(tensor.device))] = reason != "ineligible"
+    tensor.is_contiguous.return_value = reason != "noncontiguous"
+    if reason == "too_large":
+        tensor.numel.return_value = cuda_collectives._SYMM_MEM_MAX_BYTES // tensor.element_size() + 1
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: reason == "capturing")
+    if reason == "cache_full":
+        monkeypatch.setattr(cuda_collectives, "_SYMM_MEM_MAX_BUFFERS", 0)
+    empty = MagicMock()
+    monkeypatch.setattr(cuda_collectives.symm_mem, "empty", empty)
+
+    assert cuda_collectives._symm_buffer(group, tensor) is None
+    empty.assert_not_called()

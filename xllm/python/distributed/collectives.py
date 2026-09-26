@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tensor-parallel process groups and collectives.
+"""Parallel process groups and graph-visible collectives.
 
-The collectives themselves are hardware-neutral: only the ProcessGroup backend
-differs (NCCL on CUDA, HCCL on NPU), and torch picks it from the device. They
-are graph operators so that a compiled graph keeps the communication node in
-place instead of splitting around it.
+All-reduce selects its platform implementation once at import time. The graph
+operators keep communication nodes in a compiled graph rather than splitting
+around them; process-group rendezvous and topology remain shared.
 """
 
 from __future__ import annotations
@@ -29,8 +28,21 @@ from datetime import timedelta
 
 import torch
 import torch.distributed as dist
-import torch.distributed._symmetric_memory as symm_mem
 from torch.distributed import ProcessGroup
+
+from xllm.python.platform import current_platform
+
+if current_platform.is_npu():
+    from xllm.python.distributed.npu import all_reduce_on_current_stream as _all_reduce
+
+    _cuda_collectives = None
+elif current_platform.is_cuda() or current_platform.is_dcu() or current_platform.is_ilu():
+    from xllm.python.distributed import cuda as _cuda_collectives
+
+    _all_reduce = _cuda_collectives.all_reduce
+else:
+    _cuda_collectives = None
+    _all_reduce = dist.all_reduce
 
 _GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp"))
 # ``tp`` and ``moe_tp`` own a contiguous block of global ranks, while ``dp``,
@@ -49,8 +61,6 @@ _groups = {}
 _group_ranks = {}
 _stores = {}
 _world_topology = None
-_symm_eligible = {}
-_symm_buffers = {}
 _world_initialized = False
 
 
@@ -136,26 +146,6 @@ def _group_memberships(group_name: str, world_size: int, global_world_size: int)
     return [[index + offset * count for offset in range(world_size)] for index in range(count)]
 
 
-def _supports_symmetric_memory(device: torch.device, ranks: list[int]) -> bool:
-    if device.type != "cuda" or _world_topology is None:
-        return False
-    topology = [_world_topology[rank] for rank in ranks]
-    hostnames = {entry["hostname"] for entry in topology}
-    if len(hostnames) != 1:
-        return False
-    device_indices = [entry["device_index"] for entry in topology]
-    if any(not isinstance(index, int) or index < 0 for index in device_indices):
-        return False
-    if len(set(device_indices)) != len(device_indices):
-        return False
-    return all(
-        torch.cuda.can_device_access_peer(source, destination)
-        for source in device_indices
-        for destination in device_indices
-        if source != destination
-    )
-
-
 def init_process_group(
     group_name: str,
     host: str,
@@ -205,7 +195,8 @@ def init_process_group(
     assert own_ranks is not None
     _groups[group_key] = own
     _group_ranks[group_key] = tuple(own_ranks)
-    _symm_eligible[group_key] = _supports_symmetric_memory(device_obj, own_ranks)
+    if _cuda_collectives is not None:
+        _cuda_collectives.init_group(own, device_obj, own_ranks, _world_topology)
     return own
 
 
@@ -307,61 +298,10 @@ def dcp_group(device: torch.device | str) -> ProcessGroup | None:
     return _groups.get(("dcp", str(torch.device(device))))
 
 
-# A one-shot symmetric-memory reduction is an ordinary kernel on the current
-# stream, so a captured graph runs it inline. NCCL runs collectives on its own
-# stream, which costs a fork/join per call -- measured at ~32us of device idle
-# before every all-reduce in the decode graph, and there are dozens per step.
-# Past this size the staging copy stops paying for itself and NCCL's ring wins,
-# and the bound also keeps the buffer cache to decode-sized shapes rather than
-# one entry per distinct prefill length.
-_SYMM_MEM_MAX_BYTES = 512 * 1024
-# Distinct shapes still accumulate one buffer each; stop allocating rather than
-# grow without limit when a workload sweeps many small shapes.
-_SYMM_MEM_MAX_BUFFERS = 64
-_SYMM_MEM_DTYPES = frozenset((torch.float32, torch.bfloat16))
-
-
-def _symm_buffer(group: ProcessGroup, group_name: str, x: torch.Tensor) -> torch.Tensor | None:
-    """Return a symmetric-memory staging buffer for ``x``, or None.
-
-    Allocation and rendezvous are collective and cannot run inside a graph
-    capture, so a shape first seen during capture falls back to NCCL. The
-    capture path is warmed up eagerly beforehand, which is where the decode
-    shapes get their buffers.
-    """
-    group_key = (group_name, str(x.device))
-    if not _symm_eligible.get(group_key, False):
-        return None
-    if not x.is_contiguous() or x.dtype not in _SYMM_MEM_DTYPES:
-        return None
-    if x.numel() * x.element_size() > _SYMM_MEM_MAX_BYTES:
-        return None
-
-    key = (group_name, str(x.device), x.dtype, x.numel())
-    buffer = _symm_buffers.get(key)
-    if buffer is not None:
-        return buffer
-    if torch.cuda.is_current_stream_capturing():
-        return None
-    if len(_symm_buffers) >= _SYMM_MEM_MAX_BUFFERS:
-        return None
-
-    buffer = symm_mem.empty(x.numel(), dtype=x.dtype, device=x.device)
-    symm_mem.rendezvous(buffer, group.group_name)
-    _symm_buffers[key] = buffer
-    return buffer
-
-
 @torch.library.custom_op("xllm_ops::all_reduce_", mutates_args={"x"})
 def all_reduce_(x: torch.Tensor, group_name: str = "tp") -> None:
     group = _require_group(x, group_name)
-    buffer = _symm_buffer(group, group_name, x)
-    if buffer is None:
-        dist.all_reduce(x, group=group)
-        return
-    flat = x.view(-1)
-    buffer.copy_(flat)
-    torch.ops.symm_mem.one_shot_all_reduce_out(buffer, "sum", group.group_name, flat)
+    _all_reduce(x, group=group)
 
 
 @torch.library.custom_op("xllm_ops::broadcast_", mutates_args={"x"})

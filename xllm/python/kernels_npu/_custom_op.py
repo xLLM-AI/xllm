@@ -1048,6 +1048,21 @@ def _sfa_dcp_remap_out_fake(
     return out
 
 
+def _npu_all_reduce_fake(x: torch.Tensor, comm: int) -> None:
+    return None
+
+
+def _npu_all_gather_fake(input: torch.Tensor, output: torch.Tensor, comm: int) -> None:
+    return None
+
+
+def _npu_reduce_scatter_fake(input: torch.Tensor, output: torch.Tensor, comm: int) -> None:
+    return None
+
+
+register_fake("xllm_ops::npu_all_reduce", _npu_all_reduce_fake)
+register_fake("xllm_ops::npu_all_gather", _npu_all_gather_fake)
+register_fake("xllm_ops::npu_reduce_scatter", _npu_reduce_scatter_fake)
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
 register_fake("xllm_ops::l2_norm", _l2_norm_fake)
