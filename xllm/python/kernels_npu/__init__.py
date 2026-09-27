@@ -29,7 +29,6 @@ from typing import Any
 _EXPORTS = {
     "activation": ("silu_and_mul",),
     "attention": (
-        "batch_matmul_transpose",
         "reshape_paged_cache",
         "update_decode_graph_metadata",
         "vision_fusion_attention",
@@ -118,7 +117,6 @@ __all__ = [
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
-    "batch_matmul_transpose",
     "atb_matmul_ein_sum",
     "fused_qk_norm_rope",
     "interleaved_rotary_embedding",

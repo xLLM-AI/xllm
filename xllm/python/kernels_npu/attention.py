@@ -64,20 +64,8 @@ def vision_fusion_attention(
     )[0]
 
 
-def batch_matmul_transpose(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Project MLA input [T,H,D] with weight [H,D,O] into [T,H,O]."""
-    return torch.ops.npu.npu_transpose_batchmatmul(
-        x,
-        weight,
-        perm_x1=(1, 0, 2),
-        perm_x2=(0, 1, 2),
-        perm_y=(1, 0, 2),
-    )
-
-
 __all__ = [
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
-    "batch_matmul_transpose",
 ]
