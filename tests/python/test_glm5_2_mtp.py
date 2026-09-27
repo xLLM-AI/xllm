@@ -100,13 +100,13 @@ class _DecoderLayer(nn.Module):
         half_rope_sin: torch.Tensor,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
-        query_rope: tuple[torch.Tensor, torch.Tensor],
+        query_cos_sin: tuple[torch.Tensor, torch.Tensor],
         topk_indices: torch.Tensor | None,
         reuse_topk: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         del residual
         self.ropes.append((half_rope_cos, half_rope_sin, rope_cos, rope_sin))
-        assert query_rope[0] is rope_cos and query_rope[1] is rope_sin
+        assert query_cos_sin[0] is rope_cos and query_cos_sin[1] is rope_sin
         self.reuse_flags.append(reuse_topk)
         if not reuse_topk:
             topk_indices = torch.full((hidden.shape[0], 1, 2), 7, dtype=torch.int32)

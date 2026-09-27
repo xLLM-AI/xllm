@@ -27,7 +27,7 @@ from xllm.python.models.glm5_2 import (
     Glm52DecoderLayer,
     Glm52ForCausalLM,
     Glm52YarnRotaryEmbedding,
-    _indexer_query_rope,
+    _select_indexer_query_cos_sin,
 )
 from xllm.python.models.weight_utils import W8A8WeightLoader
 
@@ -137,7 +137,7 @@ class Glm52MtpModel(nn.Module):
             positions = cp_shard_positions(positions, cp_context).contiguous()
 
         half_rope_cos, half_rope_sin, rope_cos, rope_sin = self.rotary(positions)
-        query_rope = _indexer_query_rope(
+        query_cos_sin = _select_indexer_query_cos_sin(
             self.cfg.indexer_rope_interleave, half_rope_cos, half_rope_sin, rope_cos, rope_sin, cp_context
         )
         residual: torch.Tensor | None = None
@@ -151,7 +151,7 @@ class Glm52MtpModel(nn.Module):
                 half_rope_sin,
                 rope_cos,
                 rope_sin,
-                query_rope,
+                query_cos_sin,
                 topk_indices,
                 reuse_topk,
             )

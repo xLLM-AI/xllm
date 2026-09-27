@@ -40,7 +40,7 @@ class _DecoderLayer(nn.Module):
         self._layer_id = layer_id
         self._events = events
         self.rope: tuple[torch.Tensor, ...] | None = None
-        self.query_rope: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.query_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None
         self.prev_topk: torch.Tensor | None = None
         self.output_topk: torch.Tensor | None = None
 
@@ -52,11 +52,11 @@ class _DecoderLayer(nn.Module):
         half_rope_sin: torch.Tensor,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
-        query_rope: tuple[torch.Tensor, torch.Tensor],
+        query_cos_sin: tuple[torch.Tensor, torch.Tensor],
         prev_topk: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         self.rope = (half_rope_cos, half_rope_sin, rope_cos, rope_sin)
-        self.query_rope = query_rope
+        self.query_cos_sin = query_cos_sin
         self.prev_topk = prev_topk
         self.output_topk = hidden[:, :1].clone()
         if residual is None:
@@ -164,9 +164,9 @@ def test_cp_model_loop_shards_local_rows_and_merges_after_norm() -> None:
     torch.testing.assert_close(model.rotary.positions[0], torch.tensor([3, 0]))
     assert len(model.rotary.positions) == 1
     assert all(first is second for first, second in zip(layers[0].rope, layers[1].rope))
-    assert layers[0].query_rope is layers[1].query_rope
+    assert layers[0].query_cos_sin is layers[1].query_cos_sin
     torch.testing.assert_close(layers[0].rope[0], model.rotary.cos_sin_cache[[3, 0], :2])
-    torch.testing.assert_close(layers[0].query_rope[0], layers[0].rope[2][[0]])
+    torch.testing.assert_close(layers[0].query_cos_sin[0], layers[0].rope[2][[0]])
     assert layers[1].prev_topk is layers[0].output_topk
     torch.testing.assert_close(layers[1].prev_topk, torch.tensor([[40.0], [10.0]]))
     torch.testing.assert_close(output, merged_output)
@@ -207,8 +207,8 @@ def test_cp_one_preserves_full_rows_without_shard_or_merge() -> None:
     ]
     torch.testing.assert_close(model.rotary.positions[0], torch.tensor([0, 1, 2, 3]))
     assert len(model.rotary.positions) == 1
-    assert layers[0].query_rope[0] is layers[0].rope[2]
-    assert layers[0].query_rope[1] is layers[0].rope[3]
+    assert layers[0].query_cos_sin[0] is layers[0].rope[2]
+    assert layers[0].query_cos_sin[1] is layers[0].rope[3]
     torch.testing.assert_close(output, torch.tensor([[23.0], [43.0], [63.0], [83.0]]))
 
 
@@ -814,19 +814,21 @@ def test_model_shares_coefficients_across_layers_for_packed_and_empty_queries(
         patch.object(glm5_2, "cp_shard_positions", return_value=local_positions),
         patch.object(glm5_2, "cp_merge_rows", side_effect=lambda hidden, _ctx: hidden),
         patch.object(glm5_2, "record_layer_event"),
-        patch.object(glm5_2, "_indexer_query_rope", wraps=glm5_2._indexer_query_rope) as select_query,
+        patch.object(
+            glm5_2, "_select_indexer_query_cos_sin", wraps=glm5_2._select_indexer_query_cos_sin
+        ) as select_query,
     ):
         model(torch.arange(4), torch.arange(4))
 
     assert len(model.rotary.positions) == select_query.call_count == 1
-    assert layers[0].query_rope is layers[1].query_rope
+    assert layers[0].query_cos_sin is layers[1].query_cos_sin
     for first, second in zip(layers[0].rope, layers[1].rope):
         assert first is second
     expected_half = model.rotary.cos_sin_cache[local_positions]
     torch.testing.assert_close(layers[0].rope[0], expected_half[:, :2])
     torch.testing.assert_close(layers[0].rope[1], expected_half[:, 2:])
     offset = 2 if interleaved else 0
-    for index, selected in enumerate(layers[0].query_rope):
+    for index, selected in enumerate(layers[0].query_cos_sin):
         torch.testing.assert_close(selected, layers[0].rope[offset + index][context.query_index])
 
 
@@ -840,6 +842,6 @@ def test_rope_contract_rejects_inconsistent_metadata(interleaved: bool, invalid:
         shape[-1] += 1
     dtype = torch.bfloat16 if invalid == "dtype" else torch.float32
     device = "meta" if invalid == "device" else "cpu"
-    angles = (torch.empty(shape, dtype=dtype, device=device),) * 2
+    cos_sin = (torch.empty(shape, dtype=dtype, device=device),) * 2
     with pytest.raises(ValueError, match="test consumer cos: expected shape=.*got shape="):
-        glm5_2._validate_rope_angles(angles, torch.empty(2, 8), 4, interleaved, "test consumer")
+        glm5_2._validate_rope_cos_sin(cos_sin, torch.empty(2, 8), 4, interleaved, "test consumer")

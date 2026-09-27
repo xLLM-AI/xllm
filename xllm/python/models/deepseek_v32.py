@@ -172,10 +172,10 @@ def _interleave_rope_with(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor)
 def _apply_half_rope(cos_sin_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
     """Half-rotate RoPE (NeoX style) for ``[T, H, D]`` tensors."""
     half_cos, half_sin = _gather_half_rope_cos_sin(cos_sin_cache, positions)
-    return _apply_half_rope_with_angles(x, half_cos, half_sin)
+    return _apply_half_rope_with_cos_sin(x, half_cos, half_sin)
 
 
-def _apply_half_rope_with_angles(x: torch.Tensor, half_cos: torch.Tensor, half_sin: torch.Tensor) -> torch.Tensor:
+def _apply_half_rope_with_cos_sin(x: torch.Tensor, half_cos: torch.Tensor, half_sin: torch.Tensor) -> torch.Tensor:
     c = half_cos.unsqueeze(1)
     s = half_sin.unsqueeze(1)
     half = half_cos.size(-1)
@@ -976,8 +976,8 @@ class DeepseekV3Indexer(nn.Module):
         k = self.k_norm(k)
         q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
         k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-        q_pe = _apply_half_rope_with_angles(q_pe, half_rope_cos, half_rope_sin)
-        k_pe = _apply_half_rope_with_angles(k_pe.unsqueeze(1), half_rope_cos, half_rope_sin).squeeze(1)
+        q_pe = _apply_half_rope_with_cos_sin(q_pe, half_rope_cos, half_rope_sin)
+        k_pe = _apply_half_rope_with_cos_sin(k_pe.unsqueeze(1), half_rope_cos, half_rope_sin).squeeze(1)
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
 

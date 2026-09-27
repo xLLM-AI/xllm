@@ -97,7 +97,7 @@ def test_indexer_query_and_cache_equal_legacy(
     hidden = torch.randn(rows, 128, dtype=torch.bfloat16, device="npu:0")
     positions = _positions(rows, 1)
     coefficients = rotary(positions.contiguous())
-    angles = glm._indexer_query_rope(interleaved, *coefficients, None)
+    cos_sin = glm._select_indexer_query_cos_sin(interleaved, *coefficients, None)
     q = indexer.wq_b(hidden).view(rows, 4, 128)
     k = indexer.k_norm(indexer.wk(hidden))
 
@@ -123,18 +123,18 @@ def test_indexer_query_and_cache_equal_legacy(
         index_cache_scale=torch.empty(rows, 1, device=hidden.device) if quantized else None,
         update_index_cache=lambda key, scale: written.append((key.clone(), None if scale is None else scale.clone())),
     )
-    before = tuple(angle.clone() for angle in angles)
-    actual_q = indexer._project_query(hidden, angles)
-    indexer._update_index_cache(hidden, ctx, angles)
+    before = tuple(coefficient.clone() for coefficient in cos_sin)
+    actual_q = indexer._project_query(hidden, cos_sin)
+    indexer._update_index_cache(hidden, ctx, cos_sin)
     torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
     torch.testing.assert_close(written[0][0], expected_k, rtol=0, atol=0)
     if quantized:
         torch.testing.assert_close(written[0][1], expected_scale, rtol=0, atol=0)
-    for angle, unchanged in zip(angles, before):
-        torch.testing.assert_close(angle, unchanged, rtol=0, atol=0)
+    for coefficient, unchanged in zip(cos_sin, before):
+        torch.testing.assert_close(coefficient, unchanged, rtol=0, atol=0)
     if interleaved:
         value = q.clone()
-        output = indexer._apply_interleaved_rope(value, angles)
+        output = indexer._apply_interleaved_rope(value, cos_sin)
         assert output.data_ptr() == value.data_ptr()
         torch.testing.assert_close(output[..., 64:], q[..., 64:], rtol=0, atol=0)
 
@@ -178,15 +178,17 @@ def test_aclgraph_changed_positions_and_alternating_target_draft_buckets(
             consumers: int = consumers,
         ) -> tuple[torch.Tensor, ...]:
             coefficients = rotary(positions)
-            angles = glm._indexer_query_rope(interleaved, *coefficients, None)
+            cos_sin = glm._select_indexer_query_cos_sin(interleaved, *coefficients, None)
             value = query.clone()
             for _ in range(consumers):
                 attention_q = ds._interleave_rope_with(value[..., :64], *coefficients[2:])
                 if interleaved:
-                    value = indexer._apply_interleaved_rope(value, angles)
+                    value = indexer._apply_interleaved_rope(value, cos_sin)
                 else:
-                    value = torch.cat((ds._apply_half_rope_with_angles(value[..., :64], *angles), value[..., 64:]), -1)
-                indexer._update_index_cache(key, ctx, angles)
+                    value = torch.cat(
+                        (ds._apply_half_rope_with_cos_sin(value[..., :64], *cos_sin), value[..., 64:]), -1
+                    )
+                indexer._update_index_cache(key, ctx, cos_sin)
             return (*coefficients, attention_q, value, ctx.index_cache.clone())
 
         for _ in range(3):

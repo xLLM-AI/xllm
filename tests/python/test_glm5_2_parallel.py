@@ -331,8 +331,8 @@ def test_glm_dsa_projections_precede_indexer(monkeypatch: pytest.MonkeyPatch, mo
     )
 
     rope = model.model.rotary(torch.arange(num_tokens))
-    query_rope = glm5_2._indexer_query_rope(attention.cfg.indexer_rope_interleave, *rope, cp_context)
-    attention(hidden, *rope, query_rope)
+    query_cos_sin = glm5_2._select_indexer_query_cos_sin(attention.cfg.indexer_rope_interleave, *rope, cp_context)
+    attention(hidden, *rope, query_cos_sin)
 
     assert call_order.index("q_b") < call_order.index("indexer")
     assert call_order.index("kv_a") < call_order.index("indexer")

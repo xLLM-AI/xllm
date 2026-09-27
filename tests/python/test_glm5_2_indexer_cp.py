@@ -139,8 +139,8 @@ def test_short_prompt_indexer_keeps_queries_local_and_returns_padded_topk(rank: 
     local_hidden = cp_shard_rows(global_hidden, plan)
     local_positions = cp_shard_positions(torch.arange(3), plan)
     rope = torch.tensor([[1.0, 0.0]]).expand(3, -1)
-    cache_rope = _gather_half_rope_cos_sin(rope, local_positions)
-    query_rope = tuple(angle.index_select(0, plan.query_index) for angle in cache_rope)
+    key_cos_sin = _gather_half_rope_cos_sin(rope, local_positions)
+    query_cos_sin = tuple(coefficient.index_select(0, plan.query_index) for coefficient in key_cos_sin)
     expected = torch.tensor([[[0]], [[-1]]] if rank == 0 else [[[1]], [[2]]], dtype=torch.int32)
 
     def all_gather(local: torch.Tensor, dim: int, world_size: int, group: str) -> torch.Tensor:
@@ -196,8 +196,8 @@ def test_short_prompt_indexer_keeps_queries_local_and_returns_padded_topk(rank: 
             local_hidden.index_select(0, plan.query_index),
             local_hidden.index_select(0, plan.query_index),
             backend.mla_index_context(SimpleNamespace(layer_id=0)),
-            query_rope,
-            cache_rope,
+            query_cos_sin,
+            key_cos_sin,
             cache_hidden=local_hidden,
         )
 
@@ -316,8 +316,8 @@ def test_packed_chunked_pcp4_preserves_segment_owners_and_prefix(quantized: bool
     metadata.is_chunked_prefill = True
     hidden = cp_shard_rows(torch.arange(1, 7).float().unsqueeze(1).expand(-1, 2), plan)
     positions = cp_shard_positions(torch.tensor([3, 4, 5, 6, 7, 2]), plan)
-    cache_rope = _gather_half_rope_cos_sin(torch.tensor([[1.0, 0.0]]).expand(8, -1), positions)
-    query_rope = tuple(angle.index_select(0, plan.query_index) for angle in cache_rope)
+    key_cos_sin = _gather_half_rope_cos_sin(torch.tensor([[1.0, 0.0]]).expand(8, -1), positions)
+    query_cos_sin = tuple(coefficient.index_select(0, plan.query_index) for coefficient in key_cos_sin)
 
     def all_gather(local: torch.Tensor, dim: int, world_size: int, group: str) -> torch.Tensor:
         assert (dim, world_size, group) == (0, 4, "cp")
@@ -368,8 +368,8 @@ def test_packed_chunked_pcp4_preserves_segment_owners_and_prefix(quantized: bool
             hidden.index_select(0, plan.query_index),
             hidden.index_select(0, plan.query_index),
             backend.mla_index_context(SimpleNamespace(layer_id=0)),
-            query_rope,
-            cache_rope,
+            query_cos_sin,
+            key_cos_sin,
             cache_hidden=hidden,
         )
 
@@ -516,7 +516,7 @@ def test_interleaved_indexer_rope_uses_inplace_partial_kernel() -> None:
 
 
 @pytest.mark.parametrize("multi_stream", [False, True])
-def test_indexer_reuses_interleaved_rope_angles_for_query_and_cache(multi_stream: bool) -> None:
+def test_indexer_reuses_interleaved_cos_sin_for_query_and_key(multi_stream: bool) -> None:
     cfg = glm5_2.Glm52Config(
         hidden_size=2,
         q_lora_rank=2,
@@ -540,7 +540,7 @@ def test_indexer_reuses_interleaved_rope_angles_for_query_and_cache(multi_stream
         materialize_index_cache=lambda: (index_cache, None, block_table),
     )
     hidden = torch.ones(1, 2)
-    angles = (torch.ones(1, 1, 1, 2), torch.zeros(1, 1, 1, 2))
+    cos_sin = (torch.ones(1, 1, 1, 2), torch.zeros(1, 1, 1, 2))
 
     with (
         patch.object(indexer, "_update_index_cache") as update_cache,
@@ -559,18 +559,18 @@ def test_indexer_reuses_interleaved_rope_angles_for_query_and_cache(multi_stream
             create=True,
         ),
     ):
-        indexer.select_qli(hidden, hidden, ctx, angles, angles)
+        indexer.select_qli(hidden, hidden, ctx, cos_sin, cos_sin)
 
     update_cache.assert_called_once_with(
         hidden,
         ctx,
-        angles,
+        cos_sin,
         projected_k=ANY,
     )
 
 
 @pytest.mark.parametrize("multi_stream", [False, True])
-def test_indexer_consumes_explicit_distinct_query_and_cache_angles(multi_stream: bool) -> None:
+def test_indexer_consumes_explicit_distinct_query_and_key_cos_sin(multi_stream: bool) -> None:
     cfg = glm5_2.Glm52Config(
         hidden_size=2,
         q_lora_rank=2,
@@ -595,8 +595,8 @@ def test_indexer_consumes_explicit_distinct_query_and_cache_angles(multi_stream:
         update_index_cache=lambda *_args: None,
     )
     hidden = torch.ones(1, 2)
-    query_rope = (torch.full((1, 1, 1, 2), 2.0), torch.full((1, 1, 1, 2), 3.0))
-    cache_rope = (torch.full((1, 1, 1, 2), 4.0), torch.full((1, 1, 1, 2), 5.0))
+    query_cos_sin = (torch.full((1, 1, 1, 2), 2.0), torch.full((1, 1, 1, 2), 3.0))
+    key_cos_sin = (torch.full((1, 1, 1, 2), 4.0), torch.full((1, 1, 1, 2), 5.0))
     seen: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def partial_rope(value: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, *_args: object) -> None:
@@ -624,13 +624,13 @@ def test_indexer_consumes_explicit_distinct_query_and_cache_angles(multi_stream:
             hidden,
             hidden,
             ctx,
-            query_rope,
-            cache_rope,
+            query_cos_sin,
+            key_cos_sin,
             cache_hidden=hidden,
         )
 
-    expected = (query_rope, cache_rope) if multi_stream else (cache_rope, query_rope)
+    expected = (query_cos_sin, key_cos_sin) if multi_stream else (key_cos_sin, query_cos_sin)
     assert len(seen) == 2
     for actual_pair, expected_pair in zip(seen, expected):
-        for actual, angle in zip(actual_pair, expected_pair):
-            torch.testing.assert_close(actual, angle.view(1, 2))
+        for actual, coefficient in zip(actual_pair, expected_pair):
+            torch.testing.assert_close(actual, coefficient.view(1, 2))
