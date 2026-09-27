@@ -183,3 +183,27 @@ cc_test(
   SRCS openai_protocol_test.cpp
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
+
+cc_test(
+  NAME
+    anthropic_request_utils_test
+  SRCS
+    anthropic_request_utils_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+  ENVIRONMENT
+    "${_api_json_test_env}"
+)
+
+cc_test(
+  NAME
+    anthropic_call_test
+  SRCS
+    anthropic_call_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+  ENVIRONMENT
+    "${_api_json_test_env}"
+)

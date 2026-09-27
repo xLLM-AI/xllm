@@ -374,7 +374,7 @@ TEST(RequestParamsTest, AnthropicToolChoiceDefaults) {
   EXPECT_EQ(unknown_params.tool_choice, "auto");
 }
 
-TEST(RequestParamsTest, AnthropicToolWithoutSchemaUsesEmptyJson) {
+TEST(RequestParamsTest, AnthropicToolSchemaDefaultsToObject) {
   proto::AnthropicMessagesRequest request;
   request.set_model("claude-3");
   request.set_max_tokens(16);
@@ -386,7 +386,7 @@ TEST(RequestParamsTest, AnthropicToolWithoutSchemaUsesEmptyJson) {
 
   ASSERT_EQ(params.tools.size(), 1);
   EXPECT_TRUE(params.tools[0].function.parameters.is_object());
-  EXPECT_TRUE(params.tools[0].function.parameters.empty());
+  EXPECT_EQ(params.tools[0].function.parameters["type"], "object");
 }
 
 TEST(RequestParamsTest, AnthropicToolSchemaUsesPlainJson) {
@@ -442,6 +442,44 @@ TEST(RequestParamsTest, AnthropicToolSchemaUsesPlainJson) {
   nlohmann::json expected_tool_choice = {
       {"type", "function"}, {"function", {{"name", "list_files"}}}};
   EXPECT_EQ(nlohmann::json::parse(params.tool_choice), expected_tool_choice);
+}
+
+TEST(RequestParamsTest,
+     AnthropicOutputEffortAndTemplateArgumentsReachRenderer) {
+  proto::AnthropicMessagesRequest request;
+  request.mutable_output_config()->set_effort("xhigh");
+  auto* field =
+      &(*request.mutable_chat_template_kwargs()->mutable_fields())["custom"];
+  field->set_string_value("value");
+  RequestParams adaptive(request, "", "");
+  EXPECT_EQ(adaptive.chat_template_kwargs["reasoning_effort"], "xhigh");
+  EXPECT_EQ(adaptive.chat_template_kwargs["custom"], "value");
+  EXPECT_EQ(adaptive.chat_template_kwargs["enable_thinking"], true);
+  (*request.mutable_chat_template_kwargs()->mutable_fields())["enable_thinking"]
+      .set_bool_value(false);
+  RequestParams explicit_override(request, "", "");
+  EXPECT_EQ(explicit_override.chat_template_kwargs["enable_thinking"], false);
+  EXPECT_TRUE(explicit_override.request_id.starts_with("chatcmpl-"));
+}
+
+TEST(RequestParamsTest, AnthropicNoneChoiceRetainsToolDefinitions) {
+  proto::AnthropicMessagesRequest request;
+  request.add_tools()->set_name("search");
+  request.mutable_tool_choice()->set_type("none");
+  RequestParams params(request, "", "");
+  EXPECT_EQ(params.tool_choice, "none");
+  ASSERT_EQ(params.tools.size(), 1);
+  EXPECT_EQ(params.tools[0].function.name, "search");
+}
+
+TEST(RequestParamsTest, AnthropicDeferredToolMetadataReachesTemplate) {
+  proto::AnthropicMessagesRequest request;
+  auto* tool = request.add_tools();
+  tool->set_name("search");
+  tool->set_defer_loading(true);
+  RequestParams params(request, "", "");
+  ASSERT_EQ(params.tools.size(), 1);
+  EXPECT_EQ(params.tools[0].function.defer_loading, true);
 }
 
 }  // namespace

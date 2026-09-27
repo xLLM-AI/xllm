@@ -573,6 +573,9 @@ nlohmann::ordered_json normalize_messages(
       function["name"] = tool.function.name;
       function["description"] = tool.function.description;
       function["parameters"] = tool.function.parameters;
+      if (tool.function.defer_loading.has_value()) {
+        function["defer_loading"] = *tool.function.defer_loading;
+      }
       openai_tool["function"] = std::move(function);
       tools_json.emplace_back(std::move(openai_tool));
     }

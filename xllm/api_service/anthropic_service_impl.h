@@ -33,6 +33,10 @@ class AnthropicServiceImpl final : public APIServiceImpl<AnthropicCall> {
                        const std::vector<std::string>& models);
 
   void process_async_impl(std::shared_ptr<AnthropicCall> call) override;
+  void count_tokens(std::shared_ptr<AnthropicCall> call);
+  bool supports_model(const std::string& model) const {
+    return models_.contains(model);
+  }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(AnthropicServiceImpl);

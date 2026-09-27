@@ -53,11 +53,6 @@ std::string generate_rerank_request_id() {
          short_uuid.random();
 }
 
-std::string generate_anthropic_chat_request_id() {
-  return "anthropiccmpl-" + InstanceName::name()->get_name_hash() + "-" +
-         short_uuid.random();
-}
-
 void apply_beam_search_logprobs_default(
     RequestParams& params,
     bool probability_params_explicitly_set) {
@@ -82,8 +77,8 @@ std::string handle_tool_choice(
 
   const auto& tool_choice = rpc_request.tool_choice();
   const std::string& type = tool_choice.type();
-  if (type == "auto") {
-    return "auto";
+  if (type == "auto" || type == "none") {
+    return type;
   } else if (type == "any") {
     return "required";
   } else if (type == "tool") {
@@ -107,11 +102,15 @@ std::string handle_tool_choice(
 std::vector<JsonTool> handle_tools(
     const proto::AnthropicMessagesRequest& request) {
   std::vector<JsonTool> tools;
+  tools.reserve(request.tools_size());
 
   for (const auto& tool : request.tools()) {
     JsonTool json_tool;
     json_tool.type = "function";
     json_tool.function.name = tool.name();
+    if (tool.has_defer_loading()) {
+      json_tool.function.defer_loading = tool.defer_loading();
+    }
     if (tool.has_description()) {
       json_tool.function.description = tool.description();
     }
@@ -123,7 +122,10 @@ std::vector<JsonTool> handle_tools(
       json_tool.function.parameters = nlohmann::json::object();
     }
 
-    tools.push_back(std::move(json_tool));
+    if (!json_tool.function.parameters.contains("type")) {
+      json_tool.function.parameters["type"] = "object";
+    }
+    tools.emplace_back(std::move(json_tool));
   }
 
   return tools;
@@ -555,7 +557,7 @@ RequestParams::RequestParams(const proto::RerankRequest& request,
 RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
-  request_id = generate_anthropic_chat_request_id();
+  request_id = generate_chat_request_id();
   x_request_id = x_rid;
   x_request_time = x_rtime;
   if (x_request_id.empty() && request.has_x_request_id()) {
@@ -591,8 +593,17 @@ RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
   if (request.has_ignore_eos()) {
     ignore_eos = request.ignore_eos();
   }
-  tool_choice = std::move(handle_tool_choice(request));
-  tools = std::move(handle_tools(request));
+  tool_choice = handle_tool_choice(request);
+  tools = handle_tools(request);
+  if (request.has_chat_template_kwargs()) {
+    chat_template_kwargs = proto_struct_to_json(request.chat_template_kwargs());
+  }
+  if (request.has_output_config() && request.output_config().has_effort()) {
+    chat_template_kwargs["reasoning_effort"] = request.output_config().effort();
+    if (!chat_template_kwargs.contains("enable_thinking")) {
+      chat_template_kwargs["enable_thinking"] = true;
+    }
+  }
 }
 
 bool RequestParams::verify_params(OutputCallback callback) const {

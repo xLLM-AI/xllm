@@ -15,8 +15,79 @@ limitations under the License.
 
 #include "api_service/anthropic_stream_utils.h"
 
+#include <google/protobuf/util/json_util.h>
+
 namespace xllm {
 namespace api_service {
+
+std::optional<std::string> convert_anthropic_response(
+    const proto::ChatResponse& chat_response,
+    const std::string& thinking_signature,
+    proto::AnthropicMessagesResponse& anthropic_response,
+    bool include_text) {
+  anthropic_response.Clear();
+
+  // Set basic fields
+  anthropic_response.set_id(chat_response.id());
+  anthropic_response.set_type("message");
+  anthropic_response.set_role("assistant");
+  anthropic_response.set_model(chat_response.model());
+
+  // Set usage
+  if (chat_response.has_usage()) {
+    auto* usage = anthropic_response.mutable_usage();
+    usage->set_input_tokens(chat_response.usage().prompt_tokens());
+    usage->set_output_tokens(chat_response.usage().completion_tokens());
+  }
+
+  // Process first choice
+  if (chat_response.choices_size() > 0) {
+    const auto& choice = chat_response.choices(0);
+
+    // set stop_reason
+    if (choice.has_finish_reason()) {
+      anthropic_response.set_stop_reason(
+          std::move(api_service::convert_finish_reason_to_anthropic(
+              choice.finish_reason())));
+    }
+
+    const auto& message = choice.message();
+    if (!message.reasoning_content().empty()) {
+      auto* block = anthropic_response.add_content();
+      block->set_type("thinking");
+      block->set_thinking(message.reasoning_content());
+      block->set_signature(thinking_signature);
+    }
+    if (include_text && !message.content().empty()) {
+      auto* block = anthropic_response.add_content();
+      block->set_type("text");
+      block->set_text(message.content());
+    }
+
+    // Add tool_use blocks for each tool call
+    if (choice.has_message()) {
+      const auto& message = choice.message();
+      for (const auto& tool_call : message.tool_calls()) {
+        auto* tool_block = anthropic_response.add_content();
+        tool_block->set_type("tool_use");
+        tool_block->set_id(tool_call.id());
+        tool_block->set_name(tool_call.function().name());
+
+        // Parse arguments JSON string to Struct
+        auto status = google::protobuf::util::JsonStringToMessage(
+            tool_call.function().arguments().empty()
+                ? "{}"
+                : tool_call.function().arguments(),
+            tool_block->mutable_input());
+        if (!status.ok()) {
+          return "Model returned invalid tool arguments";
+        }
+      }
+    }
+  }
+
+  return std::nullopt;
+}
 
 std::string convert_finish_reason_to_anthropic(
     const std::string& finish_reason) {
@@ -34,11 +105,12 @@ std::string convert_finish_reason_to_anthropic(
 
 std::string get_stream_stop_reason(bool finished,
                                    bool has_tool_call,
-                                   const std::string& finish_reason) {
+                                   const std::string& finish_reason,
+                                   bool named_tool_choice) {
   if (!finished) {
-    return "stop";
+    return "end_turn";
   }
-  if (has_tool_call) {
+  if (has_tool_call && !named_tool_choice) {
     return "tool_use";
   }
   return convert_finish_reason_to_anthropic(finish_reason);

@@ -222,6 +222,11 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
     std::string json_str) const {
   try {
     auto j = nlohmann::json::parse(json_str);
+    if (!j.is_object()) {
+      return {
+          Status(StatusCode::INVALID_ARGUMENT, "Request must be a JSON object"),
+          ""};
+    }
 
     if (j.contains("messages") && j["messages"].is_array()) {
       for (auto& msg : j["messages"]) {
@@ -238,10 +243,6 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
                 block.value("type", "") != "tool_result") {
               continue;
             }
-            if (block.contains("tool_use_id") && !block.contains("id")) {
-              block["id"] = block["tool_use_id"];
-            }
-            block.erase("tool_use_id");
             if (!block.contains("content")) {
               continue;
             }
@@ -252,12 +253,20 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
             } else if (tool_content.is_array()) {
               block["content_list"] = {{"items", tool_content}};
               block.erase("content");
+            } else {
+              return {Status(StatusCode::INVALID_ARGUMENT,
+                             "tool_result.content must be a string or array"),
+                      ""};
             }
           }
           nlohmann::json content_blocks;
           content_blocks["blocks"] = content;
           msg["content_blocks"] = content_blocks;
           msg.erase("content");
+        } else {
+          return {Status(StatusCode::INVALID_ARGUMENT,
+                         "messages.content must be a string or array"),
+                  ""};
         }
       }
     }
@@ -272,6 +281,10 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
         system_blocks["blocks"] = system;
         j["system_blocks"] = system_blocks;
         j.erase("system");
+      } else if (!system.is_null()) {
+        return {Status(StatusCode::INVALID_ARGUMENT,
+                       "system must be a string or array"),
+                ""};
       }
     }
 

@@ -22,7 +22,7 @@ import "common.proto";
 import "google/protobuf/struct.proto";
 
 // Anthropic API Protocol Definitions
-// Reference: https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/anthropic/protocol.py
+// Reference: vLLM 0.23.0 (0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665).
 
 message AnthropicError {
   string type = 1;
@@ -58,7 +58,7 @@ message AnthropicStructList {
 
 message AnthropicContentBlock {
   // Type of content block: "text", "image", "tool_use", "tool_result",
-  // "thinking", or "redacted_thinking"
+  // "tool_reference", "thinking", or "redacted_thinking"
   string type = 1;
 
   // Text content (for text type)
@@ -94,6 +94,9 @@ message AnthropicContentBlock {
 
   // Redacted thinking data (for redacted_thinking type)
   optional string data = 12;
+
+  optional string tool_use_id = 13;
+  optional string tool_name = 14;
 }
 
 message AnthropicContentBlockList {
@@ -101,7 +104,7 @@ message AnthropicContentBlockList {
 }
 
 message AnthropicMessage {
-  // Role of the message author: "user" or "assistant"
+  // Role of the message author: "user", "assistant", or "system"
   string role = 1;
 
   // Content can be a simple string or a list of content blocks
@@ -121,23 +124,27 @@ message AnthropicTool {
 
   // JSON Schema for the tool's input parameters
   google.protobuf.Struct input_schema = 3;
+  reserved 4;
+  optional bool defer_loading = 5;
 }
 
 message AnthropicToolChoice {
-  // Type of tool choice: "auto", "any", or "tool"
+  // Type of tool choice: "auto", "any", "tool", or "none"
   string type = 1;
 
   // Name of specific tool (required when type is "tool")
   optional string name = 2;
+  reserved 3;
+}
+
+message AnthropicJsonOutputFormat {
+  string type = 1;
+  optional google.protobuf.Struct schema = 2;
 }
 
 message AnthropicOutputConfig {
   optional string effort = 1;
-}
-
-message AnthropicThinkingConfig {
-  string type = 1;
-  optional int32 budget_tokens = 2;
+  optional AnthropicJsonOutputFormat format = 2;
 }
 
 message AnthropicMessagesRequest {
@@ -196,8 +203,12 @@ message AnthropicMessagesRequest {
   // Reasoning output preference supplied by the Anthropic Messages API.
   optional AnthropicOutputConfig output_config = 21;
 
-  // Thinking configuration supplied by the Anthropic Messages API.
-  optional AnthropicThinkingConfig thinking = 22;
+  reserved 22;
+
+  optional google.protobuf.Struct chat_template_kwargs = 23;
+  reserved 24;
+  optional google.protobuf.Struct kv_transfer_params = 25;
+  reserved 26, 27;
 }
 
 message AnthropicDelta {
@@ -219,6 +230,7 @@ message AnthropicDelta {
 
   // Opaque thinking signature (for signature_delta)
   optional string signature = 6;
+  optional string thinking = 7;
 }
 
 message AnthropicStreamEvent {
@@ -268,4 +280,25 @@ message AnthropicMessagesResponse {
 
   // Token usage statistics
   optional AnthropicUsage usage = 8;
+}
+
+message AnthropicCountTokensRequest {
+  string model = 1;
+  repeated AnthropicMessage messages = 2;
+  oneof system_prompt {
+    string system_string = 3;
+    AnthropicContentBlockList system_blocks = 4;
+  }
+  repeated AnthropicTool tools = 5;
+  optional AnthropicToolChoice tool_choice = 6;
+  optional google.protobuf.Struct chat_template_kwargs = 7;
+}
+
+message AnthropicContextManagement {
+  int32 original_input_tokens = 1;
+}
+
+message AnthropicCountTokensResponse {
+  int32 input_tokens = 1;
+  optional AnthropicContextManagement context_management = 2;
 }

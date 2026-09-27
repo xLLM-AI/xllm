@@ -344,6 +344,8 @@ struct JsonFunction {
   std::string description;
   nlohmann::json parameters;
 
+  std::optional<bool> defer_loading;
+
   JsonFunction() = default;
   JsonFunction(const std::string& func_name,
                const std::string& desc,

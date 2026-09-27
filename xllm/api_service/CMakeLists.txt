@@ -22,6 +22,7 @@ cc_library(
     completion_service_impl.h
     rec_completion_service_impl.h
     chat_service_impl.h
+    anthropic_request_utils.h
     anthropic_service_impl.h
     anthropic_stream_utils.h
     sample_service_impl.h
@@ -57,6 +58,7 @@ cc_library(
     completion_service_impl.cpp
     rec_completion_service_impl.cpp
     chat_service_impl.cpp
+    anthropic_request_utils.cpp
     anthropic_service_impl.cpp
     anthropic_stream_utils.cpp
     sample_service_impl.cpp

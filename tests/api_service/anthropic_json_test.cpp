@@ -231,5 +231,79 @@ TEST(AnthropicJsonTest, EmitsSignatureDeltaField) {
   EXPECT_EQ(parsed["delta"]["signature"], "sig_123");
 }
 
+TEST(AnthropicJsonTest, MessageResponseOmitsUnsetStopSequenceLikeVllm) {
+  proto::AnthropicMessagesResponse response;
+  response.set_type("message");
+  response.set_stop_reason("end_turn");
+  std::string json;
+  std::string error;
+  ASSERT_TRUE(api_service::proto_to_anthropic_json(
+      response, json_options(), &json, &error));
+  auto parsed = nlohmann::json::parse(json);
+  EXPECT_FALSE(parsed.contains("stop_sequence"));
+
+  response.set_stop_reason("stop_sequence");
+  response.set_stop_sequence("<stop>");
+  ASSERT_TRUE(api_service::proto_to_anthropic_json(
+      response, json_options(), &json, &error));
+  parsed = nlohmann::json::parse(json);
+  EXPECT_EQ(parsed["stop_sequence"], "<stop>");
+}
+
+TEST(AnthropicJsonTest, StreamEventsMatchVllm023UnsetFieldSerialization) {
+  proto::AnthropicStreamEvent event;
+  event.set_type("message_start");
+  event.mutable_message()->set_type("message");
+  event.mutable_message()->set_role("assistant");
+  event.mutable_message()->mutable_usage();
+  std::string json;
+  std::string error;
+  ASSERT_TRUE(api_service::proto_to_anthropic_json(
+      event, json_options(), &json, &error));
+  auto parsed = nlohmann::json::parse(json);
+  EXPECT_TRUE(parsed["message"].contains("stop_reason"));
+  EXPECT_TRUE(parsed["message"]["stop_reason"].is_null());
+  EXPECT_TRUE(parsed["message"].contains("stop_sequence"));
+  EXPECT_TRUE(parsed["message"]["stop_sequence"].is_null());
+  EXPECT_FALSE(parsed["message"].contains("type"));
+  EXPECT_FALSE(parsed["message"].contains("role"));
+  EXPECT_EQ(parsed["message"]["usage"]["input_tokens"], 0);
+  EXPECT_EQ(parsed["message"]["usage"]["output_tokens"], 0);
+  event.Clear();
+  event.set_type("message_delta");
+  event.mutable_delta()->set_stop_reason("end_turn");
+  ASSERT_TRUE(api_service::proto_to_anthropic_json(
+      event, json_options(), &json, &error));
+  parsed = nlohmann::json::parse(json);
+  EXPECT_FALSE(parsed["delta"].contains("stop_sequence"));
+}
+
+TEST(AnthropicJsonTest, ThinkingDeltaUsesThinkingField) {
+  proto::AnthropicStreamEvent event;
+  event.set_type("content_block_delta");
+  event.set_index(0);
+  event.mutable_delta()->set_type("thinking_delta");
+  event.mutable_delta()->set_thinking("reason");
+  std::string json;
+  std::string error;
+  ASSERT_TRUE(api_service::proto_to_anthropic_json(
+      event, json_options(), &json, &error));
+  const auto parsed = nlohmann::json::parse(json);
+  EXPECT_EQ(parsed["delta"]["thinking"], "reason");
+  EXPECT_FALSE(parsed["delta"].contains("text"));
+}
+
+TEST(AnthropicJsonTest, ZeroTokenCountsRemainPresent) {
+  proto::AnthropicCountTokensResponse response;
+  response.mutable_context_management();
+  std::string json;
+  std::string error;
+  ASSERT_TRUE(api_service::proto_to_anthropic_json(
+      response, json_options(), &json, &error));
+  const auto parsed = nlohmann::json::parse(json);
+  EXPECT_EQ(parsed["input_tokens"], 0);
+  EXPECT_EQ(parsed["context_management"]["original_input_tokens"], 0);
+}
+
 }  // namespace
 }  // namespace xllm

@@ -20,16 +20,24 @@ limitations under the License.
 #include <string>
 
 #include "anthropic.pb.h"
+#include "chat.pb.h"
 
 namespace xllm {
 namespace api_service {
+
+std::optional<std::string> convert_anthropic_response(
+    const proto::ChatResponse& chat_response,
+    const std::string& thinking_signature,
+    proto::AnthropicMessagesResponse& anthropic_response,
+    bool include_text = true);
 
 std::string convert_finish_reason_to_anthropic(
     const std::string& finish_reason);
 
 std::string get_stream_stop_reason(bool finished,
                                    bool has_tool_call,
-                                   const std::string& finish_reason);
+                                   const std::string& finish_reason,
+                                   bool named_tool_choice = false);
 
 std::optional<proto::AnthropicStreamEvent> make_input_json_delta_event(
     int32_t content_block_index,

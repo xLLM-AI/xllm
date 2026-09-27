@@ -46,7 +46,8 @@ class StreamCall : public Call {
              Request* request,
              Response* response,
              bool use_arena = false,
-             bool is_http_request = false)
+             bool is_http_request = false,
+             bool defer_stream_start = false)
       : Call(controller, request_body_x_request_id(request), is_http_request),
         done_(done),
         request_(request),
@@ -56,18 +57,8 @@ class StreamCall : public Call {
                    (std::is_same_v<Response, proto::ChatResponse> ||
                     std::is_same_v<Response, proto::CompletionResponse>);
     stream_ = request_->stream();
-    if (stream_ && !openai_http_) {
-      pa_ = controller_->CreateProgressiveAttachment();
-
-      // Send the first SSE response
-      controller_->http_response().set_content_type(
-          "text/event-stream; charset=utf-8");
-      controller_->http_response().set_status_code(200);
-      controller_->http_response().SetHeader("Connection", "keep-alive");
-      controller_->http_response().SetHeader("Cache-Control", "no-cache");
-      // Done Run first for steam response
-      done_->Run();
-
+    if (stream_ && !openai_http_ && !defer_stream_start) {
+      start_stream();
     } else {
       controller_->http_response().set_content_type("application/json");
     }
@@ -78,7 +69,7 @@ class StreamCall : public Call {
 
   ~StreamCall() override {
     // For non stream response, call brpc done Run
-    if (!stream_ || (openai_http_ && !stream_started_)) {
+    if (!stream_started_) {
       done_->Run();
     }
     if (!use_arena_) {
@@ -151,7 +142,7 @@ class StreamCall : public Call {
       return false;
     }
     if (openai_http_ && !stream_started_) {
-      start_openai_stream();
+      start_stream();
     }
     if (pa_ == nullptr) {
       return false;
@@ -197,7 +188,7 @@ class StreamCall : public Call {
     }
 
     if (openai_http_ && !stream_started_) {
-      start_openai_stream();
+      start_stream();
     }
     io_buf_.clear();
     io_buf_.append("data: [DONE]\n\n");
@@ -260,29 +251,32 @@ class StreamCall : public Call {
     return true;
   }
 
-  void start_openai_stream() {
+  std::string system_fingerprint_;
+  bool openai_http_ = false;
+  proto::Usage stream_usage_;
+
+ protected:
+  void start_stream() {
+    if (stream_started_) {
+      return;
+    }
     pa_ = controller_->CreateProgressiveAttachment();
     controller_->http_response().set_content_type(
         "text/event-stream; charset=utf-8");
     controller_->http_response().set_status_code(200);
-    controller_->http_response().SetHeader("Cache-Control", "no-cache");
     controller_->http_response().SetHeader("Connection", "keep-alive");
+    controller_->http_response().SetHeader("Cache-Control", "no-cache");
     stream_started_ = true;
     done_->Run();
   }
 
-  std::string system_fingerprint_;
-  bool openai_http_ = false;
-  bool stream_started_ = false;
-  proto::Usage stream_usage_;
-
- protected:
   ::google::protobuf::Closure* done_;
 
   Request* request_ = nullptr;
   Response* response_ = nullptr;
 
   bool stream_ = false;
+  bool stream_started_ = false;
   bool use_arena_ = false;
   std::atomic<bool> stream_finished_{false};
   butil::intrusive_ptr<brpc::ProgressiveAttachment> pa_;
@@ -294,8 +288,9 @@ class StreamCall : public Call {
 };
 
 // Anthropic SSE stream call with custom event formatting
-class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
-                                        proto::AnthropicMessagesResponse> {
+class AnthropicCall final
+    : public StreamCall<proto::AnthropicMessagesRequest,
+                        proto::AnthropicMessagesResponse> {
  public:
   AnthropicCall(brpc::Controller* controller,
                 ::google::protobuf::Closure* done,
@@ -304,19 +299,56 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                 bool use_arena = false,
                 bool is_http_request = false)
       : StreamCall<proto::AnthropicMessagesRequest,
-                   proto::AnthropicMessagesResponse>(controller,
-                                                     done,
-                                                     request,
-                                                     response,
-                                                     use_arena,
-                                                     is_http_request) {
+                   proto::AnthropicMessagesResponse>(
+            controller,
+            done,
+            request,
+            response,
+            use_arena,
+            is_http_request,
+            /*defer_stream_start=*/true) {
     // Anthropic responses require empty content arrays to remain visible.
     this->json_options_.jsonify_empty_array = true;
   }
 
-  ~AnthropicCall() {}
+  ~AnthropicCall() override = default;
 
-  bool write_and_finish(proto::AnthropicMessagesResponse& response) {
+  bool finish_with_error(const StatusCode& code, const std::string& message) {
+    int32_t http_status = 500;
+    std::string type = "internal_error";
+    if (code == StatusCode::INVALID_ARGUMENT) {
+      http_status = 400;
+      type = "BadRequestError";
+    } else if (code == StatusCode::RESOURCE_EXHAUSTED) {
+      http_status = 429;
+      type = "rate_limit_error";
+    } else if (code == StatusCode::UNAVAILABLE) {
+      http_status = 503;
+      type = "overloaded_error";
+    }
+    const nlohmann::json error = {
+        {"type", "error"}, {"error", {{"type", type}, {"message", message}}}};
+    if (!this->stream_started_) {
+      this->controller_->http_response().set_status_code(http_status);
+      this->controller_->response_attachment().clear();
+      this->controller_->response_attachment().append(error.dump());
+      return true;
+    }
+    bool written = write("error", error.dump());
+    finish();
+    return written;
+  }
+
+  bool finish() {
+    if (this->stream_finished_.exchange(true, std::memory_order_acq_rel)) {
+      return true;
+    }
+    this->pa_.reset();
+    return true;
+  }
+
+  template <typename ProtoMessage>
+  bool write_and_finish(ProtoMessage& response) {
     std::string json;
     std::string err_msg;
     if (!api_service::proto_to_anthropic_json(
@@ -331,6 +363,10 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
 
   // Write SSE event with Anthropic format: event: <type>\ndata: <json>\n\n
   bool write(const std::string& event_type, const std::string& json_data) {
+    if (this->stream_finished_.load(std::memory_order_acquire)) {
+      return false;
+    }
+    this->start_stream();
     this->io_buf_.clear();
     this->io_buf_.append("event: ");
     this->io_buf_.append(event_type);
@@ -345,21 +381,13 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
   // Write SSE event with proto message
   template <typename ProtoMessage>
   bool write(const std::string& event_type, const ProtoMessage& message) {
-    this->io_buf_.clear();
-    this->io_buf_.append("event: ");
-    this->io_buf_.append(event_type);
-    this->io_buf_.append("\ndata: ");
     std::string json;
     std::string err_msg;
     if (!api_service::proto_to_anthropic_json(
             message, this->json_options_, &json, &err_msg)) {
-      LOG(ERROR) << "Failed to convert proto to json: " << err_msg;
-      return false;
+      return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
-    this->io_buf_.append(json);
-    this->io_buf_.append("\n\n");
-    this->connection_status_ |= this->pa_->Write(this->io_buf_);
-    return this->connection_status_ == 0;
+    return write(event_type, json);
   }
 };
 

@@ -101,6 +101,7 @@ service XllmAPIService {
   rpc ModelVersionsHttp (HttpRequest) returns (HttpResponse);
 
   rpc AnthropicMessagesHttp (HttpRequest) returns (HttpResponse);
+  rpc AnthropicCountTokensHttp (HttpRequest) returns (HttpResponse);
 
   rpc ForkMaster (MasterInfos) returns (Status);
   rpc ForkMasterHttp (HttpRequest) returns (HttpResponse);

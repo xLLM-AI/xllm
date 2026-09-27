@@ -366,6 +366,35 @@ LLMMaster::~LLMMaster() {
   }
 }
 
+void LLMMaster::count_chat_tokens(
+    std::vector<Message> messages,
+    RequestParams params,
+    std::function<void(Status, int32_t)> callback) {
+  threadpool_->schedule([this,
+                         messages = std::move(messages),
+                         params = std::move(params),
+                         callback = std::move(callback)]() {
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+    std::optional<std::string> prompt = chat_template_->apply(
+        messages, params.tools, params.chat_template_kwargs);
+    if (!prompt.has_value()) {
+      callback(Status(StatusCode::INVALID_ARGUMENT,
+                      "Failed to construct prompt from messages"),
+               0);
+      return;
+    }
+    std::vector<int32_t> tokens;
+    if (!tokenizer_->encode(
+            prompt.value(), &tokens, params.add_special_tokens)) {
+      callback(Status(StatusCode::INVALID_ARGUMENT, "Failed to encode prompt"),
+               0);
+      return;
+    }
+    callback(Status(), static_cast<int32_t>(tokens.size()));
+  });
+}
+
 void LLMMaster::handle_batch_request(std::vector<std::string> prompts,
                                      std::vector<RequestParams> sps,
                                      BatchOutputCallback callback) {

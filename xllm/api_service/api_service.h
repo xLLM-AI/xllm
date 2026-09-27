@@ -160,6 +160,11 @@ class APIService : public proto::XllmAPIService {
                              proto::HttpResponse* response,
                              ::google::protobuf::Closure* done) override;
 
+  void AnthropicCountTokensHttp(::google::protobuf::RpcController* controller,
+                                const proto::HttpRequest* request,
+                                proto::HttpResponse* response,
+                                ::google::protobuf::Closure* done) override;
+
   void ForkMaster(::google::protobuf::RpcController* controller,
                   const proto::MasterInfos* request,
                   proto::Status* response,

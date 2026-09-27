@@ -63,6 +63,11 @@ class LLMMaster : public Master {
                       std::optional<Call*> call,
                       OutputCallback callback);
 
+  // Render and tokenize on the request workers without scheduling generation.
+  void count_chat_tokens(std::vector<Message> messages,
+                         RequestParams params,
+                         std::function<void(Status, int32_t)> callback);
+
   // batch completion
   void handle_batch_request(std::vector<std::string> prompts,
                             std::vector<RequestParams> sp,
@@ -83,6 +88,11 @@ class LLMMaster : public Master {
     CHECK(tokenizer_ != nullptr)
         << "tokenizer() is only available on the leader rank (node_rank == 0).";
     return *tokenizer_;
+  }
+
+  const ChatTemplate& chat_template() const {
+    CHECK(chat_template_ != nullptr);
+    return *chat_template_;
   }
 
   // start running loop

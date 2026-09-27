@@ -411,8 +411,8 @@ TEST_F(PreprocessChatJsonTest, AnthropicToolResultRemapped) {
   const auto& blocks = request.messages(0).content_blocks().blocks();
   ASSERT_EQ(blocks.size(), 1);
   EXPECT_EQ(blocks[0].type(), "tool_result");
-  ASSERT_TRUE(blocks[0].has_id());
-  EXPECT_EQ(blocks[0].id(), "call_123");
+  ASSERT_TRUE(blocks[0].has_tool_use_id());
+  EXPECT_EQ(blocks[0].tool_use_id(), "call_123");
   ASSERT_TRUE(blocks[0].has_content_string());
   EXPECT_EQ(blocks[0].content_string(), "total 1\nfile.txt");
 }
@@ -458,8 +458,8 @@ TEST_F(PreprocessChatJsonTest, AnthropicToolResultListRemapped) {
   const auto& blocks = request.messages(0).content_blocks().blocks();
   ASSERT_EQ(blocks.size(), 1);
   EXPECT_EQ(blocks[0].type(), "tool_result");
-  ASSERT_TRUE(blocks[0].has_id());
-  EXPECT_EQ(blocks[0].id(), "call_123");
+  ASSERT_TRUE(blocks[0].has_tool_use_id());
+  EXPECT_EQ(blocks[0].tool_use_id(), "call_123");
   ASSERT_TRUE(blocks[0].has_content_list());
   ASSERT_EQ(blocks[0].content_list().items_size(), 2);
 }

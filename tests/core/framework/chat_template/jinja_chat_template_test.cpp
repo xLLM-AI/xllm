@@ -340,4 +340,68 @@ TEST(JinjaChatTemplate, SupportsUndefinedTests) {
             "configured|present");
 }
 
+TEST(JinjaChatTemplate, PreservesGlmToolResponses) {
+  const std::string template_str = R"JINJA(
+{%- macro is_list_of_outputs(m) -%}
+  {%- if m.content and m.content.0.output is defined -%}1{%- endif -%}
+{%- endmacro -%}
+{%- for m in messages -%}
+  {%- if m.role == 'tool' -%}
+    {{- '<|observation|><tool_response>' -}}
+    {%- if is_list_of_outputs(m) -%}
+      {%- for item in m.content -%}{{- item.output -}}{%- endfor -%}
+    {%- else -%}{{- m.content -}}{%- endif -%}
+    {{- '</tool_response>' -}}
+  {%- elif m.tool_calls -%}
+    {%- for call in m.tool_calls -%}
+      {{- call.function.name -}}{{- call.function.arguments | tojson -}}
+    {%- endfor -%}
+  {%- else -%}{{- m.content -}}{%- endif -%}
+{%- endfor -%}
+)JINJA";
+  TokenizerArgs args;
+  args.chat_template(template_str);
+  TestableJinjaChatTemplate template_(args);
+  const nlohmann::ordered_json tools = nlohmann::ordered_json::array();
+  const nlohmann::ordered_json string_messages = {
+      {{"role", "tool"}, {"content", "Paris is sunny."}}};
+  EXPECT_FALSE(template_.needs_polyfills(string_messages, tools));
+  auto string_result = template_.apply(string_messages);
+  ASSERT_TRUE(string_result.has_value());
+  EXPECT_EQ(*string_result,
+            "<|observation|><tool_response>Paris is sunny.</tool_response>");
+
+  const nlohmann::ordered_json list_messages = {
+      {{"role", "tool"},
+       {"content", {{{"output", "Paris "}}, {{"output", "is sunny."}}}}}};
+  auto list_result = template_.apply(list_messages);
+  ASSERT_TRUE(list_result.has_value());
+  EXPECT_EQ(*list_result, *string_result);
+
+  args.chat_template(
+      "m.content.0.output is defined|"
+      "{{ 'm.content.0.output is defined' }}");
+  TestableJinjaChatTemplate literal_template(args);
+  auto literal_result = literal_template.apply(string_messages);
+  ASSERT_TRUE(literal_result.has_value());
+  EXPECT_EQ(*literal_result,
+            "m.content.0.output is defined|m.content.0.output is defined");
+}
+
+TEST(JinjaChatTemplate, PreservesDeferredToolMetadata) {
+  TokenizerArgs args;
+  args.chat_template(kQwen25ChatTemplate);
+  TestableJinjaChatTemplate chat_template(args);
+  const ChatMessages messages = {Message("user", "hello")};
+  JsonTool tool;
+  tool.function.name = "search";
+  tool.function.parameters = {{"type", "object"}};
+  tool.function.defer_loading = true;
+  const std::vector<JsonTool> tools = {tool};
+  const auto prompt =
+      chat_template.apply(messages, tools, nlohmann::ordered_json::object());
+  ASSERT_TRUE(prompt.has_value());
+  EXPECT_NE(prompt->find("\"defer_loading\": true"), std::string::npos);
+}
+
 }  // namespace xllm

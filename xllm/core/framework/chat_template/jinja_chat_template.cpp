@@ -76,11 +76,18 @@ void replace_undefined_tests(std::string& block) {
     static constexpr char kIsNotNone[] = " is not none";
     static constexpr char kIsUndefined[] = " is undefined";
     static constexpr char kIsNone[] = " is none";
+    static constexpr char kGlmOutputTest[] = "m.content.0.output is defined";
+    static constexpr char kGuardedGlmOutputTest[] =
+        "(m.content is not string and m.content.0.output is defined)";
     if (block.compare(pos, sizeof(kIsNotUndefined) - 1, kIsNotUndefined) == 0) {
       block.replace(pos, sizeof(kIsNotUndefined) - 1, kIsNotNone);
     } else if (block.compare(pos, sizeof(kIsUndefined) - 1, kIsUndefined) ==
                0) {
       block.replace(pos, sizeof(kIsUndefined) - 1, kIsNone);
+    } else if (block.compare(pos, sizeof(kGlmOutputTest) - 1, kGlmOutputTest) ==
+               0) {
+      block.replace(pos, sizeof(kGlmOutputTest) - 1, kGuardedGlmOutputTest);
+      pos += sizeof(kGuardedGlmOutputTest) - 2;
     }
   }
 }
@@ -215,6 +222,10 @@ std::optional<std::string> JinjaChatTemplate::apply(
              {"name", json_tool.function.name},
              {"description", json_tool.function.description},
              {"parameters", json_tool.function.parameters}}}});
+    if (json_tool.function.defer_loading.has_value()) {
+      tools_json.back()["function"]["defer_loading"] =
+          *json_tool.function.defer_loading;
+    }
   }
   // apply the template
   return apply(

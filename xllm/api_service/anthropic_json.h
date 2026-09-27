@@ -114,6 +114,19 @@ inline nlohmann::json normalize_json(const nlohmann::json& value) {
   return value;
 }
 
+inline void add_usage_defaults(nlohmann::json& message) {
+  if (!message.contains("usage")) {
+    return;
+  }
+  auto& usage = message["usage"];
+  if (!usage.contains("input_tokens")) {
+    usage["input_tokens"] = 0;
+  }
+  if (!usage.contains("output_tokens")) {
+    usage["output_tokens"] = 0;
+  }
+}
+
 }  // namespace detail
 
 inline bool proto_to_anthropic_json(const google::protobuf::Message& message,
@@ -128,7 +141,28 @@ inline bool proto_to_anthropic_json(const google::protobuf::Message& message,
 
   try {
     nlohmann::json parsed = nlohmann::json::parse(raw_buf.to_string());
-    *json = detail::normalize_json(parsed).dump();
+    parsed = detail::normalize_json(parsed);
+    const std::string& name = message.GetDescriptor()->full_name();
+    detail::add_usage_defaults(parsed);
+    if (name == "xllm.proto.AnthropicStreamEvent") {
+      const std::string type = parsed.value("type", "");
+      if (type == "message_start") {
+        parsed["message"].erase("type");
+        parsed["message"].erase("role");
+        parsed["message"]["stop_reason"] = nullptr;
+        parsed["message"]["stop_sequence"] = nullptr;
+        detail::add_usage_defaults(parsed["message"]);
+      }
+    } else if (name == "xllm.proto.AnthropicCountTokensResponse") {
+      if (!parsed.contains("input_tokens")) {
+        parsed["input_tokens"] = 0;
+      }
+      if (parsed.contains("context_management") &&
+          !parsed["context_management"].contains("original_input_tokens")) {
+        parsed["context_management"]["original_input_tokens"] = 0;
+      }
+    }
+    *json = parsed.dump();
   } catch (const std::exception& e) {
     *err_msg = e.what();
     return false;

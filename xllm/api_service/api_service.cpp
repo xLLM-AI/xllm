@@ -26,6 +26,7 @@ limitations under the License.
 #include <limits>
 #include <sstream>
 
+#include "api_service/anthropic_request_utils.h"
 #include "api_service/chat_json_parser.h"
 #include "api_service/chat_request_decoder.h"
 #include "api_service/openai_http.h"
@@ -1048,54 +1049,123 @@ void APIService::ModelVersionsHttp(
 
 namespace {
 
+void anthropic_http_error(brpc::Controller* ctrl,
+                          int32_t status,
+                          const std::string& type,
+                          const std::string& message) {
+  ctrl->http_response().set_status_code(status);
+  ctrl->http_response().set_content_type("application/json");
+  ctrl->response_attachment().clear();
+  ctrl->response_attachment().append(
+      nlohmann::json({{"type", "error"},
+                      {"error", {{"type", type}, {"message", message}}}})
+          .dump());
+}
+
 void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
                                xllm::ClosureGuard& guard,
                                brpc::Controller* ctrl,
-                               const proto::HttpRequest* request,
-                               proto::HttpResponse* response) {
-  auto arena = GetArenaWithCheck<AnthropicCall>(response);
-  auto req_pb =
-      google::protobuf::Arena::CreateMessage<typename AnthropicCall::ReqType>(
-          arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<typename AnthropicCall::ResType>(
-          arena);
-
-  auto content_len = get_json_content_length(ctrl);
-  if (content_len == (size_t)-1L) {
-    ctrl->SetFailed("Content-Length header is missing.");
+                               proto::HttpResponse* response,
+                               bool count_tokens) {
+  if (ctrl->http_request().method() != brpc::HTTP_METHOD_POST) {
+    ctrl->http_response().set_status_code(405);
+    ctrl->http_response().set_content_type("application/json");
+    ctrl->http_response().SetHeader("Allow", "POST");
+    ctrl->response_attachment().append(R"({"detail":"Method Not Allowed"})");
     return;
   }
-  std::string attachment;
-  ctrl->request_attachment().copy_to(&attachment, content_len, 0);
-
+  const std::string& content_type = ctrl->http_request().content_type();
+  std::string media_type = content_type.substr(0, content_type.find(';'));
+  std::transform(media_type.begin(),
+                 media_type.end(),
+                 media_type.begin(),
+                 [](unsigned char value) { return std::tolower(value); });
+  if (media_type != "application/json") {
+    api_service::write_openai_error(
+        ctrl,
+        StatusCode::INVALID_ARGUMENT,
+        "Unsupported Media Type: Only 'application/json' is allowed",
+        "",
+        /*schema_error=*/true);
+    return;
+  }
+  if (!service) {
+    anthropic_http_error(
+        ctrl,
+        501,
+        "NotImplementedError",
+        "Anthropic messages API is only supported for LLM engine");
+    return;
+  }
   auto [preprocess_status, processed_json] =
-      ChatJsonParser::anthropic().preprocess(std::move(attachment));
+      ChatJsonParser::anthropic().preprocess(
+          ctrl->request_attachment().to_string());
   if (!preprocess_status.ok()) {
-    ctrl->SetFailed(preprocess_status.message());
-    LOG(ERROR) << "Anthropic JSON preprocessing failed: "
-               << preprocess_status.message();
+    api_service::write_openai_error(ctrl,
+                                    StatusCode::INVALID_ARGUMENT,
+                                    preprocess_status.message(),
+                                    "",
+                                    /*schema_error=*/true);
     return;
   }
-
-  google::protobuf::util::JsonParseOptions options;
-  options.ignore_unknown_fields = true;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      processed_json, req_pb, options);
+  proto::AnthropicMessagesRequest parsed_request;
+  const Status status = api_service::parse_anthropic_request(
+      processed_json, count_tokens, parsed_request);
   if (!status.ok()) {
-    ctrl->SetFailed(status.ToString());
-    LOG(ERROR) << "parse json to proto failed: " << status.ToString();
+    api_service::write_openai_error(ctrl,
+                                    StatusCode::INVALID_ARGUMENT,
+                                    status.message(),
+                                    "",
+                                    /*schema_error=*/true);
     return;
   }
-
+  Status validation =
+      api_service::validate_anthropic_request(parsed_request, count_tokens);
+  if (!validation.ok()) {
+    api_service::write_openai_error(ctrl,
+                                    StatusCode::INVALID_ARGUMENT,
+                                    validation.message(),
+                                    "",
+                                    /*schema_error=*/true);
+    return;
+  }
+  if (!service->supports_model(parsed_request.model())) {
+    anthropic_http_error(
+        ctrl,
+        404,
+        "NotFoundError",
+        "The model `" + parsed_request.model() + "` does not exist.");
+    return;
+  }
+  const Status backend =
+      api_service::validate_anthropic_backend(parsed_request, count_tokens);
+  if (!backend.ok()) {
+    const bool internal = backend.code() == StatusCode::UNKNOWN;
+    anthropic_http_error(ctrl,
+                         internal ? 500 : 400,
+                         internal ? "internal_error" : "BadRequestError",
+                         backend.message());
+    return;
+  }
+  auto* arena = GetArenaWithCheck<AnthropicCall>(response);
+  auto* req_pb =
+      google::protobuf::Arena::CreateMessage<proto::AnthropicMessagesRequest>(
+          arena);
+  req_pb->Swap(&parsed_request);
+  auto* resp_pb =
+      google::protobuf::Arena::CreateMessage<proto::AnthropicMessagesResponse>(
+          arena);
   auto call = std::make_shared<AnthropicCall>(ctrl,
                                               guard.release(),
                                               req_pb,
                                               resp_pb,
                                               /*use_arena=*/arena != nullptr,
                                               /*is_http_request=*/true);
-
-  service->process_async(call);
+  if (count_tokens) {
+    service->count_tokens(std::move(call));
+  } else {
+    service->process_async(std::move(call));
+  }
 }
 
 }  // namespace
@@ -1120,13 +1190,34 @@ void APIService::AnthropicMessagesHttp(
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
 
-  if (anthropic_service_impl_) {
-    handle_anthropic_messages(
-        anthropic_service_impl_, done_guard, ctrl, request, response);
-  } else {
-    ctrl->SetFailed("Anthropic messages API is only supported for LLM engine");
-    LOG(ERROR) << "Anthropic messages API is only supported for LLM engine";
+  handle_anthropic_messages(anthropic_service_impl_,
+                            done_guard,
+                            ctrl,
+                            response,
+                            /*count_tokens=*/false);
+}
+
+void APIService::AnthropicCountTokensHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  xllm::ClosureGuard done_guard(
+      done,
+      [](void* /*unused*/) { request_in_metric(nullptr); },
+      [controller](void* /*unused*/) {
+        request_out_metric(static_cast<void*>(controller));
+      });
+  if (!request || !response || !controller) {
+    return;
   }
+  auto* ctrl = static_cast<brpc::Controller*>(controller);
+  api_service::ensure_http_x_request_id(ctrl);
+  handle_anthropic_messages(anthropic_service_impl_,
+                            done_guard,
+                            ctrl,
+                            response,
+                            /*count_tokens=*/true);
 }
 
 bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
