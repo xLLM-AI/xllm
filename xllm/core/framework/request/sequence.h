@@ -156,11 +156,14 @@ class Sequence {
 
   // Full-prompt mRoPE positions cache, see `mrope_positions_`.
   void set_mrope_positions(const torch::Tensor& positions) {
+    CHECK(!positions.defined() || positions.dim() == 2)
+        << "mrope_positions must be 2-D [3, num_tokens], got dim="
+        << (positions.defined() ? positions.dim() : -1);
     mrope_positions_ = positions;
   }
   const torch::Tensor& mrope_positions() const { return mrope_positions_; }
   bool has_mrope_positions() const {
-    return mrope_positions_.defined() &&
+    return mrope_positions_.defined() && mrope_positions_.dim() == 2 &&
            mrope_positions_.size(1) == static_cast<int64_t>(num_tokens_);
   }
 
