@@ -79,6 +79,7 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/eplb/eplb_utils.h"
 #include "framework/kv_cache/kv_cache.h"
@@ -1073,10 +1074,47 @@ void WorkerImpl::prepare_dp_ep_padding(ModelInputParams& input_params) {
     }
   }
 
-  torch::Tensor token_size_per_dp_group = make_cpu_tensor(token_sizes);
+  const bool speculative_target_graph_decode =
+      input_params.meta.batch_forward_type.is_decode() &&
+      ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+      options_.enable_speculative_decode() && !options_.is_draft_engine() &&
+      token_sizes.size() > 1 &&
+      input_params.parallel.dp_is_decode.size() == token_sizes.size() &&
+      std::all_of(input_params.parallel.dp_is_decode.begin(),
+                  input_params.parallel.dp_is_decode.end(),
+                  [](int32_t is_decode) { return is_decode != 0; });
+  bool use_graph_padding = false;
+  int32_t graph_token_size = 0;
+  if (speculative_target_graph_decode) {
+    const int32_t max_token_size =
+        *std::max_element(token_sizes.begin(), token_sizes.end());
+    graph_token_size =
+        static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
+            max_token_size,
+            ::xllm::ExecutionConfig::get_instance()
+                .enable_graph_mode_decode_no_padding()));
+    use_graph_padding = std::any_of(token_sizes.begin(),
+                                    token_sizes.end(),
+                                    [graph_token_size](int32_t token_count) {
+                                      return token_count != graph_token_size;
+                                    });
+  }
+  std::vector<int32_t> graph_padded_token_sizes;
+  const std::vector<int32_t>* padded_token_sizes = &token_sizes;
+  if (use_graph_padding) {
+    graph_padded_token_sizes = runtime::get_decode_graph_dp_token_counts(
+        token_sizes, graph_token_size);
+    padded_token_sizes = &graph_padded_token_sizes;
+  }
+
+  const std::vector<int32_t>& effective_raw_token_sizes =
+      raw_token_sizes.empty() ? token_sizes : raw_token_sizes;
+
+  torch::Tensor token_size_per_dp_group = make_cpu_tensor(*padded_token_sizes);
   torch::Tensor raw_token_size_per_dp_group =
-      raw_token_sizes.empty() ? torch::Tensor()
-                              : make_cpu_tensor(raw_token_sizes);
+      raw_token_sizes.empty() && !use_graph_padding
+          ? torch::Tensor()
+          : make_cpu_tensor(effective_raw_token_sizes);
   DpEpPadding dp_ep_padding(token_size_per_dp_group,
                             raw_token_size_per_dp_group,
                             context_.get_model_args().num_experts_per_tok(),
