@@ -33,6 +33,7 @@ cc_test(
   DEPS
     :multimodal
     :parallel_state
+    :request
     torch
     glog::glog
     proto::xllm_proto

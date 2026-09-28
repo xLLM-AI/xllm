@@ -606,11 +606,18 @@ void APIService::ImageGenerationHttp(
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
+  const size_t json_content_length = get_json_content_length(ctrl);
+  if (json_content_length == static_cast<size_t>(-1L)) {
+    ctrl->SetFailed("Content-Length header is missing.");
+    return;
+  }
+  std::string json_payload;
+  ctrl->request_attachment().copy_to(
+      &json_payload, json_content_length, /*pos=*/0);
+
   std::string error;
   json2pb::Json2PbOptions options;
-  butil::IOBuf& buf = ctrl->request_attachment();
-  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
-  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  auto st = json2pb::JsonToProtoMessage(json_payload, req_pb, options, &error);
   if (!st) {
     ctrl->SetFailed(error);
     LOG(ERROR) << "parse json to proto failed: " << error;
@@ -665,11 +672,19 @@ void APIService::AudioGenerationHttp(
 
   brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
+  const size_t json_content_length = get_json_content_length(ctrl);
+  if (json_content_length == static_cast<size_t>(-1L)) {
+    ctrl->SetFailed("Content-Length header is missing.");
+    return;
+  }
+  std::string json_payload;
+  ctrl->request_attachment().copy_to(
+      &json_payload, json_content_length, /*pos=*/0);
+
   std::string error;
   json2pb::Json2PbOptions options;
-  butil::IOBuf& buf = ctrl->request_attachment();
-  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
-  bool st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  const bool st =
+      json2pb::JsonToProtoMessage(json_payload, req_pb, options, &error);
   if (!st) {
     ctrl->SetFailed(error);
     LOG(ERROR) << "parse json to proto failed: " << error;
@@ -783,11 +798,18 @@ void APIService::VideoGenerationHttp(
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
+  const size_t json_content_length = get_json_content_length(ctrl);
+  if (json_content_length == static_cast<size_t>(-1L)) {
+    ctrl->SetFailed("Content-Length header is missing.");
+    return;
+  }
+  std::string json_payload;
+  ctrl->request_attachment().copy_to(
+      &json_payload, json_content_length, /*pos=*/0);
+
   std::string error;
   json2pb::Json2PbOptions options;
-  butil::IOBuf& buf = ctrl->request_attachment();
-  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
-  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  auto st = json2pb::JsonToProtoMessage(json_payload, req_pb, options, &error);
   if (!st) {
     ctrl->SetFailed(error);
     LOG(ERROR) << "parse json to proto failed: " << error;

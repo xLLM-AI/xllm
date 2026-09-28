@@ -22,6 +22,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "dit_input_sources.h"
 #include "dit_request_output.h"
 
 namespace xllm {
@@ -56,9 +57,7 @@ struct DiTGenerationParams {
            audio_guidance_method == other.audio_guidance_method &&
            audio_sampling_rate == other.audio_sampling_rate &&
            num_videos_per_prompt == other.num_videos_per_prompt &&
-           num_frames == other.num_frames &&
-           force_video_output == other.force_video_output &&
-           video_fps == other.video_fps &&
+           num_frames == other.num_frames && video_fps == other.video_fps &&
            guidance_scale_2 == other.guidance_scale_2 &&
            seconds == other.seconds && boundary_ratio == other.boundary_ratio &&
            flow_shift == other.flow_shift &&
@@ -118,8 +117,6 @@ struct DiTGenerationParams {
 
   int32_t num_frames = 81;
 
-  bool force_video_output = false;
-
   double video_fps = 8.0;
 
   float guidance_scale_2 = 1.0;
@@ -152,32 +149,9 @@ struct DiTInputParams {
   // Secondary negative prompt to exclude additional unwanted features
   std::string negative_prompt_2;
 
-  torch::Tensor prompt_embed;
+  DiTImageSources image_sources;
 
-  torch::Tensor pooled_prompt_embed;
-
-  torch::Tensor negative_prompt_embed;
-
-  torch::Tensor negative_pooled_prompt_embed;
-
-  torch::Tensor latent;
-
-  torch::Tensor image;
-
-  std::vector<torch::Tensor> images;
-
-  torch::Tensor control_image;
-
-  torch::Tensor mask_image;
-
-  torch::Tensor masked_image_latent;
-
-  // Video-specific input fields
-  torch::Tensor last_image;
-
-  // Prompt audio for voice cloning (LongCat-AudioDiT).
-  // Float32 PCM, shape (1, num_samples), mono 24 kHz.
-  torch::Tensor prompt_audio;
+  DiTTensorSources tensor_sources;
 
   // Transcript of the prompt audio (for duration estimation).
   std::string audio_prompt_text;

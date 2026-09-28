@@ -24,6 +24,7 @@ limitations under the License.
 #include "distributed_runtime/dit_master.h"
 #include "framework/request/dit_request_output.h"
 #include "framework/request/dit_request_params.h"
+#include "mm_service_utils.h"
 #include "util/utils.h"
 #include "util/uuid.h"
 
@@ -34,6 +35,7 @@ bool send_result_to_client_brpc(std::shared_ptr<ImageGenerationCall> call,
                                 const std::string& request_id,
                                 int64_t created_time,
                                 const std::string& model,
+                                const std::string& output_type,
                                 const DiTRequestOutput& req_output) {
   auto& response = call->response();
   response.set_object("list");
@@ -44,19 +46,29 @@ bool send_result_to_client_brpc(std::shared_ptr<ImageGenerationCall> call,
   const std::vector<DiTGenerationOutput>& outputs = req_output.outputs;
   proto_output->mutable_results()->Reserve(outputs.size());
 
+  const bool use_binary_output = output_type == "binary";
   std::string image;
+  std::string binary_payload;
   for (const auto& output : outputs) {
-    auto* proto_result = proto_output->add_results();
+    proto::ImageGenData* proto_result = proto_output->add_results();
 
-    image.clear();
-    butil::Base64Encode(output.image, &image);
-
-    proto_result->set_image(image);
+    if (use_binary_output) {
+      proto::MediaSource* image_source = proto_result->mutable_image_source();
+      image_source->set_type("binary");
+      image_source->set_name("image");
+      mm_service_utils::append_binary_payload(
+          output.image, *image_source->mutable_binary(), binary_payload);
+    } else {
+      image.clear();
+      butil::Base64Encode(output.image, &image);
+      proto_result->set_image(image);
+    }
     proto_result->set_width(output.width);
     proto_result->set_height(output.height);
     proto_result->set_seed(output.seed);
   }
-  return call->write_and_finish(response);
+  return use_binary_output ? call->write_and_finish(response, binary_payload)
+                           : call->write_and_finish(response);
 }
 
 }  // namespace
@@ -88,18 +100,21 @@ void ImageGenerationServiceImpl::process_async_impl(
   }
 
   // create DiTRequestParams for image generation request
-  DiTRequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+  DiTRequestParams request_params(rpc_request,
+                                  call->get_x_request_id(),
+                                  call->get_x_request_time(),
+                                  call->take_request_payload());
 
   auto saved_request_id = request_params.request_id;
+  std::string output_type = request_params.output_type;
   // schedule the request
   master_->handle_request(
       std::move(request_params),
       call.get(),
       [call,
        model,
-       master = master_,
        request_id = std::move(saved_request_id),
+       output_type = std::move(output_type),
        created_time = absl::ToUnixSeconds(absl::Now())](
           const DiTRequestOutput& req_output) -> bool {
         if (req_output.status.has_value()) {
@@ -110,7 +125,7 @@ void ImageGenerationServiceImpl::process_async_impl(
         }
 
         return send_result_to_client_brpc(
-            call, request_id, created_time, model, req_output);
+            call, request_id, created_time, model, output_type, req_output);
       });
 }
 

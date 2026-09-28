@@ -118,8 +118,15 @@ torch::Tensor convert_rec_tensor_to_torch(
 
 torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor);
 
+torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor,
+                             const std::string& binary_payload);
+
 bool torch_to_proto(const torch::Tensor& torch_tensor,
                     proto::Tensor* proto_tensor);
+
+bool torch_to_proto(const torch::Tensor& torch_tensor,
+                    proto::Tensor* proto_tensor,
+                    std::string& binary_payload);
 
 int32_t ceil_pow2(int32_t n);
 

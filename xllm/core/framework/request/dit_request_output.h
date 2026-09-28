@@ -31,8 +31,11 @@ struct DiTGenerationOutput {
   // the index of the sequence in the request.
   size_t index;
 
-  // the generated image/video as base64-encoded data.
+  // the generated image as encoded image bytes.
   std::string image;
+
+  // the generated video as encoded video bytes.
+  std::string video;
 
   // the generated audio as raw WAV bytes (audio models only).
   std::string audio;

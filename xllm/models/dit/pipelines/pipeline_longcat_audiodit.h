@@ -228,9 +228,10 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
     torch::Tensor prompt_latent;  // (B, prompt_frames, latent_dim)
     int64_t prompt_dur = 0;
 
-    if (input.prompt_audio.defined() && input.prompt_audio.numel() > 0) {
-      std::tie(prompt_latent, prompt_dur) =
-          encode_prompt_audio(input.prompt_audio);
+    std::optional<torch::Tensor> prompt_audio =
+        input.tensor_sources.get("prompt_audio");
+    if (prompt_audio.has_value() && prompt_audio->numel() > 0) {
+      std::tie(prompt_latent, prompt_dur) = encode_prompt_audio(*prompt_audio);
     } else {
       prompt_latent =
           torch::empty({batch_size, 0, vae_->latent_dim_},

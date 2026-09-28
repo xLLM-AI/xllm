@@ -21,6 +21,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <cstring>
+#include <limits>
 
 #include "util/tensor_helper.h"
 
@@ -419,6 +421,89 @@ bool set_data_to_contents(proto::TensorContents* contents,
 }
 }  // namespace
 
+torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor,
+                             const std::string& binary_payload) {
+  const auto& parameters = proto_tensor.parameters();
+  auto binary_it = parameters.find("is_binary");
+  const bool is_binary = binary_it != parameters.end() &&
+                         binary_it->second.has_bool_param() &&
+                         binary_it->second.bool_param();
+  if (!is_binary) {
+    return proto_to_torch(proto_tensor);
+  }
+
+  auto offset_it = parameters.find("offset");
+  auto length_it = parameters.find("len");
+  if (offset_it == parameters.end() || length_it == parameters.end() ||
+      !offset_it->second.has_int64_param() ||
+      !length_it->second.has_int64_param()) {
+    LOG(ERROR) << "Binary Tensor requires int64 offset and len parameters";
+    return torch::Tensor();
+  }
+
+  const int64_t offset = offset_it->second.int64_param();
+  const int64_t length = length_it->second.int64_param();
+  if (offset < 0 || length <= 0) {
+    LOG(ERROR) << "Binary Tensor has invalid offset or len";
+    return torch::Tensor();
+  }
+  const size_t payload_offset = static_cast<size_t>(offset);
+  const size_t payload_length = static_cast<size_t>(length);
+  if (payload_offset > binary_payload.size() ||
+      payload_length > binary_payload.size() - payload_offset) {
+    LOG(ERROR) << "Binary Tensor range exceeds request payload";
+    return torch::Tensor();
+  }
+  if (proto_tensor.datatype().empty() || proto_tensor.shape().empty()) {
+    LOG(ERROR) << "Binary Tensor requires datatype and shape";
+    return torch::Tensor();
+  }
+  static const std::unordered_set<std::string> kSupportedDatatypes = {"BOOL",
+                                                                      "INT32",
+                                                                      "INT64",
+                                                                      "UINT32",
+                                                                      "UINT64",
+                                                                      "FP32",
+                                                                      "FP64",
+                                                                      "BYTES",
+                                                                      "FP16",
+                                                                      "BF16"};
+  if (!kSupportedDatatypes.contains(proto_tensor.datatype())) {
+    LOG(ERROR) << "Binary Tensor has unsupported datatype: "
+               << proto_tensor.datatype();
+    return torch::Tensor();
+  }
+
+  const torch::ScalarType dtype =
+      datatype_proto_to_torch(proto_tensor.datatype());
+  const size_t element_size = torch::elementSize(dtype);
+  size_t element_count = 1;
+  std::vector<int64_t> shape;
+  shape.reserve(proto_tensor.shape_size());
+  for (const int64_t dimension : proto_tensor.shape()) {
+    if (dimension <= 0 ||
+        static_cast<size_t>(dimension) >
+            std::numeric_limits<size_t>::max() / element_count) {
+      LOG(ERROR) << "Binary Tensor has invalid or overflowing shape";
+      return torch::Tensor();
+    }
+    element_count *= static_cast<size_t>(dimension);
+    shape.emplace_back(dimension);
+  }
+  if (element_count > std::numeric_limits<size_t>::max() / element_size ||
+      element_count * element_size != payload_length) {
+    LOG(ERROR) << "Binary Tensor byte length does not match dtype and shape";
+    return torch::Tensor();
+  }
+
+  torch::Tensor tensor =
+      torch::empty(shape, torch::TensorOptions().dtype(dtype));
+  std::memcpy(tensor.data_ptr(),
+              binary_payload.data() + payload_offset,
+              payload_length);
+  return tensor;
+}
+
 torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor) {
   if (proto_tensor.datatype().empty()) {
     LOG(ERROR) << "Proto Tensor missing required field: datatype (e.g., "
@@ -510,6 +595,57 @@ torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor) {
 }
 
 bool torch_to_proto(const torch::Tensor& torch_tensor,
+                    proto::Tensor* proto_tensor,
+                    std::string& binary_payload) {
+  if (!torch_tensor.defined() || torch_tensor.numel() == 0) {
+    LOG(ERROR) << "Cannot serialize an undefined or empty binary Tensor";
+    return false;
+  }
+
+  const torch::Tensor contiguous_tensor = torch_tensor.contiguous().cpu();
+  const std::string datatype =
+      torch_datatype_to_proto(contiguous_tensor.scalar_type());
+  if (datatype.empty()) {
+    return false;
+  }
+
+  proto_tensor->set_datatype(datatype);
+  proto_tensor->clear_shape();
+  for (const int64_t dimension : contiguous_tensor.sizes()) {
+    if (dimension <= 0) {
+      LOG(ERROR) << "Binary Tensor has invalid dimension: " << dimension;
+      return false;
+    }
+    proto_tensor->add_shape(dimension);
+  }
+  proto_tensor->clear_contents();
+  proto_tensor->clear_parameters();
+
+  const size_t element_count = static_cast<size_t>(contiguous_tensor.numel());
+  const size_t element_size =
+      static_cast<size_t>(contiguous_tensor.element_size());
+  if (element_count > std::numeric_limits<size_t>::max() / element_size) {
+    LOG(ERROR) << "Binary Tensor byte length overflows size_t";
+    return false;
+  }
+  const size_t byte_length = element_count * element_size;
+  const size_t offset = binary_payload.size();
+  if (offset > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
+      byte_length > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+    LOG(ERROR) << "Binary Tensor offset or byte length exceeds int64 range";
+    return false;
+  }
+  auto* parameters = proto_tensor->mutable_parameters();
+  (*parameters)["is_binary"].set_bool_param(true);
+  (*parameters)["offset"].set_int64_param(static_cast<int64_t>(offset));
+  (*parameters)["len"].set_int64_param(static_cast<int64_t>(byte_length));
+  binary_payload.append(
+      static_cast<const char*>(contiguous_tensor.const_data_ptr()),
+      byte_length);
+  return true;
+}
+
+bool torch_to_proto(const torch::Tensor& torch_tensor,
                     proto::Tensor* proto_tensor) {
   if (!torch_tensor.defined()) {
     LOG(ERROR) << "Input torch Tensor is undefined (null)";
@@ -526,6 +662,7 @@ bool torch_to_proto(const torch::Tensor& torch_tensor,
     return false;
   }
   proto_tensor->set_datatype(proto_datatype);
+  proto_tensor->clear_parameters();
 
   proto_tensor->clear_shape();
   int64_t total_elements = 1;

@@ -849,30 +849,28 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 
     auto prompts = input.prompts;
     auto negative_prompts = input.negative_prompts;
-    auto latents = input.latents;
+    auto latents = input.tensor_sources.get("latent").value_or(torch::Tensor());
     if (latents.defined()) {
       latents = latents.to(options_.device(), dtype_);
     }
 
-    auto prompt_embeds = input.prompt_embeds;
+    auto prompt_embeds =
+        input.tensor_sources.get("prompt_embed").value_or(torch::Tensor());
     if (prompt_embeds.defined()) {
       prompt_embeds = prompt_embeds.to(options_.device(), dtype_);
     }
     torch::Tensor prompt_embeds_mask;
 
-    auto negative_prompt_embeds = input.negative_prompt_embeds;
+    auto negative_prompt_embeds =
+        input.tensor_sources.get("negative_prompt_embed")
+            .value_or(torch::Tensor());
     if (negative_prompt_embeds.defined()) {
       negative_prompt_embeds =
           negative_prompt_embeds.to(options_.device(), dtype_);
     }
     torch::Tensor negative_prompt_embeds_mask;
 
-    std::vector<torch::Tensor> raw_image_inputs;
-    if (!input.images_list.empty()) {
-      raw_image_inputs = input.images_list;
-    } else if (input.images.defined()) {
-      raw_image_inputs.emplace_back(input.images);
-    }
+    std::vector<torch::Tensor> raw_image_inputs = input.image_sources.get();
 
     std::vector<torch::Tensor> image_list;
     image_list.reserve(raw_image_inputs.size());
@@ -888,7 +886,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     }
 
     if (image_list.empty() && !raw_image_inputs.empty()) {
-      LOG(FATAL) << "No valid images found in images or images_list. ";
+      LOG(FATAL) << "No valid images found in image_sources.";
     }
 
     int64_t batch_size = input.batch_size;

@@ -128,18 +128,110 @@ void DiTRequest::update_connection_status() {
 }
 
 void DiTRequest::handle_forward_output(torch::Tensor output) {
-  // Pipeline already chunks by batch size along dim 0 before calling here.
-  // For image models, also split by num_images_per_prompt.
-  // For video models, split by num_images_per_prompt * num_videos_per_prompt.
-  // For audio models, num_images_per_prompt defaults to 1 so this is a no-op.
-  const int32_t count =
-      static_cast<int32_t>(state_.generation_params().num_images_per_prompt *
-                           state_.generation_params().num_videos_per_prompt);
-  output_.tensors = torch::chunk(output, count);
+  uint32_t output_count = 1;
+  switch (state_.request_kind()) {
+    case DiTRequestKind::kImage:
+      output_count = state_.generation_params().num_images_per_prompt;
+      break;
+    case DiTRequestKind::kVideo:
+      output_count = state_.generation_params().num_videos_per_prompt;
+      break;
+    case DiTRequestKind::kAudio:
+      break;
+    case DiTRequestKind::kText:
+      LOG(FATAL) << "Text request must not contain tensor output";
+  }
+  output_.tensors = torch::chunk(output, static_cast<int32_t>(output_count));
 }
 
 void DiTRequest::handle_forward_text_output(const std::string& text) {
   output_.text_output.push_back(text);
+}
+
+std::vector<DiTGenerationOutput> DiTRequest::generate_image_outputs() const {
+  const DiTGenerationParams& params = state_.generation_params();
+  CHECK_EQ(output_.tensors.size(), params.num_images_per_prompt);
+
+  std::vector<DiTGenerationOutput> outputs;
+  outputs.reserve(output_.tensors.size());
+  OpenCVImageEncoder encoder;
+  for (size_t index = 0; index < output_.tensors.size(); ++index) {
+    torch::Tensor tensor = output_.tensors[index]
+                               .squeeze(0)
+                               .cpu()
+                               .to(torch::kFloat32)
+                               .contiguous();
+    CHECK_EQ(tensor.dim(), 3);
+    DiTGenerationOutput output;
+    output.index = index;
+    output.seed = params.seed;
+    output.seed_is_set = params.seed_is_set;
+    output.height = params.height;
+    output.width = params.width;
+    CHECK(encoder.encode(tensor, output.image));
+    outputs.emplace_back(std::move(output));
+  }
+  return outputs;
+}
+
+std::vector<DiTGenerationOutput> DiTRequest::generate_video_outputs() const {
+  const DiTGenerationParams& params = state_.generation_params();
+  CHECK_EQ(output_.tensors.size(), params.num_videos_per_prompt);
+
+  std::vector<DiTGenerationOutput> outputs;
+  outputs.reserve(output_.tensors.size());
+  for (size_t index = 0; index < output_.tensors.size(); ++index) {
+    torch::Tensor tensor = output_.tensors[index]
+                               .squeeze(0)
+                               .cpu()
+                               .to(torch::kFloat32)
+                               .contiguous();
+    CHECK_EQ(tensor.dim(), 4);
+    DiTGenerationOutput output;
+    output.index = index;
+    output.seed = params.seed;
+    output.seed_is_set = params.seed_is_set;
+    output.height = params.height;
+    output.width = params.width;
+    output.num_frames = static_cast<int32_t>(tensor.size(0));
+    output.video_fps = params.video_fps;
+    FFmpegVideoEncoder encoder;
+    CHECK(encoder.encode(tensor, params.video_fps, "mp4", output.video));
+    outputs.emplace_back(std::move(output));
+  }
+  return outputs;
+}
+
+std::vector<DiTGenerationOutput> DiTRequest::generate_audio_outputs() const {
+  CHECK_EQ(output_.tensors.size(), 1u);
+  const DiTGenerationParams& params = state_.generation_params();
+  torch::Tensor samples = output_.tensors[0]
+                              .squeeze(0)
+                              .cpu()
+                              .to(torch::kFloat32)
+                              .flatten()
+                              .contiguous();
+  DiTGenerationOutput output;
+  output.index = 0;
+  output.seed = params.seed;
+  output.seed_is_set = params.seed_is_set;
+  encode_wav(samples, params.audio_sampling_rate, output.audio);
+  return {std::move(output)};
+}
+
+std::vector<DiTGenerationOutput> DiTRequest::generate_text_outputs() const {
+  const DiTGenerationParams& params = state_.generation_params();
+  std::vector<DiTGenerationOutput> outputs;
+  outputs.reserve(output_.text_output.size());
+  for (size_t index = 0; index < output_.text_output.size(); ++index) {
+    DiTGenerationOutput output;
+    output.index = index;
+    output.seed = params.seed;
+    output.seed_is_set = params.seed_is_set;
+    output.text = output_.text_output[index];
+    outputs.emplace_back(std::move(output));
+  }
+  return outputs;
 }
 
 const DiTRequestOutput DiTRequest::generate_output() {
@@ -150,60 +242,20 @@ const DiTRequestOutput DiTRequest::generate_output() {
   output.finished = finished();
   output.cancelled = cancelled();
 
-  // Text diffusion models (e.g., Cola-DLM) produce text output directly.
-  if (!output_.text_output.empty()) {
-    const auto& gen_params = state_.generation_params();
-    for (const auto& text : output_.text_output) {
-      DiTGenerationOutput result;
-      result.seed_is_set = gen_params.seed_is_set;
-      if (gen_params.seed_is_set) {
-        result.seed = gen_params.seed;
-      }
-      result.text = text;
-      output.outputs.push_back(result);
-    }
-    return output;
+  switch (state_.request_kind()) {
+    case DiTRequestKind::kImage:
+      output.outputs = generate_image_outputs();
+      break;
+    case DiTRequestKind::kVideo:
+      output.outputs = generate_video_outputs();
+      break;
+    case DiTRequestKind::kAudio:
+      output.outputs = generate_audio_outputs();
+      break;
+    case DiTRequestKind::kText:
+      output.outputs = generate_text_outputs();
+      break;
   }
-
-  const bool is_audio =
-      !output_.tensors.empty() && output_.tensors[0].dim() <= 2;
-
-  DiTGenerationOutput result;
-  result.seed = state_.generation_params().seed;
-  if (!is_audio) {
-    result.height = state_.generation_params().height;
-    result.width = state_.generation_params().width;
-  }
-
-  const int32_t count =
-      static_cast<int32_t>(state_.generation_params().num_images_per_prompt *
-                           state_.generation_params().num_videos_per_prompt);
-  OpenCVImageEncoder image_encoder;
-  FFmpegVideoEncoder video_encoder;
-  for (size_t idx = 0; idx < count; ++idx) {
-    torch::Tensor output_tensor =
-        output_.tensors[idx].squeeze(0).cpu().to(torch::kFloat32).contiguous();
-    if (is_audio) {
-      torch::Tensor samples = output_tensor.flatten().contiguous();
-      encode_wav(samples,
-                 state_.generation_params().audio_sampling_rate,
-                 result.audio);
-    } else if (output_tensor.dim() == 4 ||
-               state_.generation_params().force_video_output) {
-      video_encoder.encode(output_tensor,
-                           state_.generation_params().video_fps,
-                           "mp4",
-                           result.image);
-      result.num_frames = output_tensor.dim() == 4
-                              ? static_cast<int32_t>(output_tensor.size(0))
-                              : 0;
-      result.video_fps = state_.generation_params().video_fps;
-    } else {
-      image_encoder.encode(output_tensor, result.image);
-    }
-    output.outputs.push_back(result);
-  }
-
   return output;
 }
 

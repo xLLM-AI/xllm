@@ -259,6 +259,11 @@ message MMData {
   repeated MMDataEntry entries = 3;
 }
 
+message NamedTensor {
+  string name = 1;
+  Tensor tensor = 2;
+}
+
 message DiTForwardInput {
   int32 batch_size = 1;
   
@@ -274,25 +279,17 @@ message DiTForwardInput {
   // Secondary negative prompt to exclude additional unwanted features
   repeated string negative_prompts_2 = 5;
   
-  // Tensor fields
-  Tensor images = 6;
-  TensorList images_list = 7;
-  Tensor mask_images = 8;
-  Tensor control_image = 9;
-  Tensor masked_image_latents = 10;
-  Tensor prompt_embeds = 11;
-  Tensor pooled_prompt_embeds = 12;
-  Tensor negative_prompt_embeds = 13;
-  Tensor negative_pooled_prompt_embeds = 14;
-  Tensor latents = 15;
+  reserved 6, 7, 8, 9, 10, 11, 12, 13, 14, 15;
   // generation params
   DiTGenerationParams generation_params = 16;
 
-  Tensor last_images = 17;
+  reserved 17;
 
-  // Voice cloning fields (LongCat-AudioDiT)
-  optional Tensor prompt_audio = 19;
+  reserved 19;
   optional string audio_prompt_text = 20;
+
+  repeated NamedTensor image_sources = 21;
+  repeated NamedTensor tensor_sources = 22;
 }
 
 message DiTForwardOutput {
@@ -315,7 +312,7 @@ message DiTGenerationParams {
   bool enable_cfg_renorm = 10;
   float cfg_renorm_min = 11;
   int32 num_frames = 12;
-  bool force_video_output = 13;
+  reserved 13;
   double video_fps = 14;
   float guidance_scale_2 = 15;
   int32 seconds = 16;
@@ -331,6 +328,11 @@ message DiTGenerationParams {
   optional float repetition_penalty = 25;
   // Explicit flag: true when the client set seed (including seed=0).
   bool seed_is_set = 26;
+  // Audio generation parameters (LongCat-AudioDiT).
+  optional int32 audio_duration_frames = 27;
+  optional int32 audio_steps = 28;
+  optional string audio_guidance_method = 29;
+  optional int32 audio_sampling_rate = 30;
 }
 
 message PackedForwardInput {

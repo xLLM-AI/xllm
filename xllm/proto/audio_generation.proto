@@ -18,6 +18,8 @@ syntax = "proto3";
 option go_package = "jd.com/jd-infer/xllm;xllm";
 package xllm.proto;
 
+import "common.proto";
+
 // Input parameters for audio generation (LongCat-AudioDiT)
 message AudioInput {
   // Text to synthesize (TTS) or text of the target speech (voice cloning).
@@ -26,7 +28,7 @@ message AudioInput {
 
   // Prompt audio for voice cloning: base64-encoded PCM WAV, mono 24 kHz.
   // When set the model clones the speaker's voice from this reference clip.
-  optional string prompt_audio = 2;
+  optional MediaSource prompt_audio = 2;
 
   // Transcript of the prompt audio (for voice cloning duration estimation).
   // The full tokenized text is prompt_text + " " + prompt (passed in `prompt`).
@@ -57,6 +59,9 @@ message AudioParameters {
   // Clients should not set this field manually; it is populated from the model
   // config (config.json "sampling_rate") and defaults to 24000.
   optional int32 sampling_rate = 7;
+
+  // Output type, either "base64" (default) or "binary".
+  optional string output_type = 8;
 }
 
 // Request structure for audio generation tasks (LongCat-AudioDiT)
@@ -77,8 +82,8 @@ message AudioGenerationRequest {
 
 // Individual audio generation result
 message AudioGenData {
-  // Base64-encoded PCM WAV audio output
-  optional string audio = 1;
+  // Generated WAV audio encoded as Base64 or stored in the binary attachment.
+  MediaSource audio = 1;
 
   // Seed used for generating this audio clip
   int64 seed = 2;

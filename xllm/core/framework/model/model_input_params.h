@@ -1050,7 +1050,9 @@ struct ModelInputParams {
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
     params.graph = graph.to(device);
-    params.dit_forward_input = dit_forward_input.to(device);
+    if (dit_forward_input.has_value()) {
+      params.dit_forward_input.emplace(dit_forward_input->to(device));
+    }
     params.linear_state_cache_ops = linear_state_cache_ops;
     params.linear_state_validity_mask = linear_state_validity_mask;
     params.is_spec_verify = is_spec_verify;
@@ -1210,7 +1212,7 @@ struct ModelInputParams {
   RecModelInputParams rec_params;
 
   // dit input data
-  DiTForwardInput dit_forward_input;
+  std::optional<DiTForwardInput> dit_forward_input;
 
   const OneRecModelInputParams* onerec_params() const {
     if (const auto* params = std::get_if<OneRecModelInputParams>(&rec_params)) {

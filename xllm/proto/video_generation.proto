@@ -35,11 +35,10 @@ message VideoInput {
   // negative prompt embedding
   optional Tensor negative_prompt_embed = 4;
 
-  // Input image for image-to-video generation (base64 encoded)
-  optional string image = 5;
+  reserved 5, 6;
 
-  // Last image (base64 encoded)
-  optional string last_image = 6;
+  // Unified ordered image inputs.
+  repeated MediaSource image_sources = 7;
 }
 
 // Generation parameters container
@@ -82,6 +81,9 @@ message VideoParameters {
 
   // True CFG scale value for balancing generation
   optional float true_cfg_scale = 13;
+
+  // Output type, either "base64" (default) or "binary".
+  optional string output_type = 14;
 }
 
 // Request structure for video generation
@@ -102,8 +104,8 @@ message VideoGenerationRequest {
 
 // Individual video generation result
 message VideoGenData {
-  // Base64-encoded video data (MP4 format)
-  optional string video = 1;
+  // Generated MP4 video encoded as Base64 or stored in the binary attachment.
+  MediaSource video = 1;
 
   // Width of the generated video in pixels
   int32 width = 3;

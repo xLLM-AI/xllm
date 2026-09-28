@@ -95,6 +95,16 @@ cc_test(
 
 cc_test(
   NAME
+    mm_service_utils_test
+  SRCS
+    mm_service_utils_test.cpp
+  DEPS
+    proto::xllm_proto
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     anthropic_json_test
   SRCS
     anthropic_json_test.cpp

@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "api_service/mm_service_utils.h"
 #include "api_service/utils.h"
 #include "core/framework/request/dit_request_params.h"
 #include "distributed_runtime/dit_master.h"
@@ -31,6 +32,7 @@ bool send_result_to_client_brpc(std::shared_ptr<VideoGenerationCall> call,
                                 const std::string& request_id,
                                 int64_t created_time,
                                 const std::string& model,
+                                const std::string& output_type,
                                 const DiTRequestOutput& req_output) {
   auto& response = call->response();
   response.set_object("list");
@@ -41,13 +43,21 @@ bool send_result_to_client_brpc(std::shared_ptr<VideoGenerationCall> call,
   const std::vector<DiTGenerationOutput>& outputs = req_output.outputs;
   proto_output->mutable_results()->Reserve(outputs.size());
 
-  std::string video;
+  const bool use_binary_output = output_type == "binary";
+  std::string binary_payload;
   for (const auto& output : outputs) {
     auto* proto_result = proto_output->add_results();
 
-    video.clear();
-    butil::Base64Encode(output.image, &video);
-    proto_result->set_video(video);
+    proto::MediaSource* video = proto_result->mutable_video();
+    video->set_name("video");
+    if (use_binary_output) {
+      video->set_type("binary");
+      mm_service_utils::append_binary_payload(
+          output.video, *video->mutable_binary(), binary_payload);
+    } else {
+      video->set_type("base64");
+      butil::Base64Encode(output.video, video->mutable_base64());
+    }
 
     proto_result->set_width(output.width);
     proto_result->set_height(output.height);
@@ -55,7 +65,8 @@ bool send_result_to_client_brpc(std::shared_ptr<VideoGenerationCall> call,
     proto_result->set_num_frames(output.num_frames);
     proto_result->set_fps(output.video_fps);
   }
-  return call->write_and_finish(response);
+  return use_binary_output ? call->write_and_finish(response, binary_payload)
+                           : call->write_and_finish(response);
 }
 
 }  // namespace
@@ -76,16 +87,20 @@ void VideoGenerationServiceImpl::process_async_impl(
     return;
   }
 
-  DiTRequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+  DiTRequestParams request_params(rpc_request,
+                                  call->get_x_request_id(),
+                                  call->get_x_request_time(),
+                                  call->take_request_payload());
 
   std::string saved_request_id = request_params.request_id;
+  std::string output_type = request_params.output_type;
   master_->handle_request(
       std::move(request_params),
       call.get(),
       [call,
        model,
        request_id = std::move(saved_request_id),
+       output_type = std::move(output_type),
        created_time = absl::ToUnixSeconds(absl::Now())](
           const DiTRequestOutput& req_output) -> bool {
         if (req_output.status.has_value()) {
@@ -96,7 +111,7 @@ void VideoGenerationServiceImpl::process_async_impl(
         }
 
         return send_result_to_client_brpc(
-            call, request_id, created_time, model, req_output);
+            call, request_id, created_time, model, output_type, req_output);
       });
 }
 

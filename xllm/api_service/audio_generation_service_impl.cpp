@@ -22,6 +22,7 @@ limitations under the License.
 #include "distributed_runtime/dit_master.h"
 #include "framework/request/dit_request_output.h"
 #include "framework/request/dit_request_params.h"
+#include "mm_service_utils.h"
 #include "util/utils.h"
 #include "util/uuid.h"
 
@@ -32,6 +33,7 @@ bool send_result_to_client_brpc(std::shared_ptr<AudioGenerationCall> call,
                                 const std::string& request_id,
                                 int64_t created_time,
                                 const std::string& model,
+                                const std::string& output_type,
                                 const DiTRequestOutput& req_output) {
   auto& response = call->response();
   response.set_object("list");
@@ -43,14 +45,24 @@ bool send_result_to_client_brpc(std::shared_ptr<AudioGenerationCall> call,
   proto_output->mutable_results()->Reserve(
       static_cast<int32_t>(outputs.size()));
 
+  const bool use_binary_output = output_type == "binary";
+  std::string binary_payload;
   for (const auto& output : outputs) {
     auto* proto_result = proto_output->add_results();
-    std::string audio_b64;
-    butil::Base64Encode(output.audio, &audio_b64);
-    proto_result->set_audio(audio_b64);
+    proto::MediaSource* audio = proto_result->mutable_audio();
+    audio->set_name("audio");
+    if (use_binary_output) {
+      audio->set_type("binary");
+      mm_service_utils::append_binary_payload(
+          output.audio, *audio->mutable_binary(), binary_payload);
+    } else {
+      audio->set_type("base64");
+      butil::Base64Encode(output.audio, audio->mutable_base64());
+    }
     proto_result->set_seed(output.seed);
   }
-  return call->write_and_finish(response);
+  return use_binary_output ? call->write_and_finish(response, binary_payload)
+                           : call->write_and_finish(response);
 }
 
 }  // namespace
@@ -71,16 +83,20 @@ void AudioGenerationServiceImpl::process_async_impl(
     return;
   }
 
-  DiTRequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+  DiTRequestParams request_params(rpc_request,
+                                  call->get_x_request_id(),
+                                  call->get_x_request_time(),
+                                  call->take_request_payload());
 
   std::string saved_request_id = request_params.request_id;
+  std::string output_type = request_params.output_type;
   master_->handle_request(
       std::move(request_params),
       call.get(),
       [call,
        model,
        request_id = std::move(saved_request_id),
+       output_type = std::move(output_type),
        created_time = absl::ToUnixSeconds(absl::Now())](
           const DiTRequestOutput& req_output) -> bool {
         if (req_output.status.has_value()) {
@@ -90,7 +106,7 @@ void AudioGenerationServiceImpl::process_async_impl(
           }
         }
         return send_result_to_client_brpc(
-            call, request_id, created_time, model, req_output);
+            call, request_id, created_time, model, output_type, req_output);
       });
 }
 

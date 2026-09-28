@@ -126,11 +126,13 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
   EXPECT_TRUE(lazy_input.input_host_buffer_has_layout);
 
   ForwardInput unpacked_input;
+  unpacked_input.input_params.dit_forward_input.emplace().batch_size = 1;
   ASSERT_TRUE(detail::unpack_from_input_host_buffer(lazy_input,
                                                     torch::Device(torch::kCPU),
                                                     torch::kFloat32,
                                                     unpacked_input,
                                                     false));
+  EXPECT_FALSE(unpacked_input.input_params.dit_forward_input.has_value());
   ASSERT_EQ(unpacked_input.input_params.linear_state_cache_ops.size(), 2u);
   expect_linear_state_cache_op_eq(
       unpacked_input.input_params.linear_state_cache_ops[0], restore_op);
@@ -210,6 +212,100 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
   ASSERT_TRUE(unpacked_input.sampling_params.filter_bitmask.defined());
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.filter_bitmask,
                            input.sampling_params.filter_bitmask));
+}
+
+TEST(BatchPackedInputTest, PackedProtoPreservesDiTGenerationParams) {
+  ForwardInput input;
+  DiTForwardInput& dit_input = input.input_params.dit_forward_input.emplace();
+  dit_input.batch_size = 1;
+  dit_input.image_sources.add(
+      "unknown", torch::tensor({1, 2}, torch::dtype(torch::kUInt8)));
+  dit_input.image_sources.add(
+      "unknown", torch::tensor({3, 4}, torch::dtype(torch::kUInt8)));
+  dit_input.image_sources.add(
+      "mask_image", torch::tensor({5, 6}, torch::dtype(torch::kUInt8)));
+  dit_input.tensor_sources.add("prompt_embed", torch::tensor({1.5f, 2.5f}));
+  dit_input.tensor_sources.add("latent", torch::tensor({3.5f, 4.5f}));
+  DiTGenerationParams& params = dit_input.generation_params;
+  params.width = 640;
+  params.height = 480;
+  params.num_inference_steps = 31;
+  params.true_cfg_scale = 2.5f;
+  params.guidance_scale = 6.5f;
+  params.num_images_per_prompt = 2;
+  params.num_videos_per_prompt = 3;
+  params.seed = 1234567;
+  params.seed_is_set = true;
+  params.max_sequence_length = 768;
+  params.strength = 0.75f;
+  params.enable_cfg_renorm = false;
+  params.cfg_renorm_min = 0.25f;
+  params.audio_duration_frames = 321;
+  params.audio_steps = 24;
+  params.audio_guidance_method = "apg";
+  params.audio_sampling_rate = 48000;
+  params.num_frames = 49;
+  params.video_fps = 12.5;
+  params.guidance_scale_2 = 4.25f;
+  params.seconds = 7;
+  params.boundary_ratio = 0.8f;
+  params.flow_shift = 1.25f;
+  params.max_new_tokens = 96;
+  params.diffusion_steps = 12;
+  params.temperature = 0.6f;
+  params.top_k = 32;
+  params.top_p = 0.85f;
+  params.repetition_penalty = 1.2f;
+
+  proto::PackedForwardInput packed_input;
+  ASSERT_TRUE(forward_input_to_packed_proto(input, &packed_input));
+
+  ForwardInput lazy_input;
+  packed_proto_to_forward_input(
+      packed_input, lazy_input, torch::Device(torch::kCPU), nullptr);
+  ForwardInput unpacked_input;
+  ASSERT_TRUE(detail::unpack_from_input_host_buffer(lazy_input,
+                                                    torch::Device(torch::kCPU),
+                                                    torch::kFloat32,
+                                                    unpacked_input,
+                                                    false));
+
+  ASSERT_TRUE(unpacked_input.input_params.dit_forward_input.has_value());
+  const DiTForwardInput& unpacked_dit_input =
+      *unpacked_input.input_params.dit_forward_input;
+  EXPECT_EQ(unpacked_dit_input.generation_params, params);
+  ASSERT_EQ(unpacked_dit_input.image_sources.size(), 3u);
+  EXPECT_EQ(unpacked_dit_input.image_sources.at(0).name, "unknown");
+  EXPECT_EQ(unpacked_dit_input.image_sources.at(1).name, "unknown");
+  EXPECT_EQ(unpacked_dit_input.image_sources.at(2).name, "mask_image");
+  EXPECT_TRUE(torch::equal(unpacked_dit_input.image_sources.at(0).tensor,
+                           dit_input.image_sources.at(0).tensor));
+  ASSERT_EQ(unpacked_dit_input.tensor_sources.size(), 2u);
+  EXPECT_TRUE(
+      torch::equal(*unpacked_dit_input.tensor_sources.get("prompt_embed"),
+                   *dit_input.tensor_sources.get("prompt_embed")));
+  EXPECT_TRUE(torch::equal(*unpacked_dit_input.tensor_sources.get("latent"),
+                           *dit_input.tensor_sources.get("latent")));
+
+  proto::DiTForwardInput proto_input;
+  ASSERT_TRUE(dit_forward_input_to_proto(dit_input, &proto_input));
+  DiTForwardInput proto_input_round_trip;
+  ASSERT_TRUE(proto_to_dit_forward_input(proto_input, proto_input_round_trip));
+  ASSERT_EQ(proto_input_round_trip.image_sources.size(), 3u);
+  EXPECT_EQ(proto_input_round_trip.image_sources.at(2).name, "mask_image");
+  EXPECT_TRUE(torch::equal(proto_input_round_trip.image_sources.at(1).tensor,
+                           dit_input.image_sources.at(1).tensor));
+  EXPECT_TRUE(
+      torch::equal(*proto_input_round_trip.tensor_sources.get("prompt_embed"),
+                   *dit_input.tensor_sources.get("prompt_embed")));
+  EXPECT_TRUE(torch::equal(*proto_input_round_trip.tensor_sources.get("latent"),
+                           *dit_input.tensor_sources.get("latent")));
+
+  proto::DiTGenerationParams proto_params;
+  ASSERT_TRUE(generation_params_to_proto(params, &proto_params));
+  DiTGenerationParams proto_round_trip;
+  ASSERT_TRUE(proto_to_generation_params(proto_params, proto_round_trip));
+  EXPECT_EQ(proto_round_trip, params);
 }
 
 TEST(BatchPackedInputTest, PackedProtoLazyToPreservesJsonMetadata) {

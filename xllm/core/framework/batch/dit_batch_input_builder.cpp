@@ -19,7 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstddef>
-#include <utility>
+#include <optional>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
@@ -70,40 +70,11 @@ DiTForwardInput DiTBatchInputBuilder::build_forward_input() const {
   input.batch_size = requests_.size();
   input.generation_params = requests_[0]->state().generation_params();
 
-  std::vector<torch::Tensor> prompt_embeds;
-  std::vector<torch::Tensor> pooled_prompt_embeds;
-
-  std::vector<torch::Tensor> negative_prompt_embeds;
-  std::vector<torch::Tensor> negative_pooled_prompt_embeds;
-
-  std::vector<torch::Tensor> images;
-  std::vector<torch::Tensor> mask_images;
-  std::vector<torch::Tensor> control_images;
-  std::vector<torch::Tensor> latents;
-  std::vector<torch::Tensor> masked_image_latents;
-  std::vector<torch::Tensor> last_images;
-  std::vector<std::vector<torch::Tensor>> per_request_images;
   const size_t batch_size = requests_.size();
   input.prompts.reserve(batch_size);
   input.prompts_2.reserve(batch_size);
   input.negative_prompts.reserve(batch_size);
   input.negative_prompts_2.reserve(batch_size);
-  prompt_embeds.reserve(batch_size);
-  pooled_prompt_embeds.reserve(batch_size);
-  negative_prompt_embeds.reserve(batch_size);
-  negative_pooled_prompt_embeds.reserve(batch_size);
-  images.reserve(batch_size);
-  mask_images.reserve(batch_size);
-  control_images.reserve(batch_size);
-  latents.reserve(batch_size);
-  masked_image_latents.reserve(batch_size);
-  last_images.reserve(batch_size);
-  per_request_images.reserve(batch_size);
-
-  std::vector<torch::Tensor> images_list;
-  size_t images_size = 0;
-  bool images_size_valid = true;
-  bool images_size_initialized = false;
   for (const auto& request : requests_) {
     const auto& generation_params = request->state().generation_params();
     CHECK(input.generation_params == generation_params)
@@ -126,40 +97,6 @@ DiTForwardInput DiTBatchInputBuilder::build_forward_input() const {
       input.negative_prompts_2.emplace_back(input_params.negative_prompt_2);
     }
 
-    prompt_embeds.emplace_back(input_params.prompt_embed);
-    pooled_prompt_embeds.emplace_back(input_params.pooled_prompt_embed);
-
-    negative_prompt_embeds.emplace_back(input_params.negative_prompt_embed);
-    negative_pooled_prompt_embeds.emplace_back(
-        input_params.negative_pooled_prompt_embed);
-
-    latents.emplace_back(input_params.latent);
-    masked_image_latents.emplace_back(input_params.masked_image_latent);
-
-    images.emplace_back(input_params.image);
-    mask_images.emplace_back(input_params.mask_image);
-    control_images.emplace_back(input_params.control_image);
-    last_images.emplace_back(input_params.last_image);
-
-    std::vector<torch::Tensor> request_images = input_params.images;
-    if (request_images.empty() && input_params.image.defined()) {
-      request_images.emplace_back(input_params.image);
-    }
-    if (!images_size_initialized) {
-      images_size = request_images.size();
-      images_size_valid = images_size > 0;
-      images_size_initialized = true;
-    } else if (request_images.size() != images_size) {
-      images_size_valid = false;
-    }
-    per_request_images.emplace_back(std::move(request_images));
-
-    // Voice cloning: prompt_audio is per-request (batch_size==1 in practice).
-    // Forward the first defined tensor; multi-batch voice cloning is not
-    // supported (different prompt lengths can't be stacked).
-    if (input_params.prompt_audio.defined() && !input.prompt_audio.defined()) {
-      input.prompt_audio = input_params.prompt_audio;
-    }
     if (!input_params.audio_prompt_text.empty() &&
         input.audio_prompt_text.empty()) {
       input.audio_prompt_text = input_params.audio_prompt_text;
@@ -184,67 +121,33 @@ DiTForwardInput DiTBatchInputBuilder::build_forward_input() const {
     input.negative_prompts_2.clear();
   }
 
-  if (check_tensors_valid(images)) {
-    input.images = torch::stack(images);
-  }
-
-  if (images_size_valid) {
-    images_list.reserve(images_size);
-    std::vector<torch::Tensor> vec;
-    vec.reserve(requests_.size());
-
-    bool all_valid = true;
-    for (size_t idx = 0; idx < images_size; ++idx) {
-      vec.clear();
-      for (const auto& request_images : per_request_images) {
-        vec.emplace_back(request_images[idx]);
-      }
-      if (!check_tensors_valid(vec)) {
-        all_valid = false;
-        break;
-      }
-      images_list.emplace_back(torch::stack(vec));
+  const DiTImageSources& first_image_sources =
+      requests_[0]->state().input_params().image_sources;
+  for (size_t index = 0; index < first_image_sources.size(); ++index) {
+    std::vector<torch::Tensor> tensors;
+    tensors.reserve(batch_size);
+    for (const auto& request : requests_) {
+      tensors.emplace_back(
+          request->state().input_params().image_sources.at(index).tensor);
     }
-    if (all_valid) {
-      input.images_list = std::move(images_list);
+    CHECK(check_tensors_valid(tensors));
+    input.image_sources.add(first_image_sources.at(index).name,
+                            torch::stack(tensors));
+  }
+
+  const DiTTensorSources& first_tensor_sources =
+      requests_[0]->state().input_params().tensor_sources;
+  for (const NamedTensor& tensor_input : first_tensor_sources.entries()) {
+    std::vector<torch::Tensor> tensors;
+    tensors.reserve(batch_size);
+    for (const auto& request : requests_) {
+      std::optional<torch::Tensor> tensor =
+          request->state().input_params().tensor_sources.get(tensor_input.name);
+      CHECK(tensor.has_value());
+      tensors.emplace_back(*tensor);
     }
-  }
-
-  if (check_tensors_valid(mask_images)) {
-    input.mask_images = torch::stack(mask_images);
-  }
-
-  if (check_tensors_valid(control_images)) {
-    input.control_image = torch::stack(control_images);
-  }
-
-  if (check_tensors_valid(prompt_embeds)) {
-    input.prompt_embeds = torch::stack(prompt_embeds);
-  }
-
-  if (check_tensors_valid(pooled_prompt_embeds)) {
-    input.pooled_prompt_embeds = torch::stack(pooled_prompt_embeds);
-  }
-
-  if (check_tensors_valid(negative_prompt_embeds)) {
-    input.negative_prompt_embeds = torch::stack(negative_prompt_embeds);
-  }
-
-  if (check_tensors_valid(negative_pooled_prompt_embeds)) {
-    input.negative_pooled_prompt_embeds =
-        torch::stack(negative_pooled_prompt_embeds);
-  }
-
-  if (check_tensors_valid(latents)) {
-    input.latents = torch::stack(latents);
-  }
-
-  if (check_tensors_valid(masked_image_latents)) {
-    input.masked_image_latents = torch::stack(masked_image_latents);
-  }
-
-  if (check_tensors_valid(last_images)) {
-    input.last_images = torch::stack(last_images);
+    CHECK(check_tensors_valid(tensors));
+    input.tensor_sources.add(tensor_input.name, torch::stack(tensors));
   }
 
   return input;

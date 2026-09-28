@@ -164,8 +164,9 @@ std::optional<ForwardOutput> DiTWorkerImpl::step(const ForwardInput& inputs) {
   torch::DeviceGuard device_guard(device_);
   Timer timer;
   ForwardInput input_on_device = inputs.to(device_, dtype_);
+  CHECK(input_on_device.input_params.dit_forward_input.has_value());
   DiTForwardOutput output = dit_model_executor_->forward(
-      input_on_device.input_params.dit_forward_input);
+      *input_on_device.input_params.dit_forward_input);
 
   auto ret = device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());

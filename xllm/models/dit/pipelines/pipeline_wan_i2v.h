@@ -115,26 +115,25 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     const auto& generation_params = input.generation_params;
 
     int64_t seed = generation_params.seed > 0 ? generation_params.seed : 42;
-    auto images = input.images.defined() ? std::make_optional(input.images)
-                                         : std::nullopt;
-    auto last_images = input.last_images.defined()
-                           ? std::make_optional(input.last_images)
-                           : std::nullopt;
+    std::vector<torch::Tensor> image_sources =
+        input.image_sources.get({"image", "last_image"});
+    std::optional<torch::Tensor> images =
+        image_sources.empty() ? std::nullopt
+                              : std::make_optional(image_sources[0]);
+    std::optional<torch::Tensor> last_images =
+        image_sources.size() < 2 ? std::nullopt
+                                 : std::make_optional(image_sources[1]);
     auto prompts = std::make_optional(input.prompts);
 
     auto negative_prompts = input.negative_prompts.empty()
                                 ? std::nullopt
                                 : std::make_optional(input.negative_prompts);
 
-    auto latents = input.latents.defined() ? std::make_optional(input.latents)
-                                           : std::nullopt;
-    auto prompt_embeds = input.prompt_embeds.defined()
-                             ? std::make_optional(input.prompt_embeds)
-                             : std::nullopt;
-    auto negative_prompt_embeds =
-        input.negative_prompt_embeds.defined()
-            ? std::make_optional(input.negative_prompt_embeds)
-            : std::nullopt;
+    std::optional<torch::Tensor> latents = input.tensor_sources.get("latent");
+    std::optional<torch::Tensor> prompt_embeds =
+        input.tensor_sources.get("prompt_embed");
+    std::optional<torch::Tensor> negative_prompt_embeds =
+        input.tensor_sources.get("negative_prompt_embed");
 
     auto output = forward_impl(images,
                                last_images,

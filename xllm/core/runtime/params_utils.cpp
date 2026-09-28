@@ -455,44 +455,27 @@ bool dit_forward_input_to_proto(const DiTForwardInput& dit_inputs,
   ADD_VECTOR_TO_PROTO(pb_dit_inputs->mutable_negative_prompts_2(),
                       dit_inputs.negative_prompts_2);
 
-  torch_tensor_to_proto_tensor(dit_inputs.images,
-                               pb_dit_inputs->mutable_images());
+  const auto serialize_named_tensors =
+      [](const std::vector<NamedTensor>& sources, auto* pb_sources) {
+        pb_sources->Reserve(static_cast<int32_t>(sources.size()));
+        for (const NamedTensor& source : sources) {
+          proto::NamedTensor* pb_source = pb_sources->Add();
+          pb_source->set_name(source.name);
+          if (!torch_tensor_to_proto_tensor(source.tensor,
+                                            pb_source->mutable_tensor())) {
+            LOG(ERROR) << "Failed to serialize named tensor: " << source.name;
+            return false;
+          }
+        }
+        return true;
+      };
 
-  auto* pb_images_list =
-      pb_dit_inputs->mutable_images_list()->mutable_tensors();
-  for (const auto& tensor : dit_inputs.images_list) {
-    torch_tensor_to_proto_tensor(tensor, pb_images_list->Add());
+  if (!serialize_named_tensors(dit_inputs.image_sources.entries(),
+                               pb_dit_inputs->mutable_image_sources()) ||
+      !serialize_named_tensors(dit_inputs.tensor_sources.entries(),
+                               pb_dit_inputs->mutable_tensor_sources())) {
+    return false;
   }
-
-  torch_tensor_to_proto_tensor(dit_inputs.mask_images,
-                               pb_dit_inputs->mutable_mask_images());
-
-  torch_tensor_to_proto_tensor(dit_inputs.control_image,
-                               pb_dit_inputs->mutable_control_image());
-
-  torch_tensor_to_proto_tensor(dit_inputs.masked_image_latents,
-                               pb_dit_inputs->mutable_masked_image_latents());
-
-  torch_tensor_to_proto_tensor(dit_inputs.prompt_embeds,
-                               pb_dit_inputs->mutable_prompt_embeds());
-
-  torch_tensor_to_proto_tensor(dit_inputs.pooled_prompt_embeds,
-                               pb_dit_inputs->mutable_pooled_prompt_embeds());
-
-  torch_tensor_to_proto_tensor(dit_inputs.negative_prompt_embeds,
-                               pb_dit_inputs->mutable_negative_prompt_embeds());
-
-  torch_tensor_to_proto_tensor(
-      dit_inputs.negative_pooled_prompt_embeds,
-      pb_dit_inputs->mutable_negative_pooled_prompt_embeds());
-
-  torch_tensor_to_proto_tensor(dit_inputs.latents,
-                               pb_dit_inputs->mutable_latents());
-  torch_tensor_to_proto_tensor(dit_inputs.last_images,
-                               pb_dit_inputs->mutable_last_images());
-
-  torch_tensor_to_proto_tensor(dit_inputs.prompt_audio,
-                               pb_dit_inputs->mutable_prompt_audio());
 
   if (!dit_inputs.audio_prompt_text.empty()) {
     pb_dit_inputs->set_audio_prompt_text(dit_inputs.audio_prompt_text);
@@ -532,8 +515,6 @@ bool generation_params_to_proto(
   pb_dit_generation_params->set_cfg_renorm_min(
       dit_generation_params.cfg_renorm_min);
   pb_dit_generation_params->set_num_frames(dit_generation_params.num_frames);
-  pb_dit_generation_params->set_force_video_output(
-      dit_generation_params.force_video_output);
   pb_dit_generation_params->set_video_fps(dit_generation_params.video_fps);
   pb_dit_generation_params->set_guidance_scale_2(
       dit_generation_params.guidance_scale_2);
@@ -557,6 +538,13 @@ bool generation_params_to_proto(
   pb_dit_generation_params->set_top_p(dit_generation_params.top_p);
   pb_dit_generation_params->set_repetition_penalty(
       dit_generation_params.repetition_penalty);
+  pb_dit_generation_params->set_audio_duration_frames(
+      dit_generation_params.audio_duration_frames);
+  pb_dit_generation_params->set_audio_steps(dit_generation_params.audio_steps);
+  pb_dit_generation_params->set_audio_guidance_method(
+      dit_generation_params.audio_guidance_method);
+  pb_dit_generation_params->set_audio_sampling_rate(
+      dit_generation_params.audio_sampling_rate);
   return true;
 }
 
@@ -582,57 +570,22 @@ bool proto_to_dit_forward_input(const proto::DiTForwardInput& pb_dit_inputs,
 
   dit_inputs.negative_prompts_2 = std::move(negative_prompts_2);
 
-  if (pb_dit_inputs.has_images()) {
-    dit_inputs.images = util::proto_to_torch(pb_dit_inputs.images());
-  }
-
-  if (pb_dit_inputs.has_images_list()) {
-    dit_inputs.images_list.reserve(
-        pb_dit_inputs.images_list().tensors().size());
-    for (const auto& pb_tensor : pb_dit_inputs.images_list().tensors()) {
-      dit_inputs.images_list.emplace_back(util::proto_to_torch(pb_tensor));
+  for (const proto::NamedTensor& pb_source : pb_dit_inputs.image_sources()) {
+    torch::Tensor tensor = util::proto_to_torch(pb_source.tensor());
+    if (!tensor.defined()) {
+      LOG(ERROR) << "Failed to convert named image tensor";
+      return false;
     }
+    dit_inputs.image_sources.add(pb_source.name(), std::move(tensor));
   }
 
-  if (pb_dit_inputs.has_mask_images()) {
-    dit_inputs.mask_images = util::proto_to_torch(pb_dit_inputs.mask_images());
-  }
-
-  if (pb_dit_inputs.has_control_image()) {
-    dit_inputs.control_image =
-        util::proto_to_torch(pb_dit_inputs.control_image());
-  }
-
-  if (pb_dit_inputs.has_masked_image_latents()) {
-    dit_inputs.masked_image_latents =
-        util::proto_to_torch(pb_dit_inputs.masked_image_latents());
-  }
-
-  if (pb_dit_inputs.has_prompt_embeds()) {
-    dit_inputs.prompt_embeds =
-        util::proto_to_torch(pb_dit_inputs.prompt_embeds());
-  }
-
-  if (pb_dit_inputs.has_pooled_prompt_embeds()) {
-    dit_inputs.pooled_prompt_embeds =
-        util::proto_to_torch(pb_dit_inputs.pooled_prompt_embeds());
-  }
-
-  if (pb_dit_inputs.has_negative_prompt_embeds()) {
-    dit_inputs.negative_prompt_embeds =
-        util::proto_to_torch(pb_dit_inputs.negative_prompt_embeds());
-  }
-
-  if (pb_dit_inputs.has_negative_pooled_prompt_embeds()) {
-    dit_inputs.negative_pooled_prompt_embeds =
-        util::proto_to_torch(pb_dit_inputs.negative_pooled_prompt_embeds());
-  }
-
-  if (pb_dit_inputs.has_latents()) {
-    dit_inputs.latents = util::proto_to_torch(pb_dit_inputs.latents());
-  }
-  if (pb_dit_inputs.has_last_images()) {
-    dit_inputs.last_images = util::proto_to_torch(pb_dit_inputs.last_images());
+  for (const proto::NamedTensor& pb_source : pb_dit_inputs.tensor_sources()) {
+    torch::Tensor tensor = util::proto_to_torch(pb_source.tensor());
+    if (!tensor.defined()) {
+      LOG(ERROR) << "Failed to convert named Tensor: " << pb_source.name();
+      return false;
+    }
+    dit_inputs.tensor_sources.add(pb_source.name(), std::move(tensor));
   }
 
   if (!proto_to_generation_params(pb_dit_inputs.generation_params(),
@@ -641,10 +594,6 @@ bool proto_to_dit_forward_input(const proto::DiTForwardInput& pb_dit_inputs,
     return false;
   }
 
-  if (pb_dit_inputs.has_prompt_audio()) {
-    dit_inputs.prompt_audio =
-        util::proto_to_torch(pb_dit_inputs.prompt_audio());
-  }
   if (pb_dit_inputs.has_audio_prompt_text()) {
     dit_inputs.audio_prompt_text = pb_dit_inputs.audio_prompt_text();
   }
@@ -686,8 +635,6 @@ bool proto_to_generation_params(
   dit_generation_params.cfg_renorm_min =
       pb_dit_generation_params.cfg_renorm_min();
   dit_generation_params.num_frames = pb_dit_generation_params.num_frames();
-  dit_generation_params.force_video_output =
-      pb_dit_generation_params.force_video_output();
   dit_generation_params.video_fps = pb_dit_generation_params.video_fps();
   dit_generation_params.guidance_scale_2 =
       pb_dit_generation_params.guidance_scale_2();
@@ -718,6 +665,21 @@ bool proto_to_generation_params(
   if (pb_dit_generation_params.has_repetition_penalty()) {
     dit_generation_params.repetition_penalty =
         pb_dit_generation_params.repetition_penalty();
+  }
+  if (pb_dit_generation_params.has_audio_duration_frames()) {
+    dit_generation_params.audio_duration_frames =
+        pb_dit_generation_params.audio_duration_frames();
+  }
+  if (pb_dit_generation_params.has_audio_steps()) {
+    dit_generation_params.audio_steps = pb_dit_generation_params.audio_steps();
+  }
+  if (pb_dit_generation_params.has_audio_guidance_method()) {
+    dit_generation_params.audio_guidance_method =
+        pb_dit_generation_params.audio_guidance_method();
+  }
+  if (pb_dit_generation_params.has_audio_sampling_rate()) {
+    dit_generation_params.audio_sampling_rate =
+        pb_dit_generation_params.audio_sampling_rate();
   }
   return true;
 }

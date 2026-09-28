@@ -214,7 +214,7 @@ inline torch::Tensor normalize_positions_for_device(
 inline bool has_contiguous_input_buffer_exclusions(
     const ModelInputParams& params) {
   return params.multimodal.mm_data.valid() || params.has_onerec_params() ||
-         params.has_llmrec_params() || params.dit_forward_input.valid() ||
+         params.has_llmrec_params() || params.dit_forward_input.has_value() ||
          !params.multimodal.deep_stacks.empty();
 }
 

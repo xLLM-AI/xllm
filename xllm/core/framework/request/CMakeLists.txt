@@ -6,6 +6,8 @@ cc_library(
     request
   HDRS
     dit_request.h
+    dit_input_sources.h
+    dit_source_decoder.h
     dit_request_params.h
     finish_reason.h
     incremental_decoder.h
@@ -34,6 +36,8 @@ cc_library(
     priority_comparator.h
   SRCS
     dit_request.cpp
+    dit_input_sources.cpp
+    dit_source_decoder.cpp
     finish_reason.cpp
     incremental_decoder.cpp
     request.cpp

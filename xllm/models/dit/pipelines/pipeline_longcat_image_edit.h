@@ -182,26 +182,20 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
             ? std::nullopt
             : std::make_optional(input.negative_prompts_2);
 
-    auto latents = input.latents.defined() ? std::make_optional(input.latents)
-                                           : std::nullopt;
-    auto prompt_embeds = input.prompt_embeds.defined()
-                             ? std::make_optional(input.prompt_embeds)
-                             : std::nullopt;
-    auto negative_prompt_embeds =
-        input.negative_prompt_embeds.defined()
-            ? std::make_optional(input.negative_prompt_embeds)
-            : std::nullopt;
-    auto pooled_prompt_embeds =
-        input.pooled_prompt_embeds.defined()
-            ? std::make_optional(input.pooled_prompt_embeds)
-            : std::nullopt;
-    auto negative_pooled_prompt_embeds =
-        input.negative_pooled_prompt_embeds.defined()
-            ? std::make_optional(input.negative_pooled_prompt_embeds)
-            : std::nullopt;
+    std::optional<torch::Tensor> latents = input.tensor_sources.get("latent");
+    std::optional<torch::Tensor> prompt_embeds =
+        input.tensor_sources.get("prompt_embed");
+    std::optional<torch::Tensor> negative_prompt_embeds =
+        input.tensor_sources.get("negative_prompt_embed");
+    std::optional<torch::Tensor> pooled_prompt_embeds =
+        input.tensor_sources.get("pooled_prompt_embed");
+    std::optional<torch::Tensor> negative_pooled_prompt_embeds =
+        input.tensor_sources.get("negative_pooled_prompt_embed");
 
-    auto image = input.images.defined() ? std::make_optional(input.images)
-                                        : std::nullopt;
+    std::optional<torch::Tensor> image =
+        input.image_sources.empty()
+            ? std::nullopt
+            : std::make_optional(input.image_sources.at(0).tensor);
 
     CHECK(image.has_value()) << "LongCat-Image-Edit requires an input image.";
 

@@ -41,73 +41,16 @@ bool TensorProtoBuilder::build_tensor(const torch::Tensor& in_tensor,
                                       xllm::proto::Tensor& out_tensor,
                                       std::string& binary_payload) {
   if (use_binary_encoding_) {
-    // build tensor in binary format
-    out_tensor.set_datatype(
-        util::torch_datatype_to_proto(in_tensor.scalar_type()));
-
-    for (auto dim : in_tensor.sizes()) {
-      out_tensor.add_shape(static_cast<int32_t>(dim));
-    }
-
-    auto numel = in_tensor.numel();
-    auto byte_len = numel * in_tensor.element_size();
-    size_t offset = binary_payload.size();
-    auto* params = out_tensor.mutable_parameters();
-    (*params)["offset"].set_int64_param(offset);
-    (*params)["len"].set_int64_param(byte_len);
-    (*params)["is_binary"].set_bool_param(true);
-    binary_payload.append(reinterpret_cast<const char*>(in_tensor.data_ptr()),
-                          byte_len);
-  } else {
-    // build tensor in json format
-    util::torch_to_proto(in_tensor, &out_tensor);
+    return util::torch_to_proto(in_tensor, &out_tensor, binary_payload);
   }
-  return true;
+  return util::torch_to_proto(in_tensor, &out_tensor);
 }
 
 bool TensorProtoBuilder::build_tensor(const xllm::proto::Tensor& in_tensor,
                                       const std::string& binary_payload,
                                       torch::Tensor& out_tensor) {
-  const auto& params = in_tensor.parameters();
-  auto it = params.find("is_binary");
-  bool is_binary = (it != params.end() && it->second.bool_param());
-
-  if (!is_binary) {
-    out_tensor = util::proto_to_torch(in_tensor);
-    return true;
-  }
-
-  auto offset_it = params.find("offset");
-  auto len_it = params.find("len");
-
-  if (offset_it == params.end() || len_it == params.end()) {
-    return false;
-  }
-
-  const int64_t offset = offset_it->second.int64_param();
-  const int64_t byte_len = len_it->second.int64_param();
-
-  if (offset < 0 || byte_len <= 0 ||
-      static_cast<size_t>(offset + byte_len) > binary_payload.size()) {
-    return false;
-  }
-
-  auto dtype = util::datatype_proto_to_torch(in_tensor.datatype());
-
-  std::vector<int64_t> sizes;
-  sizes.reserve(in_tensor.shape_size());
-  for (auto dim : in_tensor.shape()) {
-    sizes.push_back(dim);
-  }
-
-  const char* src = binary_payload.data() + offset;
-
-  out_tensor = torch::from_blob(
-      const_cast<char*>(src), sizes, torch::TensorOptions().dtype(dtype));
-
-  out_tensor = out_tensor.clone();
-
-  return true;
+  out_tensor = util::proto_to_torch(in_tensor, binary_payload);
+  return out_tensor.defined();
 }
 
 EmbeddingOutputBuilder::EmbeddingOutputBuilder(

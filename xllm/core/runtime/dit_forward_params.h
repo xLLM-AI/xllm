@@ -27,17 +27,6 @@ namespace xllm {
 
 // dit related forward input params
 struct DiTForwardInput {
-  bool valid() const {
-    return batch_size > 0 || prompts.size() > 0 || prompt_embeds.defined() ||
-           pooled_prompt_embeds.defined() || images.defined() ||
-           !images_list.empty();
-  }
-
-  void save_with_prefix(std::string prefix) const {
-    torch::save(images, prefix + "images_cpp.pt");
-    torch::save(prompt_embeds, prefix + "prompt_embeds_cpp.pt");
-    torch::save(negative_prompt_embeds, prefix + "neg_prompt_embeds_cpp.pt");
-  }
   void debug_print(std::ostream& os = std::cout) const {
     os << "=== DiTForwardInput Debug Info ===" << std::endl;
 
@@ -76,86 +65,25 @@ struct DiTForwardInput {
     // Print tensor shapes
     os << "\n--- Tensor Shapes ---" << std::endl;
 
-    os << "images: ";
-    if (images.defined()) {
-      os << images.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "images_list: [";
-    for (size_t i = 0; i < images_list.size(); ++i) {
-      if (images_list[i].defined()) {
-        os << images_list[i].sizes();
-      } else {
-        os << "undefined";
+    os << "image_sources: [";
+    for (size_t index = 0; index < image_sources.size(); ++index) {
+      const NamedTensor& source = image_sources.at(index);
+      os << source.name << ":" << source.tensor.sizes();
+      if (index + 1 < image_sources.size()) {
+        os << ", ";
       }
-      if (i < images_list.size() - 1) os << ", ";
     }
     os << "]" << std::endl;
 
-    os << "mask_images: ";
-    if (mask_images.defined()) {
-      os << mask_images.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
+    os << "tensor_sources: [";
+    for (size_t index = 0; index < tensor_sources.size(); ++index) {
+      const NamedTensor& tensor_input = tensor_sources.entries()[index];
+      os << tensor_input.name << ":" << tensor_input.tensor.sizes();
+      if (index + 1 < tensor_sources.size()) {
+        os << ", ";
+      }
     }
-
-    os << "control_image: ";
-    if (control_image.defined()) {
-      os << control_image.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "masked_image_latents: ";
-    if (masked_image_latents.defined()) {
-      os << masked_image_latents.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "prompt_embeds: ";
-    if (prompt_embeds.defined()) {
-      os << prompt_embeds.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "pooled_prompt_embeds: ";
-    if (pooled_prompt_embeds.defined()) {
-      os << pooled_prompt_embeds.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "negative_prompt_embeds: ";
-    if (negative_prompt_embeds.defined()) {
-      os << negative_prompt_embeds.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "negative_pooled_prompt_embeds: ";
-    if (negative_pooled_prompt_embeds.defined()) {
-      os << negative_pooled_prompt_embeds.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "latents: ";
-    if (latents.defined()) {
-      os << latents.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
-
-    os << "last_images: ";
-    if (last_images.defined()) {
-      os << last_images.sizes() << std::endl;
-    } else {
-      os << "undefined" << std::endl;
-    }
+    os << "]" << std::endl;
 
     // Print generation_params
     os << "\n--- Generation Parameters ---" << std::endl;
@@ -179,54 +107,8 @@ struct DiTForwardInput {
                      torch::ScalarType dtype = torch::kBFloat16) const {
     DiTForwardInput input = *this;
 
-    if (prompt_embeds.defined()) {
-      input.prompt_embeds = prompt_embeds.to(device, dtype);
-    }
-
-    if (pooled_prompt_embeds.defined()) {
-      input.pooled_prompt_embeds = pooled_prompt_embeds.to(device, dtype);
-    }
-
-    if (negative_prompt_embeds.defined()) {
-      input.negative_prompt_embeds = negative_prompt_embeds.to(device, dtype);
-    }
-
-    if (negative_pooled_prompt_embeds.defined()) {
-      input.negative_pooled_prompt_embeds =
-          negative_pooled_prompt_embeds.to(device, dtype);
-    }
-
-    if (latents.defined()) {
-      input.latents = latents.to(device, dtype);
-    }
-
-    if (masked_image_latents.defined()) {
-      input.masked_image_latents = masked_image_latents.to(device, dtype);
-    }
-
-    if (images.defined()) {
-      input.images = images.to(device, /*dtype=*/torch::kUInt8);
-    }
-
-    if (mask_images.defined()) {
-      input.mask_images = mask_images.to(device, /*dtype=*/torch::kUInt8);
-    }
-
-    for (auto& img : input.images_list) {
-      img = img.to(device, /*dtype=*/torch::kUInt8);
-    }
-
-    if (control_image.defined()) {
-      input.control_image = control_image.to(device, /*dtype=*/torch::kUInt8);
-    }
-
-    if (last_images.defined()) {
-      input.last_images = last_images.to(device, /*dtype=*/torch::kUInt8);
-    }
-
-    if (prompt_audio.defined()) {
-      input.prompt_audio = prompt_audio.to(device, torch::kFloat32);
-    }
+    input.tensor_sources = tensor_sources.to(device, dtype);
+    input.image_sources = image_sources.to(device);
     return input;
   }
 
@@ -244,32 +126,9 @@ struct DiTForwardInput {
   // Secondary negative prompt to exclude additional unwanted features
   std::vector<std::string> negative_prompts_2;
 
-  torch::Tensor images;
+  DiTImageSources image_sources;
 
-  std::vector<torch::Tensor> images_list;
-
-  torch::Tensor mask_images;
-
-  torch::Tensor control_image;
-
-  torch::Tensor masked_image_latents;
-
-  torch::Tensor prompt_embeds;
-
-  torch::Tensor pooled_prompt_embeds;
-
-  torch::Tensor negative_prompt_embeds;
-
-  torch::Tensor negative_pooled_prompt_embeds;
-
-  torch::Tensor latents;
-
-  // Last images for video generation
-  torch::Tensor last_images;
-
-  // Optional prompt audio for voice cloning (LongCat-AudioDiT)
-  // Shape: (batch, 1, num_samples) at 24kHz
-  torch::Tensor prompt_audio;
+  DiTTensorSources tensor_sources;
 
   // Transcript of the prompt audio — used for duration estimation only.
   std::string audio_prompt_text;
@@ -280,11 +139,6 @@ struct DiTForwardInput {
 
 // dit related forward output params
 struct DiTForwardOutput {
-  void save_with_prefix(std::string prefix) const {
-    if (!tensors.empty()) {
-      torch::save(tensors[0], prefix + "dit_images_cpp.pt");
-    }
-  }
   // generated tensor (for image/audio models)
   std::vector<torch::Tensor> tensors;
   // generated text (for text diffusion models like Cola-DLM)

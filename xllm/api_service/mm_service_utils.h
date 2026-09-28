@@ -15,16 +15,28 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "common.pb.h"
 #include "core/common/message.h"
 #include "core/common/types.h"
 #include "multimodal.pb.h"
 
 namespace xllm {
 namespace mm_service_utils {
+
+inline void append_binary_payload(std::string_view data,
+                                  proto::BinaryRef& binary_ref,
+                                  std::string& binary_payload) {
+  binary_ref.set_offset(static_cast<uint64_t>(binary_payload.size()));
+  binary_ref.set_length(static_cast<uint64_t>(data.size()));
+  binary_payload.append(data.data(), data.size());
+}
 
 template <typename Call>
 bool build_messages(const google::protobuf::RepeatedPtrField<

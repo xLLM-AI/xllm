@@ -11,6 +11,7 @@ cc_test(
     net_test.cpp
     shared_memory_manager_test.cpp
     suffix_decoding_cache_test.cpp
+    tensor_proto_test.cpp
     threadpool_test.cpp
     verbose_trace_logger_test.cpp
     vocab_validation_test.cpp

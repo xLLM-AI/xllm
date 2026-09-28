@@ -107,6 +107,29 @@ message Routing {
 
 message Empty {}
 
+// References binary bytes appended after the JSON request body.
+message BinaryRef {
+  // Byte offset relative to the start of the binary attachment.
+  uint64 offset = 1;
+
+  // Number of bytes in the referenced payload.
+  uint64 length = 2;
+}
+
+message MediaSource {
+  // Transport encoding: "base64" or "binary".
+  string type = 1;
+
+  // Optional semantic name, such as "prompt_audio", "audio", or "video".
+  optional string name = 2;
+
+  // Base64-encoded media container bytes.
+  string base64 = 3;
+
+  // Media container bytes in the binary attachment.
+  optional BinaryRef binary = 4;
+}
+
 message AddressInfo {
   // the ip address of worker process.
   string address = 1;

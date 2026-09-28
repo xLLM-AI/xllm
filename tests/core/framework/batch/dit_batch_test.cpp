@@ -28,8 +28,8 @@ namespace {
 std::shared_ptr<DiTRequest> make_dit_request(const std::string& prompt) {
   DiTRequestState state;
   state.input_params().prompt = prompt;
-  state.input_params().image = torch::ones({3, 2, 2});
-  state.input_params().prompt_embed = torch::ones({2, 4});
+  state.input_params().image_sources.add("image", torch::ones({3, 2, 2}));
+  state.input_params().tensor_sources.add("prompt_embed", torch::ones({2, 4}));
   return std::make_shared<DiTRequest>("request", "", "", state);
 }
 
@@ -44,18 +44,25 @@ TEST(DiTBatchTest, BuilderPreservesPromptOrderAndStacksTensorInputs) {
   DiTBatchFactory factory;
   auto first = make_dit_request("first");
   auto second = make_dit_request("second");
-  second->state().input_params().image = torch::full({3, 2, 2}, 2.0f);
+  second->state().input_params().image_sources.at(0).tensor =
+      torch::full({3, 2, 2}, 2.0f);
   auto batches = factory.create_batches({first, second});
   ASSERT_EQ(batches.size(), 1);
   ASSERT_EQ(batches[0].size(), 2);
   auto input = batches[0].prepare_forward_input();
   EXPECT_EQ(input.batch_size, 2);
   EXPECT_EQ(input.prompts, (std::vector<std::string>{"first", "second"}));
+  ASSERT_EQ(input.image_sources.size(), 1U);
+  EXPECT_EQ(input.image_sources.at(0).name, "image");
   EXPECT_TRUE(
-      torch::equal(input.images[0], first->state().input_params().image));
+      torch::equal(input.image_sources.at(0).tensor[0],
+                   first->state().input_params().image_sources.at(0).tensor));
   EXPECT_TRUE(
-      torch::equal(input.images[1], second->state().input_params().image));
-  EXPECT_EQ(input.prompt_embeds.sizes().vec(), (std::vector<int64_t>{2, 2, 4}));
+      torch::equal(input.image_sources.at(0).tensor[1],
+                   second->state().input_params().image_sources.at(0).tensor));
+  auto prompt_embeds = input.tensor_sources.get("prompt_embed");
+  ASSERT_TRUE(prompt_embeds.has_value());
+  EXPECT_EQ(prompt_embeds->sizes().vec(), (std::vector<int64_t>{2, 2, 4}));
   EXPECT_TRUE(input.generation_params == first->state().generation_params());
 }
 

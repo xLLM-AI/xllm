@@ -270,19 +270,17 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     int64_t seed = gp.seed >= 0 ? gp.seed : 42;
 
     // Collect reference images (one sample per batch entry).
-    std::vector<torch::Tensor> raw_images;
-    if (!input.images_list.empty()) {
-      raw_images = input.images_list;
-    } else if (input.images.defined()) {
-      raw_images.push_back(input.images);
-    } else {
+    std::vector<torch::Tensor> raw_images = input.image_sources.get();
+    if (raw_images.empty()) {
       LOG(FATAL) << "JoyImageEditPlus requires reference images";
     }
 
     int64_t batch_size = input.batch_size;
     if (batch_size <= 0) {
-      if (input.prompt_embeds.defined()) {
-        batch_size = input.prompt_embeds.size(0);
+      if (input.tensor_sources.contains("prompt_embed")) {
+        batch_size = input.tensor_sources.get("prompt_embed")
+                         .value_or(torch::Tensor())
+                         .size(0);
       } else if (!input.prompts.empty()) {
         batch_size = static_cast<int64_t>(input.prompts.size());
       } else {
@@ -322,13 +320,15 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     torch::Tensor prompt_embeds;
     torch::Tensor prompt_embeds_mask;
     const bool encode_text =
-        !input.prompt_embeds.defined() ||
-        (do_cfg && !input.negative_prompt_embeds.defined());
+        !input.tensor_sources.contains("prompt_embed") ||
+        (do_cfg && !input.tensor_sources.contains("negative_prompt_embed"));
     if (encode_text) {
       CHECK(!text_encoder_.is_empty()) << "Qwen3-VL text encoder is not loaded";
     }
-    if (input.prompt_embeds.defined()) {
-      prompt_embeds = input.prompt_embeds.to(options_.device(), dtype_);
+    if (input.tensor_sources.contains("prompt_embed")) {
+      prompt_embeds = input.tensor_sources.get("prompt_embed")
+                          .value_or(torch::Tensor())
+                          .to(options_.device(), dtype_);
       prompt_embeds_mask = torch::ones(
           {prompt_embeds.size(0), prompt_embeds.size(1)},
           torch::TensorOptions().device(device_).dtype(torch::kLong));
@@ -341,8 +341,10 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
 
     torch::Tensor neg_embeds, neg_embeds_mask;
     if (do_cfg) {
-      if (input.negative_prompt_embeds.defined()) {
-        neg_embeds = input.negative_prompt_embeds.to(options_.device(), dtype_);
+      if (input.tensor_sources.contains("negative_prompt_embed")) {
+        neg_embeds = input.tensor_sources.get("negative_prompt_embed")
+                         .value_or(torch::Tensor())
+                         .to(options_.device(), dtype_);
         neg_embeds_mask = torch::ones(
             {neg_embeds.size(0), neg_embeds.size(1)},
             torch::TensorOptions().device(device_).dtype(torch::kLong));
@@ -363,13 +365,14 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     }
     // Latents.
     int64_t num_channels_latents = in_channels_;
-    auto lp = prepare_latents(batch_size,
-                              num_channels_latents,
-                              height,
-                              width,
-                              seed,
-                              vae_refs,
-                              input.latents);
+    auto lp = prepare_latents(
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        seed,
+        vae_refs,
+        input.tensor_sources.get("latent").value_or(torch::Tensor()));
     auto latents = std::get<0>(lp);
     auto target_mask = std::get<1>(lp);
     auto shape_list = std::get<2>(lp);

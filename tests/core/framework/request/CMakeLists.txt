@@ -111,9 +111,39 @@ target_link_options(llm_request_factory_test
 
 cc_test(
   NAME
+    dit_image_sources_test
+  SRCS
+    dit_image_sources_test.cpp
+  DEPS
+    :request
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    dit_tensor_sources_test
+  SRCS
+    dit_tensor_sources_test.cpp
+  DEPS
+    :request
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     dit_request_params_test
   SRCS
     dit_request_params_test.cpp
+  DEPS
+    :request
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    dit_request_test
+  SRCS
+    dit_request_test.cpp
   DEPS
     :request
     GTest::gtest_main

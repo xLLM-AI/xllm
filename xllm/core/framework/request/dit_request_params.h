@@ -21,13 +21,16 @@ struct DiTRequestParams {
   DiTRequestParams() = default;
   DiTRequestParams(const proto::ImageGenerationRequest& request,
                    const std::string& x_rid,
-                   const std::string& x_rtime);
+                   const std::string& x_rtime,
+                   const std::string& request_payload = "");
   DiTRequestParams(const proto::AudioGenerationRequest& request,
                    const std::string& x_rid,
-                   const std::string& x_rtime);
+                   const std::string& x_rtime,
+                   const std::string& request_payload = "");
   DiTRequestParams(const proto::VideoGenerationRequest& request,
                    const std::string& x_rid,
-                   const std::string& x_rtime);
+                   const std::string& x_rtime,
+                   const std::string& request_payload = "");
   DiTRequestParams(const proto::TextGenerationRequest& request,
                    const std::string& x_rid,
                    const std::string& x_rtime);
@@ -47,6 +50,9 @@ struct DiTRequestParams {
   // Mandatory: Generation control parameters (encapsulates all fields related
   // to "image generation process")
   DiTGenerationParams generation_params;
+
+  Status input_status;
+  std::string output_type = "base64";
 };
 
 }  // namespace xllm

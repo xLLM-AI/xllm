@@ -64,13 +64,13 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
 
     int64_t seed = generation_params.seed > 0 ? generation_params.seed : 42;
     auto prompts = std::make_optional(input.prompts);
-    auto latents = input.latents.defined() ? std::make_optional(input.latents)
-                                           : std::nullopt;
-    auto prompt_embeds = input.prompt_embeds.defined()
-                             ? std::make_optional(input.prompt_embeds)
-                             : std::nullopt;
-    auto images = input.images.defined() ? std::make_optional(input.images)
-                                         : std::nullopt;
+    std::optional<torch::Tensor> latents = input.tensor_sources.get("latent");
+    std::optional<torch::Tensor> prompt_embeds =
+        input.tensor_sources.get("prompt_embed");
+    std::optional<torch::Tensor> images =
+        input.image_sources.empty()
+            ? std::nullopt
+            : std::make_optional(input.image_sources.at(0).tensor);
 
     auto output = forward_impl(
         prompts,                                  // prompt

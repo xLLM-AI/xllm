@@ -78,25 +78,22 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
                          ? std::nullopt
                          : std::make_optional(input.prompts_2);
 
-    auto image = input.images.defined() ? std::make_optional(input.images)
-                                        : std::nullopt;
-    auto mask_image = input.mask_images.defined()
-                          ? std::make_optional(input.mask_images)
-                          : std::nullopt;
-    auto masked_image_latents =
-        input.masked_image_latents.defined()
-            ? std::make_optional(input.masked_image_latents)
-            : std::nullopt;
+    std::vector<torch::Tensor> image_sources =
+        input.image_sources.get({"image", "mask_image"});
+    std::optional<torch::Tensor> image =
+        image_sources.empty() ? std::nullopt
+                              : std::make_optional(image_sources[0]);
+    std::optional<torch::Tensor> mask_image =
+        image_sources.size() < 2 ? std::nullopt
+                                 : std::make_optional(image_sources[1]);
+    std::optional<torch::Tensor> masked_image_latents =
+        input.tensor_sources.get("masked_image_latent");
 
-    auto latents = input.latents.defined() ? std::make_optional(input.latents)
-                                           : std::nullopt;
-    auto prompt_embeds = input.prompt_embeds.defined()
-                             ? std::make_optional(input.prompt_embeds)
-                             : std::nullopt;
-    auto pooled_prompt_embeds =
-        input.pooled_prompt_embeds.defined()
-            ? std::make_optional(input.pooled_prompt_embeds)
-            : std::nullopt;
+    std::optional<torch::Tensor> latents = input.tensor_sources.get("latent");
+    std::optional<torch::Tensor> prompt_embeds =
+        input.tensor_sources.get("prompt_embed");
+    std::optional<torch::Tensor> pooled_prompt_embeds =
+        input.tensor_sources.get("pooled_prompt_embed");
 
     auto output = forward_impl(prompts,
                                prompts_2,

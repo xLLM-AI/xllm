@@ -355,7 +355,6 @@ inline size_t get_dit_generation_params_size(
          + type_size<int64_t>   // seed
          + type_size<bool>      // enable_cfg_renorm
          + type_size<int32_t>   // num_frames
-         + type_size<bool>      // force_video_output
          + type_size<double>    // video_fps
          + type_size<float> *   // guidance_scale_2, boundary_ratio, flow_shift
                3 +
@@ -364,7 +363,10 @@ inline size_t get_dit_generation_params_size(
          + type_size<int32_t> * 2  // max_new_tokens, diffusion_steps
          + type_size<float> * 3    // temperature, top_p, repetition_penalty
          + type_size<int32_t>      // top_k
-         + type_size<bool>;        // seed_is_set
+         + type_size<bool>         // seed_is_set
+         + type_size<int32_t> * 3  // audio_duration_frames, audio_steps,
+                                   // audio_sampling_rate
+         + get_string_size(params.audio_guidance_method);
 }
 
 inline size_t get_dit_forward_input_size(const DiTForwardInput& input) {
@@ -377,18 +379,16 @@ inline size_t get_dit_forward_input_size(const DiTForwardInput& input) {
   size += get_string_vector_size(input.negative_prompts_2);
 
   // Tensors
-  size += get_tensor_size(input.images);
-  size += get_vector_tensor_size(input.images_list);
-  size += get_tensor_size(input.mask_images);
-  size += get_tensor_size(input.control_image);
-  size += get_tensor_size(input.masked_image_latents);
-  size += get_tensor_size(input.prompt_embeds);
-  size += get_tensor_size(input.pooled_prompt_embeds);
-  size += get_tensor_size(input.negative_prompt_embeds);
-  size += get_tensor_size(input.negative_pooled_prompt_embeds);
-  size += get_tensor_size(input.latents);
-  size += get_tensor_size(input.last_images);
-  size += get_tensor_size(input.prompt_audio);
+  size += type_size<size_t>;
+  for (const NamedTensor& source : input.image_sources.entries()) {
+    size += get_string_size(source.name);
+    size += get_tensor_size(source.tensor);
+  }
+  size += type_size<size_t>;
+  for (const NamedTensor& tensor_input : input.tensor_sources.entries()) {
+    size += get_string_size(tensor_input.name);
+    size += get_tensor_size(tensor_input.tensor);
+  }
   size += get_string_size(input.audio_prompt_text);
 
   // Generation params
@@ -1062,7 +1062,6 @@ inline void write_dit_generation_params(char*& buffer,
   write_data(buffer, params.enable_cfg_renorm);
   write_data(buffer, params.cfg_renorm_min);
   write_data(buffer, params.num_frames);
-  write_data(buffer, params.force_video_output);
   write_data(buffer, params.video_fps);
   write_data(buffer, params.guidance_scale_2);
   write_data(buffer, params.seconds);
@@ -1076,6 +1075,10 @@ inline void write_dit_generation_params(char*& buffer,
   write_data(buffer, params.top_p);
   write_data(buffer, params.repetition_penalty);
   write_data(buffer, params.seed_is_set);
+  write_data(buffer, params.audio_duration_frames);
+  write_data(buffer, params.audio_steps);
+  write_string(buffer, params.audio_guidance_method);
+  write_data(buffer, params.audio_sampling_rate);
 }
 
 inline void write_dit_generation_params(RawInputSerializeContext& context,
@@ -1092,7 +1095,6 @@ inline void write_dit_generation_params(RawInputSerializeContext& context,
   write_data(context.descriptor, params.enable_cfg_renorm);
   write_data(context.descriptor, params.cfg_renorm_min);
   write_data(context.descriptor, params.num_frames);
-  write_data(context.descriptor, params.force_video_output);
   write_data(context.descriptor, params.video_fps);
   write_data(context.descriptor, params.guidance_scale_2);
   write_data(context.descriptor, params.seconds);
@@ -1106,6 +1108,10 @@ inline void write_dit_generation_params(RawInputSerializeContext& context,
   write_data(context.descriptor, params.top_p);
   write_data(context.descriptor, params.repetition_penalty);
   write_data(context.descriptor, params.seed_is_set);
+  write_data(context.descriptor, params.audio_duration_frames);
+  write_data(context.descriptor, params.audio_steps);
+  write_string(context.descriptor, params.audio_guidance_method);
+  write_data(context.descriptor, params.audio_sampling_rate);
 }
 
 inline void write_dit_forward_input(char*& buffer,
@@ -1117,18 +1123,16 @@ inline void write_dit_forward_input(char*& buffer,
   write_string_vector(buffer, input.negative_prompts);
   write_string_vector(buffer, input.negative_prompts_2);
 
-  write_tensor(buffer, input.images);
-  write_vector_tensor(buffer, input.images_list);
-  write_tensor(buffer, input.mask_images);
-  write_tensor(buffer, input.control_image);
-  write_tensor(buffer, input.masked_image_latents);
-  write_tensor(buffer, input.prompt_embeds);
-  write_tensor(buffer, input.pooled_prompt_embeds);
-  write_tensor(buffer, input.negative_prompt_embeds);
-  write_tensor(buffer, input.negative_pooled_prompt_embeds);
-  write_tensor(buffer, input.latents);
-  write_tensor(buffer, input.last_images);
-  write_tensor(buffer, input.prompt_audio);
+  write_data(buffer, input.image_sources.size());
+  for (const NamedTensor& source : input.image_sources.entries()) {
+    write_string(buffer, source.name);
+    write_tensor(buffer, source.tensor);
+  }
+  write_data(buffer, input.tensor_sources.size());
+  for (const NamedTensor& tensor_input : input.tensor_sources.entries()) {
+    write_string(buffer, tensor_input.name);
+    write_tensor(buffer, tensor_input.tensor);
+  }
   write_string(buffer, input.audio_prompt_text);
 
   write_dit_generation_params(buffer, input.generation_params);
@@ -1143,18 +1147,16 @@ inline void write_dit_forward_input(RawInputSerializeContext& context,
   write_string_vector(context.descriptor, input.negative_prompts);
   write_string_vector(context.descriptor, input.negative_prompts_2);
 
-  write_tensor(context, input.images);
-  write_vector_tensor(context, input.images_list);
-  write_tensor(context, input.mask_images);
-  write_tensor(context, input.control_image);
-  write_tensor(context, input.masked_image_latents);
-  write_tensor(context, input.prompt_embeds);
-  write_tensor(context, input.pooled_prompt_embeds);
-  write_tensor(context, input.negative_prompt_embeds);
-  write_tensor(context, input.negative_pooled_prompt_embeds);
-  write_tensor(context, input.latents);
-  write_tensor(context, input.last_images);
-  write_tensor(context, input.prompt_audio);
+  write_data(context.descriptor, input.image_sources.size());
+  for (const NamedTensor& source : input.image_sources.entries()) {
+    write_string(context.descriptor, source.name);
+    write_tensor(context, source.tensor);
+  }
+  write_data(context.descriptor, input.tensor_sources.size());
+  for (const NamedTensor& tensor_input : input.tensor_sources.entries()) {
+    write_string(context.descriptor, tensor_input.name);
+    write_tensor(context, tensor_input.tensor);
+  }
   write_string(context.descriptor, input.audio_prompt_text);
 
   write_dit_generation_params(context, input.generation_params);
@@ -2069,7 +2071,6 @@ inline void read_dit_generation_params(const char*& buffer,
   read_data(buffer, params.enable_cfg_renorm);
   read_data(buffer, params.cfg_renorm_min);
   read_data(buffer, params.num_frames);
-  read_data(buffer, params.force_video_output);
   read_data(buffer, params.video_fps);
   read_data(buffer, params.guidance_scale_2);
   read_data(buffer, params.seconds);
@@ -2083,6 +2084,10 @@ inline void read_dit_generation_params(const char*& buffer,
   read_data(buffer, params.top_p);
   read_data(buffer, params.repetition_penalty);
   read_data(buffer, params.seed_is_set);
+  read_data(buffer, params.audio_duration_frames);
+  read_data(buffer, params.audio_steps);
+  read_string(buffer, params.audio_guidance_method);
+  read_data(buffer, params.audio_sampling_rate);
 }
 
 inline void read_dit_generation_params(ReadContext& context,
@@ -2099,7 +2104,6 @@ inline void read_dit_generation_params(ReadContext& context,
   read_data(context, params.enable_cfg_renorm);
   read_data(context, params.cfg_renorm_min);
   read_data(context, params.num_frames);
-  read_data(context, params.force_video_output);
   read_data(context, params.video_fps);
   read_data(context, params.guidance_scale_2);
   read_data(context, params.seconds);
@@ -2113,6 +2117,10 @@ inline void read_dit_generation_params(ReadContext& context,
   read_data(context, params.top_p);
   read_data(context, params.repetition_penalty);
   read_data(context, params.seed_is_set);
+  read_data(context, params.audio_duration_frames);
+  read_data(context, params.audio_steps);
+  read_string(context, params.audio_guidance_method);
+  read_data(context, params.audio_sampling_rate);
 }
 
 inline void clone_tensor_if_defined(torch::Tensor& tensor) {
@@ -2121,26 +2129,13 @@ inline void clone_tensor_if_defined(torch::Tensor& tensor) {
   }
 }
 
-inline void clone_vector_tensor_if_defined(
-    std::vector<torch::Tensor>& tensors) {
-  for (auto& tensor : tensors) {
-    clone_tensor_if_defined(tensor);
-  }
-}
-
 inline void stabilize_dit_forward_input_tensors(DiTForwardInput& input) {
-  clone_tensor_if_defined(input.images);
-  clone_vector_tensor_if_defined(input.images_list);
-  clone_tensor_if_defined(input.mask_images);
-  clone_tensor_if_defined(input.control_image);
-  clone_tensor_if_defined(input.masked_image_latents);
-  clone_tensor_if_defined(input.prompt_embeds);
-  clone_tensor_if_defined(input.pooled_prompt_embeds);
-  clone_tensor_if_defined(input.negative_prompt_embeds);
-  clone_tensor_if_defined(input.negative_pooled_prompt_embeds);
-  clone_tensor_if_defined(input.latents);
-  clone_tensor_if_defined(input.last_images);
-  clone_tensor_if_defined(input.prompt_audio);
+  for (NamedTensor& source : input.image_sources.entries()) {
+    clone_tensor_if_defined(source.tensor);
+  }
+  for (NamedTensor& tensor_input : input.tensor_sources.entries()) {
+    clone_tensor_if_defined(tensor_input.tensor);
+  }
 }
 
 inline void read_dit_forward_input(const char*& buffer,
@@ -2153,18 +2148,24 @@ inline void read_dit_forward_input(const char*& buffer,
   read_string_vector(buffer, input.negative_prompts);
   read_string_vector(buffer, input.negative_prompts_2);
 
-  read_tensor(buffer, input.images);
-  read_vector_tensor(buffer, input.images_list);
-  read_tensor(buffer, input.mask_images);
-  read_tensor(buffer, input.control_image);
-  read_tensor(buffer, input.masked_image_latents);
-  read_tensor(buffer, input.prompt_embeds);
-  read_tensor(buffer, input.pooled_prompt_embeds);
-  read_tensor(buffer, input.negative_prompt_embeds);
-  read_tensor(buffer, input.negative_pooled_prompt_embeds);
-  read_tensor(buffer, input.latents);
-  read_tensor(buffer, input.last_images);
-  read_tensor(buffer, input.prompt_audio);
+  size_t image_source_count = 0;
+  read_data(buffer, image_source_count);
+  for (size_t index = 0; index < image_source_count; ++index) {
+    std::string name;
+    torch::Tensor tensor;
+    read_string(buffer, name);
+    read_tensor(buffer, tensor);
+    input.image_sources.add(std::move(name), std::move(tensor));
+  }
+  size_t tensor_input_count = 0;
+  read_data(buffer, tensor_input_count);
+  for (size_t index = 0; index < tensor_input_count; ++index) {
+    std::string name;
+    torch::Tensor tensor;
+    read_string(buffer, name);
+    read_tensor(buffer, tensor);
+    input.tensor_sources.add(std::move(name), std::move(tensor));
+  }
   read_string(buffer, input.audio_prompt_text);
 
   read_dit_generation_params(buffer, input.generation_params);
@@ -2183,54 +2184,30 @@ inline void read_dit_forward_input(ReadContext& context,
   read_string_vector(context, input.negative_prompts);
   read_string_vector(context, input.negative_prompts_2);
 
-  read_tensor(context,
-              input.images,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_vector_tensor(context,
-                     input.images_list,
-                     /*stream=*/nullptr,
-                     /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.mask_images,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.control_image,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.masked_image_latents,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.prompt_embeds,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.pooled_prompt_embeds,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.negative_prompt_embeds,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.negative_pooled_prompt_embeds,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.latents,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.last_images,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
-  read_tensor(context,
-              input.prompt_audio,
-              /*stream=*/nullptr,
-              /*force_host_materialize=*/true);
+  size_t image_source_count = 0;
+  read_data(context, image_source_count);
+  for (size_t index = 0; index < image_source_count; ++index) {
+    std::string name;
+    torch::Tensor tensor;
+    read_string(context, name);
+    read_tensor(context,
+                tensor,
+                /*stream=*/nullptr,
+                /*force_host_materialize=*/true);
+    input.image_sources.add(std::move(name), std::move(tensor));
+  }
+  size_t tensor_input_count = 0;
+  read_data(context, tensor_input_count);
+  for (size_t index = 0; index < tensor_input_count; ++index) {
+    std::string name;
+    torch::Tensor tensor;
+    read_string(context, name);
+    read_tensor(context,
+                tensor,
+                /*stream=*/nullptr,
+                /*force_host_materialize=*/true);
+    input.tensor_sources.add(std::move(name), std::move(tensor));
+  }
   read_string(context, input.audio_prompt_text);
 
   read_dit_generation_params(context, input.generation_params);
@@ -2563,9 +2540,12 @@ inline void deserialize_forward_input_payload(
 
   bool has_dit_forward_input = false;
   read_data(context, has_dit_forward_input);
+  input_params.dit_forward_input.reset();
   if (has_dit_forward_input) {
+    DiTForwardInput& dit_forward_input =
+        input_params.dit_forward_input.emplace();
     read_dit_forward_input(
-        context, input_params.dit_forward_input, stabilize_dit_host_tensors);
+        context, dit_forward_input, stabilize_dit_host_tensors);
   }
 
   finalize_device_buffer_session(device_session, stream);
@@ -2984,10 +2964,10 @@ inline void serialize_forward_input_sections(
     write_tensor(context, manager_table);
   }
 
-  const bool has_dit_forward_input = input_params.dit_forward_input.valid();
+  const bool has_dit_forward_input = input_params.dit_forward_input.has_value();
   write_data(context.descriptor, has_dit_forward_input);
   if (has_dit_forward_input) {
-    write_dit_forward_input(context, input_params.dit_forward_input);
+    write_dit_forward_input(context, *input_params.dit_forward_input);
   }
 }
 

@@ -69,17 +69,15 @@ class FluxControlPipelineImpl : public FluxPipelineBaseImpl {
                          ? std::nullopt
                          : std::make_optional(input.prompts_2);
 
-    auto control_image = input.control_image;
+    torch::Tensor control_image = input.image_sources.empty()
+                                      ? torch::Tensor()
+                                      : input.image_sources.at(0).tensor;
 
-    auto latents = input.latents.defined() ? std::make_optional(input.latents)
-                                           : std::nullopt;
-    auto prompt_embeds = input.prompt_embeds.defined()
-                             ? std::make_optional(input.prompt_embeds)
-                             : std::nullopt;
-    auto pooled_prompt_embeds =
-        input.pooled_prompt_embeds.defined()
-            ? std::make_optional(input.pooled_prompt_embeds)
-            : std::nullopt;
+    std::optional<torch::Tensor> latents = input.tensor_sources.get("latent");
+    std::optional<torch::Tensor> prompt_embeds =
+        input.tensor_sources.get("prompt_embed");
+    std::optional<torch::Tensor> pooled_prompt_embeds =
+        input.tensor_sources.get("pooled_prompt_embed");
 
     auto output = forward_impl(prompts,
                                prompts_2,

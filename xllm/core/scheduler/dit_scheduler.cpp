@@ -39,42 +39,10 @@ namespace xllm {
 namespace {
 constexpr size_t kRequestQueueSize = 100;
 
-bool image_batch_signature_matches(const DiTInputParams& lhs,
-                                   const DiTInputParams& rhs) {
-  if (!tensor_batch_signature_matches(lhs.image, rhs.image)) {
-    return false;
-  }
-  if (lhs.images.size() != rhs.images.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < lhs.images.size(); ++i) {
-    if (!tensor_batch_signature_matches(lhs.images[i], rhs.images[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool stacked_tensor_inputs_match(const DiTInputParams& lhs,
-                                 const DiTInputParams& rhs) {
-  return tensor_batch_signature_matches(lhs.prompt_embed, rhs.prompt_embed) &&
-         tensor_batch_signature_matches(lhs.pooled_prompt_embed,
-                                        rhs.pooled_prompt_embed) &&
-         tensor_batch_signature_matches(lhs.negative_prompt_embed,
-                                        rhs.negative_prompt_embed) &&
-         tensor_batch_signature_matches(lhs.negative_pooled_prompt_embed,
-                                        rhs.negative_pooled_prompt_embed) &&
-         tensor_batch_signature_matches(lhs.latent, rhs.latent) &&
-         tensor_batch_signature_matches(lhs.mask_image, rhs.mask_image) &&
-         tensor_batch_signature_matches(lhs.control_image, rhs.control_image) &&
-         tensor_batch_signature_matches(lhs.masked_image_latent,
-                                        rhs.masked_image_latent) &&
-         tensor_batch_signature_matches(lhs.last_image, rhs.last_image);
-}
-
 bool prompt_audio_allows_batching(const DiTInputParams& lhs,
                                   const DiTInputParams& rhs) {
-  return !lhs.prompt_audio.defined() && !rhs.prompt_audio.defined() &&
+  return !lhs.tensor_sources.contains("prompt_audio") &&
+         !rhs.tensor_sources.contains("prompt_audio") &&
          lhs.audio_prompt_text.empty() && rhs.audio_prompt_text.empty();
 }
 
@@ -88,7 +56,7 @@ int32_t true_cfg_condition_type(const std::shared_ptr<DiTRequest>& request) {
   if (!input_params.negative_prompt.empty()) {
     return 1;
   }
-  if (input_params.negative_prompt_embed.defined()) {
+  if (input_params.tensor_sources.contains("negative_prompt_embed")) {
     return 2;
   }
   return 3;
@@ -108,8 +76,10 @@ bool is_compatible_dit_batch_request(
   }
   const auto& batch_input = batch_state.input_params();
   const auto& candidate_input = candidate_state.input_params();
-  return image_batch_signature_matches(batch_input, candidate_input) &&
-         stacked_tensor_inputs_match(batch_input, candidate_input) &&
+  return batch_input.image_sources.batch_signature_matches(
+             candidate_input.image_sources) &&
+         batch_input.tensor_sources.batch_signature_matches(
+             candidate_input.tensor_sources) &&
          prompt_audio_allows_batching(batch_input, candidate_input);
 }
 
