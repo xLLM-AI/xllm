@@ -17,18 +17,12 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/util/tensor_helper.h"
+
 namespace xllm {
 namespace adaptive_pruning {
 
 namespace {
-
-torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
-}
 
 void sync_pruned_boundary_logprobs(SampleOutput& sample_output,
                                    const ForwardOutput& target_output,
@@ -113,7 +107,7 @@ PrunedPrefixMasks build_pruned_prefix_masks(
     const torch::Device& device) {
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   torch::Tensor prefix_lengths =
-      safe_to(make_cpu_int_tensor(pruned_prefix_lengths),
+      safe_to(make_pinned_cpu_tensor(pruned_prefix_lengths),
               torch::TensorOptions().dtype(torch::kLong).device(device),
               /*non_blocking=*/true)
           .clamp(0, num_speculative_tokens);
@@ -376,10 +370,7 @@ void scatter_varlen_target_output_to_dense(
     }
   }
   torch::Tensor dst_indices =
-      torch::tensor(dst_indices_vec,
-                    torch::TensorOptions()
-                        .dtype(torch::kLong)
-                        .device(target_output.logits.device()));
+      async_h2d_tensor(dst_indices_vec, target_output.logits.device());
 
   // Logits pad to [B*max_val_tokens, V]. Only the padding rows need the -inf
   // sentinel (strictly-rejecting distribution); using empty + a targeted
@@ -401,10 +392,7 @@ void scatter_varlen_target_output_to_dense(
       }
     }
     torch::Tensor pad_indices =
-        torch::tensor(pad_indices_vec,
-                      torch::TensorOptions()
-                          .dtype(torch::kLong)
-                          .device(target_output.logits.device()));
+        async_h2d_tensor(pad_indices_vec, target_output.logits.device());
     padded_logits.index_fill_(/*dim=*/0, pad_indices, -1e9);
   }
   padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);

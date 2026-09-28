@@ -22,6 +22,8 @@ limitations under the License.
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 
+#include "util/tensor_helper.h"
+
 namespace xllm {
 namespace util {
 
@@ -359,7 +361,7 @@ template <typename T>
 bool set_data_to_contents(proto::TensorContents* contents,
                           const torch::Tensor& tensor,
                           const std::string& proto_datatype) {
-  torch::Tensor contig_tensor = tensor.contiguous().cpu();
+  torch::Tensor contig_tensor = to_cpu_contiguous(tensor);
   const T* data_ptr = contig_tensor.data_ptr<T>();
   size_t data_count = static_cast<size_t>(contig_tensor.numel());
 

@@ -75,58 +75,37 @@ void SamplingParameters::init(
 
   bool need_token_stats = false;
 
-  // Create tensor on cpu pinned memory here
-  auto int_tensor_options = torch::TensorOptions()
-                                .device(torch::kCPU)
-                                .dtype(torch::kInt)
-                                .pinned_memory(true);
-  auto int64_tensor_options = torch::TensorOptions()
-                                  .device(torch::kCPU)
-                                  .dtype(torch::kInt64)
-                                  .pinned_memory(true);
-  auto float32_tensor_options = torch::TensorOptions()
-                                    .device(torch::kCPU)
-                                    .dtype(torch::kFloat32)
-                                    .pinned_memory(true);
-  auto bool_tensor_options = torch::TensorOptions()
-                                 .device(torch::kCPU)
-                                 .dtype(torch::kBool)
-                                 .pinned_memory(true);
   if (std::any_of(frequency_penalties.begin(),
                   frequency_penalties.end(),
                   [](float t) { return t != 0.0; }) ||
       std::any_of(presence_penalties.begin(),
                   presence_penalties.end(),
                   [](float t) { return t != 0.0; })) {
-    this->frequency_penalties =
-        torch::tensor(frequency_penalties, float32_tensor_options);
-    this->presence_penalties =
-        torch::tensor(presence_penalties, float32_tensor_options);
+    this->frequency_penalties = make_pinned_cpu_tensor(frequency_penalties);
+    this->presence_penalties = make_pinned_cpu_tensor(presence_penalties);
     need_token_stats = true;
   }
   if (std::any_of(repetition_penalties.begin(),
                   repetition_penalties.end(),
                   [](float t) { return t != 1.0; })) {
-    this->repetition_penalties =
-        torch::tensor(repetition_penalties, float32_tensor_options);
+    this->repetition_penalties = make_pinned_cpu_tensor(repetition_penalties);
     need_token_stats = true;
   }
   if (std::any_of(temperatures.begin(), temperatures.end(), [](float t) {
         return t != 0.0 && t != 1.0;
       })) {
-    this->temperatures = torch::tensor(temperatures, float32_tensor_options);
+    this->temperatures = make_pinned_cpu_tensor(temperatures);
   }
   if (std::any_of(
           top_k.begin(), top_k.end(), [](int64_t t) { return t > 0; })) {
-    this->top_k = torch::tensor(top_k, int64_tensor_options);
+    this->top_k = make_pinned_cpu_tensor(top_k);
   }
   if (std::any_of(
           top_p.begin(), top_p.end(), [](float t) { return t != 1.0; })) {
-    this->top_p = torch::tensor(top_p, float32_tensor_options);
+    this->top_p = make_pinned_cpu_tensor(top_p);
   }
 
-  this->selected_token_idxes =
-      torch::tensor(selected_token_idxes, int_tensor_options);
+  this->selected_token_idxes = make_pinned_cpu_tensor(selected_token_idxes);
   const bool has_filter_mask =
       std::any_of(filter_mask_rows.begin(),
                   filter_mask_rows.end(),
@@ -175,22 +154,22 @@ void SamplingParameters::init(
         create_2d_tensor(unique_token_ids_vec, torch::kInt64);
     this->unique_token_counts =
         create_2d_tensor(unique_token_counts_vec, torch::kInt);
-    this->unique_token_ids_lens =
-        torch::tensor(unique_token_lens_vec, int_tensor_options);
+    this->unique_token_ids_lens = make_pinned_cpu_tensor(unique_token_lens_vec);
   }
 
   // construct do sample tensor
-  std::vector<int32_t> do_sample;
+  std::vector<bool> do_sample;
   do_sample.reserve(sample_idxes.size());
   for (const auto idx : sample_idxes) {
     const auto* p = req_sampling_params[idx];
     // need to do sample if any of following is true
     const bool sample = p->do_sample || p->temperature != 0.0 ||
                         p->top_p != 1.0 || p->top_k > 0;
-    do_sample.push_back(sample ? 1 : 0);
+    do_sample.push_back(sample);
   }
-  this->sample_idxes = torch::tensor(sample_idxes, int_tensor_options);
-  this->do_sample = torch::tensor(do_sample, bool_tensor_options);
+  this->sample_idxes = make_pinned_cpu_tensor(sample_idxes);
+  // The rejection sampler's torch::where requires a bool condition tensor.
+  this->do_sample = make_pinned_cpu_tensor(do_sample);
   this->logprobs = logprobs;
   this->max_top_logprobs = max_top_logprobs;
   this->is_embeddings = is_embeddings;

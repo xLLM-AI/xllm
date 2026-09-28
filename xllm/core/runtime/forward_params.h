@@ -40,6 +40,7 @@ limitations under the License.
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
 #include "runtime/json_object_output_rows.h"
+#include "util/tensor_helper.h"
 
 namespace xllm {
 
@@ -284,10 +285,8 @@ inline torch::Tensor gather_tensor_by_indices(
   if (!tensor.defined()) {
     return tensor;
   }
-  torch::Tensor cpu_tensor = tensor.device().is_cpu() ? tensor : tensor.cpu();
-  cpu_tensor = cpu_tensor.contiguous();
-  torch::Tensor gather_indices = torch::tensor(
-      indices, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+  torch::Tensor cpu_tensor = to_cpu_contiguous(tensor);
+  torch::Tensor gather_indices = make_cpu_tensor(indices);
   if (cpu_tensor.dim() <= 1) {
     return cpu_tensor.index_select(0, gather_indices);
   }
@@ -302,38 +301,9 @@ inline torch::Tensor gather_tensor_by_indices_on_dim(
   if (!tensor.defined()) {
     return tensor;
   }
-  torch::Tensor cpu_tensor = tensor.device().is_cpu() ? tensor : tensor.cpu();
-  cpu_tensor = cpu_tensor.contiguous();
-  torch::Tensor gather_indices = torch::tensor(
-      indices, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+  torch::Tensor cpu_tensor = to_cpu_contiguous(tensor);
+  torch::Tensor gather_indices = make_cpu_tensor(indices);
   return cpu_tensor.index_select(dim, gather_indices);
-}
-
-inline torch::Tensor int_vector_to_cpu_tensor(
-    const std::vector<int32_t>& values) {
-  if (values.empty()) {
-    return torch::Tensor();
-  }
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
-}
-
-template <typename T>
-inline std::vector<T> tensor_to_vector(const torch::Tensor& tensor) {
-  if (!tensor.defined() || tensor.numel() == 0) {
-    return {};
-  }
-  torch::Tensor cpu_tensor = tensor.device().is_cpu() ? tensor : tensor.cpu();
-  cpu_tensor = cpu_tensor.contiguous();
-  if (cpu_tensor.scalar_type() != get_scalar_type<T>()) {
-    cpu_tensor = cpu_tensor.to(get_scalar_type<T>());
-  }
-  const T* data_ptr = cpu_tensor.data_ptr<T>();
-  const size_t size = static_cast<size_t>(cpu_tensor.numel());
-  return std::vector<T>(data_ptr, data_ptr + size);
 }
 
 }  // namespace detail

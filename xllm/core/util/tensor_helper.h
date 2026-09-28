@@ -27,8 +27,11 @@ limitations under the License.
 #include <source_location>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
+
+#include "util/slice.h"
 
 namespace xllm {
 
@@ -38,8 +41,16 @@ inline bool is_cpu_int_tensor(const torch::Tensor& tensor, int32_t dimensions) {
          tensor.is_contiguous();
 }
 
-// Borrows flattened CPU int32 storage; the caller validates dtype and layout.
-// Undefined or empty tensors produce an empty view.
+// CHECKed flat borrow; T defaults to int32, the dominant token/length type.
+template <typename T = int32_t>
+inline Slice<T> tensor_slice(const torch::Tensor& tensor) {
+  CHECK(tensor.defined()) << "tensor_slice requires a defined tensor";
+  CHECK(tensor.device().is_cpu()) << "tensor_slice requires a CPU tensor";
+  CHECK(tensor.is_contiguous()) << "tensor_slice requires contiguous storage";
+  return {tensor.const_data_ptr<T>(), static_cast<size_t>(tensor.numel())};
+}
+
+// Lenient twin of tensor_slice: empty view instead of CHECK on empty input.
 inline std::span<const int32_t> int_span(const torch::Tensor& tensor) {
   if (!tensor.defined() || tensor.numel() == 0) {
     return {};
@@ -48,21 +59,53 @@ inline std::span<const int32_t> int_span(const torch::Tensor& tensor) {
           static_cast<uint64_t>(tensor.numel())};
 }
 
+namespace detail {
+
+// H2D-source options; the caching host allocator recycles pinned blocks.
+inline torch::TensorOptions pinned_cpu_options(torch::ScalarType dtype) {
+  return torch::TensorOptions()
+      .dtype(dtype)
+      .device(torch::kCPU)
+      .pinned_memory(true);
+}
+
+// Host-only tensors stay pageable; pinning them is pure waste.
+inline torch::TensorOptions pageable_cpu_options(torch::ScalarType dtype) {
+  return torch::TensorOptions().dtype(dtype).device(torch::kCPU);
+}
+
+// empty+memcpy avoids torch::tensor's intermediate copy; vector<bool> is
+// bit-packed with no data(), so it is filled element-by-element.
+template <typename T>
+inline torch::Tensor make_cpu_tensor_with_options(
+    const std::vector<T>& values,
+    const torch::TensorOptions& options) {
+  torch::Tensor tensor =
+      torch::empty({static_cast<int64_t>(values.size())}, options);
+  if constexpr (std::is_same_v<T, bool>) {
+    bool* data = tensor.data_ptr<bool>();
+    for (size_t i = 0; i < values.size(); ++i) {
+      data[i] = values[i];
+    }
+  } else {
+    std::memcpy(tensor.data_ptr<T>(), values.data(), values.size() * sizeof(T));
+  }
+  return tensor;
+}
+
+}  // namespace detail
+
 template <typename T>
 inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T> >& vec,
                                       torch::ScalarType dtype) {
   if (vec.empty()) {
     return {};
   }
-  // create tensor on cpu pinned memory here
   const size_t n_rows = vec.size();
   const size_t n_cols = vec[0].size();
   auto tensor =
       torch::empty({static_cast<int64_t>(n_rows), static_cast<int64_t>(n_cols)},
-                   torch::TensorOptions()
-                       .dtype(dtype)
-                       .device(torch::kCPU)
-                       .pinned_memory(true));
+                   detail::pinned_cpu_options(dtype));
   // Fill the contiguous pinned buffer row-by-row with a plain memcpy. The
   // element type T must match `dtype`'s storage; every current caller pairs
   // int32_t with kInt and int64_t with kInt64. Copying directly avoids a
@@ -78,19 +121,61 @@ inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T> >& vec,
     std::memcpy(dst + i * n_cols, vec[i].data(), n_cols * sizeof(T));
   }
   return tensor;
-};
+}
 
 inline torch::Tensor safe_to(const torch::Tensor& t,
                              const torch::TensorOptions& options,
                              bool non_blocking = false) {
   return t.defined() ? t.to(options, non_blocking) : t;
-};
+}
 
-// Creates an independent contiguous tensor that is detached from autograd.
+// Copies directly into independent contiguous storage, detached from autograd.
 inline torch::Tensor clone_contiguous_detached_tensor(
     const torch::Tensor& tensor) {
-  return tensor.contiguous().clone().detach();
-};
+  return tensor.detach().clone(torch::MemoryFormat::Contiguous);
+}
+
+template <typename T>
+constexpr torch::ScalarType get_scalar_type() {
+  return c10::CppTypeToScalarType<T>::value;
+}
+
+// Pageable: pinned only pays off as a non_blocking H2D source; paths that
+// upload directly need make_pinned_cpu_tensor instead.
+template <typename T>
+inline torch::Tensor make_cpu_tensor(const std::vector<T>& values) {
+  return detail::make_cpu_tensor_with_options(
+      values, detail::pageable_cpu_options(get_scalar_type<T>()));
+}
+
+// Pinned variant for host tensors that are the source of an async H2D copy;
+// the caching host allocator recycles these blocks, so repeated staging is
+// cheap, but a pinned allocation on a host-only path is pure waste.
+template <typename T>
+inline torch::Tensor make_pinned_cpu_tensor(const std::vector<T>& values) {
+  return detail::make_cpu_tensor_with_options(
+      values, detail::pinned_cpu_options(get_scalar_type<T>()));
+}
+
+// Identity index vector [0, count) as an int32 device tensor, built directly
+// on device: copying a temporary pinned CPU source forces its allocator to
+// synchronize before the async H2D completes.
+inline torch::Tensor arange_indices(int64_t count,
+                                    const torch::Device& device) {
+  return torch::arange(
+      count, torch::TensorOptions().dtype(torch::kInt).device(device));
+}
+
+// Stages a host vector onto the device with an async H2D copy from a pinned
+// CPU tensor, issued on the caller's current stream: the caller must keep
+// that stream active (e.g. via its stream guard) until the copy is ordered
+// before any consumer, and must synchronize before reading the result on
+// the host.
+template <typename T>
+inline torch::Tensor async_h2d_tensor(const std::vector<T>& values,
+                                      const torch::Device& device) {
+  return make_pinned_cpu_tensor(values).to(device, /*non_blocking=*/true);
+}
 
 inline std::vector<char> get_the_bytes(std::string filename) {
   std::ifstream input(filename, std::ios::binary);
@@ -329,26 +414,32 @@ inline torch::Tensor view_as_dtype(const torch::Tensor& src,
       src.data_ptr(), new_shape, deleter, src.options().dtype(target_dtype));
 }
 
+// Contiguous CPU copy with the requested scalar type; the trailing
+// contiguous() covers the same-device/dtype no-op path, where Tensor::to()
+// returns a non-contiguous input as-is.
+inline torch::Tensor to_cpu_contiguous(
+    const torch::Tensor& tensor,
+    std::optional<torch::ScalarType> dtype = std::nullopt) {
+  return safe_to(tensor,
+                 torch::TensorOptions()
+                     .device(torch::kCPU)
+                     .dtype(dtype.value_or(tensor.scalar_type())))
+      .contiguous();
+}
+
+// Reads a tensor into a host vector, converting to T's scalar type if needed.
+// Undefined input yields an empty vector: data_ptr() on an undefined tensor
+// is not safe to dereference.
 template <typename T>
-constexpr torch::ScalarType get_scalar_type() {
-  if constexpr (std::is_same_v<T, float>) {
-    return torch::kFloat32;
-  } else if constexpr (std::is_same_v<T, double>) {
-    return torch::kFloat64;
-  } else if constexpr (std::is_same_v<T, int32_t>) {
-    return torch::kInt32;
-  } else if constexpr (std::is_same_v<T, int64_t>) {
-    return torch::kInt64;
-  } else if constexpr (std::is_same_v<T, uint8_t>) {
-    return torch::kUInt8;
-  } else if constexpr (std::is_same_v<T, int8_t>) {
-    return torch::kInt8;
-  } else if constexpr (std::is_same_v<T, bool>) {
-    return torch::kBool;
-  } else {
-    LOG(FATAL) << "Unsupported type for torch::ScalarType.";
-    return torch::kFloat32;
+inline std::vector<T> tensor_to_vector(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return {};
   }
+  const torch::Tensor cpu_tensor =
+      to_cpu_contiguous(tensor, get_scalar_type<T>());
+  const T* data_ptr = cpu_tensor.data_ptr<T>();
+  const size_t size = static_cast<size_t>(cpu_tensor.numel());
+  return std::vector<T>(data_ptr, data_ptr + size);
 }
 
 inline std::optional<torch::ScalarType> try_get_scalar_type_from_string(

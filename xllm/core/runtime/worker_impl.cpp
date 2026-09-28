@@ -1073,19 +1073,10 @@ void WorkerImpl::prepare_dp_ep_padding(ModelInputParams& input_params) {
     }
   }
 
-  torch::Tensor token_size_per_dp_group =
-      torch::tensor(token_sizes,
-                    torch::TensorOptions()
-                        .device(torch::kCPU)
-                        .dtype(torch::kInt32)
-                        .pinned_memory(true));
+  torch::Tensor token_size_per_dp_group = make_cpu_tensor(token_sizes);
   torch::Tensor raw_token_size_per_dp_group =
       raw_token_sizes.empty() ? torch::Tensor()
-                              : torch::tensor(raw_token_sizes,
-                                              torch::TensorOptions()
-                                                  .device(torch::kCPU)
-                                                  .dtype(torch::kInt32)
-                                                  .pinned_memory(true));
+                              : make_cpu_tensor(raw_token_sizes);
   DpEpPadding dp_ep_padding(token_size_per_dp_group,
                             raw_token_size_per_dp_group,
                             context_.get_model_args().num_experts_per_tok(),
@@ -1385,10 +1376,8 @@ void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
     dst_indices.push_back(block.dst_block_id);
   }
 
-  auto src_tensor =
-      torch::tensor(src_indices, torch::dtype(torch::kLong).device(device_));
-  auto dst_tensor =
-      torch::tensor(dst_indices, torch::dtype(torch::kLong).device(device_));
+  auto src_tensor = async_h2d_tensor(src_indices, device_);
+  auto dst_tensor = async_h2d_tensor(dst_indices, device_);
   for (size_t layer_id = 0; layer_id < kv_caches_.size(); ++layer_id) {
     kv_caches_[layer_id].swap_blocks(src_tensor, dst_tensor);
   }
@@ -1453,12 +1442,10 @@ void WorkerImpl::refresh_cuda_block_copy_runtime_state() {
         reinterpret_cast<int64_t>(layer_v_cache.data_ptr()));
   }
 
-  auto ptr_options =
-      torch::TensorOptions().device(device_).dtype(torch::kInt64);
   cuda_block_copy_runtime_state_.k_cache_ptrs_device =
-      torch::tensor(key_cache_ptrs, ptr_options);
+      async_h2d_tensor(key_cache_ptrs, device_);
   cuda_block_copy_runtime_state_.v_cache_ptrs_device =
-      torch::tensor(value_cache_ptrs, ptr_options);
+      async_h2d_tensor(value_cache_ptrs, device_);
   cuda_block_copy_runtime_state_.num_layers = kv_caches_.size();
   cuda_block_copy_runtime_state_.numel_per_block = key_cache[0].numel();
 }
@@ -2526,16 +2513,10 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(
            input_params.attention.device.kv_cache_tokens_nums.to(device_)})
           .to(device_);
 
-  torch::Tensor ring_cur_seqlen_host =
-      input_params.attention.device.ring_cur_seqlen.cpu().contiguous();
-  torch::Tensor ring_cache_seqlen_host =
-      input_params.attention.device.ring_cache_seqlen.cpu().contiguous();
-  input_params.attention.host.ring_cur_seqlen = std::vector<int>(
-      ring_cur_seqlen_host.data_ptr<int>(),
-      ring_cur_seqlen_host.data_ptr<int>() + ring_cur_seqlen_host.numel());
-  input_params.attention.host.ring_cache_seqlen = std::vector<int>(
-      ring_cache_seqlen_host.data_ptr<int>(),
-      ring_cache_seqlen_host.data_ptr<int>() + ring_cache_seqlen_host.numel());
+  input_params.attention.host.ring_cur_seqlen =
+      tensor_to_vector<int32_t>(input_params.attention.device.ring_cur_seqlen);
+  input_params.attention.host.ring_cache_seqlen = tensor_to_vector<int32_t>(
+      input_params.attention.device.ring_cache_seqlen);
 }
 
 int64_t WorkerImpl::get_num_layers() const {

@@ -37,10 +37,6 @@ void push_cumsum(std::vector<int32_t>& vec, int32_t len) {
   vec.emplace_back(vec.back() + len);
 }
 
-Slice<int32_t> tensor_slice(const torch::Tensor& tensor) {
-  return {tensor.data_ptr<int32_t>(), static_cast<size_t>(tensor.numel())};
-}
-
 Slice<int32_t> get_token_ids(const ForwardInput& input) {
   return tensor_slice(input.token_ids_host);
 }
@@ -490,11 +486,7 @@ void update_input_params(ModelInputParams& input_params,
 }
 
 torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
+  return make_pinned_cpu_tensor(values);
 }
 
 void set_token_position_tensors(ForwardInput& input,

@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_qwen2_decoder_layer_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
+#include "core/util/tensor_helper.h"
 #include "models/llm/npu/deepseek_v3.h"
 #include "models/model_registry.h"
 #include "processors/kimi25_image_processor.h"
@@ -156,10 +157,7 @@ class KimiK2_5_VisionBlockImpl : public torch::nn::Module {
 
   torch::Tensor forward(BlockInput& block_input, int32_t node_id) {
     auto seqlens = torch::diff(block_input.cu_seqlens);
-    auto seqlens_cpu = seqlens.cpu().to(torch::kInt32).contiguous();
-    std::vector<int> seqlens_vec(
-        seqlens_cpu.data_ptr<int>(),
-        seqlens_cpu.data_ptr<int>() + seqlens_cpu.numel());
+    std::vector<int> seqlens_vec = tensor_to_vector<int>(seqlens);
 
     auto token_num = block_input.hidden_states.size(0);
     CHECK(block_input.cos_pos.defined())
@@ -219,7 +217,7 @@ class KimiK2_5_VisionPosEmbDividedImpl : public torch::nn::Module {
     std::vector<torch::Tensor> pos_embs;
     auto count = grid_thws.size(0);
     pos_embs.reserve(count);
-    auto grid_thws_cpu = grid_thws.cpu().to(torch::kLong).contiguous();
+    auto grid_thws_cpu = to_cpu_contiguous(grid_thws, torch::kLong);
 
     for (int64_t i = 0; i < count; ++i) {
       auto t = grid_thws_cpu[i][0].item<int64_t>();
@@ -389,7 +387,7 @@ class KimiK2_5_VisionRotaryEmbeddingImpl : public torch::nn::Module {
     auto count = grid_thws.size(0);
     freqs_cis.reserve(count);
 
-    auto grid_thws_cpu = grid_thws.cpu().to(torch::kLong).contiguous();
+    auto grid_thws_cpu = to_cpu_contiguous(grid_thws, torch::kLong);
     for (int64_t idx = 0; idx < count; ++idx) {
       auto t = grid_thws_cpu[idx][0].item<int64_t>();
       auto h = grid_thws_cpu[idx][1].item<int64_t>();
@@ -700,7 +698,7 @@ class KimiK2_5_VisionTransformerImpl : public torch::nn::Module {
     outputs.reserve(count);
 
     int64_t offset = 0;
-    auto grid_thw_cpu = grid_thw.cpu().to(torch::kLong).contiguous();
+    auto grid_thw_cpu = to_cpu_contiguous(grid_thw, torch::kLong);
     for (int64_t idx = 0; idx < count; ++idx) {
       auto t = grid_thw_cpu[idx][0].item<int64_t>();
       auto h = grid_thw_cpu[idx][1].item<int64_t>();
@@ -861,11 +859,8 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     auto n_patches_each_media = grid_thws.prod(-1);
     const int32_t max_infer_batch = std::max(
         n_patches_each_media.max().item<int32_t>(), kKimiVtInferMaxPatchNum);
-    auto n_patches_tensor =
-        n_patches_each_media.cpu().to(torch::kInt).contiguous();
-    std::vector<int32_t> n_patches_vec(
-        n_patches_tensor.data_ptr<int32_t>(),
-        n_patches_tensor.data_ptr<int32_t>() + n_patches_tensor.numel());
+    std::vector<int32_t> n_patches_vec =
+        tensor_to_vector<int32_t>(n_patches_each_media);
 
     std::vector<torch::Tensor> features;
     features.reserve(n);
@@ -927,14 +922,8 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
           << grid_thw.scalar_type();
       auto image_features = process_vision_features(pixel_values, grid_thw);
       auto image_embeds = torch::cat(image_features, 0);
-      auto image_tokens =
-          (image_input->image_grid_thw.prod(-1) / merge_size / merge_size)
-              .cpu()
-              .contiguous()
-              .to(torch::kLong);
-      std::vector<int64_t> image_tokens_vec(
-          image_tokens.data_ptr<int64_t>(),
-          image_tokens.data_ptr<int64_t>() + image_tokens.numel());
+      const std::vector<int64_t> image_tokens_vec = tensor_to_vector<int64_t>(
+          image_input->image_grid_thw.prod(-1) / merge_size / merge_size);
       multimodal_embeds["image|embedding"] =
           image_embeds.split(image_tokens_vec, 0 /*dim*/);
     }

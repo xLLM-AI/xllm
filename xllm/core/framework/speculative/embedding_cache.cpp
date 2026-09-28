@@ -23,20 +23,8 @@ limitations under the License.
 #include <vector>
 
 #include "util/tensor_helper.h"
-#include "util/utils.h"
 
 namespace xllm {
-namespace {
-
-torch::Tensor to_cpu_int64_contiguous(const torch::Tensor& tensor) {
-  torch::Tensor cpu_tensor = safe_to(tensor, torch::kCPU).contiguous();
-  if (cpu_tensor.scalar_type() != torch::kInt64) {
-    cpu_tensor = cpu_tensor.to(torch::kInt64);
-  }
-  return cpu_tensor;
-}
-
-}  // namespace
 
 EmbeddingCache::EmbeddingCache(int32_t total_nums) {
   CHECK_GT(total_nums, 0) << "No embeddings to allocate";
@@ -60,7 +48,8 @@ void EmbeddingCache::write_prefill_target_context(
   CHECK_EQ(embeddings.size(0), static_cast<int64_t>(ids.size()))
       << "prefill target embedding count mismatch";
 
-  torch::Tensor next_tokens_cpu = to_cpu_int64_contiguous(next_tokens);
+  const torch::Tensor next_tokens_cpu =
+      to_cpu_contiguous(next_tokens, torch::kInt64);
   const int64_t* next_tokens_data = next_tokens_cpu.const_data_ptr<int64_t>();
   const int32_t num_ids = static_cast<int32_t>(ids.size());
   for (int32_t i = 0; i < num_ids; ++i) {
@@ -128,11 +117,12 @@ void EmbeddingCache::write_target_context(
       << "accepted token/embedding width mismatch";
   CHECK_GE(num_speculative_tokens, 0) << "invalid speculative token count";
 
-  torch::Tensor accepted_tokens_cpu = to_cpu_int64_contiguous(accepted_tokens);
+  const torch::Tensor accepted_tokens_cpu =
+      to_cpu_contiguous(accepted_tokens, torch::kInt64);
   const int64_t* accepted_tokens_data =
       accepted_tokens_cpu.const_data_ptr<int64_t>();
   const int32_t num_ids = static_cast<int32_t>(ids.size());
-  const int32_t token_width = static_cast<int32_t>(accepted_tokens_cpu.size(1));
+  const int32_t token_width = static_cast<int32_t>(accepted_tokens.size(1));
   for (int32_t i = 0; i < num_ids; ++i) {
     int32_t accepted_len = 0;
     int32_t last_token_id = -1;

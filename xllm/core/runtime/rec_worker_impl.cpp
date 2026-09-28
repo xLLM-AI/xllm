@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/config/rec_config.h"
 #include "framework/model/model_input_params.h"
 #include "util/rec_model_utils.h"
+#include "util/tensor_helper.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
 #include "kernels/cuda/xattention/xattention_ops_api.h"
@@ -86,28 +87,6 @@ bool enable_onerec_selected_token_cpu_check() {
 bool enable_onerec_xattention_stage_timing() {
   return util::get_bool_env("XLLM_DEBUG_ONEREC_XATTN_STAGE_TIMING", false);
 }
-
-#if defined(USE_NPU)
-torch::Tensor int32_vector_to_device_tensor(const std::vector<int32_t>& values,
-                                            const torch::Device& device) {
-  auto cpu_options =
-      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-  torch::Tensor cpu_tensor = values.empty()
-                                 ? torch::empty({0}, cpu_options)
-                                 : torch::tensor(values, cpu_options);
-  return cpu_tensor.to(device, /*non_blocking=*/false);
-}
-
-torch::Tensor int64_vector_to_device_tensor(const std::vector<int64_t>& values,
-                                            const torch::Device& device) {
-  auto cpu_options =
-      torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-  torch::Tensor cpu_tensor = values.empty()
-                                 ? torch::empty({0}, cpu_options)
-                                 : torch::tensor(values, cpu_options);
-  return cpu_tensor.to(device, /*non_blocking=*/false);
-}
-#endif  // defined(USE_NPU)
 
 int32_t get_requested_beam_result_width(const SamplingParameters& params,
                                         int32_t beam_width) {
@@ -433,21 +412,13 @@ void RecWorkerImpl::RecWorkPipeline::prepare_work_before_execute(
   if (!runtime_.context->get_parallel_args().mapping_data().empty() &&
       (runtime_.context->get_parallel_args().dp_size() > 1 ||
        runtime_.context->get_parallel_args().ep_size() > 1)) {
-    torch::Tensor token_size_per_dp_group = torch::tensor(
-        processed_inputs.input_params.parallel.dp_global_token_nums,
-        torch::TensorOptions()
-            .device(torch::kCPU)
-            .dtype(torch::kInt32)
-            .pinned_memory(true));
+    torch::Tensor token_size_per_dp_group = make_cpu_tensor(
+        processed_inputs.input_params.parallel.dp_global_token_nums);
     const auto& raw_dp_token_nums =
         processed_inputs.input_params.parallel.raw_dp_global_token_nums;
     torch::Tensor raw_token_size_per_dp_group =
         raw_dp_token_nums.empty() ? torch::Tensor()
-                                  : torch::tensor(raw_dp_token_nums,
-                                                  torch::TensorOptions()
-                                                      .device(torch::kCPU)
-                                                      .dtype(torch::kInt32)
-                                                      .pinned_memory(true));
+                                  : make_cpu_tensor(raw_dp_token_nums);
     bool is_prefill =
         processed_inputs.input_params.meta.batch_forward_type.is_prefill();
     DpEpPadding dp_ep_padding(
@@ -922,17 +893,17 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::
 
   const torch::Device& device = runtime_.worker.device();
   constraint_device_tensors_.first_token_ids =
-      int32_vector_to_device_tensor(tables.first_token_ids, device);
+      async_h2d_tensor(tables.first_token_ids, device);
   constraint_device_tensors_.prefix1_offsets =
-      int32_vector_to_device_tensor(tables.prefix1_offsets, device);
+      async_h2d_tensor(tables.prefix1_offsets, device);
   constraint_device_tensors_.prefix1_values =
-      int32_vector_to_device_tensor(tables.prefix1_values, device);
+      async_h2d_tensor(tables.prefix1_values, device);
   constraint_device_tensors_.prefix1_pair_keys =
-      int64_vector_to_device_tensor(tables.prefix1_pair_keys, device);
+      async_h2d_tensor(tables.prefix1_pair_keys, device);
   constraint_device_tensors_.prefix2_value_offsets =
-      int32_vector_to_device_tensor(tables.prefix2_value_offsets, device);
+      async_h2d_tensor(tables.prefix2_value_offsets, device);
   constraint_device_tensors_.prefix2_values =
-      int32_vector_to_device_tensor(tables.prefix2_values, device);
+      async_h2d_tensor(tables.prefix2_values, device);
   constraint_device_tensors_.max_prefix1_degree = tables.max_prefix1_degree;
   constraint_device_tensors_.max_prefix2_degree = tables.max_prefix2_degree;
   constraint_device_tensors_.initialized = true;
@@ -1111,9 +1082,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::execute_cache_select(
   }
 #if defined(USE_NPU)
   auto device = runtime_.worker.device();
-  auto int32_options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
-  auto batch_offsets = torch::arange(batch_size, int32_options) * beam_width;
+  auto batch_offsets = arange_indices(batch_size, device) * beam_width;
   auto batch_offsets_2d = batch_offsets.unsqueeze(1);
 
   auto beam_index_global = out_token_index.reshape({batch_size, beam_width});
@@ -1121,7 +1090,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::execute_cache_select(
   auto group_prefix_global =
       out_beam_count_prefix_sums.reshape({batch_size, beam_width});
   auto group_prefix_local = group_prefix_global - batch_offsets_2d;
-  auto block_table = torch::arange(batch_size, int32_options);
+  auto block_table = arange_indices(batch_size, device);
 
   xllm::kernel::npu::select_unshared_kv(
       /*beam_index=*/beam_index_local.reshape({-1}),
@@ -1133,10 +1102,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::execute_cache_select(
       /*beam_size=*/beam_width,
       /*layer_num=*/num_layers);
 #elif defined(USE_CUDA)
-  auto block_table = torch::arange(batch_size,
-                                   torch::TensorOptions()
-                                       .dtype(torch::kInt32)
-                                       .device(runtime_.worker.device()))
+  auto block_table = arange_indices(batch_size, runtime_.worker.device())
                          .view({batch_size, 1});
   xllm::kernel::cuda::cache_select(out_token_index,
                                    onerec_params.unshared_k_caches,
@@ -1265,10 +1231,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
   }
   prepare_unshared_kv_caches_for_input(inputs, onerec_params);
   processed_inputs.input_params.attention.device.block_tables =
-      torch::arange(batch_size,
-                    torch::TensorOptions()
-                        .dtype(torch::kInt32)
-                        .device(runtime_.worker.device()));
+      arange_indices(batch_size, runtime_.worker.device());
   log_prepare_timing("cache_prepare");
 
   const int32_t beam_width =
@@ -1285,12 +1248,8 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
       processed_inputs.sampling_params.selected_token_idxes.defined()) {
     onerec_params.debug_selected_token_idxes =
         processed_inputs.sampling_params.selected_token_idxes;
-    auto selected_cpu = inputs.sampling_params.selected_token_idxes.to(
-        torch::kCPU, /*non_blocking=*/false);
-    auto selected_cpu_i64 = selected_cpu.to(torch::kInt64).contiguous();
-    const int64_t* ptr = selected_cpu_i64.data_ptr<int64_t>();
-    onerec_params.debug_selected_token_idxes_expected.assign(
-        ptr, ptr + selected_cpu_i64.numel());
+    onerec_params.debug_selected_token_idxes_expected =
+        tensor_to_vector<int64_t>(inputs.sampling_params.selected_token_idxes);
   } else {
     onerec_params.debug_selected_token_idxes = torch::Tensor();
     onerec_params.debug_selected_token_idxes_expected.clear();
@@ -1479,10 +1438,8 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
           !sampling_params.selected_token_idxes.defined()) {
         return;
       }
-      auto selected_token_idxes_stage_cpu = sampling_params.selected_token_idxes
-                                                .to(torch::kCPU,
-                                                    /*non_blocking=*/false)
-                                                .to(torch::kInt64);
+      auto selected_token_idxes_stage_cpu = to_cpu_contiguous(
+          sampling_params.selected_token_idxes, torch::kInt64);
       CHECK(torch::equal(selected_token_idxes_stage_cpu,
                          selected_token_idxes_before_cpu))
           << "OneRec xattention selected_token_idxes changed after "
@@ -1599,11 +1556,8 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
       torch::Tensor selected_token_idxes = selected_token_idxes_for_logits;
 #if defined(USE_NPU)
       if (selected_token_cpu_check) {
-        auto selected_token_idxes_after_cpu =
-            sampling_params.selected_token_idxes
-                .to(torch::kCPU,
-                    /*non_blocking=*/false)
-                .to(torch::kInt64);
+        auto selected_token_idxes_after_cpu = to_cpu_contiguous(
+            sampling_params.selected_token_idxes, torch::kInt64);
         CHECK(torch::equal(selected_token_idxes_after_cpu,
                            selected_token_idxes_before_cpu))
             << "OneRec xattention selected_token_idxes changed during model "
@@ -1721,12 +1675,10 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
             selected_token_idxes.emplace_back(seq_idx * beam_width + beam_idx);
           }
         }
-        auto int_options = torch::TensorOptions()
-                               .dtype(torch::kInt32)
-                               .device(runtime_.worker.device());
-        mutable_input.positions = torch::tensor(positions_host, int_options);
+        mutable_input.positions =
+            async_h2d_tensor(positions_host, runtime_.worker.device());
         mutable_input.decoder_sampling_params.selected_token_idxes =
-            torch::tensor(selected_token_idxes, int_options);
+            async_h2d_tensor(selected_token_idxes, runtime_.worker.device());
         mutable_input.decoder_sampling_params.num_return_sequences =
             mutable_input.sampling_params.num_return_sequences;
         mutable_input.input_params.meta.batch_forward_type =
@@ -2007,7 +1959,8 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::allocate_kv_caches_related() {
   auto dtype = runtime_.worker.dtype();
   auto device = runtime_.worker.device();
   auto kv_cache_options = torch::TensorOptions().dtype(dtype).device(device);
-  auto int_options = torch::TensorOptions().dtype(torch::kInt32).device(device);
+  const auto int_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(device);
   int32_t num_layers = runtime_.context->get_model_args().n_layers();
 
   int32_t full_kv_len =
@@ -2041,11 +1994,10 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::allocate_kv_caches_related() {
   }
 
 #if defined(USE_NPU)
-  cached_naive_block_table_ = torch::arange(max_seqs_per_batch_, int_options);
+  cached_naive_block_table_ = arange_indices(max_seqs_per_batch_, device);
 #else
   cached_naive_block_table_ =
-      torch::arange(max_seqs_per_batch_ * beam_width_, int_options)
-          .unsqueeze(1);
+      arange_indices(max_seqs_per_batch_ * beam_width_, device).unsqueeze(1);
 #endif
   cached_current_round_tensor_ = torch::zeros({1}, int_options);
   cached_beam_width_tensor_ = torch::zeros({1}, int_options);
@@ -2083,7 +2035,6 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
     prepare_kv_caches_related_for_input(const ForwardInput& inputs,
                                         ForwardInput& processed_inputs) {
   auto device = runtime_.worker.device();
-  auto int_options = torch::TensorOptions().dtype(torch::kInt32).device(device);
   auto& input_params = processed_inputs.input_params;
   auto& llm_rec_params = input_params.mutable_llmrec_params();
 
@@ -2214,7 +2165,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
         }
       }
       llm_rec_params.decode_positions_tensor_list.emplace_back(
-          torch::tensor(position_buffer, int_options));
+          async_h2d_tensor(position_buffer, device));
     }
   }
 }
@@ -2458,11 +2409,9 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_cache_select(
     int32_t num_layers) {
 #if defined(USE_NPU)
   auto device = runtime_.worker.device();
-  auto int32_options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
   const int32_t batch_size =
       static_cast<int32_t>(beam_tensors.sequence_group.size(0));
-  auto batch_offsets = torch::arange(batch_size, int32_options) * beam_width;
+  auto batch_offsets = arange_indices(batch_size, device) * beam_width;
   auto batch_offsets_2d = batch_offsets.unsqueeze(1);
 
   auto beam_index_global =
@@ -2472,7 +2421,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_cache_select(
       beam_tensors.out_beam_count_prefix_sums.reshape({batch_size, beam_width});
   auto group_prefix_local = group_prefix_global - batch_offsets_2d;
 
-  auto block_table = torch::arange(batch_size, int32_options);
+  auto block_table = arange_indices(batch_size, device);
 
   const auto& unshared_k_caches =
       input.input_params.mutable_llmrec_params().unshared_k_caches;
@@ -2607,14 +2556,14 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
 
   // The unshared two-stage decode path packs one query row per expanded beam,
   // so qo_indptr is the prefix sum of per-beam query lengths rather than a
-  // paged-kv layout descriptor.
-  auto qo_indptr_values = torch::arange(total_beam + 1, int_options);
+  // paged-kv layout descriptor. Both descriptors take the same identity
+  // indices, so one build serves both copies.
+  const torch::Tensor qo_indptr_values = arange_indices(total_beam + 1, device);
   llm_rec_params.two_stage_qo_indptr_expanded.copy_(qo_indptr_values,
                                                     /*non_blocking=*/true);
-
-  auto paged_kv_indptr_values = torch::arange(total_beam + 1, int_options);
   llm_rec_params.two_stage_paged_kv_indptr_expanded.copy_(
-      paged_kv_indptr_values, /*non_blocking=*/true);
+      qo_indptr_values,
+      /*non_blocking=*/true);
 
   if (input.input_params.attention.device.block_tables.defined() &&
       input.input_params.attention.device.block_tables.numel() >= total_beam) {
@@ -2623,7 +2572,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
             0, 0, total_beam),
         /*non_blocking=*/true);
   } else {
-    auto paged_kv_indices_values = torch::arange(total_beam, int_options);
+    auto paged_kv_indices_values = arange_indices(total_beam, device);
     llm_rec_params.two_stage_paged_kv_indices_expanded.copy_(
         paged_kv_indices_values, /*non_blocking=*/true);
   }

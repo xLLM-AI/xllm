@@ -495,7 +495,7 @@ inline void write_tensor(char*& buffer, const torch::Tensor& tensor) {
     write_data(buffer, ndim);
     return;
   }
-  auto contig_tensor = tensor.cpu().contiguous();
+  auto contig_tensor = to_cpu_contiguous(tensor);
   // write ndim
   const uint64_t tensor_ndim = contig_tensor.dim();
   write_data(buffer, tensor_ndim);
@@ -542,7 +542,7 @@ inline void write_tensor(RawInputSerializeContext& context,
   }
 
   if (context.tensor_arena.ptr != nullptr) {
-    torch::Tensor contiguous_tensor = tensor.cpu().contiguous();
+    torch::Tensor contiguous_tensor = to_cpu_contiguous(tensor);
     write_bytes(
         context.tensor_arena, contiguous_tensor.data_ptr(), tensor_data_bytes);
   } else {
@@ -2468,8 +2468,7 @@ inline void deserialize_forward_input_payload(
   if (materialize_device_buffer &&
       !input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
-        torch::tensor(input_params.embedding.linear_state_ids, torch::kInt)
-            .to(device, /*non_blocking=*/true);
+        async_h2d_tensor(input_params.embedding.linear_state_ids, device);
   }
   read_string_vector(context, input_params.embedding.request_ids);
   read_vector(context, input_params.embedding.extra_token_ids);
@@ -2792,33 +2791,12 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
 }
 
 template <typename T>
-std::vector<T> tensor_to_vector(const torch::Tensor& tensor) {
-  if (!tensor.defined() || tensor.numel() == 0) {
-    return {};
-  }
-  torch::Tensor cpu_tensor = tensor.cpu().contiguous();
-  if (cpu_tensor.scalar_type() != get_scalar_type<T>()) {
-    cpu_tensor = cpu_tensor.to(get_scalar_type<T>());
-  }
-  const T* data_ptr = cpu_tensor.data_ptr<T>();
-  const size_t size = static_cast<size_t>(cpu_tensor.numel());
-  return std::vector<T>(data_ptr, data_ptr + size);
-}
-
-template <typename T>
 std::vector<T> host_vector_or_tensor(const std::vector<T>& host_values,
                                      const torch::Tensor& tensor) {
   if (!host_values.empty()) {
     return host_values;
   }
   return tensor_to_vector<T>(tensor);
-}
-
-torch::Tensor cpu_tensor_or_self(const torch::Tensor& tensor) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  return tensor.device().is_cpu() ? tensor : tensor.cpu();
 }
 
 torch::Tensor choose_host_or_device_tensor(const torch::Tensor& host_tensor,
@@ -2860,9 +2838,9 @@ inline void serialize_forward_input_sections(
     const ForwardInput& input,
     RawInputSerializeContext& context) {
   const torch::Tensor host_token_ids =
-      cpu_tensor_or_self(input.host_token_ids());
+      to_cpu_contiguous(input.host_token_ids());
   const torch::Tensor host_positions =
-      cpu_tensor_or_self(input.host_positions());
+      to_cpu_contiguous(input.host_positions());
   write_tensor(context, host_token_ids);
   write_tensor(context, host_positions);
 

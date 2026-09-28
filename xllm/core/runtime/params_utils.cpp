@@ -22,6 +22,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/multimodal/mm_batch_data.h"
+#include "util/tensor_helper.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -247,9 +248,7 @@ void forward_output_to_proto(
         const auto token_embeddings =
             curr_embeddings.defined() ? curr_embeddings[i] : curr_embeddings;
         if (token_embeddings.defined()) {
-          Slice<float> embedding_slice = {
-              token_embeddings.data_ptr<float>(),
-              static_cast<size_t>(token_embeddings.size(0))};
+          Slice<float> embedding_slice = tensor_slice<float>(token_embeddings);
           ADD_VECTOR_TO_PROTO(pb_token.mutable_embeddings()->mutable_vals(),
                               embedding_slice);
         }
@@ -291,9 +290,7 @@ void forward_output_to_proto(
       const auto token_embeddings =
           embeddings.defined() ? embeddings[output_idx] : embeddings;
       if (token_embeddings.defined()) {
-        Slice<float> embedding_slice = {
-            token_embeddings.data_ptr<float>(),
-            static_cast<size_t>(token_embeddings.size(0))};
+        Slice<float> embedding_slice = tensor_slice<float>(token_embeddings);
         ADD_VECTOR_TO_PROTO(pb_token.mutable_embeddings()->mutable_vals(),
                             embedding_slice);
       }
@@ -321,33 +318,25 @@ void forward_output_to_proto(
     pb_forward_output->set_prepared_token(prepared_token);
 
     if (expert_load_data.defined()) {
-      torch::Tensor expert_load_data_flattened =
-          expert_load_data.view({-1}).contiguous();
-      Slice<int64_t> expert_load_data_flattened_slice = {
-          expert_load_data_flattened.data_ptr<int64_t>(),
-          static_cast<size_t>(expert_load_data_flattened.size(0))};
+      Slice<int64_t> expert_load_data_flattened_slice =
+          tensor_slice<int64_t>(expert_load_data.view({-1}));
       ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_expert_load_data(),
                           expert_load_data_flattened_slice);
     }
   }
 
   if (src_seq_idxes.defined() && src_seq_idxes.numel() > 0) {
-    Slice<int32_t> src_seq_idxes_slice = {
-        src_seq_idxes.data_ptr<int32_t>(),
-        static_cast<size_t>(src_seq_idxes.numel())};
+    Slice<int32_t> src_seq_idxes_slice = tensor_slice(src_seq_idxes);
     ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_src_seq_idxes(),
                         src_seq_idxes_slice);
   }
   if (out_tokens.defined() && out_tokens.numel() > 0) {
-    Slice<int32_t> out_tokens_slice = {out_tokens.data_ptr<int32_t>(),
-                                       static_cast<size_t>(out_tokens.numel())};
+    Slice<int32_t> out_tokens_slice = tensor_slice(out_tokens);
     ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_out_tokens(),
                         out_tokens_slice);
   }
   if (out_logprobs.defined() && out_logprobs.numel() > 0) {
-    Slice<float> out_logprobs_slice = {
-        out_logprobs.data_ptr<float>(),
-        static_cast<size_t>(out_logprobs.numel())};
+    Slice<float> out_logprobs_slice = tensor_slice<float>(out_logprobs);
     ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_out_logprobs(),
                         out_logprobs_slice);
   }
@@ -384,9 +373,8 @@ Token build_token(int64_t index,
     if (top_tokens.defined() && top_logprobs.defined()) {
       auto topk_tokens = top_tokens[index];
       auto topk_logprobs = top_logprobs[index];
-      const size_t size = topk_tokens.numel();
-      token.top_tokens = {topk_tokens.const_data_ptr<int64_t>(), size};
-      token.top_logprobs = {topk_logprobs.const_data_ptr<float>(), size};
+      token.top_tokens = tensor_slice<int64_t>(topk_tokens);
+      token.top_logprobs = tensor_slice<float>(topk_logprobs);
     }
   }
   return token;

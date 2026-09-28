@@ -31,6 +31,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#include "core/util/tensor_helper.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"
@@ -76,16 +77,9 @@ torch::Tensor causal_conv1d_prefill_npu(torch::Tensor x,
   }
 
   // Convert device tensors to host vectors for IntArrayRef parameters.
-  auto qsl_cpu = query_start_loc.to(torch::kCPU, torch::kInt64).contiguous();
-  auto si_cpu = state_indices.to(torch::kCPU, torch::kInt64).contiguous();
-  auto ism_cpu = has_initial_state.to(torch::kCPU, torch::kInt64).contiguous();
-
-  std::vector<int64_t> qsl_vec(qsl_cpu.data_ptr<int64_t>(),
-                               qsl_cpu.data_ptr<int64_t>() + qsl_cpu.numel());
-  std::vector<int64_t> si_vec(si_cpu.data_ptr<int64_t>(),
-                              si_cpu.data_ptr<int64_t>() + si_cpu.numel());
-  std::vector<int64_t> ism_vec(ism_cpu.data_ptr<int64_t>(),
-                               ism_cpu.data_ptr<int64_t>() + ism_cpu.numel());
+  std::vector<int64_t> qsl_vec = tensor_to_vector<int64_t>(query_start_loc);
+  std::vector<int64_t> si_vec = tensor_to_vector<int64_t>(state_indices);
+  std::vector<int64_t> ism_vec = tensor_to_vector<int64_t>(has_initial_state);
 
   constexpr int64_t kActivationSilu = 1;
   constexpr int64_t kPadSlotId = -1;
@@ -122,16 +116,9 @@ causal_conv1d_qkv_prefill_npu(torch::Tensor x,
     weight = weight.t().contiguous();
   }
 
-  auto qsl_cpu = query_start_loc.to(torch::kCPU, torch::kInt64).contiguous();
-  auto si_cpu = state_indices.to(torch::kCPU, torch::kInt64).contiguous();
-  auto ism_cpu = has_initial_state.to(torch::kCPU, torch::kInt64).contiguous();
-
-  std::vector<int64_t> qsl_vec(qsl_cpu.data_ptr<int64_t>(),
-                               qsl_cpu.data_ptr<int64_t>() + qsl_cpu.numel());
-  std::vector<int64_t> si_vec(si_cpu.data_ptr<int64_t>(),
-                              si_cpu.data_ptr<int64_t>() + si_cpu.numel());
-  std::vector<int64_t> ism_vec(ism_cpu.data_ptr<int64_t>(),
-                               ism_cpu.data_ptr<int64_t>() + ism_cpu.numel());
+  std::vector<int64_t> qsl_vec = tensor_to_vector<int64_t>(query_start_loc);
+  std::vector<int64_t> si_vec = tensor_to_vector<int64_t>(state_indices);
+  std::vector<int64_t> ism_vec = tensor_to_vector<int64_t>(has_initial_state);
 
   return xllm::kernel::npu::causal_conv1d_qkv(x,
                                               weight,
@@ -434,24 +421,22 @@ build_cp_context_npu(const std::vector<int64_t>& q_seq_lens,
     }
   }
 
-  const auto cpu_int64 = torch::dtype(torch::kInt64).device(torch::kCPU);
-  auto shard_tensor = torch::tensor(shard_index, cpu_int64);
+  auto shard_tensor = make_cpu_tensor(shard_index);
   auto valid_mask = shard_tensor >= 0;
   auto gather_index =
       torch::where(valid_mask, shard_tensor, torch::zeros_like(shard_tensor));
 
-  return std::make_tuple(
-      shard_tensor.to(device),
-      gather_index.to(device),
-      valid_mask.to(device),
-      torch::tensor(restore_index, cpu_int64).to(device),
-      torch::tensor(query_index, cpu_int64).to(device),
-      torch::tensor(kv_gather_index, cpu_int64).to(device),
-      q_cu_seqlens,
-      kv_cu_seqlens,
-      torch::tensor(segment_seq_indices, cpu_int64).to(device),
-      segment_kv_seq_lens,
-      total_local);
+  return std::make_tuple(shard_tensor.to(device),
+                         gather_index.to(device),
+                         valid_mask.to(device),
+                         async_h2d_tensor(restore_index, device),
+                         async_h2d_tensor(query_index, device),
+                         async_h2d_tensor(kv_gather_index, device),
+                         q_cu_seqlens,
+                         kv_cu_seqlens,
+                         async_h2d_tensor(segment_seq_indices, device),
+                         segment_kv_seq_lens,
+                         total_local);
 }
 
 }  // namespace
