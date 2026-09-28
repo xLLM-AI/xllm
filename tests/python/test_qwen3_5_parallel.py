@@ -30,7 +30,7 @@ from tests.python.qwen3_5_test_utils import (
 )
 from xllm.python import kernels
 from xllm.python.layers.layernorm import GemmaRMSNorm
-from xllm.python.layers.qwen3_5_decoder_layer import (
+from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
 )
 from xllm.python.model_loader import ScopedWeightLoader

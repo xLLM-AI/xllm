@@ -19,7 +19,7 @@ from __future__ import annotations
 from xllm.python.layers.cuda.qwen3_5.attention import CudaQwen3_5Attention
 from xllm.python.layers.cuda.qwen3_5.gated_delta_net import CudaQwen3_5GatedDeltaNet
 from xllm.python.layers.cuda.qwen3_5.moe import CudaQwen3_5SparseMoEBlock
-from xllm.python.layers.qwen3_5_decoder_layer import Qwen3_5DecoderLayer
+from xllm.python.layers.qwen3_5.decoder_layer import Qwen3_5DecoderLayer
 
 
 class CudaQwen3_5DecoderLayer(Qwen3_5DecoderLayer):

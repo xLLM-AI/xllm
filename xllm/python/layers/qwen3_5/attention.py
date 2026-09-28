@@ -26,7 +26,7 @@ import torch.nn as nn
 from xllm.python.layers.attention import Attention
 from xllm.python.layers.layernorm import GemmaRMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.qwen3_5_common import (
+from xllm.python.layers.qwen3_5.common import (
     PartialRotaryEmbedding,
     Qwen3_5AttentionConfig,
 )

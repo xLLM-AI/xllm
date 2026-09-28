@@ -23,7 +23,7 @@ import torch.nn as nn
 
 from xllm.python import kernels
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.qwen3_5_common import Qwen3_5GatedDeltaNetConfig
+from xllm.python.layers.qwen3_5.common import Qwen3_5GatedDeltaNetConfig
 from xllm.python.model_executor.forward_context import get_forward_context
 from xllm.python.model_loader import (
     ParallelLoadContext,

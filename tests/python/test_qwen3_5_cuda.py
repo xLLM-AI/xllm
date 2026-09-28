@@ -55,7 +55,7 @@ from xllm.python.layers.cuda.qwen3_5.moe import (
 )
 from xllm.python.layers.fused_moe import FusedMoE
 from xllm.python.layers.gated_mlp import GatedMLP
-from xllm.python.layers.qwen3_5_decoder_layer import (
+from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
 )
 from xllm.python.model_executor.forward_context import forward_context

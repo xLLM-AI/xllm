@@ -19,8 +19,8 @@ from __future__ import annotations
 import torch
 
 from xllm.python.layers.fused_moe import FusedMoE
-from xllm.python.layers.qwen3_5_common import Qwen3_5MoEConfig
-from xllm.python.layers.qwen3_5_moe import Qwen3_5SparseMoEBlockBase
+from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
+from xllm.python.layers.qwen3_5.moe import Qwen3_5SparseMoEBlockBase
 
 
 class CudaQwen3_5SparseMoEBlock(Qwen3_5SparseMoEBlockBase):

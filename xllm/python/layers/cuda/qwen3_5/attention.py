@@ -14,7 +14,7 @@
 
 """CUDA-specific Qwen3.5 full-attention weight preparation."""
 
-from xllm.python.layers.qwen3_5_attention import Qwen3_5Attention
+from xllm.python.layers.qwen3_5.attention import Qwen3_5Attention
 
 
 class CudaQwen3_5Attention(Qwen3_5Attention):

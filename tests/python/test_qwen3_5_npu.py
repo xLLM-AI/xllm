@@ -58,7 +58,7 @@ from xllm.python.layers.npu.qwen3_5.gated_delta_net import (
 from xllm.python.layers.npu.qwen3_5.moe import (
     NpuQwen3_5SparseMoEBlock,
 )
-from xllm.python.layers.qwen3_5_decoder_layer import (
+from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
 )
 from xllm.python.model_executor.forward_context import (

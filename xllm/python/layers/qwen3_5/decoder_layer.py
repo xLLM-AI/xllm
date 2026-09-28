@@ -21,8 +21,8 @@ import torch.nn as nn
 
 from xllm.python.layers.gated_mlp import GatedMLP
 from xllm.python.layers.layernorm import GemmaRMSNorm
-from xllm.python.layers.qwen3_5_attention import Qwen3_5Attention
-from xllm.python.layers.qwen3_5_common import (
+from xllm.python.layers.qwen3_5.attention import Qwen3_5Attention
+from xllm.python.layers.qwen3_5.common import (
     PartialRotaryEmbedding,
     Qwen3_5DecoderConfig,
 )

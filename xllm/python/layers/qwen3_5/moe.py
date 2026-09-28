@@ -23,7 +23,7 @@ import torch.nn as nn
 
 from xllm.python import distributed
 from xllm.python.layers.gated_mlp import GatedMLP
-from xllm.python.layers.qwen3_5_common import Qwen3_5MoEConfig
+from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,

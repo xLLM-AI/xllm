@@ -21,8 +21,8 @@ import torch.nn as nn
 
 from xllm.python import kernels
 from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
-from xllm.python.layers.qwen3_5_common import Qwen3_5MoEConfig
-from xllm.python.layers.qwen3_5_moe import Qwen3_5SparseMoEBlockBase
+from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
+from xllm.python.layers.qwen3_5.moe import Qwen3_5SparseMoEBlockBase
 
 
 class _NpuQwen3_5Experts(nn.Module):

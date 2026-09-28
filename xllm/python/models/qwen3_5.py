@@ -22,8 +22,8 @@ import torch
 import torch.nn as nn
 
 from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
-from xllm.python.layers.qwen3_5_common import PartialRotaryEmbedding
-from xllm.python.layers.qwen3_5_decoder_layer import get_qwen3_5_decoder_layer_class
+from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
+from xllm.python.layers.qwen3_5.decoder_layer import get_qwen3_5_decoder_layer_class
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,
