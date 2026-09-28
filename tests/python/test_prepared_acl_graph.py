@@ -16,11 +16,12 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 
+from xllm.python.attention.backend import AttentionBackend
 from xllm.python.model_executor.executor import ModelExecutor
 from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
@@ -58,6 +59,9 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> PreparedAclGraphRunner:
     )
     monkeypatch.setattr(torch, "npu", npu, raising=False)
     backend = SimpleNamespace(prepare=Mock())
+    backend.prepare_graph_replay = Mock(
+        side_effect=lambda metadata: AttentionBackend.prepare_graph_replay(backend, metadata)
+    )
     result = PreparedAclGraphRunner(torch.nn.Identity(), backend, torch.device("cpu"), 4)
     result._capture = Mock(side_effect=lambda entry, _: setattr(entry, "graph", Mock()))
     result._allocate_entry = Mock(side_effect=AssertionError("owned input allocation"))
@@ -65,7 +69,9 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> PreparedAclGraphRunner:
     return result
 
 
-def test_capture_binds_each_slot_and_shape_without_input_copies(runner: PreparedAclGraphRunner) -> None:
+def test_capture_and_replay_bind_each_slot_without_input_copies(runner: PreparedAclGraphRunner) -> None:
+    from xllm.python.model_executor.forward_context import get_forward_context
+
     inputs = []
     for _ in range(2):
         tokens = torch.arange(4, dtype=torch.int32)
@@ -83,9 +89,26 @@ def test_capture_binds_each_slot_and_shape_without_input_copies(runner: Prepared
         assert entry.static_metadata.block_table is metadata.block_table
         entries.append(entry)
     assert entries[0] is not entries[1]
-    assert runner._capture.call_count == 2
     runner._allocate_entry.assert_not_called()
     runner._fill_entry.assert_not_called()
+    runner.attention_backend.prepare_graph_replay.assert_not_called()
+    runner.attention_backend.prepare.reset_mock()
+    installed = []
+
+    def install_replay(metadata: SimpleNamespace) -> None:
+        installed.append((get_forward_context().execution_state, list(metadata.kv_seq_lens_host_values)))
+
+    runner.attention_backend.prepare_graph_replay.side_effect = install_replay
+    for step, index in enumerate((0, 1, 0)):
+        tokens, positions, metadata = inputs[index]
+        lengths = [7 + step + row for row in range(len(tokens))]
+        metadata.kv_seq_lens_host_values[:] = lengths
+        runner.execute(tokens, positions, metadata)
+        assert installed[-1][0] is entries[index].execution_state
+        assert installed[-1][1] == lengths
+    runner.attention_backend.prepare.assert_not_called()
+    assert runner.attention_backend.prepare_graph_replay.call_count == 3
+    assert runner._capture.call_count == 2
 
 
 @pytest.mark.parametrize("prepared", [True, False], ids=["pipeline", "legacy"])
@@ -511,7 +534,11 @@ def test_mtp_real_graph_replays_live_inputs_across_slots(reuse_topk: bool, dp_si
             return output + indices.sum(dim=(1, 2)).to(hidden.dtype).view(-1, 1), indices
 
     device = torch.device("npu:0")
-    backend = SimpleNamespace(prepare=lambda *args, **kwargs: None, is_mla=False)
+    backend = SimpleNamespace(
+        prepare=lambda *args, **kwargs: None,
+        prepare_graph_replay=lambda metadata: None,
+        is_mla=False,
+    )
     runner = PreparedAclGraphRunner(MtpModel(), backend, device, 4 * dp_size, dp_size)
     task_stream = torch.npu.Stream(device=device)
     inputs = []
@@ -555,3 +582,126 @@ def test_mtp_real_graph_replays_live_inputs_across_slots(reuse_topk: bool, dp_si
         assert metadata.kv_seq_lens_host_values == [1] * tokens.numel()
     assert len(runner._prepared_graphs) == 6
     assert runner.prepared_replays == 9
+
+
+@pytest.mark.parametrize("dcp_rank", [0, 3])
+@torch.inference_mode()
+def test_dcp_real_graph_replays_device_lengths_across_pages_and_slots(dcp_rank: int) -> None:
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("requires an NPU")
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
+    from xllm.python.model_executor.forward_context import get_forward_context
+
+    class DcpGroup:
+        def size(self) -> int:
+            return 4
+
+        def rank(self) -> int:
+            return dcp_rank
+
+    device = torch.device("npu:0")
+    backend = SfaDcpAttentionBackend(
+        num_heads=8,
+        num_kv_heads=1,
+        head_dim=256,
+        scale=0.1,
+        sliding_window=0,
+        device=device,
+        dtype=torch.bfloat16,
+        dcp_group=DcpGroup(),
+        index_topk=2048,
+        max_num_reqs=4,
+    )
+    physical_page_size = 4
+    backend.bind_kv_caches(
+        [
+            LayerCache(
+                key=torch.empty(8, physical_page_size, 1, 512, device=device, dtype=torch.bfloat16),
+                value=torch.empty(8, physical_page_size, 1, 64, device=device, dtype=torch.bfloat16),
+                index=torch.empty(32, physical_page_size, 1, 128, device=device, dtype=torch.bfloat16),
+            )
+        ]
+    )
+
+    class DcpMetadataModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self._bindings: dict[int, tuple[torch.Tensor, ...]] = {}
+
+        def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+            context = get_forward_context()
+            dcp = backend._sfa_metadata.dcp_context
+            expanded = backend._expanded_indexer_block_table
+            self._bindings[id(context.execution_state)] = (dcp.slot_mapping, dcp.seq_lens, expanded)
+            return torch.stack((dcp.slot_mapping, dcp.seq_lens, expanded[:, 0], expanded[:, -1]), dim=1)
+
+    model = DcpMetadataModel()
+    runner = PreparedAclGraphRunner(model, backend, device, 4)
+    task_stream = torch.npu.Stream(device=device)
+    inputs = []
+    for _ in range(2):
+        tokens = torch.zeros(4, dtype=torch.int32, device=device)
+        positions = torch.tensor([32, 32, 32, 0], dtype=torch.int32, device=device)
+        metadata = _metadata(4)
+        metadata.block_table = torch.tensor([[1, 2, 3]] * 3 + [[0, 0, 0]], dtype=torch.int32, device=device)
+        metadata.slot_mapping = torch.tensor([48, 48, 48, -1], dtype=torch.int32, device=device)
+        for name in ("q_seq_lens", "q_cu_seq_lens"):
+            setattr(metadata, name, getattr(metadata, name).to(device))
+        metadata.kv_seq_lens = torch.tensor([33, 33, 33, 1], dtype=torch.int32, device=device)
+        metadata.kv_seq_lens_host_values = [33, 33, 33, 1]
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+        task_stream.wait_stream(torch.npu.current_stream(device))
+        with torch.npu.stream(task_stream):
+            runner.warmup_prepared(tokens, positions, metadata)
+        entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)]
+        inputs.append((tokens, positions, metadata, entry))
+    torch.npu.current_stream(device).wait_stream(task_stream)
+    bindings = [model._bindings[id(entry.execution_state)] for *_, entry in inputs]
+    for first, second in zip(*bindings):
+        assert first.data_ptr() != second.data_ptr()
+
+    # Native speculative invocations can advance Device lengths after Prepare
+    # while their Host upper bounds stay fixed. Include both sides of a logical
+    # page boundary and a padded lane, alternating the warmed Slot bindings.
+    for step, index in enumerate((0, 1, 0, 1, 1, 0)):
+        tokens, positions, metadata, entry = inputs[index]
+        lengths = [15, 16, 17, 1] if step % 2 == 0 else [31, 32, 33, 1]
+        blocks = [1 + step % 2, 3 + step % 2, 5 + step % 2]
+        logical_slots = [blocks[(length - 1) // 16] * 16 + (length - 1) % 16 for length in lengths[:3]] + [-1]
+        inactive = [tensor.cpu().clone() for tensor in bindings[1 - index]]
+        metadata.block_table.copy_(torch.tensor([blocks] * 3 + [[0, 0, 0]], dtype=torch.int32, device=device))
+        metadata.slot_mapping.copy_(torch.tensor(logical_slots, dtype=torch.int32, device=device))
+        metadata.kv_seq_lens.copy_(torch.tensor(lengths, dtype=torch.int32, device=device))
+        positions.copy_(torch.tensor([length - 1 for length in lengths], dtype=torch.int32, device=device))
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+        task_stream.wait_stream(torch.npu.current_stream(device))
+        with (
+            patch.object(backend._kv_layout, "localize_slots", side_effect=AssertionError("replay derived slots")),
+            patch.object(backend._kv_layout, "local_seq_lens", side_effect=AssertionError("replay derived lengths")),
+            patch.object(
+                backend._kv_layout, "expand_indexer_block_table", side_effect=AssertionError("replay expanded pages")
+            ),
+            torch.npu.stream(task_stream),
+        ):
+            output = runner.execute(tokens, positions, metadata)
+        torch.npu.current_stream(device).wait_stream(task_stream)
+        assert backend._metadata is metadata.prepared_attention_state
+        expected_slots = [
+            slot // 16 * 4 + slot % 4 if slot >= 0 and slot % 16 // 4 == dcp_rank else -1 for slot in logical_slots
+        ]
+        expected_lengths = [sum(position % 16 // 4 == dcp_rank for position in range(length)) for length in lengths]
+        expected = torch.tensor(
+            [
+                [slot, length, blocks[0] * 4 if row < 3 else 0, blocks[-1] * 4 + 3 if row < 3 else 3]
+                for row, (slot, length) in enumerate(zip(expected_slots, expected_lengths))
+            ],
+            dtype=torch.int32,
+        )
+        torch.testing.assert_close(output.cpu(), expected)
+        for tensor, saved in zip(bindings[1 - index], inactive):
+            torch.testing.assert_close(tensor.cpu(), saved)
+        assert metadata.kv_seq_lens_host_values == [33, 33, 33, 1]
+        assert len(runner._prepared_graphs) == 2
+    assert runner.prepared_replays == 6

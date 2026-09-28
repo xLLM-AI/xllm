@@ -76,12 +76,20 @@ class MtpDecodeInputTest : public ::testing::Test {
             4};
   }
 
-  void run(SlotBuffer& binding) {
+  void run(SlotBuffer& binding, uint32_t padded_batch_size = 0) {
     Stream prepare(device_);
     Stream task(device_);
-    ASSERT_TRUE(TaskPipelineTestPeer::prepare_mtp_decode(
-                    binding, input(), batch_, prepare)
-                    .ok());
+    if (padded_batch_size == 0) {
+      ASSERT_TRUE(TaskPipelineTestPeer::prepare_mtp_decode(
+                      binding, input(), batch_, prepare)
+                      .ok());
+    } else {
+      ASSERT_TRUE(
+          TaskPipelineTestPeer::plan_mtp_decode(binding, input(), batch_).ok());
+      ASSERT_TRUE(TaskPipelineTestPeer::prepare_planned_mtp_decode(
+                      binding, input(), batch_, prepare, padded_batch_size)
+                      .ok());
+    }
     const auto ready = prepare.record_event();
     {
       auto guard = task.set_stream_guard();
@@ -272,6 +280,92 @@ TEST_F(MtpDecodeInputTest, LaterDraftLeavesSampledTokenToItsProducer) {
                    torch::tensor({25, 65}, torch::kInt32)));
   EXPECT_TRUE(
       torch::equal(model.tokens().cpu(), torch::zeros({2}, torch::kInt32)));
+}
+
+TEST_F(MtpDecodeInputTest, DcpFirstDraftRepairsAcrossLogicalPages) {
+  // Physical blocks contain eight tokens on each of two DCP ranks. The
+  // scheduler page table and this input builder use sixteen-token pages.
+  spec_.logical_block_size = 16;
+  spec_.model.max_sequences = 4;
+  blocks_ = {3, 1, 2, 0, 2, 0, 3, 1};
+  positions_ = {19, 18};
+  kv_lengths_ = {20, 19};
+  state_->state_.positions.copy_(torch::tensor({16, 15}, torch::kInt32));
+  state_->state_.kv_seq_lens.copy_(torch::tensor({17, 16}, torch::kInt32));
+  ASSERT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
+
+  for (const uint32_t padded_batch_size : {0U, 8U}) {
+    SCOPED_TRACE(padded_batch_size);
+    std::unique_ptr<SlotBuffer> binding;
+    ASSERT_TRUE(TaskPipelineTestPeer::create_mtp_input(
+                    spec_, torch::kBFloat16, device_, binding)
+                    .ok());
+    run(*binding, padded_batch_size);
+    const auto& params = binding->model_params();
+    EXPECT_TRUE(torch::equal(
+        binding->positions().cpu().narrow(/*dim=*/0, /*start=*/0, 4),
+        torch::tensor({15, 16, 14, 15}, torch::kInt32)));
+    // Full acceptance repairs the preceding page. The other row writes its
+    // unused repair result to the future page without overwriting valid KV.
+    EXPECT_TRUE(
+        torch::equal(params.attention.device.new_cache_slots.cpu().narrow(
+                         /*dim=*/0, /*start=*/0, 4),
+                     torch::tensor({63, 16, 0, 47}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(params.attention.device.kv_seq_lens.cpu().narrow(
+                                 /*dim=*/0, /*start=*/0, 4),
+                             torch::tensor({16, 17, 15, 16}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(
+        params.attention.device.new_cache_slots.cpu().slice(
+            /*dim=*/0, /*start=*/4),
+        torch::full({padded_batch_size == 0 ? 0 : 4}, -1, torch::kInt32)));
+  }
+}
+
+TEST_F(MtpDecodeInputTest, DcpValidateAndLaterDraftUseLogicalPageOffsets) {
+  spec_.logical_block_size = 16;
+  spec_.model.max_sequences = 4;
+  blocks_ = {3, 1, 2, 0, 2, 0, 3, 1};
+  positions_ = {19, 18};
+  kv_lengths_ = {20, 19};
+  state_->state_.positions.copy_(torch::tensor({16, 15}, torch::kInt32));
+  state_->state_.kv_seq_lens.copy_(torch::tensor({17, 16}, torch::kInt32));
+  ASSERT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
+
+  for (const uint32_t padded_batch_size : {0U, 16U}) {
+    SCOPED_TRACE(padded_batch_size);
+    spec_.kind = MtpInvocationKind::VALIDATE;
+    std::unique_ptr<SlotBuffer> binding;
+    ASSERT_TRUE(TaskPipelineTestPeer::create_mtp_input(
+                    spec_, torch::kBFloat16, device_, binding)
+                    .ok());
+    run(*binding, padded_batch_size);
+    const auto slots =
+        binding->model_params().attention.device.new_cache_slots.cpu();
+    EXPECT_TRUE(torch::equal(
+        slots.narrow(/*dim=*/0, /*start=*/0, 8),
+        torch::tensor({16, 17, 18, 19, 47, 0, 1, 2}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(
+        slots.slice(/*dim=*/0, /*start=*/8),
+        torch::full({padded_batch_size == 0 ? 0 : 8}, -1, torch::kInt32)));
+  }
+
+  spec_.kind = MtpInvocationKind::DRAFT;
+  spec_.draft_step = 2;
+  for (const uint32_t padded_batch_size : {0U, 4U}) {
+    SCOPED_TRACE(padded_batch_size);
+    std::unique_ptr<SlotBuffer> binding;
+    ASSERT_TRUE(TaskPipelineTestPeer::create_mtp_input(
+                    spec_, torch::kBFloat16, device_, binding)
+                    .ok());
+    run(*binding, padded_batch_size);
+    const auto slots =
+        binding->model_params().attention.device.new_cache_slots.cpu();
+    EXPECT_TRUE(torch::equal(slots.narrow(/*dim=*/0, /*start=*/0, 2),
+                             torch::tensor({18, 1}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(
+        slots.slice(/*dim=*/0, /*start=*/2),
+        torch::full({padded_batch_size == 0 ? 0 : 2}, -1, torch::kInt32)));
+  }
 }
 
 TEST_F(MtpDecodeInputTest, DraftGraphPaddingSurvivesStatePatching) {

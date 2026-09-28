@@ -188,7 +188,8 @@ Status TaskExecutionPipeline::create(
       common.max_kv_seq_len == 0 ||
       common.max_kv_seq_len > common.max_positions ||
       common.max_positions > std::numeric_limits<int32_t>::max() ||
-      common.hidden_size == 0 || common.block_size == 0 ||
+      common.hidden_size == 0 || common.logical_block_size == 0 ||
+      common.logical_block_size > std::numeric_limits<int32_t>::max() ||
       common.vocab_size == 0 ||
       (capacity.kind == SpeculativeTaskKind::MTP && !common.enable_mla) ||
       (capacity.kind != SpeculativeTaskKind::MTP &&
@@ -285,7 +286,7 @@ Status TaskExecutionPipeline::initialize_speculative() {
     }
     const MtpInputSpec validate_spec{c.model,
                                      0,
-                                     c.block_size,
+                                     c.logical_block_size,
                                      width - 1,
                                      MtpInvocationKind::VALIDATE,
                                      0,
@@ -622,7 +623,8 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
     const int64_t q = host.q_seq_lens[row];
     // Cache hits may have q < kv even when scheduler chunking is disabled.
     if (kv > c.max_kv_seq_len ||
-        (kv + c.block_size - 1) / c.block_size > host.block_table_width) {
+        (kv + c.logical_block_size - 1) / c.logical_block_size >
+            host.block_table_width) {
       return invalid("MTP KV length or Prefill mode exceeds capacity.");
     }
     for (int64_t item = 0; item < q; ++item, ++offset) {
@@ -635,10 +637,10 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
         return invalid("Invalid MTP base token or rotary position.");
       }
       const int32_t block = host.block_tables[row * host.block_table_width +
-                                              position / c.block_size];
+                                              position / c.logical_block_size];
       if (host.new_cache_slots[offset] !=
-          static_cast<int64_t>(block) * c.block_size +
-              position % c.block_size) {
+          static_cast<int64_t>(block) * c.logical_block_size +
+              position % c.logical_block_size) {
         return invalid("MTP KV write slot does not match the page table.");
       }
     }

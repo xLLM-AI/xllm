@@ -1379,9 +1379,9 @@ Status SlotBuffer::create_mtp_input(const MtpInputSpec& spec,
             static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) /
                 torch::elementSize(hidden_dtype))) ||
       (!prefill &&
-       (spec.block_size == 0 || spec.num_speculative_tokens == 0 ||
+       (spec.logical_block_size == 0 || spec.num_speculative_tokens == 0 ||
         spec.num_speculative_tokens >= std::numeric_limits<int32_t>::max() ||
-        spec.block_size > std::numeric_limits<int32_t>::max() ||
+        spec.logical_block_size > std::numeric_limits<int32_t>::max() ||
         (spec.kind != MtpInvocationKind::DRAFT &&
          spec.kind != MtpInvocationKind::VALIDATE &&
          spec.kind != MtpInvocationKind::BLOCK_DRAFT) ||
@@ -1522,7 +1522,8 @@ Status SlotBuffer::plan_mtp_decode(SlotBuffer& input,
   const int64_t max_offset =
       static_cast<int64_t>(view.first_offset_) + view.rows_per_sequence_ - 1;
   const int64_t capacity_positions =
-      static_cast<int64_t>(base.block_table_width) * view.spec_.block_size;
+      static_cast<int64_t>(base.block_table_width) *
+      view.spec_.logical_block_size;
   for (uint64_t row = 0; row < count; ++row) {
     const int64_t first_position =
         static_cast<int64_t>(base.positions[row]) + view.first_offset_;
@@ -1550,8 +1551,9 @@ Status SlotBuffer::plan_mtp_decode(SlotBuffer& input,
                   base.block_tables.end(),
                   [&view](int32_t block) {
                     return block < 0 ||
-                           static_cast<int64_t>(block) * view.spec_.block_size +
-                                   view.spec_.block_size - 1 >
+                           static_cast<int64_t>(block) *
+                                       view.spec_.logical_block_size +
+                                   view.spec_.logical_block_size - 1 >
                                std::numeric_limits<int32_t>::max();
                   })) {
     return invalid("MTP cache block cannot be represented by int32 slots.");
@@ -1713,7 +1715,7 @@ void SlotBuffer::patch_mtp_decode(SlotBuffer& input,
   auto indices_matrix =
       view.block_indices_.view({view.sequences_, view.rows_per_sequence_});
   torch::floor_divide_out(
-      indices_matrix, view.cache_positions_, view.spec_.block_size);
+      indices_matrix, view.cache_positions_, view.spec_.logical_block_size);
   if (view.spec_.kind == MtpInvocationKind::BLOCK_DRAFT) {
     auto ids_matrix =
         view.block_ids_.view({view.sequences_, view.rows_per_sequence_});
@@ -1729,13 +1731,14 @@ void SlotBuffer::patch_mtp_decode(SlotBuffer& input,
         /*dim=*/1,
         view.block_indices_);
   }
-  torch::remainder_out(
-      view.cache_offsets_, view.cache_positions_, view.spec_.block_size);
+  torch::remainder_out(view.cache_offsets_,
+                       view.cache_positions_,
+                       view.spec_.logical_block_size);
   const auto slots =
       input.model_params().attention.device.new_cache_slots.narrow(
           /*dim=*/0, /*start=*/0, view.sequences_ * view.rows_per_sequence_);
   slots.copy_(view.block_ids_.view({-1}));
-  slots.mul_(view.spec_.block_size).add_(view.cache_offsets_flat_);
+  slots.mul_(view.spec_.logical_block_size).add_(view.cache_offsets_flat_);
 }
 
 Status SlotBuffer::plan_mtp_prefill(SlotBuffer& input,

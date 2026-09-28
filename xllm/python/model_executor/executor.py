@@ -242,13 +242,26 @@ class ModelExecutor:
         self.dp_size = dp_size
         self._prepared_mtp = config.get("model_type") == "glm_moe_dsa_mtp"
         self._prepared_block_draft = config.get("model_type") in ("DFlashDraftModel", "DFlash2DraftModel")
+        prepared_kv_split = int(config.get("kv_split_size", 0)) or cp_size
+        dcp_group = distributed.dcp_group(device) if current_platform.is_npu() else None
+        dcp_size = dcp_group.size() if dcp_group is not None else 1
+        # A configured split alone is insufficient: prepared DCP requires the
+        # same runtime group that selected the SFA backend for this device.
+        prepared_dcp = (
+            current_platform.is_npu()
+            and config.get("model_type") in ("glm_moe_dsa", "glm_moe_dsa_mtp")
+            and dp_size == 1
+            and cp_size == 1
+            and prepared_kv_split > 1
+            and dcp_size == prepared_kv_split
+        )
         self._supports_prepared_metadata = (
             self.attention_backend.supports_prepared_metadata
             and (
                 config.get("model_type") in ("qwen3", "glm_moe_dsa", "glm_moe_dsa_mtp")
                 or (self._prepared_block_draft and graph_backend in ("", "off", "none", "0"))
             )
-            and int(config.get("kv_split_size", 1)) in (0, 1)
+            and ((prepared_kv_split == 1 and dcp_size == 1) or prepared_dcp)
             and graph_backend in ("", "off", "none", "0", "aclgraph")
             and all(int(config.get(key, 1)) == 1 for key in ("cp_size", "layerwise_split_size"))
         )

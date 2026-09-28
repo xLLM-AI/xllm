@@ -38,7 +38,9 @@ struct LlmTaskCapacity {
   ModelInputCapacity model;
   uint32_t max_kv_seq_len = 0;
   uint32_t max_positions = 0;
-  uint32_t block_size = 0;
+  // Scheduler page width. DCP keeps logical slots until Python localizes them
+  // against each rank's physical KV cache.
+  uint32_t logical_block_size = 0;
   uint32_t vocab_size = 0;
   uint32_t max_unique_tokens = 0;
   uint32_t max_top_logprobs = 0;

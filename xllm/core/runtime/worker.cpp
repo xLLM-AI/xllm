@@ -31,7 +31,6 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "framework/kv_cache/kv_cache.h"
@@ -72,6 +71,14 @@ Worker::Worker(const ParallelArgs& parallel_args,
         << "Task pipeline ACL graphs require enable_graph.";
     CHECK(!options.enable_graph() || !execution.disable_graph_warmup())
         << "Task pipeline ACL graphs require initialization warmup.";
+    const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+    CHECK(kv_split_size == 1 ||
+          (kv_split_size > 1 && parallel_args.dp_size() == 1 &&
+           (!options.enable_speculative_decode() ||
+            SpeculativeConfig::is_mtp_algorithm(
+                options.speculative_algorithm()))))
+        << "Task pipeline DCP requires DP=1 and ordinary or fixed MTP "
+           "decoding.";
     CHECK(worker_type == WorkerType::LLM && options.task_type() == "generate" &&
           (!options.enable_speculative_decode() ||
            ((SpeculativeConfig::is_mtp_algorithm(
@@ -88,10 +95,9 @@ Worker::Worker(const ParallelArgs& parallel_args,
           !KVCacheConfig::get_instance().enable_xtensor() &&
           !LoadConfig::get_instance().enable_rolling_load() &&
           parallel_args.cp_size() == 1 &&
-          ParallelConfig::get_instance().kv_split_size_effective() == 1 &&
-          ParallelConfig::get_instance().layerwise_split_size() == 1)
+          parallel_args.layerwise_split_size() == 1)
         << "Task pipeline requires Python LLM or fixed MTP/DFlash/DFlash2 with "
-           "CP/KV/layerwise "
+           "CP/layerwise "
            "splits of one, without offload or disaggregation.";
   }
   if (options.enable_speculative_decode()) {

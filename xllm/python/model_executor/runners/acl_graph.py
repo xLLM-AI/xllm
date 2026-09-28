@@ -97,7 +97,7 @@ class AclGraphRunner(BaseRunner):
             self._update_stream = torch.npu.Stream(device=self.device, priority=-1)
             self._replay_done_event = torch.npu.Event()
 
-    def _prepare_attention(self, entry: AclGraphEntry, metadata: AttentionMetadata) -> None:
+    def _prepare_attention(self, entry: AclGraphEntry, metadata: AttentionMetadata, *, replay: bool = False) -> None:
         context = ForwardContext(
             self.attention_backend,
             self.device,
@@ -106,7 +106,10 @@ class AclGraphRunner(BaseRunner):
             execution_state=entry.execution_state,
         )
         with forward_context(context):
-            self.attention_backend.prepare(metadata, graph_mode=True)
+            if replay:
+                self.attention_backend.prepare_graph_replay(metadata)
+            else:
+                self.attention_backend.prepare(metadata, graph_mode=True)
 
     def _update_after_replay(
         self,

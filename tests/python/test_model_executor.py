@@ -1424,6 +1424,76 @@ def test_executor_rejects_prepared_glm_split_topologies(split: str) -> None:
     assert not executor.supports_prepared_metadata
 
 
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm_moe_dsa_mtp"])
+@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
+@pytest.mark.parametrize("kv_split", [2, 4])
+def test_executor_accepts_prepared_glm_dcp(model_type: str, graph_backend: str, kv_split: int) -> None:
+    backend = _PreparedStubAttentionBackend()
+    group = MagicMock()
+    group.size.return_value = kv_split
+    config = {
+        "model_type": model_type,
+        "kv_split_size": kv_split,
+        "dp_size": 1,
+        "cp_size": 1,
+        "enable_task_pipeline": True,
+        "python_graph_backend": graph_backend,
+    }
+    with (
+        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
+        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=group),
+        patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend),
+    ):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert executor.supports_prepared_metadata
+    assert (executor.prepared_graph_runner is not None) == (graph_backend == "aclgraph")
+    assert executor.decode_graph_runner is None
+
+
+@pytest.mark.parametrize(
+    "model_type,kv_split,group_size,is_npu",
+    [
+        ("qwen3", 2, 2, True),
+        ("DFlashDraftModel", 2, 2, True),
+        ("DFlash2DraftModel", 2, 2, True),
+        ("glm_moe_dsa", 2, None, True),
+        ("glm_moe_dsa", 2, 1, True),
+        ("glm_moe_dsa", 2, 4, True),
+        ("glm_moe_dsa", 1, 2, True),
+        ("glm_moe_dsa", 2, 2, False),
+    ],
+)
+def test_executor_rejects_unsupported_prepared_dcp(
+    model_type: str, kv_split: int, group_size: int | None, is_npu: bool
+) -> None:
+    group = None if group_size is None else MagicMock()
+    if group is not None:
+        group.size.return_value = group_size
+    config = {"model_type": model_type, "kv_split_size": kv_split, "enable_task_pipeline": True}
+    with (
+        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=is_npu),
+        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=group),
+        patch(
+            "xllm.python.model_executor.executor._create_attention_backend",
+            return_value=_PreparedStubAttentionBackend(),
+        ),
+    ):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert not executor.supports_prepared_metadata
+
+
+def test_executor_rejects_prepared_dcp_with_data_parallelism() -> None:
+    with (
+        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
+        pytest.raises(NotImplementedError, match="Python DCP requires dp_size == 1"),
+    ):
+        ModelExecutor(
+            _FakeModel(),
+            {"model_type": "glm_moe_dsa", "kv_split_size": 2, "dp_size": 2, "enable_task_pipeline": True},
+            max_seqs_per_batch=2,
+        )
+
+
 def test_prepared_executor_rejects_mtp_state_before_model_execution() -> None:
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()

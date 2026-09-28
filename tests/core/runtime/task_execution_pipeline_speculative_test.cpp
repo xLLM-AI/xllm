@@ -44,6 +44,7 @@ class CountingModel final : public CausalLM {
                       const ModelInputParams& params) override {
     forward_inputs.emplace_back(tokens.clone());
     forward_positions.emplace_back(positions.clone());
+    forward_slots.emplace_back(params.attention.device.new_cache_slots.clone());
     forward_counts.emplace_back(params.parallel.dp_global_token_nums);
     auto hidden = (block_draft ? positions : tokens).to(options_).view({-1, 1});
     // Two columns exercise block drafts whose captured context is wider than
@@ -86,6 +87,7 @@ class CountingModel final : public CausalLM {
   bool block_draft = false;
   std::vector<torch::Tensor> forward_inputs;
   std::vector<torch::Tensor> forward_positions;
+  std::vector<torch::Tensor> forward_slots;
   std::vector<std::vector<int32_t>> forward_counts;
   std::vector<torch::Tensor> context_hidden;
   std::vector<torch::Tensor> context_positions;
@@ -171,7 +173,7 @@ class SpeculativePipelineTest : public ::testing::Test {
     capacity_.common.slot_count = 1;
     capacity_.common.max_kv_seq_len = 32;
     capacity_.common.max_positions = 32;
-    capacity_.common.block_size = 16;
+    capacity_.common.logical_block_size = 16;
     capacity_.common.vocab_size = 32;
     capacity_.common.max_unique_tokens = 32;
     capacity_.common.max_top_logprobs = 2;
@@ -195,6 +197,20 @@ class SpeculativePipelineTest : public ::testing::Test {
         capacity_,
         pipeline_);
     ASSERT_TRUE(status.ok()) << status.message();
+  }
+
+  void configure_dcp() {
+    // Four local physical blocks of eight tokens represent four logical
+    // sixteen-token pages shared by two DCP ranks.
+    for (auto* caches : {&target_cache_, &draft_cache_}) {
+      caches->clear();
+      caches->emplace_back(
+          KVCacheTensors{torch::zeros({4, 8, 1, 1}, target_->options()),
+                         torch::zeros({4, 8, 1, 1}, target_->options())});
+    }
+    capacity_.common.logical_block_size = 16;
+    capacity_.common.slot_count = 2;
+    capacity_.common.chunked_prefill = true;
   }
 
   ForwardInput input(bool decode, int32_t token = 3, int32_t position = 2) {
@@ -239,6 +255,25 @@ class SpeculativePipelineTest : public ::testing::Test {
     return std::move(result.output);
   }
 
+  ForwardInput dcp_input(bool decode,
+                         int32_t token = 3,
+                         int32_t position = 15) {
+    auto value = input(decode, token, position);
+    auto& host = value.input_params.attention.host;
+    host.block_tables = torch::tensor({{3, 1}}, torch::kInt32);
+    if (decode) {
+      const int32_t page = position < 16 ? 3 : 1;
+      host.new_cache_slots = {page * 16 + position % 16};
+    } else {
+      value.input_params.meta.batch_forward_type =
+          BatchForwardType::CHUNKED_PREFILL;
+      value.positions = torch::tensor({13, 14}, torch::kInt32);
+      host.kv_seq_lens = {15};
+      host.new_cache_slots = {61, 62};
+    }
+    return value;
+  }
+
   const torch::Device device_{torch::kPrivateUse1, 0};
   std::string previous_model_impl_;
   ThreadPool state_thread_{1};
@@ -274,6 +309,99 @@ TEST_F(SpeculativePipelineTest, PrefillDecodeAndSlotReuseKeepAcceptedContext) {
   EXPECT_EQ(decoded.sample_output.next_tokens[0][2].item<int64_t>(), 6);
   EXPECT_TRUE(decoded.sample_output.next_tokens.device().is_cpu());
   EXPECT_EQ(decoded.ready_event, nullptr);
+}
+
+TEST_F(SpeculativePipelineTest,
+       DcpOrdinaryInputUsesLogicalSlotsAndLocalPageBounds) {
+  configure_dcp();
+  const Status status = TaskExecutionPipeline::create(state_thread_,
+                                                      *target_,
+                                                      *target_executor_,
+                                                      target_cache_,
+                                                      capacity_.common,
+                                                      pipeline_);
+  ASSERT_TRUE(status.ok()) << status.message();
+  auto prefill = dcp_input(false);
+  prefill.input_params.embedding = {};
+  prefill.token_ids = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+  prefill.positions = torch::tensor({14, 15, 16, 17}, torch::kInt32);
+  auto& host = prefill.input_params.attention.host;
+  host.q_seq_lens = {4};
+  host.kv_seq_lens = {18};
+  host.q_cu_seq_lens = {4};
+  host.new_cache_slots = {62, 63, 16, 17};
+  prefill.sampling_params.selected_token_idxes =
+      torch::tensor({3}, torch::kInt32);
+
+  auto invalid = prefill;
+  invalid.input_params.attention.host.new_cache_slots = {30, 31, 8, 9};
+  EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
+  invalid = prefill;
+  invalid.input_params.attention.host.block_tables =
+      torch::tensor({{3, 4}}, torch::kInt32);
+  invalid.input_params.attention.host.new_cache_slots = {62, 63, 64, 65};
+  EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
+
+  const auto output = execute(prefill);
+  ASSERT_TRUE(output.sample_output.next_tokens.defined());
+  EXPECT_TRUE(torch::equal(output.sample_output.next_tokens,
+                           torch::tensor({5}, torch::kInt64)));
+  ASSERT_EQ(target_->forward_slots.size(), 1U);
+  EXPECT_TRUE(torch::equal(target_->forward_slots.front().cpu(),
+                           torch::tensor({62, 63, 16, 17}, torch::kInt32)));
+}
+
+TEST_F(SpeculativePipelineTest, DcpMtpKeepsLogicalPagesAcrossPendingSlots) {
+  configure_dcp();
+  create();
+  ASSERT_NE(pipeline_, nullptr);
+  const auto prefill = execute(dcp_input(false));
+  ASSERT_TRUE(prefill.sample_output.next_tokens.defined());
+  EXPECT_TRUE(torch::equal(prefill.sample_output.next_tokens,
+                           torch::tensor({3}, torch::kInt64)));
+
+  auto invalid = dcp_input(true);
+  invalid.input_params.attention.host.new_cache_slots = {31};
+  EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
+  invalid = dcp_input(true);
+  invalid.input_params.attention.host.block_tables =
+      torch::tensor({{3, 4}}, torch::kInt32);
+  EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
+
+  const auto first = pipeline_->submit(dcp_input(true));
+  ASSERT_TRUE(first.status.ok()) << first.status.message();
+  // The next scheduler row advances by one pending token; the accepted
+  // device state advances by all three verified tokens instead.
+  const auto second =
+      pipeline_->submit(dcp_input(true, /*token=*/-1, /*position=*/16));
+  ASSERT_TRUE(second.status.ok()) << second.status.message();
+  auto first_result = pipeline_->take_result_async(first.task_id).get();
+  ASSERT_TRUE(first_result.status.ok()) << first_result.status.message();
+  auto second_result = pipeline_->take_result_async(second.task_id).get();
+  ASSERT_TRUE(second_result.status.ok()) << second_result.status.message();
+  EXPECT_TRUE(torch::equal(first_result.output.sample_output.next_tokens,
+                           torch::tensor({{4, 5, 6}}, torch::kInt64)));
+  EXPECT_TRUE(torch::equal(second_result.output.sample_output.next_tokens,
+                           torch::tensor({{7, 8, 9}}, torch::kInt64)));
+  ASSERT_EQ(target_->forward_slots.size(), 3U);
+  EXPECT_TRUE(torch::equal(target_->forward_slots[1].cpu(),
+                           torch::tensor({63, 16, 17}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(target_->forward_slots[2].cpu(),
+                           torch::tensor({18, 19, 20}, torch::kInt32)));
+  ASSERT_EQ(draft_->forward_slots.size(), 5U);
+  EXPECT_TRUE(torch::equal(draft_->forward_slots[1].cpu(),
+                           torch::tensor({16, 63}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(draft_->forward_slots[3].cpu(),
+                           torch::tensor({17, 18}, torch::kInt32)));
+
+  const auto reused = execute(dcp_input(true, /*token=*/-1, /*position=*/19));
+  ASSERT_TRUE(reused.sample_output.next_tokens.defined());
+  EXPECT_TRUE(torch::equal(reused.sample_output.next_tokens,
+                           torch::tensor({{10, 11, 12}}, torch::kInt64)));
+  EXPECT_TRUE(torch::equal(target_->forward_slots.back().cpu(),
+                           torch::tensor({21, 22, 23}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(first_result.output.sample_output.next_tokens,
+                           torch::tensor({{4, 5, 6}}, torch::kInt64)));
 }
 
 TEST_F(SpeculativePipelineTest, LogprobsFollowAcceptedTokensAndPreserveShape) {

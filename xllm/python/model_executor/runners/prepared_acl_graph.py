@@ -195,7 +195,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
             raise RuntimeError("prepared ACL replay requires a warmed Slot binding")
         # Only serialized Launch installs shared backend state. This path
         # selects entry-owned buffers and refreshes its captured Host lists.
-        self._prepare_attention(entry, metadata)
+        self._prepare_attention(entry, metadata, replay=True)
         stream = torch.npu.current_stream(self.device)
         entry.graph.replay()
         self._update_after_replay(entry, stream)

@@ -22,14 +22,15 @@ from typing import TYPE_CHECKING
 import torch
 from torch.distributed import ProcessGroup
 
-from xllm.python.attention.backend import AttentionMetadata, LayerCache, MlaIndexContext
+from xllm.python.attention.backend import AttentionMetadata, LayerCache, MlaIndexContext, MlaPreprocessContext
 from xllm.python.attention.expanded_decode_metadata import resolve_expanded_decode_metadata
 from xllm.python.attention.kv_shard_layout import KVShardLayout
-from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend, _PreparedMlaAttention
 from xllm.python.layers.sfa_dcp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadata,
     AscendSFADCPMetadataBuilder,
+    DCPContext,
 )
 from xllm.python.model_executor.forward_context import copy_into_execution_buffer, get_forward_context
 
@@ -137,15 +138,26 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         self._sfa_metadata = None
         if self._kv_layout is None or self._builder is None:
             return
-        expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if isinstance(prepared, _PreparedMlaAttention):
+            # Prepare retains only final Slot views. Derive DCP metadata here,
+            # on the serialized Launch stream and inside ACL graph capture, so
+            # MTP's Device-updated lengths and slots remain live on every replay.
+            slot_mapping = prepared.slot_mapping
+            kv_seq_lens = prepared.actual_seq_kv
+            if graph_mode:
+                self._mla_max_seqlen_k = prepared.block_table.shape[1] * self.logical_page_size
+        else:
+            expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
+            slot_mapping = metadata.slot_mapping
+            kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         block_table = self._block_table_i32
-        kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         if block_table is None:
             raise RuntimeError("SFA DCP requires a block table.")
         if kv_seq_lens is None:
             raise RuntimeError("SFA DCP requires kv_seq_lens.")
 
-        local_slots = self._kv_layout.localize_slots(metadata.slot_mapping)
+        local_slots = self._kv_layout.localize_slots(slot_mapping)
         if graph_mode:
             local_slots = copy_into_execution_buffer(
                 ("DCP_LOCAL_SLOTS", tuple(local_slots.shape)),
@@ -174,7 +186,6 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         # a DCP context with fewer requests than local slots and query rows.
         num_reqs = int(block_table.shape[0])
         num_input_tokens = int(local_slots.numel())
-        self._ensure_builder_capacity(num_reqs)
         seq_lens = kv_seq_lens.to(dtype=torch.int32)[:num_reqs]
         local_seq_lens = self._kv_layout.local_seq_lens(seq_lens)
         if graph_mode:
@@ -187,6 +198,20 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         if not graph_mode and (metadata.is_prefill or metadata.is_chunked_prefill):
             num_prefills = num_reqs
 
+        if isinstance(prepared, _PreparedMlaAttention) and num_prefills == 0:
+            # The ordinary builder owns a shared length buffer. Each prepared
+            # graph entry must instead capture its own persistent tensors.
+            self._sfa_metadata = AscendSFADCPMetadata(
+                num_prefills=0,
+                dcp_context=DCPContext(
+                    slot_mapping=local_slots,
+                    block_table=block_table,
+                    seq_lens=local_seq_lens,
+                ),
+            )
+            return
+
+        self._ensure_builder_capacity(num_reqs)
         attn_metadata = self._builder.build(
             slot_mapping=local_slots,
             block_table=block_table,
@@ -200,6 +225,46 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         attn_metadata.dcp_context.seq_lens = local_seq_lens[:num_reqs]
         attn_metadata.dcp_context.block_table = block_table[:num_reqs]
         self._sfa_metadata = attn_metadata
+
+    def prepare_graph_replay(self, metadata: AttentionMetadata) -> None:
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if not isinstance(prepared, _PreparedMlaAttention):
+            raise ValueError("prepared DCP graph replay requires prepared MLA metadata")
+        execution_state = get_forward_context().execution_state
+        if execution_state is None:
+            raise RuntimeError("prepared DCP graph replay requires an execution state")
+        buffers = execution_state.persistent_buffers
+        num_reqs, block_count = prepared.block_table.shape
+        local_slots = buffers.get(("DCP_LOCAL_SLOTS", tuple(prepared.slot_mapping.shape)))
+        local_seq_lens = buffers.get(("DCP_LOCAL_SEQ", (num_reqs,)))
+        expanded_block_table = buffers.get(("DCP_INDEXER_BT", (num_reqs, block_count * self._dcp_group.size())))
+        if local_slots is None or local_seq_lens is None or expanded_block_table is None:
+            raise RuntimeError("prepared DCP graph replay requires captured metadata buffers")
+
+        # The prepared parent branch only installs Host state and final views.
+        # Captured Device operators refresh these entry-owned DCP buffers from
+        # the live Slot inputs during replay; do not enqueue the same work here.
+        super().prepare(metadata, graph_mode=True)
+        self._mla_max_seqlen_k = block_count * self.logical_page_size
+        self._local_slot_mapping = local_slots
+        self._expanded_indexer_block_table = expanded_block_table
+        self._sfa_metadata = AscendSFADCPMetadata(
+            num_prefills=0,
+            dcp_context=DCPContext(
+                slot_mapping=local_slots,
+                block_table=prepared.block_table,
+                seq_lens=local_seq_lens,
+            ),
+        )
+
+    def mla_preprocess_context(self, layer: Attention) -> MlaPreprocessContext | None:
+        context = super().mla_preprocess_context(layer)
+        if context is None:
+            return None
+        if self._local_slot_mapping is None:
+            raise RuntimeError("SFA DCP MLA preprocessing requires prepare()")
+        # Latent KV is sharded; the index cache still uses global logical slots.
+        return replace(context, slot_mapping=self._local_slot_mapping)
 
     def mla_index_context(self, layer: Attention) -> MlaIndexContext:
         context = super().mla_index_context(layer)
@@ -221,10 +286,12 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         self,
         q_latent: torch.Tensor,
         q_pe: torch.Tensor,
-        k_latent_3d: torch.Tensor,
-        k_pe_3d: torch.Tensor,
+        k_latent_3d: torch.Tensor | None,
+        k_pe_3d: torch.Tensor | None,
         layer: Attention,
         topk: torch.Tensor | None = None,
+        *,
+        cache_is_preprocessed: bool = False,
     ) -> torch.Tensor:
         if topk is None:
             raise NotImplementedError("dense MLA (topk=None) is not supported on SfaDcpAttentionBackend")
@@ -242,13 +309,16 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             raise RuntimeError(f"MLA latent cache is missing for layer {layer.layer_id}")
 
         attn_metadata.dcp_context.gather_context = None
-        torch.ops.xllm_ops.reshape_paged_cache(
-            attn_metadata.dcp_context.slot_mapping,
-            k_latent_3d,
-            k_pe_3d,
-            nope_cache,
-            rope_cache,
-        )
+        if not cache_is_preprocessed:
+            if k_latent_3d is None or k_pe_3d is None:
+                raise RuntimeError("SFA DCP requires K tensors unless MLA preprocessing wrote the cache")
+            torch.ops.xllm_ops.reshape_paged_cache(
+                attn_metadata.dcp_context.slot_mapping,
+                k_latent_3d,
+                k_pe_3d,
+                nope_cache,
+                rope_cache,
+            )
         kv_cache = (nope_cache, rope_cache)
         self._impl._store_parallel_kv(k_pe_3d, k_latent_3d, None, kv_cache, attn_metadata)
         self._impl._record_query_gather_context(q_latent, q_pe, attn_metadata)

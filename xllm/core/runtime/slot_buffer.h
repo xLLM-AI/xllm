@@ -64,7 +64,8 @@ enum class MtpInvocationKind : uint8_t {
 struct MtpInputSpec {
   ModelInputCapacity model;
   uint32_t hidden_size = 0;
-  uint32_t block_size = 0;
+  // Global page width, including all DCP shards of a logical KV block.
+  uint32_t logical_block_size = 0;
   uint32_t num_speculative_tokens = 0;
   MtpInvocationKind kind = MtpInvocationKind::PREFILL;
   uint32_t draft_step = 0;

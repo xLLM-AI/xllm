@@ -71,9 +71,9 @@ Status TaskExecutionPipeline::create(
       capacity.model.max_sequences > std::numeric_limits<int32_t>::max() ||
       model.device().type() != Platform::type_torch() ||
       !model.device().has_index() || capacity.max_kv_seq_len == 0 ||
-      capacity.max_positions == 0 || capacity.block_size == 0 ||
+      capacity.max_positions == 0 || capacity.logical_block_size == 0 ||
       capacity.max_positions > std::numeric_limits<int32_t>::max() ||
-      capacity.block_size > std::numeric_limits<int32_t>::max() ||
+      capacity.logical_block_size > std::numeric_limits<int32_t>::max() ||
       capacity.max_kv_seq_len > capacity.max_positions) {
     return invalid("Invalid ordinary LLM capacity or indexed device.");
   }
@@ -503,7 +503,7 @@ Status TaskExecutionPipeline::validate(const Slot& slot,
     return Status(StatusCode::UNAVAILABLE, "KV cache is not allocated.");
   }
   const int64_t blocks = kv_caches_.front().get_k_cache().size(/*dim=*/0);
-  const int64_t block_size = capacity_.block_size;
+  const int64_t block_size = capacity_.logical_block_size;
   const auto& host = input.input_params.attention.host;
   const auto tokens = int_span(input.host_token_ids());
   const auto positions = int_span(input.host_positions());

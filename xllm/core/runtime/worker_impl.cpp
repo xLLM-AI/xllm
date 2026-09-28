@@ -1866,25 +1866,41 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   const auto& args = context_.get_model_args();
   const int64_t positions = args.max_position_embeddings();
   const int64_t vocab = args.vocab_size();
+  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
+  const int64_t logical_block_size =
+      static_cast<int64_t>(options.block_size()) * kv_split_size;
+  if (kv_split_size > 1 &&
+      (args.model_type() != "glm_moe_dsa" || !args.enable_mla() ||
+       parallel_args_.cp_size() != 1 || parallel_args_.dp_size() != 1 ||
+       parallel_args_.layerwise_split_size() != 1 ||
+       (options.enable_speculative_decode() &&
+        !SpeculativeConfig::is_mtp_algorithm(
+            options.speculative_algorithm())))) {
+    return ::xllm::Status(
+        StatusCode::INVALID_ARGUMENT,
+        "Task pipeline DCP requires a GLM DSA target with CP/DP/layerwise "
+        "sizes of one and ordinary or fixed MTP decoding.");
+  }
   if (positions <= 0 || positions > std::numeric_limits<int32_t>::max() ||
       vocab <= 0 || vocab > std::numeric_limits<int32_t>::max() ||
       args.hidden_size() <= 0 ||
       args.hidden_size() > std::numeric_limits<int32_t>::max() ||
-      options.block_size() <= 0 || options.max_tokens_per_batch() <= 0 ||
+      options.block_size() <= 0 || kv_split_size <= 0 ||
+      logical_block_size > std::numeric_limits<int32_t>::max() ||
+      options.max_tokens_per_batch() <= 0 ||
       options.max_seqs_per_batch() <= 0) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
                           "Invalid fixed task pipeline capacity.");
   }
   LlmTaskCapacity capacity;
   capacity.slot_count = options.enable_schedule_overlap() ? 2U : 1U;
-  capacity.model = {
-      static_cast<uint32_t>(options.max_tokens_per_batch()),
-      static_cast<uint32_t>(options.max_seqs_per_batch()),
-      static_cast<uint32_t>((positions + options.block_size() - 1) /
-                            options.block_size())};
+  capacity.model = {static_cast<uint32_t>(options.max_tokens_per_batch()),
+                    static_cast<uint32_t>(options.max_seqs_per_batch()),
+                    static_cast<uint32_t>((positions + logical_block_size - 1) /
+                                          logical_block_size)};
   capacity.max_kv_seq_len = static_cast<uint32_t>(positions);
   capacity.max_positions = static_cast<uint32_t>(positions);
-  capacity.block_size = static_cast<uint32_t>(options.block_size());
+  capacity.logical_block_size = static_cast<uint32_t>(logical_block_size);
   capacity.vocab_size = static_cast<uint32_t>(vocab);
   capacity.max_unique_tokens =
       static_cast<uint32_t>(std::min(positions, vocab));

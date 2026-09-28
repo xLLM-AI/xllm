@@ -201,6 +201,10 @@ class AttentionBackend(ABC):
         """Build private Host metadata without changing an active forward."""
         raise NotImplementedError("attention backend does not support private prepared metadata")
 
+    def prepare_graph_replay(self, metadata: AttentionMetadata) -> None:
+        """Install live metadata for an already captured graph entry."""
+        self.prepare(metadata, graph_mode=True)
+
     def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
         """Reset request-owned state before a model attaches current inputs."""
         del metadata
