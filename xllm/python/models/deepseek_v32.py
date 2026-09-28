@@ -612,7 +612,7 @@ class W8A8DynamicLinear(nn.Module):
             not self._weight_is_transposed,
             self.weight_scale,
             None,
-            pertoken,
+            pertoken.view(-1) if pertoken is not None else None,
             None,
             torch.bfloat16,
         )

@@ -150,12 +150,28 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
 
   std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
   if (args.model_type().ends_with("_mtp")) {
+    // MTP variants skip the top-k reuse plan, but the DSA indexer still only
+    // applies to full-attention (DSA) layers — KDA (linear-attention) layers
+    // never carry one. Without this filter a KDA+DSA mixed MTP model would
+    // over-count indexer layers and trip the
+    // num_indexer_layers <= num_full_attention_layers check that the guard
+    // below is meant to enforce.
+    for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+      layer_mask[static_cast<size_t>(layer_id)] =
+          is_full_attention_layer(args, layer_id);
+    }
     return layer_mask;
   }
 
   const DsaTopkSharePlan topk_share_plan(args);
   for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+    // The DSA indexer only applies to full-attention (DSA) layers; KDA
+    // (linear-attention) layers never carry one, so mask them out
+    // regardless of the top-k reuse plan (without this, a KDA+DSA mixed
+    // model with no top-k reuse pattern over-counts indexer layers and
+    // trips the num_indexer_layers <= num_full_attention_layers check).
     layer_mask[static_cast<size_t>(layer_id)] =
+        is_full_attention_layer(args, layer_id) &&
         topk_share_plan.layer_uses_indexer(layer_id);
   }
   return layer_mask;

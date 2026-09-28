@@ -15,7 +15,7 @@
 
 from functools import lru_cache
 from io import BytesIO
-from typing import Any, cast
+from typing import Any
 
 import torch
 from PIL import Image
@@ -28,30 +28,21 @@ def __cache_image_processor(
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
-    """Load an image processor for the given model name via HuggingFace."""
+    """Load an image processor for the given model name via HuggingFace.
+
+    Returns ``None`` (cached) when the processor class is unavailable — e.g.
+    GLM-5.3-Flash's ``Glm5NextImageProcessor`` only ships in the dev (patched)
+    transformers. Callers fall back to xllm's C++ image processor in that case,
+    so image input does not require the dev transformers build.
+    """
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
     from transformers import AutoImageProcessor
-    from transformers.image_processing_utils import BaseImageProcessor
 
     try:
-        processor = AutoImageProcessor.from_pretrained(
-            processor_name, *args, trust_remote_code=trust_remote_code, **kwargs
-        )
-    except ValueError as e:
-        if not trust_remote_code:
-            err_msg = (
-                "Failed to load the image processor. If the image processor is "
-                "a custom processor not yet available in the HuggingFace "
-                "transformers library, consider setting "
-                "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI."
-            )
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
-
-    return cast(BaseImageProcessor, processor)
+        return AutoImageProcessor.from_pretrained(processor_name, *args, trust_remote_code=trust_remote_code, **kwargs)
+    except (ValueError, ImportError, KeyError):
+        return None
 
 
 def try_cat_feature(item):
@@ -81,6 +72,10 @@ def try_cat_feature(item):
 def preprocess(lst: list[str], model: str) -> dict[str, Any]:
     images = [Image.open(BytesIO(item)) for item in lst]
     image_processor = __cache_image_processor(model, trust_remote_code=True)
+    if image_processor is None:
+        raise RuntimeError(
+            f"HF AutoImageProcessor unavailable for {model}; the caller should fall back to the C++ image processor."
+        )
 
     data = image_processor.preprocess(images, return_tensors="pt").data
     return {key: try_cat_feature(val) for key, val in data.items()}
@@ -103,6 +98,10 @@ def preprocess_tensors(tensors, model: str) -> dict[str, Any]:
             arr = arr.astype(np.uint8)
         images.append(Image.fromarray(arr, mode="RGB"))
     image_processor = __cache_image_processor(model, trust_remote_code=True)
+    if image_processor is None:
+        raise RuntimeError(
+            f"HF AutoImageProcessor unavailable for {model}; the caller should fall back to the C++ image processor."
+        )
 
     data = image_processor.preprocess(images, return_tensors="pt").data
     return {key: try_cat_feature(val) for key, val in data.items()}

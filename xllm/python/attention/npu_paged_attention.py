@@ -20,10 +20,12 @@ Prefill uses FIA TND with causal mask; decode uses FIA TND with block_table.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 
 from xllm.python import distributed, kernels
@@ -42,11 +44,29 @@ from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_execution_buffer,
     get_forward_context,
+    get_forward_context_or_none,
 )
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
     from xllm.python.model_executor.cp_utils import CpContext
+
+# KDA / MTP spec-verify configuration constants + the KDA linear-attention
+# mixin live in separate modules so the backend file is not bloated by the
+# ~1k-line delta-rule state machine and the mixin can share the constants
+# without a circular import.
+from xllm.python.attention.kda_constants import (
+    _KDA_NO_COORD,
+    _KDA_SEQWISE,
+    _KDA_VERIFY_V2,
+    _KDA_VERIFY_V3,
+    _MTP_FULL_COMMIT,
+    _MTP_TRACE,
+)
+from xllm.python.attention.kda_linear_attention import (
+    KdaLinearAttentionMixin,
+    _in_acl_graph,
+)
 
 # Ascend FIA sparse_mode values (see CANN aclnnFusedInferAttentionScore docs).
 # 0: no compressed mask; used for single-query decode where no causal mask is
@@ -144,6 +164,39 @@ def _build_stable_sfa_page_layout(
     )
 
 
+def _causal_conv1d_graph_multi(
+    cin: torch.Tensor,
+    weight: torch.Tensor,
+    out_rows: int,
+    activation: str = "silu",
+) -> torch.Tensor:
+    """Graph-capturable multi-row twin of the eager V2 depthwise conv.
+
+    ``cin`` is ``[B, conv_dim, state_len + R]`` (boundary tail + the R
+    current rows); the causal outputs for the R rows are the K-wide windows
+    STARTING at ``[0, R)``. F.conv1d lowers to an aclop NPUGraph cannot
+    capture, so the conv is unrolled into the per-tap multiply-add contract
+    of ``_causal_conv1d_update_graph`` — bit-compatible with that plain-decode
+    path and the eager F.conv1d path the V2 code keeps.
+
+    Mirrors _causal_conv1d_update_graph's numeric contract exactly: operands
+    cast to fp32, per-tap products exact in fp32, ascending accumulation,
+    one final round to the weight dtype. The RNE rounding to 11 mantissa bits
+    is a no-op for bf16 sources (7 mantissa bits), so it is skipped to avoid
+    RightShift/BitwiseAnd on AI_CPU (see commit 32760093).
+    """
+    h_r = cin.to(weight.dtype).float()
+    w_r = weight.float()
+    k_size = weight.shape[-1]
+    out = w_r[:, 0:1].unsqueeze(0) * h_r[:, :, 0:out_rows]
+    for k in range(1, k_size):
+        out = out + w_r[:, k : k + 1].unsqueeze(0) * h_r[:, :, k : k + out_rows]
+    out = out.to(weight.dtype)
+    if activation == "silu":
+        out = F.silu(out)
+    return out.to(cin.dtype)
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedPagedAttention:
     block_table: torch.Tensor | None
@@ -167,7 +220,7 @@ class PagedAttentionGraphState:
     kv: list[int]
 
 
-class NpuPagedAttentionBackend(AttentionBackend):
+class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     """NPU attention backend dispatching to npu_fused_infer_attention_score."""
 
     def __init__(
@@ -201,10 +254,14 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._block_table_i32: torch.Tensor | None = None
         self._block_attention_masks: dict[tuple[int, int] | None, torch.Tensor] = {}
         self._actual_seq_lens: list[int] | None = None
-        self._actual_seq_q: list[int] | torch.Tensor = []
-        self._actual_seq_kv: list[int] | torch.Tensor = []
+        self._actual_seq_q: list[int] = []
+        self._actual_seq_kv: list[int] = []
         self._mla_actual_seq_q: torch.Tensor | None = None
         self._mla_actual_seq_kv: torch.Tensor | None = None
+        # Dense (FIA v2) MLA state: host cumulative seq-lens consumed by
+        # npu_fused_infer_attention_score_v2, plus graph-mode workspace/output
+        # buffers. Only populated when the dense path runs (topk is None), so
+        # sparse MLA never pays the D2H or allocates these.
         self._mla_actual_seq_q_host: list[int] | None = None
         self._mla_actual_seq_kv_host: list[int] | None = None
         self._mla_graph_workspaces: dict[tuple[int, ...], torch.Tensor] = {}
@@ -221,6 +278,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._kv_owner_representatives: torch.Tensor | None = None
         self._materialized_block_table: torch.Tensor | None = None
         self._sfa_page_layout: _SfaPageLayout | None = None
+        self._graph_index_history_max_kv: int | None = None
+
         self._causal_mask = (
             torch.triu(torch.ones(2048, 2048, dtype=torch.float32), 1).to(torch.int8).contiguous().to(device)
         )
@@ -238,6 +297,21 @@ class NpuPagedAttentionBackend(AttentionBackend):
         return self._page_size
 
     @property
+    def graph_index_history_max_kv(self) -> int:
+        """Static KV-length cap for the kPool graph gather.
+
+        The graph branch of ``gather_index_history`` densifies each sequence
+        to a fixed ``[num_seqs, max_kv, width]`` buffer; sizing it by the full
+        block-table capacity (max_position_embeddings can be 1M) is not
+        viable. Decode steps whose block table exceeds this cap fall back to
+        the eager runner (see DecodeAclGraphRunner), which keeps the dynamic
+        gather. Override with XLLM_GRAPH_INDEX_HISTORY_MAX_KV.
+        """
+        if self._graph_index_history_max_kv is None:
+            self._graph_index_history_max_kv = int(os.environ.get("XLLM_GRAPH_INDEX_HISTORY_MAX_KV", "32768"))
+        return self._graph_index_history_max_kv
+
+    @property
     def is_mla(self) -> bool:
         return self._is_mla
 
@@ -247,9 +321,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         return self._is_mla and not self._uses_sparse_mla
 
     def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
-        full_attention_caches = [
-            (cache.key, cache.value) for cache in kv_caches if cache.key is not None and cache.value is not None
-        ]
+        full_attention_caches = [(cache.key, cache.value) for cache in kv_caches if cache.key is not None]
         if not full_attention_caches:
             raise RuntimeError("no full-attention KV cache is bound")
 
@@ -264,7 +336,18 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._kv_caches = kv_caches
         self._page_size = page_sizes.pop()
         self._num_kv_blocks = num_kv_blocks.pop()
-        self._uses_sparse_mla = self._is_mla and any(cache.index is not None for cache in kv_caches)
+        has_sparse_index = any(cache.index is not None for cache in kv_caches)
+        # glm5_next DSA layers are NoPE: the latent lives in the key slot and
+        # the value/rope slot is a 0-dim tensor normalized to None, while the
+        # kPool indexer adds a paged index cache. Either signal marks this
+        # backend instance as MLA even though the constructor heuristic
+        # (head_dim > 192 and num_kv_heads == 1) does not fire for it.
+        has_latent_only_cache = any(
+            cache.key is not None and cache.value is None and cache.conv is None for cache in kv_caches
+        )
+        if has_sparse_index or has_latent_only_cache:
+            self._is_mla = True
+        self._uses_sparse_mla = self._is_mla and has_sparse_index
 
     @staticmethod
     def _query_sequence_ends(
@@ -707,9 +790,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         v_3d = v.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
         q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
-        # Context-Parallel prefill: q/k/v are this rank's sequence shard while the
-        # slot_mapping/metadata still describe the full global sequence (C++ does
-        # not pre-shard the Python qwen3 path). All-gather K/V to the full
+        # Context-Parallel prefill: q/k/v are this rank's sequence shard while
+        # the slot_mapping/metadata still describe the full global sequence
+        # (C++ does not pre-shard the Python path). All-gather K/V to the full
         # sequence, persist this rank's KV shard, and attend over its causal
         # prefix.
         cp_context = get_forward_context().cp_context
@@ -722,7 +805,6 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 )
             return self._prefill_cp(q_3d, k_3d, v_3d, metadata, cp_context, k_cache, v_cache)
 
-        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         kernels.reshape_paged_cache(metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache)
 
         if metadata.is_prefill or metadata.is_chunked_prefill:
@@ -743,7 +825,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
     def execute_mla(
         self,
         q_latent: torch.Tensor,
-        q_pe: torch.Tensor,
+        q_pe: torch.Tensor | None,
         k_latent_3d: torch.Tensor | None,
         k_pe_3d: torch.Tensor | None,
         layer: Attention,
@@ -757,7 +839,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         layer_cache = self._kv_caches[layer_id]
         # MLA reuses the K/V slots for the latent (nope) and rope caches.
         nope_cache, rope_cache = layer_cache.key, layer_cache.value
-        if nope_cache is None or rope_cache is None:
+        if nope_cache is None:
             raise RuntimeError(f"MLA latent cache is missing for layer {layer_id}")
         if self._block_table_i32 is None:
             raise RuntimeError("MLA requires a block table")
@@ -766,30 +848,57 @@ class NpuPagedAttentionBackend(AttentionBackend):
 
         cp_context = get_forward_context().cp_context
         if cp_context is None:
-            if not cache_is_preprocessed:
-                if k_latent_3d is None or k_pe_3d is None:
-                    raise RuntimeError("MLA cache inputs are required")
-                torch.ops.xllm_ops.reshape_paged_cache(
-                    metadata.slot_mapping,
-                    k_latent_3d,
-                    k_pe_3d,
-                    nope_cache,
-                    rope_cache,
-                )
-            if topk is None:
-                return self._mla_dense_fia_v2(
+            # NoPE (qk_rope_head_dim==0): skip rope cache write + pass None to SFA.
+            # The rope/value slot may be empty (a 0-dim tensor) or absent (None) in
+            # NoPE models — it is never read, so do not require it.
+            rope_dim = getattr(layer, "qk_rope_head_dim", None)
+            if rope_dim and rope_dim > 0:
+                # RoPE MLA (DeepSeek-V3/V4, GLM-5.2): latent + rotary.
+                if rope_cache is None:
+                    raise RuntimeError(f"MLA rope cache is missing for layer {layer_id} (qk_rope_head_dim={rope_dim})")
+                if not cache_is_preprocessed:
+                    if k_latent_3d is None or k_pe_3d is None:
+                        raise RuntimeError("MLA cache inputs are required")
+                    torch.ops.xllm_ops.reshape_paged_cache(
+                        metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
+                    )
+                # Dense absorbed MLA (indexer disabled, topk is None): fall back to
+                # FIA v2 full attention over the paged latent cache. This is the
+                # mainline path used by DeepSeek-V3.2 when index_topk == 0; keep it
+                # alongside the sparse/KDA path so the non-sparse MLA config still
+                # works. Only models with rope (qk_rope_head_dim > 0) reach here.
+                if topk is None:
+                    return self._mla_dense_fia_v2(
+                        q_latent,
+                        q_pe,
+                        nope_cache,
+                        rope_cache,
+                        self._block_table_i32,
+                        layer_id,
+                    )
+                return self._mla_sparse(
                     q_latent,
                     q_pe,
                     nope_cache,
                     rope_cache,
+                    topk,
                     self._block_table_i32,
+                    self._mla_actual_seq_q,
+                    self._mla_actual_seq_kv,
                     layer_id,
+                )
+            # NoPE path (GLM-5.3-Flash): latent only, no rope.
+            if not cache_is_preprocessed:
+                if k_latent_3d is None:
+                    raise RuntimeError("MLA cache inputs are required")
+                torch.ops.xllm_ops.reshape_paged_cache(
+                    metadata.slot_mapping, k_latent_3d, k_latent_3d, nope_cache, nope_cache
                 )
             return self._mla_sparse(
                 q_latent,
-                q_pe,
+                None,
                 nope_cache,
-                rope_cache,
+                None,
                 topk,
                 self._block_table_i32,
                 self._mla_actual_seq_q,
@@ -797,6 +906,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 layer_id,
             )
 
+        # CP prefill path (cp_context is not None) — RoPE MLA only.
         if cache_is_preprocessed:
             raise RuntimeError("CP prefill does not support preprocessed MLA cache inputs")
         if topk is None:
@@ -814,7 +924,6 @@ class NpuPagedAttentionBackend(AttentionBackend):
             nope_cache,
             rope_cache,
         )
-
         attention_nope, block_table = self._materialize_cp_cache(nope_cache, metadata, cp_context)
         attention_rope, _ = self._materialize_cp_cache(rope_cache, metadata, cp_context)
         if cp_context.query_index.numel() == 0:
@@ -824,7 +933,6 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 attention_nope,
                 attention_rope,
             )
-
         query_index = cp_context.query_index
         segment_sequences = cp_context.segment_seq_indices
         q_real = q_latent.index_select(0, query_index).contiguous()
@@ -1092,12 +1200,646 @@ class NpuPagedAttentionBackend(AttentionBackend):
         )
         return target_nope, target_rope, layout.block_table
 
+    def gather_index_history(
+        self,
+        layer: Attention,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Gather the kPool packed history into a dense ``[B, kv_len, W]`` tensor.
+
+        The index cache is paged (``[blocks, block_size, 1, W]``); the kPool
+        indexer's ``select_topk`` needs the per-sequence rows contiguous. For
+        each sequence we walk its block table, concatenating ``block_size``
+        rows per block (the last block yields only ``last_page_len``).
+        ``kv_len`` is padded to the max across the batch; out-of-range rows
+        are zeroed so ``valid`` channels read as false downstream.
+        """
+        metadata = self._metadata
+        assert metadata is not None, "gather_index_history called before prepare()"
+        index_cache = self._kv_caches[layer.layer_id].index
+        assert index_cache is not None, "gather_index_history requires a paged index cache"
+        block_table = metadata.block_table
+        if block_table is None:
+            # No paged view (standalone): caller should not reach here.
+            raise RuntimeError("gather_index_history needs a paged block_table")
+        block_size = index_cache.shape[1]
+        width = index_cache.shape[3]
+        device = index_cache.device
+
+        # batch_size is hidden_states.shape[0] which the engine flattens to 1
+        # for multi-sequence batches; the real sequence count is the block
+        # table's first dim. Use it to gather every sequence's history.
+        num_seqs = block_table.shape[0] if block_table is not None else batch_size
+
+        if _in_acl_graph():
+            # Graph branch: fixed shapes only (no .item()/host sync). Gather
+            # the block table in one vectorized index_select up to a static
+            # max_kv (replay-stable; capped by graph_index_history_max_kv —
+            # the runner falls back to eager beyond it). Rows past each
+            # sequence's live length are zeroed by an explicit kv_seq_lens
+            # mask: the valid channel alone cannot be trusted because a
+            # recycled block still carries a previous owner's valid=1 rows,
+            # and a padded block-table column points at block 0.
+            kv_lens_dev = metadata.kv_seq_lens
+            if kv_lens_dev is None:
+                raise RuntimeError("gather_index_history graph mode needs device kv_seq_lens")
+            max_kv = min(
+                block_table.shape[1] * block_size,
+                self.graph_index_history_max_kv,
+            )
+            num_blocks = (max_kv + block_size - 1) // block_size
+            out = get_execution_buffer(
+                ("KPOOL_INDEX_HISTORY", num_seqs, max_kv, width),
+                lambda: torch.empty(
+                    num_seqs,
+                    max_kv,
+                    width,
+                    dtype=index_cache.dtype,
+                    device=device,
+                ),
+            )
+            flat = index_cache.view(-1, width)
+            bt = block_table[:num_seqs, :num_blocks].to(torch.int64)
+            block_offsets = torch.arange(block_size, device=device)
+            slot_ids = (bt[:, :, None] * block_size + block_offsets[None, None, :]).reshape(num_seqs, max_kv)
+            gathered = flat.index_select(0, slot_ids.reshape(-1)).view(num_seqs, max_kv, width)
+            row_valid = torch.arange(max_kv, device=device)[None, :] < kv_lens_dev[:num_seqs].to(torch.int64)[:, None]
+            torch.mul(gathered, row_valid[:, :, None].to(out.dtype), out=out)
+            return out
+
+        kv_seq_lens = metadata.kv_seq_lens
+        if kv_seq_lens is not None:
+            kv_lens = kv_seq_lens[:num_seqs].to(torch.int64)
+        else:
+            kv_host = metadata.kv_seq_lens_host
+            if kv_host is not None:
+                kl = kv_host.cpu()
+                if kl.numel() == num_seqs + 1:
+                    kv_lens = (kl[1:] - kl[:-1]).to(torch.int64)
+                else:
+                    kv_lens = kl[:num_seqs].to(torch.int64)
+            else:
+                raise RuntimeError("gather_index_history needs kv_seq_lens")
+
+        max_kv = int(kv_lens.max().item()) if num_seqs > 0 else 0
+        flat = index_cache.view(-1, width)
+        bt = block_table[:num_seqs].to(torch.int64)
+        out = torch.zeros(num_seqs, max_kv, width, dtype=index_cache.dtype, device=device)
+        for b in range(num_seqs):
+            kl = int(kv_lens[b].item())
+            if kl == 0:
+                continue
+            n_full = kl // block_size
+            tail = kl - n_full * block_size
+            rows = []
+            blk = bt[b]
+            if n_full > 0:
+                slot_ids = (blk[:n_full, None] * block_size + torch.arange(block_size, device=device)[None, :]).reshape(
+                    -1
+                )
+                rows.append(flat.index_select(0, slot_ids))
+            if tail > 0:
+                last_blk = int(blk[n_full].item())
+                slot_ids = last_blk * block_size + torch.arange(tail, device=device)
+                rows.append(flat.index_select(0, slot_ids))
+            packed = torch.cat(rows, dim=0) if len(rows) > 1 else rows[0]
+            out[b, :kl] = packed
+        return out
+
+    def _spec_verify_v2(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        layer: Attention,
+        idx: torch.Tensor,
+        metadata,
+        conv_cache,
+        ssm_cache,
+        recurrent_kda,
+    ) -> torch.Tensor:
+        """Graph-shaped MTP spec-verify / plain-step path for KDA layers.
+
+        Selected by ``GLM5_KDA_VERIFY_V2=1`` for every non-prefill batch once
+        this backend has seen its first spec-verify batch (plain steps before
+        that keep the exact pre-MTP simple-path behavior). Semantics match the
+        eager lazy-advance protocol bit-for-bit in op-call shapes; only the
+        bookkeeping moves from host dicts to fixed-shape device tensors so the
+        same code is ACL-graph capturable:
+
+        - ``m`` (committed rows of the previous step = kv growth) stays on
+          device; row selection becomes masking: a gate=0/beta=0 row is a
+          bit-exact state no-op for ``recurrent_kda``, so the advance is
+          always the fixed [2 rows/seq] varlen call with row1 masked by
+          ``(m == 2)``.
+        - The stash stores the previous step's CHAIN conv outputs — the eager
+          advance's conv window ([boundary, stash rows]) is identical to the
+          chain's window, so the conv is precomputed once and the advance
+          degenerates to a single recurrent call.
+        - Conv state is staged as dual tails ``[after-b, after-bd]`` per slot;
+          the next step gathers the tail indexed by ``m - 1``.
+        - The stash lives in persistent SLOT-keyed buffers (one row per linear
+          state slot) read via ``index_select`` and written via
+          ``index_copy_``, so a captured graph records their fixed addresses
+          and replay sees the per-step contents. A never-armed slot's stash
+          rows are all-zero, which the mask property already makes a state
+          no-op; the per-slot ``armed`` flag only selects the boundary source
+          (fresh cache row vs staged tail). A plain (rejection-bootstrap) step
+          writes its single row zero-padded to [2], so the next verify's
+          masked advance stays correct at a fixed [B, 2] shape.
+        - In-graph the depthwise conv uses the capture-safe per-tap mul-add
+          (F.conv1d lowers to an aclop NPUGraph cannot capture); eager keeps
+          the F.conv1d original bit-for-bit.
+        """
+        device = mixed_qkv.device
+        num_seqs = idx.shape[0]
+        rows_per_seq = mixed_qkv.shape[2] // num_seqs  # 2 verify, 1 plain
+        head_dim = layer.head_dim
+        nh = layer.num_heads_local
+        qkv_dim = layer.qkv_dim
+        conv_dim = layer.conv_dim
+        conv_state_len = layer.conv_kernel_size - 1
+        scale = 1.0 / (head_dim**0.5)
+        conv_weight = layer.conv1d.weight.squeeze(1)
+        silu = layer.activation == "silu"
+        in_graph = _in_acl_graph()
+
+        _v2dbg = os.environ.get("GLM5_KDA_VERIFY_V2_DEBUG") == "1" and not in_graph
+
+        def _ckpt(tag):
+            if _v2dbg:
+                torch.npu.synchronize()
+                with open("/tmp/v2dbg.log", "a") as _fh:
+                    _fh.write(f"[ck] {tag} lid={layer.layer_id}\n")
+
+        # Numeric-parity instrumentation: same anchors/keys as the eager
+        # path's [linear-debug-in]/[linear-debug] prints (post-advance state
+        # + raw inputs in, post-write state + core out) so a per-layer diff
+        # against a GLM5NEXT_DEBUG_LINEAR run pinpoints the first diverging
+        # layer/phase. Eager only — the .item()/.tolist() reads are device->
+        # host syncs a captured stream cannot take. File-written: embedded
+        # stderr is unreliable.
+        _numdbg = os.environ.get("GLM5_KDA_VERIFY_V2_NUMDBG") == "1" and not in_graph
+
+        def _ndlog(kind, extra, tensors):
+            if _numdbg:
+                torch.npu.synchronize()
+                parts = [f"{k}={v:.6e}" for k, v in tensors.items()]
+                with open("/tmp/v2numdbg.log", "a") as _fh:
+                    _fh.write(f"pid={os.getpid()} {kind} lid={layer.layer_id} {extra} " + " ".join(parts) + "\n")
+
+        st = self.__dict__.setdefault("_kda_v2", {}).setdefault(layer.layer_id, {})
+        if "armed_buf" not in st:
+            # Persistent slot-keyed stash. Allocated on the first V2 call
+            # (which happens during the graph warmup runs, i.e. before
+            # torch.npu.graph capture) so the captured region records these
+            # fixed addresses.
+            nslots = conv_cache.shape[0]
+            st["conv_out"] = torch.zeros(nslots, conv_dim, 2, dtype=mixed_qkv.dtype, device=device)
+            st["g_raw"] = torch.zeros(nslots, 2, nh, head_dim, dtype=mixed_qkv.dtype, device=device)
+            st["b_raw"] = torch.zeros(nslots, 2, nh, dtype=mixed_qkv.dtype, device=device)
+            st["tails"] = torch.zeros(2, nslots, conv_dim, conv_state_len, dtype=mixed_qkv.dtype, device=device)
+            st["kv_prev"] = torch.zeros(nslots, dtype=torch.int64, device=device)
+            st["armed_buf"] = torch.zeros(nslots, dtype=torch.bool, device=device)
+            st["ever_armed"] = False
+
+        # Tokenwise per-row KV lengths. The chunked-typed (expanded) verify
+        # flow exposes [kv-1, kv] pairs per sequence on the expanded
+        # metadata; the plain eager flow keeps per-row kv_seq_lens. Both
+        # give one value per flattened row.
+        from xllm.python.attention.expanded_decode_metadata import (
+            resolve_expanded_decode_metadata,
+        )
+
+        expanded = resolve_expanded_decode_metadata(metadata)
+        kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
+        # Per-step hoist: kv_rows/base_now/m are layer-independent (same
+        # metadata tensor across layers of the step); recompute only when the
+        # source buffer changes.
+        hoist = getattr(self, "_v2_kv_hoist", None)
+        if hoist is not None and hoist[0] == kv_src.data_ptr() and hoist[1] == num_seqs:
+            base_now, m = hoist[2], hoist[3]
+        else:
+            kv_rows = kv_src.to(device=device, dtype=torch.int64)
+            # Per-sequence committed base = kv length of each group's row 0.
+            base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
+            armed_h = st["armed_buf"].index_select(0, idx)
+            kv_prev_h = st["kv_prev"].index_select(0, idx)
+            m = torch.where(armed_h, (base_now - kv_prev_h).clamp(min=1, max=2), torch.ones_like(base_now))
+            self._v2_kv_hoist = (kv_src.data_ptr(), num_seqs, base_now, m)
+
+        stash_g = st["g_raw"].index_select(0, idx)  # [B, 2, nh, hd]
+        tails_all = st["tails"].index_select(1, idx)  # [2, B, C, K-1]
+
+        _ckpt("after_m")
+        # ---- 1) boundary conv state + current-row conv chain ----
+        # conv cache rows are [Ks, C]; restore the [C, Ks] compute layout.
+        cache_boundary = conv_cache.index_select(0, idx).transpose(1, 2).contiguous()
+        # Dual-tail selection by m (m=1 -> after-b, m=2 -> after-bd), then
+        # the armed fallback to the live cache row. Two [B, 1, 1]-cond wheres
+        # replace the materialized-index gather (3 kernels -> 2).
+        m2 = (m == 2).view(num_seqs, 1, 1)
+        boundary = torch.where(m2, tails_all[1], tails_all[0])
+        boundary = torch.where(st["armed_buf"].index_select(0, idx).view(num_seqs, 1, 1), boundary, cache_boundary)
+        # Cold-start masking mirrors the eager entry: has_initial_state == 0
+        # means the slot's cached state is invalid, so chain from zeros.
+        his = getattr(metadata, "has_initial_state", None)
+        warm = None
+        if his is not None:
+            if isinstance(his, torch.Tensor):
+                warm = his.to(device=device, dtype=torch.bool)
+            else:
+                warm = torch.tensor(his, dtype=torch.bool, device=device)
+            if warm.numel() == num_seqs * rows_per_seq:
+                warm = warm.view(num_seqs, rows_per_seq)[:, 0].contiguous()
+        if warm is not None:
+            boundary = torch.where(warm.view(num_seqs, 1, 1), boundary, torch.zeros_like(boundary))
+        # mixed_qkv arrives as the packed [1, conv_dim, T] layout; regroup to
+        # [B, conv_dim, rows_per_seq] (reshape+permute — a direct view is not
+        # stride-compatible with the channel-major packing).
+        x = mixed_qkv.reshape(conv_dim, num_seqs, rows_per_seq).permute(1, 0, 2).contiguous()
+        cin = torch.cat([boundary.to(x.dtype), x], dim=-1)
+        if in_graph:
+            conv_out = _causal_conv1d_graph_multi(cin, conv_weight, rows_per_seq, layer.activation)
+        else:
+            # Depthwise conv on NPU: the padding=0 + tail-slice form is
+            # rejected ("non-positive stride"); the proven eager convention
+            # is padding = W-1 then keep the causal segment outputs
+            # result[Ks : Ks + R] (result[i] spans [i-p, i]).
+            _cin_c = cin.to(conv_weight.dtype).contiguous()
+            _cw = conv_weight.unsqueeze(1).contiguous()
+            conv_out = torch.nn.functional.conv1d(
+                _cin_c,
+                _cw,
+                bias=None,
+                padding=conv_state_len,
+                groups=conv_dim,
+            )[..., conv_state_len : conv_state_len + rows_per_seq]
+            if silu:
+                conv_out = torch.nn.functional.silu(conv_out)
+            conv_out = conv_out.to(x.dtype)
+        # Dual tails: window ending after row0 / after the full group.
+        tail_b = cin[..., 1 : 1 + conv_state_len]
+        tail_full = cin[..., -conv_state_len:]
+        if rows_per_seq == 2:
+            tails_new = torch.stack([tail_b, tail_full], dim=0)
+        else:
+            tails_new = torch.stack([tail_full, tail_full], dim=0)
+
+        _ckpt("after_conv")
+        # ---- 2) advance the live ssm state by the stashed rows ----
+        # Always the fixed [B, 2] call: row0 advances unless the slot was
+        # never armed (all-zero stash rows — a no-op by the mask property);
+        # row1 only when m == 2 (a gate=0/beta=0 row is a bit-exact state
+        # no-op — the verified property that keeps this fixed-shape call
+        # correct for both acceptance outcomes and for plain steps, whose
+        # row1 is written zero).
+        row_mask = st.setdefault("row_mask_buf", {}).get(num_seqs)
+        if row_mask is None:
+            row_mask = torch.ones(num_seqs, 2, 1, 1, device=device, dtype=stash_g.dtype)
+            st.setdefault("row_mask_buf", {})[num_seqs] = row_mask
+        row_mask[:, 0].fill_(1.0)
+        row_mask[:, 1] = (m == 2).view(-1, 1, 1).to(row_mask.dtype)
+        a_g = stash_g * row_mask
+        a_b = st["b_raw"].index_select(0, idx) * row_mask[..., 0]
+        a_split = st["conv_out"].index_select(0, idx).transpose(1, 2).split(qkv_dim, dim=-1)
+        aq = a_split[0].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        ak = a_split[1].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        av = a_split[2].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        a_cu = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * 2
+        _, st_adv = recurrent_kda(
+            aq,
+            ak,
+            av,
+            a_g.reshape(-1, nh, head_dim).to(torch.float32),
+            a_b.reshape(-1, nh).to(torch.float32),
+            initial_state=ssm_cache.index_select(0, idx),
+            cu_seqlens=a_cu,
+            layout="TND",
+            scale=scale,
+            output_final_state=True,
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+            state_v_first=True,
+        )
+        if isinstance(st_adv, tuple):
+            st_adv = st_adv[1] if st_adv[1] is not None else st_adv[0]
+        ssm_post = st_adv.to(ssm_cache.dtype)
+        ssm_cache.index_copy_(0, idx, ssm_post.contiguous())
+        # Every layer persists its own conv boundary (the advance leaves the
+        # live conv state at the boundary; the chain rows do not commit).
+        ssm_post = ssm_cache.index_select(0, idx)
+        conv_cache.index_copy_(0, idx, boundary.transpose(1, 2).contiguous())
+
+        _ckpt("after_advance")
+        if _numdbg:
+            # Post-advance state (matches the eager [linear-debug-in] anchor:
+            # the coordinator advances before its entry print).
+            _ndlog(
+                "[kda-in]",
+                f"v2 rps={rows_per_seq} m={[int(v) for v in m.tolist()]} base={[int(v) for v in base_now.tolist()]}",
+                {
+                    "conv_in": boundary.abs().sum().item(),
+                    "ssm_in": ssm_post.abs().sum().item(),
+                    "mqkv_in": mixed_qkv.abs().sum().item(),
+                    "gate_in": gate.abs().sum().item(),
+                    "beta_in": beta.abs().sum().item(),
+                },
+            )
+        # ---- 3) read-only chain of the current rows for the outputs ----
+        c_split = conv_out.transpose(1, 2).split(qkv_dim, dim=-1)
+        cq = c_split[0].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        ck = c_split[1].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        cv = c_split[2].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        if gate.dim() == 3:
+            gate = gate.view(num_seqs, rows_per_seq, nh * head_dim)
+        cur_g = gate.view(num_seqs, rows_per_seq, nh, head_dim)
+        cur_b = beta.view(num_seqs, rows_per_seq, nh)
+        v_cu = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * rows_per_seq
+        _g_flat = cur_g.reshape(-1, nh, head_dim).to(torch.float32)
+        _b_flat = cur_b.reshape(-1, nh).to(torch.float32)
+        chain_init = ssm_cache.index_select(0, idx)
+        if warm is not None:
+            chain_init = torch.where(warm.view(num_seqs, 1, 1, 1), chain_init, torch.zeros_like(chain_init))
+        core_out = recurrent_kda(
+            cq,
+            ck,
+            cv,
+            _g_flat,
+            _b_flat,
+            initial_state=chain_init,
+            cu_seqlens=v_cu,
+            layout="TND",
+            scale=scale,
+            output_final_state=False,
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+            state_v_first=True,
+        )
+        if isinstance(core_out, tuple):
+            core_out = core_out[0]
+
+        _ckpt("after_chain")
+        # ---- 4) stash the current group for the next step's advance ----
+        if rows_per_seq == 2:
+            stash_c = conv_out
+            stash_g_new = cur_g
+            stash_b_new = cur_b
+        else:
+            # Plain step: zero-pad row1 so the next verify's [B, 2] masked
+            # advance stays correct at the fixed shape.
+            stash_c = torch.cat([conv_out, torch.zeros_like(conv_out)], -1)
+            stash_g_new = torch.cat([cur_g, torch.zeros_like(cur_g)], dim=1)
+            stash_b_new = torch.cat([cur_b, torch.zeros_like(cur_b)], dim=1)
+        st["conv_out"].index_copy_(0, idx, stash_c.to(st["conv_out"].dtype).contiguous())
+        st["g_raw"].index_copy_(0, idx, stash_g_new.to(st["g_raw"].dtype).contiguous())
+        st["b_raw"].index_copy_(0, idx, stash_b_new.to(st["b_raw"].dtype).contiguous())
+        st["tails"].index_copy_(1, idx, tails_new.to(st["tails"].dtype).contiguous())
+        st["kv_prev"].index_copy_(0, idx, base_now)
+        st["armed_buf"].index_fill_(0, idx, True)
+        st["ever_armed"] = True
+
+        # [T, nh, hd] packed rows back to the [1, S, nh, hd] flat layout the
+        # model layer expects (matches the eager branch's reshape).
+        if _numdbg:
+            _ndlog(
+                "[kda-out]",
+                f"v2 rps={rows_per_seq}",
+                {
+                    "conv_sum": boundary.abs().sum().item(),
+                    "ssm_sum": ssm_post.abs().sum().item(),
+                    "core_sum": core_out.abs().sum().item(),
+                },
+            )
+        return core_out.view(1, num_seqs * rows_per_seq, nh, head_dim)
+
+    def _spec_verify_v3(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        layer: Attention,
+        idx: torch.Tensor,
+        metadata,
+        conv_cache,
+        ssm_cache,
+        recurrent_kda,
+    ) -> torch.Tensor:
+        """Fused multi-slot MTP spec-verify / plain-step path for KDA layers.
+
+        Selected by ``GLM5_KDA_VERIFY_V3=1``. Replaces V2's host ``m`` state
+        machine + 6-buffer slot stash with the vllm-ascend fused in-kernel-spec
+        contract: a persistent per-layer combined ``[base | draft]`` state pool
+        and a single ``recurrent_kda`` call per layer that advances BOTH the
+        confirmed (base) and draft (draft) tokens in one multi-token pass,
+        writing each token's resulting state to its own slot so both outcomes
+        survive to the next step (no stash, no host selection, no per-tap conv
+        decomposition of the recurrent state).
+
+        Correctness invariants (see docs/mtp_graph_verify_design.md / B8):
+        - The fla_npu ``aclnnRecurrentKda`` kernel writes each token ``seq_i``'s
+          state to ``ssm_state_indices[seq_i]`` (per-token-slot writeback,
+          recurrent_kda.h CopyOutState). With
+          ``ssm_state_indices = [base, base+N]`` (1D packed per seq), processing
+          ``[b, d]`` writes after-b -> base slot, after-d -> draft slot; after-b
+          is preserved so rejection (next-step num_accepted=1) resumes from it.
+        - ``num_accepted_tokens=1`` always resumes from the base slot, which
+          holds the *selected* running state (after-b from a rejection, or
+          after-d copied base<-draft when the previous draft was accepted).
+          The selection is a fixed-shape ``where`` on device tensors, not a
+          host branch.
+        - The C++ conv/ssm pools remain the source of truth for plain/prefill
+          steps: at verify entry the committed running state is copied into
+          the combined base region; at exit after-b (always accepted) is
+          committed back, so a plain step sees the correct state.
+        - Conv state is handled the same dual-slot way with the combined conv
+          pool; the conv itself reuses the proven bit-exact per-tap mul-add
+          (``_causal_conv1d_graph_multi``) — graph-capturable, no aclop conv.
+        """
+        device = mixed_qkv.device
+        num_seqs = idx.shape[0]
+        rows_per_seq = mixed_qkv.shape[2] // num_seqs  # 2 verify, 1 plain
+        head_dim = layer.head_dim
+        nh = layer.num_heads_local
+        qkv_dim = layer.qkv_dim
+        conv_dim = layer.conv_dim
+        conv_state_len = layer.conv_kernel_size - 1
+        scale = 1.0 / (head_dim**0.5)
+        conv_weight = layer.conv1d.weight.squeeze(1)
+        in_graph = _in_acl_graph()
+        nslots = conv_cache.shape[0]  # C++ pool capacity
+
+        st = self.__dict__.setdefault("_kda_v3", {}).setdefault(layer.layer_id, {})
+        if "armed_buf" not in st:
+            # Persistent combined [base | draft0 | ... | draft{R-1}] pools.
+            # Slot j = idx + j*nslots (base at 0, draft_j at j*nslots). Sized
+            # for rows_per_seq slots so MTP>1 (R = num_speculative_tokens+1) is
+            # supported: the first call is always a verify step (plain reject
+            # steps only enter via the ever_armed gate after a verify armed the
+            # slots), so rows_per_seq here is the fixed verify expansion.
+            pool_slots = rows_per_seq * nslots
+            st["combined_conv"] = torch.zeros(
+                pool_slots, conv_state_len, conv_dim, dtype=conv_cache.dtype, device=device
+            )
+            st["combined_ssm"] = torch.zeros(pool_slots, nh, head_dim, head_dim, dtype=ssm_cache.dtype, device=device)
+            st["kv_prev"] = torch.zeros(nslots, dtype=torch.int64, device=device)
+            st["armed_buf"] = torch.zeros(nslots, dtype=torch.bool, device=device)
+            st["ever_armed"] = False
+        combined_conv = st["combined_conv"]
+        combined_ssm = st["combined_ssm"]
+        kv_prev = st["kv_prev"]
+        armed_buf = st["armed_buf"]
+
+        # ---- per-step m hoist (previous accepted count = kv growth) ----
+        # Eager-only optimization: reuse the per-call (base_now, m) when the
+        # kv source buffer + batch size are unchanged. Under ACL-graph capture
+        # the data_ptr()/num_seqs keys are constant across the warmup
+        # iterations, so the hoist would always hit and freeze (base_now, m)
+        # at capture-time values — the `where(m2, ...)` selection would then
+        # replay against a stale, runner-never-updated tensor and garble
+        # exactly like V2. In graph we MUST let m recompute each replay from
+        # the live runner-filled buffers (kv_seq_lens / armed_buf / kv_prev),
+        # so the cache is bypassed entirely there.
+        # NOTE: the eager hoist is disabled. Its (kv_src.data_ptr(), num_seqs)
+        # key is unsafe under concurrency: the scheduler reuses the same kv_seq_lens
+        # host buffer across decode steps, so under N concurrent requests the key
+        # (same ptr, same N) repeats every step while the actual per-seq lengths
+        # GROW (tokens are generated) — the hoist then returns a stale (base_now,
+        # m) from a prior step, mis-selecting the conv/ssm boundary slot and
+        # diverging output under temp=0+HCCL_DETERMINISTIC. m MUST recompute from
+        # live kv_seq_lens every call. The cost is a handful of cheap host->dev
+        # + index_select ops per step. (Graph already bypassed this below.)
+        from xllm.python.attention.expanded_decode_metadata import (
+            resolve_expanded_decode_metadata,
+        )
+
+        expanded = resolve_expanded_decode_metadata(metadata)
+        kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
+        hoist = None
+        if hoist is not None and hoist[0] == kv_src.data_ptr() and hoist[1] == num_seqs:
+            base_now, m = hoist[2], hoist[3]
+        else:
+            kv_rows = kv_src.to(device=device, dtype=torch.int64)
+            base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
+            armed_h = armed_buf.index_select(0, idx)
+            kv_prev_h = kv_prev.index_select(0, idx)
+            m = torch.where(armed_h, (base_now - kv_prev_h).clamp(min=1, max=rows_per_seq), torch.ones_like(base_now))
+
+        idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
+        idx32 = idx64.to(torch.int32)
+
+        # ---- 1) committed running state (C++ pool) -> combined base ----
+        combined_conv[:nslots].index_copy_(0, idx64, conv_cache.index_select(0, idx64))
+        combined_ssm[:nslots].index_copy_(0, idx64, ssm_cache.index_select(0, idx64))
+
+        # ssm_state_indices: packed 1D [base, d0, ..., d{R-1}] per seq, where
+        # slot j = idx + j*nslots. Length = num_seqs*rows_per_seq = total_tokens,
+        # so it satisfies the kernel's packed-1D (>= total_tokens) check for
+        # any MTP depth. The kernel reads the initial slot at index (m-1) per
+        # seq (ResolveInitialStateSlot) and writes each token's state to its own
+        # slot (CopyOutState) — see recurrent_kda.h. This stays on the packed-1D
+        # path; the 2D speculative mode is an upstream-bug mode
+        # (docs/mtp_graph_verify_design.md B8) and is NOT used here.
+        slot_offsets = torch.arange(rows_per_seq, dtype=torch.int32, device=device) * nslots
+        ssm_state_indices = (idx32.view(-1, 1) + slot_offsets.view(1, -1)).reshape(-1)
+        qsl_buf = st.setdefault("qsl_buf", {}).get(num_seqs)
+        if qsl_buf is None:
+            qsl_buf = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * rows_per_seq
+            st["qsl_buf"][num_seqs] = qsl_buf
+
+        # ---- 2) conv-boundary select (slot m-1: prev last-accepted state) ----
+        # Boundary = running conv state after the previous step's last accepted
+        # token = slot (m-1) per seq (0=base/reject, 1=draft0 accept, ...,
+        # R-1=all-accepted). Generalizes the legacy 2-way where(m2, draft, base).
+        boundary_slot = idx64 + (m.to(torch.int64) - 1) * nslots  # [S]
+        sel_conv = combined_conv.index_select(0, boundary_slot)  # [S, Ks, C]
+
+        # ---- 3) conv (per-tap, bit-exact, graph-capturable) ----
+        cache_boundary = sel_conv.transpose(1, 2).contiguous()  # [S, C, Ks]
+        x = mixed_qkv.reshape(conv_dim, num_seqs, rows_per_seq).permute(1, 0, 2).contiguous()
+        cin = torch.cat([cache_boundary.to(x.dtype), x], dim=-1)
+        if in_graph:
+            conv_out = _causal_conv1d_graph_multi(cin, conv_weight, rows_per_seq, layer.activation)
+        else:
+            _cin_c = cin.to(conv_weight.dtype).contiguous()
+            _cw = conv_weight.unsqueeze(1).contiguous()
+            conv_out = torch.nn.functional.conv1d(
+                _cin_c,
+                _cw,
+                bias=None,
+                padding=conv_state_len,
+                groups=conv_dim,
+            )[..., conv_state_len : conv_state_len + rows_per_seq]
+            if layer.activation == "silu":
+                conv_out = torch.nn.functional.silu(conv_out)
+            conv_out = conv_out.to(x.dtype)
+        # multi-tail conv_state: slot j (0=base ... R-1=last draft) <- window
+        # ending after token j. For R==2 this is base<-tail_b / draft1<-tail_full
+        # (== legacy dual-tail); for R==1 only base is written (a plain step's
+        # next verify has m=1 -> base, so draft slots are never read).
+        for j in range(rows_per_seq):
+            tail_j = cin[..., (j + 1) : (j + 1) + conv_state_len].transpose(1, 2).contiguous()
+            combined_conv.index_copy_(0, idx64 + j * nslots, tail_j)
+
+        # ---- 4) split conv_out -> q/k/v; gate/beta -> g/b (TND, [T,nh,hd]) ----
+        c_split = conv_out.transpose(1, 2).split(qkv_dim, dim=-1)
+        q = c_split[0].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        k = c_split[1].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        v = c_split[2].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        if gate.dim() == 3:
+            gate = gate.view(num_seqs, rows_per_seq, nh * head_dim)
+        cur_g = gate.view(num_seqs, rows_per_seq, nh, head_dim)
+        cur_b = beta.view(num_seqs, rows_per_seq, nh)
+        g_flat = cur_g.reshape(-1, nh, head_dim).to(torch.float32)
+        b_flat = cur_b.reshape(-1, nh).to(torch.float32)
+
+        # ---- 5) fused multi-slot recurrent: advance [b, d0, ..., d{R-1}] ----
+        # ssm_state_indices 1D packed [b0, d0_0, ..., base1, ...]; per-seq
+        # num_accepted_tokens (m = prev accepted count, 1..R) drives the
+        # in-kernel initial-state slot selection (slot m-1) -- no python ssm
+        # select. inplace writes each token's state to its own slot
+        # (after-b->base, after-dj->draft_j).
+        ret = recurrent_kda(
+            q,
+            k,
+            v,
+            g_flat,
+            b_flat,
+            initial_state=combined_ssm,
+            cu_seqlens=qsl_buf,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=m.to(torch.int32),
+            layout="TND",
+            scale=scale,
+            output_final_state=True,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+            state_v_first=True,
+        )
+        core_out = ret[0] if isinstance(ret, tuple) else ret
+
+        # ---- 7) commit after-b (always accepted) -> C++ source of truth ----
+        conv_cache.index_copy_(0, idx64, combined_conv[:nslots].index_select(0, idx64))
+        ssm_cache.index_copy_(0, idx64, combined_ssm[:nslots].index_select(0, idx64))
+
+        # ---- 8) bookkeeping for next step's m ----
+        kv_prev.index_copy_(0, idx64, base_now)
+        armed_buf.index_fill_(0, idx64, True)
+        st["ever_armed"] = True
+        return core_out.view(1, num_seqs * rows_per_seq, nh, head_dim)
+
     def _mla_sparse(
         self,
         q_latent: torch.Tensor,
-        q_pe: torch.Tensor,
+        q_pe: torch.Tensor | None,
         nope_cache: torch.Tensor,
-        rope_cache: torch.Tensor,
+        rope_cache: torch.Tensor | None,
         topk: torch.Tensor,
         block_table: torch.Tensor,
         actual_seq_q: torch.Tensor,

@@ -115,6 +115,9 @@ class EagerRunner(BaseRunner):
         ):
             if mtp_topk_indices is not None:
                 return self.model(input_ids, positions, input_embedding, mtp_topk_indices)
+            # Draft-MTP steps carry the target's (or previous draft step's)
+            # hidden state as input_embedding; the MTP body fuses it with the
+            # token embedding. Regular steps take the 2-arg path.
             if input_embedding is None:
                 return self.model(input_ids, positions)
             return self.model(input_ids, positions, input_embedding)

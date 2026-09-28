@@ -262,10 +262,6 @@ namespace {
 // All NPU processes go through this path for consistency — the build system
 // links against the pip-installed torch_npu .so directly.
 void init_npu_python_runtime() {
-  auto acl_ret = aclInit(nullptr);
-  CHECK(acl_ret == ACL_SUCCESS || acl_ret == 500000)
-      << "aclInit failed with error " << acl_ret;
-
   bool we_initialized_python = false;
   if (!Py_IsInitialized()) {
     py::initialize_interpreter(/*init_signal_handlers=*/false);
@@ -284,6 +280,26 @@ void init_npu_python_runtime() {
       DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
                                       distributed_config.nnodes(),
                                       visible_device_count);
+
+  // Register fla_npu's embedded AscendC opapi (libcust_opapi) + OPP vendor
+  // dir before aclInit. The KDA forward op (aclnnChunkKdaFwd) and its kernels
+  // live in fla_npu's embedded OPP; without this registration the opapi cannot
+  // locate the kernel binary and aclnnChunkKdaFwdGetWorkspaceSize returns
+  // ACLNN_ERR_INNER_NULLPTR (561103), breaking GLM-5.3-Flash's KDA layers.
+  // Guarded so non-KDA builds without fla_npu stay unaffected.
+  {
+    py::gil_scoped_acquire gil;
+    py::exec(
+        "try:\n"
+        "    import fla_npu\n"
+        "    fla_npu.load_ascendc_opapi_libraries()\n"
+        "except (ImportError, RuntimeError):\n"
+        "    pass\n");
+  }
+
+  auto acl_ret = aclInit(nullptr);
+  CHECK(acl_ret == ACL_SUCCESS || acl_ret == 500000)
+      << "aclInit failed with error " << acl_ret;
 
   {
     py::gil_scoped_acquire gil;

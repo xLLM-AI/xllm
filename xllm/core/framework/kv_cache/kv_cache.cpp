@@ -58,7 +58,8 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
   const bool is_linear_layer =
       create_options.enable_linear_attention() &&
       is_linear_attention_layer(layer_id,
-                                create_options.full_attention_interval());
+                                create_options.full_attention_interval(),
+                                create_options.layer_types());
   if (is_linear_layer) {
     return std::make_unique<LinearAttentionKVCacheImpl>(kv_cache_shape,
                                                         create_options);

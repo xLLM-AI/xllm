@@ -65,6 +65,10 @@ struct KVCacheCreateOptions {
   PROPERTY(int64_t, num_layers) = 0;
   // full attention interval for linear attention layers
   PROPERTY(int64_t, full_attention_interval) = 1;
+  // Per-layer attention type ("full_attention"/"attention" vs linear-attention
+  // types). When non-empty it drives the linear-layer decision per layer
+  // instead of the periodic full_attention_interval.
+  PROPERTY(std::vector<std::string>, layer_types) = {};
   // model_id are required for XTensor mode
   PROPERTY(std::string, model_id);
   PROPERTY(std::string, model_type);
@@ -180,8 +184,10 @@ struct DeepSeekV4KVCacheTensors {
 };
 
 // for qwen3.5
-bool is_linear_attention_layer(int64_t layer_idx,
-                               int64_t full_attention_interval);
+bool is_linear_attention_layer(
+    int64_t layer_idx,
+    int64_t full_attention_interval,
+    const std::vector<std::string>& layer_types = {});
 
 // Whether NPU KV cache should use FRACTAL_NZ layout for a model type.
 bool use_npu_nz_kv_cache_layout(const std::string& model_type);

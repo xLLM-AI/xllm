@@ -279,6 +279,28 @@ class AttentionBackend(ABC):
         del layer
         return None
 
+    def execute_linear(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        layer: Attention,
+    ) -> torch.Tensor:
+        """KDA linear attention (conv1d + delta-rule) over framework state.
+
+        ``mixed_qkv`` is ``[B, 3*qkv_dim, S]`` (q/k/v concatenated, the local
+        head-subset already sharded). ``gate`` is the KDA forget gate ``g``
+        shaped ``[B, S, num_heads_local, head_dim]``; ``beta`` is
+        ``[B, S, num_heads_local]``. Returns the core attention output
+        ``[B, S, num_heads_local, head_dim]`` for the caller to gate + project.
+
+        The backend owns the per-layer conv/ssm state (the conv/ssm slots of
+        ``LayerCache``) and reads/advances/writes it via the
+        ``linear_state_indices`` / ``has_initial_state`` metadata view.
+        Backends that do not implement linear attention raise.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support linear attention (KDA)")
+
     def mla_index_context(self, layer: Attention) -> MlaIndexContext:
         """Public hook for an optional LightningIndexer.
 

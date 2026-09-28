@@ -71,6 +71,8 @@ def _grouped_matmul_swiglu_quant_v2(
     weight_scale: torch.Tensor,
     x_scale: torch.Tensor,
     group_list: torch.Tensor,
+    *,
+    group_list_type: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the W8A8 GMM v2 path with vllm-ascend-compatible arguments."""
     return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
@@ -83,7 +85,7 @@ def _grouped_matmul_swiglu_quant_v2(
         dequant_dtype=0,
         quant_mode=0,
         quant_dtype=_TORCH_INT8_DTYPE,
-        group_list_type=0,
+        group_list_type=group_list_type,
     )
 
 
@@ -291,6 +293,9 @@ def grouped_moe(
     renormalize: bool,
     routed_scaling_factor: float,
     active_expert_range: list[int] | None = None,
+    *,
+    expert_tokens_num_type: int = 0,
+    group_list_type: int = 0,
 ) -> torch.Tensor:
     """Route and run grouped quantized experts as one fused operator.
 
@@ -332,7 +337,11 @@ def grouped_moe(
     num_experts = gating_output.shape[1]
     expert_range = active_expert_range if active_expert_range is not None else [0, num_experts]
     use_fused_gmm1 = (
-        expert_range[0] == 0 and expert_range[1] == num_experts and supports_fused_moe_gmm1(hidden_states.device)
+        expert_range[0] == 0
+        and expert_range[1] == num_experts
+        and expert_tokens_num_type == 0
+        and group_list_type == 0
+        and supports_fused_moe_gmm1(hidden_states.device)
     )
     if use_fused_gmm1:
         sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = _moe_init_routing_v3(
@@ -349,8 +358,8 @@ def grouped_moe(
             scale=None,
             active_num=num_tokens * topk,
             expert_num=num_experts,
-            # GMM v2 consumes cumulative expert-token offsets.
-            expert_tokens_num_type=0,
+            # Match the grouped matmul group-list format requested by the model.
+            expert_tokens_num_type=expert_tokens_num_type,
             expert_tokens_num_flag=True,
             active_expert_range=expert_range,
             quant_mode=1,
@@ -373,15 +382,17 @@ def grouped_moe(
         gmm2_group_list = group_list
         gmm2_group_list_type = 2
     else:
+        group_list = group_list.to(torch.int64)
         act_i8, act_pt = _grouped_matmul_swiglu_quant_v2(
             sorted_hidden_i8,
             w13,
             w13_scale,
             pertoken_scale,
             group_list,
+            group_list_type=group_list_type,
         )
         gmm2_group_list = group_list
-        gmm2_group_list_type = 0
+        gmm2_group_list_type = group_list_type
     output = _grouped_matmul_gmm2(
         act_i8=act_i8,
         act_pertoken_scale=act_pt,
@@ -653,6 +664,9 @@ def _grouped_moe_fake(
     renormalize: bool,
     routed_scaling_factor: float,
     active_expert_range: list[int] | None = None,
+    *,
+    expert_tokens_num_type: int = 0,
+    group_list_type: int = 0,
 ) -> torch.Tensor:
     del (
         gating_output,
@@ -667,6 +681,8 @@ def _grouped_moe_fake(
         renormalize,
         routed_scaling_factor,
         active_expert_range,
+        expert_tokens_num_type,
+        group_list_type,
     )
     return torch.empty_like(hidden_states)
 

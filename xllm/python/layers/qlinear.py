@@ -101,7 +101,7 @@ class QLinearWeightLoader:
     """Probe-driven fp/w8a8 load router + TP shard, reusing W8A8WeightLoader."""
 
     def __init__(self, model: nn.Module, state_dicts, tp_size: int, tp_rank: int):
-        from xllm.python.models.deepseek_v32 import W8A8WeightLoader
+        from xllm.python.models.glm5_next_weight import W8A8WeightLoader
 
         self._w8 = W8A8WeightLoader(model, state_dicts, tp_size, tp_rank)
         self.tp_size = tp_size

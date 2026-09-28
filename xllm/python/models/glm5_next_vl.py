@@ -391,10 +391,9 @@ class VisionAttention(nn.Module):
         value_states = value_states.transpose(0, 1).unsqueeze(0)
 
         lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-        split_sizes = lengths.tolist()
-        q_chunks = torch.split(query_states, split_sizes, dim=2)
-        k_chunks = torch.split(key_states, split_sizes, dim=2)
-        v_chunks = torch.split(value_states, split_sizes, dim=2)
+        q_chunks = torch.split(query_states, lengths.tolist(), dim=2)
+        k_chunks = torch.split(key_states, lengths.tolist(), dim=2)
+        v_chunks = torch.split(value_states, lengths.tolist(), dim=2)
 
         attn_outputs = []
         for q, k, v in zip(q_chunks, k_chunks, v_chunks):

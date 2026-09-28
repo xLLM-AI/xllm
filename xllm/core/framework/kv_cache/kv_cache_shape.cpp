@@ -73,9 +73,12 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
 
   const bool enable_lighting_indexer = model_args.index_n_heads() > 0;
   const bool enable_linear_attention = has_linear_attention_layers(model_args);
-  CHECK(!(enable_lighting_indexer && enable_linear_attention))
-      << "KVCacheShape does not support index_cache_shape with "
-      << "conv_cache_shape/ssm_cache_shape simultaneously.";
+  // A model may be BOTH linear-attention (KDA layers need conv/ssm caches)
+  // AND have a lighting indexer (DSA layers need an index cache) — e.g.
+  // glm5_next. The three shape members are independent optionals, and
+  // create_kv_cache_impl dispatches ONE impl per layer (LinearAttention /
+  // Indexed / base), each reading only its own shape, so coexistence here
+  // is harmless. The prior exclusivity CHECK guarded a non-problem.
 
   init_key_cache_shape(kv_cache_cap, model_args, world_size);
   init_value_cache_shape(kv_cache_cap, model_args, world_size);
@@ -348,10 +351,16 @@ void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
       util::kv_split_size_effective() > 1) {
     index_block_count *= util::kv_split_size_effective();
   }
-  index_cache_shape_ = std::vector<int64_t>{index_block_count,
-                                            kv_cache_cap.block_size(),
-                                            1,
-                                            model_args.index_head_dim()};
+  // GLM-next kPool packs [k, gate, valid] = index_head_dim*2+1 per token into
+  // the index cache (its Python select_topk reads historical gate/valid from
+  // the cache). Models using the lightning_indexer op (DS V3.2 / glm5.2) keep
+  // only k, so index_kpool_compress (false by default) gates the packed
+  // width without affecting them.
+  const int64_t head_dim = model_args.index_head_dim();
+  const int64_t cache_head_dim =
+      model_args.index_kpool_compress() ? head_dim * 2 + 1 : head_dim;
+  index_cache_shape_ = std::vector<int64_t>{
+      index_block_count, kv_cache_cap.block_size(), 1, cache_head_dim};
 }
 
 void KVCacheShape::init_index_cache_scale_shape() {

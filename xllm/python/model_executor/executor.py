@@ -195,11 +195,24 @@ class ModelExecutor:
         if not attention_layers:
             raise ValueError("Python model does not contain an Attention layer")
 
-        first_attention = attention_layers[0]
-        expected_config = self._attention_config(first_attention)
-        for layer in attention_layers[1:]:
-            if self._attention_config(layer) != expected_config:
-                raise ValueError("Attention backend requires identical attention configuration across all layers")
+        # GLM-Next mixes DSA (MLA) and KDA (linear-attention) layers with
+        # different head/dim configs; the paged backend only serves the DSA
+        # layers, so it is built from the first DSA layer and the "identical
+        # config across all layers" check is skipped. Non-GLM-Next models keep
+        # the upstream behavior: backend from the first layer plus the
+        # identical-config check. DSA layers are tagged with the
+        # ``is_glm_next_mla`` class attribute so this dispatch does not have to
+        # import glm5_next (that import pulls KDA kernel transitive deps and
+        # fails on builds without them).
+        dsa_layers = [layer for layer in attention_layers if getattr(layer, "is_glm_next_mla", False)]
+        if dsa_layers:
+            first_attention = dsa_layers[0]
+        else:
+            first_attention = attention_layers[0]
+            expected_config = self._attention_config(first_attention)
+            for layer in attention_layers[1:]:
+                if self._attention_config(layer) != expected_config:
+                    raise ValueError("Attention backend requires identical attention configuration across all layers")
 
         first_parameter = next(model.parameters())
         device = first_parameter.device

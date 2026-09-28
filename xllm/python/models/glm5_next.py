@@ -1318,6 +1318,11 @@ class Glm5NextMlaAttention(Attention):
     q_pe/k_pe = None).
     """
 
+    # Marker so the Python executor can identify GLM-Next DSA layers without
+    # importing this module (the import would pull KDA kernel transitive deps
+    # and fail on builds without them).
+    is_glm_next_mla: bool = True
+
     def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__(
             num_heads=cfg.n_heads,
@@ -1788,6 +1793,11 @@ class Glm5NextMoE(nn.Module):
                 # 1.0 and keep the external multiply below (pre-graph
                 # behavior, numerically identical since scaling is linear).
                 routed_scaling_factor=1.0,
+                # GLM5.3 w8a8 MoE requires cumulative-offset routing metadata
+                # (type=1) on both the init-routing and grouped-matmul sides;
+                # the default (0) is the DeepSeek-V3.2 layout.
+                expert_tokens_num_type=1,
+                group_list_type=1,
             )
             routed = routed * self.routed_scaling
             out = routed.view(*orig_shape)

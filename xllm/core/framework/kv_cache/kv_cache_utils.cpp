@@ -130,7 +130,28 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
 #endif
 
 bool is_linear_attention_layer(int64_t layer_idx,
-                               int64_t full_attention_interval) {
+                               int64_t full_attention_interval,
+                               const std::vector<std::string>& layer_types) {
+  if (!layer_types.empty()) {
+    if (layer_idx < 0 ||
+        layer_idx >= static_cast<int64_t>(layer_types.size())) {
+      return false;
+    }
+    const std::string& layer_type = layer_types[static_cast<size_t>(layer_idx)];
+    // Explicit full-attention markers (including the glm5_next
+    // deepseek_sparse_attention label) use paged KV, not the linear
+    // (conv/ssm) cache.
+    if (layer_type == "full_attention" || layer_type == "attention" ||
+        layer_type == "deepseek_sparse_attention") {
+      return false;
+    }
+    // Only an explicit linear marker flips the layer to the conv/ssm cache.
+    // Unknown tags defer to the interval heuristic below instead of guessing
+    // linear — a wrong guess flips the whole KV layout and corrupts serving.
+    if (layer_type == "linear_attention") {
+      return true;
+    }
+  }
   if (full_attention_interval <= 1) {
     return false;
   }
