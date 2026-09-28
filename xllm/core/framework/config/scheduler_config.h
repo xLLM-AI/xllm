@@ -55,7 +55,8 @@ class SchedulerConfig final {
          "aggressive_coeff",
          "starve_threshold",
          "enable_starve_prevent",
-         "enable_dp_fair_token_budget"}};
+         "enable_dp_fair_token_budget",
+         "request_queue_size"}};
     return kOptionCategory;
   }
 
@@ -93,6 +94,10 @@ class SchedulerConfig final {
   // one prefill chunk), which also bounds the DSV4 SWA burst on any single
   // rank to the per-group share.
   PROPERTY(bool, enable_dp_fair_token_budget) = true;
+
+  // Capacity of the scheduler request queue. Requests arriving while the queue
+  // is full are rejected at admission.
+  PROPERTY(int32_t, request_queue_size) = 100000;
 };
 
 }  // namespace xllm

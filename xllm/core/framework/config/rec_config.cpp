@@ -71,10 +71,6 @@ DEFINE_int32(total_conversion_threshold,
              1000,
              "Maximum total number of items emitted in one REC response.");
 
-DEFINE_int32(request_queue_size,
-             100000,
-             "The request queue size of the scheduler");
-
 DEFINE_uint32(rec_worker_max_concurrency,
               1,
               "Concurrency for rec worker parallel execution. Less than or "
@@ -94,7 +90,6 @@ void RecConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_extended_item_info);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(each_conversion_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(total_conversion_threshold);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(request_queue_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(rec_worker_max_concurrency);
 }
 
@@ -110,7 +105,6 @@ void RecConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_extended_item_info);
   XLLM_CONFIG_ASSIGN_FROM_JSON(each_conversion_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(total_conversion_threshold);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(request_queue_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(rec_worker_max_concurrency);
 }
 
@@ -138,8 +132,6 @@ void RecConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, each_conversion_threshold);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, total_conversion_threshold);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, request_queue_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, rec_worker_max_concurrency);
 }

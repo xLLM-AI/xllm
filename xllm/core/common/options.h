@@ -268,6 +268,9 @@ class Options {
   // "int8": Enables INT8 quantization. Only supported on MLU backend.
   PROPERTY(std::string, kv_cache_dtype) = "auto";
 
+  // Capacity of the scheduler request queue.
+  PROPERTY(int32_t, request_queue_size) = 100000;
+
   // max concurrency for rec worker
   PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 

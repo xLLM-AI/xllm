@@ -76,6 +76,10 @@ DEFINE_bool(enable_dp_fair_token_budget,
             "PD PREFILL instances. Caps each DP group at "
             "max_tokens_per_batch / dp_size tokens per scheduling round.");
 
+DEFINE_int32(request_queue_size,
+             100000,
+             "The request queue size of the scheduler");
+
 namespace xllm {
 
 void SchedulerConfig::from_flags() {
@@ -94,6 +98,7 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_starve_prevent);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_fair_token_budget);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(request_queue_size);
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
@@ -112,6 +117,7 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_starve_prevent);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_fair_token_budget);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(request_queue_size);
 }
 
 void SchedulerConfig::append_config_json(
@@ -147,6 +153,8 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, enable_starve_prevent);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_dp_fair_token_budget);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, request_queue_size);
 }
 
 SchedulerConfig& SchedulerConfig::get_instance() {

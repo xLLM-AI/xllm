@@ -156,7 +156,7 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
         .rec_worker_max_concurrency(
             xllm_init_options.rec_worker_max_concurrency);
     if (xllm_init_options.request_queue_size > 0) {
-      xllm::RecConfig::get_instance().request_queue_size(
+      xllm::SchedulerConfig::get_instance().request_queue_size(
           xllm_init_options.request_queue_size);
     }
     xllm::SchedulerConfig::get_instance()
@@ -186,7 +186,9 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
     options.enable_graph(::xllm::ExecutionConfig::get_instance().enable_graph())
         .beam_width(::xllm::BeamSearchConfig::get_instance().beam_width())
         .rec_worker_max_concurrency(
-            ::xllm::RecConfig::get_instance().rec_worker_max_concurrency());
+            ::xllm::RecConfig::get_instance().rec_worker_max_concurrency())
+        .request_queue_size(
+            ::xllm::SchedulerConfig::get_instance().request_queue_size());
     LOG(INFO)
         << "REC C API runtime config:"
         << ", enable_rec_prefill_only="

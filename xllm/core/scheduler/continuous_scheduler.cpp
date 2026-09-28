@@ -29,7 +29,6 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
@@ -67,11 +66,12 @@ std::vector<std::shared_ptr<Request>> CancelRequestQueue::take_all() {
 ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
     : options_(options),
       batch_mode_(create_batch_mode(options)),
+      scheduler_config_(::xllm::SchedulerConfig::get_instance()),
+      batch_factory_(*BatchFactory::get_instance(options.dp_size())),
       engine_(engine),
-      request_queue_(::xllm::RecConfig::get_instance().request_queue_size()) {
+      request_queue_(options.request_queue_size()) {
   CHECK(engine_ != nullptr);
-  prefetch_admission_limit_ = static_cast<size_t>(
-      ::xllm::RecConfig::get_instance().request_queue_size());
+  prefetch_admission_limit_ = static_cast<size_t>(options.request_queue_size());
 
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
@@ -321,7 +321,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   budget.remaining_seq_budget = std::max(options_.max_seqs_per_batch(), 1);
   budget.latency_budget = options_.max_global_tpot_ms();
   budget.num_preempted_requests = 0;
-  if (::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget() &&
+  if (scheduler_config_.enable_dp_fair_token_budget() &&
       options_.dp_size() > 1 && options_.instance_role().has_value() &&
       options_.instance_role().value() == InstanceRole::PREFILL) {
     // Fair per-group token budget: each DP group can receive at most
@@ -332,7 +332,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     const int64_t dp_size = options_.dp_size();
     const int64_t max_batch_tokens = options_.max_tokens_per_batch();
     int64_t per_group_cap = (max_batch_tokens + dp_size - 1) / dp_size;
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    if (scheduler_config_.enable_chunked_prefill()) {
       // Floor the share at one prefill chunk so a single long sequence
       // still advances at full chunk speed even when the budget is below
       // dp_size * chunk.
@@ -362,12 +362,11 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     response_processor_->process_completed_requests(finished);
   }
 
-  auto batches =
-      BatchFactory::get_instance(options_.dp_size())
-          ->create_batches(running_requests_,
-                           running_sequences_,
-                           running_sequences_budgets_,
-                           kv_cache_manager_->get_swap_block_transfer_infos());
+  auto batches = batch_factory_.create_batches(
+      running_requests_,
+      running_sequences_,
+      running_sequences_budgets_,
+      kv_cache_manager_->get_swap_block_transfer_infos());
 
   bool is_batches_empty = std::all_of(
       batches.begin(), batches.end(), [](const Batch& b) { return b.empty(); });

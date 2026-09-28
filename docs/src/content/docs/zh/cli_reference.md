@@ -119,6 +119,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |
 | `starve_threshold` | `double` | `1.0` | MixScheduler 的饥饿阈值系数。 |
 | `enable_starve_prevent` | `bool` | `true` | 是否启用 MixScheduler 的防饥饿机制。 |
+| `enable_dp_fair_token_budget` | `bool` | `true` | 是否在 PD 分离的 PREFILL 实例上把每个 DP group 每轮调度的 token 数限制为 `max_tokens_per_batch / dp_size`（下限为一个 prefill chunk）。 |
+| `request_queue_size` | `int32` | `100000` | 调度器请求队列容量；队列满时新到的请求会在准入阶段被拒绝。 |
 
 ## ParallelConfig
 
@@ -278,5 +280,4 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_extended_item_info` | `bool` | `false` | 是否解析并输出 REC extended item info tensors。 |
 | `each_conversion_threshold` | `int32` | `50` | 每个 REC token triplet 最多输出的 item 数。 |
 | `total_conversion_threshold` | `int32` | `1000` | 单个 REC response 最多输出的 item 总数。 |
-| `request_queue_size` | `int32` | `100000` | scheduler request queue 大小。 |
 | `rec_worker_max_concurrency` | `uint32` | `1` | Rec worker 并行执行并发度；小于等于 `1` 表示禁用并发 Rec worker。 |

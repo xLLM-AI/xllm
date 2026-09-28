@@ -233,6 +233,10 @@ DECLARE_double(starve_threshold);
 
 DECLARE_bool(enable_starve_prevent);
 
+DECLARE_bool(enable_dp_fair_token_budget);
+
+DECLARE_int32(request_queue_size);
+
 // --- kvcache store config ---
 DECLARE_uint32(prefetch_timeout);
 
@@ -315,8 +319,6 @@ DECLARE_bool(enable_xattention_one_stage);
 DECLARE_int32(max_decode_rounds);
 
 DECLARE_bool(enable_constrained_decoding);
-
-DECLARE_int32(request_queue_size);
 
 DECLARE_uint32(rec_worker_max_concurrency);
 

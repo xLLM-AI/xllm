@@ -119,6 +119,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `aggressive_coeff` | `double` | `1.0` | Aggressive coefficient for MixScheduler urgency judgment. |
 | `starve_threshold` | `double` | `1.0` | Starvation threshold coefficient for MixScheduler. |
 | `enable_starve_prevent` | `bool` | `true` | Whether to enable anti-starvation behavior in MixScheduler. |
+| `enable_dp_fair_token_budget` | `bool` | `true` | Whether to cap each DP group at `max_tokens_per_batch / dp_size` tokens per scheduling round on disaggregated PD PREFILL instances, floored at one prefill chunk. |
+| `request_queue_size` | `int32` | `100000` | Capacity of the scheduler request queue. Requests arriving while the queue is full are rejected at admission. |
 
 ## ParallelConfig
 
@@ -278,5 +280,4 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_extended_item_info` | `bool` | `false` | Whether to parse and output REC extended item info tensors. |
 | `each_conversion_threshold` | `int32` | `50` | Maximum number of items emitted for each REC token triplet. |
 | `total_conversion_threshold` | `int32` | `1000` | Maximum total number of items emitted in one REC response. |
-| `request_queue_size` | `int32` | `100000` | Scheduler request queue size. |
 | `rec_worker_max_concurrency` | `uint32` | `1` | Concurrency for Rec worker parallel execution. Values less than or equal to `1` disable concurrent Rec workers. |
