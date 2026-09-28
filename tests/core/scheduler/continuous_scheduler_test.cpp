@@ -10,7 +10,6 @@
 
 #include "core/common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
@@ -654,10 +653,9 @@ TEST(ContinuousSchedulerTest,
 }
 
 TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
-  ScopedConfigValue<int32_t> request_queue_size(
-      RecConfig::get_instance().request_queue_size(), 1);
   ContinuousScheduler::Options options =
       create_scheduler_options(64, 4, 0, 64, 1);
+  options.request_queue_size(1);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), options);

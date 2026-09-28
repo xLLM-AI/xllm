@@ -51,7 +51,6 @@ class RecConfig final {
          "enable_extended_item_info",
          "each_conversion_threshold",
          "total_conversion_threshold",
-         "request_queue_size",
          "rec_worker_max_concurrency"}};
     return kOptionCategory;
   }
@@ -77,8 +76,6 @@ class RecConfig final {
   PROPERTY(int32_t, each_conversion_threshold) = 50;
 
   PROPERTY(int32_t, total_conversion_threshold) = 1000;
-
-  PROPERTY(int32_t, request_queue_size) = 100000;
 
   PROPERTY(uint32_t, rec_worker_max_concurrency) = 1;
 };

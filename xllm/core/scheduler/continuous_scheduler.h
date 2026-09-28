@@ -30,7 +30,6 @@ limitations under the License.
 #include "async_response_processor.h"
 #include "common/macros.h"
 #include "common/types.h"
-#include "core/framework/config/rec_config.h"
 #include "framework/batch/batch.h"
 #include "framework/block/kv_cache_manager.h"
 #include "framework/request/priority_comparator.h"
@@ -43,8 +42,10 @@ limitations under the License.
 #include "scheduler/scheduler_metrics.h"
 
 namespace xllm {
+class BatchFactory;
 class Engine;
 class RequestPriorityQueue;
+class SchedulerConfig;
 class SchedulerPolicy;
 struct SchedulerState;
 
@@ -96,6 +97,10 @@ class ContinuousScheduler : public Scheduler {
     // the maximum number of sequences per batch
     PROPERTY(int32_t, max_seqs_per_batch) = 256;
     PROPERTY(bool, enable_task_pipeline) = false;
+
+    // the capacity of the request queue; requests arriving while it is full
+    // are rejected at admission.
+    PROPERTY(int32_t, request_queue_size) = 100000;
 
     // the max tokens per chunk for request in prefill stage.
     PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
@@ -222,6 +227,12 @@ class ContinuousScheduler : public Scheduler {
   // hierarchy selection).
   BatchMode batch_mode_;
 
+  // Process-wide scheduler configuration, resolved once at construction.
+  const SchedulerConfig& scheduler_config_;
+
+  // Process-wide batch factory, resolved once at construction.
+  BatchFactory& batch_factory_;
+
   // Policy object that encapsulates all batch-assembly logic.
   std::unique_ptr<SchedulerPolicy> policy_;
 
@@ -230,9 +241,8 @@ class ContinuousScheduler : public Scheduler {
 
   KVCacheManager* kv_cache_manager_;
 
-  // a thread safe queue of requests, bounded by
-  // ::xllm::RecConfig::get_instance().request_queue_size() the schedule
-  // owns the requests and manages their lifetimes.
+  // a thread safe queue of requests, bounded by options_.request_queue_size()
+  // the schedule owns the requests and manages their lifetimes.
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
 
   // Requests waiting for Mooncake prefetch completion. This is an admission

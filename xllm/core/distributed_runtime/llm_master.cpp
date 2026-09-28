@@ -79,6 +79,7 @@ LLMMaster::LLMMaster(const Options& options)
   scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .enable_task_pipeline(options_.enable_task_pipeline())
+      .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())

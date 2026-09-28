@@ -150,6 +150,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
           kv_cache_config.max_linear_state_cache_slots())
       .max_tokens_per_batch(scheduler_config.max_tokens_per_batch())
       .max_seqs_per_batch(scheduler_config.max_seqs_per_batch())
+      .request_queue_size(scheduler_config.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           scheduler_config.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(speculative_config.num_speculative_tokens())
