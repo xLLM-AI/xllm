@@ -44,16 +44,8 @@ bool JsonReader::parse_text(const std::string& json_text) {
 }
 
 bool JsonReader::contains(const std::string& key) const {
-  // slipt the key by '.' then traverse the json object
-  std::vector<std::string> keys = absl::StrSplit(key, '.');
-  nlohmann::json data = data_;
-  for (const auto& k : keys) {
-    if (!data.contains(k)) {
-      return false;
-    }
-    data = data[k];
-  }
-  return true;
+  // top-level lookup, then fall back to text_config subtree (see resolve()).
+  return resolve(key) != nullptr;
 }
 
 }  // namespace xllm

@@ -154,6 +154,94 @@ std::optional<Size> smart_resize(int32_t height,
   return std::make_pair(h_bar, w_bar);
 }
 
+// token-budget smart_resize, mirroring HF Glm5NextImageProcessor. The
+// pixel budget is ``tokens * pixels_per_token`` where
+// ``pixels_per_token = temporal_factor * factor^2`` and ``factor =
+// patch_size * merge_size``. For a single image HF passes
+// ``num_frames == temporal_factor`` (the image is temporally duplicated), so
+// ``aligned_frames`` is at least ``temporal_factor``; we mirror that here.
+// Used as a fallback for the model_impl=python path when the HF
+// ``Glm5NextImageProcessor`` class is unavailable (stock transformers), so
+// image input no longer requires the dev (patched) transformers.
+std::optional<Size> smart_resize_tokens(int32_t num_frames,
+                                        int32_t height,
+                                        int32_t width,
+                                        int32_t temporal_factor,
+                                        int32_t factor,
+                                        int32_t min_tokens,
+                                        int32_t max_tokens) {
+  if (static_cast<double>(std::max(height, width)) / std::min(height, width) >
+      200) {
+    LOG(ERROR) << "Absolute aspect ratio must be smaller than 200, height: "
+               << height << ", width: " << width;
+    return std::nullopt;
+  }
+
+  const int64_t pixels_per_token =
+      static_cast<int64_t>(temporal_factor) * factor * factor;
+  int64_t min_pixels = static_cast<int64_t>(min_tokens) * pixels_per_token;
+  int64_t max_pixels = static_cast<int64_t>(max_tokens) * pixels_per_token;
+
+  auto align = [](int32_t value, int32_t f) {
+    return ((value + f - 1) / f) * f;
+  };
+
+  auto fit_within_budget = [&](int32_t aligned_frames) -> Size {
+    int32_t low = 1;
+    int32_t high = height;
+    int32_t best_h = factor;
+    int32_t best_w = factor;
+    while (low <= high) {
+      int32_t content_h = (low + high) / 2;
+      int32_t content_w =
+          std::max(1,
+                   static_cast<int32_t>(std::floor(static_cast<double>(width) *
+                                                   content_h / height)));
+      int32_t cand_h = align(content_h, factor);
+      int32_t cand_w = align(content_w, factor);
+      int64_t budget = static_cast<int64_t>(aligned_frames) * cand_h * cand_w;
+      if (budget <= max_pixels) {
+        best_h = cand_h;
+        best_w = cand_w;
+        low = content_h + 1;
+      } else {
+        high = content_h - 1;
+      }
+    }
+    return std::make_pair(best_h, best_w);
+  };
+
+  int32_t aligned_frames = std::max(
+      temporal_factor,
+      static_cast<int32_t>(
+          std::rint(num_frames / static_cast<double>(temporal_factor))) *
+          temporal_factor);
+  int32_t aligned_h = align(height, factor);
+  int32_t aligned_w = align(width, factor);
+  int64_t aligned_budget =
+      static_cast<int64_t>(aligned_frames) * aligned_h * aligned_w;
+
+  if (aligned_budget < min_pixels) {
+    double scale =
+        std::sqrt(static_cast<double>(min_pixels) /
+                  (static_cast<double>(num_frames) * height * width));
+    aligned_h = align(
+        std::max(1, static_cast<int32_t>(std::ceil(height * scale))), factor);
+    aligned_w = align(
+        std::max(1, static_cast<int32_t>(std::ceil(width * scale))), factor);
+    aligned_budget =
+        static_cast<int64_t>(aligned_frames) * aligned_h * aligned_w;
+  }
+
+  if (aligned_budget > max_pixels) {
+    auto fitted = fit_within_budget(aligned_frames);
+    aligned_h = fitted.first;
+    aligned_w = fitted.second;
+  }
+
+  return std::make_pair(aligned_h, aligned_w);
+}
+
 }  // namespace
 
 Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
@@ -177,6 +265,8 @@ Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
   if (args.mm_image_merge_size() > 0) {
     merge_size_ = args.mm_image_merge_size();
   }
+  min_tokens_ = args.mm_image_min_tokens();
+  max_tokens_ = args.mm_image_max_tokens();
 
   if (do_rescale_ && do_normalize_) {
     image_mean_.mul_(1.0 / rescale_factor_);
@@ -196,11 +286,24 @@ bool Qwen2VLImageProcessor::process_image(
   int64_t resized_width = shape[3];
 
   if (do_resize_) {
-    auto size = smart_resize(static_cast<int32_t>(resized_height),
-                             static_cast<int32_t>(resized_width),
-                             patch_size_ * merge_size_,
-                             min_pixels_,
-                             max_pixels_);
+    std::optional<Size> size;
+    if (min_tokens_ > 0 && max_tokens_ > 0) {
+      // token-budget resize (matches HF Glm5NextImageProcessor). For a
+      // single image HF passes num_frames == temporal_factor.
+      size = smart_resize_tokens(temporal_patch_size_,
+                                 static_cast<int32_t>(resized_height),
+                                 static_cast<int32_t>(resized_width),
+                                 temporal_patch_size_,
+                                 patch_size_ * merge_size_,
+                                 min_tokens_,
+                                 max_tokens_);
+    } else {
+      size = smart_resize(static_cast<int32_t>(resized_height),
+                          static_cast<int32_t>(resized_width),
+                          patch_size_ * merge_size_,
+                          min_pixels_,
+                          max_pixels_);
+    }
     if (!size) {
       return false;
     }
@@ -264,7 +367,17 @@ bool Qwen2VLImageProcessor::process(
   // processor; the Python model's encode() consumes the HF output directly.
   if (::xllm::ModelConfig::is_python_model_impl(
           ::xllm::ModelConfig::get_instance().model_impl())) {
-    return PyImagePreprocess::instance().run(images, output_items);
+    if (PyImagePreprocess::instance().run(images, output_items)) {
+      return true;
+    }
+    // The HF ``Glm5NextImageProcessor`` class only exists in the dev (patched)
+    // transformers. On a stock transformers build ``AutoImageProcessor`` fails
+    // to resolve it; fall back to the C++ token-budget path, whose patchify is
+    // byte-identical to HF's (verified) so the Python model consumes it
+    // unchanged.
+    LOG(WARNING)
+        << "HF AutoImageProcessor unavailable for this model (likely stock "
+           "transformers); falling back to the C++ image processor.";
   }
 
   std::vector<torch::Tensor> pixel_values;

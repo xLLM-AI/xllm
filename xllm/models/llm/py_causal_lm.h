@@ -37,10 +37,11 @@ void share_python_model_weights(pybind11::object& draft_model,
 }  // namespace detail
 
 // Inherits CausalVLM so that ``--backend vlm --model_impl python`` can route a
-// Python VLM (e.g. Qwen3-VL) through the VLM engine while PyExecutorImpl drives
-// it. The CausalVLM ``encode`` / ``get_input_embeddings`` virtuals are stubbed:
-// in the Python path, PyExecutorImpl::run calls the Python model's own
-// encode/get_input_embeddings via pybind (they are never reached here).
+// Python VLM (e.g. GLM-5.3-Flash-VL) through the VLM engine while
+// PyExecutorImpl drives it. The CausalVLM ``encode`` / ``get_input_embeddings``
+// virtuals are stubbed: in the Python path, PyExecutorImpl::run calls the
+// Python model's own encode/get_input_embeddings via pybind (they are never
+// reached here).
 class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
  public:
   explicit PyCausalLM(const ModelContext& context);

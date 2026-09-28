@@ -26,6 +26,7 @@ limitations under the License.
 #include "llm/deepseek_v4.h"                             // IWYU pragma: keep
 #include "llm/deepseek_v4_dspark.h"                      // IWYU pragma: keep
 #include "llm/deepseek_v4_mtp.h"                         // IWYU pragma: keep
+#include "llm/glm5_next.h"                               // IWYU pragma: keep
 #include "llm/npu/deepseek_mtp.h"                        // IWYU pragma: keep
 #include "llm/npu/deepseek_v2.h"                         // IWYU pragma: keep
 #include "llm/npu/deepseek_v3.h"                         // IWYU pragma: keep
@@ -58,6 +59,7 @@ limitations under the License.
 #include "llm/qwen3_moe.h"                               // IWYU pragma: keep
 #include "llm/qwen3_next.h"                              // IWYU pragma: keep
 #include "rec/npu/onerec.h"                              // IWYU pragma: keep
+#include "vlm/glm5_next_vlm.h"                           // IWYU pragma: keep
 #include "vlm/npu/glm4v.h"                               // IWYU pragma: keep
 #include "vlm/npu/glm4v_moe.h"                           // IWYU pragma: keep
 #include "vlm/npu/kimi_k25.h"                            // IWYU pragma: keep

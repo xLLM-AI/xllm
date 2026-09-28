@@ -36,4 +36,12 @@ def prepare_row_parallel_weight(
     return weight, False
 
 
-__all__ = ["prepare_row_parallel_weight"]
+def prepare_quant_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Return quantized weights in the ``[K, N]`` matmul layout."""
+    return weight.transpose(0, 1).contiguous()
+
+
+__all__ = [
+    "prepare_row_parallel_weight",
+    "prepare_quant_weight",
+]

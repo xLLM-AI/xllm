@@ -97,6 +97,29 @@ def interleaved_rotary_embedding(
     return output.view(num_tokens, num_heads, head_dim)
 
 
+def inplace_partial_rotary_mul(
+    value: torch.Tensor,
+    cosine: torch.Tensor,
+    sine: torch.Tensor,
+    start: int,
+    end: int,
+) -> None:
+    """Apply interleaved RoPE to one slice of ``value`` in place."""
+    if value.dim() == 2:
+        value_4d = value.unsqueeze(1).unsqueeze(1)
+    elif value.dim() == 3:
+        value_4d = value.unsqueeze(1)
+    else:
+        raise ValueError("inplace_partial_rotary_mul expects a 2D or 3D tensor")
+    torch.ops.xllm_ops.inplace_partial_rotary_mul(
+        value_4d,
+        cosine,
+        sine,
+        "interleave",
+        [start, end],
+    )
+
+
 @interleaved_rotary_embedding.register_fake
 def _interleaved_rotary_embedding_fake(
     value: torch.Tensor,
@@ -202,8 +225,9 @@ def npu_inplace_partial_rotary_mul(
 
 __all__ = [
     "fused_qk_norm_rope",
+    "inplace_partial_rotary_mul",
     "interleaved_rotary_embedding",
     "mrope",
-    "vision_rotary_mul",
     "npu_inplace_partial_rotary_mul",
+    "vision_rotary_mul",
 ]

@@ -217,7 +217,9 @@ def _write_mla_kv_cache(
     """Normalize and rotate MLA KV, then write it into the paged cache."""
     num_tokens = kv.shape[0]
     cache_mode = _mla_cache_mode(kv_cache)
-    # torch-npu does not accept xLLM's internal FRACTAL_NZ cache as PA_NZ.
+    # xLLM's PA_NZ cache is an internal FRACTAL_NZ tensor. The torch-npu
+    # operator currently accepts PA_NZ only as a physically packed ND tensor,
+    # so keep the established cache writer for the internal-format variant.
     if _KV_RMSNORM_ROPE_CACHE is not None and cache_mode == "PA":
         kv_no_split = kv.view(
             num_tokens,

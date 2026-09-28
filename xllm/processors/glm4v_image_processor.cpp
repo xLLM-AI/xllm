@@ -82,6 +82,96 @@ std::optional<Size> smart_resize(int32_t num_frames,
   return std::make_pair(h_bar, w_bar);
 }
 
+// token-budget smart_resize, mirroring HF Glm5NextImageProcessor.
+// ``min_tokens``/``max_tokens`` are in LLM-token units; the pixel budget is
+// ``tokens * pixels_per_token`` where ``pixels_per_token = temporal_factor *
+// factor^2`` (factor = patch_size * merge_size). Falls back to the legacy
+// pixel-budget ``smart_resize`` when token bounds are not provided.
+std::optional<Size> smart_resize_tokens(int32_t num_frames,
+                                        int32_t height,
+                                        int32_t width,
+                                        int32_t temporal_factor,
+                                        int32_t factor,
+                                        int32_t min_tokens,
+                                        int32_t max_tokens) {
+  if (height < factor || width < factor) {
+    LOG(ERROR) << "Height or width must be larger than factor";
+    return std::nullopt;
+  }
+  if (num_frames < temporal_factor) {
+    LOG(ERROR) << "num_frames must be larger than temporal_factor, num_frames: "
+               << num_frames << ", temporal_factor: " << temporal_factor;
+    return std::nullopt;
+  }
+
+  const int64_t pixels_per_token =
+      static_cast<int64_t>(temporal_factor) * factor * factor;
+  int64_t min_pixels = static_cast<int64_t>(min_tokens) * pixels_per_token;
+  int64_t max_pixels = static_cast<int64_t>(max_tokens) * pixels_per_token;
+
+  auto align = [](int32_t value, int32_t f) {
+    return ((value + f - 1) / f) * f;
+  };
+
+  // Binary-search the largest content height whose aligned canvas stays within
+  // the max-pixel budget, preserving aspect ratio. Mirrors the HF
+  // ``fit_within_budget`` loop.
+  auto fit_within_budget = [&](int32_t aligned_frames) -> Size {
+    int32_t low = 1;
+    int32_t high = height;
+    int32_t best_h = factor;
+    int32_t best_w = factor;
+    while (low <= high) {
+      int32_t content_h = (low + high) / 2;
+      int32_t content_w =
+          std::max(1,
+                   static_cast<int32_t>(std::floor(static_cast<double>(width) *
+                                                   content_h / height)));
+      int32_t cand_h = align(content_h, factor);
+      int32_t cand_w = align(content_w, factor);
+      int64_t budget = static_cast<int64_t>(aligned_frames) * cand_h * cand_w;
+      if (budget <= max_pixels) {
+        best_h = cand_h;
+        best_w = cand_w;
+        low = content_h + 1;
+      } else {
+        high = content_h - 1;
+      }
+    }
+    return std::make_pair(best_h, best_w);
+  };
+
+  int32_t aligned_frames = std::max(
+      temporal_factor,
+      static_cast<int32_t>(
+          std::rint(num_frames / static_cast<double>(temporal_factor))) *
+          temporal_factor);
+  int32_t aligned_h = align(height, factor);
+  int32_t aligned_w = align(width, factor);
+  int64_t aligned_budget =
+      static_cast<int64_t>(aligned_frames) * aligned_h * aligned_w;
+
+  if (aligned_budget < min_pixels) {
+    double scale =
+        std::sqrt(static_cast<double>(min_pixels) /
+                  (static_cast<double>(num_frames) * height * width));
+    aligned_h = align(
+        std::max(1, static_cast<int32_t>(std::ceil(height * scale))), factor);
+    aligned_w = align(
+        std::max(1, static_cast<int32_t>(std::ceil(width * scale))), factor);
+    aligned_budget =
+        static_cast<int64_t>(aligned_frames) * aligned_h * aligned_w;
+  }
+
+  if (aligned_budget > max_pixels) {
+    auto fitted = fit_within_budget(aligned_frames);
+    aligned_h = fitted.first;
+    aligned_w = fitted.second;
+  }
+
+  return std::make_pair(aligned_h, aligned_w);
+}
+
 }  // namespace
 
 Glm4VImageProcessor::Glm4VImageProcessor(const ModelArgs& args) {
@@ -101,6 +191,8 @@ Glm4VImageProcessor::Glm4VImageProcessor(const ModelArgs& args) {
   patch_size_ = args.mm_image_patch_size();
   temporal_patch_size_ = args.mm_image_temporal_patch_size();
   merge_size_ = args.mm_image_merge_size();
+  min_tokens_ = args.mm_image_min_tokens();
+  max_tokens_ = args.mm_image_max_tokens();
 
   if (do_rescale_ && do_normalize_) {
     image_mean_.mul_(1.0 / rescale_factor_);
@@ -120,13 +212,24 @@ bool Glm4VImageProcessor::process_image(
   int64_t resized_width = shape[3];
 
   if (do_resize_) {
-    auto size = smart_resize(temporal_patch_size_,
-                             static_cast<int32_t>(resized_height),
-                             static_cast<int32_t>(resized_width),
-                             temporal_patch_size_,
-                             patch_size_ * merge_size_,
-                             min_pixels_,
-                             max_pixels_);
+    std::optional<Size> size;
+    if (min_tokens_ > 0 && max_tokens_ > 0) {
+      size = smart_resize_tokens(temporal_patch_size_,
+                                 static_cast<int32_t>(resized_height),
+                                 static_cast<int32_t>(resized_width),
+                                 temporal_patch_size_,
+                                 patch_size_ * merge_size_,
+                                 min_tokens_,
+                                 max_tokens_);
+    } else {
+      size = smart_resize(temporal_patch_size_,
+                          static_cast<int32_t>(resized_height),
+                          static_cast<int32_t>(resized_width),
+                          temporal_patch_size_,
+                          patch_size_ * merge_size_,
+                          min_pixels_,
+                          max_pixels_);
+    }
     if (!size) {
       return false;
     }

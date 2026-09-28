@@ -54,6 +54,11 @@ class Glm4VVideoProcessor final : public VideoProcessor {
   int32_t video_max_pixels_ = 47040000;
   int32_t video_min_pixels_ = 12544;
 
+  // per-token resize budget (token units). When both are > 0 the
+  // token-budget smart_resize is used; otherwise the legacy pixel-budget path.
+  int32_t video_min_tokens_ = 0;
+  int32_t video_max_tokens_ = 0;
+
   int32_t video_merge_size_ = 2;
   int32_t video_patch_size_ = 14;
 

@@ -100,6 +100,15 @@ def get_forward_context() -> ForwardContext:
     return ctx
 
 
+def get_forward_context_or_none() -> ForwardContext | None:
+    """Return the current forward context, or None outside a forward pass.
+
+    Layers that must not depend on the executor (e.g. the standalone stub-loader
+    align path) use this to read per-step metadata without hard-failing.
+    """
+    return _current_context.get()
+
+
 def record_layer_event(layer_id: int) -> None:
     ctx = _current_context.get()
     if ctx is not None and ctx.layer_synchronizer is not None:

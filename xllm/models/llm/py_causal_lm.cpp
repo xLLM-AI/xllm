@@ -23,6 +23,8 @@ limitations under the License.
 #include <string>
 
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
@@ -241,6 +243,9 @@ py::dict PyCausalLM::build_config_dict(
   visit_properties(parallel_args, visitor);
   d["dtype"] = dtype_to_string(options_);
   d["device"] = c10::str(device_);
+  // Checkpoint directory: python models use it to discover side-car files
+  // shipped with the weights (e.g. optional/quarot.safetensors).
+  d["model_path"] = ModelConfig::get_instance().model();
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
   d["dp_size"] = dp_size_;
@@ -267,6 +272,9 @@ py::dict PyCausalLM::build_config_dict(
       requires_eager_execution
           ? std::string("off")
           : ExecutionConfig::get_instance().python_graph_backend();
+#if defined(USE_NPU)
+  d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
+#endif
   return d;
 }
 

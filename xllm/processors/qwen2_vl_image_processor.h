@@ -48,6 +48,11 @@ class Qwen2VLImageProcessor final : public ImageProcessor {
   int32_t max_pixels_ = 12845056;
   int32_t min_pixels_ = 3136;
 
+  // per-token resize budget (token units). When both are > 0 the
+  // token-budget smart_resize is used; otherwise the legacy pixel-budget path.
+  int32_t min_tokens_ = 0;
+  int32_t max_tokens_ = 0;
+
   int32_t merge_size_ = 2;
   int32_t patch_size_ = 14;
 

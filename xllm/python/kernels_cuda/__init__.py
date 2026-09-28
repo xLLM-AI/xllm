@@ -22,17 +22,18 @@ platform. Exactly one of them is initialized in a process; they share no code
 and never import each other. ``setup.py`` ships only the package matching
 ``--device``.
 
-Launchers live under ``triton/`` and ``flashinfer/``; the modules here bind the
-public CUDA kernel API declared in ``__all__``. Peer packages own their APIs
-independently and need not export the same names. Existing unsupported stubs
-remain explicit CUDA failure paths, but they are not a cross-platform export
-contract.
+Launchers live under ``triton/`` and ``flashinfer/``; the modules here bind one
+kernel per name in ``__all__``. Peer packages export the same names, so a name
+without a CUDA kernel is still exported here, raising
+:class:`NotImplementedError` and carrying the signature an implementation has
+to meet.
 """
 
 from __future__ import annotations
 
-from .activation import silu_and_mul
+from .activation import dequant_swiglu_quant, silu_and_mul
 from .attention import (
+    batch_matmul_transpose,
     reshape_paged_cache,
     update_decode_graph_metadata,
     vision_fusion_attention,
@@ -47,17 +48,33 @@ from .gated_delta_net import (
     fused_recurrent_gated_delta_rule_packed_decode,
     resolve_gdn_prefill_backend,
 )
-from .linear import prepare_row_parallel_weight
+from .linear import (
+    prepare_quant_weight,
+    prepare_row_parallel_weight,
+)
+from .mla import (
+    deepseek_mla_preprocess_decode,
+    deepseek_mla_preprocess_decode_v2,
+    has_mla_preprocess_v2,
+    prepare_mla_preprocess_v2_q_b,
+    prepare_mla_preprocess_v2_qkv,
+)
 from .moe import (
     cutlass_fused_moe,
     fused_moe,
     grouped_moe,
+    moe_expert_compute,
     moe_fused_topk,
+    moe_gate_routing,
+    moe_gmm1,
+    moe_gmm2_combine,
+    moe_token_dispatch,
     prepare_grouped_moe_weights,
     supports_cutlass_moe,
 )
 from .normalization import (
     fused_add_rms_norm,
+    fused_add_rms_norm_dynamic_quant,
     gemma_rms_norm,
     l2_norm,
     rms_norm,
@@ -70,6 +87,7 @@ from .quantization import (
 )
 from .rotary_embedding import (
     fused_qk_norm_rope,
+    inplace_partial_rotary_mul,
     interleaved_rotary_embedding,
     mrope,
     vision_rotary_mul,
@@ -77,6 +95,8 @@ from .rotary_embedding import (
 from .sparse_attention import (
     lightning_indexer,
     lightning_indexer_out,
+    quant_lightning_indexer,
+    quant_lightning_indexer_metadata,
     scatter_nd_update,
     sparse_flash_attention,
     sparse_flash_attention_lse,
@@ -93,13 +113,17 @@ __all__ = [
     "rms_norm",
     "gemma_rms_norm",
     "fused_add_rms_norm",
+    "fused_add_rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
     "silu_and_mul",
+    "dequant_swiglu_quant",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
+    "batch_matmul_transpose",
     "fused_qk_norm_rope",
+    "inplace_partial_rotary_mul",
     "interleaved_rotary_embedding",
     "mrope",
     "vision_rotary_mul",
@@ -107,14 +131,27 @@ __all__ = [
     "cutlass_fused_moe",
     "fused_moe",
     "grouped_moe",
+    "moe_gate_routing",
+    "moe_expert_compute",
+    "moe_token_dispatch",
+    "moe_gmm1",
+    "moe_gmm2_combine",
     "prepare_grouped_moe_weights",
     "supports_cutlass_moe",
     "prepare_row_parallel_weight",
+    "prepare_quant_weight",
+    "deepseek_mla_preprocess_decode",
+    "deepseek_mla_preprocess_decode_v2",
+    "has_mla_preprocess_v2",
+    "prepare_mla_preprocess_v2_q_b",
+    "prepare_mla_preprocess_v2_qkv",
     "quant_matmul",
     "quantize_per_tensor",
     "dynamic_quant",
     "lightning_indexer",
     "lightning_indexer_out",
+    "quant_lightning_indexer",
+    "quant_lightning_indexer_metadata",
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",

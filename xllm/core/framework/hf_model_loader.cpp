@@ -1158,86 +1158,114 @@ bool HFModelLoader::load_image_preprocessor_args(
     const std::string& model_weights_path) {
   // image preprocessor args
   JsonReader image_preprocess_reader;
-  const std::string image_preprocess_file_path =
+  const std::string flat_file_path =
       model_weights_path + "/preprocessor_config.json";
-  if (image_preprocess_reader.parse(image_preprocess_file_path)) {
+  const std::string nested_file_path =
+      model_weights_path + "/processor_config.json";
+  bool parsed = false;
+  std::string used_file_path;
+  if (image_preprocess_reader.parse(flat_file_path)) {
+    parsed = true;
+    used_file_path = flat_file_path;
+  } else if (image_preprocess_reader.parse(nested_file_path)) {
+    // GLM-5.3-Flash ships a single ``processor_config.json`` whose image
+    // fields live under the ``image_processor`` sub-object. Resolve every key
+    // as ``image_processor.<key>`` first, then the flat top-level form, so
+    // legacy flat ``preprocessor_config.json`` files keep working.
+    parsed = true;
+    used_file_path = nested_file_path;
+  }
+  if (parsed) {
     LOG(INFO) << "Success to parse image preprocess args file: "
-              << image_preprocess_file_path;
-    args_.mm_image_do_center_crop() =
-        image_preprocess_reader.value_or<bool>("do_center_crop", false);
-    args_.mm_image_crop_height_size() =
-        image_preprocess_reader.value_or<int>("crop_size.height", 335);
-    args_.mm_image_crop_width_size() =
-        image_preprocess_reader.value_or<int>("crop_size.width", 335);
+              << used_file_path;
+    const nlohmann::json root = image_preprocess_reader.data();
+    // Resolve a key against the nested ``image_processor`` sub-object first,
+    // then the flat top-level layout; returns nullptr if neither exists.
+    auto resolve_field = [&](const std::string& key) -> const nlohmann::json* {
+      if (auto* ptr =
+              JsonReader::resolve_path(root, "image_processor." + key)) {
+        return ptr;
+      }
+      return JsonReader::resolve_path(root, key);
+    };
+    auto field_int = [&](const std::string& key, int default_value) -> int {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
+        return ptr->get<int>();
+      }
+      return default_value;
+    };
+    auto field_bool = [&](const std::string& key, bool default_value) -> bool {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
+        return ptr->get<bool>();
+      }
+      return default_value;
+    };
+    auto field_double = [&](const std::string& key,
+                            double default_value) -> double {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
+        return ptr->get<double>();
+      }
+      return default_value;
+    };
+    auto field_double_vec =
+        [&](const std::string& key) -> std::optional<std::vector<double>> {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && ptr->is_array()) {
+        return ptr->get<std::vector<double>>();
+      }
+      return std::nullopt;
+    };
 
-    args_.mm_image_do_resize() =
-        image_preprocess_reader.value_or<bool>("do_resize", false);
+    args_.mm_image_do_center_crop() = field_bool("do_center_crop", false);
+    args_.mm_image_crop_height_size() = field_int("crop_size.height", 335);
+    args_.mm_image_crop_width_size() = field_int("crop_size.width", 335);
+
+    args_.mm_image_do_resize() = field_bool("do_resize", false);
     args_.mm_image_resize_shortest_edge() =
-        image_preprocess_reader.value_or<int>("size.shortest_edge", 335);
-    args_.mm_image_resample() =
-        image_preprocess_reader.value_or<int>("resample", 335);
+        field_int("size.shortest_edge", 335);
+    args_.mm_image_resample() = field_int("resample", 335);
 
-    args_.mm_image_do_rescale() =
-        image_preprocess_reader.value_or<bool>("do_rescale", false);
-    args_.mm_image_rescale_factor() =
-        image_preprocess_reader.value_or<double>("rescale_factor", 0);
+    args_.mm_image_do_rescale() = field_bool("do_rescale", false);
+    args_.mm_image_rescale_factor() = field_double("rescale_factor", 0);
 
-    args_.mm_image_do_normalize() =
-        image_preprocess_reader.value_or<bool>("do_normalize", false);
+    args_.mm_image_do_normalize() = field_bool("do_normalize", false);
 
-    const auto& image_prerocess_data = image_preprocess_reader.data();
-    if (image_preprocess_reader.contains("image_mean")) {
-      args_.mm_image_normalize_mean() =
-          image_prerocess_data["image_mean"].get<std::vector<double>>();
+    if (auto v = field_double_vec("image_mean")) {
+      args_.mm_image_normalize_mean() = std::move(*v);
+    }
+    if (auto v = field_double_vec("image_std")) {
+      args_.mm_image_normalize_std() = std::move(*v);
+    }
+    if (auto v = field_double_vec("norm_mean")) {
+      args_.mm_image_normalize_mean() = std::move(*v);
+    }
+    if (auto v = field_double_vec("norm_std")) {
+      args_.mm_image_normalize_std() = std::move(*v);
     }
 
-    if (image_preprocess_reader.contains("image_std")) {
-      args_.mm_image_normalize_std() =
-          image_prerocess_data["image_std"].get<std::vector<double>>();
-    }
+    args_.mm_image_shortest_edge() = field_int("size.shortest_edge", 0);
+    args_.mm_image_longest_edge() = field_int("size.longest_edge", 0);
 
-    if (image_preprocess_reader.contains("norm_mean")) {
-      args_.mm_image_normalize_mean() =
-          image_prerocess_data["norm_mean"].get<std::vector<double>>();
-    }
+    args_.mm_image_min_pixels() = field_int("min_pixels", 0);
+    args_.mm_image_max_pixels() = field_int("max_pixels", 0);
 
-    if (image_preprocess_reader.contains("norm_std")) {
-      args_.mm_image_normalize_std() =
-          image_prerocess_data["norm_std"].get<std::vector<double>>();
-    }
+    // per-token resize budget (token units; multiplied by pixels_per_token
+    // inside the image processor). When both are > 0 the token-budget
+    // smart_resize is used, matching HF Glm5NextImageProcessor.
+    args_.mm_image_min_tokens() = field_int("min_image_tokens", 0);
+    args_.mm_image_max_tokens() = field_int("max_image_tokens", 0);
 
-    args_.mm_image_shortest_edge() =
-        image_preprocess_reader.value_or<int>("size.shortest_edge", 0);
+    args_.mm_image_patch_size() = field_int("patch_size", 0);
+    args_.mm_image_temporal_patch_size() = field_int("temporal_patch_size", 0);
+    args_.mm_image_merge_size() = field_int("merge_size", 0);
 
-    args_.mm_image_longest_edge() =
-        image_preprocess_reader.value_or<int>("size.longest_edge", 0);
-
-    args_.mm_image_min_pixels() =
-        image_preprocess_reader.value_or<int>("min_pixels", 0);
-
-    args_.mm_image_max_pixels() =
-        image_preprocess_reader.value_or<int>("max_pixels", 0);
-
-    args_.mm_image_patch_size() =
-        image_preprocess_reader.value_or<int>("patch_size", 0);
-
-    args_.mm_image_temporal_patch_size() =
-        image_preprocess_reader.value_or<int>("temporal_patch_size", 0);
-
-    args_.mm_image_merge_size() =
-        image_preprocess_reader.value_or<int>("merge_size", 0);
-
-    args_.mm_image_feature_size() =
-        image_preprocess_reader.value_or<int>("image_feature_size", 0);
-
-    args_.mm_scale_resolution() =
-        image_preprocess_reader.value_or<int>("scale_resolution", 0);
-
-    args_.mm_slice_mode() =
-        image_preprocess_reader.value_or<bool>("slice_mode", false);
-
-    args_.mm_use_image_id() =
-        image_preprocess_reader.value_or<bool>("use_image_id", false);
+    args_.mm_image_feature_size() = field_int("image_feature_size", 0);
+    args_.mm_scale_resolution() = field_int("scale_resolution", 0);
+    args_.mm_slice_mode() = field_bool("slice_mode", false);
+    args_.mm_use_image_id() = field_bool("use_image_id", false);
   }
 
   return true;
@@ -1247,39 +1275,73 @@ bool HFModelLoader::load_video_preprocessor_args(
     const std::string& model_weights_path) {
   // video preprocessor args
   JsonReader video_preprocess_reader;
-  const std::string video_preprocess_file_path =
+  const std::string flat_file_path =
       model_weights_path + "/video_preprocessor_config.json";
-  if (video_preprocess_reader.parse(video_preprocess_file_path)) {
+  const std::string nested_file_path =
+      model_weights_path + "/processor_config.json";
+  bool parsed = false;
+  std::string used_file_path;
+  if (video_preprocess_reader.parse(flat_file_path)) {
+    parsed = true;
+    used_file_path = flat_file_path;
+  } else if (video_preprocess_reader.parse(nested_file_path)) {
+    // GLM-5.3-Flash nests video fields under ``video_processor``.
+    parsed = true;
+    used_file_path = nested_file_path;
+  }
+  if (parsed) {
     LOG(INFO) << "Success to parse video preprocess args file: "
-              << video_preprocess_file_path;
+              << used_file_path;
+    const nlohmann::json root = video_preprocess_reader.data();
+    auto resolve_field = [&](const std::string& key) -> const nlohmann::json* {
+      if (auto* ptr =
+              JsonReader::resolve_path(root, "video_processor." + key)) {
+        return ptr;
+      }
+      return JsonReader::resolve_path(root, key);
+    };
+    auto field_int = [&](const std::string& key, int default_value) -> int {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
+        return ptr->get<int>();
+      }
+      return default_value;
+    };
+    auto field_bool = [&](const std::string& key, bool default_value) -> bool {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
+        return ptr->get<bool>();
+      }
+      return default_value;
+    };
+    auto field_double_vec =
+        [&](const std::string& key) -> std::optional<std::vector<double>> {
+      const auto* ptr = resolve_field(key);
+      if (ptr != nullptr && ptr->is_array()) {
+        return ptr->get<std::vector<double>>();
+      }
+      return std::nullopt;
+    };
 
-    args_.mm_video_shortest_edge() =
-        video_preprocess_reader.value_or<int>("size.shortest_edge", 0);
+    args_.mm_video_shortest_edge() = field_int("size.shortest_edge", 0);
+    args_.mm_video_longest_edge() = field_int("size.longest_edge", 0);
 
-    args_.mm_video_longest_edge() =
-        video_preprocess_reader.value_or<int>("size.longest_edge", 0);
-
-    const auto& video_prerocess_data = video_preprocess_reader.data();
-    if (video_preprocess_reader.contains("image_mean")) {
-      args_.mm_video_normalize_mean() =
-          video_prerocess_data["image_mean"].get<std::vector<double>>();
+    if (auto v = field_double_vec("image_mean")) {
+      args_.mm_video_normalize_mean() = std::move(*v);
+    }
+    if (auto v = field_double_vec("image_std")) {
+      args_.mm_video_normalize_std() = std::move(*v);
     }
 
-    if (video_preprocess_reader.contains("image_std")) {
-      args_.mm_video_normalize_std() =
-          video_prerocess_data["image_std"].get<std::vector<double>>();
-    }
-    args_.mm_video_patch_size() =
-        video_preprocess_reader.value_or<int>("patch_size", 0);
+    args_.mm_video_patch_size() = field_int("patch_size", 0);
+    args_.mm_video_temporal_patch_size() = field_int("temporal_patch_size", 0);
+    args_.mm_video_merge_size() = field_int("merge_size", 0);
+    args_.mm_video_do_rescale() = field_bool("do_rescale", false);
 
-    args_.mm_video_temporal_patch_size() =
-        video_preprocess_reader.value_or<int>("temporal_patch_size", 0);
-
-    args_.mm_video_merge_size() =
-        video_preprocess_reader.value_or<int>("merge_size", 0);
-
-    args_.mm_video_do_rescale() =
-        video_preprocess_reader.value_or<bool>("do_rescale", false);
+    // per-token resize budget for video (token units). When both are > 0
+    // the token-budget smart_resize is used.
+    args_.mm_video_min_tokens() = field_int("min_image_tokens", 0);
+    args_.mm_video_max_tokens() = field_int("max_image_tokens", 0);
   }
 
   return true;

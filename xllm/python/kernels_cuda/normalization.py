@@ -33,6 +33,17 @@ def gemma_rms_norm(
     return normalized * (weight + 1.0)
 
 
+def fused_add_rms_norm_dynamic_quant(
+    value: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Report that fused add-RMSNorm-dynamic-quant is NPU-only."""
+    del value, residual, weight, eps
+    raise NotImplementedError("fused_add_rms_norm_dynamic_quant is available only on NPU")
+
+
 @torch.library.custom_op("xllm_triton::l2_norm", mutates_args=())
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Run Triton L2 normalization as one graph node."""
@@ -77,6 +88,7 @@ __all__ = [
     "rms_norm",
     "gemma_rms_norm",
     "fused_add_rms_norm",
+    "fused_add_rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
 ]

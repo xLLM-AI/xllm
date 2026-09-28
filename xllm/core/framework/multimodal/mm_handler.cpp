@@ -170,7 +170,8 @@ MMErrCode VideoHandler::load(const MMContent& content,
     input.type = MMType::VIDEO;
     return this->load_from_http(url, input.raw_data, content.video_url.headers);
   } else {
-    // treat as local path or file:// url (same as ImageHandler).
+    // treat as local path or file:// url (mirrors ImageHandler so local
+    // video files are accepted, not just data/http URLs).
     input.type = MMType::VIDEO;
     if (this->load_from_local(url, input.raw_data) == MMErrCode::SUCCESS) {
       return MMErrCode::SUCCESS;

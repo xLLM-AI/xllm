@@ -68,22 +68,45 @@ class JsonReader {
 
   template <typename T>
   std::optional<T> value(const std::string& key) const {
-    // slipt the key by '.' then traverse the json object
-    const std::vector<std::string> keys = absl::StrSplit(key, '.');
-    nlohmann::json data = data_;
-    for (const auto& k : keys) {
-      if (data.contains(k)) {
-        data = data[k];
-      } else {
+    if (auto data = resolve(key)) {
+      if (data->is_null() || data->is_object()) {
+        // cannot convert null or object data to T
         return std::nullopt;
       }
+      return data->get<T>();
     }
+    return std::nullopt;
+  }
 
-    if (data.is_null() || data.is_object()) {
-      // cannot convert null or object data to T
-      return std::nullopt;
+  // Resolve a dot-separated key path against a json object; returns nullptr if
+  // any segment is missing.
+  static const nlohmann::json* resolve_path(const nlohmann::json& root,
+                                            const std::string& key) {
+    const std::vector<std::string> keys = absl::StrSplit(key, '.');
+    const nlohmann::json* data = &root;
+    for (const auto& k : keys) {
+      if (data->contains(k)) {
+        data = &(*data)[k];
+      } else {
+        return nullptr;
+      }
     }
-    return data.get<T>();
+    return data;
+  }
+
+  // Look up a key, falling back to the same key under a "text_config" subtree
+  // when the top-level lookup misses. Multimodal configs (e.g. glm5_next
+  // full weights) nest the text-model fields under "text_config"; single-model
+  // configs keep them flat. This lets model args loaders use the same flat key
+  // ("num_hidden_layers") for both layouts.
+  const nlohmann::json* resolve(const std::string& key) const {
+    if (auto* data = resolve_path(data_, key)) {
+      return data;
+    }
+    if (data_.contains("text_config") && data_["text_config"].is_object()) {
+      return resolve_path(data_["text_config"], key);
+    }
+    return nullptr;
   }
 
   nlohmann::json data() const { return data_; }

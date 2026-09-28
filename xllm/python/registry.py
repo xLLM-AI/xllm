@@ -143,6 +143,11 @@ def _register_builtin_models() -> None:
         "DeepseekV32MtpForCausalLM",
         "deepseek_v32_mtp",
     )
+    _register_model_path(
+        "xllm.python.models.glm5_next_vl",
+        "Glm5NextVLModel",
+        "glm5_next",
+    )
 
 
 _register_builtin_models()

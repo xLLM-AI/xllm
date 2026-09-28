@@ -99,4 +99,8 @@ def dynamic_quant(
     raise NotImplementedError("dynamic_quant has no CUDA kernel; quantized linear layers on CUDA are not supported yet")
 
 
-__all__ = ["quant_matmul", "quantize_per_tensor", "dynamic_quant"]
+__all__ = [
+    "quant_matmul",
+    "quantize_per_tensor",
+    "dynamic_quant",
+]

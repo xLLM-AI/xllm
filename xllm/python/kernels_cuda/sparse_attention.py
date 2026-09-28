@@ -115,6 +115,66 @@ def lightning_indexer_out(
     raise NotImplementedError("lightning_indexer_out has no CUDA kernel; sparse attention on CUDA is not supported yet")
 
 
+def quant_lightning_indexer(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_dequant_scale: torch.Tensor,
+    key_dequant_scale: torch.Tensor,
+    metadata: torch.Tensor,
+    query_seq_lengths: torch.Tensor | None,
+    key_seq_lengths: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    selected_count: int,
+    cmp_ratio: int = 1,
+) -> torch.Tensor:
+    """Run INT8 LightningIndexer with per-token Q/K dequant scales."""
+    del (
+        query,
+        key,
+        weights,
+        query_dequant_scale,
+        key_dequant_scale,
+        metadata,
+        query_seq_lengths,
+        key_seq_lengths,
+        block_table,
+        selected_count,
+        cmp_ratio,
+    )
+    raise NotImplementedError(
+        "quant_lightning_indexer has no CUDA kernel; sparse attention on CUDA is not supported yet"
+    )
+
+
+def quant_lightning_indexer_metadata(
+    num_heads_q: int,
+    num_heads_k: int,
+    head_dim: int,
+    actual_seq_lengths_query: torch.Tensor,
+    actual_seq_lengths_key: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    sparse_count: int,
+    cmp_ratio: int,
+) -> torch.Tensor:
+    """Create reusable tiling metadata for QuantLightningIndexer."""
+    del (
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        max_seqlen_q,
+        max_seqlen_k,
+        sparse_count,
+        cmp_ratio,
+    )
+    raise NotImplementedError(
+        "quant_lightning_indexer_metadata has no CUDA kernel; sparse attention on CUDA is not supported yet"
+    )
+
+
 def scatter_nd_update(
     value: torch.Tensor,
     indices: torch.Tensor,
@@ -278,6 +338,8 @@ def sparse_flash_attention_lse(
 __all__ = [
     "lightning_indexer",
     "lightning_indexer_out",
+    "quant_lightning_indexer",
+    "quant_lightning_indexer_metadata",
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",

@@ -21,6 +21,16 @@ import torch
 silu_and_mul = torch.ops.xllm_ops.silu_and_mul
 
 
+def dequant_swiglu_quant(
+    value: torch.Tensor,
+    weight_scale: torch.Tensor,
+    activation_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Report that fused dequant-SwiGLU-quant is NPU-only."""
+    del value, weight_scale, activation_scale
+    raise NotImplementedError("dequant_swiglu_quant is available only on NPU")
+
+
 @torch.library.custom_op("xllm_triton::silu_and_mul", mutates_args=())
 def _silu_and_mul_triton(value: torch.Tensor) -> torch.Tensor:
     """Run the Triton gated SiLU kernel as one graph node.
@@ -42,4 +52,4 @@ def _silu_and_mul_triton_fake(value: torch.Tensor) -> torch.Tensor:
     return value.new_empty(shape)
 
 
-__all__ = ["silu_and_mul"]
+__all__ = ["silu_and_mul", "dequant_swiglu_quant"]

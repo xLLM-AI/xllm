@@ -76,7 +76,7 @@ bool is_torch_only_model_type(const std::string& model_type) {
       "deepseek_v4",
       "deepseek_v4_dspark",
       "deepseek_v4_mtp",
-      "glm5_next",
+      "glm5_next_mtp",
       "qwen3_5",
       "qwen3_5_text",
       "qwen3_5_moe",
@@ -150,7 +150,7 @@ bool resolve_model_registration(const std::string& model_type,
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
              model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
              model_type == "glm_moe_dsa_mtp" || model_type == "qwen3_vl" ||
-             model_type == "deepseek_v32_mtp") {
+             model_type == "deepseek_v32_mtp" || model_type == "glm5_next") {
     // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/glm_moe_dsa_mtp/qwen3_vl/
     // deepseek_v32_mtp support both backends. qwen3_vl on TORCH is used by
     // the Python model executor (--model_impl=python implements its own ViT
@@ -580,11 +580,11 @@ std::unique_ptr<CausalLM> create_rec_model(const ModelContext& context) {
 }
 
 std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
-  // Python model executor: build the graph in Python (Qwen3VLForConditional-
-  // Generation etc.). PyCausalLM is-a CausalVLM so it satisfies this factory's
-  // return type; PyExecutorImpl drives encode/get_input_embeddings via pybind.
-  // Read from the global ModelConfig (the VLM worker does not populate
-  // context.model_impl, unlike the LLM worker).
+  // Python model executor: build the graph in Python (e.g. GLM-5.3-Flash-VL via
+  // xllm.python.models.glm5_next_vl.Glm5NextVLModel). PyCausalLM is-a
+  // CausalVLM so it satisfies this factory's return type; PyExecutorImpl drives
+  // encode/get_input_embeddings via pybind. Read from the global ModelConfig:
+  // the VLM worker does not populate context.model_impl, unlike the LLM worker.
   if (ModelConfig::is_python_model_impl(
           ModelConfig::get_instance().model_impl())) {
     return std::make_unique<PyCausalLM>(context);

@@ -201,6 +201,87 @@ def grouped_moe(
     )
 
 
+def moe_gate_routing(
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor | None,
+    topk: int,
+    topk_group: int,
+    num_expert_groups: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reject the NPU-specific split routing path on CUDA."""
+    del (
+        gating_output,
+        correction_bias,
+        topk,
+        topk_group,
+        num_expert_groups,
+        renormalize,
+        routed_scaling_factor,
+    )
+    raise NotImplementedError("moe_gate_routing is only implemented by the NPU grouped-MoE path")
+
+
+def moe_expert_compute(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk: int,
+) -> torch.Tensor:
+    """Reject the NPU-specific split expert path on CUDA."""
+    del (
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        topk,
+    )
+    raise NotImplementedError("moe_expert_compute is only implemented by the NPU grouped-MoE path")
+
+
+def moe_token_dispatch(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk: int,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    del hidden_states, topk_ids, topk, num_experts
+    raise NotImplementedError("moe_token_dispatch is only implemented by the NPU grouped-MoE path")
+
+
+def moe_gmm1(
+    sorted_hidden_i8: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    group_list: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del sorted_hidden_i8, w13, w13_scale, pertoken_scale, group_list
+    raise NotImplementedError("moe_gmm1 is only implemented by the NPU grouped-MoE path")
+
+
+def moe_gmm2_combine(
+    act_i8: torch.Tensor,
+    act_pertoken_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_list: torch.Tensor,
+    expanded_row_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+) -> torch.Tensor:
+    del act_i8, act_pertoken_scale, w2, w2_scale, group_list
+    del expanded_row_idx, topk_weights
+    raise NotImplementedError("moe_gmm2_combine is only implemented by the NPU grouped-MoE path")
+
+
 __all__ = [
     "supports_cutlass_moe",
     "moe_fused_topk",
@@ -208,4 +289,9 @@ __all__ = [
     "fused_moe",
     "prepare_grouped_moe_weights",
     "grouped_moe",
+    "moe_gate_routing",
+    "moe_expert_compute",
+    "moe_token_dispatch",
+    "moe_gmm1",
+    "moe_gmm2_combine",
 ]
