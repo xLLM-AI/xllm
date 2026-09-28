@@ -183,6 +183,7 @@ Sequence::Sequence(const Sequence& other, size_t index)
       input_embedding_(other.input_embedding_),
       mm_data_(other.mm_data_),
       mrope_position_delta_(other.mrope_position_delta_),
+      mrope_positions_(other.mrope_positions_),
       output_embedding_(other.output_embedding_),
       mtp_bootstrap_embedding_(other.mtp_bootstrap_embedding_),
       num_tokens_(other.num_tokens_),

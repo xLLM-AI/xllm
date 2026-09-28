@@ -1033,6 +1033,11 @@ torch::Tensor BatchInputBuilder::get_mrope_positions(Sequence* sequence,
                                                      uint32_t start,
                                                      uint32_t end) {
   if (sequence->stage() == SequenceStage::DECODE) {
+    // The prefill-stage positions cache is no longer needed once decoding
+    // starts; release it to bound memory during long decodes.
+    if (sequence->mrope_positions().defined()) {
+      sequence->set_mrope_positions(torch::Tensor());
+    }
     const int32_t mrope_position_delta = sequence->get_mrope_position_delta();
     const size_t num_tokens = sequence->num_tokens();
     return torch::arange(
@@ -1041,13 +1046,16 @@ torch::Tensor BatchInputBuilder::get_mrope_positions(Sequence* sequence,
                torch::kInt32)
         .expand({3, -1});
   } else {
-    std::unique_ptr<MPositionGenerator> generator =
-        MPositionGeneratorFactory::get_instance().create_mposition_generator(
-            args_->model_type());
-    std::tuple<torch::Tensor, int32_t> result =
-        generator->generate(sequence->tokens(), sequence->mm_data(), *args_);
-    sequence->set_mrope_position_delta(std::get<1>(result));
-    return std::get<0>(result).slice(/*dim=*/1, start, end);
+    if (!sequence->has_mrope_positions()) {
+      std::unique_ptr<MPositionGenerator> generator =
+          MPositionGeneratorFactory::get_instance().create_mposition_generator(
+              args_->model_type());
+      std::tuple<torch::Tensor, int32_t> result =
+          generator->generate(sequence->tokens(), sequence->mm_data(), *args_);
+      sequence->set_mrope_position_delta(std::get<1>(result));
+      sequence->set_mrope_positions(std::get<0>(result));
+    }
+    return sequence->mrope_positions().slice(/*dim=*/1, start, end);
   }
 }
 

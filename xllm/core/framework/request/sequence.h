@@ -154,6 +154,16 @@ class Sequence {
   void set_mrope_position_delta(int val) { mrope_position_delta_ = val; }
   int get_mrope_position_delta() { return mrope_position_delta_; }
 
+  // Full-prompt mRoPE positions cache, see `mrope_positions_`.
+  void set_mrope_positions(const torch::Tensor& positions) {
+    mrope_positions_ = positions;
+  }
+  const torch::Tensor& mrope_positions() const { return mrope_positions_; }
+  bool has_mrope_positions() const {
+    return mrope_positions_.defined() &&
+           mrope_positions_.size(1) == static_cast<int64_t>(num_tokens_);
+  }
+
   // get token ids to count map
   const std::unordered_map<int32_t, int32_t>& token_to_count_map() const {
     return token_to_count_map_;
@@ -600,6 +610,13 @@ class Sequence {
 
   MMData mm_data_;
   int mrope_position_delta_ = 0;
+
+  // Full-prompt mRoPE positions [3, num_tokens], generated once on the first
+  // prefill chunk and sliced per chunk afterwards. Cached here so chunked
+  // prefill and prefix-cache hits do not regenerate the whole sequence's
+  // positions on every step. Only valid during the prefill stage; the decode
+  // stage derives positions from mrope_position_delta_ instead.
+  torch::Tensor mrope_positions_;
 
   // mm embedding of the sequence
   std::vector<torch::Tensor> output_mm_embeddings_;
