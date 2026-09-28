@@ -51,28 +51,37 @@ void MMBatchData::get(const MMKey& key, std::vector<torch::Tensor>& vec) const {
   }
 }
 
-void MMBatchData::to(const torch::Device& device) {
-  MMDict dict;
-
-  for (const auto& pair : data_) {
-    if (std::holds_alternative<torch::Tensor>(pair.second)) {
-      dict[pair.first] =
-          safe_to(std::get<torch::Tensor>(pair.second), device, true);
-    } else if (std::holds_alternative<std::vector<torch::Tensor>>(
-                   pair.second)) {
-      const auto& lst = std::get<std::vector<torch::Tensor>>(pair.second);
-
-      std::vector<torch::Tensor> vec;
-      vec.reserve(lst.size());
-
-      for (const auto& item : lst) {
-        vec.emplace_back(safe_to(item, device, true));
+namespace {
+void move_dict_to_device(MMDict& dict, const torch::Device& device) {
+  for (auto& [key, value] : dict) {
+    if (std::holds_alternative<torch::Tensor>(value)) {
+      value = safe_to(std::get<torch::Tensor>(value), device, true);
+    } else if (std::holds_alternative<std::vector<torch::Tensor>>(value)) {
+      for (auto& tensor : std::get<std::vector<torch::Tensor>>(value)) {
+        tensor = safe_to(tensor, device, true);
       }
-      dict[pair.first] = std::move(vec);
     }
   }
+}
+}  // namespace
 
-  data_ = std::move(dict);
+void MMBatchData::to(const torch::Device& device) {
+  move_dict_to_device(data_, device);
+
+  // Move per-item tensors (raw inputs and user-supplied embeddings) too. The
+  // executor re-gathers inputs from per-item MMDataItem data() before running
+  // the encoder, so a move limited to the top-level data_ dict would be
+  // clobbered by that gather. Normalizing here keeps device movement in the
+  // single input_params.to path instead of scattered per-visitor safe_to calls.
+  for (auto& mm_data : mm_datas_) {
+    if (mm_data.hold<MMItemVec>()) {
+      for (auto& item : mm_data.items<MMItemVec>()) {
+        move_dict_to_device(item.mutable_data(), device);
+      }
+    } else if (mm_data.hold<MMDict>()) {
+      move_dict_to_device(mm_data.items<MMDict>(), device);
+    }
+  }
 }
 
 MMBatchData MMBatchData::to(const MMBatchData& mm_data,

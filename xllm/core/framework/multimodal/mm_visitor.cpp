@@ -350,7 +350,7 @@ bool EncoderEmbeddingGatherVisitor::visit(MMDataItem& item) {
     LOG(ERROR) << "embedding not found for key: " << key;
     return false;
   }
-  torch::Tensor embedding = safe_to(emb.value(), device_, true);
+  torch::Tensor embedding = emb.value();
   datas_[key].push_back(
       embedding.slice(/*dim*/ 0, /*start*/ emb_start, /*end*/ emb_end));
   return true;
