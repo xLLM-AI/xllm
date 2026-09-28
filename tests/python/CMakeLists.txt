@@ -28,6 +28,7 @@ foreach(test_source IN LISTS test_sources)
   add_test(NAME ${test_target}
     COMMAND "${CMAKE_COMMAND}" -E env
       "PYTHONPATH=${PROJECT_SOURCE_DIR}:$ENV{PYTHONPATH}"
+      "XLLM_EXPORT_PATH=$<TARGET_FILE:xllm_export>"
       "${Python3_EXECUTABLE}" -m pytest -q "${test_source}")
   set_tests_properties(${test_target} PROPERTIES
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
