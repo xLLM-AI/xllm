@@ -106,6 +106,10 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
       return qweight_is_loaded_ && per_channel_scale_is_loaded_ &&
              smooth_is_loaded_;
     }
+    if (quant_args_.is_compressed_tensors_w8a8_dynamic() &&
+        is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
+      return weight_is_loaded_ && weight_scale_is_loaded_;
+    }
     return weight_is_loaded_;
   }
 
@@ -208,6 +212,10 @@ class QKVParallelLinearImpl : public torch::nn::Module {
     if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
       return qweight_is_loaded_ && per_channel_scale_is_loaded_ &&
              smooth_is_loaded_;
+    }
+    if (quant_args_.is_compressed_tensors_w8a8_dynamic() &&
+        is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
+      return weight_is_loaded_ && weight_scale_is_loaded_;
     }
     return weight_is_loaded_;
   }
@@ -331,6 +339,10 @@ class RowParallelLinearImpl : public torch::nn::Module {
     if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
       return qweight_is_loaded_ && per_channel_scale_is_loaded_ &&
              smooth_is_loaded_;
+    }
+    if (quant_args_.is_compressed_tensors_w8a8_dynamic() &&
+        is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
+      return weight_is_loaded_ && weight_scale_is_loaded_;
     }
     return weight_is_loaded_;
   }

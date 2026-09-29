@@ -809,6 +809,7 @@ struct ScaledQuantizeParams {
   // If gather_index or token_count has value, x must be 2D.
   // Must have same device as other tensors.
   torch::Tensor x;
+  // Optional smoothing: an undefined Tensor means no smoothing.
   // Smooth quantization scale tensor (corresponds to x_scale in underlying
   // API). Shape constraints depend on quantization mode and other parameters.
   // - If token_count has value: shape [token_count.size(0),

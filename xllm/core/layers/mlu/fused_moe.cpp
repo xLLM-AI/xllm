@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model_context.h"
+#include "core/layers/common/quant_utils.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
 #include "platform/model_stream_registry.h"
@@ -89,10 +90,11 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   moe_weight_bits_ = quant_args.moe_weight_bits();
   weight_pack_factor_ = (moe_weight_bits_ == 4 ? 2 : 1);
 
-  // smoothquant check: if quant_method is not empty, only smoothquant with
-  // A8 and expert W8/W4 is supported.
+  // A8 quantization supports SmoothQuant and compressed-tensors with
+  // dynamic A8 activations and expert W8/W4 weights.
   if (!quant_args.quant_method().empty()) {
-    if (quant_args.quant_method() != kQuantMethodSmoothquant ||
+    if ((quant_args.quant_method() != kQuantMethodSmoothquant &&
+         !quant_args.is_compressed_tensors_w8a8_dynamic()) ||
         quant_args.bits() != 8 || !quant_args.activation_dynamic() ||
         (moe_weight_bits_ != 8 && moe_weight_bits_ != 4)) {
       LOG(FATAL)
@@ -104,9 +106,9 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
           << ", moe_weight_bits=" << moe_weight_bits_
           << ", activation_dynamic=" << quant_args.activation_dynamic();
     }
-    is_smoothquant_ = true;
+    use_a8_quant_ = true;
   } else {
-    is_smoothquant_ = false;
+    use_a8_quant_ = false;
   }
 
   // Deep EP initialization check
@@ -118,7 +120,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     // so we will assume the max_token_num is limited to max_batch_size * (1+K)
     // K is the number of speculative tokens.
     int64_t dispatch_token_size;
-    if (quant_args.quant_method() == kQuantMethodSmoothquant) {
+    if (use_a8_quant_) {
       // float32 is for the scale of the quantized input
       dispatch_token_size = hidden_size_ * get_dtype_size(torch::kInt8) +
                             get_dtype_size(torch::kFloat32);
@@ -160,7 +162,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     // intermediate buffer that can be initialized once
     // we place these tensor here in order to speed up forward pass
     int64_t n_tokens_recv = deep_ep_params_.max_num_tokens_recv;
-    int64_t token_bytes = is_smoothquant_
+    int64_t token_bytes = use_a8_quant_
                               ? get_dtype_size(torch::kInt8)
                               : get_dtype_size(options_.dtype().toScalarType());
     token_bytes = token_bytes * hidden_size_;
@@ -169,7 +171,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
         deep_ep_buffer_.combine_send_token_tensor.narrow(0, 0, head_size)
             .view({n_tokens_recv, token_bytes});
     // input scale in smoothquant
-    if (is_smoothquant_) {
+    if (use_a8_quant_) {
       int64_t tail_size = n_tokens_recv * get_dtype_size(torch::kFloat32);
       dispatch_recv_token_tensor_tail_ =
           deep_ep_buffer_.combine_send_token_tensor
@@ -211,7 +213,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   const bool is_groupwise_scale = quant_args_.group_size() > 0;
   int64_t w13_scale_group_cols = 0;
   int64_t w2_scale_group_cols = 0;
-  if (is_smoothquant_ && weight_pack_factor_ > 1) {
+  if (use_a8_quant_ && weight_pack_factor_ > 1) {
     CHECK_EQ(hidden_size_ % weight_pack_factor_, 0)
         << "hidden_size must be divisible by weight_pack_factor for W4 MoE. "
         << "hidden_size=" << hidden_size_
@@ -222,7 +224,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
         << local_intermediate_size
         << ", weight_pack_factor=" << weight_pack_factor_;
   }
-  if (is_smoothquant_ && is_groupwise_scale) {
+  if (use_a8_quant_ && is_groupwise_scale) {
     CHECK_GT(quant_args_.group_size(), 0)
         << "group_size must be positive for group-wise smoothquant.";
     CHECK_EQ(hidden_size_ % quant_args_.group_size(), 0)
@@ -237,7 +239,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     w13_scale_group_cols = hidden_size_ / quant_args_.group_size();
     w2_scale_group_cols = local_intermediate_size / quant_args_.group_size();
   }
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     // W4 expert qweight is stored as packed int4 in an int8 tensor container.
     auto quant_option = options_.dtype(torch::kInt8);
     auto fp_option = options_.dtype(torch::kFloat32);
@@ -260,10 +262,12 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     // Note: We do not check enable_deep_ep_ here, since smooth quantization
     // information may be needed even when deep EP mode is disabled. This allows
     // retrieving quantization parameters for any subset of experts as required.
-    input_smooth_ = register_parameter(
-        "input_smooth",
-        torch::empty({num_total_experts_, hidden_size_}, fp_option),
-        false);
+    if (!quant_args_.is_compressed_tensors_w8a8_dynamic()) {
+      input_smooth_ = register_parameter(
+          "input_smooth",
+          torch::empty({num_total_experts_, hidden_size_}, fp_option),
+          false);
+    }
     w2_ = register_parameter(
         "w2",
         torch::empty({num_experts_per_rank_,
@@ -279,11 +283,13 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                   fp_option)
             : torch::empty({num_experts_per_rank_, hidden_size_}, fp_option),
         false);
-    act_smooth_ = register_parameter(
-        "act_smooth",
-        torch::empty({num_experts_per_rank_, local_intermediate_size},
-                     fp_option),
-        false);
+    if (!quant_args_.is_compressed_tensors_w8a8_dynamic()) {
+      act_smooth_ = register_parameter(
+          "act_smooth",
+          torch::empty({num_experts_per_rank_, local_intermediate_size},
+                       fp_option),
+          false);
+    }
 
   } else {
     w13_ = register_parameter(
@@ -309,7 +315,7 @@ void FusedMoEImpl::prepare_scale_layout() {
 
   // Only the groupwise W4 path carries a 3D scale; the per-channel path keeps
   // a 2D scale with no per-group quant_flag, so it needs no permute.
-  const bool needs_layout = is_smoothquant_ && moe_weight_bits_ == 4 &&
+  const bool needs_layout = use_a8_quant_ && moe_weight_bits_ == 4 &&
                             w13_scale_.defined() && w13_scale_.dim() == 3;
   if (!needs_layout) {
     return;
@@ -359,12 +365,12 @@ torch::Tensor FusedMoEImpl::create_group_gemm_output(
 
   auto options = a.options().dtype(dtype);
 
-  // non-smoothquant: direct allocation
-  if (!is_smoothquant_) {
+  // Without A8 quantization: direct allocation
+  if (!use_a8_quant_) {
     return torch::empty(output_shape, options);
   }
 
-  // smoothquant: managed workspace logic
+  // A8 quantization: managed workspace logic
   if (!workspace.defined()) {
     // Lazy initialization: allocate max buffer for the lifecycle
     // Note: accessing class members w13_ and w2_ directly for context
@@ -398,12 +404,12 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
   {
     xllm::kernel::GroupGemmParams group_gemm_params;
     torch::ScalarType a_dtype =
-        is_smoothquant_ ? torch::kInt8 : hidden_states_dtype;
+        use_a8_quant_ ? torch::kInt8 : hidden_states_dtype;
     group_gemm_params.a =
         view_as_dtype(expand_hidden_states, a_dtype).view({-1, hidden_size_});
     group_gemm_params.b = w13_;
     group_gemm_params.token_count = selected_expert_info.token_count_slice;
-    if (is_smoothquant_) {
+    if (use_a8_quant_) {
       torch::Tensor a_scale =
           selected_expert_info.input_scale.value().flatten();
       selected_expert_info.input_scale =
@@ -417,7 +423,7 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.max_dim = group_gemm_max_dim;
     group_gemm_params.trans_a = false;
     group_gemm_params.trans_b = true;
-    group_gemm_params.a_quant_bit = is_smoothquant_ ? 8 : -1;
+    group_gemm_params.a_quant_bit = use_a8_quant_ ? 8 : -1;
     group_gemm_params.output = gemm1_out;
     gemm1_out = xllm::kernel::group_gemm(group_gemm_params);
   }
@@ -433,7 +439,7 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
 
   torch::Tensor act_out;
   torch::Tensor act_out_scale;
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     int64_t slice_dim = gemm1_out.size(1);
     if (is_gated_) {
       slice_dim /= 2;
@@ -479,7 +485,7 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.a = act_out;
     group_gemm_params.b = w2_;
     group_gemm_params.token_count = selected_expert_info.token_count_slice;
-    if (is_smoothquant_) {
+    if (use_a8_quant_) {
       group_gemm_params.a_scale = act_out_scale;
       group_gemm_params.b_scale = w2_scale_;
       if (!w2_scale_quant_flag_.empty()) {
@@ -489,7 +495,7 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.max_dim = group_gemm_max_dim;
     group_gemm_params.trans_a = false;
     group_gemm_params.trans_b = true;
-    group_gemm_params.a_quant_bit = is_smoothquant_ ? 8 : -1;
+    group_gemm_params.a_quant_bit = use_a8_quant_ ? 8 : -1;
     group_gemm_params.output = gemm2_out;
     gemm2_out = xllm::kernel::group_gemm(group_gemm_params);
   }
@@ -567,6 +573,10 @@ torch::Tensor FusedMoEImpl::forward_experts(
     bool enable_all2all_communication,
     const std::optional<RouteInfo>& route_info,
     const std::optional<torch::Tensor>& input_ids) {
+  if (quant_args_.is_compressed_tensors_w8a8_dynamic() && !ct_verified_) {
+    verify_loaded_weights();
+    ct_verified_ = true;
+  }
   // Dispatcher: route to the appropriate path based on communication mode
   if (enable_all2all_communication) {
     return forward_experts_all2all(hidden_states, route_info, input_ids);
@@ -584,14 +594,60 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
       hidden_states, enable_all2all_communication, std::nullopt);
 }
 
+void FusedMoEImpl::load_ct_experts(const StateDict& state_dict) {
+  if (state_dict.size() == 0) {
+    return;
+  }
+
+  const int64_t rank = tp_pg_->rank();
+  const int64_t world_size = tp_pg_->world_size();
+  const int64_t start_expert_id = start_expert_id_;
+  const int64_t num_experts_per_rank = num_experts_per_rank_;
+  std::vector<std::string> prefixes = {"gate_proj.", "up_proj."};
+  for (int64_t expert = 0; expert < num_total_experts_; ++expert) {
+    const std::string prefix = std::to_string(expert) + ".";
+    auto expert_dict = state_dict.get_dict_with_prefix(prefix);
+    if (expert_dict.size() == 0) {
+      continue;
+    }
+
+    for (const std::string& projection :
+         {"gate_proj.", "up_proj.", "down_proj."}) {
+      std::string module =
+          std::string(state_dict.prefix()) + prefix + projection;
+      module.pop_back();
+      CHECK(!expert_dict.has(projection + "smooth"))
+          << "Compressed-tensors INT8 does not support smooth tensors: "
+          << module << ".smooth";
+      check_ct_scale(expert_dict.get_tensor(projection + "weight_scale"),
+                     module);
+      CHECK(!quant_args_.should_ignore_module(module))
+          << "MLU compressed-tensors MoE requires all experts quantized: "
+          << module;
+      torch::Tensor weight = expert_dict.get_tensor(projection + "weight");
+      CHECK(!weight.defined() || weight.scalar_type() == torch::kInt8)
+          << "Compressed-tensors expert weight must be INT8: " << module;
+    }
+  }
+
+  LOAD_MOE_FUSED_WEIGHT("weight", w1, w3, w13);
+  LOAD_MOE_FUSED_WEIGHT("weight_scale", w1_scale, w3_scale, w13_scale);
+  LOAD_MOE_WEIGHT("down_proj.", "weight", w2, 1);
+  LOAD_MOE_WEIGHT("down_proj.", "weight_scale", w2_scale, -1);
+}
+
 void FusedMoEImpl::load_experts(const StateDict& state_dict) {
+  if (quant_args_.is_compressed_tensors_w8a8_dynamic()) {
+    load_ct_experts(state_dict);
+    return;
+  }
   const int64_t rank = tp_pg_->rank();
   const int64_t world_size = tp_pg_->world_size();
   const int64_t start_expert_id = start_expert_id_;
   const int64_t num_experts_per_rank = num_experts_per_rank_;
   const int64_t num_total_experts = num_total_experts_;
   std::vector<std::string> prefixes = {"gate_proj.", "up_proj."};
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     LOAD_MOE_FUSED_WEIGHT("qweight", w1, w3, w13);
     LOAD_MOE_FUSED_WEIGHT("per_channel_scale", w1_scale, w3_scale, w13_scale);
     // When supporting DeepEP All2All mode,
@@ -616,7 +672,17 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
 }
 
 void FusedMoEImpl::verify_loaded_weights() const {
-  if (!is_smoothquant_) {
+  if (!use_a8_quant_) {
+    return;
+  }
+  if (quant_args_.is_compressed_tensors_w8a8_dynamic()) {
+    CHECK(w13_scale_is_loaded_ && w2_scale_is_loaded_)
+        << "Missing compressed-tensors expert weight scales";
+    CHECK(w13_is_loaded_)
+        << "Compressed-tensors expert gate_proj/up_proj weight was not "
+           "fully loaded.";
+    CHECK(w2_is_loaded_)
+        << "Compressed-tensors expert down_proj weight was not fully loaded.";
     return;
   }
   CHECK(w13_is_loaded_)
@@ -640,7 +706,7 @@ void FusedMoEImpl::load_state_dict(const StateDict& state_dict) {
   }
   gate_->load_state_dict(state_dict.get_dict_with_prefix("gate."));
   load_experts(state_dict.get_dict_with_prefix("experts."));
-  if (is_smoothquant_ && w13_scale_is_loaded_ && w2_scale_is_loaded_) {
+  if (use_a8_quant_ && w13_scale_is_loaded_ && w2_scale_is_loaded_) {
     // This conversion reallocates registered scale tensors, so do it before
     // MLU graph capture begins and owns its temporary allocation pool.
     prepare_scale_layout();

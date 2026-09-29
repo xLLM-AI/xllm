@@ -264,3 +264,21 @@ cc_test(
     torch
     glog::glog
 )
+
+cc_test(
+  NAME
+    compressed_tensors_mlu_test
+  SRCS
+    compressed_tensors_test.cpp
+    tests_utils.cpp
+  DEPS
+    :config
+    :mlu_layers
+    :common_layers
+    :model_context
+    :parallel_state
+    :state_dict
+    glog::glog
+    torch
+    GTest::gtest_main
+)

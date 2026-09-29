@@ -143,7 +143,7 @@ class FusedMoEImpl : public torch::nn::Module {
   bool is_gated_;
   bool enable_result_reduction_;
   std::string hidden_act_;
-  bool is_smoothquant_;
+  bool use_a8_quant_;
   int64_t moe_weight_bits_ = 8;
   int64_t weight_pack_factor_ = 1;
 
@@ -188,6 +188,9 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::List<int64_t> w13_scale_quant_flag_;
   torch::List<int64_t> w2_scale_quant_flag_;
   bool scale_layout_prepared_ = false;
+  bool ct_verified_ = false;
+
+  void load_ct_experts(const StateDict& state_dict);
 
   void load_experts(const StateDict& state_dict);
 

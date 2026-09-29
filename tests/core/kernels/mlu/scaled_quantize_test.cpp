@@ -106,6 +106,25 @@ torch::Tensor quant_smooth() {
                        torch::TensorOptions().dtype(torch::kFloat32));
 }
 
+TEST(ScaledQuantizeMluTest, AbsentSmoothMatchesIdentity) {
+  torch::DeviceGuard guard(mlu_device());
+  torch::Tensor input = quant_input().to(mlu_device());
+  auto [plain, plain_scale] =
+      kernel::mlu::scaled_quantize(input, torch::Tensor());
+  auto [identity, identity_scale] = kernel::mlu::scaled_quantize(
+      input,
+      torch::ones({input.size(-1)}, input.options().dtype(torch::kFloat32)));
+  EXPECT_TRUE(torch::equal(plain, identity));
+  EXPECT_TRUE(torch::equal(plain_scale, identity_scale));
+  torch::Tensor cpu = input.cpu().to(torch::kFloat32);
+  torch::Tensor scale = std::get<0>(cpu.abs().max(-1)) / 127.0;
+  EXPECT_TRUE(torch::allclose(plain_scale.cpu(), scale));
+  EXPECT_TRUE(torch::allclose(plain.cpu().to(torch::kFloat32),
+                              (cpu / scale.unsqueeze(-1)).round(),
+                              /*rtol=*/0.0,
+                              /*atol=*/1.0));
+}
+
 TEST(ActiveMluTest, GeluModesMatchTorchApproximations) {
   torch::Device device = mlu_device();
   torch::DeviceGuard guard(device);

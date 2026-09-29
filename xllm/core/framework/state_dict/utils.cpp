@@ -222,18 +222,21 @@ bool load_tensor_list(const StateDict& state_dict,
     // When the number of key/value heads is smaller than the number of query
     // heads (e.g., multi-query/grouped-query attention), the key/value head may
     // be replicated while the query heads are partitioned.
-    if (i == 1 && num_kv_head_replicas > 1) {
-      rank = rank / num_kv_head_replicas;
-      world_size = world_size / num_kv_head_replicas;
-    }
+    // Compute each projection's shard independently: K may already have
+    // arrived in an earlier safetensors file when V is loaded.
+    const bool replicate_kv = i > 0 && num_kv_head_replicas > 1;
+    const int32_t tensor_rank =
+        replicate_kv ? rank / num_kv_head_replicas : rank;
+    const int32_t tensor_world_size =
+        replicate_kv ? world_size / num_kv_head_replicas : world_size;
 
     const std::string tensor_name = prefixes[i] + name;
     torch::Tensor tensor;
     if (dim < 0) {
       tensor = state_dict.get_tensor(tensor_name);
     } else {
-      tensor =
-          state_dict.get_sharded_tensor(tensor_name, dim, rank, world_size);
+      tensor = state_dict.get_sharded_tensor(
+          tensor_name, dim, tensor_rank, tensor_world_size);
     }
     if (tensor.defined()) {
       tensors[i] = tensor;

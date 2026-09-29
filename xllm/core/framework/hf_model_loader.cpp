@@ -142,24 +142,55 @@ const nlohmann::json* get_compressed_tensors_config(
   return &(*quant_config_it);
 }
 
-bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
-                                           QuantArgs& quant_args) {
-  const nlohmann::json data = reader.data();
-  std::string config_key = "quantization_config";
-  const nlohmann::json* quant_config =
-      get_compressed_tensors_config(data, reader, config_key);
-  if (quant_config == nullptr && Platform::is_dcu()) {
-    config_key = "compression_config";
-    quant_config = get_compressed_tensors_config(data, reader, config_key);
-  }
-  if (quant_config == nullptr) {
+bool load_ct_w8a8_dynamic_config(const nlohmann::json& config,
+                                 const nlohmann::json& group,
+                                 QuantArgs& args) {
+  const auto& weights = group.at("weights");
+  const auto& activations = group.at("input_activations");
+  if (weights.value("preserve_smooth", false) ||
+      activations.value("preserve_smooth", false)) {
+    LOG(ERROR) << "Compressed-tensors INT8 does not support preserve_smooth";
     return false;
   }
+  // Older checkpoints omit these fields. Keep their existing symmetric,
+  // channel-weight / token-activation interpretation, but reject explicit
+  // schemes that cannot be represented by the shared W8A8 loading path.
+  if (config.value("format", "int-quantized") != "int-quantized" ||
+      config.at("config_groups").size() != 1 ||
+      !weights.value("symmetric", true) ||
+      !activations.value("symmetric", true) ||
+      weights.value("strategy", "channel") != "channel" ||
+      activations.value("strategy", "token") != "token" ||
+      group.value("targets", std::vector<std::string>{"Linear"}) !=
+          std::vector<std::string>{"Linear"} ||
+      (group.contains("output_activations") &&
+       !group.at("output_activations").is_null()) ||
+      (config.contains("kv_cache_scheme") &&
+       !config.at("kv_cache_scheme").is_null()) ||
+      (config.contains("transform_config") &&
+       !config.at("transform_config").is_null() &&
+       !config.at("transform_config").empty())) {
+    LOG(ERROR)
+        << "Compressed-tensors INT8 requires one symmetric channel/token "
+           "W8A8 Linear group without output, KV-cache or transform "
+           "quantization";
+    return false;
+  }
+  args.bits() = 8;
+  args.moe_weight_bits() = 8;
+  args.is_sym() = true;
+  args.activation_dynamic() = true;
+  args.is_compressed_tensors_w8a8_dynamic() = true;
+  return true;
+}
 
-  auto config_groups_it = quant_config->find("config_groups");
-  if (config_groups_it == quant_config->end() ||
-      !config_groups_it->is_object()) {
-    LOG(ERROR) << config_key << ".config_groups must be an object for "
+bool load_ct_quant_config(const nlohmann::json& config, QuantArgs& quant_args) {
+  quant_args.quant_method() = "compressed-tensors";
+  quant_args.ignored_modules() =
+      config.value("ignore", std::vector<std::string>{});
+  auto config_groups_it = config.find("config_groups");
+  if (config_groups_it == config.end() || !config_groups_it->is_object()) {
+    LOG(ERROR) << "config_groups must be an object for "
                << "compressed-tensors quantization.";
     return false;
   }
@@ -178,22 +209,11 @@ bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
 
     if (!is_compressed_tensors_fp8_scheme(*weights_it) ||
         !is_compressed_tensors_fp8_scheme(*input_activations_it)) {
-      // Check for INT8 W8A8 (compressed-tensors int quantized)
-      if (Platform::is_dcu() &&
-          is_compressed_tensors_int8_scheme(*weights_it,
+      if (is_compressed_tensors_int8_scheme(*weights_it,
                                             /*expected_dynamic=*/false) &&
           is_compressed_tensors_int8_scheme(*input_activations_it,
                                             /*expected_dynamic=*/true)) {
-        quant_args.bits() = 8;
-        quant_args.moe_weight_bits() = 8;
-        quant_args.activation_dynamic() = true;
-        quant_args.is_compressed_tensors_w8a8_dynamic() = true;
-        if (const auto ignore =
-                reader.value<std::vector<std::string>>(config_key + ".ignore");
-            ignore.has_value()) {
-          quant_args.ignored_modules() = *ignore;
-        }
-        return true;
+        return load_ct_w8a8_dynamic_config(config, group, quant_args);
       }
       continue;
     }
@@ -206,16 +226,15 @@ bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
     if (dynamic_it != input_activations_it->end() && !dynamic_it->is_null()) {
       quant_args.activation_dynamic() = dynamic_it->get<bool>();
     }
-    if (const auto ignore =
-            reader.value<std::vector<std::string>>(config_key + ".ignore");
-        ignore.has_value()) {
-      quant_args.ignored_modules() = *ignore;
+    if (quant_args.activation_dynamic() && !Platform::is_dcu()) {
+      LOG(ERROR) << "Compressed-tensors dynamic FP8 requires DCU.";
+      return false;
     }
     return true;
   }
 
-  LOG(ERROR) << "Failed to find an FP8 config_group in " << config_key
-             << ".config_groups for compressed-tensors quantization.";
+  LOG(ERROR) << "Failed to find a supported FP8 or dynamic INT8 scheme in "
+                "compressed-tensors config_groups";
   return false;
 }
 
@@ -446,12 +465,16 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
   if (auto v = reader.value<std::string>("quantization_config.quant_method")) {
     quant_args.quant_method() = v.value();
   }
-  // Only CUDA and DCU currently adapts this compressed-tensors JSON layout.
-  // For other backends, skip this special parsing path and continue with the
-  // generic quantization config parsing path.
-  if ((Platform::is_cuda() || Platform::is_dcu()) &&
-      try_load_compressed_tensors_quant_cfg(reader, quant_args)) {
-    return true;
+  // Checkpoint format parsing is independent of backend execution support.
+  const nlohmann::json data = reader.data();
+  const nlohmann::json* ct_config =
+      get_compressed_tensors_config(data, reader, "quantization_config");
+  if (ct_config == nullptr) {
+    ct_config =
+        get_compressed_tensors_config(data, reader, "compression_config");
+  }
+  if (ct_config != nullptr) {
+    return load_ct_quant_config(*ct_config, quant_args);
   }
   if (auto v = reader.value<int64_t>("quantization_config.bits")) {
     quant_args.bits() = v.value();

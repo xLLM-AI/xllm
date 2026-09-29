@@ -87,7 +87,7 @@ struct QuantArgs {
   PROPERTY(bool, activation_dynamic) = true;
 
   // whether weights use compressed-tensors W8A8 dynamic key naming convention
-  // (weight/weight_scale instead of qweight/per_channel_scale, no smooth)
+  // (weight/weight_scale instead of qweight/per_channel_scale).
   PROPERTY(bool, is_compressed_tensors_w8a8_dynamic) = false;
 
   // FP8 format : e4m3, e5m2

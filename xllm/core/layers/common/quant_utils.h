@@ -15,8 +15,7 @@ limitations under the License.
 
 #pragma once
 
-// Two shared quant helpers used by both LLM (linear.cpp) and DiT
-// (add_matmul.cpp, dit_parallel_linear.h).
+// Shared quantization loading and execution helpers for Linear, MoE and DiT.
 
 #include <glog/logging.h>
 #include <torch/types.h>
@@ -32,13 +31,34 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+inline void check_ct_scale(const torch::Tensor& scale,
+                           const std::string& name) {
+  if (!scale.defined()) {
+    return;
+  }
+  CHECK(scale.is_floating_point()) << name;
+  CHECK(scale.dim() == 1 || (scale.dim() == 2 && scale.size(1) == 1))
+      << "Compressed-tensors channel scale must be [N] or [N, 1]: " << name;
+  CHECK(torch::isfinite(scale).all().item<bool>() &&
+        scale.gt(0).all().item<bool>())
+      << "Compressed-tensors scale must be finite and positive: " << name;
+}
+
 inline void resolve_weight_quant_method_for_linear_load(
     const QuantArgs& quant_args,
     const StateDict& state_dict,
     const std::vector<std::string>* local_prefixes,
     std::optional<std::string>& resolved_weight_quant_method) {
-  const auto prefixes =
-      local_prefixes == nullptr ? std::vector<std::string>{} : *local_prefixes;
+  const auto prefixes = local_prefixes == nullptr || local_prefixes->empty()
+                            ? std::vector<std::string>{""}
+                            : *local_prefixes;
+  if (quant_args.is_compressed_tensors_w8a8_dynamic()) {
+    for (const std::string& prefix : prefixes) {
+      CHECK(!state_dict.has(prefix + "smooth"))
+          << "Compressed-tensors INT8 does not support smooth tensors: "
+          << state_dict.prefix() << prefix << "smooth";
+    }
+  }
   auto resolved =
       quant_args.get_quant_method_from_prefixes(state_dict, prefixes);
   if (resolved.has_value()) {
@@ -46,27 +66,31 @@ inline void resolve_weight_quant_method_for_linear_load(
     return;
   }
   if (quant_args.is_compressed_tensors_w8a8_dynamic()) {
-    bool is_w8a8_dynamic = false;
-    if (prefixes.empty()) {
-      torch::Tensor weight = state_dict.get_tensor("weight");
-      is_w8a8_dynamic = state_dict.has("weight_scale") && weight.defined() &&
-                        weight.scalar_type() == torch::kInt8;
-    } else {
-      is_w8a8_dynamic = true;
-      for (const std::string& prefix : prefixes) {
-        torch::Tensor weight = state_dict.get_tensor(prefix + "weight");
-        if (!state_dict.has(prefix + "weight_scale") || !weight.defined() ||
-            weight.scalar_type() != torch::kInt8) {
-          is_w8a8_dynamic = false;
-          break;
-        }
+    // Resolve from the scheme, even when weight and scale arrive in separate
+    // safetensors shards. Only ignored modules may load floating weights.
+    std::optional<bool> ignored;
+    for (const std::string& prefix : prefixes) {
+      std::string module = std::string(state_dict.prefix()) + prefix;
+      if (!module.empty() && module.back() == '.') {
+        module.pop_back();
       }
+      const bool skip = quant_args.should_ignore_module(module);
+      CHECK(!ignored.has_value() || ignored.value() == skip)
+          << "Cannot fuse quantized and ignored projections: " << module;
+      ignored = skip;
+      check_ct_scale(state_dict.get_tensor(prefix + "weight_scale"), module);
+      torch::Tensor weight = state_dict.get_tensor(prefix + "weight");
+      CHECK(!weight.defined() || (skip ? weight.is_floating_point()
+                                       : weight.scalar_type() == torch::kInt8))
+          << "Weight dtype disagrees with compressed-tensors scheme: "
+          << module;
     }
-    if (is_w8a8_dynamic) {
-      resolved_weight_quant_method = "w8a8_dynamic";
-      return;
-    }
+    resolved_weight_quant_method =
+        ignored.value() ? std::nullopt
+                        : std::make_optional<std::string>("w8a8_dynamic");
+    return;
   }
+
   if (!quant_args.quant_descs().empty()) {
     LOG(WARNING) << "[LinearLoad][QuantMethod] quant_descs is not empty but "
                     "quant method was not resolved from state_dict prefixes. "

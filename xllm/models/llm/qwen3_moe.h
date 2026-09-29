@@ -269,7 +269,9 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
         params, model_args_.enable_mla(), attn_mask);
 #else
     return layer::AttentionMetadataBuilder::build(params,
-                                                  model_args_.enable_mla());
+                                                  model_args_.enable_mla(),
+                                                  /*attn_mask=*/std::nullopt,
+                                                  h.device());
 #endif
   }
 

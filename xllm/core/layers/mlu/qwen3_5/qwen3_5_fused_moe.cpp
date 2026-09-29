@@ -114,7 +114,7 @@ Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(
 void Qwen3_5FusedMoEImpl::load_experts(const StateDict& state_dict) {
   FusedMoEImpl::load_experts(state_dict);
 
-  if (is_smoothquant_) {
+  if (use_a8_quant_ && !quant_args_.is_compressed_tensors_w8a8_dynamic()) {
     const bool gate_up_loaded =
         w13_is_loaded_ && w13_scale_is_loaded_ && input_smooth_is_loaded_;
     if (!gate_up_loaded && has_sq_weights(state_dict, "gate_up_proj")) {

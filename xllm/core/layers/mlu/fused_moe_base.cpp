@@ -60,11 +60,13 @@ torch::Tensor FusedMoEImpl::select_experts_base(
   token_count_slice =
       token_count.slice(0, start_expert_id_, start_expert_id_ + expert_size);
 
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     xllm::kernel::ScaledQuantizeParams scaled_quantize_params;
     scaled_quantize_params.x = hidden_states_2d;
-    scaled_quantize_params.smooth = input_smooth_.slice(
-        0, start_expert_id_, start_expert_id_ + expert_size);
+    if (input_smooth_.defined()) {
+      scaled_quantize_params.smooth = input_smooth_.slice(
+          0, start_expert_id_, start_expert_id_ + expert_size);
+    }
     scaled_quantize_params.gather_index_start_position =
         cusum_token_count.value().index({start_expert_id_}).unsqueeze(0);
     scaled_quantize_params.token_count = token_count_slice;
@@ -91,7 +93,7 @@ torch::Tensor FusedMoEImpl::select_experts_base(
   selected_expert_info.combine_idx = combine_idx;
   selected_expert_info.token_count_slice = token_count_slice;
   selected_expert_info.cusum_token_count = cusum_token_count;
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     selected_expert_info.input_scale = hidden_states_scale;
   }
 

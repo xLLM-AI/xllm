@@ -174,16 +174,14 @@ TEST(HFModelLoaderTest, LoadCompressedTensorsFp8StaticConfig) {
   )json"));
 
   QuantArgs quant_args;
-  if (Platform::is_cuda()) {
-    ASSERT_TRUE(load_quant_cfg(reader, quant_args));
-    EXPECT_EQ(quant_args.quant_method(), kQuantMethodFp8);
-    EXPECT_EQ(quant_args.bits(), 8);
-    EXPECT_EQ(quant_args.moe_weight_bits(), 8);
-    EXPECT_FALSE(quant_args.activation_dynamic());
-    ASSERT_EQ(quant_args.ignored_modules().size(), 2);
-    EXPECT_EQ(quant_args.ignored_modules()[0], "lm_head");
-    EXPECT_EQ(quant_args.ignored_modules()[1], "model.layers.1.mlp.down_proj");
-  }
+  ASSERT_TRUE(load_quant_cfg(reader, quant_args));
+  EXPECT_EQ(quant_args.quant_method(), kQuantMethodFp8);
+  EXPECT_EQ(quant_args.bits(), 8);
+  EXPECT_EQ(quant_args.moe_weight_bits(), 8);
+  EXPECT_FALSE(quant_args.activation_dynamic());
+  ASSERT_EQ(quant_args.ignored_modules().size(), 2);
+  EXPECT_EQ(quant_args.ignored_modules()[0], "lm_head");
+  EXPECT_EQ(quant_args.ignored_modules()[1], "model.layers.1.mlp.down_proj");
 }
 
 TEST(HFModelLoaderTest, KeepLegacyFp8ConfigUnchanged) {
@@ -505,7 +503,6 @@ TEST(HFModelLoaderTest, Rwkv7ModelArgsFromConvertedConfig) {
 }
 #endif  // USE_CUDA
 
-#if defined(USE_DCU)
 TEST(HFModelLoaderTest, LoadCompressedTensorsInt8Scheme) {
   struct TestCase {
     const char* name;
@@ -571,7 +568,7 @@ TEST(HFModelLoaderTest, LoadCompressedTensorsInt8Scheme) {
     ASSERT_TRUE(reader.parse_text(test_case.config));
 
     QuantArgs quant_args;
-    ASSERT_TRUE(load_quant_cfg(reader, quant_args));
+    EXPECT_EQ(load_quant_cfg(reader, quant_args), test_case.is_w8a8_dynamic);
     EXPECT_EQ(quant_args.quant_method(), "compressed-tensors");
     EXPECT_EQ(quant_args.is_compressed_tensors_w8a8_dynamic(),
               test_case.is_w8a8_dynamic);
@@ -586,6 +583,106 @@ TEST(HFModelLoaderTest, LoadCompressedTensorsInt8Scheme) {
     }
   }
 }
-#endif
+
+TEST(HFModelLoaderTest, LoadCompressedTensorsWithoutSmooth) {
+  JsonReader reader;
+  const std::string config = R"json({"quantization_config": {
+    "quant_method": "compressed-tensors", "format": "int-quantized",
+    "ignore": ["lm_head", "re:.*mlp\\.gate$"],
+    "config_groups": {"group_0": {
+      "targets": ["Linear"],
+      "weights": {"type": "int", "num_bits": 8, "dynamic": false,
+                  "strategy": "channel", "symmetric": true,
+                  "preserve_smooth": false},
+      "input_activations": {"type": "int", "num_bits": 8, "dynamic": true,
+                            "strategy": "token", "symmetric": true}
+    }}
+  }})json";
+  std::string text = config;
+  ASSERT_TRUE(reader.parse_text(text));
+  QuantArgs args;
+  ASSERT_TRUE(load_quant_cfg(reader, args));
+  EXPECT_EQ(args.quant_method(), "compressed-tensors");
+  EXPECT_TRUE(args.is_compressed_tensors_w8a8_dynamic());
+  EXPECT_EQ(args.bits(), 8);
+  EXPECT_EQ(args.moe_weight_bits(), 8);
+  EXPECT_TRUE(args.is_sym());
+  EXPECT_TRUE(args.should_ignore_module("model.layers.0.mlp.gate"));
+  text.replace(text.find("\"channel\""), 9, "\"group\"");
+  ASSERT_TRUE(reader.parse_text(text));
+  EXPECT_FALSE(load_quant_cfg(reader, args));
+}
+
+TEST(HFModelLoaderTest, RejectCompressedTensorsPreservedSmooth) {
+  const auto base = nlohmann::json::parse(R"json({
+    "quant_method": "compressed-tensors",
+    "config_groups": {"group_0": {
+      "weights": {"type": "int", "num_bits": 8},
+      "input_activations": {"type": "int", "num_bits": 8, "dynamic": true}
+    }}
+  })json");
+  for (const std::string& key : {"quantization_config", "compression_config"}) {
+    for (const std::string& target : {"weights", "input_activations"}) {
+      auto config = base;
+      config["config_groups"]["group_0"][target]["preserve_smooth"] = true;
+      SCOPED_TRACE(key + ": " + config.dump());
+      JsonReader reader;
+      ASSERT_TRUE(reader.parse_text(nlohmann::json({{key, config}}).dump()));
+      QuantArgs args;
+      EXPECT_FALSE(load_quant_cfg(reader, args));
+    }
+  }
+}
+
+TEST(HFModelLoaderTest, LoadCompressedTensorsConfigAlias) {
+  for (const std::string& key : {"quantization_config", "compression_config"}) {
+    JsonReader reader;
+    ASSERT_TRUE(reader.parse_text("{\"" + key + R"json(": {
+      "quant_method": "compressed-tensors",
+      "ignore": ["lm_head"],
+      "config_groups": {"group_0": {
+        "weights": {"type": "int", "num_bits": 8},
+        "input_activations": {"type": "int", "num_bits": 8, "dynamic": true}
+      }}
+    }})json"));
+    QuantArgs args;
+    ASSERT_TRUE(load_quant_cfg(reader, args));
+    EXPECT_EQ(args.quant_method(), "compressed-tensors");
+    EXPECT_TRUE(args.is_compressed_tensors_w8a8_dynamic());
+    EXPECT_TRUE(args.is_sym());
+    EXPECT_TRUE(args.should_ignore_module("lm_head"));
+  }
+}
+
+TEST(HFModelLoaderTest, RejectUnsupportedCompressedTensorsScheme) {
+  const auto base = nlohmann::json::parse(R"json({
+    "quant_method": "compressed-tensors",
+    "config_groups": {"group_0": {
+      "weights": {"type": "int", "num_bits": 8},
+      "input_activations": {"type": "int", "num_bits": 8, "dynamic": true}
+    }}
+  })json");
+  const std::vector<nlohmann::json> overrides = {
+      {{"format", "pack-quantized"}},
+      {{"kv_cache_scheme", {{"num_bits", 8}}}},
+      {{"transform_config", {{"rotation", true}}}},
+      {{"config_groups", nullptr}},
+      {{"config_groups", {{"group_0", {{"weights", {{"symmetric", false}}}}}}}},
+      {{"config_groups", {{"group_0", {{"targets", {"Conv2d"}}}}}}},
+      {{"config_groups",
+        {{"group_0", {{"input_activations", {{"strategy", "tensor"}}}}}}}},
+      {{"config_groups",
+        {{"group_1", base.at("config_groups").at("group_0")}}}}};
+  for (const auto& patch : overrides) {
+    auto config = base;
+    config.merge_patch(patch);
+    SCOPED_TRACE(config.dump());
+    JsonReader reader;
+    ASSERT_TRUE(reader.parse_text(
+        nlohmann::json({{"quantization_config", config}}).dump()));
+    QuantArgs args;
+    EXPECT_FALSE(load_quant_cfg(reader, args));
+  }
+}
 
 }  // namespace xllm

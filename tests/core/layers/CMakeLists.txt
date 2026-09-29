@@ -1,5 +1,17 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    compressed_tensors_test
+  SRCS
+    compressed_tensors_test.cpp
+  DEPS
+    :config
+    :state_dict
+    glog::glog
+    GTest::gtest_main
+)
+
 # Backend-independent DSA sharing policy. Keep this target outside platform
 # subdirectories so CUDA, MLU, NPU, and DCU test builds all register it.
 cc_test(

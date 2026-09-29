@@ -290,6 +290,10 @@ void ensure_w8a8_params_for_linear_load(
 #if defined(USE_MUSA)
   musa::check_quantization_supported(quant_args, resolved_weight_quant_method);
 #endif
+#if !defined(USE_NPU) && !defined(USE_MLU) && !defined(USE_DCU)
+  CHECK(!is_w8a8_dynamic_quant(resolved_weight_quant_method))
+      << "Dynamic W8A8 Linear is unsupported on this backend";
+#endif
   std::vector<weight::LazyParameterSpec> specs;
   auto push = [&](torch::Tensor& tensor,
                   bool& tensor_is_loaded,
@@ -455,36 +459,38 @@ torch::Tensor npu_w8a8_linear_forward(
   return xllm::kernel::quant_matmul(quant_matmul_params);
 }
 
-#if defined(USE_DCU)
-torch::Tensor dcu_w8a8_dynamic_linear_forward(
+torch::Tensor scaled_w8a8_linear(
     const torch::Tensor& input,
     const torch::Tensor& weight,
-    const torch::Tensor& weight_scale,
+    const torch::Tensor& scale,
+    const torch::Tensor& smooth,
     const std::optional<torch::Tensor>& bias,
-    at::ScalarType output_dtype) {
-  xllm::kernel::ScaledQuantizeParams quantize_params;
-  quantize_params.x = input;
-  quantize_params.smooth = torch::Tensor();  // no smooth factor
-
-  torch::Tensor quantized_input;
-  torch::Tensor input_scale;
-  std::tie(quantized_input, input_scale) =
-      xllm::kernel::scaled_quantize(quantize_params);
-
-  xllm::kernel::ScaledMatmulParams matmul_params;
-  matmul_params.a = quantized_input;
-  matmul_params.b = weight;
-  matmul_params.a_scale = input_scale;
-  matmul_params.b_scale = weight_scale;
-  matmul_params.output_dtype = output_dtype;
-  matmul_params.bias = bias;
-  matmul_params.beta = 0.0;
-  matmul_params.a_quant_bit_size = 8;
-
-  return xllm::kernel::scaled_matmul(matmul_params);
+    torch::ScalarType output_dtype,
+    const LinearExtraArgs& extra = LinearExtraArgs()) {
+  kernel::ScaledQuantizeParams quantize;
+  const bool reshape_input = input.dim() != 2;
+  quantize.x = reshape_input ? input.reshape({-1, input.size(-1)}) : input;
+  quantize.smooth = smooth;
+  quantize.act_mode = extra.act_mode;
+  quantize.is_gated = extra.is_gated;
+  auto [quantized, token_scale] = kernel::scaled_quantize(quantize);
+  kernel::ScaledMatmulParams matmul;
+  matmul.a = quantized;
+  matmul.b = weight;
+  matmul.a_scale = token_scale;
+  matmul.b_scale = scale;
+  matmul.bias = bias;
+  matmul.output_dtype = output_dtype;
+  matmul.a_quant_bit_size = 8;
+  matmul.beta = 0.0;
+  torch::Tensor output = kernel::scaled_matmul(matmul);
+  if (!reshape_input) {
+    return output;
+  }
+  std::vector<int64_t> shape(input.sizes().begin(), input.sizes().end());
+  shape.back() = weight.size(0);
+  return output.reshape(shape);
 }
-#endif  // USE_DCU
-
 }  // namespace
 
 ColumnParallelLinearImpl::ColumnParallelLinearImpl(const ModelContext& context)
@@ -617,44 +623,13 @@ torch::Tensor ColumnParallelLinearImpl::forward(torch::Tensor input) {
     CHECK(per_channel_scale_.defined())
         << "per_channel_scale is required for smoothquant.";
 
-    torch::Tensor quantized_input;
-    torch::Tensor input_scale;
-
-    xllm::kernel::ScaledQuantizeParams quantize_params;
-    quantize_params.x = input;
-    quantize_params.smooth = smooth_;
-    quantize_params.zero = std::nullopt;
-    quantize_params.token_count = std::nullopt;
-    quantize_params.gather_index = std::nullopt;
-    quantize_params.gather_index_start_position = std::nullopt;
-    quantize_params.output = std::nullopt;
-    quantize_params.output_scale = std::nullopt;
-    quantize_params.act_mode = linear_extra_args_.act_mode;
-    quantize_params.active_coef = 1.0;
-    quantize_params.is_gated = linear_extra_args_.is_gated;
-
-    std::tie(quantized_input, input_scale) =
-        xllm::kernel::scaled_quantize(quantize_params);
-
-    xllm::kernel::ScaledMatmulParams matmul_params;
-    matmul_params.a = quantized_input;
-    matmul_params.b = qweight_;
-    matmul_params.a_scale = input_scale;
-    matmul_params.b_scale = per_channel_scale_;
-    matmul_params.output_dtype = output_dtype_;
-    matmul_params.bias = bias;
-    matmul_params.c = std::nullopt;
-    matmul_params.act_mode = "none";
-    matmul_params.quant_bit_size = 8;
-    matmul_params.alpha = 1.0;
-    matmul_params.beta = 0.0;
-    matmul_params.use_hp_active = false;
-    matmul_params.a_quant_bit_size = 8;
-    matmul_params.a_calib = std::nullopt;
-    matmul_params.b_calib = std::nullopt;
-    matmul_params.output = std::nullopt;
-
-    output = xllm::kernel::scaled_matmul(matmul_params);
+    output = scaled_w8a8_linear(input,
+                                qweight_,
+                                per_channel_scale_,
+                                smooth_,
+                                bias,
+                                output_dtype_,
+                                linear_extra_args_);
 #if defined(USE_MUSA)
   } else if (musa::is_block_fp8_quant(quant_args_)) {
     output = musa::block_fp8_or_bf16_forward(
@@ -690,9 +665,15 @@ torch::Tensor ColumnParallelLinearImpl::forward(torch::Tensor input) {
                             : std::nullopt;
     CHECK(weight_scale.has_value() && weight_scale.value().defined())
         << "weight_scale is required for w8a8_dynamic quant matmul.";
-#if defined(USE_DCU)
-    output = dcu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
+#if defined(USE_MLU) || defined(USE_DCU)
+    CHECK(weight_is_loaded_) << "Missing compressed-tensors weight";
+    output = scaled_w8a8_linear(input,
+                                weight_,
+                                weight_scale.value(),
+                                /*smooth=*/torch::Tensor(),
+                                bias,
+                                output_dtype_,
+                                linear_extra_args_);
 #elif defined(USE_NPU)
     output = npu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, output_dtype_);
@@ -1207,22 +1188,8 @@ torch::Tensor QKVParallelLinearImpl::forward(torch::Tensor input) {
         << "per_channel_scale is required for smoothquant.";
     CHECK(smooth_.defined()) << "smooth is required for smoothquant.";
 
-    xllm::kernel::ScaledQuantizeParams quantize_params;
-    quantize_params.x = input;
-    quantize_params.smooth = smooth_;
-    auto [quantized_input, input_scale] =
-        xllm::kernel::scaled_quantize(quantize_params);
-
-    xllm::kernel::ScaledMatmulParams matmul_params;
-    matmul_params.a = quantized_input;
-    matmul_params.b = qweight_;
-    matmul_params.a_scale = input_scale;
-    matmul_params.b_scale = per_channel_scale_;
-    matmul_params.output_dtype = output_dtype_;
-    matmul_params.bias = bias;
-    matmul_params.beta = 0.0;
-    matmul_params.a_quant_bit_size = 8;
-    output = xllm::kernel::scaled_matmul(matmul_params);
+    output = scaled_w8a8_linear(
+        input, qweight_, per_channel_scale_, smooth_, bias, output_dtype_);
 #if defined(USE_MUSA)
   } else if (musa::is_block_fp8_quant(quant_args_)) {
     output = musa::block_fp8_or_bf16_forward(
@@ -1258,9 +1225,14 @@ torch::Tensor QKVParallelLinearImpl::forward(torch::Tensor input) {
                             : std::nullopt;
     CHECK(weight_scale.has_value() && weight_scale.value().defined())
         << "weight_scale is required for w8a8_dynamic quant matmul.";
-#if defined(USE_DCU)
-    output = dcu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
+#if defined(USE_MLU) || defined(USE_DCU)
+    CHECK(weight_is_loaded_) << "Missing compressed-tensors weight";
+    output = scaled_w8a8_linear(input,
+                                weight_,
+                                weight_scale.value(),
+                                /*smooth=*/torch::Tensor(),
+                                bias,
+                                output_dtype_);
 #elif defined(USE_NPU)
     output = npu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, output_dtype_);
@@ -1671,48 +1643,16 @@ torch::Tensor RowParallelLinearImpl::forward_impl(
     CHECK(per_channel_scale_.defined())
         << "per_channel_scale is required for smoothquant.";
 
-    torch::Tensor quantized_input;
-    torch::Tensor input_scale;
-
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
-
-    xllm::kernel::ScaledQuantizeParams quantize_params;
-    quantize_params.x = input;
-    quantize_params.smooth = smooth_;
-    quantize_params.zero = std::nullopt;
-    quantize_params.token_count = std::nullopt;
-    quantize_params.gather_index = std::nullopt;
-    quantize_params.gather_index_start_position = std::nullopt;
-    quantize_params.output = std::nullopt;
-    quantize_params.output_scale = std::nullopt;
-    quantize_params.act_mode = linear_extra_args_.act_mode;
-    quantize_params.active_coef = 1.0;
-    quantize_params.is_gated = linear_extra_args_.is_gated;
-
-    std::tie(quantized_input, input_scale) =
-        xllm::kernel::scaled_quantize(quantize_params);
-
-    xllm::kernel::ScaledMatmulParams matmul_params;
-    matmul_params.a = quantized_input;
-    matmul_params.b = qweight_;
-    matmul_params.a_scale = input_scale;
-    matmul_params.b_scale = per_channel_scale_;
-    matmul_params.output_dtype = output_dtype_;
-    matmul_params.bias = bias;
-    matmul_params.c = std::nullopt;
-    matmul_params.act_mode = "none";
-    matmul_params.quant_bit_size = 8;
-    matmul_params.alpha = 1.0;
-    matmul_params.beta = 0.0;
-    matmul_params.use_hp_active = false;
-    matmul_params.a_quant_bit_size = 8;
-    matmul_params.a_calib = std::nullopt;
-    matmul_params.b_calib = std::nullopt;
-    matmul_params.output = std::nullopt;
-
-    output = xllm::kernel::scaled_matmul(matmul_params);
+    output = scaled_w8a8_linear(input,
+                                qweight_,
+                                per_channel_scale_,
+                                smooth_,
+                                bias,
+                                output_dtype_,
+                                linear_extra_args_);
 #if defined(USE_MUSA)
   } else if (musa::is_block_fp8_quant(quant_args_)) {
     log_mmrs_quant_skip(reduce_mode, fc1_ctx, "block_fp8", input);
@@ -1765,9 +1705,15 @@ torch::Tensor RowParallelLinearImpl::forward_impl(
                             : std::nullopt;
     CHECK(weight_scale.has_value() && weight_scale.value().defined())
         << "weight_scale is required for w8a8_dynamic quant matmul.";
-#if defined(USE_DCU)
-    output = dcu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
+#if defined(USE_MLU) || defined(USE_DCU)
+    CHECK(weight_is_loaded_) << "Missing compressed-tensors weight";
+    output = scaled_w8a8_linear(input,
+                                weight_,
+                                weight_scale.value(),
+                                /*smooth=*/torch::Tensor(),
+                                bias,
+                                output_dtype_,
+                                linear_extra_args_);
 #elif defined(USE_NPU)
     // FC1 fused int8 MMRS: per-token quantize the (padded) activation, then let
     // torch_npu fuse matmul + reduce_scatter. Numerically equivalent to the
@@ -2111,9 +2057,14 @@ torch::Tensor ReplicatedLinearImpl::forward(torch::Tensor input) {
                             : std::nullopt;
     CHECK(weight_scale.has_value() && weight_scale.value().defined())
         << "weight_scale is required for w8a8_dynamic quant matmul.";
-#if defined(USE_DCU)
-    return dcu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, input.scalar_type());
+#if defined(USE_MLU) || defined(USE_DCU)
+    CHECK(weight_is_loaded_) << "Missing compressed-tensors weight";
+    return scaled_w8a8_linear(input,
+                              weight_,
+                              weight_scale.value(),
+                              /*smooth=*/torch::Tensor(),
+                              bias,
+                              input.scalar_type());
 #elif defined(USE_NPU)
     return npu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, input.scalar_type());

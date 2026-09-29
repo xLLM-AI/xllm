@@ -40,13 +40,22 @@ torch::Tensor scaled_matmul(
   // Check: only support w8a8 quantization for now.
   CHECK(quant_bit_size == 8 && a_quant_bit_size == 8)
       << "scaled_matmul only supports w8a8 quantization (quant_bit_size "
-         "scaled_matmul only supports w8a8 quantization (quant_bit_size "
          "== 8, a_quant_bit_size == 8) for now. "
          "Got quant_bit_size = "
       << quant_bit_size << ", a_quant_bit_size = " << a_quant_bit_size;
 
-  // Only support smooth_quant algorithm for now
-  std::string quant_algo = "smooth_quant";
+  // This is the W8A8 GEMM contract even when activation smoothing is absent.
+  const std::string quant_algo = "smooth_quant";
+  CHECK(a_scale.has_value() && a_scale->defined())
+      << "W8A8 matmul requires activation scales";
+  CHECK(b_scale.defined());
+  CHECK(a.scalar_type() == torch::kInt8 && b.scalar_type() == torch::kInt8);
+  CHECK_EQ(a.size(-1), b.size(-1));
+  CHECK_EQ(a_scale->scalar_type(), torch::kFloat32);
+  CHECK_EQ(b_scale.scalar_type(), torch::kFloat32);
+  if (b_scale.dim() == 1) {
+    CHECK_EQ(b_scale.numel(), b.size(0));
+  }
   std::string a_quant_layout = (a_scale.value().dim() == 1)
                                    ? "quantize_per_token"
                                    : "quantize_group_wise";

@@ -61,7 +61,7 @@ void FusedMoEImpl::select_experts_all2all(
       deep_ep_buffer_.dispatch_send_token_tensor.slice(0, 0, dispatch_bytes)
           .view({num_token_expand, deep_ep_params_.dispatch_token_size});
 
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     xllm::kernel::ScaledQuantizeParams scaled_quantize_params;
     scaled_quantize_params.x = hidden_states_2d;
     // use dispatch_send_token_tensor buffer for input to reduce memory
@@ -103,7 +103,7 @@ void FusedMoEImpl::select_experts_all2all(
   // collect the selected tensor
   selected_expert_info.reduce_weight = reduce_weight;
   selected_expert_info.combine_idx = combine_idx;
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     selected_expert_info.input_scale = hidden_states_scale;
   }
 }
@@ -190,7 +190,7 @@ torch::Tensor FusedMoEImpl::forward_experts_all2all(
   // use the buffer during initialization for the output
   torch::Tensor expand_hidden_states = dispatch_recv_token_tensor_head_;
   std::optional<torch::Tensor> output_tail = std::nullopt;
-  if (is_smoothquant_) {
+  if (use_a8_quant_) {
     output_tail = dispatch_recv_token_tensor_tail_;
     // update selected_expert_info with the tail (input scale)
     selected_expert_info.input_scale = output_tail;

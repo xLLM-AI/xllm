@@ -21,6 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/model/model_args.h"
 
 namespace xllm {
@@ -697,10 +698,22 @@ TEST(KVCacheEstimationTest,
   KVCacheEstimateOptions target_options;
   target_options.dtype = torch::kFloat32;
   target_options.kv_cache_dtype = "auto";
+  const DeepSeekV4CachePolicy cache_policy =
+      get_dsv4_cache_policy(target_options.dtype);
+  const int64_t scale_bytes =
+      cache_policy.has_indexer_cache_scale ? cache_policy.scale_dtype_size : 0;
+  const int64_t c4_block_bytes =
+      128 * (16 * 4 + 8 * cache_policy.index_dtype_size + scale_bytes);
+  const int64_t c128_block_bytes = 128 * 16 * 4;
+  const int64_t compressed_unit_bytes = 32 * c4_block_bytes + c128_block_bytes;
+  constexpr int64_t kTargetSwaBytes = 35 * 90112;
+  constexpr int64_t kDraftSwaBytes =
+      /*layers=*/3 * /*swa_count=*/35 * /*block_size=*/128 *
+      /*head_dim=*/16 * /*float32_bytes=*/4;
+  // Reserve both SWA pools and exactly two compressed units for either
+  // the model-dtype indexer cache or the quantized indexer cache with scales.
   target_options.cache_size_in_bytes =
-      2818048 + /*target_and_draft_swa_growth=*/229376 +
-      /*additional_target_swa=*/14 * 90112 +
-      /*additional_draft_swa=*/14 * 3 * 128 * 16 * 4;
+      kTargetSwaBytes + kDraftSwaBytes + 2 * compressed_unit_bytes;
   target_options.block_size = 128;
   target_options.max_seqs_per_batch = 4;
   target_options.max_tokens_per_batch = 2176;
@@ -716,9 +729,6 @@ TEST(KVCacheEstimationTest,
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(target_args, target_options);
 
-  constexpr int64_t kDraftSwaBytes =
-      /*layers=*/3 * /*swa_count=*/35 * /*block_size=*/128 *
-      /*head_dim=*/16 * /*float32_bytes=*/4;
   EXPECT_LE(capacity.cache_size_in_bytes() + kDraftSwaBytes,
             target_options.cache_size_in_bytes);
   EXPECT_EQ(capacity.swa_count(), 35);
