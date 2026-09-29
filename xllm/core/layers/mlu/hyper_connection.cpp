@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "layers/mlu/deepseek_v4/hyper_connection.h"
+#include "layers/mlu/hyper_connection.h"
 
 #include <tuple>
 #include <vector>
@@ -50,12 +50,24 @@ torch::Tensor flat_matrix(const torch::Tensor& x, int64_t rows, int64_t cols) {
 namespace xllm {
 namespace layer {
 
-DeepseekV4HCPreImpl::DeepseekV4HCPreImpl(int64_t hc_mult,
-                                         int64_t dim,
-                                         int64_t sinkhorn_iters,
-                                         double hc_eps,
-                                         double norm_eps,
-                                         const torch::TensorOptions& options)
+MHCFusionPlan resolve_mhc_fusion(const MHCFusionContext& context) {
+  const bool use_fused_mhc =
+      context.optimization_enabled && !context.is_prefill &&
+      !context.is_chunked_prefill && context.supports_fused_mhc &&
+      context.has_pending_storage;
+  return {
+      .use_fused_mhc = use_fused_mhc,
+      .consume_pending = use_fused_mhc && context.has_pending,
+      .defer_post = use_fused_mhc && !context.is_last_layer,
+  };
+}
+
+MHCPreImpl::MHCPreImpl(int64_t hc_mult,
+                       int64_t dim,
+                       int64_t sinkhorn_iters,
+                       double hc_eps,
+                       double norm_eps,
+                       const torch::TensorOptions& options)
     : hc_mult_(hc_mult),
       dim_(dim),
       sinkhorn_iters_(sinkhorn_iters),
@@ -75,9 +87,8 @@ DeepseekV4HCPreImpl::DeepseekV4HCPreImpl(int64_t hc_mult,
       "hc_scale", torch::empty({3}, param_options), /*requires_grad=*/false);
 }
 
-DeepseekV4HCPreOutput DeepseekV4HCPreImpl::forward(
-    const torch::Tensor& x,
-    const std::optional<torch::Tensor>& rsqrt) {
+MHCPreOutput MHCPreImpl::forward(const torch::Tensor& x,
+                                 const std::optional<torch::Tensor>& rsqrt) {
   torch::Tensor x_hc = flat_hc(x, hc_mult_, dim_);
   torch::Tensor x_flat = x_hc.reshape({x_hc.size(0), hc_mult_ * dim_});
 
@@ -117,11 +128,11 @@ DeepseekV4HCPreOutput DeepseekV4HCPreImpl::forward(
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-DeepseekV4HCPreImpl::fused_post_pre_norm(const torch::Tensor& x,
-                                         const torch::Tensor& residual,
-                                         const torch::Tensor& post,
-                                         const torch::Tensor& comb,
-                                         const torch::Tensor& gamma) {
+MHCPreImpl::fused_post_pre_norm(const torch::Tensor& x,
+                                const torch::Tensor& residual,
+                                const torch::Tensor& post,
+                                const torch::Tensor& comb,
+                                const torch::Tensor& gamma) {
   CHECK(supports_fused_mhc())
       << "fused_mhc only supports hc_mult=4 and hidden_size=4096";
   const int64_t token_count = x.numel() / dim_;
@@ -138,7 +149,7 @@ DeepseekV4HCPreImpl::fused_post_pre_norm(const torch::Tensor& x,
       hc_eps_);
 }
 
-void DeepseekV4HCPreImpl::load_state_dict(const StateDict& state_dict) {
+void MHCPreImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {
     return;
   }
@@ -147,10 +158,17 @@ void DeepseekV4HCPreImpl::load_state_dict(const StateDict& state_dict) {
   LOAD_WEIGHT(hc_scale);
 }
 
-DeepseekV4HCPostImpl::DeepseekV4HCPostImpl(double norm_eps)
-    : norm_eps_(norm_eps) {}
+void MHCPreImpl::verify_loaded_weights(const std::string& prefix) const {
+  CHECK(hc_fn_is_loaded_) << "weight is not loaded for " << prefix + "hc_fn";
+  CHECK(hc_base_is_loaded_)
+      << "weight is not loaded for " << prefix + "hc_base";
+  CHECK(hc_scale_is_loaded_)
+      << "weight is not loaded for " << prefix + "hc_scale";
+}
 
-std::tuple<torch::Tensor, torch::Tensor> DeepseekV4HCPostImpl::forward(
+MHCPostImpl::MHCPostImpl(double norm_eps) : norm_eps_(norm_eps) {}
+
+std::tuple<torch::Tensor, torch::Tensor> MHCPostImpl::forward(
     const torch::Tensor& x,
     const torch::Tensor& residual,
     const torch::Tensor& post,
@@ -177,11 +195,11 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4HCPostImpl::forward(
   return {output.reshape(out_shape), output_rms};
 }
 
-DeepseekV4HCHeadImpl::DeepseekV4HCHeadImpl(int64_t hc_mult,
-                                           int64_t dim,
-                                           double hc_eps,
-                                           double norm_eps,
-                                           const torch::TensorOptions& options)
+MHCHeadImpl::MHCHeadImpl(int64_t hc_mult,
+                         int64_t dim,
+                         double hc_eps,
+                         double norm_eps,
+                         const torch::TensorOptions& options)
     : hc_mult_(hc_mult), dim_(dim), hc_eps_(hc_eps), norm_eps_(norm_eps) {
   const int64_t hc_dim = hc_mult_ * dim_;
   torch::TensorOptions param_options =
@@ -198,7 +216,7 @@ DeepseekV4HCHeadImpl::DeepseekV4HCHeadImpl(int64_t hc_mult,
                                       /*requires_grad=*/false);
 }
 
-torch::Tensor DeepseekV4HCHeadImpl::forward(const torch::Tensor& x) {
+torch::Tensor MHCHeadImpl::forward(const torch::Tensor& x) {
   torch::Tensor x_hc = flat_hc(x, hc_mult_, dim_);
   torch::Tensor x_flat = x_hc.reshape({x_hc.size(0), hc_mult_ * dim_});
   torch::Tensor x_fp32 = x_flat.to(torch::kFloat32);
@@ -214,7 +232,7 @@ torch::Tensor DeepseekV4HCHeadImpl::forward(const torch::Tensor& x) {
   return output.reshape(out_shape);
 }
 
-void DeepseekV4HCHeadImpl::load_state_dict(const StateDict& state_dict) {
+void MHCHeadImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {
     return;
   }

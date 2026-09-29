@@ -584,7 +584,9 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
     float softplus_threshold = 20.0f,
     const std::optional<torch::Tensor>& num_accepted_tokens_opt = std::nullopt,
     bool inplace_final_state = true,
-    bool is_kda = false);
+    bool is_kda = false,
+    bool kda_use_safe_gate = false,
+    float kda_gate_lower_bound = -5.0f);
 
 torch::Tensor causal_conv1d_update_decode(
     const torch::Tensor& x,

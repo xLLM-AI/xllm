@@ -13,16 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "layers/mlu/hyper_connection.h"
+
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <array>
 #include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
 
 #include "framework/state_dict/state_dict.h"
-#include "layers/mlu/deepseek_v4/hyper_connection.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -182,7 +184,80 @@ torch::Tensor hc_head_ref(const torch::Tensor& x,
 
 }  // namespace
 
-class DeepseekV4HyperConnectionTest : public ::testing::Test {
+TEST(MHCFusionPlanTest, BuildsPendingChainForSupportedDecodeLayers) {
+  const MHCFusionPlan first_layer = resolve_mhc_fusion({
+      .optimization_enabled = true,
+      .is_prefill = false,
+      .is_chunked_prefill = false,
+      .supports_fused_mhc = true,
+      .has_pending_storage = true,
+      .has_pending = false,
+      .is_last_layer = false,
+  });
+  EXPECT_TRUE(first_layer.use_fused_mhc);
+  EXPECT_FALSE(first_layer.consume_pending);
+  EXPECT_TRUE(first_layer.defer_post);
+
+  const MHCFusionPlan middle_layer = resolve_mhc_fusion({
+      .optimization_enabled = true,
+      .is_prefill = false,
+      .is_chunked_prefill = false,
+      .supports_fused_mhc = true,
+      .has_pending_storage = true,
+      .has_pending = true,
+      .is_last_layer = false,
+  });
+  EXPECT_TRUE(middle_layer.use_fused_mhc);
+  EXPECT_TRUE(middle_layer.consume_pending);
+  EXPECT_TRUE(middle_layer.defer_post);
+
+  const MHCFusionPlan last_layer = resolve_mhc_fusion({
+      .optimization_enabled = true,
+      .is_prefill = false,
+      .is_chunked_prefill = false,
+      .supports_fused_mhc = true,
+      .has_pending_storage = true,
+      .has_pending = true,
+      .is_last_layer = true,
+  });
+  EXPECT_TRUE(last_layer.use_fused_mhc);
+  EXPECT_TRUE(last_layer.consume_pending);
+  EXPECT_FALSE(last_layer.defer_post);
+}
+
+TEST(MHCFusionPlanTest, DisablesUnsupportedFusionContexts) {
+  const MHCFusionContext supported_decode = {
+      .optimization_enabled = true,
+      .is_prefill = false,
+      .is_chunked_prefill = false,
+      .supports_fused_mhc = true,
+      .has_pending_storage = true,
+      .has_pending = false,
+      .is_last_layer = false,
+  };
+
+  MHCFusionContext disabled = supported_decode;
+  disabled.optimization_enabled = false;
+  MHCFusionContext prefill = supported_decode;
+  prefill.is_prefill = true;
+  MHCFusionContext chunked_prefill = supported_decode;
+  chunked_prefill.is_chunked_prefill = true;
+  MHCFusionContext unsupported = supported_decode;
+  unsupported.supports_fused_mhc = false;
+  MHCFusionContext missing_storage = supported_decode;
+  missing_storage.has_pending_storage = false;
+
+  const std::array<MHCFusionContext, 5> disabled_contexts = {
+      disabled, prefill, chunked_prefill, unsupported, missing_storage};
+  for (const MHCFusionContext& context : disabled_contexts) {
+    const MHCFusionPlan plan = resolve_mhc_fusion(context);
+    EXPECT_FALSE(plan.use_fused_mhc);
+    EXPECT_FALSE(plan.consume_pending);
+    EXPECT_FALSE(plan.defer_post);
+  }
+}
+
+class HyperConnectionTest : public ::testing::Test {
  protected:
   void SetUp() override {
     torch::Device torch_device(Platform::type_torch(), 0);
@@ -232,7 +307,7 @@ class DeepseekV4HyperConnectionTest : public ::testing::Test {
   torch::TensorOptions options_;
 };
 
-TEST_F(DeepseekV4HyperConnectionTest, HCPreMatchesOfficialReference) {
+TEST_F(HyperConnectionTest, HCPreMatchesOfficialReference) {
   const int64_t batch_size = 1;
   const int64_t seq_len = 2;
   torch::Tensor x = seeded("deepseek_v4_hc.pre.x",
@@ -241,14 +316,14 @@ TEST_F(DeepseekV4HyperConnectionTest, HCPreMatchesOfficialReference) {
                            options_.device());
   std::unordered_map<std::string, torch::Tensor> weights = pre_weights();
 
-  DeepseekV4HCPre hc_pre(config_.hc_mult,
-                         config_.dim,
-                         config_.sinkhorn_iters,
-                         config_.hc_eps,
-                         config_.norm_eps,
-                         options_);
+  MHCPre hc_pre(config_.hc_mult,
+                config_.dim,
+                config_.sinkhorn_iters,
+                config_.hc_eps,
+                config_.norm_eps,
+                options_);
   hc_pre->load_state_dict(StateDict(weights));
-  DeepseekV4HCPreOutput actual = hc_pre->forward(x);
+  MHCPreOutput actual = hc_pre->forward(x);
   HCPreRefOut expected = hc_pre_ref(x,
                                     weights.at("hc_fn"),
                                     weights.at("hc_scale"),
@@ -264,7 +339,7 @@ TEST_F(DeepseekV4HyperConnectionTest, HCPreMatchesOfficialReference) {
   test::verify_tensor_close(actual.comb.cpu(), expected.comb.cpu(), 1e-3, 1e-3);
 }
 
-TEST_F(DeepseekV4HyperConnectionTest, HCPostMatchesOfficialReference) {
+TEST_F(HyperConnectionTest, HCPostMatchesOfficialReference) {
   const int64_t tokens = 2;
   torch::Tensor x = seeded("deepseek_v4_hc.post.x",
                            {tokens, config_.dim},
@@ -286,7 +361,7 @@ TEST_F(DeepseekV4HyperConnectionTest, HCPostMatchesOfficialReference) {
                             options_.device()),
                      -1);
 
-  DeepseekV4HCPost hc_post(config_.norm_eps);
+  MHCPost hc_post(config_.norm_eps);
   torch::Tensor actual;
   torch::Tensor actual_rsqrt;
   std::tie(actual, actual_rsqrt) =
@@ -307,7 +382,7 @@ TEST_F(DeepseekV4HyperConnectionTest, HCPostMatchesOfficialReference) {
       actual_rsqrt.cpu(), expected_rsqrt.cpu(), 1e-4, 1e-4);
 }
 
-TEST_F(DeepseekV4HyperConnectionTest, FusedPostPreNormMatchesComposition) {
+TEST_F(HyperConnectionTest, FusedPostPreNormMatchesComposition) {
   const int64_t tokens = 2;
   torch::Tensor x = seeded("deepseek_v4_hc.fused.x",
                            {tokens, config_.dim},
@@ -334,21 +409,20 @@ TEST_F(DeepseekV4HyperConnectionTest, FusedPostPreNormMatchesComposition) {
                                options_.device()) +
                         1.0;
   std::unordered_map<std::string, torch::Tensor> weights = pre_weights();
-  DeepseekV4HCPre hc_pre(config_.hc_mult,
-                         config_.dim,
-                         config_.sinkhorn_iters,
-                         config_.hc_eps,
-                         config_.norm_eps,
-                         options_);
+  MHCPre hc_pre(config_.hc_mult,
+                config_.dim,
+                config_.sinkhorn_iters,
+                config_.hc_eps,
+                config_.norm_eps,
+                options_);
   hc_pre->load_state_dict(StateDict(weights));
-  DeepseekV4HCPost hc_post(config_.norm_eps);
+  MHCPost hc_post(config_.norm_eps);
 
   torch::Tensor expected_residual;
   torch::Tensor rsqrt;
   std::tie(expected_residual, rsqrt) =
       hc_post->forward(x, residual, post, comb, /*compute_rms=*/true);
-  DeepseekV4HCPreOutput expected_pre =
-      hc_pre->forward(expected_residual, rsqrt);
+  MHCPreOutput expected_pre = hc_pre->forward(expected_residual, rsqrt);
   torch::Tensor expected_norm =
       expected_pre.output.to(torch::kFloat32) *
       torch::rsqrt(
@@ -373,7 +447,7 @@ TEST_F(DeepseekV4HyperConnectionTest, FusedPostPreNormMatchesComposition) {
       actual_comb.cpu(), expected_pre.comb.cpu(), 2e-3, 2e-3);
 }
 
-TEST_F(DeepseekV4HyperConnectionTest, HCHeadMatchesOfficialReference) {
+TEST_F(HyperConnectionTest, HCHeadMatchesOfficialReference) {
   const int64_t batch_size = 1;
   const int64_t seq_len = 2;
   torch::Tensor x = seeded("deepseek_v4_hc.head.x",
@@ -382,7 +456,7 @@ TEST_F(DeepseekV4HyperConnectionTest, HCHeadMatchesOfficialReference) {
                            options_.device());
   std::unordered_map<std::string, torch::Tensor> weights = head_weights();
 
-  DeepseekV4HCHead hc_head(
+  MHCHead hc_head(
       config_.hc_mult, config_.dim, config_.hc_eps, config_.norm_eps, options_);
   hc_head->load_state_dict(StateDict(weights));
   torch::Tensor actual = hc_head->forward(x);

@@ -66,27 +66,39 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
+    KDA_USE_SAFE_GATE: tl.constexpr,
+    KDA_GATE_LOWER_BOUND,
+    SPLIT_HV: tl.constexpr,
     BLOCK_N: tl.constexpr = 4,  # N-dimension tile size. It should distribute N evenly across all cores; larger values are preferable
     BLOCK_QUERY_LEN: tl.constexpr = 4,  # Token tile size per sequence. It must equal T, the maximum token count of one sequence
-):
+    FACTORED_REDUCE: tl.constexpr = False,
+) -> None:
     pid = tl.program_id(0)
     num_jobs = tl.num_programs(0)
 
-    rangeV = tl.arange(0, HV)
-    # xLLM may pass bf16 A_log, while MLU tl.exp requires fp32 input.
-    A_logs = tl.load(A_log + rangeV).to(tl.float32)
     if not IS_KDA:
+        rangeV = tl.arange(0, HV)
+        # xLLM may pass bf16 A_log, while MLU tl.exp requires fp32 input.
+        A_logs = tl.load(A_log + rangeV).to(tl.float32)
         dt_bias_vals = tl.load(dt_bias + rangeV)  # [HV,]
 
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    TOTAL_BLOCKS = NK * NV * N
+    NUM_HV_BLOCKS: tl.constexpr = triton.cdiv(HV, BLOCK_HV)
+    if SPLIT_HV:
+        TOTAL_BLOCKS = NK * NV * N * NUM_HV_BLOCKS
+    else:
+        TOTAL_BLOCKS = NK * NV * N
     num_percore = TOTAL_BLOCKS // num_jobs
+    core_start = num_percore * pid
     num_acturepercore = num_percore
-    if pid == num_jobs - 1:
+    if IS_KDA:
+        # Distribute the remainder across cores instead of serializing it on
+        # the final core when the active batch is not a multiple of the grid.
+        remainder = TOTAL_BLOCKS % num_jobs
+        num_acturepercore += (pid < remainder).to(tl.int64)
+        core_start += tl.minimum(pid, remainder)
+    elif pid == num_jobs - 1:
         num_acturepercore = TOTAL_BLOCKS - num_percore * (num_jobs - 1)
-
-    ones = tl.full((1, BK), 1, tl.float32)
-    neg_ones = tl.full((1, BK), -1, tl.float32)
 
     o_T = tl.arange(0, BLOCK_QUERY_LEN * BLOCK_N)
     HEADS_PER_Q: tl.constexpr = HV // H
@@ -94,12 +106,18 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
 
     id = tl.zeros([], tl.int32)
     while id < num_acturepercore:
-        flat_pid = id + num_percore * pid
+        flat_pid = id + core_start
+        if SPLIT_HV:
+            i_hv_block = flat_pid // (NK * N * NV)
+            flat_tile_pid = flat_pid % (NK * N * NV)
+        else:
+            i_hv_block = 0
+            flat_tile_pid = flat_pid
         # Keep N in the low bits of flat: take BLOCK_N consecutive jobs along N within the same (K, V) tile column.
         # This fixes C3-a (missing tiles, duplicates, or races when NV > 1). K/V tiles occupy the high bits. NK is always 1, so i_k is always 0.
-        i_k = flat_pid % NK
-        i_n = (flat_pid // NK) % N
-        i_v = flat_pid // (NK * N)  # V-tile high bits
+        i_k = flat_tile_pid % NK
+        i_n = (flat_tile_pid // NK) % N
+        i_v = flat_tile_pid // (NK * N)  # V-tile high bits
 
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -147,11 +165,21 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
         mask_v = o_v < V
         mask_h = mask_v[:, None] & mask_k[None, :]
 
-        mask_ab = mask_T[:, None] & (tl.arange(0, HV)[None, :] < HV)
-        b_vals = tl.load(b + (start_T + o_T)[:, None] * HV + tl.arange(0, HV)[None, :], mask=mask_ab).to(
-            tl.float32
-        )  # [BL*BN, HV]
-        b_beta = tl.sigmoid(b_vals)  # [BL*BN, HV], applied as b_v *= b_beta[i_t, gi_hv] in the inner loop
+        if SPLIT_HV:
+            hv_start_lo = i_hv_block * BLOCK_HV
+            hv_start_hi = hv_start_lo + BLOCK_HV
+            b_offsets = hv_start_lo + tl.arange(0, BLOCK_HV)
+            mask_ab = mask_T[:, None] & (b_offsets[None, :] < HV)
+            b_vals = tl.load(b + (start_T + o_T)[:, None] * HV + b_offsets[None, :], mask=mask_ab).to(tl.float32)
+            b_beta = tl.sigmoid(b_vals)  # [BL*BN, BLOCK_HV]
+        else:
+            hv_start_lo = 0
+            hv_start_hi = HV
+            mask_ab = mask_T[:, None] & (tl.arange(0, HV)[None, :] < HV)
+            b_vals = tl.load(b + (start_T + o_T)[:, None] * HV + tl.arange(0, HV)[None, :], mask=mask_ab).to(
+                tl.float32
+            )  # [BL*BN, HV]
+            b_beta = tl.sigmoid(b_vals)  # [BL*BN, HV]
         if not IS_KDA:
             a_vals = tl.load(a + (start_T + o_T)[:, None] * HV + tl.arange(0, HV)[None, :], mask=mask_ab).to(
                 tl.float32
@@ -165,7 +193,7 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
             )  # [BL*BN, HV], applied as b_h *= b_gs[i_t, gi_hv] in the inner loop
 
         # Tile HV by loading BLOCK_HV V heads and the corresponding BH Q/K heads per iteration.
-        for hv_start in range(0, HV, BLOCK_HV):
+        for hv_start in range(hv_start_lo, hv_start_hi, BLOCK_HV):
             # The arange endpoint must be a literal constexpr; add the runtime hv_start offset separately.
             o_h_block = tl.arange(0, BLOCK_HV // (HV // H)) + (hv_start // (HV // H))  # [BH]
             o_hv_block = tl.arange(0, BLOCK_HV) + hv_start  # [BLOCK_HV]
@@ -185,10 +213,8 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
             qs = qs.reshape((BLOCK_QUERY_LEN * BLOCK_N * BH, BK))
             ks = ks.reshape((BLOCK_QUERY_LEN * BLOCK_N * BH, BK))
             if USE_QK_L2NORM_IN_KERNEL:
-                qs_mean = tl.rsqrt(tl.dot(ones, (qs * qs).trans(), allow_tf32=False) + 1e-6)
-                qs = qs * tl.dot(qs_mean.reshape([BLOCK_QUERY_LEN * BLOCK_N * BH, 1]), ones, allow_tf32=False)
-                ks_mean = tl.rsqrt(tl.dot(ones, (ks * ks).trans(), allow_tf32=False) + 1e-6)
-                ks = ks * tl.dot(ks_mean.reshape([BLOCK_QUERY_LEN * BLOCK_N * BH, 1]), ones, allow_tf32=False)
+                qs = qs * tl.rsqrt(tl.sum(qs * qs, 1) + 1e-6)[:, None]
+                ks = ks * tl.rsqrt(tl.sum(ks * ks, 1) + 1e-6)[:, None]
             qs = qs * scale
             qs = qs.reshape((BLOCK_QUERY_LEN * BLOCK_N, BH, BK))
             ks = ks.reshape((BLOCK_QUERY_LEN * BLOCK_N, BH, BK))
@@ -206,8 +232,12 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
                 dt_bias_b = tl.load(dt_bias + o_hv_block[:, None] * BK + tl.arange(0, BK)[None, :])  # [BLOCK_HV, BK]
                 A_log_b = tl.load(A_log + o_hv_block).to(tl.float32)  # [BLOCK_HV]
                 xs = a_vals + dt_bias_b[None, :, :]  # [BL*BN, BLOCK_HV, BK]
-                softplus_xs = tl.where(beta * xs <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * xs)), xs)
-                b_gs = tl.exp(-tl.exp(A_log_b)[None, :, None] * softplus_xs)  # [BL*BN, BLOCK_HV, BK]
+                if KDA_USE_SAFE_GATE:
+                    log_gate = KDA_GATE_LOWER_BOUND * tl.sigmoid(tl.exp(A_log_b)[None, :, None] * xs)
+                    b_gs = tl.exp(log_gate)
+                else:
+                    softplus_xs = tl.where(beta * xs <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * xs)), xs)
+                    b_gs = tl.exp(-tl.exp(A_log_b)[None, :, None] * softplus_xs)
 
             cum_tokens = tl.zeros(
                 [], tl.int64
@@ -276,20 +306,29 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
                             else:
                                 b_h *= (b_gs[i_t, local_i_hv, :])[None, :]
                             # [BV]
-                            b_v += tl.dot(neg_ones, (b_h * b_k[None, :]).trans(), allow_tf32=False)
-                            b_v *= b_beta[i_t, gi_hv]
+                            if FACTORED_REDUCE:
+                                b_v -= tl.sum(tl.sum((b_h * b_k[None, :]).reshape((BV, 4, BK // 4)), 1), 1)
+                            else:
+                                b_v -= tl.sum(b_h * b_k[None, :], 1)
+                            if SPLIT_HV:
+                                b_v *= b_beta[i_t, local_i_hv]
+                            else:
+                                b_v *= b_beta[i_t, gi_hv]
                             # [BV, BK]
-                            b_h += tl.dot(b_v.reshape([BV, 1]), ones, allow_tf32=False) * b_k[None, :]
+                            if FACTORED_REDUCE:
+                                b_h = (
+                                    b_h.reshape((BV, 4, BK // 4))
+                                    + b_v[:, None, None] * b_k.reshape((4, BK // 4))[None, :, :]
+                                ).reshape((BV, BK))
+                            else:
+                                b_h += b_v[:, None] * b_k[None, :]
                             # [BV]
-                            b_os[i_t, local_i_hv, :] = (
-                                tl.dot(ones, (b_h * b_q[None, :]).trans(), allow_tf32=False)
-                            ).reshape(
-                                [
-                                    BV,
-                                ]
-                            )
-                            # b_o = (tl.dot(ones,(b_h * b_q[None, :]).trans(),allow_tf32=False)).reshape([BV,])
-                            # tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+                            if FACTORED_REDUCE:
+                                b_os[i_t, local_i_hv, :] = tl.sum(
+                                    tl.sum((b_h * b_q[None, :]).reshape((BV, 4, BK // 4)), 1), 1
+                                )
+                            else:
+                                b_os[i_t, local_i_hv, :] = tl.sum(b_h * b_q[None, :], 1)
 
                             # keep the states for multi-query tokens
                             if INPLACE_FINAL_STATE:

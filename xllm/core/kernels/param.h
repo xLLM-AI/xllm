@@ -1610,6 +1610,8 @@ struct FusedSigmoidGatingDeltaRuleUpdateParams {
   std::optional<float> scale = std::nullopt;
   bool use_qk_l2norm_in_kernel = false;
   bool is_kda = false;
+  bool kda_use_safe_gate = false;
+  float kda_gate_lower_bound = -5.0f;
   float softplus_beta = 1.0f;
   float softplus_threshold = 20.0f;
 };

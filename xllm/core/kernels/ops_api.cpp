@@ -1402,7 +1402,9 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
       params.softplus_threshold,
       params.num_accepted_tokens,
       /*inplace_final_state=*/true,
-      params.is_kda);
+      params.is_kda,
+      params.kda_use_safe_gate,
+      params.kda_gate_lower_bound);
   return outputs.first;
 #elif defined(USE_NPU)
   return npu::npu_fused_sigmoid_gating_delta_rule_update(

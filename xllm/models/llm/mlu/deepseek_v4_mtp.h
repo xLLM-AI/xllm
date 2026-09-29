@@ -36,7 +36,6 @@ limitations under the License.
 #include "layers/mlu/deepseek_v4/deepseek_v4_decoder_layer.h"
 #include "layers/mlu/deepseek_v4/dsa_cache_mapping.h"
 #include "layers/mlu/deepseek_v4/dsa_metadata_builder_mlu.h"
-#include "layers/mlu/deepseek_v4/hyper_connection.h"
 #include "models/llm/llm_model_base.h"
 #include "models/llm/mlu/deepseek_v4.h"
 #include "models/llm/mlu/deepseek_v4_base.h"

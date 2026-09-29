@@ -45,7 +45,7 @@ limitations under the License.
 #include "core/layers/mlu/deepseek_v4/dsa_cache_mapping.h"
 #include "core/layers/mlu/deepseek_v4/dsa_empty_dp_input.h"
 #include "core/layers/mlu/deepseek_v4/dsa_metadata_builder_mlu.h"
-#include "core/layers/mlu/deepseek_v4/hyper_connection.h"
+#include "core/layers/mlu/hyper_connection.h"
 #include "models/llm/llm_model_base.h"
 #include "models/llm/mlu/deepseek_v4_base.h"
 
@@ -109,11 +109,11 @@ class DeepseekV4ModelImpl final
 
     hc_head_ = register_module(
         "hc_head",
-        layer::DeepseekV4HCHead(hc_mult_,
-                                model_args.hidden_size(),
-                                static_cast<double>(model_args.hc_eps()),
-                                static_cast<double>(model_args.rms_norm_eps()),
-                                options));
+        layer::MHCHead(hc_mult_,
+                       model_args.hidden_size(),
+                       static_cast<double>(model_args.hc_eps()),
+                       static_cast<double>(model_args.rms_norm_eps()),
+                       options));
 
     init_rope(model_args, options);
     init_hadamard(model_args, options);
@@ -225,7 +225,7 @@ class DeepseekV4ModelImpl final
     }
 
     std::optional<torch::Tensor> residual;
-    std::optional<layer::DeepseekV4PendingMHC> pending_mhc;
+    std::optional<layer::PendingMHC> pending_mhc;
     for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
       prepare_layer_metadata(attn_metadata, static_cast<int32_t>(layer_idx));
       h = layers_[layer_idx]->forward(
@@ -266,7 +266,7 @@ class DeepseekV4ModelImpl final
   using DeepseekV4Base::requires_graph_forward_metadata;
 
  private:
-  layer::DeepseekV4HCHead hc_head_{nullptr};
+  layer::MHCHead hc_head_{nullptr};
   int64_t num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
   int32_t cp_size_ = 1;

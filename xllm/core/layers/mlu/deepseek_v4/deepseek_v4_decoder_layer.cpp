@@ -75,13 +75,13 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
 
   attn_hc_pre_ = register_module(
       "attn_hc_pre",
-      DeepseekV4HCPre(
+      MHCPre(
           hc_mult, hidden_size, hc_sinkhorn_iters, hc_eps, norm_eps, options));
   ffn_hc_pre_ = register_module(
       "ffn_hc_pre",
-      DeepseekV4HCPre(
+      MHCPre(
           hc_mult, hidden_size, hc_sinkhorn_iters, hc_eps, norm_eps, options));
-  hc_post_ = register_module("hc_post", DeepseekV4HCPost(norm_eps));
+  hc_post_ = register_module("hc_post", MHCPost(norm_eps));
 
   attn_norm_ =
       register_module("input_layernorm",
@@ -183,22 +183,32 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     KVCache& kv_cache,
     const ModelInputParams& input_params,
     const std::optional<torch::Tensor>& input_ids,
-    std::optional<DeepseekV4PendingMHC>* pending_mhc,
+    std::optional<PendingMHC>* pending_mhc,
     bool is_last_layer,
     const mlu_v4_cp::DeepseekV4CpContext* cp_context) {
   (void)positions;
 
   residual = std::nullopt;
-  const bool use_fused_mhc =
-      pending_mhc != nullptr && !attn_metadata.is_prefill &&
-      !attn_metadata.is_chunked_prefill && attn_hc_pre_->supports_fused_mhc() &&
-      ffn_hc_pre_->supports_fused_mhc();
+  const bool has_pending_storage = pending_mhc != nullptr;
+  const bool has_pending = has_pending_storage && pending_mhc->has_value();
+  const MHCFusionPlan mhc_plan = resolve_mhc_fusion({
+      .optimization_enabled = true,
+      .is_prefill = attn_metadata.is_prefill,
+      .is_chunked_prefill = attn_metadata.is_chunked_prefill,
+      .supports_fused_mhc = attn_hc_pre_->supports_fused_mhc() &&
+                            ffn_hc_pre_->supports_fused_mhc(),
+      .has_pending_storage = has_pending_storage,
+      .has_pending = has_pending,
+      .is_last_layer = is_last_layer,
+  });
+  CHECK(!has_pending || mhc_plan.consume_pending)
+      << "Pending mHC state cannot enter an unfused layer.";
 
   torch::Tensor residual_attn;
-  DeepseekV4HCPreOutput attn_hc;
+  MHCPreOutput attn_hc;
   torch::Tensor attn_input;
-  if (use_fused_mhc && pending_mhc->has_value()) {
-    DeepseekV4PendingMHC& pending = pending_mhc->value();
+  if (mhc_plan.consume_pending) {
+    PendingMHC& pending = pending_mhc->value();
     std::tie(attn_input, residual_attn, attn_hc.post, attn_hc.comb) =
         attn_hc_pre_->fused_post_pre_norm(pending.x,
                                           pending.residual,
@@ -216,9 +226,9 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
       attention_->forward(attn_metadata, attn_input, kv_cache, cp_context);
 
   torch::Tensor residual_ffn;
-  DeepseekV4HCPreOutput ffn_hc;
+  MHCPreOutput ffn_hc;
   torch::Tensor ffn_input;
-  if (use_fused_mhc) {
+  if (mhc_plan.use_fused_mhc) {
     std::tie(ffn_input, residual_ffn, ffn_hc.post, ffn_hc.comb) =
         ffn_hc_pre_->fused_post_pre_norm(attn_output,
                                          residual_attn,
@@ -250,9 +260,9 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
                                                route_info.expert_id,
                                                input_params);
   }
-  if (use_fused_mhc && !is_last_layer) {
-    pending_mhc->emplace(DeepseekV4PendingMHC{
-        ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb});
+  if (mhc_plan.defer_post) {
+    pending_mhc->emplace(
+        PendingMHC{ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb});
     x = ffn_output;
     return x;
   }

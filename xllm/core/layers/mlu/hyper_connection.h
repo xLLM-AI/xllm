@@ -27,26 +27,51 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-struct DeepseekV4HCPreOutput {
+struct PendingMHC final {
+  torch::Tensor x;
+  torch::Tensor residual;
+  torch::Tensor post;
+  torch::Tensor comb;
+};
+
+struct MHCFusionContext final {
+  bool optimization_enabled = true;
+  bool is_prefill = false;
+  bool is_chunked_prefill = false;
+  bool supports_fused_mhc = false;
+  bool has_pending_storage = false;
+  bool has_pending = false;
+  bool is_last_layer = true;
+};
+
+struct MHCFusionPlan final {
+  bool use_fused_mhc = false;
+  bool consume_pending = false;
+  bool defer_post = false;
+};
+
+MHCFusionPlan resolve_mhc_fusion(const MHCFusionContext& context);
+
+struct MHCPreOutput final {
   torch::Tensor output;
   torch::Tensor post;
   torch::Tensor comb;
 };
 
-class DeepseekV4HCPreImpl final : public torch::nn::Module {
+class MHCPreImpl final : public torch::nn::Module {
  public:
-  DeepseekV4HCPreImpl() = default;
+  MHCPreImpl() = default;
 
-  DeepseekV4HCPreImpl(
-      int64_t hc_mult,
-      int64_t dim,
-      int64_t sinkhorn_iters,
-      double hc_eps,
-      double norm_eps,
-      const torch::TensorOptions& options =
-          torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU));
+  MHCPreImpl(int64_t hc_mult,
+             int64_t dim,
+             int64_t sinkhorn_iters,
+             double hc_eps,
+             double norm_eps,
+             const torch::TensorOptions& options = torch::TensorOptions()
+                                                       .dtype(torch::kBFloat16)
+                                                       .device(torch::kCPU));
 
-  DeepseekV4HCPreOutput forward(
+  MHCPreOutput forward(
       const torch::Tensor& x,
       const std::optional<torch::Tensor>& rsqrt = std::nullopt);
 
@@ -60,6 +85,7 @@ class DeepseekV4HCPreImpl final : public torch::nn::Module {
   bool supports_fused_mhc() const { return hc_mult_ == 4 && dim_ == 4096; }
 
   void load_state_dict(const StateDict& state_dict);
+  void verify_loaded_weights(const std::string& prefix) const;
 
  private:
   int64_t hc_mult_ = 0;
@@ -73,11 +99,11 @@ class DeepseekV4HCPreImpl final : public torch::nn::Module {
   DEFINE_WEIGHT(hc_scale);
 };
 
-class DeepseekV4HCPostImpl final : public torch::nn::Module {
+class MHCPostImpl final : public torch::nn::Module {
  public:
-  DeepseekV4HCPostImpl() = default;
+  MHCPostImpl() = default;
 
-  explicit DeepseekV4HCPostImpl(double norm_eps);
+  explicit MHCPostImpl(double norm_eps);
 
   std::tuple<torch::Tensor, torch::Tensor> forward(
       const torch::Tensor& x,
@@ -90,17 +116,17 @@ class DeepseekV4HCPostImpl final : public torch::nn::Module {
   double norm_eps_ = 1e-6;
 };
 
-class DeepseekV4HCHeadImpl final : public torch::nn::Module {
+class MHCHeadImpl final : public torch::nn::Module {
  public:
-  DeepseekV4HCHeadImpl() = default;
+  MHCHeadImpl() = default;
 
-  DeepseekV4HCHeadImpl(
-      int64_t hc_mult,
-      int64_t dim,
-      double hc_eps,
-      double norm_eps,
-      const torch::TensorOptions& options =
-          torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU));
+  MHCHeadImpl(int64_t hc_mult,
+              int64_t dim,
+              double hc_eps,
+              double norm_eps,
+              const torch::TensorOptions& options = torch::TensorOptions()
+                                                        .dtype(torch::kBFloat16)
+                                                        .device(torch::kCPU));
 
   torch::Tensor forward(const torch::Tensor& x);
 
@@ -117,9 +143,9 @@ class DeepseekV4HCHeadImpl final : public torch::nn::Module {
   DEFINE_WEIGHT(hc_head_scale);
 };
 
-TORCH_MODULE(DeepseekV4HCPre);
-TORCH_MODULE(DeepseekV4HCPost);
-TORCH_MODULE(DeepseekV4HCHead);
+TORCH_MODULE(MHCPre);
+TORCH_MODULE(MHCPost);
+TORCH_MODULE(MHCHead);
 
 }  // namespace layer
 }  // namespace xllm

@@ -23,7 +23,8 @@ cc_library(
     deepseek_v4/deepseek_v4_attention.h
     deepseek_v4/deepseek_v4_decoder_layer.h
     deepseek_v4/deepseek_v4_sparse_moe_block.h
-    deepseek_v4/hyper_connection.h
+    hyper_connection.h
+    glm5_next/glm5_next_kda.h
     deepseek_v32_cp_context.h
     deepseek_v32_sp_plan.h
     moe_gate.h
@@ -53,7 +54,8 @@ cc_library(
     deepseek_v4/deepseek_v4_attention.cpp
     deepseek_v4/deepseek_v4_decoder_layer.cpp
     deepseek_v4/deepseek_v4_sparse_moe_block.cpp
-    deepseek_v4/hyper_connection.cpp
+    hyper_connection.cpp
+    glm5_next/glm5_next_kda.cpp
     moe_gate.cpp
     fused_moe.cpp
     fused_moe_base.cpp

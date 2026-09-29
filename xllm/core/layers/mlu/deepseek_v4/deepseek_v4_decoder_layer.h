@@ -28,17 +28,10 @@ limitations under the License.
 #include "layers/common/rms_norm.h"
 #include "layers/mlu/deepseek_v4/deepseek_v4_attention.h"
 #include "layers/mlu/deepseek_v4/deepseek_v4_sparse_moe_block.h"
-#include "layers/mlu/deepseek_v4/hyper_connection.h"
+#include "layers/mlu/hyper_connection.h"
 
 namespace xllm {
 namespace layer {
-
-struct DeepseekV4PendingMHC {
-  torch::Tensor x;
-  torch::Tensor residual;
-  torch::Tensor post;
-  torch::Tensor comb;
-};
 
 class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
  public:
@@ -57,7 +50,7 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
       KVCache& kv_cache,
       const ModelInputParams& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt,
-      std::optional<DeepseekV4PendingMHC>* pending_mhc = nullptr,
+      std::optional<PendingMHC>* pending_mhc = nullptr,
       bool is_last_layer = true,
       const mlu_v4_cp::DeepseekV4CpContext* cp_context = nullptr);
 
@@ -69,9 +62,9 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
   int32_t layer_id_ = 0;
   bool use_hash_ = false;
 
-  DeepseekV4HCPre attn_hc_pre_{nullptr};
-  DeepseekV4HCPre ffn_hc_pre_{nullptr};
-  DeepseekV4HCPost hc_post_{nullptr};
+  MHCPre attn_hc_pre_{nullptr};
+  MHCPre ffn_hc_pre_{nullptr};
+  MHCPost hc_post_{nullptr};
   RMSNorm attn_norm_{nullptr};
   RMSNorm ffn_norm_{nullptr};
   DeepseekV4Attention attention_{nullptr};

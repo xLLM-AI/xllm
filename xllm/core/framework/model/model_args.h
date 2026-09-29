@@ -251,6 +251,7 @@ struct ModelArgs {
   PROPERTY(int32_t, linear_value_head_dim) = 0;
   PROPERTY(int64_t, linear_num_key_heads) = 0;
   PROPERTY(int32_t, linear_num_value_heads) = 0;
+  PROPERTY(float, linear_lower_bound) = -5.0f;
   PROPERTY(std::string, mamba_ssm_dtype);
   PROPERTY(int32_t, shared_expert_intermediate_size) = 0;
   PROPERTY(float, partial_rotary_factor) = 0.0f;
