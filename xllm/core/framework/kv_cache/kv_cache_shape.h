@@ -28,6 +28,16 @@ namespace proto {
 class KVCacheShape;
 }
 
+// SFA C8 packed-row constants. One physical row per token holds
+// [int8 nope | bf16 rope | fp32 per-tile scale]; kernel fixes tile=128 and
+// dequant scale as fp32. Shared by kv_cache_shape.cpp, kv_cache_estimation.cpp,
+// and the Python write path so the layout stays byte-identical everywhere.
+struct MlaPackedC8Layout {
+  static constexpr int64_t kTileSize = 128;         // fixed by kernel
+  static constexpr int64_t kRopeElementBytes = 2;   // bf16
+  static constexpr int64_t kScaleElementBytes = 4;  // fp32
+};
+
 class KVCacheShape final {
  public:
   KVCacheShape() = default;

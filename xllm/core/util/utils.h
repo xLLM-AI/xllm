@@ -282,6 +282,43 @@ inline std::string get_model_backend(const std::filesystem::path& model_path) {
   return ModelRegistry::get_model_backend(get_model_type(model_path));
 }
 
+// SFA C8: packed [int8 nope | bf16 rope | fp32 scale] KV cache. Currently only
+// GLM-5.2 (glm_moe_dsa) drives the packed 656B write/read pipeline.
+inline bool supports_mla_kv_cache_quant(std::string_view model_type) {
+  return model_type == "glm_moe_dsa" || model_type == "glm_moe_dsa_mtp";
+}
+
+// Combined predicate for the SFA C8 packed KV-cache layout. The C8 layout is
+// only defined for the (small) set of models covered by
+// supports_mla_kv_cache_quant(), and every such model_type is by construction
+// in mla_model_type_set(), so a redundant enable_mla parameter is not needed
+// here. Callers that also need to honor the runtime enable_mla config bit
+// AND it in at the call site (estimation is the only such caller today).
+//
+// The packed 656B layout is implemented on NPU only. Gating the build here
+// rather than at each consumer is what lets every caller read this flat: on a
+// non-NPU build the predicate is unconditionally false, so a caller that
+// eagerly forwards it into KVCacheCapacity / KVCacheCreateOptions can never
+// push a packed shape at a backend that has no write or read kernel for it.
+// If the layout ever lands on another backend, flip this single gate and every
+// consumer follows.
+inline bool enable_mla_packed_c8(bool enable_kv_cache_quant,
+                                 std::string_view model_type) {
+#if defined(USE_NPU)
+  return enable_kv_cache_quant && supports_mla_kv_cache_quant(model_type);
+#else
+  (void)enable_kv_cache_quant;
+  (void)model_type;
+  return false;
+#endif
+}
+
+// Shared message for the three sites that reject non-MLU KV-cache quant. Kept
+// as one string so the sites cannot drift apart.
+inline constexpr const char* kNonMluKvCacheQuantRejectMsg =
+    "KV cache quantization on non-MLU backends only supports GLM-5.2 "
+    "MLA SFA C8 (model_type=glm_moe_dsa).";
+
 inline bool should_enable_mla(
     const std::filesystem::path& model_path,
     const std::optional<std::string>& backend = std::nullopt) {

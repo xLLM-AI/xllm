@@ -84,6 +84,12 @@ struct KVCacheCreateOptions {
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
   PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
+
+  // Convenience: true when this options set drives the SFA C8 packed KV cache
+  // (int8 nope + bf16 rope + fp32 scale in one row, K==V). Every call site was
+  // previously spelling out `util::enable_mla_packed_c8(enable_kv_cache_quant,
+  // model_type)`; centralize it so the gate cannot drift by call site.
+  bool mla_packed_c8() const;
 #if defined(USE_NPU)
   PROPERTY(bool, enable_kv_cache_huge_page_allocator) = false;
 #endif

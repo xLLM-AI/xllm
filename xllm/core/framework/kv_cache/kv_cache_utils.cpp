@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#include "util/utils.h"
 #if defined(USE_MLU)
 #include "platform/mlu/mlu_host_memory.h"
 #endif
@@ -128,6 +129,10 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
   return tensor;
 }
 #endif
+
+bool KVCacheCreateOptions::mla_packed_c8() const {
+  return util::enable_mla_packed_c8(enable_kv_cache_quant(), model_type());
+}
 
 bool is_linear_attention_layer(int64_t layer_idx,
                                int64_t full_attention_interval,

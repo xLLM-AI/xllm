@@ -33,6 +33,10 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, num_indexer_layers) = 0;
   PROPERTY(bool, enable_indexer_cache_quant) = false;
 
+  // MLA SFA C8: KV cache is packed (int8 nope + bf16 rope + fp32 scale) in a
+  // single byte tensor. Consumed by KVCacheShape to switch to the 656B layout.
+  PROPERTY(bool, enable_mla_kv_cache_quant) = false;
+
   // for kv cache quantization scale cache
   PROPERTY(int64_t, scale_slot_size) = 0;
 
