@@ -61,7 +61,6 @@ from xllm.python.attention.kda_constants import (
     _KDA_VERIFY_V2,
     _KDA_VERIFY_V3,
     _MTP_FULL_COMMIT,
-    _MTP_TRACE,
 )
 from xllm.python.attention.kda_linear_attention import (
     KdaLinearAttentionMixin,
@@ -1364,30 +1363,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         silu = layer.activation == "silu"
         in_graph = _in_acl_graph()
 
-        _v2dbg = os.environ.get("GLM5_KDA_VERIFY_V2_DEBUG") == "1" and not in_graph
-
-        def _ckpt(tag):
-            if _v2dbg:
-                torch.npu.synchronize()
-                with open("/tmp/v2dbg.log", "a") as _fh:
-                    _fh.write(f"[ck] {tag} lid={layer.layer_id}\n")
-
-        # Numeric-parity instrumentation: same anchors/keys as the eager
-        # path's [linear-debug-in]/[linear-debug] prints (post-advance state
-        # + raw inputs in, post-write state + core out) so a per-layer diff
-        # against a GLM5NEXT_DEBUG_LINEAR run pinpoints the first diverging
-        # layer/phase. Eager only — the .item()/.tolist() reads are device->
-        # host syncs a captured stream cannot take. File-written: embedded
-        # stderr is unreliable.
-        _numdbg = os.environ.get("GLM5_KDA_VERIFY_V2_NUMDBG") == "1" and not in_graph
-
-        def _ndlog(kind, extra, tensors):
-            if _numdbg:
-                torch.npu.synchronize()
-                parts = [f"{k}={v:.6e}" for k, v in tensors.items()]
-                with open("/tmp/v2numdbg.log", "a") as _fh:
-                    _fh.write(f"pid={os.getpid()} {kind} lid={layer.layer_id} {extra} " + " ".join(parts) + "\n")
-
         st = self.__dict__.setdefault("_kda_v2", {}).setdefault(layer.layer_id, {})
         if "armed_buf" not in st:
             # Persistent slot-keyed stash. Allocated on the first V2 call
@@ -1413,25 +1388,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         expanded = resolve_expanded_decode_metadata(metadata)
         kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
-        # Per-step hoist: kv_rows/base_now/m are layer-independent (same
-        # metadata tensor across layers of the step); recompute only when the
-        # source buffer changes.
-        hoist = getattr(self, "_v2_kv_hoist", None)
-        if hoist is not None and hoist[0] == kv_src.data_ptr() and hoist[1] == num_seqs:
-            base_now, m = hoist[2], hoist[3]
-        else:
-            kv_rows = kv_src.to(device=device, dtype=torch.int64)
-            # Per-sequence committed base = kv length of each group's row 0.
-            base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
-            armed_h = st["armed_buf"].index_select(0, idx)
-            kv_prev_h = st["kv_prev"].index_select(0, idx)
-            m = torch.where(armed_h, (base_now - kv_prev_h).clamp(min=1, max=2), torch.ones_like(base_now))
-            self._v2_kv_hoist = (kv_src.data_ptr(), num_seqs, base_now, m)
+        # Graph replay reuses the metadata address while values and per-layer
+        # stash state change. Derive both values for every layer and step.
+        kv_rows = kv_src.to(device=device, dtype=torch.int64)
+        base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
+        armed_h = st["armed_buf"].index_select(0, idx)
+        kv_prev_h = st["kv_prev"].index_select(0, idx)
+        m = torch.where(armed_h, (base_now - kv_prev_h).clamp(min=1, max=2), torch.ones_like(base_now))
 
         stash_g = st["g_raw"].index_select(0, idx)  # [B, 2, nh, hd]
         tails_all = st["tails"].index_select(1, idx)  # [2, B, C, K-1]
 
-        _ckpt("after_m")
         # ---- 1) boundary conv state + current-row conv chain ----
         # conv cache rows are [Ks, C]; restore the [C, Ks] compute layout.
         cache_boundary = conv_cache.index_select(0, idx).transpose(1, 2).contiguous()
@@ -1486,7 +1453,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         else:
             tails_new = torch.stack([tail_full, tail_full], dim=0)
 
-        _ckpt("after_conv")
         # ---- 2) advance the live ssm state by the stashed rows ----
         # Always the fixed [B, 2] call: row0 advances unless the slot was
         # never armed (all-zero stash rows — a no-op by the mask property);
@@ -1530,24 +1496,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         ssm_cache.index_copy_(0, idx, ssm_post.contiguous())
         # Every layer persists its own conv boundary (the advance leaves the
         # live conv state at the boundary; the chain rows do not commit).
-        ssm_post = ssm_cache.index_select(0, idx)
         conv_cache.index_copy_(0, idx, boundary.transpose(1, 2).contiguous())
 
-        _ckpt("after_advance")
-        if _numdbg:
-            # Post-advance state (matches the eager [linear-debug-in] anchor:
-            # the coordinator advances before its entry print).
-            _ndlog(
-                "[kda-in]",
-                f"v2 rps={rows_per_seq} m={[int(v) for v in m.tolist()]} base={[int(v) for v in base_now.tolist()]}",
-                {
-                    "conv_in": boundary.abs().sum().item(),
-                    "ssm_in": ssm_post.abs().sum().item(),
-                    "mqkv_in": mixed_qkv.abs().sum().item(),
-                    "gate_in": gate.abs().sum().item(),
-                    "beta_in": beta.abs().sum().item(),
-                },
-            )
         # ---- 3) read-only chain of the current rows for the outputs ----
         c_split = conv_out.transpose(1, 2).split(qkv_dim, dim=-1)
         cq = c_split[0].reshape(-1, nh, head_dim).to(torch.bfloat16)
@@ -1583,7 +1533,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if isinstance(core_out, tuple):
             core_out = core_out[0]
 
-        _ckpt("after_chain")
         # ---- 4) stash the current group for the next step's advance ----
         if rows_per_seq == 2:
             stash_c = conv_out
@@ -1605,16 +1554,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         # [T, nh, hd] packed rows back to the [1, S, nh, hd] flat layout the
         # model layer expects (matches the eager branch's reshape).
-        if _numdbg:
-            _ndlog(
-                "[kda-out]",
-                f"v2 rps={rows_per_seq}",
-                {
-                    "conv_sum": boundary.abs().sum().item(),
-                    "ssm_sum": ssm_post.abs().sum().item(),
-                    "core_sum": core_out.abs().sum().item(),
-                },
-            )
         return core_out.view(1, num_seqs * rows_per_seq, nh, head_dim)
 
     def _spec_verify_v3(
@@ -1694,40 +1633,25 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         kv_prev = st["kv_prev"]
         armed_buf = st["armed_buf"]
 
-        # ---- per-step m hoist (previous accepted count = kv growth) ----
-        # Eager-only optimization: reuse the per-call (base_now, m) when the
-        # kv source buffer + batch size are unchanged. Under ACL-graph capture
-        # the data_ptr()/num_seqs keys are constant across the warmup
-        # iterations, so the hoist would always hit and freeze (base_now, m)
-        # at capture-time values — the `where(m2, ...)` selection would then
-        # replay against a stale, runner-never-updated tensor and garble
-        # exactly like V2. In graph we MUST let m recompute each replay from
-        # the live runner-filled buffers (kv_seq_lens / armed_buf / kv_prev),
-        # so the cache is bypassed entirely there.
-        # NOTE: the eager hoist is disabled. Its (kv_src.data_ptr(), num_seqs)
-        # key is unsafe under concurrency: the scheduler reuses the same kv_seq_lens
-        # host buffer across decode steps, so under N concurrent requests the key
-        # (same ptr, same N) repeats every step while the actual per-seq lengths
-        # GROW (tokens are generated) — the hoist then returns a stale (base_now,
-        # m) from a prior step, mis-selecting the conv/ssm boundary slot and
-        # diverging output under temp=0+HCCL_DETERMINISTIC. m MUST recompute from
-        # live kv_seq_lens every call. The cost is a handful of cheap host->dev
-        # + index_select ops per step. (Graph already bypassed this below.)
+        # ---- per-step m (previous accepted count = kv growth) ----
+        # (base_now, m) is recomputed from the live kv_seq_lens on every call
+        # and must NOT be cached across steps: the scheduler reuses the same
+        # kv_seq_lens host buffer, so a (data_ptr, num_seqs) key repeats every
+        # step while the per-seq lengths GROW — a cached (base_now, m) would
+        # mis-select the conv/ssm boundary slot and diverge output under
+        # temp=0 + HCCL_DETERMINISTIC. The cost is a handful of cheap host->dev
+        # + index_select ops per step.
         from xllm.python.attention.expanded_decode_metadata import (
             resolve_expanded_decode_metadata,
         )
 
         expanded = resolve_expanded_decode_metadata(metadata)
         kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
-        hoist = None
-        if hoist is not None and hoist[0] == kv_src.data_ptr() and hoist[1] == num_seqs:
-            base_now, m = hoist[2], hoist[3]
-        else:
-            kv_rows = kv_src.to(device=device, dtype=torch.int64)
-            base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
-            armed_h = armed_buf.index_select(0, idx)
-            kv_prev_h = kv_prev.index_select(0, idx)
-            m = torch.where(armed_h, (base_now - kv_prev_h).clamp(min=1, max=rows_per_seq), torch.ones_like(base_now))
+        kv_rows = kv_src.to(device=device, dtype=torch.int64)
+        base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
+        armed_h = armed_buf.index_select(0, idx)
+        kv_prev_h = kv_prev.index_select(0, idx)
+        m = torch.where(armed_h, (base_now - kv_prev_h).clamp(min=1, max=rows_per_seq), torch.ones_like(base_now))
 
         idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
         idx32 = idx64.to(torch.int32)

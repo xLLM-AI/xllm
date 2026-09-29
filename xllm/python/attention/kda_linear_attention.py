@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -27,7 +26,6 @@ from xllm.python.attention.kda_constants import (
     _KDA_VERIFY_V2,
     _KDA_VERIFY_V3,
     _MTP_FULL_COMMIT,
-    _MTP_TRACE,
 )
 from xllm.python.model_executor.forward_context import (
     get_execution_buffer,
@@ -290,24 +288,6 @@ class KdaLinearAttentionMixin:
             # which are forbidden on a captured ACL-graph stream. The graph
             # decode path is not spec-verify (merged_q_cu stays None and the
             # simple path below uses the capture-safe conv), so skip it whole.
-            if os.environ.get("XLLM_KDA_DISPATCH_TRACE") == "1" and in_graph:
-                _tn = getattr(self, "_kda_tr_n", 0)
-                if _tn < 400:
-                    self._kda_tr_n = _tn + 1
-                    try:
-                        _ea = bool(self.__dict__.get("_kda_v3", {}).get(layer.layer_id, {}).get("ever_armed"))
-                    except Exception:
-                        _ea = "n/a"
-                    _shp = tuple(mixed_qkv.shape)
-                    with open("/tmp/kda_dispatch.log", "a") as _fh:
-                        _fh.write(
-                            f"#{_tn} L={getattr(layer, 'layer_id', '?')} "
-                            f"ing={in_graph} dec={is_decode} "
-                            f"ns={num_seqs} idx={idx.numel() if idx is not None else 0} "
-                            f"shp={_shp} qcu={(None if q_cu_raw is None else int(q_cu_raw.numel()) - 1)} "
-                            f"exp={getattr(metadata, 'expanded_decode_metadata', None) is not None} "
-                            f"armed={_ea} flat={flatten_graph_decode}\n"
-                        )
             q_rows = 0 if in_graph else (int(q_cu_raw.numel()) - 1 if q_cu_raw is not None else 0)
             per_row_idx = None
             per_row_cu = None
@@ -357,14 +337,7 @@ class KdaLinearAttentionMixin:
                     from fla_npu.ops.ascendc import recurrent_kda as _rk
 
                     _fn = self._spec_verify_v3 if _KDA_VERIFY_V3 else self._spec_verify_v2
-                    try:
-                        return _fn(mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk)
-                    except Exception:
-                        import traceback
-
-                        with open("/tmp/v2dbg.log", "a") as _fh:
-                            _fh.write(traceback.format_exc() + "\n")
-                        raise
+                    return _fn(mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk)
             else:
                 if _KDA_VERIFY_V3:
                     _v3_states = self.__dict__.get("_kda_v3", {})
@@ -384,19 +357,9 @@ class KdaLinearAttentionMixin:
                         # single confirmed token in one fused call.
                         from fla_npu.ops.ascendc import recurrent_kda as _rk
 
-                        if os.environ.get("XLLM_KDA_DISPATCH_TRACE") == "1":
-                            with open("/tmp/kda_dispatch.log", "a") as _fh:
-                                _fh.write(f"#{getattr(self, '_kda_tr_n', 0)} BRANCH=V3_reject\n")
-                        try:
-                            return self._spec_verify_v3(
-                                mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
-                            )
-                        except Exception:
-                            import traceback
-
-                            with open("/tmp/v2dbg.log", "a") as _fh:
-                                _fh.write(traceback.format_exc() + "\n")
-                            raise
+                        return self._spec_verify_v3(
+                            mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
+                        )
                 if _KDA_VERIFY_V2:
                     _v2_states = self.__dict__.get("_kda_v2", {})
                     if metadata.is_prefill or metadata.is_chunked_prefill:
@@ -418,16 +381,9 @@ class KdaLinearAttentionMixin:
                         # chain this row read-only, re-stash it.
                         from fla_npu.ops.ascendc import recurrent_kda as _rk
 
-                        try:
-                            return self._spec_verify_v2(
-                                mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
-                            )
-                        except Exception:
-                            import traceback
-
-                            with open("/tmp/v2dbg.log", "a") as _fh:
-                                _fh.write(traceback.format_exc() + "\n")
-                            raise
+                        return self._spec_verify_v2(
+                            mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
+                        )
                 # Non-verify path (plain decode / prefill): states are
                 # committed wholesale the regular way, plus lazy-commit
                 # handshakes - but ONLY once this backend has seen a
@@ -459,16 +415,6 @@ class KdaLinearAttentionMixin:
                     _kv_list = metadata.kv_seq_lens.tolist() if metadata.kv_seq_lens is not None else None
                     _active = getattr(self, "_mtp_seen_verify", False)
                     _is_pf = metadata.is_prefill or metadata.is_chunked_prefill
-                    if (
-                        _MTP_TRACE
-                        and layer.layer_id == 0
-                        and not _is_pf
-                        and getattr(self, "_mtp_stats", None) is not None
-                    ):
-                        # Non-prefill plain steps inside the decode phase are
-                        # the rejection bootstraps - their share of all steps
-                        # is the acceptance-rate signal.
-                        self._mtp_stats["plain"] += num_seqs
                     _cw = layer.conv1d.weight.squeeze(1)
                     for s, slot in enumerate(idx.tolist()):
                         slot = int(slot)
@@ -681,27 +627,6 @@ class KdaLinearAttentionMixin:
                 # pure-decode backend never sets this and keeps the exact
                 # pre-MTP plain-path behavior).
                 self._mtp_seen_verify = True
-                if _MTP_TRACE and layer.layer_id == 0:
-                    _st = getattr(self, "_mtp_stats", None)
-                    if _st is None:
-                        _st = {"verify": 0, "plain": 0}
-                        self._mtp_stats = _st
-                    _st["verify"] += num_seqs
-                    if _st["verify"] >= 50:
-                        _mh = getattr(self, "_mtp_mhist", {})
-                        _mh_str = " ".join(f"m{k}={v}" for k, v in sorted(_mh.items()))
-                        with open("/tmp/mtp_accept.log", "a") as _fh:
-                            _fh.write(
-                                f"[accept] pid={os.getpid()} "
-                                f"verify={_st['verify']} "
-                                f"plain(reject)={_st['plain']} "
-                                f"accept_rate="
-                                f"{_st['verify'] / max(1, _st['verify'] + _st['plain']):.2f} "
-                                f"{_mh_str}\n"
-                            )
-                        _st["verify"] = 0
-                        _st["plain"] = 0
-                        self._mtp_mhist = {}
                 # ---- MTP spec-verify steps (observed layout, k=1) ----
                 # Rows are [last-confirmed token (re-processed each step to
                 # judge the next draft), drafted token]; the C++ commits
@@ -752,12 +677,6 @@ class KdaLinearAttentionMixin:
                     if prev is not None and not _MTP_FULL_COMMIT:
                         (prev_base, prev_seg, prev_g, prev_b, _pw, _pact) = prev
                         m = base_now - prev_base
-                        if _MTP_TRACE and layer.layer_id == 0:
-                            _mh = getattr(self, "_mtp_mhist", None)
-                            if _mh is None:
-                                _mh = {}
-                                self._mtp_mhist = _mh
-                            _mh[m] = _mh.get(m, 0) + 1
                         if 0 < m <= prev_seg.shape[2]:
                             adv_seg.append(prev_seg[:, :, :m])
                             adv_g.append(prev_g[:, :m])

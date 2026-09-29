@@ -64,8 +64,3 @@ _KDA_VERIFY_V2 = os.environ.get("GLM5_KDA_VERIFY_V2", "0") == "1"
 # to opt in, or GLM5_KDA_VERIFY_V2=1 to fall back to the legacy V2 path (which
 # forces V3 off to avoid the two competing).
 _KDA_VERIFY_V3 = (not _KDA_VERIFY_V2) and (os.environ.get("GLM5_KDA_VERIFY_V3", "0") == "1")
-
-# Spec-verify acceptance instrumentation (MTP_TRACE=1): layer-0 counts
-# verify steps and non-prefill plain steps (each reject inserts one plain
-# bootstrap step, so the plain share of decode steps is the reject rate).
-_MTP_TRACE = os.environ.get("MTP_TRACE", "") == "1"
