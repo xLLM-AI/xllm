@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include "framework/kv_cache_transfer/prefetch_result.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/request/sequence.h"
@@ -83,6 +84,13 @@ bool block_transfer_info_to_proto(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info,
     proto::BlockTransferInfos* pb_block_transfer_info);
+
+bool storage_prefetch_request_to_proto(const StoragePrefetchRequest& request,
+                                       proto::PrefetchRequest* proto_request);
+
+bool proto_to_storage_prefetch_request(
+    const proto::PrefetchRequest& proto_request,
+    StoragePrefetchRequest* request);
 
 bool dit_forward_input_to_proto(const DiTForwardInput& dit_inputs,
                                 proto::DiTForwardInput* pb_dit_inputs);

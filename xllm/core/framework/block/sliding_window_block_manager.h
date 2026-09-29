@@ -38,6 +38,7 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
       Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) override;
+  bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
 
   // Deallocate leading blocks that have slid out of the window; leaves
   // invalid placeholders in their slots. Called by the composite after a

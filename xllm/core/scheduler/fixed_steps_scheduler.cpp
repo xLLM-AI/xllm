@@ -179,7 +179,7 @@ void FixedStepsScheduler::handle_prefill_requests(
 
 RecBatchGroup FixedStepsScheduler::prepare_rec_batch() {
   Timer timer;
-  drain_prefetched_requests();
+  drain_prefetch_pipeline();
   // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   auto propagate_request = [this](std::shared_ptr<Request>& request) {
@@ -349,8 +349,12 @@ ScheduleResult FixedStepsScheduler::schedule_request(
     // spinning of a fixed sleep under high concurrency. The prefetched request
     // is consumed by the next prepare_rec_batch() call.
     std::shared_ptr<Request> request;
-    const auto wait_deadline = std::chrono::steady_clock::now() +
-                               absl::ToChronoNanoseconds(deadline - now);
+    const auto remaining = absl::ToChronoNanoseconds(deadline - now);
+    const auto wait_duration =
+        prefetching_requests_.load(std::memory_order_relaxed) > 0
+            ? std::min(remaining, std::chrono::nanoseconds(50'000'000))
+            : remaining;
+    const auto wait_deadline = std::chrono::steady_clock::now() + wait_duration;
     if (request_queue_.tryReadUntil(wait_deadline, request)) {
       prefetched_request_ = std::move(request);
     }

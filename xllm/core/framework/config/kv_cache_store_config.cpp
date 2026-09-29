@@ -18,10 +18,11 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
-DEFINE_uint32(prefetch_timeout,
-              0,
-              "Stop issuing new KV cache Store prefetch batches after this "
-              "timeout; wait for in-flight batches before admission.");
+DEFINE_uint32(
+    prefetch_timeout,
+    120000,
+    "Stop KV cache Store prefetch after this timeout in milliseconds; "
+    "stalled prefetch streams are closed.");
 
 DEFINE_uint32(prefetch_batch_size,
               2,

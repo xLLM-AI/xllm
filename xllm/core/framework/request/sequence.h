@@ -45,7 +45,6 @@ limitations under the License.
 #include "sequence_kv_state.h"
 #include "sequence_logprob_state.h"
 #include "stopping_checker.h"
-#include "util/timer.h"
 
 namespace xllm {
 
@@ -425,6 +424,7 @@ class Sequence {
   }
 
   KVCacheState& host_kv_state() { return host_kv_state_; }
+  const KVCacheState& host_kv_state() const { return host_kv_state_; }
 
   void set_host_cache_match(size_t restore_tokens, size_t copy_units);
   void set_host_cache_restore(size_t restore_tokens, size_t copy_units);
@@ -443,12 +443,6 @@ class Sequence {
       size_t end_idx,
       const Tokenizer& tokenizer,
       std::optional<std::vector<LogProb>>& out_logprobs);
-
-  std::vector<std::shared_ptr<std::atomic<uint32_t>>>* get_prefetch_results() {
-    return &prefetch_results_;
-  }
-
-  bool update_prefetch_result(uint32_t timeout, uint32_t& success_cnt);
 
   void reset();
 
@@ -709,15 +703,6 @@ class Sequence {
   std::queue<bool> is_pre_scheduled_step_prefill_;
 
   std::atomic<bool> cancelled_{false};
-
-  // kvcache store copy async result. Only ever read/written by this sequence
-  // (nothing shares it), so it is a plain atomic rather than a heap-allocated
-  // shared_ptr<atomic>.
-  std::atomic<int32_t> termination_flag_{INT32_MAX};
-  std::vector<std::shared_ptr<std::atomic<uint32_t>>> prefetch_results_;
-
-  Timer timer_;
-  bool is_timeout_set_ = false;
 
   // whether the last token is handled
   std::atomic<bool> last_token_handled_{false};

@@ -110,11 +110,12 @@ class Engine {
     NOT_IMPLEMENTED();
   };
 
-  virtual std::shared_ptr<PrefetchResult> prefetch_from_storage(
+  virtual void prefetch_from_storage(
       const uint32_t dp_rank,
-      const std::vector<BlockTransferInfo>& block_transfer_info) {
+      std::shared_ptr<const StoragePrefetchRequest> request,
+      PrefetchResult::StopPredicate stop_requested,
+      PrefetchResult::DoneCallback done) {
     NOT_IMPLEMENTED();
-    return nullptr;
   };
 
   virtual void get_cache_info(std::vector<uint64_t>& cluster_ids,

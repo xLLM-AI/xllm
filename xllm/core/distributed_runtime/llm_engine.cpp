@@ -670,6 +670,7 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
                                : options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
+      .prefetch_batch_size(options_.prefetch_batch_size())
       .enable_xtensor(kv_cache_config.enable_xtensor())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
@@ -879,23 +880,27 @@ void LLMEngine::transfer_kv_blocks(
   }
 }
 
-std::shared_ptr<PrefetchResult> LLMEngine::prefetch_from_storage(
+void LLMEngine::prefetch_from_storage(
     const uint32_t dp_rank,
-    const std::vector<BlockTransferInfo>& block_transfer_info) {
-  const size_t batch_size =
-      std::max<size_t>(options_.prefetch_batch_size(), 1u);
-  auto result = std::make_shared<PrefetchResult>(
-      dp_local_tp_size_,
-      block_transfer_info.size(),
-      batch_size,
-      options_.prefetch_timeout() == 0
-          ? -1
-          : static_cast<int64_t>(options_.prefetch_timeout()));
+    std::shared_ptr<const StoragePrefetchRequest> request,
+    PrefetchResult::StopPredicate stop_requested,
+    PrefetchResult::DoneCallback done) {
+  CHECK(request != nullptr);
+  CHECK(request->valid());
+  const uint32_t configured_timeout_ms = options_.prefetch_timeout();
+  const int64_t timeout_ms = configured_timeout_ms == 0
+                                 ? -1
+                                 : static_cast<int64_t>(configured_timeout_ms);
+  auto result =
+      std::make_shared<PrefetchResult>(dp_local_tp_size_,
+                                       request->batch_end_unit_offsets,
+                                       timeout_ms,
+                                       std::move(stop_requested),
+                                       std::move(done));
   for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]
-        ->prefetch_from_storage(block_transfer_info, result, tp_rank);
+        ->prefetch_from_storage(request, result, tp_rank);
   }
-  return result;
 }
 
 void LLMEngine::get_cache_info(std::vector<uint64_t>& cluster_ids,

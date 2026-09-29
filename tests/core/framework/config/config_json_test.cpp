@@ -592,11 +592,15 @@ TEST(ConfigJsonTest, MissingJsonFileKeepsFlagDefaults) {
   KVCacheConfig kv_cache_config;
   kv_cache_config.initialize();
 
+  KVCacheStoreConfig kv_cache_store_config;
+  kv_cache_store_config.initialize();
+
   SchedulerConfig scheduler_config;
   scheduler_config.initialize();
 
   EXPECT_EQ(kv_cache_config.block_size(), 128);
   EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.8);
+  EXPECT_EQ(kv_cache_store_config.prefetch_timeout(), 120000u);
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 10240);
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 200);
 }

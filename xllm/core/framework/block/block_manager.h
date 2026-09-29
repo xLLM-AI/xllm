@@ -188,6 +188,10 @@ class BlockManager {
       KVCacheState& kv_state,
       size_t num_tokens) = 0;
 
+  virtual bool allocate_for_prefetch(Sequence* /*seq*/, size_t /*num_tokens*/) {
+    return false;
+  }
+
   // Sliding-window hook: release leading blocks that have slid out of the
   // window. The composite calls this on every leaf after a successful commit;
   // the SWA leaf may also call it after an allocation shortage before retrying.

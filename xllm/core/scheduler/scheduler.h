@@ -50,6 +50,9 @@ class Scheduler : public SchedulerBase {
 
   virtual uint32_t get_waiting_requests_num() const = 0;
 
+  // Shutdown must keep advancing callbacks that still own scheduler state.
+  virtual bool has_pending_prefetch() const { return false; }
+
   virtual void get_latency_metrics(std::vector<int64_t>& ttft,
                                    std::vector<int64_t>& tbt) = 0;
 

@@ -90,9 +90,11 @@ class LLMEngine : public Engine {
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
-  std::shared_ptr<PrefetchResult> prefetch_from_storage(
+  void prefetch_from_storage(
       const uint32_t dp_rank,
-      const std::vector<BlockTransferInfo>& block_transfer_info) override;
+      std::shared_ptr<const StoragePrefetchRequest> request,
+      PrefetchResult::StopPredicate stop_requested,
+      PrefetchResult::DoneCallback done) override;
 
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,

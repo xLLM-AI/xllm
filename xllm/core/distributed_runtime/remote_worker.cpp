@@ -284,16 +284,14 @@ void RemoteWorker::transfer_kv_blocks(
 }
 
 void RemoteWorker::prefetch_from_storage(
-    const std::vector<BlockTransferInfo>& block_transfer_info,
+    const std::shared_ptr<const StoragePrefetchRequest>& request,
     std::shared_ptr<PrefetchResult> result,
     size_t worker_index) {
-  copy_threadpool_.schedule([this,
-                             block_transfer_info = block_transfer_info,
-                             result = std::move(result),
-                             worker_index]() mutable {
-    channel_->prefetch_from_storage(
-        block_transfer_info, std::move(result), worker_index);
-  });
+  copy_threadpool_.schedule(
+      [this, request, result = std::move(result), worker_index]() mutable {
+        channel_->prefetch_from_storage(
+            *request, std::move(result), worker_index);
+      });
 }
 
 const torch::Device& RemoteWorker::device() const {

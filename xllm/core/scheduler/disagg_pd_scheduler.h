@@ -56,7 +56,8 @@ class DisaggPDScheduler : public ContinuousScheduler {
   ~DisaggPDScheduler() override;
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size() + num_prefetch_pending_requests();
+    return prefill_queue_->size() +
+           prefetching_requests_.load(std::memory_order_relaxed);
   };
 
   void step(const absl::Duration& timeout) override;
@@ -123,7 +124,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
 
   void do_permanent_rejection(const std::shared_ptr<Request>& request);
 
-  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
+  void enqueue_ready_request(std::shared_ptr<Request> request) override;
 
   // Pre-execute prefill requests of different lengths at startup and obtain the
   // corresponding TTFT for calculating the estimated TTFT of requests.

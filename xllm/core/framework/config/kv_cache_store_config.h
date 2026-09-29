@@ -55,7 +55,7 @@ class KVCacheStoreConfig final {
     return kOptionCategory;
   }
 
-  PROPERTY(uint32_t, prefetch_timeout) = 0;
+  PROPERTY(uint32_t, prefetch_timeout) = 120000;
 
   PROPERTY(uint32_t, prefetch_batch_size) = 2;
 

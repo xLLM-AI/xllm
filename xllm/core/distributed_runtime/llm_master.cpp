@@ -104,7 +104,6 @@ LLMMaster::LLMMaster(const Options& options)
       .max_global_ttft_ms(options_.max_global_ttft_ms())
       .max_global_tpot_ms(options_.max_global_tpot_ms())
       .server_idx(options_.server_idx())
-      .prefetch_timeout(options_.prefetch_timeout())
       .rec_worker_max_concurrency(options_.rec_worker_max_concurrency());
   scheduler_ = create_continuous_scheduler(engine_.get(), scheduler_options);
 
@@ -138,7 +137,6 @@ LLMMaster::LLMMaster(const Options& options)
 }
 
 LLMMaster::~LLMMaster() {
-  stoped_.store(true, std::memory_order_relaxed);
   LOG(INFO) << "LLMMaster stopping...";
 
   // Drain and join the request thread pool before any of the members its
@@ -151,6 +149,9 @@ LLMMaster::~LLMMaster() {
   // Done before joining loop_thread_ so the scheduler keeps advancing while the
   // pool drains.
   threadpool_.reset();
+  // Stop accepting work after request handlers have finished admission. The
+  // loop still drains prefetch callbacks before scheduler/engine destruction.
+  stoped_.store(true, std::memory_order_release);
 
   // wait for the loop thread to finish
   if (loop_thread_.joinable()) {
@@ -303,7 +304,8 @@ void LLMMaster::run() {
   running_.store(true, std::memory_order_relaxed);
   loop_thread_ = std::thread([this]() {
     const auto timeout = absl::Milliseconds(500);
-    while (!stoped_.load(std::memory_order_relaxed)) {
+    while (!stoped_.load(std::memory_order_acquire) ||
+           scheduler_->has_pending_prefetch()) {
       scheduler_->step(timeout);
     }
     running_.store(false, std::memory_order_relaxed);

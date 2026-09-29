@@ -113,6 +113,22 @@ ConcurrentBlockManagerImpl::allocate_for_sequence(Sequence* seq,
   return blocks;
 }
 
+bool ConcurrentBlockManagerImpl::allocate_for_prefetch(Sequence* seq,
+                                                       size_t num_tokens) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  const bool complete = inner_->allocate_for_prefetch(seq, num_tokens);
+  if (seq != nullptr) {
+    std::vector<Block>* blocks =
+        seq->host_kv_state().mutable_blocks(block_type());
+    for (Block& block : *blocks) {
+      if (block.is_valid()) {
+        block.set_manager(this);
+      }
+    }
+  }
+  return complete;
+}
+
 void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   inner_->release_out_of_window(seq);

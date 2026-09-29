@@ -367,14 +367,13 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-bool DisaggPDScheduler::enqueue_ready_request(
+void DisaggPDScheduler::enqueue_ready_request(
     std::shared_ptr<Request> request) {
   if (request->offline()) {
     prefill_request_queue_offline_.enqueue(std::move(request));
-    return true;
+    return;
   }
   prefill_request_queue_.enqueue(std::move(request));
-  return true;
 }
 
 // prefill send new request to remote instance

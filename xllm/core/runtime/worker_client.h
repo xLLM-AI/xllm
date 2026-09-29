@@ -119,7 +119,7 @@ class WorkerClient {
       const std::vector<BlockTransferInfo>& block_transfer_info);
 
   virtual void prefetch_from_storage(
-      const std::vector<BlockTransferInfo>& block_transfer_info,
+      const std::shared_ptr<const StoragePrefetchRequest>& request,
       std::shared_ptr<PrefetchResult> result,
       size_t worker_index);
 

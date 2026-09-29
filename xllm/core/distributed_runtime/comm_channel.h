@@ -97,10 +97,9 @@ class CommChannel {
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
 
-  virtual void prefetch_from_storage(
-      const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<PrefetchResult> result,
-      size_t worker_index);
+  virtual void prefetch_from_storage(const StoragePrefetchRequest& request,
+                                     std::shared_ptr<PrefetchResult> result,
+                                     size_t worker_index);
 
   virtual bool get_last_step_result_async(
       folly::Promise<std::optional<RawForwardOutput>>& promise);

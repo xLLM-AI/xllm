@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <functional>
 #include <vector>
 
 #include "common/macros.h"
@@ -33,6 +34,8 @@ struct HostCacheRestorePoint {
 
 class KVCacheManager {
  public:
+  using PrefetchDoneCallback = std::function<void(std::shared_ptr<Request>)>;
+
   virtual ~KVCacheManager() = default;
 
   virtual bool allocate(Sequence* sequence) = 0;
@@ -44,12 +47,16 @@ class KVCacheManager {
   virtual void transfer_blocks(RecBatchGroup& batches) {};
   virtual void transfer_blocks() {};
 
-  virtual void prefetch_from_storage(std::shared_ptr<Request>& request) {};
+  // Managers without storage prefetch admit directly to the ready queue.
+  virtual bool has_storage_prefetch() const { return false; }
 
-  virtual bool update_prefetch_result(std::shared_ptr<Request>& request,
-                                      const uint32_t timeout) {
-    return true;
-  };
+  virtual void prefetch_from_storage(std::shared_ptr<Request> request,
+                                     PrefetchDoneCallback done) {
+    done(std::move(request));
+  }
+
+  // Apply completed prefetches on the scheduler thread before cache admission.
+  virtual void drain_prefetch_completions() {}
 
   virtual std::vector<Block> allocate(size_t num_tokens, int32_t& dp_rank) = 0;
   virtual void deallocate(Request* request) = 0;

@@ -170,9 +170,6 @@ class ContinuousScheduler : public Scheduler {
     // if the model supports multiple version or there are multiple models.
     PROPERTY(int64_t, server_idx) = 0;
 
-    // Prefetch timeout for prefetch from kv cache store
-    PROPERTY(uint32_t, prefetch_timeout) = 0;
-
     // max concurrency for rec worker
     PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
   };
@@ -200,10 +197,48 @@ class ContinuousScheduler : public Scheduler {
     return pending_requests_.load(std::memory_order_relaxed);
   }
 
+  bool has_pending_prefetch() const override {
+    return prefetching_requests_.load(std::memory_order_relaxed) > 0;
+  }
+
   uint32_t get_waiting_requests_num() const override {
     return prefill_queue_->size() + chunk_queue_->size() +
-           decode_restore_waiting_.size() + num_prefetch_pending_requests();
+           decode_restore_waiting_.size() +
+           prefetching_requests_.load(std::memory_order_relaxed);
   }
+
+  // for test only
+  std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
+  void process_batch_output_test(bool enable_schedule_overlap) {
+    process_batch_output(enable_schedule_overlap);
+  }
+  std::vector<std::shared_ptr<Request>> get_running_requests() {
+    return running_requests_;
+  }
+  std::vector<size_t> get_running_sequences_budgets() {
+    return running_sequences_budgets_;
+  }
+  std::vector<std::shared_ptr<Request>> get_waiting_requests() {
+    std::vector<std::shared_ptr<Request>> result;
+    if (prefill_queue_ == nullptr) {
+      return result;
+    }
+
+    auto copied_waiting_queue = prefill_queue_->clone();
+    result.reserve(copied_waiting_queue->size());
+    while (!copied_waiting_queue->empty()) {
+      result.emplace_back(copied_waiting_queue->top());
+      copied_waiting_queue->pop_top();
+    }
+    result.reserve(result.size() + decode_restore_waiting_.size());
+    for (const DecodeRestoreEntry& entry : decode_restore_waiting_) {
+      result.emplace_back(entry.request);
+    }
+
+    return result;
+  }
+
+  ProfileManager* get_profile_manager() { return profile_manager_.get(); }
 
   void get_latency_metrics(std::vector<int64_t>& ttft,
                            std::vector<int64_t>& tbt) override {}
@@ -212,11 +247,8 @@ class ContinuousScheduler : public Scheduler {
 
  protected:
   void clear_mtp_bootstrap(Request* request);
-  void drain_prefetched_requests();
-  void release_prefetch_admission_slot();
-  virtual bool enqueue_ready_request(std::shared_ptr<Request> request);
-
-  size_t num_prefetch_pending_requests() const;
+  void drain_prefetch_pipeline();
+  virtual void enqueue_ready_request(std::shared_ptr<Request> request);
 
   // process the batch output
   void process_batch_output(bool enable_schedule_overlap);
@@ -245,12 +277,10 @@ class ContinuousScheduler : public Scheduler {
   // the schedule owns the requests and manages their lifetimes.
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
 
-  // Requests waiting for Mooncake prefetch completion. This is an admission
-  // barrier only; SchedulerPolicy never sees these requests.
-  mutable std::mutex prefetch_admission_mutex_;
-  std::deque<std::shared_ptr<Request>> prefetch_admission_queue_;
-  size_t prefetch_admission_slots_ = 0;
-  size_t prefetch_admission_limit_ = 0;
+  std::atomic<size_t> prefetching_requests_{0};
+  std::mutex prefetch_admission_mutex_;
+  std::deque<std::shared_ptr<Request>> prefetch_admissions_;
+  std::deque<std::shared_ptr<Request>> completed_prefetches_;
 
   // a batch of requests in running state, sorted by priority from high to low.
   // This may include decoding requests and prefill requests in chunked prefill
@@ -328,6 +358,9 @@ class ContinuousScheduler : public Scheduler {
  private:
   // Construct a SchedulerState snapshot for the policy.
   SchedulerState make_state();
+
+  void drain_prefetch_admissions();
+  void drain_completed_prefetches();
 
   void apply_cancel_requests();
 

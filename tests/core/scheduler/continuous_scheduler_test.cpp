@@ -6,7 +6,10 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <thread>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "core/common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -23,24 +26,38 @@ class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
   explicit ControllablePrefetchBlockManagerPool(const Options& options)
       : BlockManagerPool(options, /*dp_size=*/1) {}
 
-  void prefetch_from_storage(std::shared_ptr<Request>& /*request*/) override {
+  bool has_storage_prefetch() const override { return true; }
+
+  void prefetch_from_storage(std::shared_ptr<Request> request,
+                             PrefetchDoneCallback done) override {
     ++prefetch_calls_;
+    if (prefetch_ready_) {
+      done(std::move(request));
+      return;
+    }
+    pending_.emplace_back(std::move(request), std::move(done));
   }
 
-  bool update_prefetch_result(std::shared_ptr<Request>& /*request*/,
-                              uint32_t /*timeout*/) override {
-    ++update_calls_;
-    return prefetch_ready_;
+  void set_prefetch_ready(bool ready) {
+    prefetch_ready_ = ready;
+    if (!prefetch_ready_) {
+      return;
+    }
+
+    auto pending = std::move(pending_);
+    pending_.clear();
+    for (auto& [request, done] : pending) {
+      done(std::move(request));
+    }
   }
 
-  void set_prefetch_ready(bool ready) { prefetch_ready_ = ready; }
   size_t prefetch_calls() const { return prefetch_calls_; }
-  size_t update_calls() const { return update_calls_; }
 
  private:
   bool prefetch_ready_ = true;
   size_t prefetch_calls_ = 0;
-  size_t update_calls_ = 0;
+  std::vector<std::pair<std::shared_ptr<Request>, PrefetchDoneCallback>>
+      pending_;
 };
 
 class FakeTokenizer : public Tokenizer {
@@ -105,10 +122,6 @@ class FakeEngine : public Engine {
     return fake_block_manager_->prefetch_calls();
   }
 
-  size_t prefetch_update_calls() const {
-    return fake_block_manager_->update_calls();
-  }
-
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<ControllablePrefetchBlockManagerPool> fake_block_manager_;
@@ -146,8 +159,6 @@ class TestableContinuousScheduler final : public ContinuousScheduler {
   std::vector<size_t> get_running_sequences_budgets() {
     return running_sequences_budgets_;
   }
-
-  using ContinuousScheduler::num_prefetch_pending_requests;
 
   void reject_stream(const std::shared_ptr<Request>& request) {
     response_processor_->process_stream_request(request);
@@ -597,25 +608,27 @@ TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
                        /*max_context_len=*/30000)[0];
 
   ASSERT_TRUE(scheduler->add_request(request));
-  EXPECT_EQ(engine->prefetch_calls(), 1u);
-  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  EXPECT_EQ(engine->prefetch_calls(), 0u);
+  EXPECT_TRUE(scheduler->has_pending_prefetch());
   EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
   EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
 
   BatchGroup batches = scheduler->prepare_batch_test();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());
+  EXPECT_EQ(engine->prefetch_calls(), 1u);
+  EXPECT_TRUE(scheduler->has_pending_prefetch());
   EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
-  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
 
   engine->set_prefetch_ready(true);
   batches = scheduler->prepare_batch_test();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 1u);
   EXPECT_EQ(batches.front()[0], request->sequences().front().get());
-  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
+  EXPECT_FALSE(scheduler->has_pending_prefetch());
   EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
-  EXPECT_GE(engine->prefetch_update_calls(), 3u);
 }
 
 TEST(ContinuousSchedulerTest,
@@ -636,21 +649,26 @@ TEST(ContinuousSchedulerTest,
                        /*max_context_len=*/30000)[0];
 
   ASSERT_TRUE(scheduler->add_request(request));
-  ASSERT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  ASSERT_EQ(scheduler->get_waiting_requests_num(), 1u);
   request->set_cancel();
 
   BatchGroup batches = scheduler->prepare_batch_test();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());
-  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  EXPECT_EQ(engine->prefetch_calls(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
   EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
 
   engine->set_prefetch_ready(true);
   batches = scheduler->prepare_batch_test();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());
-  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
   EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  ASSERT_TRUE(scheduler->add_request(request));
+  EXPECT_TRUE(scheduler->has_pending_prefetch());
+  scheduler.reset();
+  EXPECT_EQ(engine->prefetch_calls(), 0u);
 }
 
 TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
@@ -658,6 +676,7 @@ TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
       create_scheduler_options(64, 4, 0, 64, 1);
   options.request_queue_size(1);
   auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->set_prefetch_ready(false);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), options);
   std::vector<std::shared_ptr<Request>> requests =
@@ -670,12 +689,53 @@ TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
                        /*max_context_len=*/30000);
 
   ASSERT_TRUE(scheduler->add_request(requests[0]));
-  EXPECT_EQ(engine->prefetch_calls(), 1u);
-  EXPECT_EQ(scheduler->scheduler_queue_size(), 1u);
+  EXPECT_EQ(engine->prefetch_calls(), 0u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
 
   EXPECT_FALSE(scheduler->add_request(requests[1]));
+  EXPECT_EQ(engine->prefetch_calls(), 0u);
+  scheduler->prepare_batch_test();
   EXPECT_EQ(engine->prefetch_calls(), 1u);
-  EXPECT_EQ(scheduler->scheduler_queue_size(), 1u);
+  engine->set_prefetch_ready(true);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+  scheduler->prepare_batch_test();
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
+}
+
+TEST(ContinuousSchedulerTest,
+     CompletedPrefetchEntersSchedulerOnlyOnOwnerThread) {
+  ContinuousScheduler::Options options =
+      create_scheduler_options(64, 4, 0, 64, 1);
+  options.request_queue_size(1);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->set_prefetch_ready(false);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({8, 8},
+                       {4, 4},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/30000);
+
+  ASSERT_TRUE(scheduler->add_request(requests[0]));
+  scheduler->prepare_batch_test();
+  EXPECT_EQ(engine->prefetch_calls(), 1u);
+
+  std::thread worker([&engine] { engine->set_prefetch_ready(true); });
+  worker.join();
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+
+  BatchGroup batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches.front().size(), 1u);
+  EXPECT_EQ(batches.front()[0], requests[0]->sequences().front().get());
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
 }
 
 TEST(ContinuousSchedulerFactoryTest,

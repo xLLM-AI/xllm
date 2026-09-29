@@ -88,7 +88,7 @@ class WorkerService : public proto::DistributeWorker {
                       ::google::protobuf::Closure* done) override;
 
   void PrefetchFromStorage(google::protobuf::RpcController* controller,
-                           const proto::BlockTransferInfos* req,
+                           const proto::PrefetchRequest* req,
                            proto::Status* resp,
                            google::protobuf::Closure* done) override;
 

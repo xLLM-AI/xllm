@@ -44,6 +44,7 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, enable_prefix_cache) = true;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
+    PROPERTY(uint32_t, prefetch_batch_size) = 2;
     // Host prefix-cache offload (host_blocks_factor > 1). Wraps composite
     // leaves in ConcurrentBlockManagerImpl so the async D2H offload callback
     // can free blocks off-thread safely.

@@ -15,9 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
+#include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
-#include <unordered_map>
 
 #include "block_manager_pool.h"
 #include "composite_block_manager.h"
@@ -46,7 +48,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   explicit HierarchyBlockManagerPool(const BlockManagerPool::Options& options,
                                      Engine* engine,
                                      int32_t dp_size = 1);
-  ~HierarchyBlockManagerPool() = default;
+  ~HierarchyBlockManagerPool() override;
 
   bool allocate(Sequence* sequence, size_t num_tokens) override;
 
@@ -65,33 +67,17 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   void transfer_blocks(RecBatchGroup& batches) override;
   void transfer_blocks() override;
 
-  void prefetch_from_storage(std::shared_ptr<Request>& request) override;
-
-  bool update_prefetch_result(std::shared_ptr<Request>& request,
-                              const uint32_t timeout) override;
+  bool has_storage_prefetch() const override {
+    return options_.enable_kvcache_store();
+  }
+  void prefetch_from_storage(std::shared_ptr<Request> request,
+                             PrefetchDoneCallback done) override;
+  void drain_prefetch_completions() override;
 
  private:
-  struct PrefetchQuery {
-    size_t probe_index = 0;
-    size_t block_index = 0;
-    size_t result_index = 0;
-    size_t token_start = 0;
-  };
-
-  struct PrefetchPlan {
-    // Each probe owns the complete logical prompt vector for its Host leaf.
-    // Invalid entries are either local misses waiting for Store or Store
-    // misses after completion; SWA intentionally keeps those holes positional.
-    std::vector<CompositeBlockManager::ProbeResult> host_probes;
-    std::vector<PrefetchQuery> queries;
-    Sequence* sequence = nullptr;
-    std::shared_ptr<PrefetchResult> result;
-    Timer timer;
-  };
-
   friend class HierarchyPoolTestPeer;
   void release_host_match(Sequence* sequence, int32_t dp_rank);
-  void release_prefetch_plan(PrefetchPlan* plan, bool publish_store_hits);
+  void quarantine_prefetch(Sequence* sequence, int32_t dp_rank);
   void collect_offload_pairs(Sequence* sequence,
                              int32_t dp_rank,
                              size_t completed_tokens);
@@ -105,13 +91,22 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   // Per-DP Host block managers discovered from the device prefix-cache leaves.
   std::vector<CompositeBlockManager::LeafMap> host_block_managers_;
 
+  // An interrupted stream cannot certify remote-write completion. Keep those
+  // block ids reserved until pool destruction and stop further storage reads
+  // on the affected DP. Declared after the managers so blocks release first.
+  std::vector<Block> quarantined_prefetch_blocks_;
+  std::vector<bool> storage_prefetch_disabled_;
+
   // Per-DP H2D descriptions waiting to be registered with workers. Blocks stay
   // owned only by the Sequence's Host/device cache states.
   std::vector<std::vector<BlockTransferInfo>> load_block_transfer_infos_;
   std::vector<OffloadBlockPairQueue> offload_block_pair_queues_;
 
-  std::mutex prefetch_plans_mutex_;
-  std::unordered_map<Sequence*, std::shared_ptr<PrefetchPlan>> prefetch_plans_;
+  // Guards the destruction-time invariant for asynchronous prefetch callbacks.
+  std::atomic<size_t> prefetching_requests_{0};
+
+  std::mutex prefetch_completion_mutex_;
+  std::deque<std::function<void()>> prefetch_completions_;
 
   // Declared last so destruction waits for callbacks before any manager or
   // block storage captured by those callbacks is released.

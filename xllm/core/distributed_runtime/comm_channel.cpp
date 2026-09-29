@@ -19,9 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
-#include <future>
 
 #include "common/global_flags.h"
 
@@ -431,147 +429,127 @@ class ClientStreamReceiver final : public brpc::StreamInputHandler {
  private:
   std::shared_ptr<PrefetchResult> result_;
   size_t worker_index_ = 0;
-  size_t result_offset_ = 0;
-  std::promise<bool> close_promise_;
-  std::atomic<bool> promise_set_{false};
-  bool terminal_received_ = false;
-  bool batch_ok_ = false;
+  bool stop_sent_ = false;
   bool failed_ = false;
-
-  void finish(bool batch_ok) {
-    if (!promise_set_.exchange(true)) {
-      close_promise_.set_value(batch_ok);
-    }
-  }
 
   void fail_and_close(brpc::StreamId id) {
     failed_ = true;
     brpc::StreamClose(id);
   }
 
- public:
-  ClientStreamReceiver(std::shared_ptr<PrefetchResult> result,
-                       size_t worker_index,
-                       size_t result_offset)
-      : result_(std::move(result)),
-        worker_index_(worker_index),
-        result_offset_(result_offset) {
-    CHECK(result_ != nullptr);
-    CHECK_LT(worker_index_, result_->worker_count());
-    CHECK_LE(result_offset_, result_->block_count());
+  bool send_control(brpc::StreamId id, PrefetchControl control) {
+    const uint8_t control_byte = static_cast<uint8_t>(control);
+    butil::IOBuf response;
+    response.append(&control_byte, sizeof(control_byte));
+    if (brpc::StreamWrite(id, response) == 0) {
+      stop_sent_ = control == PrefetchControl::STOP;
+      return true;
+    }
+    LOG(ERROR) << "Failed to write Mooncake prefetch decision: worker="
+               << worker_index_;
+    fail_and_close(id);
+    return false;
   }
 
-  ~ClientStreamReceiver() override { finish(/*batch_ok=*/false); }
-
-  std::future<bool> get_close_future() { return close_promise_.get_future(); }
+ public:
+  ClientStreamReceiver(std::shared_ptr<PrefetchResult> result,
+                       size_t worker_index)
+      : result_(std::move(result)), worker_index_(worker_index) {
+    CHECK(result_ != nullptr);
+    CHECK_LT(worker_index_, result_->worker_count());
+  }
 
   int on_received_messages(brpc::StreamId id,
                            butil::IOBuf* const messages[],
                            size_t size) override {
-    for (size_t i = 0; i < size; ++i) {
-      std::string msg_str = messages[i]->to_string();
-      proto::PrefetchResultChunk chunk;
-      if (!chunk.ParseFromString(msg_str)) {
-        LOG(ERROR) << "Failed to parse Mooncake prefetch result chunk.";
-        fail_and_close(id);
-        return -1;
-      }
+    if (size != 1 || messages[0]->length() != 1) {
+      LOG(ERROR) << "Invalid Mooncake prefetch result frame: worker="
+                 << worker_index_ << ", messages=" << size;
+      fail_and_close(id);
+      return -1;
+    }
+    if (stop_sent_) {
+      LOG(ERROR) << "Mooncake prefetch continued after stop: worker="
+                 << worker_index_;
+      fail_and_close(id);
+      return -1;
+    }
 
-      const std::string& bitmap = chunk.hit_bitmap();
-      std::vector<uint8_t> hits(bitmap.begin(), bitmap.end());
-      if (chunk.offset() > result_->block_count() - result_offset_) {
-        LOG(ERROR) << "Invalid Mooncake prefetch result offset: worker="
-                   << worker_index_ << ", base_offset=" << result_offset_
-                   << ", chunk_offset=" << chunk.offset();
-        fail_and_close(id);
-        return -1;
-      }
-      const size_t result_offset =
-          result_offset_ + static_cast<size_t>(chunk.offset());
-      if (!result_->set_batch_result(worker_index_, result_offset, hits)) {
-        LOG(ERROR) << "Invalid Mooncake prefetch result chunk: worker="
-                   << worker_index_ << ", offset=" << result_offset
-                   << ", count=" << hits.size();
-        fail_and_close(id);
-        return -1;
-      }
-      if (chunk.completed()) {
-        terminal_received_ = true;
-        batch_ok_ = chunk.worker_ok();
-        brpc::StreamClose(id);
-        break;
-      }
+    uint8_t prefix_hit_units = 0;
+    messages[0]->copy_to(&prefix_hit_units, sizeof(prefix_hit_units));
+    const std::optional<PrefetchControl> control =
+        result_->record_batch_result(worker_index_, prefix_hit_units);
+    if (!control.has_value()) {
+      LOG(ERROR) << "Unexpected Mooncake prefetch result: worker="
+                 << worker_index_;
+      fail_and_close(id);
+      return -1;
+    }
+    if (!send_control(id, *control)) {
+      return -1;
     }
     return 0;
   }
 
-  void on_idle_timeout(brpc::StreamId id) override { fail_and_close(id); }
+  void on_idle_timeout(brpc::StreamId id) override {
+    if (stop_sent_) {
+      brpc::StreamClose(id);
+      return;
+    }
+    fail_and_close(id);
+  }
+
+  void on_failed(brpc::StreamId /*id*/,
+                 int /*error_code*/,
+                 const std::string& /*error_text*/) override {
+    failed_ = true;
+  }
 
   void on_closed(brpc::StreamId /*id*/) override {
-    finish(terminal_received_ && batch_ok_ && !failed_);
+    // STOP is sent only after a completed batch result. A transport close
+    // without STOP does not certify that the remote write has finished.
+    result_->mark_worker_ended(
+        worker_index_, stop_sent_ && !failed_, /*worker_quiescent=*/stop_sent_);
     delete this;
   }
 };
 
-void CommChannel::prefetch_from_storage(
-    const std::vector<BlockTransferInfo>& block_transfer_info,
-    std::shared_ptr<PrefetchResult> result,
-    size_t worker_index) {
+void CommChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
+                                        std::shared_ptr<PrefetchResult> result,
+                                        size_t worker_index) {
   CHECK(result != nullptr);
-  const size_t batch_size = result->batch_size();
-  bool worker_ok = true;
-  for (size_t offset = 0; offset < block_transfer_info.size();
-       offset += batch_size) {
-    if (result->stop_requested()) {
-      VLOG(1) << "[Mooncake][PrefetchStop] worker=" << worker_index
-              << ", completed_blocks=" << offset;
-      break;
-    }
-
-    const size_t end =
-        offset + std::min(batch_size, block_transfer_info.size() - offset);
-    const std::vector<BlockTransferInfo> current_batch(
-        block_transfer_info.begin() + static_cast<std::ptrdiff_t>(offset),
-        block_transfer_info.begin() + static_cast<std::ptrdiff_t>(end));
-    proto::BlockTransferInfos pb_block_transfer_info;
-    if (!block_transfer_info_to_proto(current_batch, &pb_block_transfer_info)) {
-      LOG(ERROR) << "prefetch_from_storage fail: create proto fail!";
-      worker_ok = false;
-      break;
-    }
-
-    auto* receiver = new ClientStreamReceiver(result, worker_index, offset);
-    std::future<bool> close_future = receiver->get_close_future();
-    brpc::Controller cntl;
-    brpc::StreamOptions stream_options;
-    brpc::StreamId stream_id;
-    proto::Status response;
-    stream_options.handler = receiver;
-    stream_options.idle_timeout_ms = result->stream_idle_timeout_ms();
-    if (brpc::StreamCreate(&stream_id, cntl, &stream_options) != 0) {
-      LOG(ERROR) << "Failed to create stream";
-      delete receiver;
-      worker_ok = false;
-      break;
-    }
-
-    stub_->PrefetchFromStorage(
-        &cntl, &pb_block_transfer_info, &response, nullptr);
-    if (cntl.Failed() || !response.ok()) {
-      LOG(ERROR) << "Fail to connect stream, " << cntl.ErrorText();
-      brpc::StreamClose(stream_id);
-      close_future.wait();
-      worker_ok = false;
-      break;
-    }
-
-    const bool batch_ok = close_future.get();
-    if (!batch_ok) {
-      worker_ok = false;
-      break;
-    }
+  CHECK(request.valid());
+  proto::PrefetchRequest proto_request;
+  if (!storage_prefetch_request_to_proto(request, &proto_request)) {
+    LOG(ERROR) << "Failed to serialize Mooncake prefetch request.";
+    result->mark_worker_ended(
+        worker_index, /*worker_ok=*/false, /*worker_quiescent=*/true);
+    return;
   }
-  result->mark_worker_completed(worker_index, worker_ok);
+
+  auto* receiver = new ClientStreamReceiver(result, worker_index);
+  brpc::Controller cntl;
+  brpc::StreamOptions stream_options;
+  brpc::StreamId stream_id;
+  proto::Status response;
+  stream_options.handler = receiver;
+  stream_options.idle_timeout_ms = result->stream_idle_timeout_ms();
+  result->begin_worker_rpc(worker_index);
+  if (brpc::StreamCreate(&stream_id, cntl, &stream_options) != 0) {
+    LOG(ERROR) << "Failed to create Mooncake prefetch stream.";
+    delete receiver;
+    result->complete_worker_rpc(worker_index, /*rejected_before_start=*/true);
+    return;
+  }
+
+  stub_->PrefetchFromStorage(&cntl, &proto_request, &response, nullptr);
+  result->complete_worker_rpc(
+      worker_index, /*rejected_before_start=*/!cntl.Failed() && !response.ok());
+  if (cntl.Failed() || !response.ok()) {
+    LOG(ERROR) << "Failed to connect Mooncake prefetch stream: "
+               << cntl.ErrorText();
+    brpc::StreamClose(stream_id);
+  }
 }
 
 bool CommChannel::get_last_step_result_async(

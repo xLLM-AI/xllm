@@ -16,11 +16,16 @@ limitations under the License.
 
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
+#include <brpc/stream.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -92,6 +97,187 @@ std::vector<std::string> build_speculative_position_labels(
   }
   return labels;
 }
+
+class WorkerPrefetchSession final
+    : public brpc::StreamInputHandler,
+      public std::enable_shared_from_this<WorkerPrefetchSession> {
+ public:
+  WorkerPrefetchSession(Worker* worker,
+                        ThreadPool* threadpool,
+                        StoragePrefetchRequest request)
+      : worker_(worker), threadpool_(threadpool), request_(std::move(request)) {
+    CHECK(worker_ != nullptr);
+    CHECK(threadpool_ != nullptr);
+    CHECK(request_.valid());
+  }
+
+  void retain() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    keepalive_ = shared_from_this();
+  }
+
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    keepalive_.reset();
+  }
+
+  void start(brpc::StreamId stream_id) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ != State::CREATED) {
+        return;
+      }
+      stream_id_ = stream_id;
+      state_ = State::RUNNING_BATCH;
+    }
+    schedule_batch();
+  }
+
+  int on_received_messages(brpc::StreamId id,
+                           butil::IOBuf* const messages[],
+                           size_t size) override {
+    if (size != 1 || messages[0]->length() != 1) {
+      fail_and_close(id);
+      return -1;
+    }
+
+    uint8_t control_byte = 0;
+    messages[0]->copy_to(&control_byte, sizeof(control_byte));
+    const PrefetchControl control = static_cast<PrefetchControl>(control_byte);
+    bool run_next = false;
+    bool close = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ == State::RUNNING_BATCH && control == PrefetchControl::STOP) {
+        stop_after_batch_ = true;
+      } else if (state_ != State::WAITING_DECISION) {
+        state_ = State::FAILED;
+        close = true;
+      } else if (control == PrefetchControl::STOP) {
+        state_ = State::COMPLETED;
+        close = true;
+      } else if (control == PrefetchControl::CONTINUE &&
+                 last_prefix_hit_units_ ==
+                     request_.batch_unit_count(batch_index_) &&
+                 batch_index_ + 1 < request_.batch_count()) {
+        ++batch_index_;
+        state_ = State::RUNNING_BATCH;
+        run_next = true;
+      } else {
+        state_ = State::FAILED;
+        close = true;
+      }
+    }
+
+    if (run_next) {
+      schedule_batch();
+    } else if (close) {
+      brpc::StreamClose(id);
+    }
+    // A close triggered by anything other than a STOP is a protocol error;
+    // a STOP-driven close is the normal completion path.
+    const bool protocol_error = close && control != PrefetchControl::STOP;
+    return protocol_error ? -1 : 0;
+  }
+
+  void on_idle_timeout(brpc::StreamId id) override { fail_and_close(id); }
+
+  void on_failed(brpc::StreamId /*id*/,
+                 int /*error_code*/,
+                 const std::string& /*error_text*/) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != State::COMPLETED) {
+      state_ = State::FAILED;
+    }
+  }
+
+  void on_closed(brpc::StreamId /*id*/) override {
+    std::shared_ptr<WorkerPrefetchSession> self = shared_from_this();
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_ = State::CLOSED;
+    keepalive_.reset();
+  }
+
+ private:
+  enum class State : uint8_t {
+    CREATED = 0,
+    RUNNING_BATCH = 1,
+    WAITING_DECISION = 2,
+    COMPLETED = 3,
+    FAILED = 4,
+    CLOSED = 5,
+  };
+
+  void schedule_batch() {
+    std::shared_ptr<WorkerPrefetchSession> self = shared_from_this();
+    threadpool_->schedule([self = std::move(self)]() { self->run_batch(); });
+  }
+
+  void run_batch() {
+    size_t batch_index = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ != State::RUNNING_BATCH) {
+        return;
+      }
+      batch_index = batch_index_;
+    }
+
+    const auto [transfer_begin, transfer_end] =
+        request_.batch_transfer_range(batch_index);
+    Slice<BlockTransferInfo> all_transfers(request_.transfer_infos);
+    Slice<BlockTransferInfo> batch =
+        all_transfers.slice(transfer_begin, transfer_end);
+    std::vector<uint8_t> logical_hits = worker_->prefetch_kv_blocks(batch);
+    const std::optional<uint8_t> prefix_hit_units =
+        request_.count_prefix_hit_units(batch_index, logical_hits);
+    if (!prefix_hit_units.has_value()) {
+      fail_and_close(stream_id_);
+      return;
+    }
+
+    bool close_after_result = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ != State::RUNNING_BATCH || batch_index != batch_index_) {
+        return;
+      }
+      last_prefix_hit_units_ = *prefix_hit_units;
+      close_after_result = stop_after_batch_;
+      state_ = close_after_result ? State::COMPLETED : State::WAITING_DECISION;
+    }
+
+    butil::IOBuf result;
+    result.append(&*prefix_hit_units, sizeof(*prefix_hit_units));
+    if (brpc::StreamWrite(stream_id_, result) != 0) {
+      fail_and_close(stream_id_);
+    } else if (close_after_result) {
+      brpc::StreamClose(stream_id_);
+    }
+  }
+
+  void fail_and_close(brpc::StreamId id) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ == State::CLOSED) {
+        return;
+      }
+      state_ = State::FAILED;
+    }
+    brpc::StreamClose(id);
+  }
+
+  Worker* worker_ = nullptr;
+  ThreadPool* threadpool_ = nullptr;
+  StoragePrefetchRequest request_;
+  std::mutex mutex_;
+  brpc::StreamId stream_id_ = brpc::INVALID_STREAM_ID;
+  size_t batch_index_ = 0;
+  size_t last_prefix_hit_units_ = 0;
+  bool stop_after_batch_ = false;
+  State state_ = State::CREATED;
+  std::shared_ptr<WorkerPrefetchSession> keepalive_;
+};
 
 }  // namespace
 
@@ -642,61 +828,39 @@ void WorkerService::TransferBlocks(
 
 void WorkerService::PrefetchFromStorage(
     google::protobuf::RpcController* controller,
-    const proto::BlockTransferInfos* req,
+    const proto::PrefetchRequest* req,
     proto::Status* resp,
     google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   brpc::Controller* cntl = static_cast<brpc::Controller*>(controller);
 
+  StoragePrefetchRequest request;
+  if (!proto_to_storage_prefetch_request(*req, &request)) {
+    resp->set_ok(false);
+    LOG(ERROR) << "Invalid Mooncake prefetch request.";
+    return;
+  }
+
+  auto session = std::make_shared<WorkerPrefetchSession>(
+      worker_.get(), &copy_threadpool_, std::move(request));
+
   brpc::StreamId stream_id;
   brpc::StreamOptions stream_options;
   stream_options.idle_timeout_ms = -1;
+  stream_options.handler = session.get();
+  session->retain();
   if (brpc::StreamAccept(&stream_id, *cntl, &stream_options) != 0) {
+    session->release();
     resp->set_ok(false);
     LOG(ERROR) << "Failed to accept stream!";
     return;
   }
 
-  std::vector<BlockTransferInfo> block_transfer_info;
-  proto_to_block_transfer_info(*req, block_transfer_info);
-
   resp->set_ok(true);
   if (google::protobuf::Closure* response_done = done_guard.release()) {
     response_done->Run();
   }
-
-  copy_threadpool_.schedule(
-      [this,
-       block_transfer_info = std::move(block_transfer_info),
-       stream_id = std::move(stream_id)]() mutable {
-        brpc::ScopedStream stream_guard(stream_id);
-        Slice<BlockTransferInfo> transfer_slice{block_transfer_info};
-        std::vector<uint8_t> hits = worker_->prefetch_kv_blocks(transfer_slice);
-        const bool worker_ok = hits.size() == transfer_slice.size();
-        if (!worker_ok) {
-          LOG(ERROR) << "Mooncake prefetch returned an invalid bitmap size: "
-                     << hits.size() << " != " << transfer_slice.size();
-          hits.assign(transfer_slice.size(), /*value=*/0);
-        }
-
-        proto::PrefetchResultChunk result_chunk;
-        result_chunk.set_offset(0);
-        result_chunk.set_hit_bitmap(reinterpret_cast<const char*>(hits.data()),
-                                    hits.size());
-        result_chunk.set_completed(true);
-        result_chunk.set_worker_ok(worker_ok);
-
-        std::string payload;
-        CHECK(result_chunk.SerializeToString(&payload));
-        butil::IOBuf buffer;
-        buffer.append(payload);
-        const int32_t write_result =
-            static_cast<int32_t>(brpc::StreamWrite(stream_id, buffer));
-        if (write_result != 0) {
-          LOG(ERROR) << "Failed to write Mooncake prefetch result: error="
-                     << write_result;
-        }
-      });
+  session->start(stream_id);
 }
 
 void WorkerService::LinkCluster(::google::protobuf::RpcController* controller,

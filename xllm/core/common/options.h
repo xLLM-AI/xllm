@@ -252,7 +252,7 @@ class Options {
   PROPERTY(int64_t, server_idx) = 0;
 
   // Prefetch timeout for prefetch from kv cache store
-  PROPERTY(uint32_t, prefetch_timeout) = 0;
+  PROPERTY(uint32_t, prefetch_timeout) = 120000;
 
   // Prefetch from kvcache store copy batch size
   PROPERTY(uint32_t, prefetch_batch_size) = 2;

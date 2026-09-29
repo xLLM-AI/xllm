@@ -206,8 +206,6 @@ Sequence::Sequence(const Sequence& other, size_t index)
       is_pre_scheduled_step_prefill_(other.is_pre_scheduled_step_prefill_),
       updated_since_last_beam_search_(other.updated_since_last_beam_search_) {
   logprob_state_ = other.logprob_state_;
-  // termination_flag_ intentionally starts fresh (INT32_MAX) rather than
-  // copying: a forked sequence has its own kvcache-store copy lifecycle.
   // A forked sequence (beam / best_of) shares the prompt KV prefix by
   // ref-counting those blocks, but its linear-state / embedding resource block
   // is private: drop the copied Embedding and Linear blocks so this sequence
@@ -757,8 +755,6 @@ void Sequence::reset() {
   kv_state_.reset();
   host_kv_state_.reset();
   clear_host_cache_match();
-  timer_.reset();
-  is_timeout_set_ = false;
   volatile_num_prompt_tokens_ = num_tokens_;
 }
 
@@ -940,37 +936,6 @@ void Sequence::generate_output_tokens_logprobs(
       out_logprobs,
       sequence_params_.skip_special_tokens,
       tokens_);
-}
-
-bool Sequence::update_prefetch_result(uint32_t timeout, uint32_t& success_cnt) {
-  if (prefetch_results_.empty()) {
-    return true;
-  }
-
-  if (timeout != 0 && termination_flag_.load(std::memory_order_acquire) > 0) {
-    if (!is_timeout_set_) {
-      timer_.reset();
-      is_timeout_set_ = true;
-      return false;
-    }
-
-    if (timer_.elapsed_milliseconds() < timeout) {
-      return false;
-    }
-  }
-
-  termination_flag_.store(0, std::memory_order_release);
-  success_cnt = host_kv_state_.blocks(BlockType::KV).size();
-  for (auto& cnt : prefetch_results_) {
-    success_cnt = std::min(success_cnt, cnt->load());
-  }
-  if (success_cnt > 0) {
-    host_kv_state_.incr_kv_cache_tokens_num(
-        success_cnt * host_kv_state_.blocks(BlockType::KV)[0].size());
-    host_kv_state_.incr_shared_blocks_num(BlockType::KV, success_cnt);
-  }
-  prefetch_results_.clear();
-  return true;
 }
 
 void Sequence::finish() {

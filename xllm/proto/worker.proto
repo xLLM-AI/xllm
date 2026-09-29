@@ -135,6 +135,12 @@ message BlockTransferInfos {
   repeated BlockTransferInfo transfer_infos = 3;
 }
 
+message PrefetchRequest {
+  repeated BlockTransferInfo transfer_infos = 1;
+  repeated uint32 unit_end_offsets = 2;
+  repeated uint32 batch_end_unit_offsets = 3;
+}
+
 message TransferStatus {
  uint32 success_cnt = 1;
 }
@@ -419,18 +425,9 @@ service DistributeWorker {
   rpc GetLastStepResult (Empty) returns (ForwardOutput);
   rpc GetActiveActivationMemory (Empty) returns (ActivationMemory);
   rpc TransferBlocks(BlockTransferInfos) returns (TransferStatus) {}
-  rpc PrefetchFromStorage(BlockTransferInfos) returns (Status) {}
+  rpc PrefetchFromStorage(PrefetchRequest) returns (Status) {}
   rpc Sleep (SleepRequest)  returns (Status);
   rpc Wakeup (WakeupRequest) returns (Status);
   rpc StartProfile (Empty) returns (Status);
   rpc StopProfile (Empty) returns (Status);
-}
-
-// Block-granular result for one Mooncake prefetch batch. The payload is sent
-// over the brpc stream opened by PrefetchFromStorage.
-message PrefetchResultChunk {
-  uint64 offset = 1;
-  bytes hit_bitmap = 2;
-  bool completed = 3;
-  bool worker_ok = 4;
 }

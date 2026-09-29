@@ -94,6 +94,15 @@ class HierarchyPoolTestPeer final {
     return count;
   }
 
+  static void release_pending_offload_pairs(HierarchyBlockManagerPool& pool) {
+    for (auto& queue : pool.offload_block_pair_queues_) {
+      std::shared_ptr<OffloadBlockPair> pair;
+      while (queue.try_dequeue(pair)) {
+        pair.reset();
+      }
+    }
+  }
+
   static bool should_probe_prefix_cache(const HierarchyBlockManagerPool& pool,
                                         Sequence* sequence) {
     return pool.should_probe_prefix_cache(sequence);
@@ -104,8 +113,8 @@ namespace {
 
 class FakePrefetchEngine final : public Engine {
  public:
-  explicit FakePrefetchEngine(size_t worker_count)
-      : worker_count_(worker_count) {}
+  explicit FakePrefetchEngine(size_t worker_count, int64_t timeout_ms = -1)
+      : worker_count_(worker_count), timeout_ms_(timeout_ms) {}
 
   ForwardOutput step(BatchGroup& /*batch*/) override { return {}; }
 
@@ -115,28 +124,55 @@ class FakePrefetchEngine final : public Engine {
     return {0};
   }
 
-  std::shared_ptr<PrefetchResult> prefetch_from_storage(
+  void prefetch_from_storage(
       uint32_t dp_rank,
-      const std::vector<BlockTransferInfo>& block_transfer_info) override {
+      std::shared_ptr<const StoragePrefetchRequest> request,
+      PrefetchResult::StopPredicate stop_requested,
+      PrefetchResult::DoneCallback done) override {
+    CHECK(request != nullptr);
     dp_rank_ = dp_rank;
-    transfer_infos_ = block_transfer_info;
-    result_ =
-        std::make_shared<PrefetchResult>(worker_count_, transfer_infos_.size());
-    return result_;
+    request_ = std::move(request);
+    result_ = std::make_shared<PrefetchResult>(worker_count_,
+                                               request_->batch_end_unit_offsets,
+                                               timeout_ms_,
+                                               std::move(stop_requested),
+                                               std::move(done));
   }
 
   uint32_t dp_rank() const { return dp_rank_; }
 
-  const std::vector<BlockTransferInfo>& transfer_infos() const {
-    return transfer_infos_;
-  }
+  const StoragePrefetchRequest& request() const { return *request_; }
 
   const std::shared_ptr<PrefetchResult>& result() const { return result_; }
 
+  void finish_worker(size_t worker_index,
+                     size_t hit_units,
+                     bool worker_ok = true,
+                     bool worker_quiescent = true) {
+    CHECK(result_ != nullptr);
+    size_t remaining_hits = hit_units;
+    for (size_t batch_index = 0; batch_index < request_->batch_count();
+         ++batch_index) {
+      const size_t batch_units = request_->batch_unit_count(batch_index);
+      const uint8_t batch_hits =
+          static_cast<uint8_t>(std::min(remaining_hits, batch_units));
+      const std::optional<PrefetchControl> control =
+          result_->record_batch_result(worker_index, batch_hits);
+      CHECK(control.has_value());
+      remaining_hits -= batch_hits;
+      if (*control == PrefetchControl::STOP) {
+        break;
+      }
+    }
+    CHECK_EQ(remaining_hits, 0u);
+    result_->mark_worker_ended(worker_index, worker_ok, worker_quiescent);
+  }
+
  private:
   size_t worker_count_ = 0;
+  int64_t timeout_ms_ = -1;
   uint32_t dp_rank_ = 0;
-  std::vector<BlockTransferInfo> transfer_infos_;
+  std::shared_ptr<const StoragePrefetchRequest> request_;
   std::shared_ptr<PrefetchResult> result_;
 };
 
@@ -898,6 +934,49 @@ TEST(HierarchyBlockManagerPoolTest,
 }
 
 TEST(HierarchyBlockManagerPoolTest,
+     Dsv4OneMillionTokensReuseHostBlocksWithSmallChunks) {
+  constexpr size_t kChunkTokens = 4096;
+  constexpr size_t kUnitTokens = 16384;
+  constexpr size_t kContextTokens = 1024 * 1024;
+  constexpr size_t kFinalTokens = kContextTokens + kChunkTokens;
+
+  BlockManagerPool::Options options = make_typed_cache_options();
+  options.num_blocks(16384)
+      .swa_num_blocks(36)
+      .max_tokens_per_batch(kChunkTokens)
+      .max_seqs_per_batch(1)
+      .host_num_blocks_by_type(
+          {{BlockType::SWA, 144}, {BlockType::C4, 64}, {BlockType::C128, 4}});
+  HierarchyBlockManagerPool pool(options, /*engine=*/nullptr, /*dp_size=*/1);
+  std::vector<int32_t> tokens(kFinalTokens + 1, 83);
+  Sequence sequence = make_test_sequence(/*index=*/0, tokens);
+  size_t offloaded_units = 0;
+
+  for (size_t target_tokens = kChunkTokens; target_tokens <= kFinalTokens;
+       target_tokens += kChunkTokens) {
+    ASSERT_TRUE(pool.allocate(&sequence, target_tokens)) << target_tokens;
+    const size_t completed_tokens = sequence.kv_state().kv_cache_tokens_num();
+    if (completed_tokens > 0 && completed_tokens % kUnitTokens == 0) {
+      EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 34u);
+      HierarchyPoolTestPeer::release_pending_offload_pairs(pool);
+      ++offloaded_units;
+    } else {
+      EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 0u);
+    }
+    sequence.kv_state().set_kv_cache_tokens_num(target_tokens);
+  }
+
+  EXPECT_EQ(count_valid_blocks(sequence.host_kv_state().blocks(BlockType::SWA)),
+            kChunkTokens / 128);
+  EXPECT_EQ(count_valid_blocks(sequence.host_kv_state().blocks(BlockType::C4)),
+            kChunkTokens / 512);
+  EXPECT_EQ(
+      count_valid_blocks(sequence.host_kv_state().blocks(BlockType::C128)), 1u);
+  EXPECT_EQ(offloaded_units, kContextTokens / kUnitTokens);
+  pool.deallocate(&sequence);
+}
+
+TEST(HierarchyBlockManagerPoolTest,
      H2dRestoreIsPublishedToDevicePrefixCacheDuringAllocation) {
   constexpr size_t kPromptTokens = 20001;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
@@ -1218,109 +1297,235 @@ TEST(HierarchyBlockManagerPoolTest, ExistingHostPrefixSkipsDuplicateD2h) {
   sequence.reset();
 }
 
-TEST(PrefetchResultTest, MergesBatchedTpWorkerBitmaps) {
-  PrefetchResult result(/*worker_count=*/2, /*block_count=*/5);
-  EXPECT_TRUE(result.set_batch_result(
-      /*worker_index=*/0, /*offset=*/0, {1, 1}));
-  EXPECT_TRUE(result.set_batch_result(
-      /*worker_index=*/0, /*offset=*/2, {1, 0, 1}));
-  EXPECT_TRUE(result.set_batch_result(
-      /*worker_index=*/1, /*offset=*/0, {1, 0, 1, 1, 1}));
-
-  result.mark_worker_completed(/*worker_index=*/0, /*worker_ok=*/true);
-  EXPECT_FALSE(result.completed());
-  result.mark_worker_completed(/*worker_index=*/1, /*worker_ok=*/true);
-  ASSERT_TRUE(result.completed());
-  EXPECT_EQ(result.merged_hits(), (std::vector<uint8_t>{1, 0, 1, 0, 1}));
-}
-
-TEST(PrefetchResultTest, StopRequestIsIdempotent) {
+TEST(PrefetchResultTest, UsesMinimumContiguousUnitPrefixAcrossWorkers) {
+  size_t common_hit_units = std::numeric_limits<size_t>::max();
   PrefetchResult result(
-      /*worker_count=*/2, /*block_count=*/5, /*batch_size=*/2);
-  EXPECT_EQ(result.batch_size(), 2u);
-  EXPECT_FALSE(result.stop_requested());
-  EXPECT_TRUE(result.request_stop());
-  EXPECT_TRUE(result.stop_requested());
-  EXPECT_FALSE(result.request_stop());
+      /*worker_count=*/2,
+      /*batch_end_unit_offsets=*/{2, 4, 5},
+      /*timeout_ms=*/-1,
+      [] { return false; },
+      [&common_hit_units](size_t hit_units, bool workers_quiescent) {
+        EXPECT_TRUE(workers_quiescent);
+        common_hit_units = hit_units;
+      });
+
+  std::optional<PrefetchControl> control =
+      result.record_batch_result(/*worker_index=*/0, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::CONTINUE);
+  control =
+      result.record_batch_result(/*worker_index=*/0, /*prefix_hit_units=*/1);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  result.mark_worker_ended(
+      /*worker_index=*/0, /*worker_ok=*/true, /*worker_quiescent=*/true);
+  EXPECT_EQ(common_hit_units, std::numeric_limits<size_t>::max());
+
+  control =
+      result.record_batch_result(/*worker_index=*/1, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::CONTINUE);
+  control =
+      result.record_batch_result(/*worker_index=*/1, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::CONTINUE);
+  control =
+      result.record_batch_result(/*worker_index=*/1, /*prefix_hit_units=*/1);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  result.mark_worker_ended(
+      /*worker_index=*/1, /*worker_ok=*/true, /*worker_quiescent=*/true);
+
+  EXPECT_EQ(common_hit_units, 3u);
+
+  size_t failed_hit_units = std::numeric_limits<size_t>::max();
+  PrefetchResult failed_result(
+      /*worker_count=*/2,
+      /*batch_end_unit_offsets=*/{2},
+      /*timeout_ms=*/-1,
+      [] { return false; },
+      [&failed_hit_units](size_t hit_units, bool workers_quiescent) {
+        EXPECT_FALSE(workers_quiescent);
+        failed_hit_units = hit_units;
+      });
+  control = failed_result.record_batch_result(
+      /*worker_index=*/0, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  failed_result.mark_worker_ended(
+      /*worker_index=*/0, /*worker_ok=*/false, /*worker_quiescent=*/false);
+  control = failed_result.record_batch_result(
+      /*worker_index=*/1, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  failed_result.mark_worker_ended(
+      /*worker_index=*/1, /*worker_ok=*/true, /*worker_quiescent=*/true);
+  EXPECT_EQ(failed_hit_units, 0u);
+
+  for (bool close_before_reply : {false, true}) {
+    size_t callback_count = 0;
+    PrefetchResult rejected_result(
+        /*worker_count=*/1,
+        /*batch_end_unit_offsets=*/{2},
+        /*timeout_ms=*/-1,
+        [] { return false; },
+        [&callback_count](size_t hit_units, bool workers_quiescent) {
+          EXPECT_EQ(hit_units, 0u);
+          EXPECT_TRUE(workers_quiescent);
+          ++callback_count;
+        });
+    rejected_result.begin_worker_rpc(/*worker_index=*/0);
+    if (close_before_reply) {
+      rejected_result.mark_worker_ended(
+          /*worker_index=*/0, /*worker_ok=*/false, /*worker_quiescent=*/false);
+      EXPECT_EQ(callback_count, 0u);
+    }
+    rejected_result.complete_worker_rpc(
+        /*worker_index=*/0, /*rejected_before_start=*/true);
+    EXPECT_EQ(callback_count, 1u);
+    rejected_result.mark_worker_ended(
+        /*worker_index=*/0, /*worker_ok=*/false, /*worker_quiescent=*/false);
+    EXPECT_EQ(callback_count, 1u);
+  }
+
+  size_t ambiguous_callback_count = 0;
+  PrefetchResult ambiguous_result(
+      /*worker_count=*/1,
+      /*batch_end_unit_offsets=*/{2},
+      /*timeout_ms=*/-1,
+      [] { return false; },
+      [&ambiguous_callback_count](size_t hit_units, bool workers_quiescent) {
+        EXPECT_EQ(hit_units, 0u);
+        EXPECT_FALSE(workers_quiescent);
+        ++ambiguous_callback_count;
+      });
+  ambiguous_result.begin_worker_rpc(/*worker_index=*/0);
+  ambiguous_result.mark_worker_ended(
+      /*worker_index=*/0, /*worker_ok=*/false, /*worker_quiescent=*/false);
+  EXPECT_EQ(ambiguous_callback_count, 0u);
+  ambiguous_result.complete_worker_rpc(
+      /*worker_index=*/0, /*rejected_before_start=*/false);
+  EXPECT_EQ(ambiguous_callback_count, 1u);
 }
 
-TEST(PrefetchResultTest, CarriesStreamIdleTimeout) {
-  PrefetchResult default_timeout(/*worker_count=*/2, /*block_count=*/5);
-  EXPECT_EQ(default_timeout.stream_idle_timeout_ms(), -1);
+TEST(PrefetchResultTest, StopsAfterCancellationOrTimeout) {
+  bool cancelled = false;
+  size_t common_hit_units = 0;
+  PrefetchResult cancelled_result(
+      /*worker_count=*/1,
+      /*batch_end_unit_offsets=*/{2, 4},
+      /*timeout_ms=*/-1,
+      [&cancelled] { return cancelled; },
+      [&common_hit_units](size_t hit_units, bool workers_quiescent) {
+        EXPECT_TRUE(workers_quiescent);
+        common_hit_units = hit_units;
+      });
+  cancelled = true;
+  std::optional<PrefetchControl> control = cancelled_result.record_batch_result(
+      /*worker_index=*/0, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  EXPECT_FALSE(cancelled_result
+                   .record_batch_result(/*worker_index=*/0,
+                                        /*prefix_hit_units=*/2)
+                   .has_value());
+  cancelled_result.mark_worker_ended(
+      /*worker_index=*/0, /*worker_ok=*/true, /*worker_quiescent=*/true);
+  EXPECT_EQ(common_hit_units, 2u);
 
-  PrefetchResult configured_timeout(/*worker_count=*/2,
-                                    /*block_count=*/5,
-                                    /*batch_size=*/8,
-                                    /*stream_idle_timeout_ms=*/30000);
-  EXPECT_EQ(configured_timeout.stream_idle_timeout_ms(), 30000);
+  PrefetchResult timed_out_result(
+      /*worker_count=*/1,
+      /*batch_end_unit_offsets=*/{2, 4},
+      /*timeout_ms=*/1,
+      [] { return false; },
+      [](size_t /*hit_units*/, bool /*workers_quiescent*/) {});
+  EXPECT_EQ(timed_out_result.stream_idle_timeout_ms(), 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  control = timed_out_result.record_batch_result(
+      /*worker_index=*/0, /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
 }
 
 TEST(HierarchyBlockManagerPoolTest,
-     StoragePrefetchTimeoutWaitsForInFlightBatch) {
+     StoragePrefetchTimeoutWaitsForWorkersToEnd) {
   BlockManagerPool::Options options = make_flat_kv_options();
-  options.enable_kvcache_store(true);
-  FakePrefetchEngine engine(/*worker_count=*/2);
+  options.enable_kvcache_store(true).prefetch_batch_size(2);
+  FakePrefetchEngine engine(/*worker_count=*/2, /*timeout_ms=*/1);
   HierarchyBlockManagerPool pool(options, &engine, /*dp_size=*/1);
   std::vector<int32_t> tokens(1025, 83);
   std::shared_ptr<Request> request = make_test_request(tokens);
   Sequence* sequence = request->sequences().front().get();
+  bool completed = false;
 
-  pool.prefetch_from_storage(request);
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
   ASSERT_NE(engine.result(), nullptr);
-  ASSERT_EQ(engine.transfer_infos().size(), 8u);
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/0, /*offset=*/0, {1, 1}));
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/1, /*offset=*/0, {1, 1}));
+  EXPECT_EQ(engine.request().transfer_infos.size(), 8u);
+  EXPECT_EQ(engine.request().unit_end_offsets.size(), 8u);
+  EXPECT_EQ(engine.request().batch_end_unit_offsets,
+            (std::vector<uint32_t>{2, 4, 6, 8}));
+  EXPECT_TRUE(sequence->host_kv_state().has_any_blocks());
+  EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
 
   std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  EXPECT_FALSE(pool.update_prefetch_result(request, /*timeout=*/1));
-  EXPECT_TRUE(engine.result()->stop_requested());
-  EXPECT_FALSE(sequence->host_kv_state().has_any_blocks());
+  std::optional<PrefetchControl> control =
+      engine.result()->record_batch_result(/*worker_index=*/0,
+                                           /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  engine.result()->mark_worker_ended(
+      /*worker_index=*/0, /*worker_ok=*/true, /*worker_quiescent=*/true);
+  EXPECT_FALSE(completed);
+  control = engine.result()->record_batch_result(/*worker_index=*/1,
+                                                 /*prefix_hit_units=*/2);
+  ASSERT_TRUE(control.has_value());
+  EXPECT_EQ(*control, PrefetchControl::STOP);
+  engine.result()->mark_worker_ended(
+      /*worker_index=*/1, /*worker_ok=*/true, /*worker_quiescent=*/true);
 
-  engine.result()->mark_worker_completed(/*worker_index=*/0,
-                                         /*worker_ok=*/true);
-  EXPECT_FALSE(pool.update_prefetch_result(request, /*timeout=*/1));
-  engine.result()->mark_worker_completed(/*worker_index=*/1,
-                                         /*worker_ok=*/true);
-  EXPECT_TRUE(pool.update_prefetch_result(request, /*timeout=*/1));
+  EXPECT_FALSE(completed);
+  pool.drain_prefetch_completions();
+  EXPECT_TRUE(completed);
   EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::KV), 2u);
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), 256u);
   EXPECT_TRUE(sequence->host_kv_state().prefix_cache_matched());
   pool.deallocate(sequence);
 }
 
 TEST(HierarchyBlockManagerPoolTest,
-     StoragePrefetchPublishesOnlyAfterAllTpWorkersComplete) {
+     StoragePrefetchPublishesOnlyAfterAllTpWorkersEnd) {
   BlockManagerPool::Options options = make_flat_kv_options();
-  options.enable_kvcache_store(true);
+  options.enable_kvcache_store(true).prefetch_batch_size(2);
   FakePrefetchEngine engine(/*worker_count=*/2);
   HierarchyBlockManagerPool pool(options, &engine, /*dp_size=*/1);
   std::vector<int32_t> tokens(1025, 73);
   std::shared_ptr<Request> request = make_test_request(tokens);
   Sequence* sequence = request->sequences().front().get();
+  bool completed = false;
 
-  pool.prefetch_from_storage(request);
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
   ASSERT_EQ(engine.dp_rank(), 0u);
-  ASSERT_EQ(engine.transfer_infos().size(), 8u);
+  ASSERT_EQ(engine.request().transfer_infos.size(), 8u);
   ASSERT_NE(engine.result(), nullptr);
   EXPECT_FALSE(sequence->kv_state().has_any_blocks());
-  EXPECT_FALSE(sequence->host_kv_state().has_any_blocks());
-  EXPECT_FALSE(pool.update_prefetch_result(request, /*timeout=*/0));
+  EXPECT_TRUE(sequence->host_kv_state().has_any_blocks());
+  EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
 
-  const std::vector<uint8_t> hits(engine.transfer_infos().size(), 1);
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/0, /*offset=*/0, hits));
-  engine.result()->mark_worker_completed(/*worker_index=*/0,
-                                         /*worker_ok=*/true);
-  EXPECT_FALSE(pool.update_prefetch_result(request, /*timeout=*/0));
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/1, /*offset=*/0, hits));
-  engine.result()->mark_worker_completed(/*worker_index=*/1,
-                                         /*worker_ok=*/true);
-  EXPECT_TRUE(pool.update_prefetch_result(request, /*timeout=*/0));
+  engine.finish_worker(/*worker_index=*/0, /*hit_units=*/8);
+  EXPECT_FALSE(completed);
+  EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
+  std::thread worker(
+      [&engine] { engine.finish_worker(/*worker_index=*/1, /*hit_units=*/8); });
+  worker.join();
 
-  // Prefetch publishes the completed Host probe directly. HBM remains
-  // unmatched until the normal shared-allocation step.
+  EXPECT_FALSE(completed);
+  EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
+  pool.drain_prefetch_completions();
+  EXPECT_TRUE(completed);
   EXPECT_FALSE(sequence->kv_state().has_any_blocks());
   EXPECT_TRUE(sequence->host_kv_state().has_any_blocks());
   EXPECT_FALSE(sequence->kv_state().prefix_cache_matched());
@@ -1333,9 +1538,9 @@ TEST(HierarchyBlockManagerPoolTest,
 }
 
 TEST(HierarchyBlockManagerPoolTest,
-     CancelledStoragePrefetchStopsAndReleasesAfterCompletion) {
+     CancelledStoragePrefetchReleasesReservedBlocks) {
   BlockManagerPool::Options options = make_flat_kv_options();
-  options.enable_kvcache_store(true);
+  options.enable_kvcache_store(true).prefetch_batch_size(2);
   FakePrefetchEngine engine(/*worker_count=*/2);
   HierarchyBlockManagerPool pool(options, &engine, /*dp_size=*/1);
   std::vector<int32_t> tokens(1025);
@@ -1354,54 +1559,85 @@ TEST(HierarchyBlockManagerPoolTest,
   seed_host_prefix(host_leaf, cached_tokens);
   const size_t free_blocks_before = host_leaf->num_free_blocks();
   const size_t cached_blocks_before = host_leaf->num_blocks_in_prefix_cache();
+  bool completed = false;
 
-  pool.prefetch_from_storage(request);
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
   ASSERT_NE(engine.result(), nullptr);
   ASSERT_LT(host_leaf->num_free_blocks(), free_blocks_before);
   request->set_cancel();
 
-  EXPECT_FALSE(pool.update_prefetch_result(request, /*timeout=*/0));
-  EXPECT_TRUE(engine.result()->stop_requested());
-  EXPECT_FALSE(sequence->host_kv_state().has_any_blocks());
-  engine.result()->mark_worker_completed(/*worker_index=*/0,
-                                         /*worker_ok=*/true);
-  EXPECT_FALSE(pool.update_prefetch_result(request, /*timeout=*/0));
-  engine.result()->mark_worker_completed(/*worker_index=*/1,
-                                         /*worker_ok=*/true);
-  EXPECT_TRUE(pool.update_prefetch_result(request, /*timeout=*/0));
+  engine.finish_worker(/*worker_index=*/0, /*hit_units=*/2);
+  EXPECT_FALSE(completed);
+  engine.finish_worker(/*worker_index=*/1, /*hit_units=*/2);
 
+  EXPECT_FALSE(completed);
+  pool.drain_prefetch_completions();
+  EXPECT_TRUE(completed);
   EXPECT_EQ(host_leaf->num_free_blocks(), free_blocks_before);
   EXPECT_EQ(host_leaf->num_blocks_in_prefix_cache(), cached_blocks_before);
   EXPECT_FALSE(sequence->host_kv_state().has_any_blocks());
   EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
+
+  // Cancellation after completed writes releases reservations. A stream close
+  // during an unconfirmed write must instead keep block ids out of circulation.
+  request = make_test_request(tokens);
+  sequence = request->sequences().front().get();
+  completed = false;
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
+  const size_t free_blocks_during_write = host_leaf->num_free_blocks();
+  ASSERT_LT(free_blocks_during_write, free_blocks_before);
+  engine.finish_worker(/*worker_index=*/0,
+                       /*hit_units=*/2,
+                       /*worker_ok=*/false,
+                       /*worker_quiescent=*/false);
+  engine.finish_worker(/*worker_index=*/1, /*hit_units=*/2);
+  pool.drain_prefetch_completions();
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(sequence->host_kv_state().has_any_blocks());
+  EXPECT_EQ(host_leaf->num_free_blocks(), free_blocks_during_write);
+
+  request = make_test_request(tokens);
+  completed = false;
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(request->sequences().front()->host_kv_state().has_any_blocks());
+  EXPECT_EQ(host_leaf->num_free_blocks(), free_blocks_during_write);
 }
 
 TEST(HierarchyBlockManagerPoolTest,
      TypedStoragePrefetchRetainsLongestPrefixWithinHostCapacity) {
   constexpr size_t kPromptTokens = 32769;
   BlockManagerPool::Options options = make_typed_cache_options();
-  options.enable_kvcache_store(true).host_num_blocks_by_type(
-      {{BlockType::SWA, 129}, {BlockType::C4, 33}, {BlockType::C128, 2}});
+  options.enable_kvcache_store(true)
+      .prefetch_batch_size(2)
+      .host_num_blocks_by_type(
+          {{BlockType::SWA, 129}, {BlockType::C4, 33}, {BlockType::C128, 2}});
   FakePrefetchEngine engine(/*worker_count=*/2);
   HierarchyBlockManagerPool pool(options, &engine, /*dp_size=*/1);
   std::vector<int32_t> tokens(kPromptTokens, 79);
   std::shared_ptr<Request> request = make_test_request(tokens);
   Sequence* sequence = request->sequences().front().get();
+  bool completed = false;
 
-  pool.prefetch_from_storage(request);
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
   ASSERT_NE(engine.result(), nullptr);
-  EXPECT_EQ(engine.transfer_infos().size(), 1u + 32u + 1u);
+  EXPECT_EQ(engine.request().transfer_infos.size(), 1u + 32u + 1u);
+  EXPECT_EQ(engine.request().unit_end_offsets, (std::vector<uint32_t>{34}));
 
-  const std::vector<uint8_t> hits(engine.transfer_infos().size(), 1);
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/0, /*offset=*/0, hits));
-  engine.result()->mark_worker_completed(/*worker_index=*/0,
-                                         /*worker_ok=*/true);
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/1, /*offset=*/0, hits));
-  engine.result()->mark_worker_completed(/*worker_index=*/1,
-                                         /*worker_ok=*/true);
-  ASSERT_TRUE(pool.update_prefetch_result(request, /*timeout=*/0));
+  engine.finish_worker(/*worker_index=*/0, /*hit_units=*/1);
+  EXPECT_FALSE(completed);
+  engine.finish_worker(/*worker_index=*/1, /*hit_units=*/1);
+  EXPECT_FALSE(completed);
+  pool.drain_prefetch_completions();
+  ASSERT_TRUE(completed);
 
   pool.allocate_shared(sequence);
   const Slice<Block> swa_blocks =
@@ -1418,72 +1654,34 @@ TEST(HierarchyBlockManagerPoolTest,
 }
 
 TEST(HierarchyBlockManagerPoolTest,
-     TypedStoragePrefetchKeepsSwaHitsAfterMiddleMiss) {
+     TypedStoragePrefetchStopsAtFirstIncompleteUnit) {
   constexpr size_t kPromptTokens = 32769;
-  constexpr size_t kMissedSwaOrdinal = 0;
-  constexpr size_t kMissedSwaBlock = 127;
   BlockManagerPool::Options options = make_typed_cache_options();
-  options.enable_kvcache_store(true);
+  options.enable_kvcache_store(true).prefetch_batch_size(2);
   FakePrefetchEngine engine(/*worker_count=*/2);
   HierarchyBlockManagerPool pool(options, &engine, /*dp_size=*/1);
   std::vector<int32_t> tokens(kPromptTokens, 79);
   std::shared_ptr<Request> request = make_test_request(tokens);
   Sequence* sequence = request->sequences().front().get();
+  bool completed = false;
 
-  pool.prefetch_from_storage(request);
+  pool.prefetch_from_storage(
+      request,
+      [&completed](std::shared_ptr<Request> /*request*/) { completed = true; });
   ASSERT_NE(engine.result(), nullptr);
-  ASSERT_FALSE(engine.transfer_infos().empty());
-  std::vector<uint8_t> first_worker_hits(engine.transfer_infos().size(), 1);
-  size_t swa_ordinal = 0;
-  size_t missed_result_index = engine.transfer_infos().size();
-  for (size_t i = 0; i < engine.transfer_infos().size(); ++i) {
-    if (engine.transfer_infos()[i].block_type != BlockType::SWA) {
-      continue;
-    }
-    if (swa_ordinal == kMissedSwaOrdinal) {
-      missed_result_index = i;
-      first_worker_hits[i] = 0;
-    }
-    ++swa_ordinal;
-  }
-  ASSERT_EQ(swa_ordinal, 2u);
-  ASSERT_LT(missed_result_index, engine.transfer_infos().size());
+  ASSERT_EQ(engine.request().unit_end_offsets.size(), 2u);
+  EXPECT_EQ(engine.request().unit_end_offsets, (std::vector<uint32_t>{34, 68}));
 
-  const size_t split = engine.transfer_infos().size() / 2;
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/0,
-      /*offset=*/0,
-      std::vector<uint8_t>(first_worker_hits.begin(),
-                           first_worker_hits.begin() + split)));
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/0,
-      /*offset=*/split,
-      std::vector<uint8_t>(first_worker_hits.begin() + split,
-                           first_worker_hits.end())));
-  engine.result()->mark_worker_completed(/*worker_index=*/0,
-                                         /*worker_ok=*/true);
+  engine.finish_worker(/*worker_index=*/0, /*hit_units=*/0);
+  EXPECT_FALSE(completed);
+  engine.finish_worker(/*worker_index=*/1, /*hit_units=*/2);
 
-  const std::vector<uint8_t> second_worker_hits(engine.transfer_infos().size(),
-                                                1);
-  ASSERT_TRUE(engine.result()->set_batch_result(
-      /*worker_index=*/1, /*offset=*/0, second_worker_hits));
-  engine.result()->mark_worker_completed(/*worker_index=*/1,
-                                         /*worker_ok=*/true);
-  ASSERT_TRUE(pool.update_prefetch_result(request, /*timeout=*/0));
-  ASSERT_TRUE(sequence->host_kv_state().has_any_blocks());
-  ASSERT_TRUE(sequence->host_kv_state().prefix_cache_matched());
-  ASSERT_FALSE(sequence->kv_state().prefix_cache_matched());
-
-  pool.allocate_shared(sequence);
-  const Slice<Block> swa_blocks =
-      sequence->host_kv_state().blocks(BlockType::SWA);
-  ASSERT_EQ(swa_blocks.size(), 256u);
-  EXPECT_FALSE(swa_blocks[kMissedSwaBlock].is_valid());
-  EXPECT_TRUE(swa_blocks.back().is_valid());
-  EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::C4), 64u);
-  EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::C128), 2u);
-  EXPECT_EQ(sequence->kv_cache_tokens_num(), 32768u);
-  pool.deallocate(sequence);
+  EXPECT_FALSE(completed);
+  pool.drain_prefetch_completions();
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(sequence->host_kv_state().has_any_blocks());
+  EXPECT_TRUE(sequence->host_kv_state().prefix_cache_matched());
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), 0u);
 }
 
 TEST(HierarchyBlockManagerPoolTest, TypedLayoutSupportsStoragePrefetch) {

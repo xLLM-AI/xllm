@@ -71,7 +71,16 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     const size_t active_blocks = logical_blocks - live_begin;
     std::vector<Block> live_blocks = allocate(active_blocks);
     if (live_blocks.size() != active_blocks) {
-      return std::nullopt;
+      const size_t reclaimable =
+          num_reclaimable_out_of_window_blocks(kv_state, restore_tokens);
+      if (num_free_blocks() + reclaimable < active_blocks) {
+        return std::nullopt;
+      }
+      release_out_of_window(seq, kv_state, restore_tokens);
+      live_blocks = allocate(active_blocks);
+      if (live_blocks.size() != active_blocks) {
+        return std::nullopt;
+      }
     }
 
     std::vector<Block> sparse_blocks(live_begin - held);
@@ -99,12 +108,12 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
     CHECK_GT(num_blocks_needed, held);
     const size_t num_additional = num_blocks_needed - held;
-    const size_t reclaimable = num_reclaimable_out_of_window_blocks(
-        kv_state, kv_state.kv_cache_tokens_num());
+    const size_t reclaimable =
+        num_reclaimable_out_of_window_blocks(kv_state, restore_tokens);
     if (num_free_blocks() + reclaimable < num_additional) {
       return std::nullopt;
     }
-    release_out_of_window(seq, kv_state);
+    release_out_of_window(seq, kv_state, restore_tokens);
     return BlockManagerImpl::allocate_for_sequence(seq, kv_state, num_tokens);
   }
 
@@ -129,6 +138,18 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
   return sparse_blocks;
 }
 
+bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
+                                                      size_t num_tokens) {
+  const size_t block_size = options_.block_size();
+  CHECK_GT(block_size, 0u);
+  const size_t target_blocks = num_tokens / block_size;
+  const size_t blocks_per_window =
+      static_cast<size_t>(options_.swa_blocks_per_seq());
+  const size_t required_begin =
+      target_blocks - std::min(target_blocks, blocks_per_window);
+  return allocate_prefetch_range(seq, num_tokens, required_begin);
+}
+
 void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
   if (seq == nullptr) {
     return;
@@ -138,7 +159,7 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
 
 void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
                                                       KVCacheState& kv_state) {
-  release_out_of_window(seq, kv_state, kv_state.kv_cache_tokens_num());
+  release_out_of_window(seq, kv_state, seq->kv_cache_tokens_num());
 }
 
 void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
