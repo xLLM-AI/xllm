@@ -44,7 +44,6 @@ bool JsonReader::parse_text(const std::string& json_text) {
 }
 
 bool JsonReader::contains(const std::string& key) const {
-  // top-level lookup, then fall back to text_config subtree (see resolve()).
   return resolve(key) != nullptr;
 }
 

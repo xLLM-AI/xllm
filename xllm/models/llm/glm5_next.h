@@ -50,80 +50,88 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
   // normalization is needed; downstream model_type checks
   // (e.g. is_glm5_next_mtp_draft_model_type) match the checkpoint value
   // directly.
-  LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
-  LOAD_ARG_OR(vocab_size, "vocab_size", 154880);
-  LOAD_ARG_OR(hidden_size, "hidden_size", 4096);
-  LOAD_ARG_OR(n_layers, "num_hidden_layers", 45);
-  LOAD_ARG_OR(n_heads, "num_attention_heads", 64);
-  LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 64);
-  LOAD_ARG_OR(intermediate_size, "intermediate_size", 12288);
-  LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 1104096);
-  LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
+  // GLM-5.3-Flash config.json nests every text-side field under "text_config"
+  // (verified against GLM-5.3-Flash-W8A8). Read those fields with an explicit
+  // "text_config." prefix; do not rely on an implicit fallback in JsonReader.
+  LOAD_ARG_OR(dtype, "text_config.torch_dtype", "bfloat16");
+  LOAD_ARG_OR(vocab_size, "text_config.vocab_size", 154880);
+  LOAD_ARG_OR(hidden_size, "text_config.hidden_size", 4096);
+  LOAD_ARG_OR(n_layers, "text_config.num_hidden_layers", 45);
+  LOAD_ARG_OR(n_heads, "text_config.num_attention_heads", 64);
+  LOAD_ARG_OR(n_kv_heads, "text_config.num_key_value_heads", 64);
+  LOAD_ARG_OR(intermediate_size, "text_config.intermediate_size", 12288);
+  LOAD_ARG_OR(
+      max_position_embeddings, "text_config.max_position_embeddings", 1104096);
+  LOAD_ARG_OR(rms_norm_eps, "text_config.rms_norm_eps", 1e-5);
   // fake config carries eos_token_id as a single-element array [154879]
   // (the C++ loader expects an array; the generator emits it that way).
-  LOAD_ARG_OR_FUNC(eos_token_id_vec, "eos_token_id", [&] {
+  LOAD_ARG_OR_FUNC(eos_token_id_vec, "text_config.eos_token_id", [&] {
     return std::vector<int32_t>{154879};
   });
-  LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);
-  LOAD_ARG_OR(rope_theta, "rope_parameters.rope_theta", 10000.0f);
+  LOAD_ARG_OR(bos_token_id, "text_config.bos_token_id", 0);
+  LOAD_ARG_OR(rope_theta, "text_config.rope_parameters.rope_theta", 10000.0f);
 
   // MoE parameters
-  LOAD_ARG_OR(first_k_dense_replace, "first_k_dense_replace", 3);
-  LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
-  LOAD_ARG_OR(n_routed_experts, "n_routed_experts", 288);
-  LOAD_ARG_OR(n_shared_experts, "n_shared_experts", 1);
-  LOAD_ARG_OR(num_experts_per_tok, "num_experts_per_tok", 8);
-  LOAD_ARG_OR(moe_intermediate_size, "moe_intermediate_size", 2048);
-  LOAD_ARG_OR(routed_scaling_factor, "routed_scaling_factor", 2.5f);
-  LOAD_ARG_OR(norm_topk_prob, "norm_topk_prob", true);
-  LOAD_ARG_OR(n_group, "n_group", 1);
-  LOAD_ARG_OR(topk_group, "topk_group", 1);
+  LOAD_ARG_OR(first_k_dense_replace, "text_config.first_k_dense_replace", 3);
+  LOAD_ARG_OR(hidden_act, "text_config.hidden_act", "silu");
+  LOAD_ARG_OR(n_routed_experts, "text_config.n_routed_experts", 288);
+  LOAD_ARG_OR(n_shared_experts, "text_config.n_shared_experts", 1);
+  LOAD_ARG_OR(num_experts_per_tok, "text_config.num_experts_per_tok", 8);
+  LOAD_ARG_OR(moe_intermediate_size, "text_config.moe_intermediate_size", 2048);
+  LOAD_ARG_OR(routed_scaling_factor, "text_config.routed_scaling_factor", 2.5f);
+  LOAD_ARG_OR(norm_topk_prob, "text_config.norm_topk_prob", true);
+  LOAD_ARG_OR(n_group, "text_config.n_group", 1);
+  LOAD_ARG_OR(topk_group, "text_config.topk_group", 1);
 
   // MLA (NoPE: qk_rope=0) + DSA indexer parameters
-  LOAD_ARG_OR(qk_nope_head_dim, "qk_nope_head_dim", 256);
-  LOAD_ARG_OR(qk_rope_head_dim, "qk_rope_head_dim", 0);
-  LOAD_ARG_OR(v_head_dim, "v_head_dim", 256);
-  LOAD_ARG_OR(q_lora_rank, "q_lora_rank", 1536);
-  LOAD_ARG_OR(kv_lora_rank, "kv_lora_rank", 512);
-  LOAD_ARG_OR(index_head_dim, "index_head_dim", 128);
-  LOAD_ARG_OR(index_n_heads, "index_n_heads", 32);
-  LOAD_ARG_OR(index_topk, "index_topk", 2048);
-  LOAD_ARG_OR(index_kpool, "index_kpool", 1);
-  LOAD_ARG_OR(index_kpool_compress, "index_kpool_compress", false);
+  LOAD_ARG_OR(qk_nope_head_dim, "text_config.qk_nope_head_dim", 256);
+  LOAD_ARG_OR(qk_rope_head_dim, "text_config.qk_rope_head_dim", 0);
+  LOAD_ARG_OR(v_head_dim, "text_config.v_head_dim", 256);
+  LOAD_ARG_OR(q_lora_rank, "text_config.q_lora_rank", 1536);
+  LOAD_ARG_OR(kv_lora_rank, "text_config.kv_lora_rank", 512);
+  LOAD_ARG_OR(index_head_dim, "text_config.index_head_dim", 128);
+  LOAD_ARG_OR(index_n_heads, "text_config.index_n_heads", 32);
+  LOAD_ARG_OR(index_topk, "text_config.index_topk", 2048);
+  LOAD_ARG_OR(index_kpool, "text_config.index_kpool", 1);
+  LOAD_ARG_OR(index_kpool_compress, "text_config.index_kpool_compress", false);
+  LOAD_ARG_OR(index_kpool_always_select_tail,
+              "text_config.index_kpool_always_select_tail",
+              false);
+  LOAD_ARG_OR(index_topk_freq, "text_config.index_topk_freq", 1);
+  LOAD_ARG_OR(index_skip_topk_offset, "text_config.index_skip_topk_offset", 1);
   LOAD_ARG_OR(
-      index_kpool_always_select_tail, "index_kpool_always_select_tail", false);
-  LOAD_ARG_OR(index_topk_freq, "index_topk_freq", 1);
-  LOAD_ARG_OR(index_skip_topk_offset, "index_skip_topk_offset", 1);
-  LOAD_ARG_OR(indexer_types, "indexer_types", std::vector<std::string>());
-  LOAD_ARG_OR(mlp_layer_types, "mlp_layer_types", std::vector<std::string>());
+      indexer_types, "text_config.indexer_types", std::vector<std::string>());
+  LOAD_ARG_OR(mlp_layer_types,
+              "text_config.mlp_layer_types",
+              std::vector<std::string>());
 
   // KDA linear-attention config (transformers nests it under
   // linear_attn_config). Drives the engine's linear-state slot pool:
   // has_linear_attention_layers(args) becomes true, and conv/ssm caches
   // are allocated for KDA layers (see is_linear_attention_layer).
   LOAD_ARG_OR(full_attn_layers,
-              "linear_attn_config.full_attn_layers",
+              "text_config.linear_attn_config.full_attn_layers",
               std::vector<int32_t>{});
   LOAD_ARG_OR(linear_num_key_heads,
-              "linear_attn_config.num_heads",
+              "text_config.linear_attn_config.num_heads",
               args->linear_num_key_heads());
   LOAD_ARG_OR(linear_key_head_dim,
-              "linear_attn_config.head_dim",
+              "text_config.linear_attn_config.head_dim",
               args->linear_key_head_dim());
-  LOAD_ARG_OR_FUNC(linear_num_value_heads, "linear_attn_config.num_heads", [&] {
-    return args->linear_num_key_heads();
-  });
-  LOAD_ARG_OR_FUNC(linear_value_head_dim, "linear_attn_config.head_dim", [&] {
-    return args->linear_key_head_dim();
-  });
+  LOAD_ARG_OR_FUNC(linear_num_value_heads,
+                   "text_config.linear_attn_config.num_heads",
+                   [&] { return args->linear_num_key_heads(); });
+  LOAD_ARG_OR_FUNC(linear_value_head_dim,
+                   "text_config.linear_attn_config.head_dim",
+                   [&] { return args->linear_key_head_dim(); });
   LOAD_ARG_OR(linear_conv_kernel_dim,
-              "linear_attn_config.short_conv_kernel_size",
+              "text_config.linear_attn_config.short_conv_kernel_size",
               args->linear_conv_kernel_dim());
   // recurrent_state must be fp32 for numerical stability.
-  LOAD_ARG_OR(mamba_ssm_dtype, "mamba_ssm_dtype", "float32");
+  LOAD_ARG_OR(mamba_ssm_dtype, "text_config.mamba_ssm_dtype", "float32");
   // layer_types mirrors the python _resolve_schedules derivation so C++ and
   // python agree on which layers are KDA (linear) vs DSA (full attention).
-  LOAD_ARG_OR(layer_types, "layer_types", args->layer_types());
+  LOAD_ARG_OR(layer_types, "text_config.layer_types", args->layer_types());
   // When config.json omits layer_types, derive from full_attn_layers:
   // a layer is full-attention iff its index is in full_attn_layers. When
   // full_attn_layers is also absent, fall back to every 4th layer (i % 4 == 3)

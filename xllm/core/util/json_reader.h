@@ -94,19 +94,13 @@ class JsonReader {
     return data;
   }
 
-  // Look up a key, falling back to the same key under a "text_config" subtree
-  // when the top-level lookup misses. Multimodal configs (e.g. glm5_next
-  // full weights) nest the text-model fields under "text_config"; single-model
-  // configs keep them flat. This lets model args loaders use the same flat key
-  // ("num_hidden_layers") for both layouts.
+  // Resolve a dot-separated key path against the top-level document. Loaders
+  // that need to read from a "text_config" subtree must spell the path
+  // explicitly (e.g. "text_config.num_hidden_layers"); the reader does not
+  // perform an implicit fallback that would silently redirect vision-side keys
+  // (e.g. "head_dim") to the text subtree.
   const nlohmann::json* resolve(const std::string& key) const {
-    if (auto* data = resolve_path(data_, key)) {
-      return data;
-    }
-    if (data_.contains("text_config") && data_["text_config"].is_object()) {
-      return resolve_path(data_["text_config"], key);
-    }
-    return nullptr;
+    return resolve_path(data_, key);
   }
 
   nlohmann::json data() const { return data_; }
