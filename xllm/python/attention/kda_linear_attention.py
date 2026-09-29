@@ -74,6 +74,7 @@ class KdaLinearAttentionMixin:
                     st["tails"].index_select(1, idx64).clone(),
                     st["kv_prev"].index_select(0, idx64).clone(),
                     st["armed_buf"].index_select(0, idx64).clone(),
+                    st["ever_armed"],
                 )
             )
         return snap or None
@@ -82,13 +83,14 @@ class KdaLinearAttentionMixin:
     def restore_kda_v2_state(snap) -> None:
         if not snap:
             return
-        for st, idx64, co, g, b, t, kv, ar in snap:
+        for st, idx64, co, g, b, t, kv, ar, ever_armed in snap:
             st["conv_out"].index_copy_(0, idx64, co)
             st["g_raw"].index_copy_(0, idx64, g)
             st["b_raw"].index_copy_(0, idx64, b)
             st["tails"].index_copy_(1, idx64, t)
             st["kv_prev"].index_copy_(0, idx64, kv)
             st["armed_buf"].index_copy_(0, idx64, ar)
+            st["ever_armed"] = ever_armed
 
     def disarm_kda_v2_slots(self, idx: torch.Tensor) -> None:
         """Mark slots' V2 stash invalid (prefill restarts the chain)."""
@@ -128,6 +130,7 @@ class KdaLinearAttentionMixin:
                     [st["combined_ssm"].index_select(0, s).clone() for s in slot_idx],
                     st["kv_prev"].index_select(0, idx64).clone(),
                     st["armed_buf"].index_select(0, idx64).clone(),
+                    st["ever_armed"],
                 )
             )
         return snap or None
@@ -136,12 +139,13 @@ class KdaLinearAttentionMixin:
     def restore_kda_v3_state(snap) -> None:
         if not snap:
             return
-        for st, idx64, nslots, rslots, conv_snaps, ssm_snaps, kv, ar in snap:
+        for st, idx64, nslots, rslots, conv_snaps, ssm_snaps, kv, ar, ever_armed in snap:
             for j in range(rslots):
                 st["combined_conv"].index_copy_(0, idx64 + j * nslots, conv_snaps[j])
                 st["combined_ssm"].index_copy_(0, idx64 + j * nslots, ssm_snaps[j])
             st["kv_prev"].index_copy_(0, idx64, kv)
             st["armed_buf"].index_copy_(0, idx64, ar)
+            st["ever_armed"] = ever_armed
 
     def execute_linear(
         self,

@@ -716,6 +716,29 @@ class TestDecodeAclGraphSpeculativeMetadata:
             runner.warmup(input_ids, positions, metadata)
             prepare.assert_called_once()
 
+        # Capture warmup advances KDA state; the first real replay must start
+        # from the original recurrent state, not from a synthetic warmup step.
+        conv = torch.arange(4, dtype=torch.float32)
+        ssm = torch.arange(4, dtype=torch.float32) + 10
+        runner.layer_caches = [SimpleNamespace(conv=conv, ssm=ssm)]
+        entry = SimpleNamespace(static_metadata=SimpleNamespace(linear_state_indices=torch.tensor([1])))
+        caller_stream = MagicMock()
+        graph_stream = MagicMock()
+
+        def advance_state(_entry, _stream):
+            conv[1] += 10
+            ssm[1] += 20
+
+        with (
+            patch.object(torch, "npu", SimpleNamespace(current_stream=lambda: caller_stream), create=True),
+            patch("xllm.python.model_executor.runners.acl_graph.AclGraphRunner._capture", side_effect=advance_state),
+        ):
+            runner._capture(entry, graph_stream)
+
+        assert conv.tolist() == [0, 1, 2, 3]
+        assert ssm.tolist() == [10, 11, 12, 13]
+        caller_stream.wait_stream.assert_called_once_with(graph_stream)
+
     @pytest.mark.parametrize(
         ("field", "value", "message"),
         [

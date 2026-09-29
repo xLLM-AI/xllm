@@ -634,6 +634,60 @@ class DecodeAclGraphRunner(AclGraphRunner):
             topk = topk[:batch_size].clone()
         return hidden, aux_hidden, topk
 
+    def _capture(self, entry: AclGraphEntry, stream: torch.npu.Stream) -> None:
+        # Graph warmup and capture execute the model before the first replay.
+        # KDA advances recurrent cache and speculative state on each forward,
+        # so restore the touched slots before serving the decode step.
+        idx = entry.static_metadata.linear_state_indices
+        linear_snapshot = []
+        v2_snapshot = None
+        v3_snapshot = None
+        # A first capture may create backend-owned KDA state after snapshots.
+        # Record the existing objects so only new states have their global
+        # ever_armed flag reset when the synthetic capture is discarded.
+        backend_state = getattr(self.attention_backend, "__dict__", {})
+        v2_before = {id(st) for st in backend_state.get("_kda_v2", {}).values()}
+        v3_before = {id(st) for st in backend_state.get("_kda_v3", {}).values()}
+        if idx is not None:
+            for cache in self.layer_caches:
+                conv = getattr(cache, "conv", None)
+                ssm = getattr(cache, "ssm", None)
+                if conv is not None and ssm is not None:
+                    linear_snapshot.append(
+                        (conv, ssm, conv.index_select(0, idx).clone(), ssm.index_select(0, idx).clone())
+                    )
+            v2_snapshot_fn = getattr(self.attention_backend, "snapshot_kda_v2_state", None)
+            if v2_snapshot_fn is not None:
+                v2_snapshot = v2_snapshot_fn(idx)
+            v3_snapshot_fn = getattr(self.attention_backend, "snapshot_kda_v3_state", None)
+            if v3_snapshot_fn is not None:
+                v3_snapshot = v3_snapshot_fn(idx)
+
+        try:
+            super()._capture(entry, stream)
+        finally:
+            # Snapshot reads precede capture via the parent stream wait; wait
+            # for capture writes before restoring on the caller's stream.
+            torch.npu.current_stream().wait_stream(stream)
+            if idx is not None:
+                for conv, ssm, conv_rows, ssm_rows in linear_snapshot:
+                    conv.index_copy_(0, idx, conv_rows)
+                    ssm.index_copy_(0, idx, ssm_rows)
+            if idx is not None:
+                # Disarm all touched slots first; snapshots then restore the
+                # exact previous contents of states that existed before capture.
+                for version, prior in (("v2", v2_before), ("v3", v3_before)):
+                    disarm = getattr(self.attention_backend, f"disarm_kda_{version}_slots", None)
+                    if disarm is not None:
+                        disarm(idx)
+                    for st in backend_state.get(f"_kda_{version}", {}).values():
+                        if id(st) not in prior:
+                            st["ever_armed"] = False
+            if v2_snapshot is not None:
+                self.attention_backend.restore_kda_v2_state(v2_snapshot)
+            if v3_snapshot is not None:
+                self.attention_backend.restore_kda_v3_state(v3_snapshot)
+
     def _prepare_graph_entry(
         self,
         input_ids: torch.Tensor,
