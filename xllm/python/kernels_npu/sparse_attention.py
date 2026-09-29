@@ -18,6 +18,54 @@ from __future__ import annotations
 
 import torch
 
+try:
+    import torch_npu
+except (ImportError, OSError):
+    _TORCH_NPU_LIGHTNING_INDEXER = None
+else:
+    _TORCH_NPU_LIGHTNING_INDEXER = getattr(torch_npu, "npu_lightning_indexer", None)
+
+
+MAX_LIGHTNING_INDEXER_WINDOW = 2**63 - 1
+
+
+def supports_torch_npu_lightning_indexer() -> bool:
+    """Return whether the native torch_npu Lightning Indexer is available."""
+    return _TORCH_NPU_LIGHTNING_INDEXER is not None
+
+
+def _call_xllm_lightning_indexer(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_seq_lengths: torch.Tensor | None,
+    key_seq_lengths: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    layout_query: str,
+    layout_key: str,
+    selected_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    return_value: bool,
+) -> torch.Tensor:
+    """Call the xLLM implementation after the optional native fast path."""
+    return torch.ops.xllm_ops.lightning_indexer(
+        query,
+        key,
+        weights,
+        query_seq_lengths,
+        key_seq_lengths,
+        block_table,
+        layout_query,
+        layout_key,
+        selected_count,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        return_value,
+    )
+
 
 def lightning_indexer(
     query: torch.Tensor,
@@ -33,6 +81,8 @@ def lightning_indexer(
     pre_tokens: int,
     next_tokens: int,
     return_value: bool,
+    *,
+    prefer_torch_npu: bool = False,
 ) -> torch.Tensor:
     """Select the key blocks each query attends to.
 
@@ -50,11 +100,41 @@ def lightning_indexer(
         pre_tokens: Tokens visible before the query position.
         next_tokens: Tokens visible after the query position.
         return_value: Whether to also return the indexer scores.
+        prefer_torch_npu: Prefer the native torch_npu implementation when its
+            ABI matches this request; otherwise use the xLLM operator.
 
     Returns:
         Selected key indices of dtype ``torch.int32``.
     """
-    return torch.ops.xllm_ops.lightning_indexer(
+    if (
+        prefer_torch_npu
+        and _TORCH_NPU_LIGHTNING_INDEXER is not None
+        and query.device.type in ("npu", "privateuseone")
+        and layout_query == "TND"
+        and layout_key == "PA_BSND"
+        and sparse_mode == 3
+        and pre_tokens == MAX_LIGHTNING_INDEXER_WINDOW
+        and next_tokens == MAX_LIGHTNING_INDEXER_WINDOW
+        and not return_value
+        and query_seq_lengths is not None
+        and key_seq_lengths is not None
+        and block_table is not None
+    ):
+        topk_indices, _ = _TORCH_NPU_LIGHTNING_INDEXER(
+            query=query,
+            key=key,
+            weights=weights,
+            actual_seq_lengths_query=query_seq_lengths,
+            actual_seq_lengths_key=key_seq_lengths,
+            block_table=block_table,
+            layout_query=layout_query,
+            layout_key=layout_key,
+            sparse_count=selected_count,
+            sparse_mode=sparse_mode,
+        )
+        return topk_indices
+
+    return _call_xllm_lightning_indexer(
         query,
         key,
         weights,
@@ -333,6 +413,7 @@ def sparse_flash_attention_lse(
 
 __all__ = [
     "lightning_indexer",
+    "supports_torch_npu_lightning_indexer",
     "lightning_indexer_out",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
