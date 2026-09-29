@@ -20,6 +20,7 @@ limitations under the License.
 #include <limits>
 #include <string>
 
+#include "core/util/binary_payload.h"
 #include "core/util/utils.h"
 #include "tensor.pb.h"
 
@@ -60,6 +61,27 @@ TEST(TensorProtoTest, BinaryTensorsSharePayloadWithIndependentOffsets) {
   EXPECT_TRUE(torch::equal(util::proto_to_torch(first_proto, payload), first));
   EXPECT_TRUE(
       torch::equal(util::proto_to_torch(second_proto, payload), second));
+}
+
+TEST(TensorProtoTest, SegmentedBinaryPayloadCopiesDirectlyToTensor) {
+  const torch::Tensor input = torch::tensor({1.25f, -2.5f});
+  proto::Tensor proto_tensor;
+  std::string flat_payload;
+  ASSERT_TRUE(util::torch_to_proto(input, &proto_tensor, flat_payload));
+
+  butil::IOBuf first;
+  butil::IOBuf second;
+  first.append(flat_payload.data(), 3);
+  second.append(flat_payload.data() + 3, flat_payload.size() - 3);
+  butil::IOBuf segmented;
+  segmented.append(first);
+  segmented.append(second);
+
+  const torch::Tensor output =
+      util::proto_to_torch(proto_tensor, BinaryPayload(std::move(segmented)));
+
+  ASSERT_TRUE(output.defined());
+  EXPECT_TRUE(torch::equal(output, input));
 }
 
 TEST(TensorProtoTest, ContentsTensorRemainsSupportedWithPayloadOverload) {

@@ -43,13 +43,13 @@ std::pair<int, int> split_resolution(const std::string& s) {
 
 bool decode_tensor_input(std::string_view name,
                          const proto::Tensor& proto_tensor,
-                         const std::string& request_payload,
+                         const BinaryPayload& request_payload,
                          DiTTensorSources& tensor_sources,
-                         Status& input_status) {
+                         Status& request_parse_status) {
   torch::Tensor tensor = util::proto_to_torch(proto_tensor, request_payload);
   if (!tensor.defined()) {
-    input_status = Status(StatusCode::INVALID_ARGUMENT,
-                          "invalid " + std::string(name) + " tensor");
+    request_parse_status = Status(StatusCode::INVALID_ARGUMENT,
+                                  "invalid " + std::string(name) + " tensor");
     return false;
   }
   tensor_sources.add(std::string(name), std::move(tensor));
@@ -59,8 +59,8 @@ bool decode_tensor_input(std::string_view name,
 template <typename InputProto>
 bool fill_input_params(DiTInputParams& input_params,
                        const InputProto& input,
-                       const std::string& request_payload,
-                       Status& input_status) {
+                       const BinaryPayload& request_payload,
+                       Status& request_parse_status) {
   input_params.prompt = input.prompt();
   if (input.has_negative_prompt()) {
     input_params.negative_prompt = input.negative_prompt();
@@ -70,7 +70,7 @@ bool fill_input_params(DiTInputParams& input_params,
                            input.prompt_embed(),
                            request_payload,
                            input_params.tensor_sources,
-                           input_status)) {
+                           request_parse_status)) {
     return false;
   }
   if (input.has_negative_prompt_embed() &&
@@ -78,7 +78,7 @@ bool fill_input_params(DiTInputParams& input_params,
                            input.negative_prompt_embed(),
                            request_payload,
                            input_params.tensor_sources,
-                           input_status)) {
+                           request_parse_status)) {
     return false;
   }
   return true;
@@ -120,7 +120,7 @@ void fill_generation_params(DiTGenerationParams& generation_params,
 DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime,
-                                   const std::string& request_payload) {
+                                   const BinaryPayload& request_payload) {
   request_kind = DiTRequestKind::kImage;
   request_id = request.has_request_id() ? request.request_id()
                                         : generate_request_id("imggen-");
@@ -131,7 +131,7 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
   if (request.has_input()) {
     const auto& input = request.input();
     if (!fill_input_params(
-            input_params, input, request_payload, input_status)) {
+            input_params, input, request_payload, request_parse_status)) {
       return;
     }
     // Image-only input fields
@@ -146,7 +146,7 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
                              input.pooled_prompt_embed(),
                              request_payload,
                              input_params.tensor_sources,
-                             input_status)) {
+                             request_parse_status)) {
       return;
     }
     if (input.has_negative_pooled_prompt_embed() &&
@@ -154,14 +154,14 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
                              input.negative_pooled_prompt_embed(),
                              request_payload,
                              input_params.tensor_sources,
-                             input_status)) {
+                             request_parse_status)) {
       return;
     }
     if (input.has_latent() && !decode_tensor_input("latent",
                                                    input.latent(),
                                                    request_payload,
                                                    input_params.tensor_sources,
-                                                   input_status)) {
+                                                   request_parse_status)) {
       return;
     }
     if (input.has_masked_image_latent() &&
@@ -169,24 +169,25 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
                              input.masked_image_latent(),
                              request_payload,
                              input_params.tensor_sources,
-                             input_status)) {
+                             request_parse_status)) {
       return;
     }
     DiTSourceDecoder image_decoder(request_payload);
     if (!image_decoder.add_sources(input.image_sources(),
                                    /*default_name=*/"unknown",
-                                   input_status)) {
+                                   request_parse_status)) {
       return;
     }
     image_decoder.add_sources(input.images(),
                               /*default_name=*/"unknown");
     std::vector<NamedTensor> decoded_images;
-    const auto decode_image = [](const std::string& raw_bytes,
+    const auto decode_image = [](std::string_view raw_bytes,
                                  torch::Tensor& tensor) {
       OpenCVImageDecoder decoder;
       return decoder.decode(raw_bytes, tensor);
     };
-    if (!image_decoder.decode(decode_image, decoded_images, input_status)) {
+    if (!image_decoder.decode(
+            decode_image, decoded_images, request_parse_status)) {
       return;
     }
     for (NamedTensor& image : decoded_images) {
@@ -214,8 +215,9 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
       output_type = params.output_type();
     }
     if (output_type != "base64" && output_type != "binary") {
-      input_status = Status(StatusCode::INVALID_ARGUMENT,
-                            "output_type must be either base64 or binary");
+      request_parse_status =
+          Status(StatusCode::INVALID_ARGUMENT,
+                 "output_type must be either base64 or binary");
       return;
     }
   }
@@ -277,7 +279,7 @@ DiTRequestParams::DiTRequestParams(const proto::TextGenerationRequest& request,
 DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime,
-                                   const std::string& request_payload) {
+                                   const BinaryPayload& request_payload) {
   request_kind = DiTRequestKind::kAudio;
   if (request.has_request_id()) {
     request_id = request.request_id();
@@ -317,8 +319,9 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
     output_type = params.output_type();
   }
   if (output_type != "base64" && output_type != "binary") {
-    input_status = Status(StatusCode::INVALID_ARGUMENT,
-                          "output_type must be either base64 or binary");
+    request_parse_status =
+        Status(StatusCode::INVALID_ARGUMENT,
+               "output_type must be either base64 or binary");
     return;
   }
 
@@ -330,12 +333,12 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
     DiTSourceDecoder audio_decoder(request_payload);
     if (!audio_decoder.add_source(input.prompt_audio(),
                                   /*default_name=*/"prompt_audio",
-                                  input_status)) {
+                                  request_parse_status)) {
       return;
     }
     std::vector<NamedTensor> decoded_audio;
     const int64_t sample_rate = generation_params.audio_sampling_rate;
-    const auto decode_audio = [sample_rate](const std::string& raw_bytes,
+    const auto decode_audio = [sample_rate](std::string_view raw_bytes,
                                             torch::Tensor& tensor) {
       FFmpegAudioDecoder decoder;
       AudioMetadata metadata;
@@ -352,7 +355,8 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
       tensor = decoded.to(torch::kFloat32);
       return true;
     };
-    if (!audio_decoder.decode(decode_audio, decoded_audio, input_status)) {
+    if (!audio_decoder.decode(
+            decode_audio, decoded_audio, request_parse_status)) {
       return;
     }
     input_params.tensor_sources.add("prompt_audio",
@@ -369,7 +373,7 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
 DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime,
-                                   const std::string& request_payload) {
+                                   const BinaryPayload& request_payload) {
   request_kind = DiTRequestKind::kVideo;
   request_id = request.has_request_id() ? request.request_id()
                                         : generate_request_id("vidgen-");
@@ -380,22 +384,23 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
   if (request.has_input()) {
     const auto& input = request.input();
     if (!fill_input_params(
-            input_params, input, request_payload, input_status)) {
+            input_params, input, request_payload, request_parse_status)) {
       return;
     }
     DiTSourceDecoder image_decoder(request_payload);
     if (!image_decoder.add_sources(input.image_sources(),
                                    /*default_name=*/"unknown",
-                                   input_status)) {
+                                   request_parse_status)) {
       return;
     }
     std::vector<NamedTensor> decoded_images;
-    const auto decode_image = [](const std::string& raw_bytes,
+    const auto decode_image = [](std::string_view raw_bytes,
                                  torch::Tensor& tensor) {
       OpenCVImageDecoder decoder;
       return decoder.decode(raw_bytes, tensor);
     };
-    if (!image_decoder.decode(decode_image, decoded_images, input_status)) {
+    if (!image_decoder.decode(
+            decode_image, decoded_images, request_parse_status)) {
       return;
     }
     for (NamedTensor& image : decoded_images) {
@@ -433,8 +438,9 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
       output_type = params.output_type();
     }
     if (output_type != "base64" && output_type != "binary") {
-      input_status = Status(StatusCode::INVALID_ARGUMENT,
-                            "output_type must be either base64 or binary");
+      request_parse_status =
+          Status(StatusCode::INVALID_ARGUMENT,
+                 "output_type must be either base64 or binary");
       return;
     }
   }
@@ -442,9 +448,9 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
 
 bool DiTRequestParams::verify_params(
     std::function<bool(DiTRequestOutput)> callback) const {
-  if (!input_status.ok()) {
-    callback(
-        DiTRequestOutput(Status(input_status.code(), input_status.message())));
+  if (!request_parse_status.ok()) {
+    callback(DiTRequestOutput(
+        Status(request_parse_status.code(), request_parse_status.message())));
     return false;
   }
 

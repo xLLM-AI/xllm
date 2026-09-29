@@ -16,12 +16,14 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "butil/base64.h"
 #include "common.pb.h"
 #include "core/common/message.h"
 #include "core/common/types.h"
@@ -30,12 +32,58 @@ limitations under the License.
 namespace xllm {
 namespace mm_service_utils {
 
+template <typename Outputs, typename GetMedia>
+bool reserve_binary_payload(const Outputs& outputs,
+                            GetMedia get_media,
+                            std::string& binary_payload) {
+  size_t total_bytes = 0;
+  for (const auto& output : outputs) {
+    const std::string_view media = get_media(output);
+    if (media.size() > std::numeric_limits<size_t>::max() - total_bytes) {
+      return false;
+    }
+    total_bytes += media.size();
+  }
+  binary_payload.reserve(total_bytes);
+  return true;
+}
+
 inline void append_binary_payload(std::string_view data,
                                   proto::BinaryRef& binary_ref,
                                   std::string& binary_payload) {
   binary_ref.set_offset(static_cast<uint64_t>(binary_payload.size()));
   binary_ref.set_length(static_cast<uint64_t>(data.size()));
   binary_payload.append(data.data(), data.size());
+}
+
+inline void fill_media_source(std::string_view data,
+                              std::string_view name,
+                              bool use_binary,
+                              proto::MediaSource& source,
+                              std::string& binary_payload) {
+  source.set_name(name.data(), name.size());
+  if (use_binary) {
+    source.set_type("binary");
+    source.clear_base64();
+    append_binary_payload(data, *source.mutable_binary(), binary_payload);
+    return;
+  }
+  source.set_type("base64");
+  source.clear_binary();
+  butil::Base64Encode(butil::StringPiece(data.data(), data.size()),
+                      source.mutable_base64());
+}
+
+template <typename Response>
+auto* initialize_generation_response(Response& response,
+                                     const std::string& request_id,
+                                     int64_t created_time,
+                                     const std::string& model) {
+  response.set_object("list");
+  response.set_id(request_id);
+  response.set_created(created_time);
+  response.set_model(model);
+  return response.mutable_output();
 }
 
 template <typename Call>

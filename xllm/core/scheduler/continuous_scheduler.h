@@ -207,39 +207,6 @@ class ContinuousScheduler : public Scheduler {
            prefetching_requests_.load(std::memory_order_relaxed);
   }
 
-  // for test only
-  std::vector<Batch> prepare_batch_test() { return prepare_batch(); }
-  void process_batch_output_test(bool enable_schedule_overlap) {
-    process_batch_output(enable_schedule_overlap);
-  }
-  std::vector<std::shared_ptr<Request>> get_running_requests() {
-    return running_requests_;
-  }
-  std::vector<size_t> get_running_sequences_budgets() {
-    return running_sequences_budgets_;
-  }
-  std::vector<std::shared_ptr<Request>> get_waiting_requests() {
-    std::vector<std::shared_ptr<Request>> result;
-    if (prefill_queue_ == nullptr) {
-      return result;
-    }
-
-    auto copied_waiting_queue = prefill_queue_->clone();
-    result.reserve(copied_waiting_queue->size());
-    while (!copied_waiting_queue->empty()) {
-      result.emplace_back(copied_waiting_queue->top());
-      copied_waiting_queue->pop_top();
-    }
-    result.reserve(result.size() + decode_restore_waiting_.size());
-    for (const DecodeRestoreEntry& entry : decode_restore_waiting_) {
-      result.emplace_back(entry.request);
-    }
-
-    return result;
-  }
-
-  ProfileManager* get_profile_manager() { return profile_manager_.get(); }
-
   void get_latency_metrics(std::vector<int64_t>& ttft,
                            std::vector<int64_t>& tbt) override {}
 

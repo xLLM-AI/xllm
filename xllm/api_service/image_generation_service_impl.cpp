@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "butil/base64.h"
 #include "common/instance_name.h"
+#include "core/util/binary_payload.h"
 #include "distributed_runtime/dit_master.h"
 #include "framework/request/dit_request_output.h"
 #include "framework/request/dit_request_params.h"
@@ -38,26 +39,33 @@ bool send_result_to_client_brpc(std::shared_ptr<ImageGenerationCall> call,
                                 const std::string& output_type,
                                 const DiTRequestOutput& req_output) {
   auto& response = call->response();
-  response.set_object("list");
-  response.set_id(request_id);
-  response.set_created(created_time);
-  response.set_model(model);
-  auto* proto_output = response.mutable_output();
+  auto* proto_output = mm_service_utils::initialize_generation_response(
+      response, request_id, created_time, model);
   const std::vector<DiTGenerationOutput>& outputs = req_output.outputs;
   proto_output->mutable_results()->Reserve(outputs.size());
 
   const bool use_binary_output = output_type == "binary";
   std::string image;
   std::string binary_payload;
+  if (use_binary_output &&
+      !mm_service_utils::reserve_binary_payload(
+          outputs,
+          [](const DiTGenerationOutput& output) -> std::string_view {
+            return output.image;
+          },
+          binary_payload)) {
+    return call->finish_with_error(StatusCode::UNKNOWN,
+                                   "Binary image payload size overflow");
+  }
   for (const auto& output : outputs) {
     proto::ImageGenData* proto_result = proto_output->add_results();
 
     if (use_binary_output) {
-      proto::MediaSource* image_source = proto_result->mutable_image_source();
-      image_source->set_type("binary");
-      image_source->set_name("image");
-      mm_service_utils::append_binary_payload(
-          output.image, *image_source->mutable_binary(), binary_payload);
+      mm_service_utils::fill_media_source(output.image,
+                                          /*name=*/"image",
+                                          /*use_binary=*/true,
+                                          *proto_result->mutable_image_source(),
+                                          binary_payload);
     } else {
       image.clear();
       butil::Base64Encode(output.image, &image);
@@ -103,7 +111,7 @@ void ImageGenerationServiceImpl::process_async_impl(
   DiTRequestParams request_params(rpc_request,
                                   call->get_x_request_id(),
                                   call->get_x_request_time(),
-                                  call->take_request_payload());
+                                  BinaryPayload(call->take_request_iobuf()));
 
   auto saved_request_id = request_params.request_id;
   std::string output_type = request_params.output_type;

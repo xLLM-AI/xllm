@@ -61,10 +61,13 @@ bool send_result_to_client_brpc(std::shared_ptr<EmbeddingCall> call,
     }
     if (output.mm_embeddings.has_value()) {
       call->set_bytes_to_base64(true);
-      mm_embeddings_output_builder.build_repeated_embedding_output(
-          *output.mm_embeddings,
-          *(data->mutable_mm_embeddings()),
-          binary_payload);
+      if (!mm_embeddings_output_builder.build_repeated_embedding_output(
+              *output.mm_embeddings,
+              *(data->mutable_mm_embeddings()),
+              binary_payload)) {
+        return call->finish_with_error(
+            StatusCode::UNKNOWN, "Failed to serialize multimodal embeddings");
+      }
     }
   }
 

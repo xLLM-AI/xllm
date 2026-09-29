@@ -548,7 +548,7 @@ class MemoryAudioReader : public MemoryMediaReader {
   std::vector<float> pcm_;
 };
 
-bool OpenCVImageDecoder::decode(const std::string& raw_data, torch::Tensor& t) {
+bool OpenCVImageDecoder::decode(std::string_view raw_data, torch::Tensor& t) {
   cv::Mat buffer(1, raw_data.size(), CV_8UC1, (void*)raw_data.data());
   if (raw_data.empty()) {
     LOG(ERROR) << "opencv image decode got empty data";
@@ -610,7 +610,7 @@ bool OpenCVImageEncoder::valid(const torch::Tensor& t) {
   return true;
 }
 
-bool FFmpegVideoDecoder::decode(const std::string& raw_data,
+bool FFmpegVideoDecoder::decode(std::string_view raw_data,
                                 torch::Tensor& t,
                                 VideoMetadata& metadata) {
   MemoryVideoReader reader(reinterpret_cast<const uint8_t*>(raw_data.data()),
@@ -623,7 +623,7 @@ bool FFmpegVideoDecoder::decode(const std::string& raw_data,
   return true;
 }
 
-bool FFmpegAudioDecoder::decode(const std::string& raw_data,
+bool FFmpegAudioDecoder::decode(std::string_view raw_data,
                                 torch::Tensor& t,
                                 AudioMetadata& metadata,
                                 int64_t target_sr) {

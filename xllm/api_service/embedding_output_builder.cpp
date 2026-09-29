@@ -79,16 +79,20 @@ bool EmbeddingOutputBuilder::build_embedding_output(
     xllm::proto::Embedding& out_embedding,
     std::string& binary_payload) {
   TensorProtoBuilder embedding_output_builder(embedding_use_binary_encoding_);
-  embedding_output_builder.build_tensor(in_embedding.embedding,
-                                        *out_embedding.mutable_embedding(),
-                                        binary_payload);
+  if (!embedding_output_builder.build_tensor(in_embedding.embedding,
+                                             *out_embedding.mutable_embedding(),
+                                             binary_payload)) {
+    return false;
+  }
 
   auto* meta_map = out_embedding.mutable_metadata();
   TensorProtoBuilder meta_output_builder(metadata_use_binary_encoding_);
   for (const auto& [key, value] : in_embedding.metadata) {
     xllm::proto::Tensor metadata_tensor;
-    meta_output_builder.build_tensor(
-        in_embedding.metadata.at(key), metadata_tensor, binary_payload);
+    if (!meta_output_builder.build_tensor(
+            value, metadata_tensor, binary_payload)) {
+      return false;
+    }
     (*meta_map)[key] = std::move(metadata_tensor);
   }
   return true;

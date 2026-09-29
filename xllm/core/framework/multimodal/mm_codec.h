@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <opencv2/opencv.hpp>
 #include <string>
+#include <string_view>
 
 #include "mm_type.h"
 
@@ -29,7 +30,7 @@ class OpenCVImageDecoder {
   OpenCVImageDecoder() = default;
   ~OpenCVImageDecoder() = default;
 
-  bool decode(const std::string& raw_data, torch::Tensor& t);
+  bool decode(std::string_view raw_data, torch::Tensor& t);
 };
 
 class OpenCVImageEncoder {
@@ -48,9 +49,7 @@ class FFmpegVideoDecoder {
   FFmpegVideoDecoder() = default;
   ~FFmpegVideoDecoder() = default;
 
-  bool decode(const std::string& raw_data,
-              torch::Tensor& t,
-              VideoMetadata& meta);
+  bool decode(std::string_view raw_data, torch::Tensor& t, VideoMetadata& meta);
 };
 
 class FFmpegAudioDecoder {
@@ -58,7 +57,7 @@ class FFmpegAudioDecoder {
   FFmpegAudioDecoder() = default;
   ~FFmpegAudioDecoder() = default;
 
-  bool decode(const std::string& raw_data,
+  bool decode(std::string_view raw_data,
               torch::Tensor& t,
               AudioMetadata& meta,
               int64_t target_sr = 16000);

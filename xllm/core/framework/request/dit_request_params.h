@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "audio_generation.pb.h"
+#include "core/util/binary_payload.h"
 #include "dit_request_output.h"
 #include "dit_request_state.h"
 #include "image_generation.pb.h"
@@ -22,15 +23,15 @@ struct DiTRequestParams {
   DiTRequestParams(const proto::ImageGenerationRequest& request,
                    const std::string& x_rid,
                    const std::string& x_rtime,
-                   const std::string& request_payload = "");
+                   const BinaryPayload& request_payload = {});
   DiTRequestParams(const proto::AudioGenerationRequest& request,
                    const std::string& x_rid,
                    const std::string& x_rtime,
-                   const std::string& request_payload = "");
+                   const BinaryPayload& request_payload = {});
   DiTRequestParams(const proto::VideoGenerationRequest& request,
                    const std::string& x_rid,
                    const std::string& x_rtime,
-                   const std::string& request_payload = "");
+                   const BinaryPayload& request_payload = {});
   DiTRequestParams(const proto::TextGenerationRequest& request,
                    const std::string& x_rid,
                    const std::string& x_rtime);
@@ -51,7 +52,7 @@ struct DiTRequestParams {
   // to "image generation process")
   DiTGenerationParams generation_params;
 
-  Status input_status;
+  Status request_parse_status;
   std::string output_type = "base64";
 };
 

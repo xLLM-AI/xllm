@@ -56,9 +56,6 @@ class DiTWorkerImpl : public WorkerImpl {
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs) override;
 
-  folly::SemiFuture<std::optional<DiTForwardOutput>> step_async(
-      const DiTForwardInput& inputs);
-
   void process_group_test() override;
 
   folly::SemiFuture<folly::Unit> process_group_test_async() override;

@@ -49,6 +49,13 @@ void Call::init(std::string body_x_request_id, bool is_http_request) {
   init_request_payload();
 }
 
+std::string Call::take_request_payload() {
+  std::string payload;
+  request_payload_.copy_to(&payload);
+  request_payload_.clear();
+  return payload;
+}
+
 void Call::init_request_payload() {
   const auto infer_content_len =
       controller_->http_request().GetHeader(kInferContentLength);
@@ -67,8 +74,14 @@ void Call::init_request_payload() {
     return;
   }
 
-  controller_->request_attachment().copy_to(
-      &request_payload_, len - infer_len, infer_len);
+  const size_t payload_size = len - infer_len;
+  const size_t appended = controller_->request_attachment().append_to(
+      &request_payload_, payload_size, infer_len);
+  if (appended != payload_size) {
+    request_payload_.clear();
+    LOG(ERROR) << "failed to retain binary request payload: expected "
+               << payload_size << " bytes, got " << appended;
+  }
 }
 
 }  // namespace xllm

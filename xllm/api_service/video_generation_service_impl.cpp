@@ -15,13 +15,12 @@ limitations under the License.
 
 #include "video_generation_service_impl.h"
 
-#include <butil/base64.h>
-
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "api_service/mm_service_utils.h"
 #include "api_service/utils.h"
 #include "core/framework/request/dit_request_params.h"
+#include "core/util/binary_payload.h"
 #include "distributed_runtime/dit_master.h"
 
 namespace xllm {
@@ -35,29 +34,31 @@ bool send_result_to_client_brpc(std::shared_ptr<VideoGenerationCall> call,
                                 const std::string& output_type,
                                 const DiTRequestOutput& req_output) {
   auto& response = call->response();
-  response.set_object("list");
-  response.set_id(request_id);
-  response.set_created(created_time);
-  response.set_model(model);
-  auto* proto_output = response.mutable_output();
+  auto* proto_output = mm_service_utils::initialize_generation_response(
+      response, request_id, created_time, model);
   const std::vector<DiTGenerationOutput>& outputs = req_output.outputs;
   proto_output->mutable_results()->Reserve(outputs.size());
 
   const bool use_binary_output = output_type == "binary";
   std::string binary_payload;
+  if (use_binary_output &&
+      !mm_service_utils::reserve_binary_payload(
+          outputs,
+          [](const DiTGenerationOutput& output) -> std::string_view {
+            return output.video;
+          },
+          binary_payload)) {
+    return call->finish_with_error(StatusCode::UNKNOWN,
+                                   "Binary video payload size overflow");
+  }
   for (const auto& output : outputs) {
     auto* proto_result = proto_output->add_results();
 
-    proto::MediaSource* video = proto_result->mutable_video();
-    video->set_name("video");
-    if (use_binary_output) {
-      video->set_type("binary");
-      mm_service_utils::append_binary_payload(
-          output.video, *video->mutable_binary(), binary_payload);
-    } else {
-      video->set_type("base64");
-      butil::Base64Encode(output.video, video->mutable_base64());
-    }
+    mm_service_utils::fill_media_source(output.video,
+                                        /*name=*/"video",
+                                        use_binary_output,
+                                        *proto_result->mutable_video(),
+                                        binary_payload);
 
     proto_result->set_width(output.width);
     proto_result->set_height(output.height);
@@ -90,7 +91,7 @@ void VideoGenerationServiceImpl::process_async_impl(
   DiTRequestParams request_params(rpc_request,
                                   call->get_x_request_id(),
                                   call->get_x_request_time(),
-                                  call->take_request_payload());
+                                  BinaryPayload(call->take_request_iobuf()));
 
   std::string saved_request_id = request_params.request_id;
   std::string output_type = request_params.output_type;

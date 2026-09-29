@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "audio_generation.pb.h"
 #include "butil/base64.h"
+#include "core/util/binary_payload.h"
 #include "image_generation.pb.h"
 #include "text_generation.pb.h"
 #include "video_generation.pb.h"
@@ -136,7 +137,7 @@ TEST(DiTRequestParamsTest, LegacyImagesMapToOrderedUnknownSources) {
 
   DiTRequestParams params(request, "rid", "rtime");
 
-  ASSERT_TRUE(params.input_status.ok());
+  ASSERT_TRUE(params.request_parse_status.ok());
   ASSERT_EQ(params.input_params.image_sources.size(), 2u);
   EXPECT_EQ(params.input_params.image_sources.at(0).name, "unknown");
   EXPECT_EQ(params.input_params.image_sources.at(1).name, "unknown");
@@ -155,11 +156,11 @@ TEST(DiTRequestParamsTest, ImageSourcesSupportBase64AndBinaryInOrder) {
   binary->set_name("control_image");
   binary->mutable_binary()->set_offset(2);
   binary->mutable_binary()->set_length(TinyPngBytes().size());
-  const std::string payload = "xx" + TinyPngBytes();
+  const std::string payload = "xx" + TinyPngBytes() + "trailing bytes";
 
-  DiTRequestParams params(request, "rid", "rtime", payload);
+  DiTRequestParams params(request, "rid", "rtime", BinaryPayload(payload));
 
-  ASSERT_TRUE(params.input_status.ok());
+  ASSERT_TRUE(params.request_parse_status.ok());
   ASSERT_EQ(params.input_params.image_sources.size(), 2u);
   EXPECT_EQ(params.input_params.image_sources.at(0).name, "unknown");
   EXPECT_EQ(params.input_params.image_sources.at(1).name, "control_image");
@@ -182,9 +183,9 @@ TEST(DiTRequestParamsTest, VideoImageSourcesAreDecoded) {
   last->mutable_binary()->set_length(image_size);
   const std::string payload = TinyPngBytes() + TinyPngBytes();
 
-  DiTRequestParams params(request, "rid", "rtime", payload);
+  DiTRequestParams params(request, "rid", "rtime", BinaryPayload(payload));
 
-  ASSERT_TRUE(params.input_status.ok());
+  ASSERT_TRUE(params.request_parse_status.ok());
   std::vector<torch::Tensor> images =
       params.input_params.image_sources.get({"image", "last_image"});
   EXPECT_EQ(images.size(), 2u);
@@ -203,9 +204,10 @@ TEST(DiTRequestParamsTest, MixedImageSourcesAndLegacyImagesPreserveOrder) {
   binary->mutable_binary()->set_length(TinyPngBytes().size());
   input->add_images(kTinyPngBase64);
 
-  DiTRequestParams params(request, "rid", "rtime", TinyPngBytes());
+  DiTRequestParams params(
+      request, "rid", "rtime", BinaryPayload(TinyPngBytes()));
 
-  ASSERT_TRUE(params.input_status.ok());
+  ASSERT_TRUE(params.request_parse_status.ok());
   ASSERT_EQ(params.input_params.image_sources.size(), 3u);
   EXPECT_EQ(params.input_params.image_sources.at(0).name, "first");
   EXPECT_EQ(params.input_params.image_sources.at(1).name, "second");
@@ -248,7 +250,7 @@ TEST(DiTRequestParamsTest, DuplicateImageSourceNamesArePreserved) {
 
   DiTRequestParams params(request, "rid", "rtime");
 
-  ASSERT_TRUE(params.input_status.ok());
+  ASSERT_TRUE(params.request_parse_status.ok());
   EXPECT_EQ(params.input_params.image_sources.get({"image", "image"}).size(),
             2u);
 }
@@ -261,7 +263,8 @@ TEST(DiTRequestParamsTest, RejectsOutOfBoundsBinaryImage) {
   binary->set_offset(TinyPngBytes().size());
   binary->set_length(1);
 
-  DiTRequestParams params(request, "rid", "rtime", TinyPngBytes());
+  DiTRequestParams params(
+      request, "rid", "rtime", BinaryPayload(TinyPngBytes()));
 
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
 }
@@ -274,7 +277,8 @@ TEST(DiTRequestParamsTest, RejectsOverflowingBinaryImageRange) {
   binary->set_offset(1);
   binary->set_length(std::numeric_limits<uint64_t>::max());
 
-  DiTRequestParams params(request, "rid", "rtime", TinyPngBytes());
+  DiTRequestParams params(
+      request, "rid", "rtime", BinaryPayload(TinyPngBytes()));
 
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
 }
@@ -310,9 +314,10 @@ TEST(DiTRequestParamsTest, BinaryTensorInputMatchesContentsInput) {
   const float values[] = {1.25f, -2.5f};
   std::string payload = "xx";
   payload.append(reinterpret_cast<const char*>(values), sizeof(values));
-  DiTRequestParams binary_params(binary_request, "rid", "rtime", payload);
+  DiTRequestParams binary_params(
+      binary_request, "rid", "rtime", BinaryPayload(payload));
 
-  ASSERT_TRUE(binary_params.input_status.ok());
+  ASSERT_TRUE(binary_params.request_parse_status.ok());
   EXPECT_TRUE(torch::equal(
       *binary_params.input_params.tensor_sources.get("prompt_embed"),
       *contents_params.input_params.tensor_sources.get("prompt_embed")));
@@ -340,9 +345,10 @@ TEST(DiTRequestParamsTest, VideoBinaryTensorInputMatchesContentsInput) {
   const float values[] = {1.25f, -2.5f};
   std::string payload = "xx";
   payload.append(reinterpret_cast<const char*>(values), sizeof(values));
-  DiTRequestParams binary_params(binary_request, "rid", "rtime", payload);
+  DiTRequestParams binary_params(
+      binary_request, "rid", "rtime", BinaryPayload(payload));
 
-  ASSERT_TRUE(binary_params.input_status.ok());
+  ASSERT_TRUE(binary_params.request_parse_status.ok());
   EXPECT_TRUE(torch::equal(
       *binary_params.input_params.tensor_sources.get("prompt_embed"),
       *contents_params.input_params.tensor_sources.get("prompt_embed")));
@@ -357,7 +363,7 @@ TEST(DiTRequestParamsTest, ImageOutputTypeDefaultsAndValidates) {
   binary_request.mutable_parameters()->set_output_type("binary");
   DiTRequestParams binary_params(binary_request, "rid", "rtime");
   EXPECT_EQ(binary_params.output_type, "binary");
-  EXPECT_TRUE(binary_params.input_status.ok());
+  EXPECT_TRUE(binary_params.request_parse_status.ok());
 
   proto::ImageGenerationRequest invalid_request = MakeImageRequest();
   invalid_request.mutable_parameters()->set_output_type("url");
@@ -374,7 +380,7 @@ TEST(DiTRequestParamsTest, VideoOutputTypeDefaultsAndValidates) {
   binary_request.mutable_parameters()->set_output_type("binary");
   DiTRequestParams binary_params(binary_request, "rid", "rtime");
   EXPECT_EQ(binary_params.output_type, "binary");
-  EXPECT_TRUE(binary_params.input_status.ok());
+  EXPECT_TRUE(binary_params.request_parse_status.ok());
 
   proto::VideoGenerationRequest invalid_request = MakeVideoRequest();
   invalid_request.mutable_parameters()->set_output_type("url");
@@ -400,10 +406,10 @@ TEST(DiTRequestParamsTest, PromptAudioSupportsBase64AndBinary) {
   binary_source->mutable_binary()->set_offset(2);
   binary_source->mutable_binary()->set_length(TinyWavBytes().size());
   DiTRequestParams binary_params(
-      binary_request, "rid", "rtime", "xx" + TinyWavBytes());
+      binary_request, "rid", "rtime", BinaryPayload("xx" + TinyWavBytes()));
 
-  ASSERT_TRUE(base64_params.input_status.ok());
-  ASSERT_TRUE(binary_params.input_status.ok());
+  ASSERT_TRUE(base64_params.request_parse_status.ok());
+  ASSERT_TRUE(binary_params.request_parse_status.ok());
   const torch::Tensor base64_audio =
       *base64_params.input_params.tensor_sources.get("prompt_audio");
   EXPECT_EQ(base64_audio.scalar_type(), torch::kFloat32);
@@ -419,7 +425,8 @@ TEST(DiTRequestParamsTest, RejectsOutOfBoundsBinaryPromptAudio) {
   source->mutable_binary()->set_offset(1);
   source->mutable_binary()->set_length(std::numeric_limits<uint64_t>::max());
 
-  DiTRequestParams params(request, "rid", "rtime", TinyWavBytes());
+  DiTRequestParams params(
+      request, "rid", "rtime", BinaryPayload(TinyWavBytes()));
 
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
 }
@@ -433,7 +440,7 @@ TEST(DiTRequestParamsTest, AudioOutputTypeDefaultsAndValidates) {
   binary_request.mutable_parameters()->set_output_type("binary");
   DiTRequestParams binary_params(binary_request, "rid", "rtime");
   EXPECT_EQ(binary_params.output_type, "binary");
-  EXPECT_TRUE(binary_params.input_status.ok());
+  EXPECT_TRUE(binary_params.request_parse_status.ok());
 
   proto::AudioGenerationRequest invalid_request = MakeAudioRequest();
   invalid_request.mutable_parameters()->set_output_type("url");
@@ -450,8 +457,8 @@ TEST(DiTRequestParamsTest, RejectsBinaryTensorLengthMismatch) {
   (*tensor->mutable_parameters())["offset"].set_int64_param(0);
   (*tensor->mutable_parameters())["len"].set_int64_param(sizeof(float));
 
-  DiTRequestParams params(
-      request, "rid", "rtime", std::string(sizeof(float), 0));
+  const std::string payload(sizeof(float), 0);
+  DiTRequestParams params(request, "rid", "rtime", BinaryPayload(payload));
 
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
 }
@@ -463,7 +470,8 @@ TEST(DiTRequestParamsTest, RejectsMissingOrInvalidBinaryImagePayload) {
   source->mutable_binary()->set_length(4);
 
   DiTRequestParams missing_params(request, "rid", "rtime");
-  DiTRequestParams invalid_params(request, "rid", "rtime", "nope");
+  DiTRequestParams invalid_params(
+      request, "rid", "rtime", BinaryPayload("nope"));
 
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(missing_params));
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(invalid_params));

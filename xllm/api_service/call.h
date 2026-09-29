@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <brpc/controller.h>
+#include <butil/iobuf.h>
 
 #include <string>
 #include <utility>
@@ -45,7 +46,10 @@ class Call {
   const std::string& get_x_request_id() const { return x_request_id_; }
   const std::string& get_x_request_time() const { return x_request_time_; }
 
-  std::string take_request_payload() { return std::move(request_payload_); }
+  std::string take_request_payload();
+  butil::IOBuf take_request_iobuf() {
+    return butil::IOBuf(request_payload_.movable());
+  }
   void init_request_payload();
 
   virtual bool is_disconnected() const = 0;
@@ -59,7 +63,7 @@ class Call {
   std::string x_request_id_;
   std::string x_request_time_;
 
-  std::string request_payload_;
+  butil::IOBuf request_payload_;
 };
 
 }  // namespace xllm

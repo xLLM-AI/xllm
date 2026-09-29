@@ -16,11 +16,14 @@ limitations under the License.
 #include "api_service.h"
 
 #include <glog/logging.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/util/json_util.h>
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <charconv>
 #include <filesystem>
+#include <limits>
 
 #include "api_service/chat_json_parser.h"
 #include "api_service/chat_request_decoder.h"
@@ -316,19 +319,78 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
 namespace {
 
 size_t get_json_content_length(const brpc::Controller* ctrl) {
-  const auto infer_content_len =
+  const std::string* content_len =
       ctrl->http_request().GetHeader(kInferContentLength);
-  if (infer_content_len != nullptr) {
-    return std::stoul(*infer_content_len);
+  if (content_len == nullptr) {
+    content_len = ctrl->http_request().GetHeader(kContentLength);
   }
-
-  const auto content_len = ctrl->http_request().GetHeader(kContentLength);
   if (content_len != nullptr) {
-    return std::stoul(*content_len);
+    size_t length = 0;
+    const char* begin = content_len->data();
+    const char* end = begin + content_len->size();
+    const auto parsed = std::from_chars(begin, end, length);
+    if (parsed.ec == std::errc{} && parsed.ptr == end) {
+      return length;
+    }
+    LOG(ERROR) << "Invalid JSON content length.";
+  } else {
+    LOG(ERROR) << "Content-Length header is missing.";
+  }
+  return std::numeric_limits<size_t>::max();
+}
+
+template <typename CallT, typename Service>
+void media_generation_http_impl(std::unique_ptr<Service>& service,
+                                xllm::ClosureGuard& guard,
+                                brpc::Controller* ctrl,
+                                const proto::HttpRequest* request,
+                                proto::HttpResponse* response) {
+  const size_t json_content_length = get_json_content_length(ctrl);
+  if (json_content_length == static_cast<size_t>(-1L)) {
+    ctrl->SetFailed("JSON content length header is missing or invalid.");
+    return;
+  }
+  const butil::IOBuf& attachment = ctrl->request_attachment();
+  if (json_content_length > attachment.size() ||
+      json_content_length >
+          static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+    ctrl->SetFailed("JSON content length exceeds request attachment.");
+    return;
   }
 
-  LOG(ERROR) << "Content-Length header is missing.";
-  return (size_t)-1L;
+  auto arena = GetArenaWithCheck<CallT>(response);
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<typename CallT::ReqType>(arena);
+  // Arena allocations belong to brpc. Heap allocations need an owner until
+  // the Call takes responsibility, including JSON parsing failure paths.
+  std::unique_ptr<typename CallT::ReqType> request_owner(
+      arena == nullptr ? req_pb : nullptr);
+
+  butil::IOBufAsZeroCopyInputStream attachment_stream(attachment);
+  google::protobuf::io::LimitingInputStream json_stream(
+      &attachment_stream, static_cast<int64_t>(json_content_length));
+  std::string error;
+  json2pb::Json2PbOptions options;
+  if (!json2pb::JsonToProtoMessage(&json_stream, req_pb, options, &error)) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+
+  auto resp_pb =
+      google::protobuf::Arena::CreateMessage<typename CallT::ResType>(arena);
+  std::unique_ptr<typename CallT::ResType> response_owner(
+      arena == nullptr ? resp_pb : nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<CallT>(ctrl,
+                              guard.release(),
+                              req_pb,
+                              resp_pb,
+                              arena != nullptr,
+                              /*is_http_request=*/true);
+  request_owner.release();
+  response_owner.release();
+  service->process_async(call);
 }
 
 }  // namespace
@@ -596,41 +658,14 @@ void APIService::ImageGenerationHttp(
     return;
   }
 
-  auto arena = GetArenaWithCheck<ImageGenerationCall>(response);
-  auto req_pb =
-      google::protobuf::Arena::CreateMessage<proto::ImageGenerationRequest>(
-          arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<proto::ImageGenerationResponse>(
-          arena);
-
-  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  auto* ctrl = static_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
-  const size_t json_content_length = get_json_content_length(ctrl);
-  if (json_content_length == static_cast<size_t>(-1L)) {
-    ctrl->SetFailed("Content-Length header is missing.");
+  if (!image_generation_service_impl_) {
+    ctrl->SetFailed("ImageGeneration service is not available on this server");
     return;
   }
-  std::string json_payload;
-  ctrl->request_attachment().copy_to(
-      &json_payload, json_content_length, /*pos=*/0);
-
-  std::string error;
-  json2pb::Json2PbOptions options;
-  auto st = json2pb::JsonToProtoMessage(json_payload, req_pb, options, &error);
-  if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
-    return;
-  }
-  std::shared_ptr<ImageGenerationCall> call =
-      std::make_shared<ImageGenerationCall>(ctrl,
-                                            done_guard.release(),
-                                            req_pb,
-                                            resp_pb,
-                                            arena != nullptr,
-                                            /*is_http_request=*/true);
-  image_generation_service_impl_->process_async(call);
+  media_generation_http_impl<ImageGenerationCall>(
+      image_generation_service_impl_, done_guard, ctrl, request, response);
 }
 
 void APIService::AudioGeneration(::google::protobuf::RpcController* controller,
@@ -662,42 +697,14 @@ void APIService::AudioGenerationHttp(
     return;
   }
 
-  auto arena = GetArenaWithCheck<AudioGenerationCall>(response);
-  auto req_pb =
-      google::protobuf::Arena::CreateMessage<proto::AudioGenerationRequest>(
-          arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<proto::AudioGenerationResponse>(
-          arena);
-
-  brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  auto* ctrl = static_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
-  const size_t json_content_length = get_json_content_length(ctrl);
-  if (json_content_length == static_cast<size_t>(-1L)) {
-    ctrl->SetFailed("Content-Length header is missing.");
+  if (!audio_generation_service_impl_) {
+    ctrl->SetFailed("AudioGeneration service is not available on this server");
     return;
   }
-  std::string json_payload;
-  ctrl->request_attachment().copy_to(
-      &json_payload, json_content_length, /*pos=*/0);
-
-  std::string error;
-  json2pb::Json2PbOptions options;
-  const bool st =
-      json2pb::JsonToProtoMessage(json_payload, req_pb, options, &error);
-  if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
-    return;
-  }
-  std::shared_ptr<AudioGenerationCall> call =
-      std::make_shared<AudioGenerationCall>(ctrl,
-                                            done_guard.release(),
-                                            req_pb,
-                                            resp_pb,
-                                            arena != nullptr,
-                                            /*is_http_request=*/true);
-  audio_generation_service_impl_->process_async(call);
+  media_generation_http_impl<AudioGenerationCall>(
+      audio_generation_service_impl_, done_guard, ctrl, request, response);
 }
 
 void APIService::TextGeneration(::google::protobuf::RpcController* controller,
@@ -788,41 +795,14 @@ void APIService::VideoGenerationHttp(
     return;
   }
 
-  auto arena = GetArenaWithCheck<VideoGenerationCall>(response);
-  auto req_pb =
-      google::protobuf::Arena::CreateMessage<proto::VideoGenerationRequest>(
-          arena);
-  auto resp_pb =
-      google::protobuf::Arena::CreateMessage<proto::VideoGenerationResponse>(
-          arena);
-
-  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  auto* ctrl = static_cast<brpc::Controller*>(controller);
   api_service::ensure_http_x_request_id(ctrl);
-  const size_t json_content_length = get_json_content_length(ctrl);
-  if (json_content_length == static_cast<size_t>(-1L)) {
-    ctrl->SetFailed("Content-Length header is missing.");
+  if (!video_generation_service_impl_) {
+    ctrl->SetFailed("VideoGeneration service is not available on this server");
     return;
   }
-  std::string json_payload;
-  ctrl->request_attachment().copy_to(
-      &json_payload, json_content_length, /*pos=*/0);
-
-  std::string error;
-  json2pb::Json2PbOptions options;
-  auto st = json2pb::JsonToProtoMessage(json_payload, req_pb, options, &error);
-  if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
-    return;
-  }
-  std::shared_ptr<VideoGenerationCall> call =
-      std::make_shared<VideoGenerationCall>(ctrl,
-                                            done_guard.release(),
-                                            req_pb,
-                                            resp_pb,
-                                            arena != nullptr,
-                                            /*is_http_request=*/true);
-  video_generation_service_impl_->process_async(call);
+  media_generation_http_impl<VideoGenerationCall>(
+      video_generation_service_impl_, done_guard, ctrl, request, response);
 }
 
 void APIService::Rerank(::google::protobuf::RpcController* controller,

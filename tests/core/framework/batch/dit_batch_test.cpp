@@ -96,5 +96,43 @@ TEST(DiTBatchDeathTest, RejectsMismatchedGenerationParameters) {
   EXPECT_DEATH(batches[0].prepare_forward_input(), "generation params");
 }
 
+TEST(DiTBatchTest, SingleRequestSourcesUseBatchViews) {
+  DiTInputParams input_params;
+  torch::Tensor image =
+      torch::arange(12, torch::dtype(torch::kUInt8)).reshape({3, 2, 2});
+  torch::Tensor prompt_embed = torch::randn({4, 8});
+  torch::Tensor prompt_audio = torch::randn({1, 32});
+  input_params.image_sources.add("image", image);
+  input_params.tensor_sources.add("prompt_embed", prompt_embed);
+  input_params.tensor_sources.add("prompt_audio", prompt_audio);
+
+  DiTGenerationParams generation_params;
+  DiTOutputFunc output_func;
+  DiTOutputsFunc outputs_func;
+  DiTRequestState state(input_params,
+                        generation_params,
+                        output_func,
+                        outputs_func,
+                        DiTRequestKind::kImage);
+  auto request = std::make_shared<DiTRequest>("request", "rid", "rtime", state);
+
+  DiTBatch batch;
+  batch.add(request);
+  DiTForwardInput forward_input = batch.prepare_forward_input();
+
+  const torch::Tensor& batched_image = forward_input.image_sources.at(0).tensor;
+  const torch::Tensor batched_embed =
+      *forward_input.tensor_sources.get("prompt_embed");
+  const torch::Tensor batched_audio =
+      *forward_input.tensor_sources.get("prompt_audio");
+
+  EXPECT_EQ(batched_image.sizes(), torch::IntArrayRef({1, 3, 2, 2}));
+  EXPECT_EQ(batched_embed.sizes(), torch::IntArrayRef({1, 4, 8}));
+  EXPECT_EQ(batched_audio.sizes(), torch::IntArrayRef({1, 1, 32}));
+  EXPECT_EQ(batched_image.data_ptr(), image.data_ptr());
+  EXPECT_EQ(batched_embed.data_ptr(), prompt_embed.data_ptr());
+  EXPECT_EQ(batched_audio.data_ptr(), prompt_audio.data_ptr());
+}
+
 }  // namespace
 }  // namespace xllm

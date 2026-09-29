@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "butil/base64.h"
 #include "common/instance_name.h"
+#include "core/util/binary_payload.h"
 #include "distributed_runtime/dit_master.h"
 #include "framework/request/dit_request_output.h"
 #include "framework/request/dit_request_params.h"
@@ -36,29 +36,31 @@ bool send_result_to_client_brpc(std::shared_ptr<AudioGenerationCall> call,
                                 const std::string& output_type,
                                 const DiTRequestOutput& req_output) {
   auto& response = call->response();
-  response.set_object("list");
-  response.set_id(request_id);
-  response.set_created(created_time);
-  response.set_model(model);
-  auto* proto_output = response.mutable_output();
+  auto* proto_output = mm_service_utils::initialize_generation_response(
+      response, request_id, created_time, model);
   const std::vector<DiTGenerationOutput>& outputs = req_output.outputs;
   proto_output->mutable_results()->Reserve(
       static_cast<int32_t>(outputs.size()));
 
   const bool use_binary_output = output_type == "binary";
   std::string binary_payload;
+  if (use_binary_output &&
+      !mm_service_utils::reserve_binary_payload(
+          outputs,
+          [](const DiTGenerationOutput& output) -> std::string_view {
+            return output.audio;
+          },
+          binary_payload)) {
+    return call->finish_with_error(StatusCode::UNKNOWN,
+                                   "Binary audio payload size overflow");
+  }
   for (const auto& output : outputs) {
     auto* proto_result = proto_output->add_results();
-    proto::MediaSource* audio = proto_result->mutable_audio();
-    audio->set_name("audio");
-    if (use_binary_output) {
-      audio->set_type("binary");
-      mm_service_utils::append_binary_payload(
-          output.audio, *audio->mutable_binary(), binary_payload);
-    } else {
-      audio->set_type("base64");
-      butil::Base64Encode(output.audio, audio->mutable_base64());
-    }
+    mm_service_utils::fill_media_source(output.audio,
+                                        /*name=*/"audio",
+                                        use_binary_output,
+                                        *proto_result->mutable_audio(),
+                                        binary_payload);
     proto_result->set_seed(output.seed);
   }
   return use_binary_output ? call->write_and_finish(response, binary_payload)
@@ -86,7 +88,7 @@ void AudioGenerationServiceImpl::process_async_impl(
   DiTRequestParams request_params(rpc_request,
                                   call->get_x_request_id(),
                                   call->get_x_request_time(),
-                                  call->take_request_payload());
+                                  BinaryPayload(call->take_request_iobuf()));
 
   std::string saved_request_id = request_params.request_id;
   std::string output_type = request_params.output_type;

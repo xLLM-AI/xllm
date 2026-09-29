@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "common.pb.h"
 #include "core/common/types.h"
+#include "core/util/binary_payload.h"
 #include "framework/request/dit_input_sources.h"
 
 namespace xllm {
@@ -33,18 +34,20 @@ class ThreadPool;
 class DiTSourceDecoder final {
  public:
   using DecodeFn =
-      std::function<bool(const std::string& raw_bytes, torch::Tensor& tensor)>;
+      std::function<bool(std::string_view raw_bytes, torch::Tensor& tensor)>;
 
-  explicit DiTSourceDecoder(const std::string& request_payload);
+  // Source views refer to the request proto or request_payload. Keep both
+  // alive until this decoder and its synchronous decode calls are finished.
+  explicit DiTSourceDecoder(const BinaryPayload& request_payload);
 
   bool add_source(const proto::MediaSource& source,
                   std::string default_name,
-                  Status& input_status);
+                  Status& status);
 
   bool add_sources(
       const google::protobuf::RepeatedPtrField<proto::MediaSource>& sources,
       std::string_view default_name,
-      Status& input_status);
+      Status& status);
 
   void add_sources(
       const google::protobuf::RepeatedPtrField<std::string>& sources,
@@ -52,7 +55,7 @@ class DiTSourceDecoder final {
 
   bool decode(const DecodeFn& decode_fn,
               std::vector<NamedTensor>& outputs,
-              Status& input_status) const;
+              Status& status) const;
 
  private:
   enum class Encoding : uint8_t {
@@ -62,7 +65,7 @@ class DiTSourceDecoder final {
 
   struct Input {
     std::string name;
-    std::string encoded_data;
+    std::string_view encoded_data;
     size_t binary_offset = 0;
     size_t binary_length = 0;
     Encoding encoding = Encoding::BASE64;
@@ -70,7 +73,7 @@ class DiTSourceDecoder final {
 
   static ThreadPool& thread_pool();
 
-  const std::string& request_payload_;
+  const BinaryPayload& request_payload_;
   std::vector<Input> inputs_;
 };
 

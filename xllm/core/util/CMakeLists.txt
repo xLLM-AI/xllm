@@ -7,6 +7,7 @@ cc_library(
     concurrent_queue.h
     blocking_counter.h
     blockingconcurrentqueue.h
+    binary_payload.h
     closure_guard.h
     concurrentqueue.h
     cpu_affinity.h
@@ -38,6 +39,7 @@ cc_library(
     verbose_trace_logger.h
     shared_memory_manager.h
   SRCS
+    binary_payload.cpp
     cpu_affinity.cpp
     env_var.cpp
     hash_util.cpp

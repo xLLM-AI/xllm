@@ -100,6 +100,7 @@ cc_test(
     mm_service_utils_test.cpp
   DEPS
     proto::xllm_proto
+    brpc
     GTest::gtest_main
 )
 

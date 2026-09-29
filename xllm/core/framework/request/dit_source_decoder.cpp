@@ -23,7 +23,7 @@ limitations under the License.
 
 namespace xllm {
 
-DiTSourceDecoder::DiTSourceDecoder(const std::string& request_payload)
+DiTSourceDecoder::DiTSourceDecoder(const BinaryPayload& request_payload)
     : request_payload_(request_payload) {}
 
 ThreadPool& DiTSourceDecoder::thread_pool() {
@@ -35,7 +35,7 @@ ThreadPool& DiTSourceDecoder::thread_pool() {
 
 bool DiTSourceDecoder::add_source(const proto::MediaSource& source,
                                   std::string default_name,
-                                  Status& input_status) {
+                                  Status& status) {
   Input input;
   input.name = !source.has_name() || source.name().empty()
                    ? std::move(default_name)
@@ -47,15 +47,14 @@ bool DiTSourceDecoder::add_source(const proto::MediaSource& source,
     const uint64_t length = source.binary().length();
     const uint64_t payload_size = request_payload_.size();
     if (offset > payload_size || length > payload_size - offset) {
-      input_status =
-          Status(StatusCode::INVALID_ARGUMENT, "invalid media source");
+      status = Status(StatusCode::INVALID_ARGUMENT, "invalid media source");
       return false;
     }
     input.encoding = Encoding::BINARY;
     input.binary_offset = static_cast<size_t>(offset);
     input.binary_length = static_cast<size_t>(length);
   } else {
-    input_status = Status(StatusCode::INVALID_ARGUMENT, "invalid media source");
+    status = Status(StatusCode::INVALID_ARGUMENT, "invalid media source");
     return false;
   }
   inputs_.emplace_back(std::move(input));
@@ -65,10 +64,10 @@ bool DiTSourceDecoder::add_source(const proto::MediaSource& source,
 bool DiTSourceDecoder::add_sources(
     const google::protobuf::RepeatedPtrField<proto::MediaSource>& sources,
     std::string_view default_name,
-    Status& input_status) {
+    Status& status) {
   inputs_.reserve(inputs_.size() + sources.size());
   for (const proto::MediaSource& source : sources) {
-    if (!add_source(source, std::string(default_name), input_status)) {
+    if (!add_source(source, std::string(default_name), status)) {
       return false;
     }
   }
@@ -87,7 +86,7 @@ void DiTSourceDecoder::add_sources(
 
 bool DiTSourceDecoder::decode(const DecodeFn& decode_fn,
                               std::vector<NamedTensor>& outputs,
-                              Status& input_status) const {
+                              Status& status) const {
   if (inputs_.empty()) {
     return true;
   }
@@ -96,14 +95,21 @@ bool DiTSourceDecoder::decode(const DecodeFn& decode_fn,
   std::vector<uint8_t> decoded(inputs_.size(), 0);
   const auto decode_one = [&](size_t index) {
     const Input& input = inputs_[index];
-    std::string raw_bytes;
+    std::string decoded_bytes;
+    std::string_view raw_bytes;
     if (input.encoding == Encoding::BASE64) {
-      if (!butil::Base64Decode(input.encoded_data, &raw_bytes)) {
+      const butil::StringPiece encoded(input.encoded_data.data(),
+                                       input.encoded_data.size());
+      if (!butil::Base64Decode(encoded, &decoded_bytes)) {
         return;
       }
+      raw_bytes = decoded_bytes;
     } else {
-      raw_bytes.assign(
-          request_payload_, input.binary_offset, input.binary_length);
+      if (!request_payload_.copy_to(
+              input.binary_offset, input.binary_length, decoded_bytes)) {
+        return;
+      }
+      raw_bytes = decoded_bytes;
     }
     if (decode_fn(raw_bytes, tensors[index])) {
       decoded[index] = 1;
@@ -123,7 +129,7 @@ bool DiTSourceDecoder::decode(const DecodeFn& decode_fn,
 
   for (size_t index = 0; index < inputs_.size(); ++index) {
     if (decoded[index] == 0) {
-      input_status = Status(
+      status = Status(
           StatusCode::INVALID_ARGUMENT,
           "failed to decode media source at index " + std::to_string(index));
       return false;

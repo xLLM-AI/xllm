@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/util/binary_payload.h"
 #include "core/util/dit_model_discovery.h"
 #include "core/util/json_reader.h"
 #include "core/util/model_config_utils.h"
@@ -42,6 +43,7 @@ limitations under the License.
 #include "worker.pb.h"
 
 namespace xllm {
+
 namespace util {
 
 std::pair<int, int> find_ones_indices(std::vector<int>& q_seq_lens);
@@ -120,6 +122,9 @@ torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor);
 
 torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor,
                              const std::string& binary_payload);
+
+torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor,
+                             const BinaryPayload& binary_payload);
 
 bool torch_to_proto(const torch::Tensor& torch_tensor,
                     proto::Tensor* proto_tensor);

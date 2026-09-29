@@ -6,7 +6,6 @@ cc_test(
   SRCS
     batch_test.cpp
     batch_factory_test.cpp
-    dit_batch_test.cpp
   DEPS
     :config
     :batch
@@ -16,6 +15,24 @@ cc_test(
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )
 target_link_libraries(batch_test
+                      PUBLIC
+                      Python::Python
+                      $<$<BOOL:${USE_NPU}>:ascendcl>
+                      $<$<BOOL:${USE_NPU}>:hccl>
+                      $<$<BOOL:${USE_NPU}>:c_sec>
+                      $<$<BOOL:${USE_NPU}>:nnopbase>)
+
+cc_test(
+  NAME
+    dit_batch_test
+  SRCS
+    dit_batch_test.cpp
+  DEPS
+    :batch
+    GTest::gtest_main
+    $<$<BOOL:${USE_NPU}>:torch_npu>
+)
+target_link_libraries(dit_batch_test
                       PUBLIC
                       Python::Python
                       $<$<BOOL:${USE_NPU}>:ascendcl>

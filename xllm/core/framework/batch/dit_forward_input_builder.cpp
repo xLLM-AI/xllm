@@ -52,6 +52,14 @@ bool check_tensors_valid(const std::vector<torch::Tensor>& vec) {
   return true;
 }
 
+torch::Tensor batch_tensors(const std::vector<torch::Tensor>& tensors) {
+  CHECK(check_tensors_valid(tensors));
+  if (tensors.size() == 1) {
+    return tensors.front().unsqueeze(0);
+  }
+  return torch::stack(tensors);
+}
+
 }  // namespace
 
 namespace xllm {
@@ -130,9 +138,8 @@ DiTForwardInput DiTForwardInputBuilder::build_forward_input() const {
       tensors.emplace_back(
           request->state().input_params().image_sources.at(index).tensor);
     }
-    CHECK(check_tensors_valid(tensors));
     input.image_sources.add(first_image_sources.at(index).name,
-                            torch::stack(tensors));
+                            batch_tensors(tensors));
   }
 
   const DiTTensorSources& first_tensor_sources =
@@ -146,8 +153,7 @@ DiTForwardInput DiTForwardInputBuilder::build_forward_input() const {
       CHECK(tensor.has_value());
       tensors.emplace_back(*tensor);
     }
-    CHECK(check_tensors_valid(tensors));
-    input.tensor_sources.add(tensor_input.name, torch::stack(tensors));
+    input.tensor_sources.add(tensor_input.name, batch_tensors(tensors));
   }
 
   return input;

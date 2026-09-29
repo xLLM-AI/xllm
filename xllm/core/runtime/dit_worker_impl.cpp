@@ -168,10 +168,17 @@ std::optional<ForwardOutput> DiTWorkerImpl::step(const ForwardInput& inputs) {
   DiTForwardOutput output = dit_model_executor_->forward(
       *input_on_device.input_params.dit_forward_input);
 
-  auto ret = device_.synchronize_default_stream();
+  const int32_t ret = device_.synchronize_default_stream();
+  CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
+
+  // DiT currently does not support DP, so is_driver() identifies global rank 0.
+  if (!is_driver()) {
+    return std::nullopt;
+  }
+
   ForwardOutput forward_output;
-  forward_output.dit_forward_output = output;
+  forward_output.dit_forward_output = std::move(output);
   return forward_output;
 }
 
