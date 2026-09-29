@@ -910,7 +910,12 @@ REGISTER_MODEL_ARGS(glm4v, [&] {
   // LOAD_ARG_OR(mm_rms_norm_eps, "vision_config.rms_norm_eps", 1e-05);
   LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2);
   LOAD_ARG_OR(mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);
-  LOAD_ARG_OR_FUNC(mm_head_dim, "head_dim", [&] {
+  // Vision-scoped key so JsonReader's text_config fallback cannot resolve
+  // "head_dim" against text_config.head_dim (which is 0 for GLM-5.3-Flash and
+  // 128 for future GLM4V variants that adopt the nested HF multimodal layout).
+  // vision_config has no head_dim; the fallback lambda derives it from
+  // mm_hidden_size / mm_num_attention_heads.
+  LOAD_ARG_OR_FUNC(mm_head_dim, "vision_config.head_dim", [&] {
     return args->mm_hidden_size() / args->mm_num_attention_heads();
   });
 

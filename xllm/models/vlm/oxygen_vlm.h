@@ -764,7 +764,11 @@ REGISTER_MODEL_ARGS(oxygenvlm, [&] {
   LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2);
   LOAD_ARG_OR(mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);
 
-  LOAD_ARG_OR_FUNC(mm_head_dim, "head_dim", [&] {
+  // Vision-scoped key so JsonReader's text_config fallback cannot resolve
+  // "head_dim" against text_config.head_dim. vision_config has no head_dim;
+  // the fallback lambda derives it from mm_hidden_size /
+  // mm_num_attention_heads.
+  LOAD_ARG_OR_FUNC(mm_head_dim, "vision_config.head_dim", [&] {
     return args->mm_hidden_size() / args->mm_num_attention_heads();
   });
   if (args->rope_scaling_rope_type() == "default")

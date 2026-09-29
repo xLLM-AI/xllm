@@ -274,7 +274,11 @@ REGISTER_MODEL_ARGS(qwen3_vl_moe, [&] {
   LOAD_ARG_OR(mm_patch_size, "vision_config.patch_size", 16);
   LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2);
   LOAD_ARG_OR(mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);
-  LOAD_ARG_OR_FUNC(mm_head_dim, "head_dim", [&] {
+  // Read the vision-scoped key so the top-level fallback in JsonReader does
+  // not resolve "head_dim" against text_config: Qwen3-VL keeps the text
+  // head_dim (128) under text_config and derives the vision head_dim from
+  // vision_config.hidden_size / vision_config.num_heads (1152 / 16 = 72).
+  LOAD_ARG_OR_FUNC(mm_head_dim, "vision_config.head_dim", [&] {
     return args->mm_hidden_size() / args->mm_num_attention_heads();
   });
 
