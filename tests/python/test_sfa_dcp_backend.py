@@ -338,6 +338,7 @@ def test_graph_prepare_keeps_valid_indexer_pages_for_padded_lanes(prepared_backe
         slot_mapping=slot_mapping,
         block_table=block_table,
         kv_seq_lens=kv_seq_lens,
+        kv_seq_lens_host=None,
         kv_seq_lens_host_values=None,
         q_cu_seq_lens=None,
         q_seq_lens=None,
