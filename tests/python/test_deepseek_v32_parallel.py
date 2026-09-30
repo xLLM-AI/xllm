@@ -23,21 +23,6 @@ import pytest
 import torch
 
 from xllm.python import distributed, kernels
-
-kernels.grouped_moe = MagicMock()
-kernels.prepare_grouped_moe_weights = MagicMock(side_effect=lambda w13, w2: (w13, w2))
-kernels.supports_cutlass_moe = MagicMock(return_value=False)
-kernels.moe_fused_topk = MagicMock()
-kernels.cutlass_fused_moe = MagicMock()
-kernels.fused_moe = MagicMock()
-kernels.dynamic_quant = MagicMock()
-kernels.quant_matmul = MagicMock()
-kernels.silu_and_mul = MagicMock()
-distributed.all_gather_variable = MagicMock()
-distributed.all_reduce_ = MagicMock()
-distributed.all_gather = MagicMock(side_effect=lambda x, **kw: x)
-distributed.tp_rank = MagicMock(return_value=0)
-
 from xllm.python.model_executor.forward_context import (  # noqa: E402
     AclGraphExecutionState,
     ForwardContext,
@@ -47,6 +32,33 @@ from xllm.python.models.deepseek_v32 import (  # noqa: E402
     DeepseekV3Config,
     DeepseekV3MoE,
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_parallel_ops(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep these CPU-only mocks local to this module's tests.
+    for name in (
+        "grouped_moe",
+        "moe_fused_topk",
+        "cutlass_fused_moe",
+        "fused_moe",
+        "dynamic_quant",
+        "quant_matmul",
+        "silu_and_mul",
+    ):
+        monkeypatch.setattr(kernels, name, MagicMock(), raising=False)
+    monkeypatch.setattr(
+        kernels,
+        "prepare_grouped_moe_weights",
+        MagicMock(side_effect=lambda w13, w2: (w13, w2)),
+        raising=False,
+    )
+    monkeypatch.setattr(kernels, "supports_cutlass_moe", MagicMock(return_value=False), raising=False)
+    monkeypatch.setattr(distributed, "all_gather_variable", MagicMock())
+    monkeypatch.setattr(distributed, "all_reduce_", MagicMock())
+    monkeypatch.setattr(distributed, "all_gather", MagicMock(side_effect=lambda x, **kw: x))
+    monkeypatch.setattr(distributed, "tp_rank", MagicMock(return_value=0))
+
 
 # ---------------------------------------------------------------------------
 # Config helpers

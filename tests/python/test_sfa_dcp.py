@@ -38,7 +38,7 @@ from xllm.python.model_executor.forward_context import (
     copy_into_execution_buffer,
     forward_context,
 )
-from xllm.python.models import glm5_2
+from xllm.python.models import deepseek_v32, glm5_2
 
 
 def _cpu_context(execution_state: AclGraphExecutionState | None) -> ForwardContext:
@@ -280,6 +280,7 @@ def test_glm_quant_indexer_without_cp_uses_materialized_scale() -> None:
         return quantized, scale
 
     with (
+        patch.object(deepseek_v32, "_apply_half_rope_with_cos_sin", side_effect=lambda value, _cos, _sin: value),
         patch.object(
             glm5_2.kernels,
             "dynamic_quant",

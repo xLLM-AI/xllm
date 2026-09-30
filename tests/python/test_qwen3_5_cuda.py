@@ -16,10 +16,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 from unittest.mock import MagicMock
 
 import pytest
 import torch
+
+if importlib.util.find_spec("xllm.python.kernels_cuda") is None:
+    pytest.skip("CUDA kernels are unavailable in this build", allow_module_level=True)
 
 from tests.python.qwen3_5_test_utils import (
     StateDict as _StateDict,
