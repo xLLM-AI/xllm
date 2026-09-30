@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// batch_input_builder.h
+// forward_input_builder.h
 #pragma once
 
 #include <torch/types.h>
@@ -35,17 +35,17 @@ limitations under the License.
 
 namespace xllm {
 
-class BatchInputBuilderTestPeer;
+class ForwardInputBuilderTestPeer;
 struct ModelArgs;
 
-class BatchInputBuilder final {
+class ForwardInputBuilder final {
  public:
-  BatchInputBuilder(const BatchInputData& data,
-                    const ModelArgs* args,
-                    int32_t cp_size = 1,
-                    ThreadPool* thread_pool = nullptr);
+  ForwardInputBuilder(const BatchInputData& data,
+                      const ModelArgs* args,
+                      int32_t cp_size = 1,
+                      ThreadPool* thread_pool = nullptr);
 
-  explicit BatchInputBuilder(
+  explicit ForwardInputBuilder(
       const std::vector<Sequence*>& sequences,
       const std::vector<uint32_t>& allowed_max_tokens,
       const std::vector<torch::Tensor>& input_embeddings_vec,
@@ -66,7 +66,7 @@ class BatchInputBuilder final {
   }
 
  private:
-  friend class BatchInputBuilderTestPeer;
+  friend class ForwardInputBuilderTestPeer;
 
   // Core building methods
   void process_sequences();

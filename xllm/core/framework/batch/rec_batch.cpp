@@ -15,75 +15,38 @@ limitations under the License.
 
 #include "core/framework/batch/rec_batch.h"
 
-#include <glog/logging.h>
-
-#include <limits>
-
-#include "core/framework/batch/rec_batch_input_builder.h"
-#include "core/util/rec_model_utils.h"
-
 namespace xllm {
 
-RecBatch::RecBatch(BatchInputType input_type) : input_type_(input_type) {
-  switch (input_type_) {
-    case BatchInputType::SEQUENCE:
-    case BatchInputType::ONEREC:
-    case BatchInputType::ONEREC_XATTENTION:
-    case BatchInputType::REC_MULTI_ROUND:
-      return;
-  }
-  LOG(FATAL) << "Unsupported batch input type: "
-             << static_cast<int32_t>(input_type_);
-}
+RecBatch::RecBatch(BatchInputType input_type) : state_(input_type) {}
 
-bool RecBatch::uses_group_input() const {
-  return input_type_ == BatchInputType::ONEREC ||
-         input_type_ == BatchInputType::ONEREC_XATTENTION;
-}
+bool RecBatch::uses_group_input() const { return state_.uses_group_input(); }
 
-size_t RecBatch::size() const {
-  return uses_group_input() ? state_.num_group_sequences()
-                            : state_.sequence_plan().size();
-}
+size_t RecBatch::size() const { return state_.size(); }
 
 Sequence* RecBatch::sequence(size_t index) const {
-  return uses_group_input() ? state_.group_sequence(index)
-                            : state_.sequence_plan()[index].sequence;
+  return state_.sequence(index);
 }
 
 std::vector<Sequence*> RecBatch::get_sequences() const {
-  if (!uses_group_input() && !state_.sequence_plan().empty()) {
-    return state_.sequence_plan().sequences();
-  }
-  return state_.group_sequences();
+  return state_.get_sequences();
 }
 
 void RecBatch::refresh_sequences_from_groups() {
-  if (!uses_group_input()) {
-    state_.refresh_sequences_from_groups();
-  }
+  state_.refresh_sequences_from_groups();
 }
 
 ForwardInput RecBatch::prepare_forward_input(uint32_t num_decoding_tokens,
                                              uint32_t min_decoding_batch_size,
                                              const ModelArgs& args,
                                              int32_t cp_size) {
-  if (input_type_ == BatchInputType::SEQUENCE) {
-    return state_.prepare_sequence_input(
-        num_decoding_tokens, min_decoding_batch_size, args, cp_size);
-  }
-  return prepare_rec_forward_input(num_decoding_tokens,
-                                   min_decoding_batch_size,
-                                   args,
-                                   /*thread_pool=*/nullptr);
+  return state_.prepare_forward_input(
+      num_decoding_tokens, min_decoding_batch_size, args, cp_size);
 }
 
 ForwardInput RecBatch::prepare_forward_input(const ModelArgs& args,
                                              ThreadPool* thread_pool,
                                              int32_t cp_size) {
-  CHECK(input_type_ == BatchInputType::SEQUENCE)
-      << "Distributed input transport requires a sequence batch";
-  return state_.prepare_distributed_input(args, thread_pool, cp_size);
+  return state_.prepare_forward_input(args, thread_pool, cp_size);
 }
 
 ForwardInput RecBatch::prepare_rec_forward_input(
@@ -91,35 +54,52 @@ ForwardInput RecBatch::prepare_rec_forward_input(
     uint32_t min_decoding_batch_size,
     const ModelArgs& args,
     MPMCThreadPool* thread_pool) {
-  CHECK(input_type_ != BatchInputType::SEQUENCE)
-      << "Rec input requires an explicit Rec batch input type";
-  state_.output_handler().clear();
-  if (state_.empty()) {
-    return {};
+  return state_.prepare_rec_forward_input(
+      num_decoding_tokens, min_decoding_batch_size, args, thread_pool);
+}
+
+void RecBatch::process_sample_output(const RawForwardOutput& output,
+                                     bool replace_fake_token) {
+  const auto sequences = get_sequences();
+  state_.sequence_state().output_handler().process_sample_output(
+      {sequences, state_.sequence_state().sequence_groups()},
+      output,
+      replace_fake_token);
+}
+
+void RecBatch::process_sample_output(const SampleOutput& output,
+                                     bool replace_fake_token,
+                                     bool force_requested_beam_result_size) {
+  const auto sequences = get_sequences();
+  state_.sequence_state().output_handler().process_sample_output(
+      {sequences, state_.sequence_state().sequence_groups()},
+      output,
+      replace_fake_token,
+      force_requested_beam_result_size);
+}
+
+void RecBatch::process_beam_search_output(const RawForwardOutput& output,
+                                          bool replace_fake_token) {
+  const auto sequences = get_sequences();
+  state_.sequence_state().output_handler().process_beam_search_output(
+      {sequences, state_.sequence_state().sequence_groups()},
+      output,
+      replace_fake_token);
+}
+
+void RecBatch::process_beam_sequence_group(const ForwardOutput& output) {
+  const auto sequences = get_sequences();
+  state_.sequence_state().output_handler().process_beam_sequence_group(
+      {sequences, state_.sequence_state().sequence_groups()}, output);
+}
+
+void RecBatch::finish() {
+  for (auto* group : state_.sequence_state().sequence_groups()) {
+    group->finish();
   }
-  BatchSequencePlan group_plan;
-  const BatchSequencePlan* plan = &state_.sequence_plan();
-  if (uses_group_input()) {
-    CHECK(!state_.sequence_groups().empty())
-        << "OneRec input requires request groups";
-    group_plan.reserve(size());
-    for (auto* sequence : get_sequences()) {
-      group_plan.add(sequence, std::numeric_limits<uint32_t>::max());
-    }
-    plan = &group_plan;
-  } else {
-    CHECK(state_.sequence_groups().empty() || !plan->empty())
-        << "Sequence input requires scheduled sequences";
+  for (auto* sequence : get_sequences()) {
+    sequence->finish();
   }
-  auto data = state_.input_data(*plan);
-  if (uses_group_input()) {
-    state_.output_handler().prepare(data,
-                                    use_legacy_onerec_prefill_only_contract());
-  }
-  auto builder =
-      RecBatchInputBuilder::create(input_type_, data, &args, thread_pool);
-  return builder->build_rec_forward_input(num_decoding_tokens,
-                                          min_decoding_batch_size);
 }
 
 }  // namespace xllm

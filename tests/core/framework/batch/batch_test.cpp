@@ -29,7 +29,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "batch_input_builder.h"
+#include "core/framework/batch/forward_input_builder.h"
 #include "core/framework/config/scheduler_config.h"
 #include "framework/block/block.h"
 #include "framework/block/block_manager_impl.h"
@@ -53,14 +53,14 @@ limitations under the License.
 
 namespace xllm {
 
-class BatchInputBuilderTestPeer final {
+class ForwardInputBuilderTestPeer final {
  public:
   static TransferKVInfo build_step_transfer_info(
       const TransferKVInfo& full_info,
       Sequence* sequence,
       uint32_t seq_len,
       uint32_t kv_split_size = 1) {
-    return BatchInputBuilder::build_step_transfer_info(
+    return ForwardInputBuilder::build_step_transfer_info(
         full_info, sequence, seq_len, kv_split_size);
   }
 };
@@ -322,7 +322,7 @@ class ScopedJsonObjectOutput final {
 
 }  // namespace
 
-TEST(BatchInputBuilderTest, FirstChunkUsesRemotePrefix) {
+TEST(ForwardInputBuilderTest, FirstChunkUsesRemotePrefix) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -332,14 +332,14 @@ TEST(BatchInputBuilderTest, FirstChunkUsesRemotePrefix) {
   const TransferKVInfo full_info = make_info({100, 101, 102, 103, 104});
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/32);
 
   expect_mapping(info, BlockType::KV, block_ids(blocks), {100, 101});
   EXPECT_EQ(sequence.kv_state().next_transfer_block_idx(), 2u);
 }
 
-TEST(BatchInputBuilderTest, LaterChunkUsesLogicalOffset) {
+TEST(ForwardInputBuilderTest, LaterChunkUsesLogicalOffset) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -350,7 +350,7 @@ TEST(BatchInputBuilderTest, LaterChunkUsesLogicalOffset) {
   const TransferKVInfo full_info = make_info({100, 101, 102, 103, 104});
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/64);
 
   const std::vector<uint64_t> ids = block_ids(blocks);
@@ -358,7 +358,7 @@ TEST(BatchInputBuilderTest, LaterChunkUsesLogicalOffset) {
   EXPECT_EQ(sequence.kv_state().next_transfer_block_idx(), 4u);
 }
 
-TEST(BatchInputBuilderTest, PartialBoundaryRepeatsDirtyBlocks) {
+TEST(ForwardInputBuilderTest, PartialBoundaryRepeatsDirtyBlocks) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -368,14 +368,14 @@ TEST(BatchInputBuilderTest, PartialBoundaryRepeatsDirtyBlocks) {
   const TransferKVInfo full_info = make_info({100, 101, 102});
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/33);
 
   expect_mapping(info, BlockType::KV, block_ids(blocks), {100, 101, 102});
   EXPECT_EQ(sequence.kv_state().next_transfer_block_idx(), 2u);
 }
 
-TEST(BatchInputBuilderTest, SharedPrefixUsesLogicalMapping) {
+TEST(ForwardInputBuilderTest, SharedPrefixUsesLogicalMapping) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -385,7 +385,7 @@ TEST(BatchInputBuilderTest, SharedPrefixUsesLogicalMapping) {
   const TransferKVInfo full_info = make_info({100, 101, 102, 103, 104});
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/80);
 
   expect_mapping(
@@ -393,7 +393,7 @@ TEST(BatchInputBuilderTest, SharedPrefixUsesLogicalMapping) {
   EXPECT_EQ(sequence.kv_state().next_transfer_block_idx(), 5u);
 }
 
-TEST(BatchInputBuilderTest, FlatRemoteSharedPrefixUsesTrimmedRemoteMapping) {
+TEST(ForwardInputBuilderTest, FlatRemoteSharedPrefixUsesTrimmedRemoteMapping) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -408,7 +408,7 @@ TEST(BatchInputBuilderTest, FlatRemoteSharedPrefixUsesTrimmedRemoteMapping) {
       make_offsets({1002, 1003, 1004}, {2002, 2003, 2004})};
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/80);
 
   const std::vector<uint64_t> ids = block_ids(blocks);
@@ -423,7 +423,7 @@ TEST(BatchInputBuilderTest, FlatRemoteSharedPrefixUsesTrimmedRemoteMapping) {
             (std::vector<uint64_t>{2002, 2003, 2004}));
 }
 
-TEST(BatchInputBuilderTest, GroupRemoteSharedPrefixKeepsFullRemoteMapping) {
+TEST(ForwardInputBuilderTest, GroupRemoteSharedPrefixKeepsFullRemoteMapping) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -437,7 +437,7 @@ TEST(BatchInputBuilderTest, GroupRemoteSharedPrefixKeepsFullRemoteMapping) {
   full_info.mappings[0].remote_shared_num = 2;
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/80);
 
   const std::vector<uint64_t> ids = block_ids(blocks);
@@ -448,7 +448,7 @@ TEST(BatchInputBuilderTest, GroupRemoteSharedPrefixKeepsFullRemoteMapping) {
             5u);
 }
 
-TEST(BatchInputBuilderTest, RemoteSWASentinelsAreNotTransferred) {
+TEST(ForwardInputBuilderTest, RemoteSWASentinelsAreNotTransferred) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -461,7 +461,7 @@ TEST(BatchInputBuilderTest, RemoteSWASentinelsAreNotTransferred) {
       make_info({invalid_id, invalid_id, 102, 103}, BlockType::SWA);
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/64);
 
   const std::vector<uint64_t> ids = block_ids(blocks);
@@ -470,7 +470,7 @@ TEST(BatchInputBuilderTest, RemoteSWASentinelsAreNotTransferred) {
             4u);
 }
 
-TEST(BatchInputBuilderTest, SharedPrefixSlicesXTensorOffsets) {
+TEST(ForwardInputBuilderTest, SharedPrefixSlicesXTensorOffsets) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -485,7 +485,7 @@ TEST(BatchInputBuilderTest, SharedPrefixSlicesXTensorOffsets) {
       make_offsets({3000, 3001, 3002, 3003, 3004},
                    {4000, 4001, 4002, 4003, 4004})};
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/64);
 
   const std::vector<uint64_t> ids = block_ids(blocks);
@@ -502,7 +502,7 @@ TEST(BatchInputBuilderTest, SharedPrefixSlicesXTensorOffsets) {
             (std::vector<uint64_t>{4002, 4003}));
 }
 
-TEST(BatchInputBuilderTest, PartialBoundaryRepeatsXTensorOffsets) {
+TEST(ForwardInputBuilderTest, PartialBoundaryRepeatsXTensorOffsets) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -514,7 +514,7 @@ TEST(BatchInputBuilderTest, PartialBoundaryRepeatsXTensorOffsets) {
       make_offsets({1000, 1001, 1002}, {2000, 2001, 2002}),
       make_offsets({3000, 3001, 3002}, {4000, 4001, 4002})};
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/33);
 
   expect_mapping(info, BlockType::KV, block_ids(blocks), {100, 101, 102});
@@ -530,7 +530,7 @@ TEST(BatchInputBuilderTest, PartialBoundaryRepeatsXTensorOffsets) {
             (std::vector<uint64_t>{4000, 4001, 4002}));
 }
 
-TEST(BatchInputBuilderTest, RemoteCoverageShortageDies) {
+TEST(ForwardInputBuilderTest, RemoteCoverageShortageDies) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -542,14 +542,14 @@ TEST(BatchInputBuilderTest, RemoteCoverageShortageDies) {
   EXPECT_DEATH(
       {
         const TransferKVInfo info =
-            BatchInputBuilderTestPeer::build_step_transfer_info(
+            ForwardInputBuilderTestPeer::build_step_transfer_info(
                 full_info, &sequence, /*seq_len=*/48);
         (void)info;
       },
       "remote");
 }
 
-TEST(BatchInputBuilderTest, DSV4FirstChunkSlicesFullRemoteAllocation) {
+TEST(ForwardInputBuilderTest, DSV4FirstChunkSlicesFullRemoteAllocation) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -560,7 +560,7 @@ TEST(BatchInputBuilderTest, DSV4FirstChunkSlicesFullRemoteAllocation) {
       make_info({100, 101, 102, 103}, BlockType::C4);
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/32);
 
   expect_mapping(info, BlockType::C4, block_ids(blocks), {100, 101});
@@ -568,7 +568,7 @@ TEST(BatchInputBuilderTest, DSV4FirstChunkSlicesFullRemoteAllocation) {
             2u);
 }
 
-TEST(BatchInputBuilderTest, DSV4KvSplitMapsOneSourceBlockToTwoDecodeBlocks) {
+TEST(ForwardInputBuilderTest, DSV4KvSplitMapsOneSourceBlockToTwoDecodeBlocks) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(32);
   BlockManagerImpl manager(options);
@@ -579,7 +579,7 @@ TEST(BatchInputBuilderTest, DSV4KvSplitMapsOneSourceBlockToTwoDecodeBlocks) {
       make_info({100, 101, 102, 103}, BlockType::C4);
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/64, /*kv_split_size=*/2);
 
   expect_mapping(info, BlockType::C4, block_ids(blocks), {100, 101, 102, 103});
@@ -587,7 +587,7 @@ TEST(BatchInputBuilderTest, DSV4KvSplitMapsOneSourceBlockToTwoDecodeBlocks) {
             2u);
 }
 
-TEST(BatchInputBuilderTest, DSV4LaterChunkSkipsExpiredSWABlocks) {
+TEST(ForwardInputBuilderTest, DSV4LaterChunkSkipsExpiredSWABlocks) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -601,7 +601,7 @@ TEST(BatchInputBuilderTest, DSV4LaterChunkSkipsExpiredSWABlocks) {
       make_info({100, 101, 102, 103}, BlockType::SWA);
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/64);
 
   expect_mapping(info, BlockType::SWA, block_ids(live_blocks), {102, 103});
@@ -609,7 +609,7 @@ TEST(BatchInputBuilderTest, DSV4LaterChunkSkipsExpiredSWABlocks) {
             4u);
 }
 
-TEST(BatchInputBuilderTest, DSV4PartialBlockIsRepeatedOnNextChunk) {
+TEST(ForwardInputBuilderTest, DSV4PartialBlockIsRepeatedOnNextChunk) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl manager(options);
@@ -619,7 +619,7 @@ TEST(BatchInputBuilderTest, DSV4PartialBlockIsRepeatedOnNextChunk) {
   const TransferKVInfo full_info = make_info({100, 101, 102}, BlockType::C4);
 
   const TransferKVInfo info =
-      BatchInputBuilderTestPeer::build_step_transfer_info(
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
           full_info, &sequence, /*seq_len=*/33);
 
   expect_mapping(info, BlockType::C4, block_ids(blocks), {100, 101, 102});
@@ -1749,14 +1749,14 @@ TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {8};
-  BatchInputBuilder builder(sequences,
-                            budgets,
-                            {},
-                            {},
-                            nullptr,
-                            0,
-                            nullptr,
-                            BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(sequences,
+                              budgets,
+                              {},
+                              {},
+                              nullptr,
+                              0,
+                              nullptr,
+                              BatchForwardType::PREFILL);
 
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -1811,14 +1811,14 @@ TEST(BatchTest, PrefixCacheTransferIgnoresKvCacheCursor) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {2};
-  BatchInputBuilder builder(sequences,
-                            budgets,
-                            {},
-                            {},
-                            nullptr,
-                            0,
-                            nullptr,
-                            BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(sequences,
+                              budgets,
+                              {},
+                              {},
+                              nullptr,
+                              0,
+                              nullptr,
+                              BatchForwardType::PREFILL);
 
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -1871,14 +1871,14 @@ TEST(BatchTest, ForwardInputPreservesTransferInfoAndBatchId) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {8};
-  BatchInputBuilder builder(sequences,
-                            budgets,
-                            {},
-                            {},
-                            nullptr,
-                            batch_id,
-                            nullptr,
-                            BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(sequences,
+                              budgets,
+                              {},
+                              {},
+                              nullptr,
+                              batch_id,
+                              nullptr,
+                              BatchForwardType::PREFILL);
 
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -1933,14 +1933,14 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {4};
-  BatchInputBuilder builder(sequences,
-                            budgets,
-                            {},
-                            {},
-                            nullptr,
-                            batch_id,
-                            nullptr,
-                            BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(sequences,
+                              budgets,
+                              {},
+                              {},
+                              nullptr,
+                              batch_id,
+                              nullptr,
+                              BatchForwardType::PREFILL);
 
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2132,14 +2132,14 @@ TEST(BatchTest, ForwardInputBlockCopyKernelFieldsMatchExpectedLayout) {
   std::vector<uint32_t> budgets = {4};
 
   std::vector<Sequence*> forward_sequences = {&forward_seq};
-  BatchInputBuilder forward_builder(forward_sequences,
-                                    budgets,
-                                    {},
-                                    {},
-                                    &forward_swap_blocks,
-                                    /*batch_id=*/1,
-                                    nullptr,
-                                    BatchForwardType::PREFILL);
+  ForwardInputBuilder forward_builder(forward_sequences,
+                                      budgets,
+                                      {},
+                                      {},
+                                      &forward_swap_blocks,
+                                      /*batch_id=*/1,
+                                      nullptr,
+                                      BatchForwardType::PREFILL);
   ForwardInput forward_input =
       forward_builder.build_forward_input(/*num_decoding_tokens=*/1,
                                           /*min_decoding_batch_size=*/0);
@@ -2258,16 +2258,16 @@ TEST(BatchTest, SampleRequestKeepsThreadedForwardBuilderOffsetsStable) {
   std::vector<MMData> mm_data_vec;
   ThreadPool thread_pool(2);
   ModelArgs args;
-  BatchInputBuilder builder(sequences,
-                            allowed_max_tokens,
-                            input_embeddings_vec,
-                            mm_data_vec,
-                            /*swap_block_transfer_infos=*/nullptr,
-                            /*batch_id=*/1,
-                            &args,
-                            BatchForwardType::PREFILL,
-                            /*cp_size=*/1,
-                            &thread_pool);
+  ForwardInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::PREFILL,
+                              /*cp_size=*/1,
+                              &thread_pool);
 
   ForwardInput forward_input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2323,14 +2323,14 @@ TEST(BatchTest, DecodeMinBatchSizeDoesNotPadTransportState) {
   std::vector<torch::Tensor> input_embeddings_vec;
   std::vector<MMData> mm_data_vec;
   ModelArgs args;
-  BatchInputBuilder builder(sequences,
-                            allowed_max_tokens,
-                            input_embeddings_vec,
-                            mm_data_vec,
-                            /*swap_block_transfer_infos=*/nullptr,
-                            /*batch_id=*/1,
-                            &args,
-                            BatchForwardType::DECODE);
+  ForwardInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::DECODE);
 
   ForwardInput forward_input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2391,14 +2391,14 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
   std::vector<MMData> mm_data_vec;
   ModelArgs args;
   args.layer_types({"linear_attention"});
-  BatchInputBuilder builder(sequences,
-                            allowed_max_tokens,
-                            input_embeddings_vec,
-                            mm_data_vec,
-                            /*swap_block_transfer_infos=*/nullptr,
-                            /*batch_id=*/1,
-                            &args,
-                            BatchForwardType::DECODE);
+  ForwardInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::DECODE);
 
   ForwardInput forward_input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,

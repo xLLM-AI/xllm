@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/sequence_batch_builder.h"
+#include "core/framework/batch/batch_builder.h"
 
 #include <glog/logging.h>
 
@@ -25,12 +25,11 @@ limitations under the License.
 
 namespace xllm {
 
-SequenceBatchBuilder::SequenceBatchBuilder(int32_t dp_size)
-    : dp_size_(dp_size) {
+BatchBuilder::BatchBuilder(int32_t dp_size) : dp_size_(dp_size) {
   CHECK_GT(dp_size_, 0);
 }
 
-BatchGroup SequenceBatchBuilder::build(
+BatchGroup BatchBuilder::build(
     const std::vector<std::shared_ptr<Request>>& requests,
     const std::vector<Sequence*>& sequences,
     const std::vector<size_t>& budgets,
@@ -82,9 +81,7 @@ BatchGroup SequenceBatchBuilder::build(
     }
   }
 
-  BatchGroup batches(static_cast<size_t>(dp_size_),
-                     BatchDomain::SEQUENCE,
-                     BatchInputType::SEQUENCE);
+  BatchGroup batches(static_cast<size_t>(dp_size_));
   for (int32_t rank = 0; rank < dp_size_; ++rank) {
     batches[rank].reserve(sequence_counts[rank], group_counts[rank]);
   }

@@ -23,10 +23,10 @@ limitations under the License.
 
 namespace xllm {
 
-class DiTBatchInputBuilder final {
+class DiTForwardInputBuilder final {
  public:
   // The request container is owned by DiTBatch and outlives this builder.
-  explicit DiTBatchInputBuilder(
+  explicit DiTForwardInputBuilder(
       const std::vector<std::shared_ptr<DiTRequest>>& requests)
       : requests_(requests) {}
 

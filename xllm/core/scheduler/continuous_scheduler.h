@@ -29,8 +29,8 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/common/types.h"
+#include "core/framework/batch/batch_factory.h"
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/batch/sequence_batch_factory.h"
 #include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
@@ -231,7 +231,7 @@ class ContinuousScheduler : public Scheduler {
   const SchedulerConfig& scheduler_config_;
 
   // Each scheduler owns a factory configured for its DP topology.
-  SequenceBatchFactory batch_factory_;
+  BatchFactory batch_factory_;
 
   // Policy object that encapsulates all batch-assembly logic.
   std::unique_ptr<SchedulerPolicy> policy_;

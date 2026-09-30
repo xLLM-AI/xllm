@@ -444,7 +444,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   // --- mRoPE: collapse [3, N] decode positions to 1-D ---
   // Only PURE decode collapses to 1-D: decode rows are identical
-  // (batch_input_builder get_mrope_positions), and mRoPE(p,p,p) == standard
+  // (forward_input_builder get_mrope_positions), and mRoPE(p,p,p) == standard
   // RoPE at p, so a single row feeds the captured aclgraph's 1-D
   // static_positions unchanged. Chunked/mixed prefill (is_prefill=false but
   // is_chunked_prefill=true) still needs the full [3, N] for the Python mRoPE

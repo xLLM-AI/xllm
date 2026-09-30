@@ -22,7 +22,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "distributed_runtime/dist_manager.h"
 #include "engine.h"
-#include "framework/batch/batch_group.h"
+#include "framework/batch/rec_batch_group.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/quant_args.h"
@@ -43,7 +43,7 @@ class RecEngine : public Engine {
 
   virtual ~RecEngine() = default;
 
-  ForwardOutput step(BatchGroup& batch) override;
+  ForwardOutput step(RecBatchGroup& batch) override;
 
   const runtime::Options& options() const { return options_; }
 
@@ -53,8 +53,6 @@ class RecEngine : public Engine {
   // call this so rank 0's DistManager can collect the cluster; LlmRec
   // otherwise creates DistManager only inside init().
   void setup_distributed_workers();
-
-  void update_last_step_result(BatchGroup& batch) override;
 
   std::vector<int64_t> get_active_activation_memory() const override;
 
@@ -78,7 +76,7 @@ class RecEngine : public Engine {
     virtual int64_t minimal_kv_cache_blocks() const { return 0; }
 
     // Execution
-    virtual ForwardOutput step(BatchGroup& batches) = 0;
+    virtual ForwardOutput step(RecBatchGroup& batches) = 0;
 
     // Misc
     virtual std::vector<int64_t> get_active_activation_memory() const = 0;
@@ -100,15 +98,15 @@ class RecEngine : public Engine {
     bool init_model_workers(const std::string& model_path) override;
     int64_t estimate_min_available_memory() override;
     bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
-    ForwardOutput step(BatchGroup& batches) override;
+    ForwardOutput step(RecBatchGroup& batches) override;
     std::vector<int64_t> get_active_activation_memory() const override;
     size_t num_workers() const override;
 
    private:
-    std::vector<ForwardInput> prepare_inputs(BatchGroup& batch);
+    std::vector<ForwardInput> prepare_inputs(RecBatchGroup& batch);
 
     // Get max tokens from batch for dynamic step control
-    size_t get_max_steps_from_batch(BatchGroup& batches) const;
+    size_t get_max_steps_from_batch(RecBatchGroup& batches) const;
   };
 
   // ============================================================
@@ -136,7 +134,7 @@ class RecEngine : public Engine {
     explicit OneRecPrefillOnlyEnginePipeline(RecEngine& engine);
 
     int64_t minimal_kv_cache_blocks() const override;
-    ForwardOutput step(BatchGroup& batches) override;
+    ForwardOutput step(RecBatchGroup& batches) override;
 
    private:
     ForwardOutput get_model_output(const ForwardInput& model_inputs);
@@ -152,7 +150,7 @@ class RecEngine : public Engine {
     explicit OneRecXAttentionEnginePipeline(RecEngine& engine);
 
     int64_t minimal_kv_cache_blocks() const override;
-    ForwardOutput step(BatchGroup& batches) override;
+    ForwardOutput step(RecBatchGroup& batches) override;
 
    private:
     ForwardOutput get_model_output(const ForwardInput& model_inputs);
@@ -171,7 +169,7 @@ class RecEngine : public Engine {
     bool init_model_workers(const std::string& model_path) override;
     int64_t estimate_min_available_memory() override;
     bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
-    ForwardOutput step(BatchGroup& batches) override;
+    ForwardOutput step(RecBatchGroup& batches) override;
     std::vector<int64_t> get_active_activation_memory() const override;
     size_t num_workers() const override;
 

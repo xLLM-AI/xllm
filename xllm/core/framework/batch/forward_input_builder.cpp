@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/batch_input_builder.h"
+#include "core/framework/batch/forward_input_builder.h"
 
 #include <c10/core/DeviceType.h>
 #include <glog/logging.h>
@@ -205,22 +205,22 @@ bool should_save_linear_checkpoint(Sequence* sequence,
 
 }  // namespace
 
-BatchInputBuilder::BatchInputBuilder(const BatchInputData& data,
-                                     const ModelArgs* args,
-                                     int32_t cp_size,
-                                     ThreadPool* thread_pool)
-    : BatchInputBuilder(data.sequences,
-                        data.allowed_max_tokens,
-                        data.input_embeddings,
-                        data.mm_data,
-                        data.swap_block_transfer_infos,
-                        data.batch_id,
-                        args,
-                        data.forward_type,
-                        cp_size,
-                        thread_pool) {}
+ForwardInputBuilder::ForwardInputBuilder(const BatchInputData& data,
+                                         const ModelArgs* args,
+                                         int32_t cp_size,
+                                         ThreadPool* thread_pool)
+    : ForwardInputBuilder(data.sequences,
+                          data.allowed_max_tokens,
+                          data.input_embeddings,
+                          data.mm_data,
+                          data.swap_block_transfer_infos,
+                          data.batch_id,
+                          args,
+                          data.forward_type,
+                          cp_size,
+                          thread_pool) {}
 
-BatchInputBuilder::BatchInputBuilder(
+ForwardInputBuilder::ForwardInputBuilder(
     const std::vector<Sequence*>& sequences,
     const std::vector<uint32_t>& allowed_max_tokens,
     const std::vector<torch::Tensor>& input_embeddings_vec,
@@ -272,7 +272,7 @@ BatchInputBuilder::BatchInputBuilder(
   state_.batch_forward_type = batch_forward_type;
 }
 
-TransferKVInfo BatchInputBuilder::build_step_transfer_info(
+TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     const TransferKVInfo& full_info,
     Sequence* sequence,
     uint32_t seq_len,
@@ -433,7 +433,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
   return info;
 }
 
-ForwardInput BatchInputBuilder::build_forward_input(
+ForwardInput ForwardInputBuilder::build_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size) {
   process_sequences();
@@ -442,7 +442,7 @@ ForwardInput BatchInputBuilder::build_forward_input(
   return state_to_forward_input();
 }
 
-void BatchInputBuilder::process_sequences() {
+void ForwardInputBuilder::process_sequences() {
   // Multithreading only helps when the parallelized per-sequence work is large
   // enough to amortize the fixed thread-dispatch cost plus the serial merge of
   // per-thread states (which is O(total tokens)). Decode batches carry ~1 query
@@ -471,7 +471,7 @@ void BatchInputBuilder::process_sequences() {
   }
 }
 
-void BatchInputBuilder::process_sequences_multithreaded() {
+void ForwardInputBuilder::process_sequences_multithreaded() {
   const size_t threads_num = thread_pool_->size();
   const size_t sequences_per_thread =
       (num_sequences_ + threads_num - 1) / threads_num;
@@ -725,7 +725,7 @@ void BatchInputBuilder::process_sequences_multithreaded() {
   }
 }
 
-void BatchInputBuilder::process_single_sequence(
+void ForwardInputBuilder::process_single_sequence(
     int32_t seq_index,
     BuilderState* state_ptr,
     std::unordered_set<int32_t>* write_block_ids_ptr) {
@@ -794,10 +794,11 @@ void BatchInputBuilder::process_single_sequence(
   }
 }
 
-void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
-                                                     uint32_t n_kv_cache_tokens,
-                                                     uint32_t seq_len,
-                                                     BuilderState* state_ptr) {
+void ForwardInputBuilder::extract_tokens_and_positions(
+    Sequence* sequence,
+    uint32_t n_kv_cache_tokens,
+    uint32_t seq_len,
+    BuilderState* state_ptr) {
   BuilderState& state = state_ptr ? *state_ptr : state_;
   const size_t seq_token_begin = state.flatten_tokens_vec.size();
 
@@ -885,10 +886,10 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
   }
 }
 
-void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
-                                                uint32_t n_kv_cache_tokens,
-                                                uint32_t seq_len,
-                                                BuilderState& state) {
+void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
+                                                  uint32_t n_kv_cache_tokens,
+                                                  uint32_t seq_len,
+                                                  BuilderState& state) {
   // linear_state_ids must stay aligned with logical batch rows even when the
   // model has no linear-attention layers, because downstream consumers index by
   // batch row. GDN models always hold a dedicated LINEAR slot, so read it
@@ -973,8 +974,8 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
   state.linear_state_cache_ops.emplace_back(std::move(linear_state_cache_op));
 }
 
-void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
-                                                   BuilderState* state_ptr) {
+void ForwardInputBuilder::handle_sampling_parameters(Sequence* sequence,
+                                                     BuilderState* state_ptr) {
   BuilderState& state = state_ptr ? *state_ptr : state_;
 
   state.sampling.append(
@@ -992,9 +993,9 @@ void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
   }
 }
 
-torch::Tensor BatchInputBuilder::get_mrope_positions(Sequence* sequence,
-                                                     uint32_t start,
-                                                     uint32_t end) {
+torch::Tensor ForwardInputBuilder::get_mrope_positions(Sequence* sequence,
+                                                       uint32_t start,
+                                                       uint32_t end) {
   if (sequence->stage() == SequenceStage::DECODE) {
     // The prefill-stage positions cache is no longer needed once decoding
     // starts; release it to bound memory during long decodes.
@@ -1022,7 +1023,7 @@ torch::Tensor BatchInputBuilder::get_mrope_positions(Sequence* sequence,
   }
 }
 
-void BatchInputBuilder::setup_kv_cache_info(
+void ForwardInputBuilder::setup_kv_cache_info(
     Sequence* sequence,
     uint32_t n_kv_cache_tokens,
     uint32_t seq_len,
@@ -1111,7 +1112,7 @@ void BatchInputBuilder::setup_kv_cache_info(
 
   auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
   if (transfer_kv_info.has_value()) {
-    TransferKVInfo step_info = BatchInputBuilder::build_step_transfer_info(
+    TransferKVInfo step_info = ForwardInputBuilder::build_step_transfer_info(
         transfer_kv_info.value(),
         sequence,
         seq_len,
@@ -1129,7 +1130,7 @@ void BatchInputBuilder::setup_kv_cache_info(
   state.block_tables_vec.emplace_back(std::move(block_ids));
 }
 
-void BatchInputBuilder::padding_decode_batch_size(
+void ForwardInputBuilder::padding_decode_batch_size(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size) {
   if (num_sequences_ < min_decoding_batch_size) {
@@ -1178,7 +1179,7 @@ void BatchInputBuilder::padding_decode_batch_size(
   }
 }
 
-ForwardInput BatchInputBuilder::state_to_forward_input() {
+ForwardInput ForwardInputBuilder::state_to_forward_input() {
   if (state_.flatten_tokens_vec.empty()) {
     return {};
   }
@@ -1381,7 +1382,8 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   return forward_input;
 }
 
-void BatchInputBuilder::process_swap_block_infos(ForwardInput& forward_input) {
+void ForwardInputBuilder::process_swap_block_infos(
+    ForwardInput& forward_input) {
   if (swap_block_transfer_infos_ == nullptr ||
       swap_block_transfer_infos_->empty()) {
     return;
@@ -1430,11 +1432,11 @@ void BatchInputBuilder::process_swap_block_infos(ForwardInput& forward_input) {
   }
 }
 
-void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
-                                                   uint32_t n_kv_cache_tokens,
-                                                   uint32_t q_seq_len,
-                                                   int32_t seq_index,
-                                                   BuilderState* state_ptr) {
+void ForwardInputBuilder::process_multi_modal_inputs(Sequence* sequence,
+                                                     uint32_t n_kv_cache_tokens,
+                                                     uint32_t q_seq_len,
+                                                     int32_t seq_index,
+                                                     BuilderState* state_ptr) {
   BuilderState& state = state_ptr ? *state_ptr : state_;
   MMData& mm_data = sequence->mutable_mm_data();
   if ((sequence->stage() != SequenceStage::DECODE) && mm_data.valid()) {

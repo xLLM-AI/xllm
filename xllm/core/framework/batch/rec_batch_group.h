@@ -18,39 +18,35 @@ limitations under the License.
 #include <cstddef>
 #include <vector>
 
-#include "core/framework/batch/batch.h"
+#include "core/framework/batch/rec_batch.h"
 
 namespace xllm {
 
-// A DP batch aggregate. Each element is the rank-local Batch for the same
-// scheduler step, and its index is the corresponding DP rank.
-class BatchGroup final {
+// DP-rank-local Rec batches for one scheduler step.
+class RecBatchGroup final {
  public:
-  using Container = std::vector<Batch>;
+  using Container = std::vector<RecBatch>;
   using iterator = Container::iterator;
   using const_iterator = Container::const_iterator;
 
-  BatchGroup() = default;
-  explicit BatchGroup(size_t dp_size);
+  RecBatchGroup() = default;
+  RecBatchGroup(size_t dp_size, BatchInputType input_type);
 
-  BatchGroup(const BatchGroup&) = delete;
-  BatchGroup& operator=(const BatchGroup&) = delete;
-  BatchGroup(BatchGroup&&) noexcept = default;
-  BatchGroup& operator=(BatchGroup&&) noexcept = default;
+  RecBatchGroup(const RecBatchGroup&) = delete;
+  RecBatchGroup& operator=(const RecBatchGroup&) = delete;
+  RecBatchGroup(RecBatchGroup&&) noexcept = default;
+  RecBatchGroup& operator=(RecBatchGroup&&) noexcept = default;
 
   size_t size() const { return batches_.size(); }
   bool empty() const { return batches_.empty(); }
-
-  Batch& front() { return batches_.front(); }
-  const Batch& front() const { return batches_.front(); }
-  Batch& back() { return batches_.back(); }
-  const Batch& back() const { return batches_.back(); }
-
-  Batch& operator[](size_t dp_rank) { return batches_[dp_rank]; }
-  const Batch& operator[](size_t dp_rank) const { return batches_[dp_rank]; }
-  Batch& at(size_t dp_rank) { return batches_.at(dp_rank); }
-  const Batch& at(size_t dp_rank) const { return batches_.at(dp_rank); }
-
+  RecBatch& front() { return batches_.front(); }
+  const RecBatch& front() const { return batches_.front(); }
+  RecBatch& back() { return batches_.back(); }
+  const RecBatch& back() const { return batches_.back(); }
+  RecBatch& operator[](size_t rank) { return batches_[rank]; }
+  const RecBatch& operator[](size_t rank) const { return batches_[rank]; }
+  RecBatch& at(size_t rank) { return batches_.at(rank); }
+  const RecBatch& at(size_t rank) const { return batches_.at(rank); }
   iterator begin() { return batches_.begin(); }
   iterator end() { return batches_.end(); }
   const_iterator begin() const { return batches_.begin(); }

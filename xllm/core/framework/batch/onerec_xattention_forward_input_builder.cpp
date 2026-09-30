@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/onerec_xattention_batch_input_builder.h"
+#include "core/framework/batch/onerec_xattention_forward_input_builder.h"
 
 #include <algorithm>
 #include <vector>
@@ -37,10 +37,10 @@ int32_t get_onerec_xattention_decode_position(const Sequence& sequence) {
 
 }  // namespace
 
-ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
+ForwardInput OneRecXAttentionForwardInputBuilder::build_rec_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size) {
-  auto input = OneRecBatchInputBuilder::build_rec_forward_input(
+  auto input = OneRecForwardInputBuilder::build_rec_forward_input(
       num_decoding_tokens, min_decoding_batch_size);
   if (const auto* onerec = input.input_params.onerec_params()) {
     OneRecModelInputParams legacy_params = *onerec;

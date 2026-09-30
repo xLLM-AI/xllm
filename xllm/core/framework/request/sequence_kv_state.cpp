@@ -60,7 +60,7 @@ void KVCacheState::incr_kv_cache_tokens_num_up_to(size_t new_target) {
   const size_t capacity = current_max_tokens_capacity();
   // Drift check: the counter was already advanced past capacity by an earlier
   // call. Failing here loudly names the producer instead of silently letting
-  // the drift propagate to batch_input_builder's CHECK.
+  // the drift propagate to forward_input_builder's CHECK.
   CHECK_LE(kv_cache_tokens_num_, capacity)
       << "kv_cache_tokens_num_ drifted past capacity: " << kv_cache_tokens_num_
       << " > " << capacity;

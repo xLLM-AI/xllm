@@ -90,6 +90,7 @@ class Worker {
 
   // prepare input for execution
   ForwardInput prepare_inputs(Batch& batch);
+  ForwardInput prepare_inputs(RecBatch& batch);
 
   std::optional<ForwardOutput> step(const ForwardInput& inputs);
 

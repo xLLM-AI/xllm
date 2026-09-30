@@ -25,15 +25,15 @@ limitations under the License.
 
 namespace xllm {
 
-class RecBatchInputBuilder {
+class RecForwardInputBuilder {
  public:
-  virtual ~RecBatchInputBuilder() = default;
+  virtual ~RecForwardInputBuilder() = default;
 
   virtual ForwardInput build_rec_forward_input(
       uint32_t num_decoding_tokens,
       uint32_t min_decoding_batch_size) = 0;
 
-  static std::unique_ptr<RecBatchInputBuilder> create(
+  static std::unique_ptr<RecForwardInputBuilder> create(
       BatchInputType input_type,
       const BatchInputData& data,
       const ModelArgs* args,

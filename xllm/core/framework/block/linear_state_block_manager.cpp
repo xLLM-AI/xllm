@@ -74,7 +74,7 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   // the whole sequence.
   const std::optional<XXH3Key> pending_hash = seq->take_pending_linear_save();
   // When prefix cache is off (DECODE role for LINEAR) the checkpoint index
-  // is not constructed; skip save-rotation entirely. batch_input_builder
+  // is not constructed; skip save-rotation entirely. forward_input_builder
   // still may set a pending hash from an earlier PREFILL role transition,
   // so guard here instead of assuming pending_hash stays nullopt.
   const bool should_apply_save =

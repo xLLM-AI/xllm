@@ -32,8 +32,8 @@ namespace xllm {
 struct ModelArgs;
 constexpr uint64_t UNINITIALIZED_BATCH_ID = 0x0;
 
-// Shared execution state, composed by SequenceBatch and RecBatch. It maintains
-// scheduling invariants and forward resources without choosing a model domain.
+// Shared sequence execution state, composed by Batch and RecBatchState. It
+// maintains scheduling invariants and forward resources across model domains.
 class BatchState final {
  public:
   void reserve(size_t sequence_count, size_t group_count);

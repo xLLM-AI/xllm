@@ -29,7 +29,7 @@ limitations under the License.
 #include <sstream>
 
 #include "core/common/global_flags.h"
-#include "core/framework/batch/sequence_batch_factory.h"
+#include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"

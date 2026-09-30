@@ -15,24 +15,29 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
 #include "core/framework/batch/batch_state.h"
 
 namespace xllm {
 
-// LLM/VLM batch: scheduled sequence rows and budgets are authoritative.
-class SequenceBatch final {
+// Rec-specific input contract and sequence view around shared batch state.
+class RecBatchState final {
  public:
-  BatchInputType input_type() const { return BatchInputType::SEQUENCE; }
-  BatchState& state() { return state_; }
-  const BatchState& state() const { return state_; }
-  size_t size() const { return state_.sequence_plan().size(); }
-  Sequence* sequence(size_t index) const {
-    return state_.sequence_plan()[index].sequence;
-  }
+  explicit RecBatchState(BatchInputType input_type);
+
+  BatchInputType input_type() const { return input_type_; }
+  BatchState& sequence_state() { return sequence_state_; }
+  const BatchState& sequence_state() const { return sequence_state_; }
+
+  bool uses_group_input() const;
+  size_t size() const;
+  Sequence* sequence(size_t index) const;
   std::vector<Sequence*> get_sequences() const;
-  void refresh_sequences_from_groups() {
-    state_.refresh_sequences_from_groups();
-  }
+  void refresh_sequences_from_groups();
+
   ForwardInput prepare_forward_input(uint32_t num_decoding_tokens,
                                      uint32_t min_decoding_batch_size,
                                      const ModelArgs& args,
@@ -40,9 +45,14 @@ class SequenceBatch final {
   ForwardInput prepare_forward_input(const ModelArgs& args,
                                      ThreadPool* thread_pool,
                                      int32_t cp_size);
+  ForwardInput prepare_rec_forward_input(uint32_t num_decoding_tokens,
+                                         uint32_t min_decoding_batch_size,
+                                         const ModelArgs& args,
+                                         MPMCThreadPool* thread_pool);
 
  private:
-  BatchState state_;
+  BatchState sequence_state_;
+  BatchInputType input_type_;
 };
 
 }  // namespace xllm

@@ -13,18 +13,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/batch_group.h"
+#pragma once
 
-#include <glog/logging.h>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include "core/framework/batch/batch_group.h"
+#include "core/framework/request/request.h"
 
 namespace xllm {
 
-BatchGroup::BatchGroup(size_t dp_size) : batches_() {
-  CHECK_GT(dp_size, 0);
-  batches_.reserve(dp_size);
-  for (size_t rank = 0; rank < dp_size; ++rank) {
-    batches_.emplace_back();
-  }
-}
+// Builds LLM/VLM batches grouped by DP rank.
+class BatchBuilder final {
+ public:
+  explicit BatchBuilder(int32_t dp_size);
+
+  BatchGroup build(
+      const std::vector<std::shared_ptr<Request>>& requests,
+      const std::vector<Sequence*>& sequences,
+      const std::vector<size_t>& budgets,
+      std::vector<std::vector<BlockTransferInfo>>* swap_infos) const;
+
+ private:
+  int32_t dp_size_;
+};
 
 }  // namespace xllm

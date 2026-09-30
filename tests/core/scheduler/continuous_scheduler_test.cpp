@@ -1261,7 +1261,7 @@ TEST(ContinuousSchedulerTest, InBatchCacheReusesPartialPrefixWithinSameBatch) {
 // up with enough kv capacity to cover its matched prefix plus the tokens it is
 // asked to compute this step, even when the per-step token budget is clamped to
 // fewer tokens than the prefix length. This is the invariant enforced by
-// batch_input_builder.cpp (current_max_tokens_capacity >= kv + q_seq_len).
+// forward_input_builder.cpp (current_max_tokens_capacity >= kv + q_seq_len).
 TEST(ContinuousSchedulerTest,
      PrefixHitUnderClampedBudgetKeepsCapacitySufficient) {
   constexpr int32_t kBlockSize = 8;

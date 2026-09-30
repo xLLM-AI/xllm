@@ -13,32 +13,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/rec_batch_input_builder.h"
+#include "core/framework/batch/rec_forward_input_builder.h"
 
 #include <glog/logging.h>
 
 #include <cstdint>
 #include <memory>
 
-#include "core/framework/batch/onerec_batch_input_builder.h"
-#include "core/framework/batch/onerec_xattention_batch_input_builder.h"
-#include "core/framework/batch/rec_multi_round_batch_input_builder.h"
+#include "core/framework/batch/onerec_forward_input_builder.h"
+#include "core/framework/batch/onerec_xattention_forward_input_builder.h"
+#include "core/framework/batch/rec_multi_round_forward_input_builder.h"
 
 namespace xllm {
 
-std::unique_ptr<RecBatchInputBuilder> RecBatchInputBuilder::create(
+std::unique_ptr<RecForwardInputBuilder> RecForwardInputBuilder::create(
     BatchInputType input_type,
     const BatchInputData& data,
     const ModelArgs* args,
     MPMCThreadPool* thread_pool) {
   switch (input_type) {
     case BatchInputType::ONEREC:
-      return std::make_unique<OneRecBatchInputBuilder>(data, args, thread_pool);
+      return std::make_unique<OneRecForwardInputBuilder>(
+          data, args, thread_pool);
     case BatchInputType::ONEREC_XATTENTION:
-      return std::make_unique<OneRecXAttentionBatchInputBuilder>(
+      return std::make_unique<OneRecXAttentionForwardInputBuilder>(
           data, args, thread_pool);
     case BatchInputType::REC_MULTI_ROUND:
-      return std::make_unique<RecMultiRoundBatchInputBuilder>(
+      return std::make_unique<RecMultiRoundForwardInputBuilder>(
           data, args, thread_pool);
     case BatchInputType::SEQUENCE:
       break;

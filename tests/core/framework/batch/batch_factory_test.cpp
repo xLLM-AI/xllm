@@ -13,18 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "core/framework/batch/batch_factory.h"
+
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "core/framework/batch/rec_batch_factory.h"
 #include "core/framework/batch/sampling_input_builder.h"
-#include "core/framework/batch/sequence_batch_factory.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/model/model_args.h"
@@ -120,12 +122,15 @@ TEST(SamplingInputBuilderTest, PadsAndMergesAdjustedTokenCounts) {
 }
 
 TEST(BatchFactoryTest, FactoriesKeepDomainsSeparateForTheSameInputContract) {
-  SequenceBatchFactory sequence_factory(/*dp_size=*/1);
+  BatchFactory sequence_factory(/*dp_size=*/1);
   RecBatchFactory rec_factory(/*dp_size=*/1, BatchInputType::SEQUENCE);
   auto sequence_batches = sequence_factory.create_batches({}, {}, {});
   auto rec_batches = rec_factory.create_batches({}, {}, {});
-  EXPECT_FALSE(sequence_batches[0].is_rec());
-  EXPECT_TRUE(rec_batches[0].is_rec());
+  static_assert(std::is_same_v<decltype(sequence_batches[0]), Batch&>);
+  static_assert(std::is_same_v<decltype(rec_batches[0]), RecBatch&>);
+  static_assert(!std::is_convertible_v<RecBatch&, Batch&>);
+  EXPECT_EQ(sequence_batches[0].size(), 0);
+  EXPECT_EQ(rec_batches[0].size(), 0);
   EXPECT_EQ(sequence_batches[0].input_type(), BatchInputType::SEQUENCE);
   EXPECT_EQ(rec_batches[0].input_type(), BatchInputType::SEQUENCE);
   ModelArgs args;
@@ -134,9 +139,27 @@ TEST(BatchFactoryTest, FactoriesKeepDomainsSeparateForTheSameInputContract) {
   EXPECT_FALSE(input.token_ids.defined());
 }
 
+TEST(BatchFactoryTest, RecBatchFinishesSequenceAndGroupInputs) {
+  RecBatchFactory sequence_factory(/*dp_size=*/1, BatchInputType::SEQUENCE);
+  auto sequence_request = make_request(/*rank=*/0, RecType::kLlmRec);
+  auto sequence_batches = sequence_factory.create_batches(
+      {sequence_request}, {sequence_request->sequences()[0].get()}, {1});
+  EXPECT_FALSE(sequence_request->sequences()[0]->finished());
+  sequence_batches[0].finish();
+  EXPECT_TRUE(sequence_request->sequences()[0]->finished());
+
+  RecBatchFactory group_factory(/*dp_size=*/1, BatchInputType::ONEREC);
+  auto group_request = make_request(/*rank=*/0, RecType::kOneRec);
+  auto group_batches = group_factory.create_batches(
+      {group_request}, {group_request->sequences()[0].get()}, {0});
+  EXPECT_FALSE(group_request->sequence_group()->finished());
+  group_batches[0].finish();
+  EXPECT_TRUE(group_request->sequence_group()->finished());
+}
+
 TEST(BatchFactoryTest, IndependentFactoriesKeepTheirOwnDpSize) {
-  SequenceBatchFactory single(/*dp_size=*/1);
-  SequenceBatchFactory multiple(/*dp_size=*/3);
+  BatchFactory single(/*dp_size=*/1);
+  BatchFactory multiple(/*dp_size=*/3);
   auto request = make_request(/*rank=*/2);
   auto batches = multiple.create_batches(
       {request}, {request->sequences().front().get()}, {2});
@@ -149,7 +172,7 @@ TEST(BatchFactoryTest, IndependentFactoriesKeepTheirOwnDpSize) {
 }
 
 TEST(BatchFactoryTest, PreservesRankLocalSequenceOrderAndBudgets) {
-  SequenceBatchFactory factory(/*dp_size=*/3);
+  BatchFactory factory(/*dp_size=*/3);
   auto first = make_request(/*rank=*/2);
   auto second = make_request(/*rank=*/0);
   auto third = make_request(/*rank=*/2);
@@ -169,7 +192,7 @@ TEST(BatchFactoryTest, PreservesRankLocalSequenceOrderAndBudgets) {
 }
 
 TEST(BatchFactoryTest, BeamBatchRetainsAllRequestGroupsInOrder) {
-  SequenceBatchFactory factory(/*dp_size=*/1);
+  BatchFactory factory(/*dp_size=*/1);
   auto first = make_request(/*rank=*/0);
   auto beam = make_request(/*rank=*/0, RecType::kNone, /*beam_width=*/2);
   auto batches = factory.create_batches(
@@ -182,7 +205,7 @@ TEST(BatchFactoryTest, BeamBatchRetainsAllRequestGroupsInOrder) {
 }
 
 TEST(BatchFactoryTest, ReusingFactoryDoesNotRetainPreviousBeamGroups) {
-  SequenceBatchFactory factory(/*dp_size=*/1);
+  BatchFactory factory(/*dp_size=*/1);
   auto beam = make_request(/*rank=*/0, RecType::kNone, /*beam_width=*/2);
   auto beam_batches =
       factory.create_batches({beam}, {beam->sequences()[0].get()}, {3});
@@ -214,7 +237,6 @@ TEST(BatchFactoryTest, FactoriesKeepIndependentInputContractsAcrossCalls) {
         {onerec}, {onerec->sequences()[0].get()}, {0});
     ASSERT_EQ(onerec_batches.size(), 2);
     EXPECT_TRUE(onerec_batches[0].empty());
-    EXPECT_TRUE(onerec_batches[0].is_rec());
     EXPECT_EQ(onerec_batches[1].input_type(), BatchInputType::ONEREC);
     EXPECT_EQ(onerec_batches[1].sequence_groups(),
               (std::vector<SequencesGroup*>{onerec->sequence_group()}));
@@ -412,7 +434,7 @@ TEST(BatchFactoryTest, EmptyRecRanksPrepareEmptyInputs) {
 }
 
 TEST(BatchFactoryTest, TransfersAreConsumedOnlyForActiveRanks) {
-  SequenceBatchFactory factory(/*dp_size=*/2);
+  BatchFactory factory(/*dp_size=*/2);
   auto request = make_request(/*rank=*/1);
   std::vector<std::vector<BlockTransferInfo>> transfers(2);
   uint8_t key[XXH3_128BITS_HASH_VALUE_LEN] = {};
@@ -427,7 +449,7 @@ TEST(BatchFactoryTest, TransfersAreConsumedOnlyForActiveRanks) {
 }
 
 TEST(BatchOutputHandlerDeathTest, RejectsBeamSourceOutsideBatch) {
-  SequenceBatchFactory factory(/*dp_size=*/1);
+  BatchFactory factory(/*dp_size=*/1);
   auto request = make_request(/*rank=*/0, RecType::kNone, /*beam_width=*/2);
   auto batches =
       factory.create_batches({request}, {request->sequences()[0].get()}, {1});
@@ -443,7 +465,7 @@ TEST(BatchOutputHandlerDeathTest, RejectsBeamSourceOutsideBatch) {
 }
 
 TEST(BatchFactoryDeathTest, RejectsInvalidDpSize) {
-  EXPECT_DEATH(SequenceBatchFactory(/*dp_size=*/0), "dp_size_");
+  EXPECT_DEATH(BatchFactory(/*dp_size=*/0), "dp_size_");
   EXPECT_DEATH((RecBatchFactory(/*dp_size=*/-1, BatchInputType::ONEREC)),
                "dp_size_");
 }
@@ -469,7 +491,7 @@ TEST(BatchFactoryDeathTest, RejectsGroupOnlySequenceInput) {
 
 TEST(BatchFactoryDeathTest, RejectsOneRecInputWithoutRequestGroups) {
   auto request = make_request(/*rank=*/0, RecType::kOneRec);
-  Batch batch(BatchInputType::ONEREC);
+  RecBatch batch(BatchInputType::ONEREC);
   batch.add(request->sequences()[0].get());
   ModelArgs args;
   EXPECT_DEATH(batch.prepare_forward_input(/*num_decoding_tokens=*/1,
@@ -479,7 +501,7 @@ TEST(BatchFactoryDeathTest, RejectsOneRecInputWithoutRequestGroups) {
 }
 
 TEST(BatchFactoryDeathTest, RejectsMismatchedBudgetsAndInvalidRanks) {
-  SequenceBatchFactory factory(/*dp_size=*/2);
+  BatchFactory factory(/*dp_size=*/2);
   auto request = make_request(/*rank=*/0);
   auto* sequence = request->sequences()[0].get();
   EXPECT_DEATH(factory.create_batches({request}, {sequence}, {}),
@@ -496,7 +518,7 @@ TEST(BatchFactoryDeathTest, RejectsMismatchedBudgetsAndInvalidRanks) {
 }
 
 TEST(BatchFactoryDeathTest, RejectsInvalidSwapRankCount) {
-  SequenceBatchFactory factory(/*dp_size=*/2);
+  BatchFactory factory(/*dp_size=*/2);
   std::vector<std::vector<BlockTransferInfo>> transfers(1);
   EXPECT_DEATH(factory.create_batches({}, {}, {}, &transfers), "swap_infos");
 }

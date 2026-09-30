@@ -32,7 +32,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/framework/batch/batch.h"
+#include "core/framework/batch/rec_batch.h"
 #include "core/framework/batch/rec_batch_factory.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -177,7 +177,7 @@ void FixedStepsScheduler::handle_prefill_requests(
   }
 }
 
-BatchGroup FixedStepsScheduler::prepare_batch() {
+RecBatchGroup FixedStepsScheduler::prepare_rec_batch() {
   Timer timer;
   drain_prefetched_requests();
   // propagate new requests to prefill_queue_
@@ -277,7 +277,7 @@ BatchGroup FixedStepsScheduler::prepare_batch() {
     response_processor_->process_completed_requests(finished_requests);
   }
 
-  BatchGroup batches;
+  RecBatchGroup batches;
   if (rec_batch_factory_) {
     batches = rec_batch_factory_->create_batches(
         running_requests_,
@@ -288,11 +288,12 @@ BatchGroup FixedStepsScheduler::prepare_batch() {
     // No pipeline has been selected before the first request arrives.
     CHECK(running_requests_.empty());
     CHECK(running_sequences_.empty());
-    batches = BatchGroup(static_cast<size_t>(options_.dp_size()));
+    batches = RecBatchGroup(static_cast<size_t>(options_.dp_size()),
+                            BatchInputType::SEQUENCE);
   }
 
   // update metrics before returning
-  if (std::any_of(batches.begin(), batches.end(), [](const Batch& batch) {
+  if (std::any_of(batches.begin(), batches.end(), [](const RecBatch& batch) {
         return !batch.empty();
       })) {
     // only update the scheduling latency when there are requests to process
@@ -327,11 +328,11 @@ ScheduleResult FixedStepsScheduler::schedule_request(
   const auto deadline = absl::Now() + timeout;
   ScheduleResult result;
   while (true) {
-    result.batches = prepare_batch();
-    bool all_empty =
-        std::all_of(result.batches.begin(),
-                    result.batches.end(),
-                    [](const Batch& one_batch) { return one_batch.empty(); });
+    result.batches = prepare_rec_batch();
+    bool all_empty = std::all_of(
+        result.batches.begin(),
+        result.batches.end(),
+        [](const RecBatch& one_batch) { return one_batch.empty(); });
     if (!all_empty) {
       // Move running_requests_ and running_sequences_ into result
       result.requests = std::move(running_requests_);
@@ -346,7 +347,7 @@ ScheduleResult FixedStepsScheduler::schedule_request(
     // request queue until a new request arrives or the deadline is reached.
     // This wakes up immediately on arrival, avoiding the extra latency and CPU
     // spinning of a fixed sleep under high concurrency. The prefetched request
-    // is consumed by the next prepare_batch() call.
+    // is consumed by the next prepare_rec_batch() call.
     std::shared_ptr<Request> request;
     const auto wait_deadline = std::chrono::steady_clock::now() +
                                absl::ToChronoNanoseconds(deadline - now);
@@ -364,10 +365,10 @@ void FixedStepsScheduler::step(const absl::Duration& timeout) {
   if (!options_.enable_schedule_overlap()) {
     // get a new batch of requests
     ScheduleResult result = schedule_request(timeout);
-    bool all_empty =
-        std::all_of(result.batches.begin(),
-                    result.batches.end(),
-                    [](const Batch& one_batch) { return one_batch.empty(); });
+    bool all_empty = std::all_of(
+        result.batches.begin(),
+        result.batches.end(),
+        [](const RecBatch& one_batch) { return one_batch.empty(); });
     if (all_empty) {
       return;
     }

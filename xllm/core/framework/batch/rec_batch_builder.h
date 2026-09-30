@@ -20,7 +20,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/framework/batch/batch_group.h"
+#include "core/framework/batch/rec_batch_group.h"
 #include "core/framework/request/request.h"
 
 namespace xllm {
@@ -30,7 +30,7 @@ class RecBatchBuilder final {
  public:
   RecBatchBuilder(int32_t dp_size, BatchInputType input_type);
 
-  BatchGroup build(
+  RecBatchGroup build(
       const std::vector<std::shared_ptr<Request>>& requests,
       const std::vector<Sequence*>& sequences,
       const std::vector<size_t>& budgets,

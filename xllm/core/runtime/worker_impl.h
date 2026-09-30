@@ -52,6 +52,7 @@ limitations under the License.
 
 namespace xllm {
 
+class RecBatch;
 class WorkerRendezvous;
 class TaskExecutionPipeline;
 struct LlmTaskCapacity;
@@ -123,6 +124,7 @@ class WorkerImpl {
 
   // prepare input for execution
   virtual ForwardInput prepare_inputs(Batch& batch);
+  virtual ForwardInput prepare_inputs(RecBatch& batch);
 
   // prepare work before model execution
   virtual void prepare_work_before_execute(const ForwardInput& inputs,

@@ -704,6 +704,11 @@ ForwardInput WorkerImpl::prepare_inputs(Batch& batch) {
   return model_executor_->prepare_inputs(batch);
 }
 
+ForwardInput WorkerImpl::prepare_inputs(RecBatch& batch) {
+  LOG(FATAL) << "Rec batch input requires a Rec worker";
+  return {};
+}
+
 bool WorkerImpl::can_prepare_npu_graph_decode_input(
     const ModelInputParams& input_params) const {
 #if defined(USE_NPU)

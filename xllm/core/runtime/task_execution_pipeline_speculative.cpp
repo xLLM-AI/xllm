@@ -1876,7 +1876,7 @@ Status TaskExecutionPipeline::context_prepare_prefill(
     return Status(StatusCode::RESOURCE_EXHAUSTED,
                   "MTP prefill exceeds fixed Slot capacity.");
   }
-  // BatchInputBuilder emits embedding ids only for completed chunks, in
+  // ForwardInputBuilder emits embedding ids only for completed chunks, in
   // model order. Publication follows sampling order, which may differ.
   uint32_t completed = 0;
   for (uint32_t row = 0; row < extra_token_ids.size(); ++row) {

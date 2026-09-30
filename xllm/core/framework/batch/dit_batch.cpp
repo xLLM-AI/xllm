@@ -21,7 +21,7 @@ limitations under the License.
 #include <cstdint>
 #include <utility>
 
-#include "core/framework/batch/dit_batch_input_builder.h"
+#include "core/framework/batch/dit_forward_input_builder.h"
 
 namespace xllm {
 
@@ -31,7 +31,7 @@ void DiTBatch::add(std::shared_ptr<DiTRequest> request) {
 }
 
 DiTForwardInput DiTBatch::prepare_forward_input() {
-  return DiTBatchInputBuilder(request_vec_).build_forward_input();
+  return DiTForwardInputBuilder(request_vec_).build_forward_input();
 }
 
 void DiTBatch::process_forward_output(const DiTForwardOutput& output) {

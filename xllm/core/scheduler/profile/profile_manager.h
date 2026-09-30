@@ -23,7 +23,7 @@ limitations under the License.
 #include "core/common/macros.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/framework/batch/sequence_batch_factory.h"
+#include "core/framework/batch/batch_factory.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
@@ -213,7 +213,7 @@ class ProfileManager {
   const Options options_;
 
   Engine* engine_;
-  SequenceBatchFactory batch_factory_;
+  BatchFactory batch_factory_;
 
   DecodeGraphWarmupPlan decode_graph_warmup_plan_;
 

@@ -28,7 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/distributed_runtime/engine.h"
-#include "core/framework/batch/sequence_batch_factory.h"
+#include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"

@@ -23,6 +23,7 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
+#include "framework/batch/rec_batch.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/rec_model_utils.h"
@@ -52,7 +53,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
 
   void load_model(std::unique_ptr<ModelLoader> loader) override;
 
-  ForwardInput prepare_inputs(Batch& batch) override;
+  ForwardInput prepare_inputs(RecBatch& batch) override;
 
   void prepare_work_before_execute(const ForwardInput& inputs,
                                    ForwardInput& processed_inputs) override;
@@ -92,7 +93,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
         : runtime_(std::move(runtime)) {}
     virtual ~RecWorkPipeline() = default;
 
-    virtual ForwardInput prepare_inputs(Batch& batch);
+    virtual ForwardInput prepare_inputs(RecBatch& batch);
 
     virtual void prepare_work_before_execute(const ForwardInput& inputs,
                                              ForwardInput& processed_inputs);
@@ -120,7 +121,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
         RecPipelineRuntime& runtime,
         RecPipelineType pipeline_type = RecPipelineType::kOneRecDefault);
 
-    ForwardInput prepare_inputs(Batch& batch) override;
+    ForwardInput prepare_inputs(RecBatch& batch) override;
 
     void prepare_work_before_execute(const ForwardInput& inputs,
                                      ForwardInput& processed_inputs) override;
@@ -140,7 +141,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
    public:
     explicit OneRecXAttentionWorkPipeline(RecPipelineRuntime& runtime);
 
-    ForwardInput prepare_inputs(Batch& batch) override;
+    ForwardInput prepare_inputs(RecBatch& batch) override;
 
     void prepare_work_before_execute(const ForwardInput& inputs,
                                      ForwardInput& processed_inputs) override;
@@ -205,7 +206,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
    public:
     explicit LlmRecMultiRoundPipeline(RecPipelineRuntime& runtime);
 
-    ForwardInput prepare_inputs(Batch& batch) override;
+    ForwardInput prepare_inputs(RecBatch& batch) override;
 
     void prepare_work_before_execute(const ForwardInput& inputs,
                                      ForwardInput& processed_inputs) override;

@@ -1102,11 +1102,11 @@ void MusaGraph::refresh_persistent_paged_kv_host_mirrors(
   // underlying storage pointer must be STABLE across the lifetime of this
   // MusaGraph (captured FFI run() bakes it into the graph).
   //
-  // Prefer copying from attention.host CPU mirrors (batch_input_builder path):
-  // the values are already on host, so a CPU->pinned memcpy avoids the extra
-  // device round-trip and the musaStreamSync that blocking D2H would insert.
-  // Fall back to blocking D2H from persistent device tensors for callers that
-  // did not pre-stage host mirrors (profile / warmup paths).
+  // Prefer copying from attention.host CPU mirrors (forward_input_builder
+  // path): the values are already on host, so a CPU->pinned memcpy avoids the
+  // extra device round-trip and the musaStreamSync that blocking D2H would
+  // insert. Fall back to blocking D2H from persistent device tensors for
+  // callers that did not pre-stage host mirrors (profile / warmup paths).
   //
   // CRITICAL: when allocating for the first time, size to max(numel,
   // min_alloc_numel). The captured graph cannot tolerate a later realloc:

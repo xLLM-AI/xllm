@@ -20,7 +20,7 @@ namespace xllm {
 RecBatchFactory::RecBatchFactory(int32_t dp_size, BatchInputType input_type)
     : builder_(dp_size, input_type) {}
 
-BatchGroup RecBatchFactory::create_batches(
+RecBatchGroup RecBatchFactory::create_batches(
     const std::vector<std::shared_ptr<Request>>& running_requests,
     const std::vector<Sequence*>& running_sequences,
     const std::vector<size_t>& running_sequences_budgets,

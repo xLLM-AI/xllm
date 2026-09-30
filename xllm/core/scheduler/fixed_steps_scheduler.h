@@ -26,8 +26,8 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/common/types.h"
-#include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/rec_batch_factory.h"
+#include "core/framework/batch/rec_batch_group.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
 #include "core/runtime/xservice_client.h"
@@ -41,7 +41,7 @@ class Engine;
 
 // Return value structure for schedule_request
 struct ScheduleResult {
-  BatchGroup batches;
+  RecBatchGroup batches;
   std::vector<std::shared_ptr<Request>> requests;
   std::vector<Sequence*> sequences;
 };
@@ -56,7 +56,7 @@ class FixedStepsScheduler : public ContinuousScheduler {
   void step(const absl::Duration& timeout) override;
 
  protected:
-  BatchGroup prepare_batch() override;
+  RecBatchGroup prepare_rec_batch();
 
  private:
   // Scheduler pipeline for different rec types
@@ -131,8 +131,8 @@ class FixedStepsScheduler : public ContinuousScheduler {
   std::unique_ptr<RecBatchFactory> rec_batch_factory_;
 
   // Holds a request consumed by the blocking wait in schedule_request() while
-  // the queue was empty. prepare_batch() drains it first, through the same path
-  // as request_queue_, so the blocking wait does not lose requests.
+  // the queue was empty. prepare_rec_batch() drains it first, through the same
+  // path as request_queue_, so the blocking wait does not lose requests.
   std::shared_ptr<Request> prefetched_request_;
 
   // Scheduler thread pool for parallel execution of step()

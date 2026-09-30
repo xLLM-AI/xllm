@@ -288,10 +288,10 @@ Scheduling and engine:
 - `xllm/core/distributed_runtime/rec_engine.h`
 
 Batch / request / proto:
-- `xllm/core/framework/batch/rec_batch_input_builder.cpp`
-- `xllm/core/framework/batch/rec_batch_input_builder.h`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.cpp`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.h`
+- `xllm/core/framework/batch/rec_forward_input_builder.cpp`
+- `xllm/core/framework/batch/rec_forward_input_builder.h`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.cpp`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.h`
 - `xllm/core/framework/request/rec_type.h`
 - `xllm/proto/rec.proto`
 - `xllm/proto/completion.proto`
@@ -328,7 +328,7 @@ To align the design with the actual implementation, the current branch can be un
    - For the `LlmRec` multi-round scenario, execution is routed into `RecMultiRoundEnginePipeline`, which pushes more decode control logic down toward the worker side.
 
 5. **Batch building and input construction**
-   - `RecBatchInputBuilder` and `RecMultiRoundBatchInputBuilder` organize sequences, step information, decode positions, sampling parameters, and other metadata into `ForwardInput`.
+   - `RecForwardInputBuilder` and `RecMultiRoundForwardInputBuilder` organize sequences, step information, decode positions, sampling parameters, and other metadata into `ForwardInput`.
    - `step_meta` is especially important here because it provides the per-round information needed for multi-step execution.
 
 6. **Multi-round execution inside the worker**
@@ -454,16 +454,16 @@ If the talk needs to prove that “fixed step is not just an idea but the actual
 
 To explain why `multi_step_pipeline` is possible, it is not enough to stop at the scheduler. The batch builder layer is equally important:
 
-- `xllm/core/framework/batch/rec_batch_input_builder.h`
-- `xllm/core/framework/batch/rec_batch_input_builder.cpp`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.h`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.cpp`
+- `xllm/core/framework/batch/rec_forward_input_builder.h`
+- `xllm/core/framework/batch/rec_forward_input_builder.cpp`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.h`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.cpp`
 - `xllm/core/framework/batch/batch.cpp`
 
 The key points here are:
 
-- `RecBatchInputBuilder::create(...)` chooses different builders according to `RecType` and multi-round mode
-- `RecMultiRoundBatchInputBuilder` is not just a small variation of the default builder, but a dedicated implementation for multi-round decode input construction
+- `RecForwardInputBuilder::create(...)` chooses different builders according to `RecType` and multi-round mode
+- `RecMultiRoundForwardInputBuilder` is not just a small variation of the default builder, but a dedicated implementation for multi-round decode input construction
 - `step_meta`, `decode_positions`, `sampling params`, and `batch forward type` are assembled here before being sent further into runtime
 
 So if the document or talk wants to explain “why later rounds can already be prepared at the first step”, this layer is more important than only talking about the engine loop.
@@ -519,7 +519,7 @@ entry
   -> RecMaster
   -> FixedStepsScheduler
   -> RecEngine
-  -> RecBatchInputBuilder / RecMultiRoundBatchInputBuilder
+  -> RecForwardInputBuilder / RecMultiRoundForwardInputBuilder
   -> RecWorkerImpl::LlmRecMultiRoundPipeline
   -> xAttention / beam_search / cache_select
 ```
@@ -559,8 +559,8 @@ This group is useful when the talk needs to answer a simple question first: how 
 - `xllm/core/scheduler/fixed_steps_scheduler.cpp:186`
   - `FixedStepsScheduler::prepare_batch()`
   - useful for explaining how requests are grouped under fixed scheduling
-- `xllm/core/framework/batch/rec_batch_input_builder.cpp:29`
-  - `RecBatchInputBuilder::create(...)`
+- `xllm/core/framework/batch/rec_forward_input_builder.cpp:29`
+  - `RecForwardInputBuilder::create(...)`
   - useful for explaining how builders are selected according to `RecType` and multi-round mode
 
 Taken together, these anchors are strong evidence that fixed-step scheduling is not just a conceptual preference but the actual scheduling choice in the code path.
@@ -624,7 +624,7 @@ This order works well because the audience first understands the design motivati
 If the audience already works on xLLM or recommendation infrastructure, the order can be more implementation-driven:
 
 1. start from `RecMaster -> FixedStepsScheduler -> RecEngine`
-2. then `RecBatchInputBuilder`
+2. then `RecForwardInputBuilder`
 3. then `RecWorkerImpl::LlmRecMultiRoundPipeline`
 4. finally `xAttention / beam_search / cache_select`
 

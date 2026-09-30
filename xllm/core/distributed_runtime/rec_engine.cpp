@@ -270,12 +270,8 @@ bool RecEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   return pipeline_->allocate_kv_cache(kv_cache_shape);
 }
 
-ForwardOutput RecEngine::step(BatchGroup& batches) {
+ForwardOutput RecEngine::step(RecBatchGroup& batches) {
   return pipeline_->step(batches);
-}
-
-void RecEngine::update_last_step_result(BatchGroup& batch) {
-  UNUSED_PARAMETER(batch);
 }
 
 std::vector<int64_t> RecEngine::get_active_activation_memory() const {
@@ -394,7 +390,7 @@ size_t RecEngine::LlmRecEnginePipeline::num_workers() const {
 }
 
 std::vector<ForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
-    BatchGroup& batch) {
+    RecBatchGroup& batch) {
   std::vector<ForwardInput> batched_inputs;
   batched_inputs.reserve(engine_.dp_size_);
 
@@ -412,7 +408,7 @@ std::vector<ForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
     batch[dp_rank].refresh_forward_type();
 
     batched_inputs.emplace_back(std::move(batch[dp_rank].prepare_forward_input(
-        engine_.args_, engine_.threadpool_.get())));
+        engine_.args_, engine_.threadpool_.get(), /*cp_size=*/1)));
     dp_global_token_nums[dp_rank] =
         static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
     dp_global_sequence_nums[dp_rank] =
@@ -446,7 +442,7 @@ std::vector<ForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
   return batched_inputs;
 }
 
-ForwardOutput RecEngine::LlmRecEnginePipeline::step(BatchGroup& batches) {
+ForwardOutput RecEngine::LlmRecEnginePipeline::step(RecBatchGroup& batches) {
   if (engine_.worker_clients_.empty()) {
     return {};
   }
@@ -517,9 +513,8 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(BatchGroup& batches) {
           }
         }
       }
-      // Refresh sequences_ from sequence_groups_ after beam search processing.
-      // This is needed because SequencesGroup::process_beam_search() replaces
-      // its internal sequences_, invalidating pointers in Batch::sequences_.
+      // Refresh scheduled rows after beam search replaces group-owned
+      // sequences, invalidating the old sequence pointers.
       batches[dp_rank].refresh_sequences_from_groups();
       ++dp_rank;
     }
@@ -561,7 +556,7 @@ RecEngine::LlmRecEnginePipeline::get_active_activation_memory() const {
 }
 
 size_t RecEngine::LlmRecEnginePipeline::get_max_steps_from_batch(
-    BatchGroup& batches) const {
+    RecBatchGroup& batches) const {
   size_t max_steps = 0;
   bool has_stopping_checker = false;
   for (auto& batch : batches) {
@@ -739,7 +734,7 @@ int64_t RecEngine::OneRecPrefillOnlyEnginePipeline::minimal_kv_cache_blocks()
 }
 
 ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
-    BatchGroup& batches) {
+    RecBatchGroup& batches) {
   if (engine_.workers_.empty()) {
     return {};
   }
@@ -761,7 +756,9 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
                     timer.elapsed_microseconds());
 
   timer.reset();
-  batches[0].process_sample_output(prefill_output.sample_output, false);
+  batches[0].process_sample_output(prefill_output.sample_output,
+                                   false,
+                                   /*force_requested_beam_result_size=*/false);
   HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
                     timer.elapsed_microseconds());
 
@@ -885,7 +882,7 @@ int64_t RecEngine::OneRecXAttentionEnginePipeline::minimal_kv_cache_blocks()
 }
 
 ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(
-    BatchGroup& batches) {
+    RecBatchGroup& batches) {
   if (engine_.workers_.empty()) {
     return {};
   }
@@ -909,7 +906,10 @@ ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(
       output.beam_sequence_group.numel() > 0) {
     batches[0].process_beam_sequence_group(output);
   } else {
-    batches[0].process_sample_output(output.sample_output, false);
+    batches[0].process_sample_output(
+        output.sample_output,
+        false,
+        /*force_requested_beam_result_size=*/false);
   }
   HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
                     timer.elapsed_microseconds());
@@ -1176,7 +1176,7 @@ size_t RecEngine::RecMultiRoundEnginePipeline::num_workers() const {
 }
 
 ForwardOutput RecEngine::RecMultiRoundEnginePipeline::step(
-    BatchGroup& batches) {
+    RecBatchGroup& batches) {
   if (engine_.workers_.empty()) {
     return {};
   }

@@ -15,17 +15,18 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/batch/onerec_batch_input_builder.h"
+#include "core/framework/batch/onerec_forward_input_builder.h"
 
 namespace xllm {
 
 // Adds xattention decode metadata to the common OneRec encoder/decoder input.
-class OneRecXAttentionBatchInputBuilder final : public OneRecBatchInputBuilder {
+class OneRecXAttentionForwardInputBuilder final
+    : public OneRecForwardInputBuilder {
  public:
-  OneRecXAttentionBatchInputBuilder(const BatchInputData& data,
-                                    const ModelArgs* args,
-                                    MPMCThreadPool* thread_pool = nullptr)
-      : OneRecBatchInputBuilder(data, args, thread_pool),
+  OneRecXAttentionForwardInputBuilder(const BatchInputData& data,
+                                      const ModelArgs* args,
+                                      MPMCThreadPool* thread_pool = nullptr)
+      : OneRecForwardInputBuilder(data, args, thread_pool),
         sequence_groups_(data.sequence_groups),
         args_(args) {}
 

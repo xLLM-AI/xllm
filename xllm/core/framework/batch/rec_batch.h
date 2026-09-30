@@ -15,17 +15,53 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/batch/batch_state.h"
+#include <limits>
+#include <utility>
+
+#include "core/framework/batch/rec_batch_state.h"
 
 namespace xllm {
 
-// Rec owns its execution contract, live group view and cross-round context.
+// Rec engine-facing batch, backed by RecBatchState.
 class RecBatch final {
  public:
   explicit RecBatch(BatchInputType input_type);
-  BatchInputType input_type() const { return input_type_; }
-  BatchState& state() { return state_; }
-  const BatchState& state() const { return state_; }
+  BatchInputType input_type() const { return state_.input_type(); }
+  RecBatchState& state() { return state_; }
+  const RecBatchState& state() const { return state_; }
+  void reserve(size_t sequence_count, size_t group_count) {
+    state_.sequence_state().reserve(sequence_count, group_count);
+  }
+  void add(Sequence* sequence,
+           uint32_t token_budget = std::numeric_limits<uint32_t>::max()) {
+    state_.sequence_state().add(sequence, token_budget);
+  }
+  void add(SequencesGroup* group) { state_.sequence_state().add(group); }
+  void set_batch_id() { state_.sequence_state().set_batch_id(); }
+  uint64_t batch_id() const { return state_.sequence_state().batch_id(); }
+  bool empty() const { return state_.sequence_state().empty(); }
+  size_t num_scheduled_sequences() const {
+    return state_.sequence_state().sequence_plan().size();
+  }
+  size_t num_groups() const {
+    return state_.sequence_state().sequence_groups().size();
+  }
+  void set_swap_block_transfer_infos(std::vector<BlockTransferInfo> infos) {
+    state_.sequence_state().set_swap_block_transfer_infos(std::move(infos));
+  }
+  const std::vector<SequencesGroup*>& sequence_groups() const {
+    return state_.sequence_state().sequence_groups();
+  }
+  const BatchSequencePlan& sequence_plan() const {
+    return state_.sequence_state().sequence_plan();
+  }
+  const std::vector<uint32_t>& get_allowed_max_tokens() const {
+    return state_.sequence_state().sequence_plan().budgets();
+  }
+  void refresh_forward_type() {
+    state_.sequence_state().refresh_forward_type(get_sequences());
+  }
+  Sequence* operator[](size_t index) const { return sequence(index); }
   size_t size() const;
   Sequence* sequence(size_t index) const;
   std::vector<Sequence*> get_sequences() const;
@@ -34,18 +70,26 @@ class RecBatch final {
   ForwardInput prepare_forward_input(uint32_t num_decoding_tokens,
                                      uint32_t min_decoding_batch_size,
                                      const ModelArgs& args,
-                                     int32_t cp_size);
+                                     int32_t cp_size = 1);
   ForwardInput prepare_forward_input(const ModelArgs& args,
                                      ThreadPool* thread_pool,
-                                     int32_t cp_size);
+                                     int32_t cp_size = 1);
   ForwardInput prepare_rec_forward_input(uint32_t num_decoding_tokens,
                                          uint32_t min_decoding_batch_size,
                                          const ModelArgs& args,
                                          MPMCThreadPool* thread_pool);
+  void process_sample_output(const RawForwardOutput& output,
+                             bool replace_fake_token);
+  void process_sample_output(const SampleOutput& output,
+                             bool replace_fake_token,
+                             bool force_requested_beam_result_size);
+  void process_beam_search_output(const RawForwardOutput& output,
+                                  bool replace_fake_token);
+  void process_beam_sequence_group(const ForwardOutput& output);
+  void finish();
 
  private:
-  BatchState state_;
-  BatchInputType input_type_;
+  RecBatchState state_;
 };
 
 }  // namespace xllm

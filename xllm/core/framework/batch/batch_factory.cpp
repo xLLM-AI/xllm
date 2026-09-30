@@ -13,31 +13,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#pragma once
-
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <vector>
-
-#include "core/framework/batch/batch_group.h"
-#include "core/framework/request/request.h"
+#include "core/framework/batch/batch_factory.h"
 
 namespace xllm {
 
-// Builds sequence batches shared by LLM and VLM execution paths.
-class SequenceBatchBuilder final {
- public:
-  explicit SequenceBatchBuilder(int32_t dp_size);
+BatchFactory::BatchFactory(int32_t dp_size) : builder_(dp_size) {}
 
-  BatchGroup build(
-      const std::vector<std::shared_ptr<Request>>& requests,
-      const std::vector<Sequence*>& sequences,
-      const std::vector<size_t>& budgets,
-      std::vector<std::vector<BlockTransferInfo>>* swap_infos) const;
-
- private:
-  int32_t dp_size_;
-};
+BatchGroup BatchFactory::create_batches(
+    const std::vector<std::shared_ptr<Request>>& running_requests,
+    const std::vector<Sequence*>& running_sequences,
+    const std::vector<size_t>& running_sequences_budgets,
+    std::vector<std::vector<BlockTransferInfo>>* swap_block_transfer_infos)
+    const {
+  return builder_.build(running_requests,
+                        running_sequences,
+                        running_sequences_budgets,
+                        swap_block_transfer_infos);
+}
 
 }  // namespace xllm

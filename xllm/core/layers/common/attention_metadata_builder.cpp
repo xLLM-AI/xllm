@@ -227,10 +227,11 @@ void materialize_linear_state_validity(
       static_cast<int64_t>(params.linear_state_validity_mask.size());
   // Dense (non-linear) models still emit one linear_state_ids row per batch
   // entry to keep row alignment for downstream consumers, but every slot is
-  // the invalid sentinel (-1); see BatchInputBuilder::append_linear_state_row.
-  // A canonical validity mask is only required when at least one row carries a
-  // real (non-negative) linear-state slot, so mirror has_linear_state_slot()
-  // rather than treating a placeholder-only container as linear state.
+  // the invalid sentinel (-1); see
+  // ForwardInputBuilder::append_linear_state_row. A canonical validity mask is
+  // only required when at least one row carries a real (non-negative)
+  // linear-state slot, so mirror has_linear_state_slot() rather than treating a
+  // placeholder-only container as linear state.
   const bool has_linear_state_rows =
       std::any_of(params.embedding.linear_state_ids.begin(),
                   params.embedding.linear_state_ids.end(),
@@ -293,7 +294,7 @@ AttentionMetadata build_attention_metadata(
   attn_metadata.q_cu_seq_lens = params.attention.device.q_seq_lens;
   attn_metadata.kv_cu_seq_lens = params.attention.device.kv_seq_lens;
 #if defined(USE_NPU)
-  // BatchInputBuilder supplies per-sequence KV lengths on NPU.  Expose the
+  // ForwardInputBuilder supplies per-sequence KV lengths on NPU.  Expose the
   // cumulative form separately so Python graph execution can consume the
   // scheduler-owned tensor without rebuilding it in the model path.
   if (attn_metadata.kv_cu_seq_lens.defined() &&

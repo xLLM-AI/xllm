@@ -24,7 +24,7 @@ limitations under the License.
 #include <numeric>
 #include <utility>
 
-#include "core/framework/batch/batch_input_builder.h"
+#include "core/framework/batch/forward_input_builder.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/model/model_args.h"
@@ -287,10 +287,10 @@ ForwardInput BatchState::prepare_sequence_input(
     int32_t cp_size) {
   CHECK(sequence_groups_.empty() || !sequence_plan_.empty())
       << "Sequence input requires scheduled sequences; group-only input "
-         "requires an explicit OneRec batch input type";
+         "requires a domain-specific input builder";
   const auto data = input_data(sequence_plan_);
   output_handler_.prepare(data);
-  BatchInputBuilder builder(data, &args, cp_size);
+  ForwardInputBuilder builder(data, &args, cp_size);
   auto input =
       builder.build_forward_input(num_decoding_tokens, min_decoding_batch_size);
   linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
@@ -305,7 +305,7 @@ ForwardInput BatchState::prepare_distributed_input(const ModelArgs& args,
   dp_balance_shuffle_seqs();
   const auto data = input_data(sequence_plan_);
   output_handler_.prepare(data);
-  BatchInputBuilder builder(data, &args, cp_size, thread_pool);
+  ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
   auto input = builder.build_forward_input(/*num_decoding_tokens=*/0,
                                            /*min_decoding_batch_size=*/0);
   linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();

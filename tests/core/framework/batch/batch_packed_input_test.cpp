@@ -22,7 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/global_flags.h"
-#include "core/framework/batch/batch_input_builder.h"
+#include "core/framework/batch/forward_input_builder.h"
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/request/stopping_checker.h"
@@ -93,14 +93,14 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {4};
-  BatchInputBuilder builder(sequences,
-                            budgets,
-                            {},
-                            {},
-                            nullptr,
-                            /*batch_id=*/1,
-                            nullptr,
-                            BatchForwardType::DECODE);
+  ForwardInputBuilder builder(sequences,
+                              budgets,
+                              {},
+                              {},
+                              nullptr,
+                              /*batch_id=*/1,
+                              nullptr,
+                              BatchForwardType::DECODE);
 
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -174,14 +174,14 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {4};
-  BatchInputBuilder builder(sequences,
-                            budgets,
-                            {},
-                            {},
-                            nullptr,
-                            /*batch_id=*/1,
-                            nullptr,
-                            BatchForwardType::DECODE);
+  ForwardInputBuilder builder(sequences,
+                              budgets,
+                              {},
+                              {},
+                              nullptr,
+                              /*batch_id=*/1,
+                              nullptr,
+                              BatchForwardType::DECODE);
 
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -335,14 +335,14 @@ TEST(BatchPackedInputTest, PackedProtoLazyToPreservesJsonMetadata) {
 
   std::vector<Sequence*> sequences = {&sequence};
   std::vector<uint32_t> allowed_max_tokens = {4};
-  BatchInputBuilder builder(sequences,
-                            allowed_max_tokens,
-                            {},
-                            {},
-                            nullptr,
-                            /*batch_id=*/2,
-                            nullptr,
-                            BatchForwardType::DECODE);
+  ForwardInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              {},
+                              {},
+                              nullptr,
+                              /*batch_id=*/2,
+                              nullptr,
+                              BatchForwardType::DECODE);
   ForwardInput input = builder.build_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0);
 

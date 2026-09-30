@@ -23,32 +23,19 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <utility>
-#include <variant>
 #include <vector>
 
-#include "core/framework/batch/rec_batch.h"
-#include "core/framework/batch/sequence_batch.h"
+#include "core/framework/batch/batch_state.h"
 #include "core/framework/request/request.h"
 
 namespace xllm {
 
 struct ModelArgs;
 
-enum class BatchDomain : int8_t {
-  SEQUENCE,
-  REC,
-};
-
-// Engine-facing value adapter. Concrete batches own domain behavior and state.
+// LLM/VLM engine-facing batch. Rec uses RecBatch directly.
 class Batch final {
  public:
   Batch() = default;
-  // Group-only inputs must explicitly select a OneRec input type.
-  explicit Batch(BatchInputType input_type);
-  Batch(BatchDomain domain, BatchInputType input_type);
-  explicit Batch(SequenceBatch batch) : batch_(std::move(batch)) {}
-  explicit Batch(RecBatch batch) : batch_(std::move(batch)) {}
-  bool is_rec() const { return std::holds_alternative<RecBatch>(batch_); }
 
   BatchInputType input_type() const;
   void reserve(size_t sequence_count, size_t group_count);
@@ -64,7 +51,7 @@ class Batch final {
   void add(SequencesGroup* sequence_group);
 
   const std::vector<SequencesGroup*>& sequence_groups() const {
-    return state().sequence_groups();
+    return state_.sequence_groups();
   }
 
   void update_forward_type(Sequence* sequence);
@@ -73,22 +60,22 @@ class Batch final {
 
   void set_swap_block_transfer_infos(
       std::vector<BlockTransferInfo> swap_block_transfer_infos) {
-    state().set_swap_block_transfer_infos(std::move(swap_block_transfer_infos));
+    state_.set_swap_block_transfer_infos(std::move(swap_block_transfer_infos));
   }
 
   void set_batch_id();
 
-  uint64_t batch_id() const { return state().batch_id(); }
+  uint64_t batch_id() const { return state_.batch_id(); }
 
-  // Logical execution rows. OneRec reads its live group-owned sequences.
+  // Logical execution rows.
   size_t size() const;
-  bool empty() const { return state().empty(); }
+  bool empty() const { return state_.empty(); }
   size_t num_scheduled_sequences() const {
-    return state().sequence_plan().size();
+    return state_.sequence_plan().size();
   }
-  size_t num_groups() const { return state().sequence_groups().size(); }
+  size_t num_groups() const { return state_.sequence_groups().size(); }
   const BatchSequencePlan& sequence_plan() const {
-    return state().sequence_plan();
+    return state_.sequence_plan();
   }
 
   Sequence* operator[](size_t index) const;
@@ -98,11 +85,6 @@ class Batch final {
                                      uint32_t min_decoding_bach_size,
                                      const ModelArgs& args,
                                      int32_t cp_size = 1);
-
-  ForwardInput prepare_rec_forward_input(uint32_t num_decoding_tokens,
-                                         uint32_t min_decoding_batch_size,
-                                         const ModelArgs& args,
-                                         MPMCThreadPool* thread_pool = nullptr);
 
   // Prepare ForwardInput for distributed transport.
   ForwardInput prepare_forward_input(const ModelArgs& args,
@@ -129,17 +111,12 @@ class Batch final {
   void process_beam_search_output(const RawForwardOutput& raw_output,
                                   bool replace_fake_token);
 
-  void process_beam_sequence_group(const RawForwardOutput& raw_output);
-  void process_beam_sequence_group(const ForwardOutput& output);
-  // mark all sequences as finished (used by rec model multi-round decoding)
-  void finish();
-
   // Start a new sequence view after beam expansion. New beam rows have no
-  // scheduler token limit. OneRec uses live groups and needs no refresh.
+  // scheduler token limit.
   void refresh_sequences_from_groups();
 
   const std::vector<uint32_t>& get_allowed_max_tokens() const {
-    return state().sequence_plan().budgets();
+    return state_.sequence_plan().budgets();
   }
 
   std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index_test(
@@ -147,15 +124,12 @@ class Batch final {
     return BatchState::cal_seq_exchange_index(kv_cache_tokens_num);
   }
 
-  // Return the current sequence view selected by the concrete batch.
-  // Used by RecEngine to access sequences for stopping checker evaluation
+  // Return the current sequence view.
   std::vector<Sequence*> get_sequences();
   std::vector<Sequence*> get_sequences() const;
 
  private:
-  BatchState& state();
-  const BatchState& state() const;
-  std::variant<SequenceBatch, RecBatch> batch_;
+  BatchState state_;
 };
 
 }  // namespace xllm

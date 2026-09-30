@@ -1017,6 +1017,22 @@ void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
   transfer_offload_blocks();
 }
 
+void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
+  for (size_t i = 0; i < load_block_transfer_infos_.size(); ++i) {
+    if (load_block_transfer_infos_[i].empty()) {
+      continue;
+    }
+    CHECK_LT(i, batches.size())
+        << "Missing batch for pending H2D transfer at dp_rank=" << i;
+    batches[i].set_batch_id();
+    engine_->transfer_kv_blocks(
+        i, batches[i].batch_id(), load_block_transfer_infos_[i]);
+    load_block_transfer_infos_[i].clear();
+  }
+
+  transfer_offload_blocks();
+}
+
 void HierarchyBlockManagerPool::transfer_blocks() { transfer_offload_blocks(); }
 
 bool HierarchyBlockManagerPool::has_pending_async_block_release() const {

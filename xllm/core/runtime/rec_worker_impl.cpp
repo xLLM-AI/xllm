@@ -435,8 +435,12 @@ void RecWorkerImpl::RecWorkPipeline::prepare_work_before_execute(
 #endif
 }
 
-ForwardInput RecWorkerImpl::RecWorkPipeline::prepare_inputs(Batch& batch) {
-  return runtime_.worker.WorkerImpl::prepare_inputs(batch);
+ForwardInput RecWorkerImpl::RecWorkPipeline::prepare_inputs(RecBatch& batch) {
+  return batch.prepare_forward_input(
+      runtime_.worker.options_.num_decoding_tokens(),
+      /*min_decoding_batch_size=*/0,
+      runtime_.context->get_model_args(),
+      runtime_.worker.options_.cp_size());
 }
 
 std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
@@ -623,7 +627,8 @@ RecWorkerImpl::OneRecWorkPipeline::OneRecWorkPipeline(
       << vocab_size;
 }
 
-ForwardInput RecWorkerImpl::OneRecWorkPipeline::prepare_inputs(Batch& batch) {
+ForwardInput RecWorkerImpl::OneRecWorkPipeline::prepare_inputs(
+    RecBatch& batch) {
   MPMCThreadPool* thread_pool =
       runtime_.worker.input_builder_thread_pool_
           ? runtime_.worker.input_builder_thread_pool_.get()
@@ -1123,7 +1128,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::execute_cache_select(
 }
 
 ForwardInput RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_inputs(
-    Batch& batch) {
+    RecBatch& batch) {
   MPMCThreadPool* thread_pool =
       runtime_.worker.input_builder_thread_pool_
           ? runtime_.worker.input_builder_thread_pool_.get()
@@ -1930,7 +1935,7 @@ RecWorkerImpl::LlmRecMultiRoundPipeline::LlmRecMultiRoundPipeline(
 }
 
 ForwardInput RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_inputs(
-    Batch& batch) {
+    RecBatch& batch) {
   MPMCThreadPool* thread_pool =
       runtime_.worker.input_builder_thread_pool_
           ? runtime_.worker.input_builder_thread_pool_.get()
@@ -3034,7 +3039,7 @@ void RecWorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
   LOG(INFO) << "Loaded weights for all " << work_pipelines_.size() << " models";
 }
 
-ForwardInput RecWorkerImpl::prepare_inputs(Batch& batch) {
+ForwardInput RecWorkerImpl::prepare_inputs(RecBatch& batch) {
   CHECK(!work_pipelines_.empty()) << "RecWorkerImpl is not initialized.";
   return work_pipelines_[0]->prepare_inputs(batch);
 }

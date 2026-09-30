@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/onerec_batch_input_builder.h"
+#include "core/framework/batch/onerec_forward_input_builder.h"
 
 #include <glog/logging.h>
 
@@ -66,16 +66,17 @@ std::vector<int32_t> build_q_cu_seq_lens_vec(
 
 }  // namespace
 
-OneRecBatchInputBuilder::HighPerformanceCache&
-OneRecBatchInputBuilder::get_perf_cache() {
+OneRecForwardInputBuilder::HighPerformanceCache&
+OneRecForwardInputBuilder::get_perf_cache() {
   static HighPerformanceCache cache;
   cache.ensure_tensors_initialized();
   return cache;
 }
 
-OneRecBatchInputBuilder::OneRecBatchInputBuilder(const BatchInputData& data,
-                                                 const ModelArgs* args,
-                                                 MPMCThreadPool* thread_pool)
+OneRecForwardInputBuilder::OneRecForwardInputBuilder(
+    const BatchInputData& data,
+    const ModelArgs* args,
+    MPMCThreadPool* thread_pool)
     : sequence_groups_(data.sequence_groups),
       allowed_max_tokens_(data.allowed_max_tokens),
       input_embeddings_vec_(data.input_embeddings),
@@ -89,7 +90,7 @@ OneRecBatchInputBuilder::OneRecBatchInputBuilder(const BatchInputData& data,
   perf_cache.memory_pool.reset();
 }
 
-ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
+ForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size) {
   auto& perf_cache = get_perf_cache();

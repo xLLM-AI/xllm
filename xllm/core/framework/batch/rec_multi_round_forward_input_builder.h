@@ -22,7 +22,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "core/framework/batch/rec_batch_input_builder.h"
+#include "core/framework/batch/rec_forward_input_builder.h"
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/sequence.h"
@@ -34,14 +34,14 @@ namespace xllm {
 
 struct ModelArgs;
 
-class RecMultiRoundBatchInputBuilder final : public RecBatchInputBuilder {
+class RecMultiRoundForwardInputBuilder final : public RecForwardInputBuilder {
  public:
-  explicit RecMultiRoundBatchInputBuilder(
+  explicit RecMultiRoundForwardInputBuilder(
       const BatchInputData& data,
       const ModelArgs* args,
       MPMCThreadPool* thread_pool = nullptr);
 
-  ~RecMultiRoundBatchInputBuilder() override = default;
+  ~RecMultiRoundForwardInputBuilder() override = default;
 
   // Override base class method
   ForwardInput build_rec_forward_input(

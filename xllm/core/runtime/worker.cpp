@@ -222,6 +222,10 @@ ForwardInput Worker::prepare_inputs(Batch& batch) {
   return impl_->prepare_inputs(batch);
 }
 
+ForwardInput Worker::prepare_inputs(RecBatch& batch) {
+  return impl_->prepare_inputs(batch);
+}
+
 std::optional<ForwardOutput> Worker::step(const ForwardInput& inputs) {
   if (enable_task_pipeline_) {
     return std::move(step_async(inputs)).get();

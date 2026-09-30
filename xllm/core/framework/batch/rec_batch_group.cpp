@@ -13,23 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/sequence_batch_factory.h"
+#include "core/framework/batch/rec_batch_group.h"
+
+#include <glog/logging.h>
 
 namespace xllm {
 
-SequenceBatchFactory::SequenceBatchFactory(int32_t dp_size)
-    : builder_(dp_size) {}
-
-BatchGroup SequenceBatchFactory::create_batches(
-    const std::vector<std::shared_ptr<Request>>& running_requests,
-    const std::vector<Sequence*>& running_sequences,
-    const std::vector<size_t>& running_sequences_budgets,
-    std::vector<std::vector<BlockTransferInfo>>* swap_block_transfer_infos)
-    const {
-  return builder_.build(running_requests,
-                        running_sequences,
-                        running_sequences_budgets,
-                        swap_block_transfer_infos);
+RecBatchGroup::RecBatchGroup(size_t dp_size, BatchInputType input_type) {
+  CHECK_GT(dp_size, 0);
+  batches_.reserve(dp_size);
+  for (size_t rank = 0; rank < dp_size; ++rank) {
+    batches_.emplace_back(input_type);
+  }
 }
 
 }  // namespace xllm

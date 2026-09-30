@@ -16,7 +16,7 @@ limitations under the License.
 // Hop 4 of the request path: Batch -> ForwardInput -> worker -> output.
 //
 // Once the scheduler has built a Batch, LLMEngine::step turns it into a
-// ForwardInput (BatchInputBuilder), serialises that for the remote worker
+// ForwardInput (ForwardInputBuilder), serialises that for the remote worker
 // (packed proto), the worker unpacks it before the H2D copy, and after the
 // model + sampler have run the worker serialises the sampled tokens back
 // (proto::ForwardOutput), which the engine turns into a RawForwardOutput and
@@ -26,10 +26,10 @@ limitations under the License.
 //
 //   * BM_BlockManagerPool_AllocateRelease - prefix match + block allocation
 //                                           + release for one prompt.
-//   * BM_Batch_PrepareForwardInput_Prefill - BatchInputBuilder for one prefill
-//                                            sequence, swept over prompt
-//                                            length.
-//   * BM_Batch_PrepareForwardInput_Decode  - BatchInputBuilder for N decode
+//   * BM_Batch_PrepareForwardInput_Prefill - prefill input for one sequence,
+//                                            built by ForwardInputBuilder and
+//                                            swept over prompt length.
+//   * BM_Batch_PrepareForwardInput_Decode  - ForwardInputBuilder for N decode
 //                                            sequences.
 //   * BM_ForwardInput_ToPackedProto   - engine side: ForwardInput -> proto.
 //   * BM_ForwardInput_FromPackedProto - worker side: proto -> ForwardInput

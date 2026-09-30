@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/dit_batch_input_builder.h"
+#include "core/framework/batch/dit_forward_input_builder.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
@@ -56,7 +56,7 @@ bool check_tensors_valid(const std::vector<torch::Tensor>& vec) {
 
 namespace xllm {
 
-DiTForwardInput DiTBatchInputBuilder::build_forward_input() const {
+DiTForwardInput DiTForwardInputBuilder::build_forward_input() const {
   CHECK(!requests_.empty());
   if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
     LOG(INFO) << "DiT batch_size=" << requests_.size();

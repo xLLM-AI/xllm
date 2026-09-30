@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "framework/batch/batch_group.h"
+#include "framework/batch/rec_batch_group.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -40,6 +41,7 @@ class KVCacheManager {
   virtual bool try_allocate(Sequence* sequence) = 0;
 
   virtual void transfer_blocks(BatchGroup& batches) {};
+  virtual void transfer_blocks(RecBatchGroup& batches) {};
   virtual void transfer_blocks() {};
 
   virtual void prefetch_from_storage(std::shared_ptr<Request>& request) {};

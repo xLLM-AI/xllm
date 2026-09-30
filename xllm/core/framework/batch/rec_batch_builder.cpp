@@ -33,7 +33,7 @@ RecBatchBuilder::RecBatchBuilder(int32_t dp_size, BatchInputType input_type)
   CHECK_GT(dp_size_, 0);
 }
 
-BatchGroup RecBatchBuilder::build(
+RecBatchGroup RecBatchBuilder::build(
     const std::vector<std::shared_ptr<Request>>& requests,
     const std::vector<Sequence*>& sequences,
     const std::vector<size_t>& budgets,
@@ -87,8 +87,7 @@ BatchGroup RecBatchBuilder::build(
     }
   }
 
-  BatchGroup batches(
-      static_cast<size_t>(dp_size_), BatchDomain::REC, input_type_);
+  RecBatchGroup batches(static_cast<size_t>(dp_size_), input_type_);
   for (int32_t rank = 0; rank < dp_size_; ++rank) {
     batches[rank].reserve(uses_group_input_ ? 0 : sequence_counts[rank],
                           group_counts[rank]);

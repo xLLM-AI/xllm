@@ -20,7 +20,7 @@ limitations under the License.
 #include <future>
 #include <vector>
 
-#include "core/framework/batch/rec_batch_input_builder.h"
+#include "core/framework/batch/rec_forward_input_builder.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -31,11 +31,11 @@ limitations under the License.
 
 namespace xllm {
 
-class OneRecBatchInputBuilder : public RecBatchInputBuilder {
+class OneRecForwardInputBuilder : public RecForwardInputBuilder {
  public:
-  explicit OneRecBatchInputBuilder(const BatchInputData& data,
-                                   const ModelArgs* args,
-                                   MPMCThreadPool* thread_pool = nullptr);
+  explicit OneRecForwardInputBuilder(const BatchInputData& data,
+                                     const ModelArgs* args,
+                                     MPMCThreadPool* thread_pool = nullptr);
 
  public:
   ForwardInput build_rec_forward_input(

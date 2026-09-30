@@ -455,7 +455,7 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   // Grow-or-fail: every cache-bearing leaf must cover num_tokens now.
   // Without this a leaf that mistakenly returned an empty vector under
   // pressure would let the pool report admission success while the device
-  // is under-provisioned -- batch_input_builder's CHECK then fires
+  // is under-provisioned -- forward_input_builder's CHECK then fires
   // downstream. Rolling back lets the scheduler defer to the next tick.
   // EMBEDDING / LINEAR are per-sequence resource slots, not token cache.
   for (const auto& [type, entry] : leaves_) {

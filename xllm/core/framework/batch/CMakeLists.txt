@@ -7,46 +7,48 @@ cc_library(
   HDRS
     dit_batch.h
     dit_batch_factory.h
-    dit_batch_input_builder.h
+    dit_forward_input_builder.h
     batch_input_data.h
     batch.h
     batch_group.h
     batch_state.h
-    sequence_batch.h
     rec_batch.h
+    rec_batch_state.h
+    rec_batch_group.h
     batch_output_handler.h
     batch_sequence_plan.h
-    sequence_batch_builder.h
+    batch_builder.h
     rec_batch_builder.h
-    sequence_batch_factory.h
+    batch_factory.h
     rec_batch_factory.h
-    batch_input_builder.h
+    forward_input_builder.h
     sampling_input_builder.h
-    rec_batch_input_builder.h
-    onerec_batch_input_builder.h
-    onerec_xattention_batch_input_builder.h
-    rec_multi_round_batch_input_builder.h
+    rec_forward_input_builder.h
+    onerec_forward_input_builder.h
+    onerec_xattention_forward_input_builder.h
+    rec_multi_round_forward_input_builder.h
   SRCS
     dit_batch.cpp
     dit_batch_factory.cpp
-    dit_batch_input_builder.cpp
+    dit_forward_input_builder.cpp
     batch.cpp
     batch_group.cpp
     batch_state.cpp
-    sequence_batch.cpp
     rec_batch.cpp
+    rec_batch_state.cpp
+    rec_batch_group.cpp
     batch_output_handler.cpp
     batch_sequence_plan.cpp
-    sequence_batch_builder.cpp
+    batch_builder.cpp
     rec_batch_builder.cpp
-    sequence_batch_factory.cpp
+    batch_factory.cpp
     rec_batch_factory.cpp
-    batch_input_builder.cpp
+    forward_input_builder.cpp
     sampling_input_builder.cpp
-    rec_batch_input_builder.cpp
-    onerec_batch_input_builder.cpp
-    onerec_xattention_batch_input_builder.cpp
-    rec_multi_round_batch_input_builder.cpp
+    rec_forward_input_builder.cpp
+    onerec_forward_input_builder.cpp
+    onerec_xattention_forward_input_builder.cpp
+    rec_multi_round_forward_input_builder.cpp
     beam_search.h
   DEPS
     :config

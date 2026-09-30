@@ -237,7 +237,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
             // window release loop leaves moved-from Blocks in place so
             // positional indexing stays stable, and both P and D produce
             // the same invalid pattern for the slid-out window. Ship them
-            // as max-uint64 sentinels; BatchInputBuilder skips
+            // as max-uint64 sentinels; ForwardInputBuilder skips
             // positions where the local block id is negative, so the
             // remote id at those positions is never dereferenced. The
             // CHECK below only refuses invalid blocks under types where

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/rec_multi_round_batch_input_builder.h"
+#include "core/framework/batch/rec_multi_round_forward_input_builder.h"
 
 #include <c10/core/DeviceType.h>
 #include <torch/torch.h>
@@ -68,7 +68,7 @@ std::vector<int32_t> build_q_cu_seq_lens_vec(
 
 }  // namespace
 
-RecMultiRoundBatchInputBuilder::RecMultiRoundBatchInputBuilder(
+RecMultiRoundForwardInputBuilder::RecMultiRoundForwardInputBuilder(
     const BatchInputData& data,
     const ModelArgs* args,
     MPMCThreadPool* thread_pool)
@@ -101,7 +101,7 @@ RecMultiRoundBatchInputBuilder::RecMultiRoundBatchInputBuilder(
   rec_multi_round_state_.base_state.batch_forward_type = batch_forward_type_;
 }
 
-void RecMultiRoundBatchInputBuilder::process_single_sequence(
+void RecMultiRoundForwardInputBuilder::process_single_sequence(
     int32_t seq_index,
     BuilderState* state_ptr,
     std::unordered_set<int32_t>* write_block_ids_ptr) {
@@ -163,7 +163,7 @@ void RecMultiRoundBatchInputBuilder::process_single_sequence(
   }
 }
 
-ForwardInput RecMultiRoundBatchInputBuilder::build_rec_forward_input(
+ForwardInput RecMultiRoundForwardInputBuilder::build_rec_forward_input(
     uint32_t /*num_decoding_tokens*/,
     uint32_t /*min_decoding_batch_size*/) {
   // Rec multi-round mode doesn't use num_decoding_tokens and
@@ -172,7 +172,7 @@ ForwardInput RecMultiRoundBatchInputBuilder::build_rec_forward_input(
   return build_forward_input();
 }
 
-ForwardInput RecMultiRoundBatchInputBuilder::build_forward_input() {
+ForwardInput RecMultiRoundForwardInputBuilder::build_forward_input() {
   // Reset Rec multi-round state for this build.
   rec_multi_round_state_.total_steps = get_rec_multi_round_decode_rounds();
 
@@ -184,7 +184,7 @@ ForwardInput RecMultiRoundBatchInputBuilder::build_forward_input() {
   return state_to_forward_input();
 }
 
-void RecMultiRoundBatchInputBuilder::extract_tokens_and_positions(
+void RecMultiRoundForwardInputBuilder::extract_tokens_and_positions(
     Sequence* sequence,
     uint32_t n_kv_cache_tokens,
     uint32_t seq_len,
@@ -260,7 +260,7 @@ void RecMultiRoundBatchInputBuilder::extract_tokens_and_positions(
   }
 }
 
-void RecMultiRoundBatchInputBuilder::setup_kv_cache_info(
+void RecMultiRoundForwardInputBuilder::setup_kv_cache_info(
     Sequence* sequence,
     uint32_t n_kv_cache_tokens,
     uint32_t seq_len,
@@ -289,7 +289,7 @@ void RecMultiRoundBatchInputBuilder::setup_kv_cache_info(
 #endif
 }
 
-ForwardInput RecMultiRoundBatchInputBuilder::state_to_forward_input() {
+ForwardInput RecMultiRoundForwardInputBuilder::state_to_forward_input() {
   BuilderState& state = rec_multi_round_state_.base_state;
   if (state.flatten_tokens_vec.empty()) {
     return {};
@@ -297,7 +297,7 @@ ForwardInput RecMultiRoundBatchInputBuilder::state_to_forward_input() {
 
   ForwardInput forward_input;
 
-  // Create tensors (same as BatchInputBuilder)
+  // Create tensors (same as ForwardInputBuilder)
   forward_input.token_ids =
       torch::tensor(state.flatten_tokens_vec, torch::kInt);
   forward_input.token_ids_host = forward_input.token_ids;

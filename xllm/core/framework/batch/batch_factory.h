@@ -20,17 +20,17 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/framework/batch/batch_builder.h"
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/batch/sequence_batch_builder.h"
 #include "core/framework/request/request.h"
 
 namespace xllm {
 
 // LLM and VLM share sequence scheduling, KV state and token budgets. Their
 // multimodal differences belong to input building, not DP batch assembly.
-class SequenceBatchFactory final {
+class BatchFactory final {
  public:
-  explicit SequenceBatchFactory(int32_t dp_size);
+  explicit BatchFactory(int32_t dp_size);
 
   BatchGroup create_batches(
       const std::vector<std::shared_ptr<Request>>& running_requests,
@@ -40,7 +40,7 @@ class SequenceBatchFactory final {
           nullptr) const;
 
  private:
-  SequenceBatchBuilder builder_;
+  BatchBuilder builder_;
 };
 
 }  // namespace xllm

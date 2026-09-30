@@ -62,6 +62,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   void deallocate(Sequence* sequence) override;
 
   void transfer_blocks(BatchGroup& batches) override;
+  void transfer_blocks(RecBatchGroup& batches) override;
   void transfer_blocks() override;
 
   void prefetch_from_storage(std::shared_ptr<Request>& request) override;

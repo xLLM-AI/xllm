@@ -298,10 +298,10 @@ xLLM 在 `backend=rec` 场景下提供了生成式推荐推理能力。其目标
 - `xllm/core/distributed_runtime/rec_engine.h`
 
 batch / request / proto：
-- `xllm/core/framework/batch/rec_batch_input_builder.cpp`
-- `xllm/core/framework/batch/rec_batch_input_builder.h`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.cpp`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.h`
+- `xllm/core/framework/batch/rec_forward_input_builder.cpp`
+- `xllm/core/framework/batch/rec_forward_input_builder.h`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.cpp`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.h`
 - `xllm/core/framework/request/rec_type.h`
 - `xllm/proto/rec.proto`
 - `xllm/proto/completion.proto`
@@ -338,7 +338,7 @@ kernel / 算子热路径：
    - 对 `LlmRec` multi-round 场景，会下沉到 `RecMultiRoundEnginePipeline`，把多轮 decode 的主要控制逻辑继续往 worker 侧下压。
 
 5. **batch 与输入拼装**
-   - `RecBatchInputBuilder` 和 `RecMultiRoundBatchInputBuilder` 负责把 sequence、step 信息、decode positions、sampling params 等整理成 `ForwardInput`。
+   - `RecForwardInputBuilder` 和 `RecMultiRoundForwardInputBuilder` 负责把 sequence、step 信息、decode positions、sampling params 等整理成 `ForwardInput`。
    - 这里的 `step_meta` 是 multi-step 执行的关键数据来源，它决定后续每一轮 decode 该如何构造位置、cache 和 beam 相关输入。
 
 6. **worker 侧多轮执行**
@@ -464,16 +464,16 @@ Rec request
 
 如果要解释 `multi_step_pipeline` 为什么能成立，单看 scheduler 还不够，必须继续看 batch builder：
 
-- `xllm/core/framework/batch/rec_batch_input_builder.h`
-- `xllm/core/framework/batch/rec_batch_input_builder.cpp`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.h`
-- `xllm/core/framework/batch/rec_multi_round_batch_input_builder.cpp`
+- `xllm/core/framework/batch/rec_forward_input_builder.h`
+- `xllm/core/framework/batch/rec_forward_input_builder.cpp`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.h`
+- `xllm/core/framework/batch/rec_multi_round_forward_input_builder.cpp`
 - `xllm/core/framework/batch/batch.cpp`
 
 这里最重要的不是“类名”，而是几个关键事实：
 
-- `RecBatchInputBuilder::create(...)` 会按 `RecType` 和 multi-round 模式选择 builder
-- `RecMultiRoundBatchInputBuilder` 不是普通 builder 的轻微变种，而是专门为多轮 decode 组织输入的实现
+- `RecForwardInputBuilder::create(...)` 会按 `RecType` 和 multi-round 模式选择 builder
+- `RecMultiRoundForwardInputBuilder` 不是普通 builder 的轻微变种，而是专门为多轮 decode 组织输入的实现
 - `step_meta`、`decode_positions`、`sampling params`、`batch forward type` 等信息是在这一层被拼好并送往后续 runtime 的
 
 所以，如果要说明“为什么第一步就能把后面几步的输入准备好”，这一层比只讲 engine 更关键。
@@ -529,7 +529,7 @@ Rec request
   -> RecMaster
   -> FixedStepsScheduler
   -> RecEngine
-  -> RecBatchInputBuilder / RecMultiRoundBatchInputBuilder
+  -> RecForwardInputBuilder / RecMultiRoundForwardInputBuilder
   -> RecWorkerImpl::LlmRecMultiRoundPipeline
   -> xAttention / beam_search / cache_select
 ```
@@ -569,8 +569,8 @@ Rec request
 - `xllm/core/scheduler/fixed_steps_scheduler.cpp:186`
   - `FixedStepsScheduler::prepare_batch()`
   - 适合解释当前 batch 是怎么在固定步场景下被组织的
-- `xllm/core/framework/batch/rec_batch_input_builder.cpp:29`
-  - `RecBatchInputBuilder::create(...)`
+- `xllm/core/framework/batch/rec_forward_input_builder.cpp:29`
+  - `RecForwardInputBuilder::create(...)`
   - 适合解释 builder 是如何按 `RecType` 和 multi-round 模式切换的
 
 这几处放在一起，可以直接支持“fixed_steps_scheduler 不是概念，而是代码主链里的真实选择”这一点。
@@ -634,7 +634,7 @@ Rec request
 如果听众本身就是 xLLM 或推荐基础设施相关同学，那么也可以采用另一条顺序：
 
 1. 先看 `RecMaster -> FixedStepsScheduler -> RecEngine`
-2. 再看 `RecBatchInputBuilder`
+2. 再看 `RecForwardInputBuilder`
 3. 再看 `RecWorkerImpl::LlmRecMultiRoundPipeline`
 4. 最后看 `xAttention / beam_search / cache_select`
 
