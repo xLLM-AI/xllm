@@ -23,9 +23,9 @@ namespace xllm::testing {
 // multiple Environments in the same process.
 void init_npu_test_runtime();
 
-// Reacquire the GIL saved by init_npu_test_runtime so pybind11 objects held by
-// torch_npu / torch can dec_ref safely during process exit. Call from the
-// Environment's TearDown; idempotent.
+// Reacquire the GIL and finalize NPU queues before static resources are
+// destroyed, keeping Python alive for pybind11 decrefs during process exit.
+// Call from the Environment's TearDown; idempotent.
 void finalize_npu_test_runtime();
 
 }  // namespace xllm::testing

@@ -162,7 +162,11 @@ def _make_moe(
         moe_tp_size=moe_tp_size,
         world_size=max(ep_size, 1) * dp_size,
     )
-    return DeepseekV3MoE(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu"))
+    moe = DeepseekV3MoE(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu"))
+    # CPU addmm cannot accumulate bf16 operands into an fp32 output. These
+    # layout tests use an ordinary fp32 gate while mocking the expert kernels.
+    moe.gate = torch.nn.Linear(cfg.hidden_size, cfg.n_routed_experts, bias=False, dtype=torch.float32)
+    return moe
 
 
 class TestDeepseekV3MoEConstruction:

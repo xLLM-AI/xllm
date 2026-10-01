@@ -86,6 +86,10 @@ void finalize_npu_test_runtime() {
   if (g_saved_thread_state != nullptr) {
     PyEval_RestoreThread(g_saved_thread_state);
     g_saved_thread_state = nullptr;
+    // Embedded Python does not run atexit hooks at C++ process exit. The
+    // framework shutdown drains used devices and also supports CPU-only tests.
+    const int shutdown_ret = PyRun_SimpleString("torch_npu._npu_shutdown()\n");
+    EXPECT_EQ(shutdown_ret, 0) << "torch_npu test runtime shutdown failed.";
   }
 }
 
