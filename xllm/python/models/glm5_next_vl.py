@@ -673,59 +673,6 @@ class Glm5NextVisionModel(nn.Module):
 
     # -- image preprocessing (via xllm pybind / HF AutoImageProcessor) -----
 
-    @staticmethod
-    def preprocess_images(
-        images: list,
-        model_path: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Preprocess raw images into ViT inputs using xllm's pybind layer.
-
-        Delegates to ``xllm.pybind.multimodal.preprocess``, which uses HF
-        ``AutoImageProcessor.from_pretrained(model_path)`` to produce
-        ``pixel_values`` and ``image_grid_thw`` — the same algorithm as SGLang
-        and HF (smart_resize → normalize → patchify).
-
-        Args:
-            images: list of raw image bytes (each item is ``bytes`` or ``str``).
-            model_path: HuggingFace model path or local directory containing
-                ``preprocessor_config.json`` (e.g. ``/mnt/public/models/GLM-OCR``).
-
-        Returns:
-            ``(pixel_values, image_grid_thw)``:
-              - ``pixel_values``: ``(total_patches, C*t*p*p)`` float32.
-              - ``image_grid_thw``: ``(num_images, 3)`` int64 (T/H/W per image).
-        """
-        from xllm.pybind.multimodal import preprocess
-
-        data = preprocess(images, model_path)
-        pixel_values = data["pixel_values"]
-        image_grid_thw = data["image_grid_thw"]
-        return pixel_values, image_grid_thw
-
-    def encode_images(
-        self,
-        images: list,
-        model_path: str,
-    ) -> VisionModelOutput:
-        """One-shot: preprocess raw images → ViT forward → embeddings.
-
-        Combines :meth:`preprocess_images` and :meth:`forward` so the caller
-        can pass raw image bytes directly without manually handling
-        ``pixel_values`` / ``grid_thw``.
-
-        Args:
-            images: list of raw image bytes.
-            model_path: model path for the HF image processor.
-
-        Returns:
-            :class:`VisionModelOutput` with ``pooler_output`` and
-            ``last_hidden_state``.
-        """
-        pixel_values, grid_thw = self.preprocess_images(images, model_path)
-        pixel_values = pixel_values.to(dtype=self.dtype, device=self.device)
-        grid_thw = grid_thw.to(dtype=torch.int32, device=self.device)
-        return self.forward(pixel_values, grid_thw)
-
     # -- weight loading ----------------------------------------------------
 
     def load_weights(self, state_dicts: list, prefix: str = "model.visual.") -> None:
@@ -847,48 +794,6 @@ class Glm5NextVisionModel(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Top-level VLM config
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class Glm5NextVLConfig:
-    """Top-level config for GLM-5.3-Flash-VL (vision + text + connection params)."""
-
-    vision_config: dict
-    text_config: dict
-    image_token_id: int = 154854
-    video_token_id: int = 154855
-    image_start_token_id: int = 154830
-    image_end_token_id: int = 154831
-    video_start_token_id: int = 154832
-    video_end_token_id: int = 154833
-    tie_word_embeddings: bool = False
-    dtype: str = "bfloat16"
-    device: str = "cuda"
-    tp_size: int = 1
-    tp_rank: int = 0
-
-    @classmethod
-    def from_dict(cls, d: dict) -> Glm5NextVLConfig:
-        return cls(
-            vision_config=d.get("vision_config", {}),
-            text_config=d.get("text_config", {}),
-            image_token_id=int(d.get("image_token_id", 154854)),
-            video_token_id=int(d.get("video_token_id", 154855)),
-            image_start_token_id=int(d.get("image_start_token_id", 154830)),
-            image_end_token_id=int(d.get("image_end_token_id", 154831)),
-            video_start_token_id=int(d.get("video_start_token_id", 154832)),
-            video_end_token_id=int(d.get("video_end_token_id", 154833)),
-            tie_word_embeddings=bool(d.get("tie_word_embeddings", False)),
-            dtype=d.get("dtype") or d.get("torch_dtype", "bfloat16"),
-            device=d.get("device", "cuda"),
-            tp_size=int(d.get("tp_size", 1)),
-            tp_rank=int(d.get("tp_rank", 0)),
-        )
-
-
-# ---------------------------------------------------------------------------
 # Top-level conditional generation model
 # ---------------------------------------------------------------------------
 
@@ -993,24 +898,6 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
                 raise RuntimeError(f"{_rot_path} has no 'global_rotation' key")
             self._hidden_rot = _sd["global_rotation"].to(device=device, dtype=dtype)
 
-        # Install per-layer dump hooks. Glm5NextForCausalLM.__init__ installs
-        # these too, but VLModel deliberately skips that __init__, so the
-        # engine (which instantiates Glm5NextVLModel for model_type=glm5_next)
-        # would otherwise never install them. Mirrors the ForCausalLM logic incl.
-        # the per-rank subdir split (TP ranks clobber a single file otherwise).
-        _dump_dir = os.environ.get("GLM5_NEXT_DUMP_DIR")
-        if _dump_dir:
-            try:
-                from xllm.python import distributed
-
-                _rk = distributed.tp_rank(device)
-            except Exception:
-                _rk = 0
-            _dump_dir = os.path.join(_dump_dir, f"rank{_rk}")
-            from xllm.python.models.glm5_next_debug import install_dump_hooks
-
-            install_dump_hooks(self.model, self.lm_head, _dump_dir)
-
     # ------------------------------------------------------------------
     # Connection logic: ViT → LLM
     # ------------------------------------------------------------------
@@ -1032,27 +919,6 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
         """
         pixel_values = pixel_values.type(self.vision_model.dtype)
         out = self.vision_model(pixel_values, grid_thw)
-        return out.pooler_output
-
-    def encode_from_images(
-        self,
-        images: list,
-        model_path: str,
-    ) -> torch.Tensor:
-        """Stage 1 (one-shot): raw images → preprocess → ViT encode → embeds.
-
-        Uses xllm's pybind ``preprocess`` (HF ``AutoImageProcessor``) for image
-        preprocessing — the same algorithm as SGLang / HF.
-
-        Args:
-            images: list of raw image bytes.
-            model_path: model path for the HF image processor
-                (e.g. ``/mnt/public/models/GLM-OCR``).
-
-        Returns:
-            ``image_embeds`` of shape ``(total_image_tokens, out_hidden_size)``.
-        """
-        out = self.vision_model.encode_images(images, model_path)
         return out.pooler_output
 
     def get_placeholder_mask(
@@ -1152,64 +1018,3 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
         #    TP sharding, and the model.↔model.language_model. checkpoint alias).
         self.cfg = self.text_cfg
         Glm5NextForCausalLM.load_weights(self, state_dicts, tp_rank, tp_size)
-
-    def _load_language_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        """Load language model weights.
-
-        TODO: implement full GLM-5.3-Flash LLM weight loading (MLA + MoE).
-        For now this is a placeholder that loads embed_tokens + norm, enough
-        to demonstrate the connection logic.
-        """
-
-        def find(name: str):
-            # Check both "model.language_model." and "model." prefixes.
-            for prefix in ("model.language_model.", "model."):
-                full = prefix + name
-                for sd in state_dicts:
-                    if sd.has(full):
-                        return sd, full
-            return None, None
-
-        def load_tensor(name: str) -> torch.Tensor:
-            sd, full = find(name)
-            assert sd is not None, f"checkpoint tensor not found: {name}"
-            return sd.get_tensor(full)
-
-        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
-            param = self.get_parameter(param_name)
-            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-        def shard(name: str, dim: int) -> torch.Tensor:
-            t = load_tensor(name)
-            if tp_size <= 1:
-                return t
-            chunk = t.size(dim) // tp_size
-            return t.narrow(dim, tp_rank * chunk, chunk).contiguous()
-
-        # embed_tokens (sharded on hidden dim).
-        embed_name = "embed_tokens.weight"
-        copy_in("language_model.embed_tokens.weight", shard(embed_name, dim=1))
-
-        # Final norm.
-        copy_in("language_model.norm.weight", load_tensor("norm.weight"))
-
-    def _load_lm_head(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        """Load lm_head weights (sharded on vocab dim)."""
-
-        def find(name: str):
-            for sd in state_dicts:
-                if sd.has(name):
-                    return sd
-            return None
-
-        def load_tensor(name: str) -> torch.Tensor:
-            sd = find(name)
-            assert sd is not None, f"checkpoint tensor not found: {name}"
-            return sd.get_tensor(name)
-
-        t = load_tensor("lm_head.weight")
-        if tp_size > 1:
-            chunk = t.size(0) // tp_size
-            t = t.narrow(0, tp_rank * chunk, chunk).contiguous()
-        param = self.get_parameter("lm_head.weight")
-        param.data.copy_(t.to(dtype=param.dtype, device=param.device))

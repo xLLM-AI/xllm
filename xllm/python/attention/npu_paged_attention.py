@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +44,7 @@ from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_execution_buffer,
     get_forward_context,
-    get_forward_context_or_none,
+    in_acl_graph,
 )
 
 if TYPE_CHECKING:
@@ -64,7 +64,6 @@ from xllm.python.attention.kda_constants import (
 )
 from xllm.python.attention.kda_linear_attention import (
     KdaLinearAttentionMixin,
-    _in_acl_graph,
 )
 
 # Ascend FIA sparse_mode values (see CANN aclnnFusedInferAttentionScore docs).
@@ -1234,7 +1233,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         # table's first dim. Use it to gather every sequence's history.
         num_seqs = block_table.shape[0] if block_table is not None else batch_size
 
-        if _in_acl_graph():
+        if in_acl_graph():
             # Graph branch: fixed shapes only (no .item()/host sync). Gather
             # the block table in one vectorized index_select up to a static
             # max_kv (replay-stable; capped by graph_index_history_max_kv —
@@ -1365,7 +1364,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         scale = 1.0 / (head_dim**0.5)
         conv_weight = layer.conv1d.weight.squeeze(1)
         silu = layer.activation == "silu"
-        in_graph = _in_acl_graph()
+        in_graph = in_acl_graph()
 
         st = self.__dict__.setdefault("_kda_v2", {}).setdefault(layer.layer_id, {})
         if "armed_buf" not in st:
@@ -1386,10 +1385,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         # flow exposes [kv-1, kv] pairs per sequence on the expanded
         # metadata; the plain eager flow keeps per-row kv_seq_lens. Both
         # give one value per flattened row.
-        from xllm.python.attention.expanded_decode_metadata import (
-            resolve_expanded_decode_metadata,
-        )
-
         expanded = resolve_expanded_decode_metadata(metadata)
         kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         # Graph replay reuses the metadata address while values and per-layer
@@ -1613,7 +1608,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         conv_state_len = layer.conv_kernel_size - 1
         scale = 1.0 / (head_dim**0.5)
         conv_weight = layer.conv1d.weight.squeeze(1)
-        in_graph = _in_acl_graph()
+        in_graph = in_acl_graph()
         nslots = conv_cache.shape[0]  # C++ pool capacity
 
         st = self.__dict__.setdefault("_kda_v3", {}).setdefault(layer.layer_id, {})
@@ -1645,10 +1640,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         # mis-select the conv/ssm boundary slot and diverge output under
         # temp=0 + HCCL_DETERMINISTIC. The cost is a handful of cheap host->dev
         # + index_select ops per step.
-        from xllm.python.attention.expanded_decode_metadata import (
-            resolve_expanded_decode_metadata,
-        )
-
         expanded = resolve_expanded_decode_metadata(metadata)
         kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         kv_rows = kv_src.to(device=device, dtype=torch.int64)

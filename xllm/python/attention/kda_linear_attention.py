@@ -29,22 +29,11 @@ from xllm.python.attention.kda_constants import (
 )
 from xllm.python.model_executor.forward_context import (
     get_execution_buffer,
-    get_forward_context_or_none,
+    in_acl_graph,
 )
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
-
-
-def _in_acl_graph() -> bool:
-    """Whether the current forward runs under ACL graph warmup/capture.
-
-    The decode graph runner always passes an ``execution_state`` (warmup and
-    capture) and an ``acl_graph`` capture context (capture only); the eager
-    runner sets neither, so eager paths stay byte-identical.
-    """
-    ctx = get_forward_context_or_none()
-    return ctx is not None and (ctx.acl_graph is not None or ctx.execution_state is not None)
 
 
 class KdaLinearAttentionMixin:
@@ -201,7 +190,7 @@ class KdaLinearAttentionMixin:
         # exactly one token per sequence, so reshape to ``[num_seqs, conv_dim,
         # 1]`` and take the simple per-sequence path with static shapes. gate
         # ``[1, T, nh, hd]`` / beta ``[1, T, nh]`` follow the same transpose.
-        in_graph = _in_acl_graph()
+        in_graph = in_acl_graph()
         is_decode = not metadata.is_prefill and not metadata.is_chunked_prefill
         flatten_graph_decode = (
             in_graph

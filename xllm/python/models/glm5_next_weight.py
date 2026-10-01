@@ -17,8 +17,8 @@ This module factors out the checkpoint-tensor lookup / TP sharding / W8A8
 projection- and MLP-weight packing used by GLM-5.3-Flash's ``load_weights``.
 It is intentionally a standalone helper (not the shared
 ``xllm.python.models.weight_utils.W8A8WeightLoader`` used by Deepseek-V3):
-GLM-5.3-Flash's W8A8 layers need a ``find`` lookup and GLM-specific
-``load_w8a8_a`` / ``load_fused_w8a8_a`` / ``load_w8a8_b`` packers that the
+GLM-5.3-Flash's W8A8 layers need a ``find`` lookup and the GLM-specific
+``pack_gate_up`` / ``load_w8a8_down`` / ``load_w8a8_mlp`` packing that the
 shared loader does not provide, while Deepseek-V3's ``load_weights`` relies
 on the shared loader's ``load_w8a8_projection`` / ``load_fused_w8a8_projection``
 which this helper does not need. Keeping the two classes in separate modules
@@ -161,53 +161,3 @@ class W8A8WeightLoader:
             prefix + "down_proj.weight_offset",
             self.load_tensor(prefix + "down_proj.weight_offset"),
         )
-
-    def load_w8a8_a(self, prefix: str, proj: str, shard_dims: Optional[dict] = None) -> None:
-        for suffix in ("weight", "deq_scale", "quant_bias", "input_scale", "input_offset"):
-            t = self.load_tensor(prefix + proj + "." + suffix)
-            dim = (shard_dims or {}).get(suffix)
-            if dim is not None:
-                t = self.shard(t, dim=dim)
-            self.copy_in(prefix + proj + "." + suffix, t)
-
-    def load_fused_w8a8_a(
-        self,
-        prefix: str,
-        target_proj: str,
-        source_projs: tuple[str, ...],
-    ) -> None:
-        for suffix in ("weight", "deq_scale", "quant_bias"):
-            tensors = [self.load_tensor(prefix + proj + "." + suffix) for proj in source_projs]
-            self.copy_in(
-                prefix + target_proj + "." + suffix,
-                torch.cat(tensors, dim=0).contiguous(),
-            )
-
-        for suffix in ("input_scale", "input_offset"):
-            tensors = [self.load_tensor(prefix + proj + "." + suffix) for proj in source_projs]
-            reference = tensors[0]
-            if any(not torch.equal(reference, tensor) for tensor in tensors[1:]):
-                names = ", ".join(source_projs)
-                raise ValueError(f"{prefix}{names} must share {suffix} for fused W8A8")
-            self.copy_in(prefix + target_proj + "." + suffix, reference)
-
-    def load_w8a8_b(self, mlp_pfx: str) -> None:
-        gw = self.load_tensor(mlp_pfx + "gate_proj.weight")
-        gs = self.load_tensor(mlp_pfx + "gate_proj.weight_scale")
-        go = self.load_tensor(mlp_pfx + "gate_proj.weight_offset")
-        uw = self.load_tensor(mlp_pfx + "up_proj.weight")
-        us = self.load_tensor(mlp_pfx + "up_proj.weight_scale")
-        uo = self.load_tensor(mlp_pfx + "up_proj.weight_offset")
-        self.copy_in(
-            mlp_pfx + "gate_up_proj.weight", torch.cat([self.shard(gw, 0), self.shard(uw, 0)], dim=0).contiguous()
-        )
-        self.copy_in(
-            mlp_pfx + "gate_up_proj.weight_scale", torch.cat([self.shard(gs, 0), self.shard(us, 0)], dim=0).contiguous()
-        )
-        self.copy_in(
-            mlp_pfx + "gate_up_proj.weight_offset",
-            torch.cat([self.shard(go, 0), self.shard(uo, 0)], dim=0).contiguous(),
-        )
-        self.copy_in(mlp_pfx + "down_proj.weight", self.shard(self.load_tensor(mlp_pfx + "down_proj.weight"), dim=1))
-        self.copy_in(mlp_pfx + "down_proj.weight_scale", self.load_tensor(mlp_pfx + "down_proj.weight_scale"))
-        self.copy_in(mlp_pfx + "down_proj.weight_offset", self.load_tensor(mlp_pfx + "down_proj.weight_offset"))

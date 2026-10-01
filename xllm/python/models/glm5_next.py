@@ -53,7 +53,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -71,6 +71,7 @@ from xllm.python.attention.backend import MlaIndexContext
 from xllm.python.model_executor.forward_context import (
     get_forward_context,
     get_forward_context_or_none,
+    in_acl_graph,
 )
 
 _has_mhc_fused = hasattr(kernels, "hc_pre") and kernels.hc_pre is not None
@@ -107,28 +108,8 @@ except ImportError:  # pragma: no cover - stub-loader path
             super().__init__()
 
 
-def _use_acl_graph(config: dict) -> bool:
-    """Whether this run captures decode ACL graphs (mirrors deepseek_v32)."""
-    graph_backend = str(config.get("python_graph_backend", "off")).lower()
-    if graph_backend == "aclgraph":
-        return True
-    return graph_backend in ("", "off", "none", "0") and bool(config.get("enable_graph", False))
-
-
-def _in_acl_graph() -> bool:
-    """Whether the current forward runs under ACL graph warmup/capture."""
-    ctx = get_forward_context_or_none()
-    return ctx is not None and (ctx.acl_graph is not None or ctx.execution_state is not None)
-
-
 # Paged pool cache: write-time incremental compression + direct pool read
 # (see glm5_next_kpool.py).
-
-
-def _capturing_acl_graph() -> bool:
-    """Whether the current forward is being recorded by NPUGraph capture."""
-    ctx = get_forward_context_or_none()
-    return ctx is not None and ctx.acl_graph is not None
 
 
 # ---------------------------------------------------------------------------
@@ -138,33 +119,6 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     """FLA-style l2norm: sqrt(sum(x^2)+eps) then divide (NOT F.normalize)."""
     inv_norm = torch.sqrt((x * x).sum(dim=dim, keepdim=True) + eps)
     return x / inv_norm
-
-
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., 0::2]
-    x2 = x[..., 1::2]
-    return torch.stack((-x2, x1), dim=-1).flatten(-2)
-
-
-def _apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    unsqueeze_dim: int = 1,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    cos = cos[..., : cos.shape[-1] // 2].repeat_interleave(2, dim=-1)
-    sin = sin[..., : sin.shape[-1] // 2].repeat_interleave(2, dim=-1)
-    rotary_dim = cos.shape[-1]
-    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
-    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
-    q_embed = (q_rot * cos) + (_rotate_half(q_rot) * sin)
-    k_embed = (k_rot * cos) + (_rotate_half(k_rot) * sin)
-    q_embed = torch.cat([q_embed, q_pass], dim=-1)
-    k_embed = torch.cat([k_embed, k_pass], dim=-1)
-    return q_embed, k_embed
 
 
 # Upper bound on the flattened seq dim (T = total tokens across every sequence
@@ -330,18 +284,6 @@ def _causal_conv1d_update(
     return out.to(mixed_qkv.dtype)
 
 
-def _round_mantissa_rne(x: torch.Tensor, keep_bits: int = 11) -> torch.Tensor:
-    """Round fp32 to ``keep_bits`` explicit mantissa bits (round-to-nearest-even).
-
-    Pure integer-op transform (ACL-graph capturable; ``view(dtype)`` is a
-    metadata-only reinterpret). Standard RNE: add ``0x7FF + lsb`` then mask.
-    """
-    keep = 23 - keep_bits
-    xi = x.contiguous().view(torch.int32)
-    xi = xi + (((1 << (keep - 1)) - 1) + ((xi >> keep) & 1))
-    return (xi & ~((1 << keep) - 1)).view(torch.float32)
-
-
 def _causal_conv1d_update_graph(
     mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
 ) -> torch.Tensor:
@@ -366,8 +308,8 @@ def _causal_conv1d_update_graph(
     # are rounded RNE to 11 explicit mantissa bits (a no-op for bf16/fp16
     # sources). Since the engine's conv weight is always bf16 and hidden_states
     # are cast to bf16 above, the RNE rounding is a no-op — float() alone
-    # preserves the exact bf16 value in fp32. We skip _round_mantissa_rne to
-    # avoid RightShift/BitwiseAnd on AI_CPU (~7.4% of total decode time).
+    # preserves the exact bf16 value in fp32. We skip the RNE mantissa rounding
+    # to avoid RightShift/BitwiseAnd on AI_CPU (~7.4% of total decode time).
     h_r = hidden_states_new.float()
     w_r = weight.float()
     out = w_r[:, 0:1].unsqueeze(0) * h_r[:, :, 0:seq_len]
@@ -584,14 +526,6 @@ class Glm5NextConfig:
     indexer_types: list = field(default_factory=list)  # "full" / "shared"
     tp_size: int = 1
     tp_rank: int = 0
-    # Load-time static flag: decode ACL graph capture is enabled, so graph
-    # branches (fixed-shape indexer pooling etc.) may be taken at runtime when
-    # the forward context confirms capture/warmup (_in_acl_graph()).
-    use_acl_graph: bool = False
-
-    @property
-    def qk_head_dim(self) -> int:
-        return self.qk_rope_head_dim + self.qk_nope_head_dim
 
     @classmethod
     def from_dict(cls, d: dict) -> Glm5NextConfig:
@@ -671,7 +605,6 @@ class Glm5NextConfig:
             index_kpool_always_select_tail=bool(pick("index_kpool_always_select_tail", default=False)),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
-            use_acl_graph=_use_acl_graph(d),
             # mHC fields: ModelArgs may emit a 0 default (un-plumbed); treat 0
             # /None as unset and fall back to the real 300B defaults.
             hc_mult=(int(pick("hc_mult", default=4)) or 4),
@@ -730,7 +663,6 @@ class Glm5NextForgetGate(nn.Module):
         # Head-sharded TP (mirrors DSA): each rank owns kda_num_heads//tp heads.
         # f_b_proj / A_log / dt_bias are per-head (column-parallel, dim 0);
         # f_a_proj feeds the shared head_dim latent so it stays replicated.
-        self.tp = cfg.tp_size
         self.num_heads = cfg.kda_num_heads // cfg.tp_size  # local per-rank
         self.qkv_dim = self.head_dim * self.num_heads
         self.f_a_proj = nn.Linear(cfg.hidden_size, self.head_dim, bias=False)
@@ -911,11 +843,9 @@ class Glm5NextIndexer(nn.Module):
         self.layer_id = layer_id
         self.n_heads = cfg.index_n_heads
         self.head_dim = cfg.index_head_dim
-        self.rope_dim = cfg.qk_rope_head_dim  # 0 for the 300B default
         self.topk = cfg.index_topk
         self.index_kpool = cfg.index_kpool
         self.index_kpool_always_select_tail = cfg.index_kpool_always_select_tail
-        self.use_acl_graph = cfg.use_acl_graph
         self.softmax_scale = self.head_dim**-0.5
         self.wq_b = nn.Linear(cfg.q_lora_rank, self.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(cfg.hidden_size, self.head_dim, bias=False)
@@ -941,7 +871,7 @@ class Glm5NextIndexer(nn.Module):
             self.head_dim,
             self.index_kpool,
         )
-        if self.use_acl_graph and _in_acl_graph():
+        if in_acl_graph():
             # Graph branch (fixed shapes): keep ALL pools. The boolean
             # ``pool_keys[:, keep]`` filter below produces a data-dependent
             # output shape (aclnnNonzeroV2) that ACL graph capture cannot
@@ -1155,7 +1085,7 @@ class Glm5NextIndexer(nn.Module):
             and ctx.actual_seq_kv is not None
         ):
             pool_cache = self._pool_caches.get(layer.layer_id)
-            if pool_cache is None and not _in_acl_graph():
+            if pool_cache is None and not in_acl_graph():
                 # Lazy alloc on the first eager forward (before capture);
                 # never allocate inside a capture.
                 pool_cache = alloc_pool_cache(ctx.index_cache, self.index_kpool)
@@ -1215,7 +1145,7 @@ class Glm5NextIndexer(nn.Module):
             # ---- read path: direct pool read for decode ----
             if num_tokens == n_seqs:
                 max_kv_cap = getattr(backend, "graph_index_history_max_kv", None)
-                if not _in_acl_graph():
+                if not in_acl_graph():
                     max_kv = int(kv_lens_t.max().item())
                 elif max_kv_cap is not None:
                     # Same static cap the dense gather used, so the graph
@@ -1600,8 +1530,6 @@ class Glm5NextExperts(nn.Module):
             hit = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
         for expert_idx in hit:
             expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts:
-                continue
             top_k_pos, token_idx = torch.where(mask[expert_idx])
             gate_up = F.linear(hidden_states[token_idx], self.gate_up_proj[expert_idx])
             gate, up = gate_up.chunk(2, dim=-1)
@@ -1804,9 +1732,6 @@ class Glm5NextMoE(nn.Module):
         else:
             # bf16: existing _topk routing + Glm5NextExperts per-expert loop.
             _, topk_weights, topk_indices = self._topk(hidden_states)
-            # Debug hooks read these to compare the router against the reference.
-            self._last_topk_weights = topk_weights.detach()
-            self._last_topk_indices = topk_indices.detach()
             out = self.experts(flat, topk_indices, topk_weights).view(*orig_shape)
         final = out + self.shared_experts(hidden_states)
         # Single TP all-reduce on the combined routed+shared output. shared_experts
@@ -1815,10 +1740,6 @@ class Glm5NextMoE(nn.Module):
         if self.cfg.tp_size > 1:
             distributed.all_reduce_(final)
         return final
-
-    def gate_call(self, hidden_states: torch.Tensor):
-        # routed via the local _topk (mirrors Glm5NextTopkRouter).
-        return self._topk(hidden_states)
 
 
 # ---------------------------------------------------------------------------
@@ -2052,11 +1973,8 @@ class Glm5NextModel(nn.Module):
         # position embeddings are computed or threaded (reference passes None).
         hidden = hidden.unsqueeze(2).expand(-1, -1, self.cfg.hc_mult, -1).contiguous()
         prev_topk: Optional[torch.Tensor] = None
-        _trace = os.environ.get("GLM5_NEXT_TRACE")
         for i, layer in enumerate(self.layers):
             hidden, prev_topk = layer(hidden, position_ids, attention_mask, prev_topk)
-        if _trace:
-            logger.debug("[trace] final_norm")
         # Final collapse: unweighted mean over the streams, then RMSNorm
         # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
         # Flatten [B, S, D] -> [B*S, D]: the engine's compute_logits does
@@ -2080,7 +1998,7 @@ def _resolve_module(root: nn.Module, dotted: str) -> nn.Module:
 
 
 def _w8a8_shard_dims(fp_dim: Optional[int]) -> Optional[dict]:
-    """Static-W8A8 shard map for ``load_w8a8_a`` from the fp shard dim.
+    """Static-W8A8 shard map for ``QLinear.load_w8a8`` from the fp shard dim.
 
     - ``fp_dim is None`` (replicated, e.g. q_a_proj / kv_a_proj): no shard.
     - ``fp_dim == 0`` (column-parallel, e.g. q_b_proj): weight + deq_scale +
@@ -2172,20 +2090,6 @@ class Glm5NextForCausalLM(PyModelBase):
         # (which runs .to(bf16) over the model). The KDA conv1d is included in
         # this cast — the reference's conv1d is also bf16 after .to(dtype).
         self.to(device=device, dtype=dtype)
-        _dump_dir = os.environ.get("GLM5_NEXT_DUMP_DIR")
-        if _dump_dir:
-            # TP4: each rank writes the SAME filename -> they clobber each other.
-            # Split into a per-rank subdir so all 4 ranks' views survive.
-            try:
-                _rk = distributed.tp_rank(device)
-            except Exception:
-                _rk = 0
-            _dump_dir = os.path.join(_dump_dir, f"rank{_rk}")
-            # Lazy import: debug scaffolding lives out-of-line so the serving
-            # module carries no dump/trace code at import time.
-            from xllm.python.models.glm5_next_debug import install_dump_hooks
-
-            install_dump_hooks(self.model, self.lm_head, _dump_dir)
 
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
@@ -2369,9 +2273,10 @@ class Glm5NextForCausalLM(PyModelBase):
         )
         if is_w8a8:
             # dynamic w8a8: route through load_w8a8_mlp_into_qlinear (cat
-            # gate+up, shard dim 0; down shard dim 1), NOT load_w8a8_a which
-            # only handles static per-projection tensors. resolve_quant builds
-            # the w8a8 submodules; the loader writes into ``_w8a8``.
+            # gate+up, shard dim 0; down shard dim 1), NOT the per-projection
+            # QLinear.load_w8a8 which only handles static per-projection
+            # tensors. resolve_quant builds the w8a8 submodules; the loader
+            # writes into ``_w8a8``.
             gate_mod.resolve_quant(True)
             down_mod.resolve_quant(True)
             L.load_w8a8_mlp_into_qlinear(mlp_pfx)

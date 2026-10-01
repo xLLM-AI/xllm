@@ -148,8 +148,8 @@ class QLinearWeightLoader:
         ``qlinear_name + "._w8a8.<suffix>"`` (``qlinear_name`` is the QLinear's
         own dotted path, e.g. ``model.layers.0.self_attn.o_proj``). QLinear's
         ``forward`` reads ``self._w8a8``, so that int8 slot is the only one that
-        must be populated. Unlike ``load_w8a8_a`` (which targets the module's
-        own name), this lands on the ``_w8a8`` path segment.
+        must be populated. Unlike a loader that targets the module's own name,
+        this lands on the ``_w8a8`` path segment.
         """
         for suffix in ("weight", "deq_scale", "quant_bias", "input_scale", "input_offset"):
             key = f"{prefix}{proj}.{suffix}"
@@ -164,9 +164,9 @@ class QLinearWeightLoader:
     def load_w8a8_mlp_into_qlinear(self, mlp_pfx: str) -> None:
         """Load dynamic W8A8 MLP tensors into the QLinear-wrapped ``_w8a8``.
 
-        Mirrors ``W8A8WeightLoader.load_w8a8_b`` (cat gate+up on dim 0, down
-        shard dim 1) but writes into ``gate_up_proj._w8a8`` / ``down_proj._w8a8``
-        instead of the QLinear fp slots. ``mlp_pfx`` is the dotted MLP path, e.g.
+        Cats gate+up on dim 0 and shards down on dim 1, but writes into
+        ``gate_up_proj._w8a8`` / ``down_proj._w8a8`` instead of the QLinear fp
+        slots. ``mlp_pfx`` is the dotted MLP path, e.g.
         ``model.layers.0.mlp.``.
         """
         g = mlp_pfx + "gate_proj."
