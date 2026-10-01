@@ -58,9 +58,8 @@ _KDA_VERIFY_V2 = os.environ.get("GLM5_KDA_VERIFY_V2", "0") == "1"
 # Fused multi-slot MTP spec-verify (GLM5_KDA_VERIFY_V3=1): replaces V2's host
 # m state machine + 6-buffer slot stash with a persistent combined [base|draft]
 # state pool and a single fused recurrent_kda call per layer (vllm-ascend's
-# in-kernel-spec contract). See _spec_verify_v3. V3 is OFF by default in this
-# PR (eager-only); it is the MTP spec-verify path and is enabled in the MTP
-# PR along with its graph snapshot/restore wiring. Set GLM5_KDA_VERIFY_V3=1
-# to opt in, or GLM5_KDA_VERIFY_V2=1 to fall back to the legacy V2 path (which
-# forces V3 off to avoid the two competing).
+# in-kernel-spec contract). See _spec_verify_v3. V3 is opt-in — it only
+# supports uniform verify width (rows_per_seq = total_rows / num_seqs) and
+# does not yet cover adaptive speculative decode's per-seq variable widths;
+# flip to "1" once _spec_verify_v3 consumes real cumulative q lengths.
 _KDA_VERIFY_V3 = (not _KDA_VERIFY_V2) and (os.environ.get("GLM5_KDA_VERIFY_V3", "0") == "1")

@@ -54,6 +54,16 @@ import torch  # noqa: E402
 _torch_library.Library = _OrigLibrary
 del _OrigLibrary, _SafeLibrary
 
+# Register the optional KDA OPP before torch_npu initializes ACL. Import or
+# registration failures in an installed package must remain visible.
+try:
+    import fla_npu
+except ModuleNotFoundError as error:
+    if error.name != "fla_npu":
+        raise
+else:
+    fla_npu.load_ascendc_opapi_libraries()
+
 # ---------------------------------------------------------------------------
 # Import torch_npu with accelerator masked to prevent re-initialization.
 # ---------------------------------------------------------------------------

@@ -284,6 +284,10 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         )
 
     @property
+    def supports_linear_spec_verify_graph(self) -> bool:
+        return _KDA_VERIFY_V2 or _KDA_VERIFY_V3
+
+    @property
     def num_kv_blocks(self) -> int:
         if self._num_kv_blocks is None:
             raise RuntimeError("full-attention KV caches are not bound")

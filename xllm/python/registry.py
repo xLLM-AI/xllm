@@ -148,6 +148,11 @@ def _register_builtin_models() -> None:
         "Glm5NextVLModel",
         "glm5_next",
     )
+    _register_model_path(
+        "xllm.python.models.glm5_next_mtp",
+        "Glm5NextMtpForCausalLM",
+        "glm5_next_mtp",
+    )
 
 
 _register_builtin_models()

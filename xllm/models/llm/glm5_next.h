@@ -207,7 +207,15 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
 
 }  // namespace glm5_next_args
 
+REGISTER_MODEL_BACKEND(glm5_next, "llm");
+REGISTER_MODEL_BACKEND(glm5_next_mtp, "llm");
 REGISTER_MODEL_ARGS_LOADER(glm5_next, &glm5_next_args::load_model_args);
 REGISTER_MODEL_ARGS_LOADER(glm5_next_mtp, &glm5_next_args::load_model_args);
+
+// Exported MTP checkpoints contain their own embedding and LM head weights.
+const bool glm5_next_mtp_shared_weight_owner_registered = []() {
+  ModelRegistry::register_mtp_shared_weight_owner("glm5_next_mtp");
+  return true;
+}();
 
 }  // namespace xllm

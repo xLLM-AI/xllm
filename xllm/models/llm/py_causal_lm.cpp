@@ -331,17 +331,16 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                                  const torch::Tensor& seleted_idxes,
                                  torch::Tensor& out_hidden) {
   torch::NoGradGuard no_grad;
-  py::gil_scoped_acquire gil;
-
-  py::object selected = optional_tensor(seleted_idxes);
+  // Select the draft's hidden rows once and reuse the two-argument
+  // projection path, avoiding a second Python-side index_select.
   if (seleted_idxes.defined() && seleted_idxes.numel() > 0) {
-    out_hidden = hidden_states.index_select(
-        /*dim=*/0, seleted_idxes.to(torch::kLong));
-  } else {
-    out_hidden = hidden_states;
+    const auto idxes = seleted_idxes.to(
+        torch::dtype(torch::kLong).device(hidden_states.device()));
+    out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
+    return logits(out_hidden, /*seleted_idxes=*/torch::Tensor());
   }
-  py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
-  return out.cast<torch::Tensor>();
+  out_hidden = hidden_states;
+  return logits(hidden_states, seleted_idxes);
 }
 
 ModelOutput PyCausalLM::write_context_kv(

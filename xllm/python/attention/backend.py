@@ -194,6 +194,11 @@ class CsaIndexContext:
 
 class AttentionBackend(ABC):
     @property
+    def supports_linear_spec_verify_graph(self) -> bool:
+        """Whether expanded speculative verification can capture linear state."""
+        return False
+
+    @property
     def supports_prepared_metadata(self) -> bool:
         return False
 

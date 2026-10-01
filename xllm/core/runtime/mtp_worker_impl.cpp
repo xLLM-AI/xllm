@@ -26,6 +26,7 @@ limitations under the License.
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -56,9 +57,11 @@ limitations under the License.
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/runtime/task_execution_pipeline.h"
+#include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/pretty_print.h"
 #include "util/slice.h"
+#include "util/tensor_helper.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -234,14 +237,8 @@ void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
   }
 
   if (!kv_lens_already_bound) {
-    torch::Tensor expanded_kv_seq_lens_host =
-        torch::tensor(input_params.graph.expanded_kv_seq_lens_vec,
-                      torch::TensorOptions()
-                          .dtype(torch::kInt)
-                          .device(torch::kCPU)
-                          .pinned_memory(true));
     input_params.graph.expanded_kv_seq_lens =
-        expanded_kv_seq_lens_host.to(device, /*non_blocking=*/true);
+        async_h2d_tensor(input_params.graph.expanded_kv_seq_lens_vec, device);
   }
 
   // ATB consumes this tensor as dense row-major storage. Keep the generic
@@ -298,7 +295,7 @@ torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {
     return tensor;
   }
   CHECK(tensor.device().is_cpu()) << "expected a CPU host tensor";
-  return tensor.contiguous().clone();
+  return clone_contiguous_detached_tensor(tensor);
 }
 
 void stabilize_decode_host_tensors(ForwardInput& input) {
@@ -329,10 +326,7 @@ void set_token_ids_device_tensor(ForwardInput& input,
 }
 
 torch::Tensor to_cpu_int_tensor_for_read(const torch::Tensor& values) {
-  return safe_to(values.flatten(),
-                 torch::TensorOptions().dtype(torch::kInt).device(torch::kCPU),
-                 false)
-      .contiguous();
+  return to_cpu_contiguous(values.flatten(), torch::kInt);
 }
 
 void check_mtp_decode_states(
@@ -347,8 +341,7 @@ void check_mtp_decode_states(
   CHECK_GE(token_ids_host.numel(), static_cast<int64_t>(states.size()))
       << "MTP decode token/state count mismatch";
 
-  Slice<int32_t> token_ids = {token_ids_host.data_ptr<int32_t>(),
-                              static_cast<size_t>(token_ids_host.numel())};
+  Slice<int32_t> token_ids = tensor_slice(token_ids_host);
   for (int32_t i = 0; i < static_cast<int32_t>(states.size()); ++i) {
     const EmbeddingCache::DecodeState& state = states[i];
     const int32_t token_id = token_ids[i];
@@ -393,9 +386,7 @@ void replace_host_token_placeholders(ForwardInput& input,
   int32_t* token_ids = input.token_ids_host.data_ptr<int32_t>();
   const size_t num_token_ids =
       static_cast<size_t>(input.token_ids_host.numel());
-  Slice<int32_t> replacement_ids = {
-      replacement_cpu.data_ptr<int32_t>(),
-      static_cast<size_t>(replacement_cpu.numel())};
+  Slice<int32_t> replacement_ids = tensor_slice(replacement_cpu);
 
   size_t replacement_idx = 0;
   for (size_t i = 0; i < num_token_ids; ++i) {
@@ -468,11 +459,6 @@ ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
   draft_args.moe_ep_group_ = parallel_args.single_rank_group_;
   draft_args.moe_tp_group_ = parallel_args.single_rank_group_;
   return draft_args;
-}
-
-bool is_qwen3_5_draft_model_type(const std::string& model_type) {
-  return mtp_async::classify_combined_draft_execution_path(model_type) ==
-         mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
 }
 
 }  // namespace
@@ -672,8 +658,7 @@ class NpuJsonDraftTokenHandoff final {
 
   std::vector<int32_t> read_tokens_synchronously(
       const torch::Tensor& next_tokens) const {
-    torch::Tensor host_tokens =
-        safe_to(next_tokens.flatten(), torch::kCPU).contiguous();
+    torch::Tensor host_tokens = to_cpu_contiguous(next_tokens.flatten());
     if (host_tokens.scalar_type() == torch::kLong) {
       return copy_json_draft_token_ids(
           host_tokens.data_ptr<int64_t>(),
@@ -862,16 +847,17 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    const std::string& draft_model_type =
+        draft_impl_->context_.get_model_args().model_type();
     combined_draft_execution_path_ =
-        mtp_async::classify_combined_draft_execution_path(
-            draft_impl_->context_.get_model_args().model_type());
+        mtp_async::classify_combined_draft_execution_path(draft_model_type);
     const bool draft_owns_shared_weights =
-        options_.enable_mtp_draft_body_tp1() &&
-        combined_draft_execution_path_ ==
-            mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
-    // Qwen3.5 draft checkpoints contain complete embedding and LMHead weights.
-    // Other MTP drafts retain their existing target-weight sharing contract;
-    // only their transformer body is replicated with TP1 parallel arguments.
+        (options_.enable_mtp_draft_body_tp1() &&
+         combined_draft_execution_path_ ==
+             mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION) ||
+        ModelRegistry::owns_mtp_shared_weights(draft_model_type);
+    // Preserve independently loaded checkpoint weights when the draft model
+    // advertises ownership; other drafts share the target's weights.
     if (!draft_owns_shared_weights) {
       const bool python_weights_shared =
           draft_impl_->share_weights_from(*impl_);
@@ -1375,7 +1361,9 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input = input.to(device_, dtype_);
   prepare_draft_sampling(prefill_input.sampling_params);
   clear_ready_events(prefill_input);
+  // Draft prefill consumes target hidden states, not vision inputs.
   auto& input_params = prefill_input.input_params;
+  input_params.multimodal = MultiModalInput();
   // The Qwen draft is a pure full-attention model; without this cleanup the
   // target's recurrent slot metadata makes MTP prefill enter a stateful path
   // it has neither a validity mask nor a recurrent cache for.
@@ -1383,8 +1371,7 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;
-  Slice<int32_t> tokens_ids_slice = {token_ids.data_ptr<int32_t>(),
-                                     static_cast<size_t>(token_ids.numel())};
+  Slice<int32_t> tokens_ids_slice = tensor_slice(token_ids);
 
   int32_t start_idx = 0;
   std::vector<int32_t> new_token_ids;
@@ -1513,9 +1500,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
              static_cast<int64_t>(embedding.mtp_bootstrap_row_idxes.size()))
         << "MTP bootstrap row count mismatch";
 
-    Slice<int32_t> token_ids = {
-        input.token_ids_host.data_ptr<int32_t>(),
-        static_cast<size_t>(input.token_ids_host.numel())};
+    Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
     for (int32_t i = 0;
          i < static_cast<int32_t>(embedding.mtp_bootstrap_row_idxes.size());
          ++i) {
@@ -1814,8 +1799,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
           next_tokens, *compute_stream_, draft_idx);
 #else
       Timer draft_token_d2h_timer;
-      torch::Tensor draft_tokens =
-          safe_to(next_tokens.flatten(), torch::kCPU).contiguous();
+      torch::Tensor draft_tokens = to_cpu_contiguous(next_tokens.flatten());
       HISTOGRAM_OBSERVE(
           speculative_draft_token_d2h_latency_microseconds,
           static_cast<int64_t>(draft_token_d2h_timer.elapsed_microseconds()));
@@ -1882,15 +1866,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     }
     record_current_metadata_ready_event(current_draft_input, *compute_stream_);
   }
-  const double draft_latency_ms = timer.elapsed_milliseconds();
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              draft_latency_ms / 1000.0);
-
+              timer.elapsed_seconds());
   if (use_adaptive_speculative_decode) {
     return run_adaptive_validate(
         input, draft_outputs, validate_input, num_speculative_tokens);
   }
-
   return run_validate(input,
                       draft_outputs,
                       validate_input,
@@ -2033,24 +2014,10 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
     if (!dst_idx_vec.empty()) {
       // Move all indices to device once (instead of a per-step H2D copy) and
       // select each step's entries on-device via a boolean mask.
-      const torch::TensorOptions long_dev_opts =
-          torch::TensorOptions()
-              .dtype(torch::kLong)
-              .device(validate_input.token_ids.device());
-      torch::Tensor dst_idx_all =
-          safe_to(torch::tensor(dst_idx_vec,
-                                torch::TensorOptions().dtype(torch::kLong)),
-                  long_dev_opts,
-                  /*non_blocking=*/true);
-      torch::Tensor src_idx_all =
-          safe_to(torch::tensor(src_idx_vec,
-                                torch::TensorOptions().dtype(torch::kLong)),
-                  long_dev_opts,
-                  /*non_blocking=*/true);
-      torch::Tensor step_all = safe_to(
-          torch::tensor(step_vec, torch::TensorOptions().dtype(torch::kLong)),
-          long_dev_opts,
-          /*non_blocking=*/true);
+      const torch::Device& device = validate_input.token_ids.device();
+      torch::Tensor dst_idx_all = async_h2d_tensor(dst_idx_vec, device);
+      torch::Tensor src_idx_all = async_h2d_tensor(src_idx_vec, device);
+      torch::Tensor step_all = async_h2d_tensor(step_vec, device);
       for (int32_t step = 0; step <= max_draft_step; ++step) {
         CHECK(static_cast<size_t>(step) < draft_outputs.size())
             << "draft_outputs index out of range for step " << step;
@@ -2403,7 +2370,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
         << "failed to wait for accepted MTP tokens before JSON replay";
 
     const torch::Tensor accepted_tokens =
-        accepted_tokens_host.to(torch::kInt64).contiguous();
+        to_cpu_contiguous(accepted_tokens_host, torch::kInt64);
     const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
         detail::find_json_accepted_token_mismatches(
             input.json_object_states,
@@ -2945,10 +2912,8 @@ void MTPWorkerImpl::update_decode_step_input(
 
   const torch::Tensor& token_ids_cpu = input.token_ids_host;
   const torch::Tensor& positions_cpu = input.positions_host;
-  Slice<int32_t> input_token_ids = {token_ids_cpu.data_ptr<int32_t>(),
-                                    static_cast<size_t>(token_ids_cpu.numel())};
-  Slice<int32_t> input_positions = {positions_cpu.data_ptr<int32_t>(),
-                                    static_cast<size_t>(positions_cpu.numel())};
+  Slice<int32_t> input_token_ids = tensor_slice(token_ids_cpu);
+  Slice<int32_t> input_positions = tensor_slice(positions_cpu);
   std::vector<int32_t> positions_vec;
   positions_vec.reserve(num_sequences);
 
@@ -3083,12 +3048,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
 #endif
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
-  Slice<int32_t> token_ids = {
-      input.token_ids_host.data_ptr<int32_t>(),
-      static_cast<size_t>(input.token_ids_host.numel())};
-  Slice<int32_t> positions = {
-      input.positions_host.data_ptr<int32_t>(),
-      static_cast<size_t>(input.positions_host.numel())};
+  Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
+  Slice<int32_t> positions = tensor_slice(input.positions_host);
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   const bool use_atb_spec_kernel =
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
@@ -3506,12 +3467,8 @@ void MTPWorkerImpl::prepare_validate_inputs(
   const bool positions_decoupled = positions_are_decoupled_from_kv_length();
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
-  Slice<int32_t> token_ids = {
-      input.token_ids_host.data_ptr<int32_t>(),
-      static_cast<size_t>(input.token_ids_host.numel())};
-  Slice<int32_t> positions = {
-      input.positions_host.data_ptr<int32_t>(),
-      static_cast<size_t>(input.positions_host.numel())};
+  Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
+  Slice<int32_t> positions = tensor_slice(input.positions_host);
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   const bool use_atb_spec_kernel =
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
@@ -3706,9 +3663,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       specBuilder::make_decode_row_context(base_input);
   torch::TensorOptions token_options = extend_input.token_ids.options();
   torch::TensorOptions position_options = extend_input.positions.options();
-  Slice<int32_t> token_ids = {
-      base_input.token_ids_host.data_ptr<int32_t>(),
-      static_cast<size_t>(base_input.token_ids_host.numel())};
+  Slice<int32_t> token_ids = tensor_slice(base_input.token_ids_host);
 
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(num_sequences * 2);

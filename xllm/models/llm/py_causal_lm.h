@@ -69,6 +69,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override;
 
+  // Expose selected hidden rows to MTP and reuse the projection path.
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes,
                        torch::Tensor& out_hidden) override;

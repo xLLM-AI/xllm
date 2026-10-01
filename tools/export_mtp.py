@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Collection
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,8 +44,18 @@ from transformers import AutoConfig
 
 from scripts.logger import logger
 
-LEGACY_LAYER_MTP_MODEL_TYPES = {"deepseek_v3", "deepseek_v32", "glm4_moe", "glm_moe_dsa"}
+LEGACY_LAYER_MTP_MODEL_TYPES = {
+    "deepseek_v3",
+    "deepseek_v32",
+    "glm4_moe",
+    "glm_moe_dsa",
+    "glm5_next",
+}
 MIMO_MTP_MODEL_TYPES = {"mimo"}
+_GLM5_NEXT_SHARED_MTP_KEYS = {
+    "model.language_model.embed_tokens.weight": "model.embed_tokens.weight",
+    "lm_head.weight": "lm_head.weight",
+}
 QWEN3_5_MODEL_TYPES = {"qwen3_5", "qwen3_5_text"}
 QWEN3_5_MOE_MODEL_TYPES = {"qwen3_5_moe", "qwen3_5_moe_text"}
 QWEN3_5_EXPORT_MODEL_TYPES = QWEN3_5_MODEL_TYPES | QWEN3_5_MOE_MODEL_TYPES
@@ -176,6 +187,11 @@ def get_mtp_layer_id(config: ConfigView, model_type: str) -> int:
     raise ValueError(f"Unsupported model type for MTP export: {model_type}")
 
 
+def _skip_duplicate_shared_mtp_key(model_type: str, key: str, new_key: str, exported_keys: Collection[str]) -> bool:
+    """Keep draft-owned shared weights and their quantization metadata."""
+    return model_type == "glm5_next" and key in _GLM5_NEXT_SHARED_MTP_KEYS and new_key in exported_keys
+
+
 def get_mtp_model_type(model_type: str) -> str:
     """Get the MTP model type name for the output config."""
     mapping = {
@@ -184,6 +200,7 @@ def get_mtp_model_type(model_type: str) -> str:
         "deepseek_v4": "deepseek_v4_mtp",
         "glm4_moe": "glm4_moe_mtp",
         "glm_moe_dsa": "glm_moe_dsa_mtp",
+        "glm5_next": "glm5_next_mtp",
         "mimo": "mimo_mtp",
         "qwen3_5": "qwen3_5_mtp",
         "qwen3_5_text": "qwen3_5_mtp",
@@ -201,6 +218,7 @@ def get_mtp_architecture(model_type: str) -> str:
         "deepseek_v4": "DeepseekV4MtpForCausalLM",
         "glm4_moe": "Glm4MoeMtpForCausalLM",
         "glm_moe_dsa": "GlmMoeDsaMtpForCausalLM",
+        "glm5_next": "Glm5NextMtpForCausalLM",
         "mimo": "MiMoMtpForCausalLM",
         "qwen3_5": "Qwen3_5MtpForCausalLM",
         "qwen3_5_text": "Qwen3_5MtpForCausalLM",
@@ -299,7 +317,20 @@ def update_and_save_config(config: ConfigView, output_dir: str, model_type: str,
 
     _update_mtp_dsa_topk_config(updates, config, model_type)
 
+    if model_type == "glm5_next":
+        updates.update(
+            # GLM-5.3 uses KPool indices; the draft computes its own top-k.
+            index_share_for_mtp_iteration=False,
+            layer_types=["deepseek_sparse_attention"] * mtp_layer_count,
+            mlp_layer_types=["sparse"] * mtp_layer_count,
+            indexer_types=["full"] * mtp_layer_count,
+        )
+
     new_config.update(updates)
+
+    # The C++ GLM loader reads text_config; both views describe the draft.
+    if model_type == "glm5_next" and isinstance(new_config.get("text_config"), dict):
+        new_config["text_config"].update(updates)
 
     if model_type in QWEN3_5_EXPORT_MODEL_TYPES and isinstance(new_config.get("text_config"), dict):
         new_config["text_config"]["num_hidden_layers"] = mtp_layer_count
@@ -325,12 +356,28 @@ def get_mtp_weight_prefix(config: ConfigView, model_type: str) -> str:
     if model_type in MIMO_MTP_MODEL_TYPES:
         # MiMo checkpoint stores MTP weights at "model.mtp_layers.0." (0-indexed).
         return "model.mtp_layers.0."
+    if model_type == "glm5_next":
+        return f"model.language_model.layers.{get_mtp_layer_id(config, model_type)}."
     return f"model.layers.{get_mtp_layer_id(config, model_type)}"
 
 
 def map_mtp_key(key: str, prefix: str, model_type: str) -> str | None:
     if key == "rot.weight":
         return "model.rot.weight"
+
+    if model_type == "glm5_next":
+        if key in _GLM5_NEXT_SHARED_MTP_KEYS:
+            return _GLM5_NEXT_SHARED_MTP_KEYS[key]
+        if not key.startswith(prefix):
+            return None
+        relative_key = key[len(prefix) :]
+        if relative_key == "shared_head.norm.weight":
+            return "model.norm.weight"
+        if relative_key.startswith("shared_head.head."):
+            return "lm_head." + relative_key.removeprefix("shared_head.head.")
+        if relative_key.split(".", 1)[0] in {"embed_tokens", "enorm", "hnorm", "eh_proj"}:
+            return "model." + relative_key
+        return "model.layers.0." + relative_key
 
     if not key.startswith(prefix):
         return None
@@ -364,6 +411,8 @@ def update_quant_model_description(input_dir: str, output_dir: str, prefix: str,
     for key, value in quant_desc.items():
         new_key = map_mtp_key(key, prefix, model_type)
         if new_key is not None:
+            if _skip_duplicate_shared_mtp_key(model_type, key, new_key, updated_desc):
+                continue
             updated_desc[new_key] = value
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -432,15 +481,12 @@ def export_mtp_layer_parameters(input_dir: str, output_dir: str, config: ConfigV
 
         try:
             with safe_open(file_path, framework="pt") as f:
-                matching_keys = [k for k in f.keys() if k == "rot.weight" or k.startswith(prefix)]
-
-                if not matching_keys:
-                    logger.info(f"  No parameters starting with '{prefix}' found")
-                    continue
-
-                for key in matching_keys:
+                for key in f.keys():
                     new_key = map_mtp_key(key, prefix, model_type)
                     if new_key is None:
+                        continue
+                    # Prefer draft-owned embedding/head weights when present.
+                    if _skip_duplicate_shared_mtp_key(model_type, key, new_key, params):
                         continue
                     params[new_key] = f.get_tensor(key)
         except Exception:

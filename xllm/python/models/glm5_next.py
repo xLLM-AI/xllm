@@ -189,7 +189,7 @@ def _rowwise_rms(fn, x, *extra):
     Returns ``None`` when the row-wise path does not apply (env off, S<=1, or
     S above the cap), so the caller falls through to its batched implementation.
     Slicing (``x[..., i:i+1, :]``) is a pure view — no device tensor creation,
-    no H2D sync — so it is legal under aclgraph capture (see the _RMSNorm
+    no H2D sync — so it is legal under aclgraph capture (see the Glm5NextRMSNorm
     comment on why index_select was removed).
     """
     if os.environ.get("GLM5_RMSNORM_ROWWISE") == "1" and x.dim() >= 2 and 1 < x.shape[-2] <= _RMSNORM_ROWWISE_MAX_S:
@@ -199,7 +199,7 @@ def _rowwise_rms(fn, x, *extra):
     return None
 
 
-class _RMSNorm(nn.Module):
+class Glm5NextRMSNorm(nn.Module):
     """Pure-torch RMSNorm matching transformers (fp32 compute, cast back)."""
 
     def __init__(self, hidden_size: int, eps: float, dtype: torch.dtype, device: torch.device) -> None:
@@ -242,7 +242,7 @@ class _UnweightedRMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
-        # Same concurrency tiling hazard as _RMSNorm (this runs in the mHC
+        # Same concurrency tiling hazard as Glm5NextRMSNorm (this runs in the mHC
         # input projection on the same flattened [1, T, D] decode batch);
         # pin S=1 per row so the reduce path is batch-size-independent.
         rowwise = _rowwise_rms(self.forward, x)
@@ -1355,7 +1355,7 @@ class Glm5NextMlaAttention(Attention):
         self.q_a_proj = QLinear(
             self.hidden_size, self.q_lora_rank, device=dev, dtype=dt, kind="static", bias=cfg.attention_bias
         )
-        self.q_a_layernorm = _RMSNorm(self.q_lora_rank, self.eps, dtype, device)
+        self.q_a_layernorm = Glm5NextRMSNorm(self.q_lora_rank, self.eps, dtype, device)
         # q_b_proj: column-parallel (out = num_heads_local * (qk_nope + qk_rope))
         self.q_b_proj = QLinear(self.q_lora_rank, num_heads * self.qk_head_dim, device=dev, dtype=dt, kind="static")
         # kv_a: replicated (latent + rope)
@@ -1367,7 +1367,7 @@ class Glm5NextMlaAttention(Attention):
             kind="static",
             bias=cfg.attention_bias,
         )
-        self.kv_a_layernorm = _RMSNorm(self.kv_lora_rank, self.eps, dtype, device)
+        self.kv_a_layernorm = Glm5NextRMSNorm(self.kv_lora_rank, self.eps, dtype, device)
         # kv_b: column-parallel fp (absorbed split reads .weight; stays fp, see
         # design §3)
         self.kv_b_proj = ColumnParallelLinear(
@@ -1901,12 +1901,12 @@ class Glm5NextDecoderLayer(nn.Module):
     def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.layer_id = layer_id
-        self.input_layernorm = _RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.input_layernorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_dsa(layer_id):
             self.self_attn = Glm5NextMlaAttention(cfg, layer_id, dtype, device)
         else:
             self.self_attn = Glm5NextKdaAttention(cfg, layer_id, dtype, device)
-        self.post_attention_layernorm = _RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.post_attention_layernorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_moe(layer_id):
             self.mlp = Glm5NextMoE(cfg, dtype, device)
         else:
@@ -2019,7 +2019,7 @@ class Glm5NextModel(nn.Module):
             device=device,
         )
         self.layers = nn.ModuleList([Glm5NextDecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
-        self.norm = _RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.norm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.hc_head = Glm5NextHyperHead()
         # Set externally by the VL composer (get_input_embeddings) before the
         # runner drives forward(); when set, it replaces embed_tokens(input_ids)
@@ -2139,7 +2139,7 @@ def _real_ckpt_aliases(name: str) -> list:
 class Glm5NextForCausalLM(PyModelBase):
     """glm5_next causal LM. Registered under model_type='glm5_next'."""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, build_model: bool = True) -> None:
         super().__init__()
         self.cfg = Glm5NextConfig.from_dict(config)
         self.cfg.tp_size = int(config.get("tp_size", 1))
@@ -2156,7 +2156,8 @@ class Glm5NextForCausalLM(PyModelBase):
         device = torch.device(config.get("device", "npu:0" if torch_npu else "cpu"))
         self.dtype = dtype
         self.device = device
-        self.model = Glm5NextModel(self.cfg, dtype, device)
+        if build_model:
+            self.model = Glm5NextModel(self.cfg, dtype, device)
         self.lm_head = ColumnParallelLinear(
             self.cfg.hidden_size,
             self.cfg.vocab_size // self.cfg.tp_size,

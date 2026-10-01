@@ -112,6 +112,18 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if (metadata.is_prefill or metadata.is_chunked_prefill) and not is_expanded_spec_verify:
             return False
 
+        # KDA verify needs an explicit recurrent-state protocol. Preserve
+        # the eager fallback while both opt-in protocols are disabled.
+        linear_indices = getattr(metadata, "linear_state_indices", None)
+        if (
+            is_expanded_spec_verify
+            and not self.attention_backend.is_mla
+            and linear_indices is not None
+            and linear_indices.numel() > 0
+            and not self.attention_backend.supports_linear_spec_verify_graph
+        ):
+            return False
+
         batch_size = input_ids.numel()
         if mtp_topk_indices is not None:
             if mtp_topk_indices.dim() < 2 or mtp_topk_indices.shape[0] != batch_size:

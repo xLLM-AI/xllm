@@ -26,5 +26,6 @@ MODEL_PLATFORM_SUPPORT: dict[str, dict[str, bool]] = {
     "glm5_2": {"cuda": False, "npu": True},
     "glm5_2_mtp": {"cuda": False, "npu": True},
     "glm5_next_vl": {"cuda": False, "npu": True},
+    "glm5_next_mtp": {"cuda": False, "npu": True},
     "deepseek_v32_mtp": {"cuda": False, "npu": True},
 }

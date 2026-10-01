@@ -679,17 +679,21 @@ class TestDecodeAclGraphSpeculativeMetadata:
             is_prefill=False,
             is_chunked_prefill=False,
             dp_execution_token_counts=(),
+            linear_state_indices=torch.arange(8, dtype=torch.int32),
         )
 
-        with patch.object(
-            runner,
-            "_has_compatible_decode_metadata",
-            return_value=True,
+        with (
+            patch.object(runner, "_has_compatible_decode_metadata", return_value=True),
+            patch(
+                "xllm.python.model_executor.runners.decode_acl_graph.resolve_expanded_decode_metadata",
+                return_value=object(),
+            ),
         ):
-            assert runner.can_execute(
-                torch.zeros(32, dtype=torch.int32),
-                metadata,
-            )
+            # A KDA expanded batch requires a recurrent-state protocol.
+            with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", False):
+                assert not runner.can_execute(torch.zeros(32, dtype=torch.int32), metadata)
+            with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", True):
+                assert runner.can_execute(torch.zeros(32, dtype=torch.int32), metadata)
 
     def test_warmup_captures_with_scheduler_metadata_once(self) -> None:
         runner = self._runner()

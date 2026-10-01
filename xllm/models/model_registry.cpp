@@ -518,6 +518,16 @@ std::string resolve_dit_pipeline_type(
 
 }  // namespace util
 
+void ModelRegistry::register_mtp_shared_weight_owner(const std::string& name) {
+  get_instance()->model_registry_[name].owns_mtp_shared_weights = true;
+}
+
+bool ModelRegistry::owns_mtp_shared_weights(const std::string& name) {
+  const auto& models = get_instance()->model_registry_;
+  const auto entry = models.find(name);
+  return entry != models.end() && entry->second.owns_mtp_shared_weights;
+}
+
 std::string ModelRegistry::get_model_backend(const std::string& name) {
   ModelRegistry* instance = get_instance();
   return instance->model_backend_[name];

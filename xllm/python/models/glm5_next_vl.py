@@ -909,12 +909,6 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
     """
 
     def __init__(self, config: dict) -> None:
-        # NOTE: we inherit Glm5NextForCausalLM to reuse its weight-loader helpers
-        # (_load_kda_attn / _load_dsa_attn / _load_mlp / ...), but we deliberately
-        # do NOT call its __init__ (it requires a text-only config and would build
-        # a redundant language model). Initialize nn.Module directly instead.
-        nn.Module.__init__(self)
-
         # PyCausalLM hands us a FLAT ModelArgs dict (built by build_config_dict
         # via visit_properties): text fields are top-level (hidden_size,
         # n_layers, n_heads, tie_word_embeddings, tp_size, ...), vision fields
@@ -928,14 +922,23 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
         vcfg.tp_size = int(config.get("tp_size", 1))
         vcfg.tp_rank = int(config.get("tp_rank", 0))
 
-        tcfg = Glm5NextConfig.from_dict(text_cfg_dict)
-        tcfg.tp_size = int(config.get("tp_size", 1))
-        tcfg.tp_rank = int(config.get("tp_rank", 0))
-
-        dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
-        device = torch.device(config.get("device", "cuda"))
-        self.dtype = dtype
-        self.device = device
+        text_config = {
+            **text_cfg_dict,
+            "tp_size": vcfg.tp_size,
+            "tp_rank": vcfg.tp_rank,
+            "dtype": (
+                config.get("dtype")
+                or config.get("torch_dtype")
+                or text_cfg_dict.get("dtype")
+                or text_cfg_dict.get("torch_dtype")
+            ),
+            "torch_dtype": None,
+            "device": config.get("device", "cuda"),
+        }
+        super().__init__(text_config, build_model=False)
+        tcfg = self.cfg
+        dtype = self.dtype
+        device = self.device
 
         # Token IDs (flat or nested)
         self.image_token_id = int(config.get("image_token_id", text_cfg_dict.get("image_token_id", 154854)))
@@ -963,17 +966,6 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
         self.model = Glm5NextModel(tcfg, dtype=dtype, device=device)
         self.language_model = self.model
 
-        # --- LM head ---
-        tp = tcfg.tp_size
-        assert tcfg.vocab_size % tp == 0
-        self.lm_head = ColumnParallelLinear(
-            tcfg.hidden_size,
-            tcfg.vocab_size // tp,
-            tp,
-            gather_output=True,
-            dtype=dtype,
-            device=device,
-        )
         # Cast the whole graph (vision + LM + lm_head) to the target dtype/device
         # — mirrors Glm5NextForCausalLM.__init__ so KDA conv1d / indexer params
         # (which default to float32 inside Glm5NextModel) are bf16 like the rest.
