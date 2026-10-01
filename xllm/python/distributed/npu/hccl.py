@@ -14,8 +14,9 @@
 
 """HCCL collectives on the caller's current NPU stream.
 
-Buffers must be contiguous, nonempty and in ND storage format. The caller must
-retain the group and buffers through completion and graph replay. Capture requires
+Buffers must be contiguous and nonempty. AllGather also accepts aligned,
+whole 2D FRACTAL_NZ storage; other collectives require ND. The caller must retain
+the group and buffers through completion and graph replay. Capture requires
 ``HCCL_OP_EXPANSION_MODE=AIV``; unsupported execution fails without fallback.
 """
 
@@ -26,27 +27,48 @@ import torch.distributed as dist
 import torch_npu  # noqa: F401
 
 
-def _hccl_comm(group: dist.ProcessGroup, x: torch.Tensor) -> int:
-    if x.device.type != "npu":
-        raise RuntimeError(f"HCCL requires an NPU tensor, got {x.device}")
-    # torch_npu indexes local communicators by device, not group rank.
-    comm = group._get_backend(x.device).get_hccl_comm(x.device.index)
+def get_hccl_comm(
+    group: dist.ProcessGroup | None,
+    device: torch.device,
+    *,
+    initialize: bool = False,
+) -> int:
+    if device.type != "npu":
+        raise RuntimeError(f"HCCL requires an NPU tensor, got {device}")
+    if not dist.is_initialized():
+        raise RuntimeError("distributed is not initialized")
+    group = dist.distributed_c10d._get_default_group() if group is None else group
+    device_index = device.index if device.index is not None else torch.npu.current_device()
+    device = torch.device("npu", device_index)
+    backend = group._get_backend(device)
+    if initialize:
+        # Use the backend's idempotent initialization rather than inserting a
+        # collective conditionally on rank-local communicator cache state.
+        with torch.npu.device(device):
+            backend.eager_connect_single_device(device)
+    comm = backend.get_hccl_comm(device_index)
     if not comm:
-        raise RuntimeError(f"group {group.group_name} has no HCCL communicator on {x.device}")
+        raise RuntimeError(f"group {group.group_name} has no HCCL communicator on {device}")
     return comm
 
 
 def all_reduce_on_current_stream(x: torch.Tensor, group: dist.ProcessGroup) -> None:
     """In-place SUM, preserving the input dtype."""
-    torch.ops.xllm_ops.npu_all_reduce(x, _hccl_comm(group, x))
+    torch.ops.xllm_ops.npu_all_reduce(x, get_hccl_comm(group, x.device))
 
 
-def all_gather_on_current_stream(input: torch.Tensor, output: torch.Tensor, group: dist.ProcessGroup) -> None:
+def all_gather_on_current_stream(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    group: dist.ProcessGroup | None,
+    *,
+    initialize: bool = False,
+) -> None:
     """Gather equal input blocks in rank order into a nonoverlapping output.
 
     ``output.numel()`` must equal ``group.size() * input.numel()``.
     """
-    torch.ops.xllm_ops.npu_all_gather(input, output, _hccl_comm(group, input))
+    torch.ops.xllm_ops.npu_all_gather(input, output, get_hccl_comm(group, input.device, initialize=initialize))
 
 
 def reduce_scatter_on_current_stream(input: torch.Tensor, output: torch.Tensor, group: dist.ProcessGroup) -> None:
@@ -54,4 +76,4 @@ def reduce_scatter_on_current_stream(input: torch.Tensor, output: torch.Tensor, 
 
     ``input.numel()`` must equal ``group.size() * output.numel()``.
     """
-    torch.ops.xllm_ops.npu_reduce_scatter(input, output, _hccl_comm(group, input))
+    torch.ops.xllm_ops.npu_reduce_scatter(input, output, get_hccl_comm(group, input.device))

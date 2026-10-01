@@ -18,6 +18,8 @@ add_dependencies(all_tests python_tests)
 file(GLOB test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test_*.py")
 # These modules require a CUDA device and contain no NPU-testable cases.
 list(FILTER test_sources EXCLUDE REGEX "/test_(flashinfer_attention|kda_triton_ops|triton_ops)\\.py$")
+# These distributed modules are executed directly by torchrun below.
+list(FILTER test_sources EXCLUDE REGEX "/test_(all_gather_nz_bytes|bitwise_nz_bytes|matmul_nz_bytes)\\.py$")
 foreach(test_source IN LISTS test_sources)
   get_filename_component(test_name "${test_source}" NAME_WE)
   string(REGEX REPLACE "^test_" "python_tests." test_target "${test_name}")
@@ -35,4 +37,24 @@ foreach(test_source IN LISTS test_sources)
     LABELS python_tests
     # Preserve serial device use within the former single pytest process.
     RESOURCE_LOCK python_tests)
+endforeach()
+
+# Distributed NZ tests are standalone torchrun entrypoints; pytest skips them.
+foreach(nz_test IN ITEMS all_gather_nz_bytes bitwise_nz_bytes matmul_nz_bytes)
+  set(test_target python_distributed_tests.${nz_test})
+  add_custom_target(${test_target})
+  add_dependencies(python_tests ${test_target})
+  add_dependencies(${test_target} xllm_export)
+  add_test(NAME ${test_target}
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "PYTHONPATH=${PROJECT_SOURCE_DIR}:$ENV{PYTHONPATH}"
+      "XLLM_EXPORT_PATH=$<TARGET_FILE:xllm_export>"
+      "${Python3_EXECUTABLE}" -m torch.distributed.run
+      --standalone --nproc_per_node=2
+      "${CMAKE_CURRENT_SOURCE_DIR}/test_${nz_test}.py")
+  set_tests_properties(${test_target} PROPERTIES
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    LABELS "python_tests;distributed;npu"
+    RUN_SERIAL TRUE
+    TIMEOUT 300)
 endforeach()

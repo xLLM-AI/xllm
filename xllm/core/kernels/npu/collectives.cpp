@@ -44,6 +44,14 @@ bool is_npu(const torch::Tensor& tensor) {
   return tensor.defined() && tensor.device().is_privateuseone();
 }
 
+int64_t npu_format(const torch::Tensor& tensor) {
+#ifdef TORCH_HIGHER_THAN_PTA6
+  return at_npu::native::get_npu_format(tensor);
+#else
+  return at_npu::native::NPUNativeFunctions::get_npu_format(tensor);
+#endif
+}
+
 HcclDataType to_hccl_data_type(const torch::Tensor& input) {
   const torch::ScalarType type = input.scalar_type();
   switch (type) {
@@ -71,22 +79,34 @@ HcclDataType to_hccl_data_type(const torch::Tensor& input) {
   }
 }
 
-void check_input(const torch::Tensor& input) {
+void check_input(const torch::Tensor& input, bool allow_nz = false) {
   CHECK(is_npu(input)) << "HCCL requires an NPU tensor.";
   CHECK(input.layout() == torch::kStrided) << "HCCL requires a dense tensor.";
   CHECK(input.is_contiguous()) << "HCCL requires a contiguous tensor.";
   CHECK_GT(input.numel(), 0) << "HCCL requires a nonempty tensor.";
-#ifdef TORCH_HIGHER_THAN_PTA6
-  const int64_t format = at_npu::native::get_npu_format(input);
-#else
-  const int64_t format =
-      at_npu::native::NPUNativeFunctions::get_npu_format(input);
-#endif
-  CHECK_EQ(format, ACL_FORMAT_ND) << "HCCL requires ND storage format.";
+  const int64_t format = npu_format(input);
+  if (allow_nz && format == ACL_FORMAT_FRACTAL_NZ) {
+    CHECK_EQ(input.dim(), 2) << "NZ AllGather requires a 2D tensor.";
+    CHECK_EQ(input.storage_offset(), 0)
+        << "NZ AllGather requires whole storage.";
+    const auto dtype = input.scalar_type();
+    CHECK(dtype == torch::kChar || dtype == torch::kHalf ||
+          dtype == torch::kFloat || dtype == torch::kBFloat16)
+        << "Unsupported NZ AllGather dtype " << dtype;
+    const int64_t k0 = dtype == torch::kChar ? 32 : 16;
+    CHECK_EQ(input.size(0) % 16, 0) << "NZ AllGather requires aligned N.";
+    CHECK_EQ(input.size(1) % k0, 0) << "NZ AllGather requires aligned K.";
+    CHECK_EQ(input.storage().nbytes(), input.numel() * input.element_size())
+        << "NZ AllGather requires storage without padding.";
+  } else {
+    CHECK_EQ(format, ACL_FORMAT_ND) << "HCCL requires ND storage format.";
+  }
 }
 
-c10_npu::NPUStream collective_stream(const torch::Tensor& input, int64_t comm) {
-  check_input(input);
+c10_npu::NPUStream collective_stream(const torch::Tensor& input,
+                                     int64_t comm,
+                                     bool allow_nz = false) {
+  check_input(input, allow_nz);
   CHECK_NE(comm, 0) << "HCCL communicator must not be null.";
   const auto stream = c10_npu::getCurrentNPUStream();
   CHECK_EQ(stream.device_index(), input.device().index())
@@ -96,8 +116,12 @@ c10_npu::NPUStream collective_stream(const torch::Tensor& input, int64_t comm) {
 }
 
 void check_out_of_place_buffers(const torch::Tensor& input,
-                                const torch::Tensor& output) {
-  check_input(output);
+                                const torch::Tensor& output,
+                                bool allow_nz = false) {
+  check_input(output, allow_nz);
+  if (allow_nz) {
+    CHECK_EQ(npu_format(input), npu_format(output));
+  }
   CHECK_EQ(output.device(), input.device()) << "HCCL buffer device mismatch.";
   CHECK_EQ(output.scalar_type(), input.scalar_type())
       << "HCCL buffer dtype mismatch.";
@@ -137,8 +161,8 @@ void all_reduce_on_current_stream(torch::Tensor& input, int64_t comm) {
 void all_gather_on_current_stream(const torch::Tensor& input,
                                   torch::Tensor& output,
                                   int64_t comm) {
-  const auto stream = collective_stream(input, comm);
-  check_out_of_place_buffers(input, output);
+  const auto stream = collective_stream(input, comm, /*allow_nz=*/true);
+  check_out_of_place_buffers(input, output, /*allow_nz=*/true);
   const int64_t rank_size = comm_rank_size(comm);
   CHECK_EQ(output.numel() % rank_size, 0)
       << "AllGather output size must be divisible by rank size " << rank_size;
