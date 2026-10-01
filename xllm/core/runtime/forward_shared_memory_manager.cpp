@@ -3281,15 +3281,10 @@ std::string ForwardSharedMemoryManager::create_unique_name(
 }
 
 bool ForwardSharedMemoryManager::input_write(const ForwardInput& input) {
-  proto::PackedForwardInput packed_forward_input;
-  if (!forward_input_to_packed_proto(input, &packed_forward_input)) {
-    LOG(ERROR) << "failed to convert ForwardInput to packed transport payload";
-    return false;
-  }
-
-  const std::string& payload = packed_forward_input.payload();
-  uint64_t total_size = sizeof(ControlMetadata);
-  total_size += type_size<uint64_t> + payload.size();
+  const RawInputLayoutHeader layout = calculate_forward_input_layout(input);
+  const uint64_t payload_size = get_input_layout_size(layout);
+  const uint64_t total_size =
+      sizeof(ControlMetadata) + type_size<uint64_t> + payload_size;
   if (unlikely(total_size > size())) {
     LOG(ERROR) << "forward input size overflow, total_size: " << total_size
                << ", shm size: " << size();
@@ -3297,13 +3292,10 @@ bool ForwardSharedMemoryManager::input_write(const ForwardInput& input) {
   }
 
   char* data_ptr = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
-  write_data(data_ptr, static_cast<uint64_t>(payload.size()));
-  if (!payload.empty()) {
-    std::memcpy(data_ptr, payload.data(), payload.size());
-    data_ptr += payload.size();
-  }
+  write_data(data_ptr, payload_size);
+  serialize_forward_input(input, layout, data_ptr);
 
-  uint64_t real_size =
+  const uint64_t real_size =
       static_cast<uint64_t>(data_ptr - static_cast<char*>(base_address()));
   CHECK_EQ(total_size, real_size) << "total_size != real_size.";
   std::atomic_thread_fence(std::memory_order_release);
