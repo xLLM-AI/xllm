@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -37,6 +39,18 @@ struct MlaPackedC8Layout {
   static constexpr int64_t kRopeElementBytes = 2;   // bf16
   static constexpr int64_t kScaleElementBytes = 4;  // fp32
 };
+
+// Physical bytes per token for packed SFA C8 main KV storage.
+inline int64_t mla_packed_c8_row_bytes(int64_t kv_lora_rank,
+                                       int64_t qk_rope_head_dim) {
+  CHECK_EQ(kv_lora_rank % MlaPackedC8Layout::kTileSize, 0)
+      << "kv_lora_rank must be a multiple of the SFA C8 tile size ("
+      << MlaPackedC8Layout::kTileSize << ").";
+  return kv_lora_rank +
+         MlaPackedC8Layout::kRopeElementBytes * qk_rope_head_dim +
+         MlaPackedC8Layout::kScaleElementBytes *
+             (kv_lora_rank / MlaPackedC8Layout::kTileSize);
+}
 
 class KVCacheShape final {
  public:
@@ -84,6 +98,8 @@ class KVCacheShape final {
                               int64_t world_size);
   void init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
                               const ModelArgs& model_args);
+  void init_mla_packed_c8_shape(const KVCacheCapacity& kv_cache_cap,
+                                const ModelArgs& model_args);
   void init_index_cache_scale_shape();
   void init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
                              const ModelArgs& model_args,

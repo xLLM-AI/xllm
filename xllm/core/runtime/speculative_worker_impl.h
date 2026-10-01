@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "common/macros.h"
@@ -34,11 +35,13 @@ class LLMWorkerImpl;
 int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args);
 
 // Builds draft cache geometry while preserving grouped target pool capacities.
+// Match the draft pool to the configured main-KV storage dtype.
 KVCacheShape build_speculative_draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape,
     const ModelArgs& draft_model_args,
     int64_t block_size,
-    int64_t draft_world_size);
+    int64_t draft_world_size,
+    const std::string& kv_cache_dtype);
 
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.

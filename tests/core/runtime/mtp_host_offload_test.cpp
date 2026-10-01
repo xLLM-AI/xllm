@@ -359,8 +359,12 @@ TEST(SpeculativeDraftKVCacheShapeTest, ReusesGroupedTargetPoolCounts) {
   const KVCacheShape target_shape(
       target_capacity, target_model_args, /*world_size=*/8);
 
-  const KVCacheShape draft_shape = build_speculative_draft_kv_cache_shape(
-      target_shape, draft_model_args, kBlockSize, /*draft_world_size=*/1);
+  const KVCacheShape draft_shape =
+      build_speculative_draft_kv_cache_shape(target_shape,
+                                             draft_model_args,
+                                             kBlockSize,
+                                             /*draft_world_size=*/1,
+                                             /*kv_cache_dtype=*/"auto");
 
   EXPECT_TRUE(draft_shape.has_grouped_cache_layout());
   EXPECT_EQ(draft_shape.key_cache_shape(), (std::vector<int64_t>{2, 3, 5}));
@@ -771,6 +775,96 @@ TEST_F(MTPHostOffloadTest, Dsv4DraftSkipsUnsupportedCompressedBlockTypes) {
   EXPECT_TRUE(draft_ptr->blocks_equal(
       BlockType::SWA, kSourceBlockId, kDestinationBlockId));
 }
+
+#if defined(USE_NPU)
+// util::enable_mla_packed_c8 propagates packed layout only on NPU builds.
+// These shape checks do not allocate device tensors.
+constexpr int64_t kMtpTestBlockCount = 8;
+constexpr int64_t kMtpTestBlockSize = 16;
+constexpr int64_t kMtpTestKvLoraRank = 512;
+constexpr int64_t kMtpTestQkRopeHeadDim = 64;
+constexpr int64_t kMtpTestIndexHeadDim = 128;
+// Packed C8 layout: kv_lora + 2 * rope_dim + 4 * (kv_lora / tile=128).
+constexpr int64_t kMtpTestExpectedPackedHeadDim =
+    kMtpTestKvLoraRank + 2 * kMtpTestQkRopeHeadDim +
+    4 * (kMtpTestKvLoraRank / 128);
+
+ModelArgs make_glm_dsa_target_args() {
+  ModelArgs args;
+  args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(64)
+      .n_kv_heads(1)
+      .head_dim(kMtpTestKvLoraRank + kMtpTestQkRopeHeadDim)
+      .kv_lora_rank(kMtpTestKvLoraRank)
+      .qk_rope_head_dim(kMtpTestQkRopeHeadDim)
+      .index_n_heads(1)
+      .index_head_dim(kMtpTestIndexHeadDim);
+  return args;
+}
+
+KVCacheCapacity make_glm_dsa_target_capacity(bool enable_packed_c8) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kMtpTestBlockCount)
+      .block_size(kMtpTestBlockSize)
+      .enable_mla_kv_cache_quant(enable_packed_c8);
+  return capacity;
+}
+
+TEST(SpeculativeDraftKVCacheShapeTest,
+     PropagatesPackedC8LayoutOnGlmMoeDsaMtpDraft) {
+  const ModelArgs target_args = make_glm_dsa_target_args();
+  const KVCacheCapacity target_capacity =
+      make_glm_dsa_target_capacity(/*enable_packed_c8=*/true);
+  const KVCacheShape target_shape(
+      target_capacity, target_args, /*world_size=*/1);
+  ASSERT_TRUE(target_shape.has_key_cache_shape());
+  ASSERT_EQ(target_shape.key_cache_shape().back(),
+            kMtpTestExpectedPackedHeadDim);
+
+  ModelArgs draft_args = target_args;
+  draft_args.model_type("glm_moe_dsa_mtp");
+
+  const KVCacheShape draft_shape =
+      build_speculative_draft_kv_cache_shape(target_shape,
+                                             draft_args,
+                                             kMtpTestBlockSize,
+                                             /*draft_world_size=*/1,
+                                             /*kv_cache_dtype=*/"int8");
+  ASSERT_TRUE(draft_shape.has_key_cache_shape());
+  EXPECT_EQ(draft_shape.key_cache_shape(), target_shape.key_cache_shape());
+  ASSERT_TRUE(draft_shape.has_value_cache_shape());
+  EXPECT_EQ(draft_shape.value_cache_shape(), target_shape.value_cache_shape());
+  EXPECT_EQ(draft_shape.key_cache_shape().back(),
+            kMtpTestExpectedPackedHeadDim);
+}
+
+TEST(SpeculativeDraftKVCacheShapeTest, KeepsBf16LayoutWhenKvCacheDtypeIsAuto) {
+  const ModelArgs target_args = make_glm_dsa_target_args();
+  // enable_mla_kv_cache_quant defaults to false; kv_cache_dtype auto keeps
+  // the legacy BF16 [nope][rope] split (trailing dim is kv_lora, not the
+  // 656B packed row).
+  const KVCacheCapacity target_capacity =
+      make_glm_dsa_target_capacity(/*enable_packed_c8=*/false);
+  const KVCacheShape target_shape(
+      target_capacity, target_args, /*world_size=*/1);
+  ASSERT_TRUE(target_shape.has_key_cache_shape());
+  EXPECT_EQ(target_shape.key_cache_shape().back(), kMtpTestKvLoraRank);
+
+  ModelArgs draft_args = target_args;
+  draft_args.model_type("glm_moe_dsa_mtp");
+
+  const KVCacheShape draft_shape =
+      build_speculative_draft_kv_cache_shape(target_shape,
+                                             draft_args,
+                                             kMtpTestBlockSize,
+                                             /*draft_world_size=*/1,
+                                             /*kv_cache_dtype=*/"auto");
+  ASSERT_TRUE(draft_shape.has_key_cache_shape());
+  EXPECT_EQ(draft_shape.key_cache_shape(), target_shape.key_cache_shape());
+  EXPECT_EQ(draft_shape.key_cache_shape().back(), kMtpTestKvLoraRank);
+}
+#endif  // USE_NPU
 
 }  // namespace
 }  // namespace xllm

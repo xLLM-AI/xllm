@@ -80,8 +80,13 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
   // Indexed / base), each reading only its own shape, so coexistence here
   // is harmless. The prior exclusivity CHECK guarded a non-problem.
 
-  init_key_cache_shape(kv_cache_cap, model_args, world_size);
-  init_value_cache_shape(kv_cache_cap, model_args, world_size);
+  const bool mla_packed_c8 = kv_cache_cap.enable_mla_kv_cache_quant();
+  if (mla_packed_c8) {
+    init_mla_packed_c8_shape(kv_cache_cap, model_args);
+  } else {
+    init_key_cache_shape(kv_cache_cap, model_args, world_size);
+    init_value_cache_shape(kv_cache_cap, model_args, world_size);
+  }
 
   if (enable_lighting_indexer) {
     init_index_cache_shape(kv_cache_cap, model_args);
@@ -342,6 +347,15 @@ void KVCacheShape::init_value_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                             kv_cache_cap.block_size(),
                                             local_kv_head_count,
                                             model_args.head_dim()};
+}
+
+void KVCacheShape::init_mla_packed_c8_shape(const KVCacheCapacity& kv_cache_cap,
+                                            const ModelArgs& model_args) {
+  const int64_t packed_head_dim = mla_packed_c8_row_bytes(
+      model_args.kv_lora_rank(), model_args.qk_rope_head_dim());
+  key_cache_shape_ = std::vector<int64_t>{
+      kv_cache_cap.n_blocks(), kv_cache_cap.block_size(), 1, packed_head_dim};
+  value_cache_shape_ = *key_cache_shape_;
 }
 
 void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,

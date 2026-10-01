@@ -184,29 +184,27 @@ KVCacheTensors create_kv_cache_tensors(
                                              create_options);
   }
 #elif defined(USE_NPU)
+  const bool mla_packed_c8 = create_options.mla_packed_c8();
   const aclFormat npu_format_type =
       get_npu_kv_cache_format(create_options.model_type());
-  if (create_options.enable_kv_cache_huge_page_allocator()) {
-    tensors.key_cache =
-        alloc_npu_huge_page_tensor(kv_cache_shape.key_cache_shape(),
-                                   create_options.dtype(),
-                                   npu_format_type);
-    tensors.value_cache =
-        alloc_npu_huge_page_tensor(kv_cache_shape.value_cache_shape(),
-                                   create_options.dtype(),
-                                   npu_format_type);
-  } else {
-    tensors.key_cache = at_npu::native::npu_format_cast(
-        torch::empty(kv_cache_shape.key_cache_shape(),
-                     torch::dtype(create_options.dtype())
-                         .device(create_options.device())),
+  auto allocate = [&](const std::vector<int64_t>& shape,
+                      torch::ScalarType dtype) -> torch::Tensor {
+    if (create_options.enable_kv_cache_huge_page_allocator()) {
+      return alloc_npu_huge_page_tensor(shape, dtype, npu_format_type);
+    }
+    return at_npu::native::npu_format_cast(
+        torch::empty(shape,
+                     torch::dtype(dtype).device(create_options.device())),
         npu_format_type);
-    tensors.value_cache = at_npu::native::npu_format_cast(
-        torch::empty(kv_cache_shape.value_cache_shape(),
-                     torch::dtype(create_options.dtype())
-                         .device(create_options.device())),
-        npu_format_type);
-  }
+  };
+  tensors.key_cache =
+      allocate(kv_cache_shape.key_cache_shape(),
+               mla_packed_c8 ? torch::kChar : create_options.dtype());
+  // Packed main KV stores NoPE, RoPE and scale bytes once; K and V alias.
+  tensors.value_cache = mla_packed_c8
+                            ? tensors.key_cache
+                            : allocate(kv_cache_shape.value_cache_shape(),
+                                       create_options.dtype());
 #else
   tensors.key_cache = alloc_cache_tensor(KVCacheTensorRole::KEY,
                                          kv_cache_shape.key_cache_shape(),
@@ -230,13 +228,15 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
   CHECK(kv_cache_shape.has_index_cache_shape())
       << "index_cache_shape must be initialized.";
   IndexedKVCacheTensors tensors;
-  if (create_options.enable_kv_cache_quant()) {
+  const bool mla_packed_c8 = create_options.mla_packed_c8();
+  if (create_options.enable_kv_cache_quant() && !mla_packed_c8) {
     QuantizedKVCacheTensors quantized_tensors =
         create_quantized_kv_cache_tensors(kv_cache_shape, create_options);
     tensors.kv_cache_tensors = quantized_tensors.kv_cache_tensors;
     tensors.key_cache_scale = quantized_tensors.key_cache_scale;
     tensors.value_cache_scale = quantized_tensors.value_cache_scale;
   } else {
+    // Packed C8 uses byte storage with embedded scales.
     tensors.kv_cache_tensors =
         create_kv_cache_tensors(kv_cache_shape, create_options);
   }
@@ -312,8 +312,10 @@ QuantizedKVCacheTensors create_quantized_kv_cache_tensors(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& create_options) {
 #if !defined(USE_MLU)
+  // SFA C8 uses indexed byte storage; this generic factory keeps the
+  // conventional key/value scale contract and is only supported on MLU.
   CHECK(!create_options.enable_kv_cache_quant())
-      << "KV cache quantization is only supported on MLU backend.";
+      << util::kNonMluKvCacheQuantRejectMsg;
 #endif
 
   QuantizedKVCacheTensors tensors;

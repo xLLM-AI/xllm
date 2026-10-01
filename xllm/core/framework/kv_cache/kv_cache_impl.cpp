@@ -193,7 +193,9 @@ void KVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
                               torch::Tensor& dst_tensor) {
   torch::Tensor selected_keys = torch::index_select(key_cache_, 0, src_tensor);
   key_cache_.index_copy_(0, dst_tensor, selected_keys);
-  if (value_cache_.defined() && value_cache_.numel() > 0) {
+  // Packed MLA stores K and V in the same tensor.
+  if (value_cache_.defined() && value_cache_.numel() > 0 &&
+      !value_cache_.is_same(key_cache_)) {
     torch::Tensor selected_values =
         torch::index_select(value_cache_, 0, src_tensor);
     value_cache_.index_copy_(0, dst_tensor, selected_values);

@@ -34,12 +34,12 @@ DEFINE_double(max_memory_utilization,
               "The fraction of GPU memory to be used for model inference, "
               "including model weights and kv cache.");
 
-DEFINE_string(
-    kv_cache_dtype,
-    "auto",
-    "KV cache data type for quantization. \"auto\" (default): KV "
-    "cache dtype aligns with model dtype (no quantization). "
-    "\"int8\": Enables INT8 quantization. Only supported on MLU backend.");
+DEFINE_string(kv_cache_dtype,
+              "auto",
+              "KV cache data type for quantization. \"auto\" (default): KV "
+              "cache dtype aligns with model dtype (no quantization). "
+              "\"int8\": Enables INT8 quantization on MLU, and on NPU for "
+              "GLM-5.2 SFA packed KV cache.");
 
 DEFINE_string(indexer_cache_dtype,
               "auto",

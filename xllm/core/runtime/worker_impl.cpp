@@ -501,8 +501,12 @@ bool WorkerImpl::allocate_kv_cache_storage(
 
   if (enable_kv_cache_quant) {
 #if !defined(USE_MLU)
-    LOG(FATAL) << "KV Cache quantization is only supported on MLU backend. "
-               << "Current backend does not support this feature.";
+    // GLM-5.2 SFA C8 is the only MLA path plumbed for packed int8 KV cache on
+    // non-MLU backends. Anything else on non-MLU still hard-fails.
+    if (!util::enable_mla_packed_c8(enable_kv_cache_quant, args.model_type())) {
+      LOG(FATAL) << util::kNonMluKvCacheQuantRejectMsg << " got \""
+                 << args.model_type() << "\".";
+    }
 #endif
     // Check for unsupported scenarios
     if (options_.backend() == "vlm") {

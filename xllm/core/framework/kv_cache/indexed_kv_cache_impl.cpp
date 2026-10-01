@@ -188,15 +188,7 @@ std::vector<std::vector<int64_t>> IndexedKVCacheImpl::get_shapes() const {
 
 void IndexedKVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
                                      torch::Tensor& dst_tensor) {
-  torch::Tensor selected_keys = torch::index_select(key_cache_, 0, src_tensor);
-  key_cache_.index_copy_(0, dst_tensor, selected_keys);
-
-  // deepseek MLA has no value cache.
-  if (has_data(value_cache_)) {
-    torch::Tensor selected_values =
-        torch::index_select(value_cache_, 0, src_tensor);
-    value_cache_.index_copy_(0, dst_tensor, selected_values);
-  }
+  KVCacheImpl::swap_blocks(src_tensor, dst_tensor);
 
   if (key_cache_scale_.has_value() && has_data(key_cache_scale_.value())) {
     torch::Tensor selected_key_scales =

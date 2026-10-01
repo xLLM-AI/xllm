@@ -50,9 +50,11 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
     int64_t layer_id) {
   CHECK_GE(layer_id, 0) << "KV cache layer_id must be non-negative.";
 
+  const bool mla_packed_c8 = create_options.mla_packed_c8();
 #if !defined(USE_MLU)
-  CHECK(!create_options.enable_kv_cache_quant())
-      << "KV cache quantization is only supported on MLU backend.";
+  // Packed SFA C8 is the supported NPU KV quantization path.
+  CHECK(!create_options.enable_kv_cache_quant() || mla_packed_c8)
+      << util::kNonMluKvCacheQuantRejectMsg;
 #endif
 
   const bool is_linear_layer =
@@ -63,6 +65,12 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
   if (is_linear_layer) {
     return std::make_unique<LinearAttentionKVCacheImpl>(kv_cache_shape,
                                                         create_options);
+  }
+
+  // Packed main KV storage still honors per-layer indexer ownership.
+  if (mla_packed_c8) {
+    CHECK(create_options.enable_lighting_indexer())
+        << "SFA C8 packed KV cache requires an indexer (index_n_heads > 0).";
   }
 
   if (create_options.enable_kv_cache_quant() &&
@@ -87,7 +95,7 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
     return std::make_unique<IndexedKVCacheImpl>(kv_cache_shape, create_options);
   }
 
-  if (create_options.enable_kv_cache_quant()) {
+  if (create_options.enable_kv_cache_quant() && !mla_packed_c8) {
     return std::make_unique<QuantizedKVCacheImpl>(kv_cache_shape,
                                                   create_options);
   }
@@ -100,6 +108,10 @@ std::unique_ptr<KVCacheImpl> create_host_kv_cache_impl(
     const KVCacheCreateOptions& create_options,
     BlockType type,
     int64_t layer_count) {
+  // Host offload currently allocates model-dtype rows, not packed bytes.
+  CHECK(!create_options.mla_packed_c8())
+      << "Host KV cache offload does not support the SFA C8 packed layout; "
+         "set --host_blocks_factor=0 or --kv_cache_dtype=auto.";
   if (util::is_deepseek_v4_model_type(create_options.model_type())) {
     return std::make_unique<DeepSeekV4KVCacheImpl>(
         kv_cache_shape, create_options, type, layer_count);
