@@ -116,8 +116,14 @@ class CausalLM : public torch::nn::Module {
   virtual torch::Tensor logits(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes,
                                torch::Tensor& out_hidden) {
-    NOT_IMPLEMENTED();
-    return torch::Tensor();
+    if (seleted_idxes.defined()) {
+      const auto idxes = seleted_idxes.to(
+          torch::dtype(torch::kLong).device(hidden_states.device()));
+      out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
+    } else {
+      out_hidden = hidden_states;
+    }
+    return logits(hidden_states, seleted_idxes);
   }
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader) = 0;

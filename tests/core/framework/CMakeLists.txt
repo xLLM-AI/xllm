@@ -28,3 +28,16 @@ cc_test(
 )
 target_link_libraries(hf_model_loader_test PRIVATE
   "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+
+cc_test(
+  NAME
+    causal_lm_test
+  SRCS
+    causal_lm_test.cpp
+  DEPS
+    :model_loader
+    :xllm_server
+    GTest::gtest_main
+)
+target_link_libraries(causal_lm_test PRIVATE
+  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
