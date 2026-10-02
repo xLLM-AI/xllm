@@ -42,6 +42,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/parallel_state.h"
+#include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/params_utils.h"
 #include "runtime/worker.h"
@@ -276,6 +277,8 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
       static_cast<int64_t>(options_.max_tokens_per_chunk_for_prefill());
   estimate_options.max_linear_state_cache_slots =
       options_.max_linear_state_cache_slots();
+  estimate_options.linear_state_cache_block_limit =
+      get_npu_linear_state_cache_block_limit(args_.model_type());
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_chunked_prefill = options_.enable_chunked_prefill();
   estimate_options.enable_schedule_overlap = options_.enable_schedule_overlap();

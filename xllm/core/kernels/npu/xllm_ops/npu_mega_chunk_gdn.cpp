@@ -20,52 +20,46 @@ limitations under the License.
 #include <unordered_map>
 
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
+#include "core/kernels/npu/xllm_ops/mega_gdn_constants.h"
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"
 
 namespace xllm::kernel::npu {
 
 namespace {
-constexpr int64_t kMegaChunkSize = 128;
 
-struct MaskCache {
-  torch::Tensor mask_lower;
-  torch::Tensor mask_full;
-  torch::Tensor minus_identity_fp16;
-  torch::Tensor minus_identity_bf16;
-};
-
-std::unordered_map<int32_t, MaskCache> g_mask_cache;
+std::unordered_map<int32_t, MegaGdnMasks> g_mask_cache;
 std::mutex g_mask_cache_mutex;
 
-MaskCache get_or_create_masks(const torch::Device& device) {
+}  // namespace
+
+MegaGdnMasks get_or_create_mega_gdn_masks(const torch::Device& device) {
   const int32_t device_index = static_cast<int32_t>(device.index());
   std::lock_guard<std::mutex> lock(g_mask_cache_mutex);
   auto it = g_mask_cache.find(device_index);
   if (it != g_mask_cache.end()) {
     return it->second;
   }
-  MaskCache cache;
+  MegaGdnMasks cache;
   cache.mask_lower = torch::tril(
-      torch::ones({kMegaChunkSize, kMegaChunkSize},
+      torch::ones({kMegaGdnChunkSize, kMegaGdnChunkSize},
                   torch::TensorOptions(device).dtype(torch::kFloat32)),
       /*diagonal=*/-1);
   cache.mask_full = torch::tril(
-      torch::ones({kMegaChunkSize, kMegaChunkSize},
+      torch::ones({kMegaGdnChunkSize, kMegaGdnChunkSize},
                   torch::TensorOptions(device).dtype(torch::kFloat32)),
       /*diagonal=*/0);
   cache.minus_identity_fp16 =
-      torch::zeros({kMegaChunkSize, kMegaChunkSize},
+      torch::zeros({kMegaGdnChunkSize, kMegaGdnChunkSize},
                    torch::TensorOptions(device).dtype(torch::kFloat16));
   cache.minus_identity_fp16.diagonal().fill_(-1);
   cache.minus_identity_bf16 =
-      torch::zeros({kMegaChunkSize, kMegaChunkSize},
+      torch::zeros({kMegaGdnChunkSize, kMegaGdnChunkSize},
                    torch::TensorOptions(device).dtype(torch::kBFloat16));
   cache.minus_identity_bf16.diagonal().fill_(-1);
   g_mask_cache[device_index] = cache;
   return cache;
 }
-}  // namespace
 
 std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
     torch::Tensor& q,
@@ -114,8 +108,8 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
           << "cu_seqlens and q_seq_lens must describe the same sequences.";
       for (const int32_t seq_len : q_seq_lens) {
         CHECK_GE(seq_len, 0) << "q_seq_lens must be non-negative.";
-        num_chunks += (static_cast<int64_t>(seq_len) + kMegaChunkSize - 1) /
-                      kMegaChunkSize;
+        num_chunks += (static_cast<int64_t>(seq_len) + kMegaGdnChunkSize - 1) /
+                      kMegaGdnChunkSize;
       }
     } else {
       num_sequences = cu_seqlens_int32.numel() - 1;
@@ -123,7 +117,7 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
       auto cu_data = cu_cpu.accessor<int32_t, 1>();
       for (int64_t i = 0; i < num_sequences; ++i) {
         const int64_t seq_len = cu_data[i + 1] - cu_data[i];
-        num_chunks += (seq_len + kMegaChunkSize - 1) / kMegaChunkSize;
+        num_chunks += (seq_len + kMegaGdnChunkSize - 1) / kMegaGdnChunkSize;
       }
     }
   } else {
@@ -132,13 +126,13 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
         torch::tensor({0, static_cast<int32_t>(total_tokens)},
                       torch::TensorOptions(q.device()).dtype(torch::kInt32));
     num_sequences = 1;
-    num_chunks = (total_tokens + kMegaChunkSize - 1) / kMegaChunkSize;
+    num_chunks = (total_tokens + kMegaGdnChunkSize - 1) / kMegaGdnChunkSize;
   }
 
   const int64_t num_value_heads = v.size(2);
   const int64_t num_matrices = num_chunks * num_value_heads;
 
-  auto masks = get_or_create_masks(q.device());
+  auto masks = get_or_create_mega_gdn_masks(q.device());
   const auto& minus_identity =
       use_bf16_compute ? masks.minus_identity_bf16 : masks.minus_identity_fp16;
 
@@ -160,9 +154,9 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
   auto g_sum = torch::empty({B, T, H}, opts_fp32);
   auto g_t = torch::empty({H, T}, opts_fp32);
   auto beta_t = torch::empty({H, T}, opts_compute);
-  auto a = torch::zeros({B, T, H, kMegaChunkSize}, opts_compute);
-  auto a_inv_f32 = torch::zeros({B, T, H, kMegaChunkSize}, opts_fp32);
-  auto a_inv = torch::zeros({B, T, H, kMegaChunkSize}, opts_compute);
+  auto a = torch::zeros({B, T, H, kMegaGdnChunkSize}, opts_compute);
+  auto a_inv_f32 = torch::zeros({B, T, H, kMegaGdnChunkSize}, opts_fp32);
+  auto a_inv = torch::zeros({B, T, H, kMegaGdnChunkSize}, opts_compute);
   auto w = torch::empty({B, T, H, V}, opts_compute);
   auto u = torch::empty({B, T, H, V}, opts_compute);
   auto h = torch::zeros({num_matrices, K, V}, opts_compute);

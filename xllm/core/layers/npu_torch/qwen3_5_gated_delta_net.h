@@ -27,6 +27,18 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+namespace qwen3_5_gdn_internal {
+
+const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
+    const AttentionMetadata& attn_metadata,
+    const std::vector<int32_t>& live_slots,
+    const std::vector<int64_t>& validity_mask,
+    int64_t checkpoint_stride,
+    int64_t num_slots,
+    const torch::Device& device);
+
+}  // namespace qwen3_5_gdn_internal
+
 class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
  public:
   Qwen3_5GatedDeltaNetImpl() = default;
@@ -35,11 +47,12 @@ class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
                            const ParallelArgs& parallel_args,
                            const torch::TensorOptions& options);
 
+  torch::Tensor forward(const torch::Tensor& hidden_states,
+                        const AttentionMetadata& attn_metadata,
+                        KVCache& kv_cache,
+                        const ModelInputParams& input_params) override;
+
  protected:
-  std::pair<torch::Tensor, torch::Tensor> project_decode_inputs(
-      const torch::Tensor& hidden_states) override;
-  std::pair<torch::Tensor, torch::Tensor> project_flat_inputs(
-      const torch::Tensor& hidden_states) override;
   std::optional<
       std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
   project_split_inputs(const torch::Tensor& hidden_states,
@@ -50,11 +63,6 @@ class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
   void verify_projection_weights(const std::string& prefix) const override;
 
  private:
-  torch::Tensor merge_qkvz_from_split_activations(const torch::Tensor& qkv,
-                                                  const torch::Tensor& z) const;
-  torch::Tensor merge_ba_from_split_activations(const torch::Tensor& b,
-                                                const torch::Tensor& a) const;
-
   ColumnParallelLinear in_proj_qkv_{nullptr};
   ColumnParallelLinear in_proj_z_{nullptr};
   ColumnParallelLinear in_proj_b_{nullptr};

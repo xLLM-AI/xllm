@@ -55,6 +55,7 @@ limitations under the License.
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
 #include "framework/xtensor/xtensor_allocator.h"
+#include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/params_utils.h"
 #include "runtime/worker.h"
@@ -523,6 +524,8 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       static_cast<int64_t>(options_.max_tokens_per_chunk_for_prefill());
   estimate_options.max_linear_state_cache_slots =
       options_.max_linear_state_cache_slots();
+  estimate_options.linear_state_cache_block_limit =
+      get_npu_linear_state_cache_block_limit(args_.model_type());
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_chunked_prefill = options_.enable_chunked_prefill();
   estimate_options.enable_schedule_overlap = options_.enable_schedule_overlap();

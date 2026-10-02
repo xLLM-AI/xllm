@@ -34,6 +34,8 @@ class RmsNormGatedImpl : public torch::nn::Module {
   torch::Tensor forward(torch::Tensor& input,
                         std::optional<torch::Tensor> gate = std::nullopt);
 
+  const torch::Tensor& weight() const { return weight_; }
+
   void load_state_dict(const StateDict& state_dict);
 
  private:
