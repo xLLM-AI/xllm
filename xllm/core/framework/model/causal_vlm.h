@@ -96,14 +96,7 @@ class CausalVLMImpl : public CausalVLM {
     if constexpr (detail::has_logits_with_hidden<Model>::value) {
       return model_->logits(hidden_states, seleted_idxes, out_hidden);
     } else {
-      if (seleted_idxes.defined()) {
-        torch::Tensor idxes = seleted_idxes.to(
-            torch::dtype(torch::kLong).device(hidden_states.device()));
-        out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
-      } else {
-        out_hidden = hidden_states;
-      }
-      return model_->logits(hidden_states, seleted_idxes);
+      return CausalLM::logits(hidden_states, seleted_idxes, out_hidden);
     }
   }
 
