@@ -43,6 +43,8 @@ class RotaryEmbedding(nn.Module):
     rotary tables. Built on ``device`` in the model dtype to match C++ exactly.
     """
 
+    cos_sin_cache: torch.Tensor
+
     def __init__(
         self,
         head_dim: int,

@@ -34,6 +34,8 @@ from xllm.python.model_loader import (
 class Qwen3_5GatedDeltaNetBase(nn.Module, ABC):
     """Backend-neutral parameters and checkpoint layout for gated delta nets."""
 
+    conv1d_weight: torch.Tensor
+
     def __init__(
         self,
         cfg: Qwen3_5GatedDeltaNetConfig,
