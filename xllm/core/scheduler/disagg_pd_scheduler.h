@@ -15,8 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <absl/hash/hash.h>
 #include <brpc/channel.h>
 
+#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +26,7 @@ limitations under the License.
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "disagg_pd.pb.h"
@@ -98,6 +101,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   // decode-2: for decode receive first token from prefill
   bool decode_recv_first_generation(
       const std::string& req_id,
+      const std::string& reservation_id,
       int64_t token_id,
       bool has_logprob,
       float logprob,
@@ -113,6 +117,10 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       int32_t src_dp_rank,
       torch::Tensor mtp_bootstrap_embedding = torch::Tensor(),
       int32_t num_cached_tokens = 0);
+
+  // Only consumes a matching waiting reservation, never a running request.
+  bool release_reservation(const std::string& req_id,
+                           const std::string& reservation_id);
 
   // decode allocate blocks with prefix cache.
   bool try_allocate(Sequence* sequence);
@@ -156,6 +164,11 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       LOG(FATAL) << "Instance type is not set in disagg pd mode.";
     }
   }
+
+  void release_failed_request(const std::shared_ptr<Request>& request) override;
+
+  // Caller holds received_request_map_mutex_. Deallocation stays outside it.
+  std::shared_ptr<Request> take_waiting_request(const std::string& req_id);
 
   void do_permanent_rejection(const std::shared_ptr<Request>& request);
 
@@ -215,6 +228,12 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   moodycamel::BlockingConcurrentQueue<std::shared_ptr<Request>>
       prefill_request_queue_offline_;
 
+  // Release retries must not delay FirstGeneration or local KV reclamation.
+  ThreadPool reservation_release_threadpool_{
+      /*num_threads=*/1,
+      /*cpu_binding=*/false,
+      /*pool_name=*/"DisaggPDScheduler.reservation_release"};
+
   // use threadpool to handle prefill-completed request
   ThreadPool prefill_threadpool_{/*num_threads=*/1,
                                  /*cpu_binding=*/false,
@@ -239,6 +258,11 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   // instance_to_received_requests_map_ when the request is processed.
   std::unordered_map<std::string, std::string> request_to_instance_map_;
   std::mutex received_request_map_mutex_;
+  using ReservationIdentity = std::pair<std::string, std::string>;
+  std::unordered_map<ReservationIdentity,
+                     std::chrono::steady_clock::time_point,
+                     absl::Hash<ReservationIdentity>>
+      released_reservations_;
 
   // Lock for multi-threaded read-write linked instances
   std::mutex linked_instances_mutex_;

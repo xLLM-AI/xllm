@@ -15,11 +15,19 @@ limitations under the License.
 
 #include "scheduler/disagg_pd_scheduler.h"
 
+#include <brpc/closure_guard.h>
+#include <brpc/server.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <atomic>
+#include <barrier>
+#include <chrono>
 #include <cstdint>
+#include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,6 +36,7 @@ limitations under the License.
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_impl.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -67,19 +76,29 @@ class FakeEngine final : public Engine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
-             int32_t num_speculative_tokens = 0) {
+             int32_t num_speculative_tokens = 0,
+             int32_t dp_size = 1,
+             int32_t embedding_blocks = 0) {
     BlockManagerPool::Options options;
     options.num_blocks(num_blocks)
         .block_size(block_size)
         .enable_prefix_cache(true)
         .enable_disagg_pd(true)
         .num_speculative_tokens(num_speculative_tokens)
-        .num_embedding_blocks(num_blocks);
+        .num_embedding_blocks(embedding_blocks == 0 ? num_blocks
+                                                    : embedding_blocks);
     tokenizer_ = std::make_unique<FakeTokenizer>();
-    block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
+    block_manager_ = std::make_unique<BlockManagerPool>(options, dp_size);
   }
 
-  ForwardOutput step(BatchGroup& /*batch*/) { NOT_IMPLEMENTED(); }
+  std::function<ForwardOutput(BatchGroup&)> forward;
+
+  ForwardOutput step(BatchGroup& batch) {
+    if (forward) {
+      return forward(batch);
+    }
+    NOT_IMPLEMENTED();
+  }
 
   void update_last_step_result(BatchGroup& /*batch*/) { NOT_IMPLEMENTED(); }
 
@@ -94,7 +113,7 @@ class FakeEngine final : public Engine {
   const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
 
   std::vector<int64_t> get_active_activation_memory() const override {
-    NOT_IMPLEMENTED();
+    return {0};
   }
 
   bool init() override { return true; }
@@ -119,9 +138,47 @@ class FakeEngine final : public Engine {
 
 class TestDisaggPDScheduler final : public DisaggPDScheduler {
  public:
+  using DisaggPDScheduler::prepare_batch;
+
   template <typename TargetEngine>
   TestDisaggPDScheduler(TargetEngine* engine, const Options& options)
       : DisaggPDScheduler(engine, options, SkipRuntimeStart{}) {}
+
+  void admit_prefill(std::shared_ptr<Request> request,
+                     proto::DisaggPDService_Stub* stub = nullptr) {
+    {
+      std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
+      req_to_channel_map_[request->request_id()] = stub;
+    }
+    request_queue_.write(std::move(request));
+  }
+
+  bool has_channel(const std::string& req_id) {
+    std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
+    return req_to_channel_map_.contains(req_id);
+  }
+
+  bool reservations_empty() {
+    std::lock_guard<std::mutex> lock(received_request_map_mutex_);
+    return received_request_map_.empty() &&
+           instance_to_received_requests_map_.empty() &&
+           request_to_instance_map_.empty();
+  }
+
+  void wait_notifications() {
+    std::promise<void> done;
+    auto future = done.get_future();
+    reservation_release_threadpool_.schedule([&done] { done.set_value(); });
+    future.get();
+  }
+
+  std::future<void> prefill_completion() {
+    std::promise<void> done;
+    auto future = done.get_future();
+    prefill_threadpool_.schedule(
+        [done = std::move(done)]() mutable { done.set_value(); });
+    return future;
+  }
 
   void cache_prefill_blocks_for_test(Request* request) {
     cache_prefill_blocks(request);
@@ -136,6 +193,135 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   }
 };
 
+class DelayedReservationService final : public proto::DisaggPDService {
+ public:
+  explicit DelayedReservationService(DisaggPDScheduler* scheduler)
+      : scheduler_(scheduler) {
+    pending_releases_.reserve(3);
+  }
+
+  std::future<void> release_started() { return release_started_.get_future(); }
+
+  void ReleaseReservation(google::protobuf::RpcController* /*controller*/,
+                          const proto::ReleaseReservationRequest* request,
+                          proto::ReleaseReservationResponse* response,
+                          google::protobuf::Closure* done) override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!delay_releases_) {
+      lock.unlock();
+      complete_release(request, response, done);
+      return;
+    }
+    // Keep the server-side RPC alive without blocking a brpc worker.
+    pending_releases_.emplace_back([this, request, response, done] {
+      complete_release(request, response, done);
+    });
+    if (pending_releases_.size() == 1) {
+      release_started_.set_value();
+    }
+  }
+
+  void FirstGeneration(google::protobuf::RpcController* /*controller*/,
+                       const proto::DisaggGenerationsRequests* request,
+                       proto::Status* response,
+                       google::protobuf::Closure* done) override {
+    brpc::ClosureGuard done_guard(done);
+    CHECK_EQ(request->multi_gens_size(), 1);
+    const auto& gen = request->multi_gens(0);
+    CHECK_EQ(gen.tokens_size(), 1);
+    CHECK_EQ(gen.kv_cache_transfer_mode(), "PUSH");
+    const auto& token = gen.tokens(0);
+    response->set_ok(scheduler_->decode_recv_first_generation(
+        gen.req_id(),
+        gen.reservation_id(),
+        token.token_id(),
+        token.has_logprob(),
+        token.logprob(),
+        token.time_to_first_token_latency_seconds(),
+        gen.upstream_elapsed_seconds(),
+        /*top_tokens=*/{},
+        /*top_logprobs=*/{},
+        gen.kv_cache_transfer_mode(),
+        /*src_cluster_ids=*/{},
+        /*src_addrs=*/{},
+        /*source_mappings=*/{},
+        gen.dp_size(),
+        gen.dp_rank()));
+  }
+
+  void resume_releases() {
+    std::vector<std::function<void()>> pending;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      delay_releases_ = false;
+      pending.swap(pending_releases_);
+    }
+    for (auto& release : pending) {
+      release();
+    }
+  }
+
+ private:
+  void complete_release(const proto::ReleaseReservationRequest* request,
+                        proto::ReleaseReservationResponse* response,
+                        google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    const bool released = scheduler_->release_reservation(
+        request->req_id(), request->reservation_id());
+    response->set_result(released
+                             ? proto::ReleaseReservationResponse::RELEASED
+                             : proto::ReleaseReservationResponse::NOT_WAITING);
+  }
+
+  DisaggPDScheduler* scheduler_;
+  std::mutex mutex_;
+  bool delay_releases_ = true;
+  std::promise<void> release_started_;
+  std::vector<std::function<void()>> pending_releases_;
+};
+
+class ReservationService final : public proto::DisaggPDService {
+ public:
+  explicit ReservationService(DisaggPDScheduler* scheduler)
+      : scheduler_(scheduler) {}
+
+  enum class Failure { NONE, LOST_ACK, TRANSPORT, UNSUPPORTED };
+  Failure failure = Failure::NONE;
+  std::atomic<int32_t> calls{0};
+  std::atomic<int32_t> released{0};
+
+  void ReleaseReservation(google::protobuf::RpcController* controller,
+                          const proto::ReleaseReservationRequest* request,
+                          proto::ReleaseReservationResponse* response,
+                          google::protobuf::Closure* done) override {
+    const int32_t attempt = ++calls;
+    if (failure == Failure::UNSUPPORTED) {
+      proto::DisaggPDService::ReleaseReservation(
+          controller, request, response, done);
+      return;
+    }
+    if (failure == Failure::TRANSPORT) {
+      controller->SetFailed("injected transport error");
+    } else {
+      const bool freed = scheduler_->release_reservation(
+          request->req_id(), request->reservation_id());
+      released += freed ? 1 : 0;
+      response->set_result(
+          freed ? proto::ReleaseReservationResponse::RELEASED
+                : proto::ReleaseReservationResponse::NOT_WAITING);
+      if (failure == Failure::LOST_ACK && attempt == 1) {
+        controller->SetFailed("injected lost release confirmation");
+      }
+    }
+    if (done != nullptr) {
+      done->Run();
+    }
+  }
+
+ private:
+  DisaggPDScheduler* scheduler_;
+};
+
 DisaggPDScheduler::Options make_options() {
   DisaggPDScheduler::Options options;
   options.enable_disagg_pd(true)
@@ -148,9 +334,11 @@ DisaggPDScheduler::Options make_options() {
   return options;
 }
 
-DisaggPDScheduler::Options make_mtp_decode_options() {
+DisaggPDScheduler::Options make_mtp_decode_options(int32_t dp_size = 1) {
   DisaggPDScheduler::Options options = make_options();
-  options.instance_role(InstanceRole::DECODE).num_speculative_tokens(1);
+  options.instance_role(InstanceRole::DECODE)
+      .num_speculative_tokens(1)
+      .dp_size(dp_size);
   return options;
 }
 
@@ -162,6 +350,7 @@ DisaggPDScheduler::Options make_decode_options() {
 
 std::shared_ptr<Request> make_request(
     const std::vector<int32_t>& prompt_token_ids,
+    const std::string& req_id = "req",
     bool enable_schedule_overlap = false) {
   RequestSamplingParam sampling_param;
   SchedulerParam scheduler_param;
@@ -187,8 +376,11 @@ std::shared_ptr<Request> make_request(
                      /*mm_data=*/nullptr,
                      /*service_request_id=*/nullptr);
 
-  return std::make_shared<Request>(
-      "req", "x-request-id", "x-request-time", std::move(state), "service-req");
+  return std::make_shared<Request>(req_id,
+                                   "x-request-id",
+                                   "x-request-time",
+                                   std::move(state),
+                                   "service-req");
 }
 
 void finish_prefill(Sequence* sequence) {
@@ -224,9 +416,11 @@ bool recv_first_generation(DisaggPDScheduler* scheduler,
                            const torch::Tensor& mtp_embedding,
                            int32_t num_cached_tokens = 0,
                            double time_to_first_token_latency_seconds = 0.1,
-                           double upstream_elapsed_seconds = 0.0) {
+                           double upstream_elapsed_seconds = 0.0,
+                           const std::string& reservation_id = "") {
   return scheduler->decode_recv_first_generation(
       "req",
+      reservation_id,
       /*token_id=*/42,
       /*has_logprob=*/false,
       /*logprob=*/0.0f,
@@ -362,6 +556,7 @@ TEST(DisaggPDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
   source_mapping.remote_ids = {101, 102};
   ASSERT_TRUE(scheduler.decode_recv_first_generation(
       "req",
+      /*reservation_id=*/"",
       /*token_id=*/42,
       /*has_logprob=*/false,
       /*logprob=*/0.0f,
@@ -577,7 +772,7 @@ TEST(DisaggPDSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
         .num_speculative_tokens(num_speculative_tokens);
     TestDisaggPDScheduler scheduler(&engine, options);
     std::shared_ptr<Request> request =
-        make_request({1, 2, 3, 4}, /*enable_schedule_overlap=*/true);
+        make_request({1, 2, 3, 4}, "req", /*enable_schedule_overlap=*/true);
     Sequence* sequence = request->sequences().front().get();
     sequence->kv_state().set_kv_cache_tokens_num(2);
     ASSERT_TRUE(sequence->is_chunked_prefill_stage());
@@ -717,4 +912,470 @@ TEST(DisaggPDSchedulerTest, GenerationLatencyFieldsPreserveWireTags) {
   EXPECT_EQ(proto::RemoteToken::kTimeToFirstTokenLatencySecondsFieldNumber, 6);
 }
 
+TEST(DisaggPDSchedulerTest, LocalFailureReturnsDecodeReservation) {
+  FakeEngine decode_engine(/*num_blocks=*/16,
+                           /*block_size=*/2,
+                           /*num_speculative_tokens=*/1);
+  TestDisaggPDScheduler decode(&decode_engine, make_mtp_decode_options());
+  auto remote = make_request({1, 2, 3, 4, 5, 6, 7, 8});
+  auto* pool = decode_engine.block_manager_pool();
+  const auto free_before = pool->num_free_blocks();
+  ASSERT_TRUE(decode.try_allocate(remote->sequences()[0].get()));
+  remote->state().pd_reservation_id = "reservation";
+  ASSERT_TRUE(decode.decode_schedule(remote, "prefill"));
+  ASSERT_GE(remote->sequences()[0]->get_embedding_block_id(), 0);
+
+  ReservationService service(&decode);
+  brpc::Server server;
+  ASSERT_EQ(server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
+  ASSERT_EQ(server.Start("127.0.0.1:0", nullptr), 0);
+
+  FakeEngine prefill_engine(/*num_blocks=*/2, /*block_size=*/2);
+  TestDisaggPDScheduler prefill(&prefill_engine, make_options());
+  auto local = make_request({1, 2, 3, 4, 5, 6, 7, 8});
+  TransferKVInfo info;
+  info.request_id = local->request_id();
+  info.remote_instance_info.rpc_address =
+      "127.0.0.1:" + std::to_string(server.listen_address().port);
+  local->state().pd_reservation_id = "reservation";
+  local->state().decode_rpc_address = info.remote_instance_info.rpc_address;
+  local->sequences()[0]->kv_state().set_transfer_kv_info(std::move(info));
+  local->state().output_func = [](const RequestOutput&) { return true; };
+  prefill.admit_prefill(local);
+  auto batch = prefill.prepare_batch();
+  EXPECT_TRUE(batch[0].empty());
+  prefill.wait_notifications();
+
+  EXPECT_FALSE(prefill.has_channel(local->request_id()));
+  EXPECT_TRUE(decode.reservations_empty());
+  EXPECT_EQ(service.calls, 1);
+  EXPECT_EQ(pool->num_used_blocks()[0], 0u);
+  EXPECT_EQ(pool->num_free_blocks(), free_before);
+  EXPECT_EQ(remote->sequences()[0]->get_embedding_block_id(), -1);
+  EXPECT_EQ(first_cache_size(*pool), 0u);
+  server.Stop(0);
+  server.Join();
+}
+TEST(DisaggPDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
+  FakeEngine decode_engine(/*num_blocks=*/16, /*block_size=*/2);
+  TestDisaggPDScheduler decode(&decode_engine, make_decode_options());
+  auto remote_failed = make_request({1, 2, 3, 4, 5, 6, 7, 8}, "failed");
+  remote_failed->state().pd_reservation_id = "failed-reservation";
+  ASSERT_TRUE(decode.try_allocate(remote_failed->sequences()[0].get()));
+  ASSERT_TRUE(decode.decode_schedule(remote_failed, "prefill"));
+  auto remote_healthy = make_request({11, 12}, "healthy");
+  remote_healthy->state().stream = true;
+  remote_healthy->state().pd_reservation_id = "healthy-reservation";
+  ASSERT_TRUE(decode.try_allocate(remote_healthy->sequences()[0].get()));
+  ASSERT_TRUE(decode.decode_schedule(remote_healthy, "prefill"));
+
+  DelayedReservationService service(&decode);
+  brpc::Server server;
+  ASSERT_EQ(server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
+  ASSERT_EQ(server.Start("127.0.0.1:0", nullptr), 0);
+  const std::string address =
+      "127.0.0.1:" + std::to_string(server.listen_address().port);
+  brpc::Channel channel;
+  ASSERT_EQ(channel.Init(address.c_str(), nullptr), 0);
+  proto::DisaggPDService_Stub stub(&channel);
+
+  FakeEngine prefill_engine(/*num_blocks=*/4, /*block_size=*/2);
+  auto options = make_options();
+  options.enable_chunked_prefill(false).kv_cache_transfer_mode("PUSH");
+  TestDisaggPDScheduler prefill(&prefill_engine, options);
+  auto local_failed = make_request({1, 2, 3, 4, 5, 6, 7, 8}, "failed");
+  local_failed->state().pd_reservation_id = "failed-reservation";
+  local_failed->state().decode_rpc_address = address;
+  local_failed->state().output_func = [](const RequestOutput&) { return true; };
+  auto release_started = service.release_started();
+  prefill.admit_prefill(local_failed);
+  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  // Always resume the deferred server RPCs below, including on test failure.
+  EXPECT_EQ(release_started.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+
+  auto local_healthy = make_request({11, 12}, "healthy");
+  local_healthy->state().stream = true;
+  local_healthy->state().pd_reservation_id = "healthy-reservation";
+  prefill.admit_prefill(local_healthy, &stub);
+  auto batch = prefill.prepare_batch();
+  EXPECT_FALSE(batch[0].empty());
+  if (!batch[0].empty()) {
+    finish_prefill(local_healthy->sequences()[0].get());
+    // Supply the engine's PD output without enabling global PD configuration.
+    local_healthy->sequences()[0]->first_token() = RemoteToken{.token_id = 999};
+    prefill.prefill_send_first_generation();
+  }
+  auto prefill_done = prefill.prefill_completion();
+  // Shorter than the release retry budget: handoff and local reclamation must
+  // finish while the release RPC is still awaiting its server-side completion.
+  const std::future_status status =
+      prefill_done.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(status, std::future_status::ready);
+  std::shared_ptr<Request> queued;
+  if (status == std::future_status::ready) {
+    EXPECT_TRUE(decode.pop_decode_request_for_test(&queued));
+    EXPECT_EQ(queued, remote_healthy);
+    EXPECT_EQ(remote_healthy->sequences()[0]->num_generated_tokens(), 1u);
+    EXPECT_EQ(prefill_engine.block_manager_pool()->num_used_blocks()[0], 0u);
+    EXPECT_FALSE(decode.reservations_empty());
+  }
+
+  service.resume_releases();
+  prefill.wait_notifications();
+  prefill_done.get();
+  EXPECT_TRUE(decode.reservations_empty());
+  if (queued == nullptr) {
+    decode.pop_decode_request_for_test(&queued);
+  }
+  decode_engine.block_manager_pool()->deallocate_without_cache(
+      remote_healthy->sequences()[0].get());
+  server.Stop(0);
+  server.Join();
+}
+
+namespace {
+class ReservationTest : public ::testing::Test {
+ protected:
+  FakeEngine engine_{/*num_blocks=*/16,
+                     /*block_size=*/2,
+                     /*num_speculative_tokens=*/1,
+                     /*dp_size=*/2};
+  TestDisaggPDScheduler decode_{&engine_,
+                                make_mtp_decode_options(/*dp_size=*/2)};
+  ReservationService service_{&decode_};
+  brpc::Server server_;
+
+  void SetUp() override {
+    ASSERT_EQ(server_.AddService(&service_, brpc::SERVER_DOESNT_OWN_SERVICE),
+              0);
+    ASSERT_EQ(server_.Start("127.0.0.1:0", nullptr), 0);
+  }
+
+  void TearDown() override {
+    server_.Stop(0);
+    server_.Join();
+  }
+
+  std::shared_ptr<Request> reserve(
+      const std::string& id = "req",
+      const std::string& identity = "reservation") {
+    auto request = make_request({1, 2, 3, 4, 5, 6, 7, 8}, id);
+    request->state().pd_reservation_id = identity;
+    CHECK(decode_.try_allocate(request->sequences()[0].get()));
+    CHECK(decode_.decode_schedule(request, "prefill"));
+    return request;
+  }
+
+  std::shared_ptr<Request> accepted(const std::string& id = "req") {
+    auto request = make_request({1, 2, 3, 4, 5, 6, 7, 8}, id);
+    request->state().pd_reservation_id = "reservation";
+    request->state().decode_rpc_address =
+        "127.0.0.1:" + std::to_string(server_.listen_address().port);
+    request->state().output_func = [](const RequestOutput&) { return true; };
+    return request;
+  }
+
+  void fail_prefill() {
+    FakeEngine engine(/*num_blocks=*/2, /*block_size=*/2);
+    auto options = make_options();
+    options.enable_chunked_prefill(false);
+    TestDisaggPDScheduler prefill(&engine, options);
+    auto request = accepted();
+    std::promise<Status> error;
+    auto status = error.get_future();
+    request->state().output_func = [&error](const RequestOutput& output) {
+      error.set_value(output.status.value());
+      return true;
+    };
+    prefill.admit_prefill(request);
+    EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+    prefill.wait_notifications();
+    EXPECT_EQ(status.get().code(), StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_FALSE(prefill.has_channel(request->request_id()));
+    EXPECT_TRUE(request->state().decode_rpc_address.empty());
+    EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
+  }
+};
+}  // namespace
+
+TEST_F(ReservationTest, LostConfirmationRetriesWithoutDoubleFree) {
+  auto request = reserve();
+  BlockManager* embedding = request->sequences()[0]
+                                ->kv_state()
+                                .blocks(BlockType::EMBEDDING)[0]
+                                .manager();
+  ASSERT_EQ(embedding->num_used_blocks(), 1u);
+  service_.failure = ReservationService::Failure::LOST_ACK;
+  fail_prefill();
+  EXPECT_EQ(service_.calls, 2);
+  EXPECT_EQ(service_.released, 1);
+  EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+            (std::vector<size_t>{0, 0}));
+  EXPECT_EQ(embedding->num_used_blocks(), 0u);
+  EXPECT_EQ(embedding->num_free_blocks(), 15u);
+}
+
+TEST_F(ReservationTest, TransportFailureHasBoundedRetries) {
+  auto request = reserve();
+  service_.failure = ReservationService::Failure::TRANSPORT;
+  fail_prefill();
+  EXPECT_EQ(service_.calls, 3);
+  EXPECT_EQ(service_.released, 0);
+  EXPECT_FALSE(decode_.reservations_empty());
+  EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
+}
+
+TEST_F(ReservationTest, UnsupportedRpcHasBoundedRetries) {
+  auto request = reserve();
+  service_.failure = ReservationService::Failure::UNSUPPORTED;
+  fail_prefill();
+  EXPECT_EQ(service_.calls, 3);
+  EXPECT_EQ(service_.released, 0);
+  EXPECT_FALSE(decode_.reservations_empty());
+  EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
+}
+
+TEST_F(ReservationTest, ReleaseNeverConsumesAnotherReservation) {
+  auto first = reserve();
+  auto other = reserve("other");
+  EXPECT_FALSE(decode_.release_reservation("unknown", "reservation"));
+  EXPECT_FALSE(decode_.release_reservation("req", "wrong"));
+  EXPECT_FALSE(decode_.release_reservation("req", ""));
+  EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
+  EXPECT_FALSE(decode_.release_reservation("req", "reservation"));
+  auto replacement = reserve("req", "replacement");
+  EXPECT_FALSE(decode_.release_reservation("req", "reservation"));
+  EXPECT_GE(replacement->sequences()[0]->get_embedding_block_id(), 0);
+  EXPECT_GE(other->sequences()[0]->get_embedding_block_id(), 0);
+  EXPECT_TRUE(decode_.release_reservation("other", "reservation"));
+  EXPECT_TRUE(decode_.release_reservation("req", "replacement"));
+  EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+            (std::vector<size_t>{0, 0}));
+}
+
+TEST_F(ReservationTest, ReleasePreventsLateHandoff) {
+  EXPECT_FALSE(decode_.release_reservation("early", "reservation"));
+  auto late = make_request({11, 12, 13, 14}, "early");
+  late->state().pd_reservation_id = "reservation";
+  ASSERT_TRUE(decode_.try_allocate(late->sequences()[0].get()));
+  EXPECT_FALSE(decode_.decode_schedule(late, "prefill"));
+  EXPECT_EQ(late->sequences()[0]->get_embedding_block_id(), -1);
+  EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+            (std::vector<size_t>{0, 0}));
+  auto request = reserve();
+  EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
+  auto replacement = reserve("req", "replacement");
+  EXPECT_FALSE(recv_first_generation(
+      &decode_, torch::tensor({1.0f}), 0, 0.1, 0.0, "reservation"));
+  std::shared_ptr<Request> queued;
+  EXPECT_FALSE(decode_.pop_decode_request_for_test(&queued));
+  EXPECT_GE(replacement->sequences()[0]->get_embedding_block_id(), 0);
+  EXPECT_TRUE(recv_first_generation(
+      &decode_, torch::tensor({1.0f}), 0, 0.1, 0.0, "replacement"));
+  ASSERT_TRUE(decode_.pop_decode_request_for_test(&queued));
+  EXPECT_EQ(queued, replacement);
+  EXPECT_TRUE(decode_.reservations_empty());
+  engine_.block_manager_pool()->deallocate_without_cache(
+      queued->sequences()[0].get());
+}
+
+TEST_F(ReservationTest, HandoffPreventsReleaseOfRunningResources) {
+  auto request = reserve();
+  EXPECT_TRUE(recv_first_generation(
+      &decode_, torch::tensor({1.0f}), 0, 0.1, 0.0, "reservation"));
+  EXPECT_FALSE(decode_.release_reservation("req", "reservation"));
+  EXPECT_GE(request->sequences()[0]->get_embedding_block_id(), 0);
+  std::shared_ptr<Request> queued;
+  ASSERT_TRUE(decode_.pop_decode_request_for_test(&queued));
+  EXPECT_EQ(queued, request);
+  EXPECT_TRUE(decode_.reservations_empty());
+  engine_.block_manager_pool()->deallocate_without_cache(
+      queued->sequences()[0].get());
+}
+
+TEST_F(ReservationTest, ConcurrentHandoffAndReleaseHaveOneOwner) {
+  auto request = reserve();
+  std::barrier start(2);
+  auto release = std::async(std::launch::async, [&] {
+    start.arrive_and_wait();
+    return decode_.release_reservation("req", "reservation");
+  });
+  start.arrive_and_wait();
+  const bool handed_off = recv_first_generation(
+      &decode_, torch::tensor({1.0f}), 0, 0.1, 0.0, "reservation");
+  EXPECT_NE(release.get(), handed_off);
+  EXPECT_TRUE(decode_.reservations_empty());
+  std::shared_ptr<Request> queued;
+  EXPECT_EQ(decode_.pop_decode_request_for_test(&queued), handed_off);
+  if (handed_off) {
+    engine_.block_manager_pool()->deallocate_without_cache(
+        queued->sequences()[0].get());
+  }
+  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+            (std::vector<size_t>{0, 0}));
+}
+
+TEST_F(ReservationTest, ReleasePreservesValidPrefixOnly) {
+  auto* pool = engine_.block_manager_pool();
+  auto seed = make_request({1, 2, 3, 4}, "seed");
+  auto* seq = seed->sequences()[0].get();
+  ASSERT_TRUE(pool->allocate(seq));
+  const int32_t dp_rank = seq->dp_rank();
+  finish_prefill(seq);
+  decode_.cache_prefill_blocks_for_test(seed.get());
+  pool->deallocate(seed.get());
+  const auto cache_before = pool->num_blocks_in_prefix_cache();
+  auto request = make_request({1, 2, 3, 4, 5, 6, 7, 8});
+  request->state().pd_reservation_id = "reservation";
+  request->sequences()[0]->set_dp_rank(dp_rank);
+  ASSERT_TRUE(decode_.try_allocate(request->sequences()[0].get()));
+  ASSERT_EQ(
+      request->sequences()[0]->kv_state().shared_blocks_num(BlockType::KV), 2u);
+  ASSERT_TRUE(decode_.decode_schedule(request, "prefill"));
+  EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
+  EXPECT_EQ(pool->num_blocks_in_prefix_cache(), cache_before);
+  EXPECT_EQ(pool->num_used_blocks(), (std::vector<size_t>{0, 0}));
+  auto probe = make_request({1, 2, 3, 4, 5, 6, 7, 8}, "probe");
+  probe->sequences()[0]->set_dp_rank(dp_rank);
+  pool->allocate_shared(probe->sequences()[0].get());
+  EXPECT_EQ(probe->sequences()[0]->kv_state().shared_blocks_num(BlockType::KV),
+            2u);
+  pool->deallocate_without_cache(probe->sequences()[0].get());
+}
+
+TEST_F(ReservationTest, RejectedAllocationRollsBackWithoutReservation) {
+  auto* pool = engine_.block_manager_pool();
+  const auto free_before = pool->num_free_blocks();
+  auto rejected = make_request(std::vector<int32_t>(40, 1));
+  EXPECT_FALSE(decode_.try_allocate(rejected->sequences()[0].get()));
+  EXPECT_EQ(pool->num_free_blocks(), free_before);
+  EXPECT_EQ(pool->num_used_blocks(), (std::vector<size_t>{0, 0}));
+  EXPECT_EQ(rejected->sequences()[0]->get_embedding_block_id(), -1);
+  EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_FALSE(decode_.release_reservation("req", "reservation"));
+}
+
+TEST_F(ReservationTest, UnacceptedLocalFailureSendsNoRelease) {
+  FakeEngine engine(/*num_blocks=*/2, /*block_size=*/2);
+  TestDisaggPDScheduler prefill(&engine, make_options());
+  auto local = accepted();
+  local->state().decode_rpc_address.clear();
+  prefill.admit_prefill(local);
+  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  prefill.wait_notifications();
+  EXPECT_EQ(service_.calls, 0);
+  EXPECT_FALSE(prefill.has_channel(local->request_id()));
+}
+
+class ChunkReservationTest : public ReservationTest,
+                             public ::testing::WithParamInterface<bool> {};
+
+TEST_P(ChunkReservationTest, ChunkFailureWaitsForPriorPushCompletion) {
+  auto remote = reserve();
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  auto options = make_options();
+  options.enable_schedule_overlap(GetParam())
+      .enable_chunked_prefill(true)
+      .max_tokens_per_chunk_for_prefill(2)
+      .max_tokens_per_batch(2);
+  TestDisaggPDScheduler prefill(&engine, options);
+  auto local = accepted();
+  prefill.admit_prefill(local);
+  folly::Promise<bool> push;
+  std::promise<void> started;
+  auto entered = started.get_future();
+  engine.forward = [&](BatchGroup& batch) {
+    KVTransferCompletion completion;
+    completion.add(push.getSemiFuture());
+    started.set_value();
+    CHECK(completion.wait());
+    batch[0][0]->kv_state().set_kv_cache_tokens_num(2);
+    return ForwardOutput{};
+  };
+  auto step = std::async(std::launch::async,
+                         [&] { prefill.step(absl::ZeroDuration()); });
+  entered.get();
+  EXPECT_EQ(service_.calls, 0);
+  EXPECT_FALSE(decode_.reservations_empty());
+  EXPECT_GE(remote->sequences()[0]->get_embedding_block_id(), 0);
+  push.setValue(true);
+  step.get();
+  auto blocker = make_request(std::vector<int32_t>(12, 99), "blocker");
+  ASSERT_TRUE(
+      engine.block_manager_pool()->allocate(blocker->sequences()[0].get()));
+  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  prefill.wait_notifications();
+  EXPECT_EQ(service_.released, 1);
+  EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+            (std::vector<size_t>{0, 0}));
+  engine.block_manager_pool()->deallocate_without_cache(
+      blocker->sequences()[0].get());
+}
+INSTANTIATE_TEST_SUITE_P(OverlapModes, ChunkReservationTest, ::testing::Bool());
+
+TEST_F(ReservationTest, BudgetFailureReleasesOnlyTarget) {
+  auto remote = reserve();
+  auto other = reserve("other");
+  FakeEngine engine(/*num_blocks=*/16, /*block_size=*/2);
+  auto options = make_options();
+  options.enable_chunked_prefill(false).max_tokens_per_batch(2);
+  TestDisaggPDScheduler prefill(&engine, options);
+  auto local = accepted();
+  prefill.admit_prefill(local);
+  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  prefill.wait_notifications();
+  EXPECT_EQ(service_.released, 1);
+  EXPECT_EQ(remote->sequences()[0]->get_embedding_block_id(), -1);
+  EXPECT_GE(other->sequences()[0]->get_embedding_block_id(), 0);
+  EXPECT_TRUE(decode_.release_reservation("other", "reservation"));
+  EXPECT_TRUE(decode_.reservations_empty());
+}
+
+TEST_F(ReservationTest, DuplicateAdmissionRollsBackUncomputedResources) {
+  auto original = reserve();
+  auto duplicate = make_request({11, 12, 13, 14});
+  duplicate->state().pd_reservation_id = "duplicate";
+  ASSERT_TRUE(decode_.try_allocate(duplicate->sequences()[0].get()));
+  BlockManager* embedding = duplicate->sequences()[0]
+                                ->kv_state()
+                                .blocks(BlockType::EMBEDDING)[0]
+                                .manager();
+  const size_t embedding_used = embedding->num_used_blocks();
+  EXPECT_FALSE(decode_.decode_schedule(duplicate, "prefill"));
+  EXPECT_EQ(duplicate->sequences()[0]->get_embedding_block_id(), -1);
+  EXPECT_EQ(embedding->num_used_blocks(), embedding_used - 1);
+  EXPECT_EQ(engine_.block_manager_pool()->num_blocks_in_prefix_cache(),
+            (std::vector<size_t>{0, 0}));
+  EXPECT_GE(original->sequences()[0]->get_embedding_block_id(), 0);
+  EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
+}
+TEST(DisaggPDSchedulerTest, MtpExhaustionRollsBackKvReservation) {
+  FakeEngine engine(/*num_blocks=*/8,
+                    /*block_size=*/2,
+                    /*num_speculative_tokens=*/1,
+                    /*dp_size=*/1,
+                    /*embedding_blocks=*/2);
+  TestDisaggPDScheduler decode(&engine, make_mtp_decode_options());
+  auto original = make_request({1, 2, 3, 4});
+  original->state().pd_reservation_id = "reservation";
+  ASSERT_TRUE(decode.try_allocate(original->sequences()[0].get()));
+  ASSERT_TRUE(decode.decode_schedule(original, "prefill"));
+  auto* pool = engine.block_manager_pool();
+  const auto free_before = pool->num_free_blocks();
+  auto rejected = make_request({11, 12, 13, 14}, "rejected");
+  EXPECT_FALSE(decode.try_allocate(rejected->sequences()[0].get()));
+  EXPECT_EQ(rejected->sequences()[0]->get_embedding_block_id(), -1);
+  EXPECT_EQ(pool->num_free_blocks(), free_before);
+  EXPECT_EQ(pool->num_used_blocks()[0], 2u);
+  EXPECT_EQ(first_cache_size(*pool), 0u);
+  EXPECT_FALSE(decode.release_reservation("rejected", "reservation"));
+  EXPECT_TRUE(decode.release_reservation("req", "reservation"));
+  EXPECT_TRUE(decode.reservations_empty());
+  EXPECT_EQ(pool->num_used_blocks()[0], 0u);
+}
 }  // namespace xllm

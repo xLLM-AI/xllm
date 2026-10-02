@@ -408,6 +408,10 @@ SchedulerState ContinuousSchedulerBase::make_state() {
       .min_speculative_tokens_required = min_speculative_tokens_required_,
       .enable_prefix_cache = enable_prefix_cache_,
       .has_linear_attention_layers = has_linear_attention_layers_,
+      .release_failed_request =
+          [this](const std::shared_ptr<Request>& request) {
+            release_failed_request(request);
+          },
   };
 }
 

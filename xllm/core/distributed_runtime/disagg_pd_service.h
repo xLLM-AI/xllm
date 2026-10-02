@@ -49,6 +49,11 @@ class DisaggPDService : public proto::DisaggPDService {
                       proto::Status* response,
                       ::google::protobuf::Closure* done) override;
 
+  void ReleaseReservation(::google::protobuf::RpcController* controller,
+                          const proto::ReleaseReservationRequest* request,
+                          proto::ReleaseReservationResponse* response,
+                          ::google::protobuf::Closure* done) override;
+
  protected:
   std::unique_ptr<DisaggPDServiceImpl> disagg_pd_service_impl_;
 
