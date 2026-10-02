@@ -52,6 +52,8 @@ TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
             CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION);
   EXPECT_EQ(classify_combined_draft_execution_path("glm_moe_dsa_mtp"),
             CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION);
+  EXPECT_EQ(classify_combined_draft_execution_path("qwen3_next_mtp"),
+            CombinedDraftExecutionPath::UNSUPPORTED);
   EXPECT_EQ(classify_combined_draft_execution_path("mimo_mtp"),
             CombinedDraftExecutionPath::UNSUPPORTED);
 }

@@ -127,6 +127,76 @@ torch::Tensor decode_attention_reference(const torch::Tensor& query,
       .unsqueeze(0);
 }
 
+struct MegaGdnInputs {
+  torch::Tensor qkv;
+  torch::Tensor z;
+  torch::Tensor b;
+  torch::Tensor a;
+  torch::Tensor conv_weight;
+  torch::Tensor conv_state;
+  torch::Tensor a_log;
+  torch::Tensor dt_bias;
+  torch::Tensor ssm_state;
+  torch::Tensor read_indices;
+  torch::Tensor write_indices;
+  torch::Tensor norm_weight;
+};
+
+MegaGdnInputs make_mega_gdn_inputs(int64_t sequence_length, bool same_slot) {
+  constexpr int64_t kHeadDim = 128;
+  constexpr int64_t kKeyHeads = 1;
+  constexpr int64_t kValueHeads = 1;
+  constexpr int64_t kConvDim = (2 * kKeyHeads + kValueHeads) * kHeadDim;
+  constexpr int64_t kSlots = 2;
+  torch::manual_seed(20260831 + sequence_length);
+  const auto cpu_bf16 = torch::TensorOptions().dtype(torch::kBFloat16);
+  const auto cpu_float = torch::TensorOptions().dtype(torch::kFloat32);
+  const auto npu = torch::Device(torch::kPrivateUse1);
+  const int64_t write_slot = same_slot ? 0 : 1;
+
+  MegaGdnInputs inputs;
+  inputs.qkv = (torch::randn({1, sequence_length, kConvDim}, cpu_float) * 0.1)
+                   .to(torch::kBFloat16)
+                   .to(npu);
+  inputs.z =
+      (torch::randn({1, sequence_length, kValueHeads, kHeadDim}, cpu_float) *
+       0.1)
+          .to(torch::kBFloat16)
+          .to(npu);
+  inputs.b = (torch::randn({1, sequence_length, kValueHeads}, cpu_float) * 0.1)
+                 .to(torch::kBFloat16)
+                 .to(npu);
+  inputs.a = (torch::randn({1, sequence_length, kValueHeads}, cpu_float) * 0.1)
+                 .to(torch::kBFloat16)
+                 .to(npu);
+  inputs.conv_weight = (torch::randn({4, kConvDim}, cpu_float) * 0.05)
+                           .to(torch::kBFloat16)
+                           .to(npu);
+  inputs.conv_state =
+      (torch::randn({kSlots, sequence_length + 2, kConvDim}, cpu_float) * 0.1)
+          .to(torch::kBFloat16)
+          .to(npu);
+  inputs.a_log = torch::full({kValueHeads}, -1.0, cpu_float).to(npu);
+  inputs.dt_bias = torch::zeros({kValueHeads}, cpu_float).to(npu);
+  inputs.ssm_state =
+      (torch::randn({kSlots * sequence_length, kValueHeads, kHeadDim, kHeadDim},
+                    cpu_float) *
+       0.02)
+          .to(npu);
+  inputs.read_indices =
+      torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt32)).to(npu);
+  inputs.write_indices =
+      torch::tensor({write_slot}, torch::TensorOptions().dtype(torch::kInt32))
+          .to(npu);
+  inputs.norm_weight = torch::ones({kHeadDim}, cpu_bf16).to(npu);
+  return inputs;
+}
+
+void expect_same_storage(const torch::Tensor& output,
+                         const torch::Tensor& input) {
+  EXPECT_EQ(output.const_data_ptr(), input.const_data_ptr());
+}
+
 class NpuXllmOpsTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -1084,6 +1154,148 @@ assert graph_result.data_ptr() == indices_address
 assert sparse_indices.data_ptr() == indices_address
 assert sparse_values.data_ptr() == values_address
 )PY");
+}
+
+TEST_F(NpuXllmOpsTest, MegaGdnPrefillColdAndSameSlotKeepD2DState) {
+  py::gil_scoped_acquire gil;
+  constexpr int64_t kSequenceLength = 128;
+  constexpr int64_t kCheckpointStride = 2;
+  for (const bool cold_start : {true, false}) {
+    SCOPED_TRACE(::testing::Message() << "cold_start=" << cold_start);
+    MegaGdnInputs inputs = make_mega_gdn_inputs(kSequenceLength,
+                                                /*same_slot=*/true);
+    inputs.conv_state =
+        inputs.conv_state.slice(/*dim=*/1, 0, kCheckpointStride + 2)
+            .contiguous();
+    inputs.ssm_state =
+        inputs.ssm_state.slice(/*dim=*/0, 0, 2 * kCheckpointStride)
+            .contiguous();
+    const auto index_options = torch::TensorOptions().dtype(torch::kInt32);
+    auto conv_read_indices =
+        torch::tensor({cold_start ? int32_t{-1} : int32_t{1}}, index_options)
+            .to(torch::kPrivateUse1);
+    auto conv_write_indices =
+        torch::tensor({1}, index_options).to(torch::kPrivateUse1);
+    auto ssm_read_indices =
+        torch::tensor({cold_start ? int32_t{-1}
+                                  : static_cast<int32_t>(kCheckpointStride)},
+                      index_options)
+            .to(torch::kPrivateUse1);
+    auto ssm_write_indices =
+        torch::tensor({static_cast<int32_t>(kCheckpointStride)}, index_options)
+            .to(torch::kPrivateUse1);
+    auto cu_seqlens =
+        torch::tensor({int32_t{0}, static_cast<int32_t>(kSequenceLength)},
+                      torch::TensorOptions().dtype(torch::kInt32))
+            .to(torch::kPrivateUse1);
+
+    const torch::Tensor expected_conv_tail =
+        inputs.qkv.squeeze(0).slice(/*dim=*/0, kSequenceLength - 3).clone();
+    torch::Tensor packed_qkv = inputs.qkv.squeeze(0);
+    torch::Tensor packed_b = inputs.b.squeeze(0);
+    torch::Tensor packed_a = inputs.a.squeeze(0);
+    torch::Tensor packed_z = inputs.z.squeeze(0);
+    const auto outputs =
+        xllm::kernel::npu::npu_mega_gdn_prefill(packed_qkv,
+                                                packed_b,
+                                                packed_a,
+                                                packed_z,
+                                                inputs.conv_weight,
+                                                inputs.conv_state,
+                                                inputs.a_log,
+                                                inputs.dt_bias,
+                                                conv_read_indices,
+                                                conv_write_indices,
+                                                ssm_read_indices,
+                                                ssm_write_indices,
+                                                inputs.ssm_state,
+                                                cu_seqlens,
+                                                inputs.norm_weight,
+                                                /*num_matrices=*/1);
+
+    EXPECT_EQ(std::get<0>(outputs).sizes(), packed_z.sizes());
+    expect_same_storage(std::get<1>(outputs), inputs.conv_state);
+    expect_same_storage(std::get<2>(outputs), inputs.ssm_state);
+    EXPECT_TRUE(torch::equal(inputs.conv_state[1].slice(/*dim=*/0, 0, 3).cpu(),
+                             expected_conv_tail.cpu()));
+    EXPECT_TRUE(torch::isfinite(std::get<0>(outputs)).all().item<bool>());
+  }
+}
+
+TEST_F(NpuXllmOpsTest, MegaGdnDecodeSameSlotKeepsD2DState) {
+  py::gil_scoped_acquire gil;
+  MegaGdnInputs inputs = make_mega_gdn_inputs(/*sequence_length=*/1,
+                                              /*same_slot=*/true);
+
+  const torch::Tensor initial_conv_state = inputs.conv_state.clone();
+  const auto outputs =
+      xllm::kernel::npu::npu_mega_gdn_decode(inputs.qkv.squeeze(1),
+                                             inputs.z.squeeze(1),
+                                             inputs.b.squeeze(1),
+                                             inputs.a.squeeze(1),
+                                             inputs.conv_weight,
+                                             inputs.conv_state,
+                                             inputs.a_log,
+                                             inputs.dt_bias,
+                                             inputs.ssm_state,
+                                             inputs.read_indices,
+                                             inputs.write_indices,
+                                             inputs.norm_weight,
+                                             /*fla_ssm_state_layout=*/true);
+
+  EXPECT_EQ(std::get<0>(outputs).sizes(), inputs.qkv.squeeze(1).sizes());
+  EXPECT_EQ(std::get<3>(outputs).sizes(), inputs.z.squeeze(1).sizes());
+  expect_same_storage(std::get<1>(outputs), inputs.conv_state);
+  expect_same_storage(std::get<2>(outputs), inputs.ssm_state);
+  EXPECT_TRUE(torch::equal(inputs.conv_state[0][0].cpu(),
+                           initial_conv_state[0][1].cpu()));
+  EXPECT_TRUE(torch::equal(inputs.conv_state[0][1].cpu(),
+                           initial_conv_state[0][2].cpu()));
+  EXPECT_TRUE(
+      torch::equal(inputs.conv_state[0][2].cpu(), inputs.qkv[0][0].cpu()));
+  EXPECT_TRUE(torch::isfinite(std::get<3>(outputs)).all().item<bool>());
+}
+
+TEST_F(NpuXllmOpsTest, MegaGdnMtpSameSlotAcceptedBoundariesKeepD2DState) {
+  py::gil_scoped_acquire gil;
+  constexpr int64_t kSequenceLength = 5;
+  for (const int32_t accepted : {1, static_cast<int32_t>(kSequenceLength)}) {
+    SCOPED_TRACE(::testing::Message() << "accepted=" << accepted);
+    MegaGdnInputs inputs = make_mega_gdn_inputs(kSequenceLength,
+                                                /*same_slot=*/true);
+    const auto accepted_tokens =
+        torch::tensor({accepted}, torch::TensorOptions().dtype(torch::kInt32))
+            .to(torch::kPrivateUse1);
+
+    const torch::Tensor initial_conv_state = inputs.conv_state.clone();
+    const auto outputs = xllm::kernel::npu::npu_mega_gdn_mtp_decode(
+        inputs.qkv,
+        inputs.z,
+        inputs.b,
+        inputs.a,
+        inputs.conv_weight,
+        inputs.conv_state,
+        inputs.a_log,
+        inputs.dt_bias,
+        inputs.ssm_state,
+        inputs.read_indices,
+        inputs.write_indices,
+        accepted_tokens,
+        inputs.norm_weight,
+        /*fla_ssm_state_layout=*/true);
+
+    EXPECT_EQ(std::get<0>(outputs).sizes(), inputs.qkv.sizes());
+    EXPECT_EQ(std::get<3>(outputs).sizes(), inputs.z.sizes());
+    expect_same_storage(std::get<1>(outputs), inputs.conv_state);
+    expect_same_storage(std::get<2>(outputs), inputs.ssm_state);
+    EXPECT_TRUE(torch::equal(
+        inputs.conv_state[0].slice(/*dim=*/0, 0, 2).cpu(),
+        initial_conv_state[0].slice(/*dim=*/0, accepted, accepted + 2).cpu()));
+    EXPECT_TRUE(torch::equal(
+        inputs.conv_state[0].slice(/*dim=*/0, 2, kSequenceLength + 2).cpu(),
+        inputs.qkv[0].cpu()));
+    EXPECT_TRUE(torch::isfinite(std::get<3>(outputs)).all().item<bool>());
+  }
 }
 
 }  // namespace

@@ -41,6 +41,9 @@ cc_library(
     rec_constrained_topk_fused.cpp
     beam_search_rec_final.cpp
     npu_mega_chunk_gdn.cpp
+    npu_mega_gdn_prefill.cpp
+    npu_mega_gdn_decode.cpp
+    npu_mega_gdn_mtp_decode.cpp
     layer_norm_fwd.cpp
     gamma_add_rms_norm.cpp
   INCLUDES
@@ -52,5 +55,6 @@ cc_library(
     gflags::gflags
     nlohmann_json::nlohmann_json
     opapi
+    ${NPU_RUNTIME_SO}
     spdlog::spdlog
 )

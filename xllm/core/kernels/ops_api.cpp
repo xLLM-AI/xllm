@@ -2131,6 +2131,73 @@ std::pair<torch::Tensor, torch::Tensor> mega_chunk_gdn(
 #endif
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mega_gdn_prefill(
+    MegaGdnPrefillParams& params) {
+#if defined(USE_NPU)
+  return npu::npu_mega_gdn_prefill(params.mixed_qkv,
+                                   params.b,
+                                   params.a,
+                                   params.z,
+                                   params.conv_weight,
+                                   params.conv_state,
+                                   params.a_log,
+                                   params.dt_bias,
+                                   params.conv_state_read_indices,
+                                   params.conv_state_write_indices,
+                                   params.ssm_state_read_indices,
+                                   params.ssm_state_write_indices,
+                                   params.ssm_cache,
+                                   params.cu_seqlens,
+                                   params.norm_weight,
+                                   params.num_matrices);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+mega_gdn_decode(MegaGdnDecodeParams& params) {
+#if defined(USE_NPU)
+  return npu::npu_mega_gdn_decode(params.qkv,
+                                  params.z,
+                                  params.b,
+                                  params.a,
+                                  params.conv_weight,
+                                  params.conv_state,
+                                  params.a_log,
+                                  params.dt_bias,
+                                  params.ssm_state,
+                                  params.read_state_indices,
+                                  params.write_state_indices,
+                                  params.norm_weight,
+                                  params.fla_ssm_state_layout);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+mega_gdn_mtp_decode(MegaGdnMtpDecodeParams& params) {
+#if defined(USE_NPU)
+  return npu::npu_mega_gdn_mtp_decode(params.qkv,
+                                      params.z,
+                                      params.b,
+                                      params.a,
+                                      params.conv_weight,
+                                      params.conv_state,
+                                      params.a_log,
+                                      params.dt_bias,
+                                      params.ssm_state,
+                                      params.read_state_indices,
+                                      params.write_state_indices,
+                                      params.num_accepted_tokens,
+                                      params.norm_weight,
+                                      params.fla_ssm_state_layout);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
 void npu_inplace_partial_rotary_mul(NpuInplacePartialRotaryMulParams& params) {
 #if defined(USE_NPU)
   npu::npu_inplace_partial_rotary_mul(params.x,

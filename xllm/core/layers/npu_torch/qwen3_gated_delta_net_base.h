@@ -46,10 +46,10 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
   virtual void load_state_dict(const StateDict& state_dict) = 0;
   virtual void verify_loaded_weights(const std::string& prefix) const = 0;
 
-  torch::Tensor forward(const torch::Tensor& hidden_states,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params);
+  virtual torch::Tensor forward(const torch::Tensor& hidden_states,
+                                const AttentionMetadata& attn_metadata,
+                                KVCache& kv_cache,
+                                const ModelInputParams& input_params);
 
  protected:
   virtual std::pair<torch::Tensor, torch::Tensor> project_decode_inputs(

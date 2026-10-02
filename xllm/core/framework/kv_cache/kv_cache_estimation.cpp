@@ -579,7 +579,7 @@ void init_standard_counts(const ModelArgs& model_args,
   const int64_t full_cache_block_size_in_bytes =
       standard_full_cache_block_size_in_bytes(*kv_cache_cap) +
       options.embedding_context_bytes_per_block;
-  kv_cache_cap->num_linear_state_blocks(
+  int64_t num_linear_state_blocks =
       calculate_linear_state_blocks(kv_cache_cap->cache_size_in_bytes(),
                                     kv_cache_cap->num_linear_attention_layers(),
                                     kv_cache_cap->linear_slot_size(),
@@ -587,7 +587,20 @@ void init_standard_counts(const ModelArgs& model_args,
                                     options.max_seqs_per_batch,
                                     options.max_concurrent_requests,
                                     options.max_linear_state_cache_slots,
-                                    options.enable_prefix_cache));
+                                    options.enable_prefix_cache);
+  CHECK_GE(options.linear_state_cache_block_limit, 0);
+  if (options.linear_state_cache_block_limit > 0 &&
+      kv_cache_cap->num_linear_attention_layers() > 0) {
+    CHECK_LE(options.max_linear_state_cache_slots + kPaddingLinearStateBlocks,
+             options.linear_state_cache_block_limit)
+        << "Selected backend supports at most "
+        << options.linear_state_cache_block_limit
+        << " physical linear-state slots, including "
+        << kPaddingLinearStateBlocks << " padding slots.";
+    num_linear_state_blocks = std::min(num_linear_state_blocks,
+                                       options.linear_state_cache_block_limit);
+  }
+  kv_cache_cap->num_linear_state_blocks(num_linear_state_blocks);
   kv_cache_cap->linear_cache_size_in_bytes(
       kv_cache_cap->num_linear_attention_layers() *
       kv_cache_cap->num_linear_state_blocks() *

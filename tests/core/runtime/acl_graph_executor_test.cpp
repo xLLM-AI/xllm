@@ -1359,6 +1359,10 @@ TEST(AclGraphPersistentParamTest, HybridSpecVerifyMetadataCoversBucketPadding) {
       torch::zeros({kActualNumTokens}, int_options);
   params.attention.device.block_tables =
       torch::zeros({kNumSequences, 2}, int_options);
+  params.embedding.linear_state_ids = {1, 2, 3, 4};
+  params.embedding.linear_state_indices =
+      torch::tensor(params.embedding.linear_state_ids, int_options);
+  params.linear_state_validity_mask.assign(kNumSequences, 1);
   // Hybrid spec verify consumes token-wise expanded metadata: one row per
   // (sequence, draft token) with kv_seq_lens growing inside each sequence.
   params.graph.use_expanded_decode_for_spec_verify_attention = true;
@@ -1386,6 +1390,13 @@ TEST(AclGraphPersistentParamTest, HybridSpecVerifyMetadataCoversBucketPadding) {
                       params,
                       /*padded_num_tokens=*/kBucketNumTokens,
                       /*return_capture_params=*/true));
+  ASSERT_TRUE(capture_params.has_value());
+  EXPECT_EQ(capture_params->embedding.linear_state_ids,
+            (std::vector<int32_t>{1, 2, 3, 4, 0, 0, 0}));
+  EXPECT_EQ(capture_params->linear_state_validity_mask,
+            (std::vector<int64_t>{1, 1, 1, 1, 0, 0, 0}));
+  EXPECT_TRUE(torch::equal(capture_params->embedding.linear_state_indices.cpu(),
+                           torch::tensor({1, 2, 3, 4, 0, 0, 0}, torch::kInt)));
 
   speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }

@@ -1500,15 +1500,6 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                        padded_q_seq_lens_vec[static_cast<size_t>(i)]);
     }
 
-    if (!params.linear_state_validity_mask.empty()) {
-      auto& validity_mask = graph_params->linear_state_validity_mask;
-      validity_mask = params.linear_state_validity_mask;
-      if (validity_mask.size() > static_cast<size_t>(actual_batch_size)) {
-        validity_mask.resize(static_cast<size_t>(actual_batch_size));
-      }
-      validity_mask.resize(static_cast<size_t>(padded_batch_size), 0);
-    }
-
     if (params.num_accepted_tokens.defined() &&
         params.num_accepted_tokens.numel() > 0) {
       if (!params.num_accepted_tokens_host.empty()) {

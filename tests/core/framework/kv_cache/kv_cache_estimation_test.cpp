@@ -285,6 +285,35 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
   }
 }
 
+TEST(KVCacheEstimationTest, CapsPhysicalLinearStateSlotsForSelectedBackend) {
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
+  model_args.model_type("qwen3_5");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.cache_size_in_bytes = 64LL << 30;
+  options.enable_prefix_cache = true;
+
+  KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_GT(capacity.num_linear_state_blocks(), 1024);
+  options.linear_state_cache_block_limit = 1024;
+  capacity = estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 1024);
+}
+
+TEST(KVCacheEstimationTest, RejectsExplicitSlotsBeyondSelectedBackendLimit) {
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
+  model_args.model_type("qwen3_5");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.cache_size_in_bytes = 64LL << 30;
+  options.enable_prefix_cache = true;
+  options.max_linear_state_cache_slots = 1023;
+  options.linear_state_cache_block_limit = 1024;
+
+  EXPECT_DEATH(
+      (void)estimate_kv_cache_capacity(model_args, options),
+      "Selected backend supports at most 1024 physical linear-state slots");
+}
+
 TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {
   ModelArgs model_args = make_standard_args();
   model_args.model_type("qwen3_5")

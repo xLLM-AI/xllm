@@ -51,6 +51,24 @@ struct ExpandedDecodeMetadata {
   std::vector<int32_t> kv_seq_lens_host_vec;
 };
 
+#if defined(USE_NPU)
+struct MegaGdnPrefillIndicesKey {
+  torch::Device device;
+  int64_t num_slots;
+  int64_t checkpoint_stride;
+  std::vector<int32_t> linear_state_ids;
+  std::vector<int64_t> linear_state_validity_mask;
+};
+
+struct MegaGdnPrefillIndicesCache {
+  torch::Tensor conv_read;
+  torch::Tensor conv_write;
+  torch::Tensor ssm_read;
+  torch::Tensor ssm_write;
+  MegaGdnPrefillIndicesKey key;
+};
+#endif
+
 #if defined(USE_CUDA) || defined(USE_MUSA)
 struct PlanInfo {
   int32_t layer_id = -1;
@@ -218,6 +236,9 @@ struct AttentionMetadata {
 #endif
 
 #if defined(USE_NPU)
+  // One set per model forward, reused by every Qwen3.5 GDN prefill layer.
+  mutable std::optional<MegaGdnPrefillIndicesCache> mega_gdn_prefill_indices;
+
   // for npu
   std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
   // For ACL graph execution - fixed-address device tiling data for

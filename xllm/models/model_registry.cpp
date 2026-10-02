@@ -232,6 +232,18 @@ void resolve_npu_kernel_backend(Options* options) {
 }
 #endif
 
+int64_t get_npu_linear_state_cache_block_limit(const std::string& model_type) {
+#if defined(USE_NPU)
+  if (!ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl()) &&
+      (is_qwen3_5_target_model_type(model_type) ||
+       model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp")) {
+    return 1024;
+  }
+#endif
+  return 0;
+}
+
 bool resolve_model_registration_name(const std::string& model_type,
                                      std::string* resolved_name,
                                      std::string* error_message) {
