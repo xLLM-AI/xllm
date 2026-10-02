@@ -48,6 +48,9 @@ class DisaggPDServiceImpl {
   virtual void unlink_instance(const proto::InstanceClusterInfo* request,
                                proto::Status* response);
 
+  void release_reservation(const proto::ReleaseReservationRequest* request,
+                           proto::ReleaseReservationResponse* response);
+
  protected:
   std::shared_ptr<Request> generate_request(const proto::DisaggRequest& req);
 

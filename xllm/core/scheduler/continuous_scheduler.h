@@ -132,6 +132,8 @@ class ContinuousSchedulerBase : public Scheduler {
   void clear_mtp_bootstrap(Request* request);
   void drain_prefetch_pipeline();
   virtual void enqueue_ready_request(std::shared_ptr<Request> request);
+  virtual void release_failed_request(const std::shared_ptr<Request>& request) {
+  }
 
   // process the batch output
   void process_batch_output(bool enable_schedule_overlap);

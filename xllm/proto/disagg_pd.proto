@@ -89,6 +89,8 @@ message DisaggRequest {
   bool include_stop_str_in_output = 39;
   bool json_object = 40;
   bool json_reasoning_enabled = 41;
+  // Identifies this reservation even when callers reuse a request ID.
+  string reservation_id = 42;
 
 }
 
@@ -260,6 +262,7 @@ message DisaggGenerationsRequest {
   repeated KVTransferGroup source_groups = 20;
   // Cumulative end-to-end latency measured by the source at handoff.
   optional double upstream_elapsed_seconds = 21;
+  string reservation_id = 22;
 }
 
 message DisaggGenerationsRequests {
@@ -276,7 +279,23 @@ message InstanceClusterInfo {
   int32 kv_split_size = 7;
 }
 
+message ReleaseReservationRequest {
+  string req_id = 1;
+  string reservation_id = 2;
+}
+
+message ReleaseReservationResponse {
+  enum Result {
+    UNKNOWN = 0;
+    RELEASED = 1;
+    NOT_WAITING = 2;
+  }
+  Result result = 1;
+}
+
 service DisaggPDService {
+  rpc ReleaseReservation(ReleaseReservationRequest)
+      returns (ReleaseReservationResponse) {}
   rpc AddNewRequests(DisaggRequests) returns (DisaggResponses) {}
   rpc FirstGeneration(DisaggGenerationsRequests) returns (Status) {}
   rpc LinkInstance(InstanceClusterInfo) returns (Status) {}

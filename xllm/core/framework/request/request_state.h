@@ -169,6 +169,8 @@ class RequestState final {
 
   // decode address.
   std::string decode_address;
+  std::string pd_reservation_id;
+  std::string decode_rpc_address;
 
   torch::Tensor input_embedding;
 
