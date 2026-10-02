@@ -624,6 +624,43 @@ TEST(KVCacheEstimationTest,
   EXPECT_EQ(capacity.c4_count(), 32 * capacity.c128_count());
 }
 
+TEST(KVCacheEstimationTest,
+     DeepSeekV4PdPrefillFairBudgetKeepsPrefixCachePublishUnit) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 64 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 16384;
+  options.max_tokens_per_chunk_for_prefill = 4096;
+  options.enable_chunked_prefill = true;
+  options.enable_prefix_cache = true;
+  options.enable_dp_fair_token_budget = true;
+  options.dp_size = 4;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 146);
+
+  KVCacheEstimateOptions no_prefix_options = options;
+  no_prefix_options.enable_prefix_cache = false;
+  const KVCacheCapacity no_prefix_capacity =
+      estimate_kv_cache_capacity(model_args, no_prefix_options);
+  EXPECT_EQ(no_prefix_capacity.swa_count(), 50);
+}
+
 TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")

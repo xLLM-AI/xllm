@@ -809,8 +809,9 @@ class TestUT(Command):
 
     # Whitelist: tests that must run sequentially (not in parallel with others)
     # Add test names here if they use fork() or have device initialization conflicts
-    # Note: Use test case name patterns (from gtest), not executable names
+    # Note: Use CTest test-name patterns; gtest cases are registered individually.
     SEQUENTIAL_TESTS = [
+        r"^python_(distributed_)?tests\.",
         "ReduceScatterMultiDeviceTest",
         "BroadcastMultiDeviceTest",
         "DeepEPMultiDeviceTest",

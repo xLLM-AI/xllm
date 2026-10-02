@@ -101,6 +101,9 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::kv_seq_lens_host)
       .def_property_readonly("kv_seq_lens_host_values",
                              &PyAttentionMetadataView::kv_seq_lens_host_values)
+      .def_property_readonly(
+          "new_cache_slots_host_values",
+          &PyAttentionMetadataView::new_cache_slots_host_values)
       .def_property_readonly("q_seq_lens_host",
                              &PyAttentionMetadataView::q_seq_lens_host)
       .def_property_readonly("multi_block_tables",
@@ -153,7 +156,8 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::is_chunked_prefill)
       .def_property_readonly("is_mixed", &PyAttentionMetadataView::is_mixed)
       .def_property_readonly("is_spec_verify",
-                             &PyAttentionMetadataView::is_spec_verify);
+                             &PyAttentionMetadataView::is_spec_verify)
+      .def_property_readonly("is_dummy", &PyAttentionMetadataView::is_dummy);
 }
 
 PyExpandedDecodeMetadataView::PyExpandedDecodeMetadataView(
@@ -214,6 +218,9 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
     const ModelInputParams& params)
     : PyAttentionMetadataView(std::move(metadata)) {
+  if (!params.multi_block_tables.empty()) {
+    new_cache_slots_host_values_ = params.attention.host.new_cache_slots;
+  }
   multi_block_tables_ = params.multi_block_tables;
   linear_state_indices_ = params.embedding.linear_state_indices;
   // Python model kernels consume materialized execution rows. Empty DP ranks
@@ -294,6 +301,11 @@ py::object PyAttentionMetadataView::kv_seq_lens_host() const {
 const std::vector<int32_t>& PyAttentionMetadataView::kv_seq_lens_host_values()
     const {
   return metadata_->kv_seq_lens_vec;
+}
+
+const std::vector<int32_t>&
+PyAttentionMetadataView::new_cache_slots_host_values() const {
+  return new_cache_slots_host_values_;
 }
 
 py::object PyAttentionMetadataView::block_table() const {
@@ -448,6 +460,8 @@ bool PyAttentionMetadataView::is_mixed() const { return metadata_->is_mixed; }
 bool PyAttentionMetadataView::is_spec_verify() const {
   return metadata_->is_spec_verify;
 }
+
+bool PyAttentionMetadataView::is_dummy() const { return metadata_->is_dummy; }
 
 torch::Tensor PyAttentionMetadataView::make_host_int32_view(
     const std::shared_ptr<layer::AttentionMetadata>& metadata,

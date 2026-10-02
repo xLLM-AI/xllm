@@ -362,6 +362,7 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
   int64_t burst_budget =
       std::max(options.max_tokens_per_batch, static_cast<int64_t>(0));
+  int64_t publish_unit_blocks = 0;
   if (options.enable_dp_fair_token_budget && options.dp_size > 1 &&
       options.instance_role == InstanceRole::PREFILL) {
     // The scheduler caps each DP group at max_tokens_per_batch / dp_size
@@ -380,8 +381,18 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       per_group_cap = burst_budget;
     }
     burst_budget = per_group_cap;
+    if (options.enable_prefix_cache) {
+      // Prefix reuse needs the SWA rows of a complete compressed checkpoint.
+      for (const int32_t ratio : compress_ratios) {
+        if (ratio > 1) {
+          publish_unit_blocks =
+              std::max(publish_unit_blocks, static_cast<int64_t>(ratio));
+        }
+      }
+    }
   }
-  const int64_t burst_blocks = util::ceil_div(burst_budget, block_size);
+  const int64_t burst_blocks =
+      std::max(util::ceil_div(burst_budget, block_size), publish_unit_blocks);
   cache_cost.swa_count =
       swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
 

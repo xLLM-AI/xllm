@@ -45,10 +45,10 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     model_type = config.get("model_type", "")
     algorithm = str(config.get("speculative_algorithm", "mtp")).lower()
     is_glm_mtp_draft = model_type == "glm_moe_dsa_mtp" and config.get("is_draft_engine", False) and algorithm == "mtp"
-    if model_type not in ("qwen3", "glm_moe_dsa") and not is_glm_mtp_draft:
+    if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm_mtp_draft:
         raise NotImplementedError(
             f"Python model-side CP does not support model_type={model_type!r}; "
-            "supported models are qwen3, glm_moe_dsa and glm_moe_dsa_mtp draft engines"
+            "supported models are qwen3, glm_moe_dsa, deepseek_v4 and glm_moe_dsa_mtp draft engines"
         )
     if config.get("task_type", "generate") != "generate":
         raise NotImplementedError("Python model-side CP supports only the generate task")
@@ -59,6 +59,8 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     if speculative and algorithm in ("eagle3", "dflash", "dflash2", "dspark"):
         raise NotImplementedError("Python model-side CP does not support aux-hidden-capture speculative algorithms")
     kv_split = int(config.get("kv_split_size", 0)) or int(config["cp_size"])
+    if model_type == "deepseek_v4" and kv_split != 1:
+        raise NotImplementedError("Python DeepSeek-V4 CP requires replicated KV caches; use kv_split_size=1")
     if (is_glm_mtp_draft or (model_type == "glm_moe_dsa" and speculative and algorithm == "mtp")) and kv_split != 1:
         # Verification and draft decode keep global rows on each CP rank, so
         # their paged caches must retain every token written by CP prefill.

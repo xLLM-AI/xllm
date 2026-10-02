@@ -41,18 +41,24 @@ import torch
 import torch.nn as nn
 import torch_npu
 
+from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
+    _CompressedAttentionCacheMapping,
     _get_layer_cache_tensor,
     _scatter_by_slot,
 )
+from xllm.python.attention.dsa_metadata import DsaMetadata
 from xllm.python.layers.attention import Attention
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
+from xllm.python.layers.moe_dp import dp_gather_tokens
+from xllm.python.layers.rotary_embedding import _expand_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import (
     get_forward_context,
     record_layer_event,
 )
+from xllm.python.model_executor.v4_cp_context import build_deepseek_v4_cp_context
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP,
@@ -126,7 +132,10 @@ def _compress_kv(
 
     # C++ keeps the tiling metadata on the host. Only tensor inputs consumed by
     # the AICore kernel are converted to the required BF16 device representation.
-    seq_q = dsa.actual_seq_lengths_query.contiguous()
+    seq_q = dsa.actual_seq_lengths_query
+    cp_ctx = getattr(dsa, "v4_cp_context", None)
+    if cp_ctx is not None and cp_ctx.enabled():
+        seq_q = cp_ctx.global_q_cu_seq_lens.to(seq_q.device)
     start_pos = dsa.start_pos.contiguous() if dsa.start_pos.numel() > 0 else None
     compressed_kv, _, _, _, _ = kernels.compressor(
         x=hidden.to(torch.bfloat16).contiguous(),
@@ -140,7 +149,7 @@ def _compress_kv(
         rope_cos=cos_view.to(device=hidden.device, dtype=torch.bfloat16).contiguous(),
         kv_block_table=kv_block_table,
         score_block_table=score_block_table,
-        cu_seqlens=seq_q,
+        cu_seqlens=seq_q.contiguous(),
         seqused=None,
         start_pos=start_pos,
         rope_head_dim=rope_head_dim,
@@ -603,12 +612,16 @@ class DeepseekV4Attention(Attention):
             dtype=dtype,
             device=device,
         )
+        # Native RowParallelLinear keeps the checkpoint [N, K] layout and calls
+        # F.linear(input, weight). Do not transpose o_b to FRACTAL_NZ here:
+        # that changes the NPU matmul accumulation order for BF16.
         self.o_b_proj = RowParallelLinear(
             (cfg.o_groups * cfg.o_lora_rank) // tp,
             cfg.hidden_size,
             tp,
             dtype=dtype,
             device=device,
+            use_checkpoint_layout=True,
         )
         compress_ratio = cfg.compress_ratios[layer_id]
         self.indexer: DeepseekV4Indexer | None = (
@@ -650,10 +663,6 @@ class DeepseekV4Attention(Attention):
     def process_weights_after_loading(self) -> None:
         for m in (self.q_a_proj, self.kv_proj, self.q_b_proj):
             m.process_weights_after_loading()
-        # Keep o_b in checkpoint [N, K] layout. Native DSAttention sends this
-        # unquantized RowParallelLinear through F.linear(input, weight); the
-        # generic NPU preparation transposes it to FRACTAL_NZ and selects a
-        # different matmul accumulation path.
         if hasattr(self.o_a_proj, "process_weights_after_loading"):
             self.o_a_proj.process_weights_after_loading()
         if self.indexer is not None:
@@ -670,10 +679,15 @@ class DeepseekV4Attention(Attention):
         cos_sin_cache: torch.Tensor,
     ) -> torch.Tensor:
         num_tokens = hidden.shape[0]
-        backend = get_forward_context().attention_backend
-        metadata = get_forward_context().metadata
-        dsa = getattr(metadata, "dsa_metadata", None)
-        kv_hidden = hidden
+        context = get_forward_context()
+        backend = context.attention_backend
+        dsa = getattr(context.metadata, "dsa_metadata", None)
+        cp_ctx = getattr(dsa, "v4_cp_context", None)
+        if cp_ctx is not None and cp_ctx.enabled():
+            # CP localizes queries, but KV writes require globally ordered hidden rows and positions.
+            kv_hidden = cp_ctx.gather_restore(hidden)
+        else:
+            kv_hidden = hidden
 
         # q/kv down + up + RoPE (matches run_dsv4_preprocess_fallback).
         # W8A8 path (C++ deepseek_sparse_attention.cpp:396-413): q_a_proj does
@@ -689,10 +703,9 @@ class DeepseekV4Attention(Attention):
         q = self.q_b_proj.forward_quantized(qr, qr_pertoken_scale).view(num_tokens, self.num_heads_local, self.head_dim)
         q = _k.rms_norm(q, self.q_rms_gamma, self.cfg.rms_norm_eps)
 
-        cos_sin = cos_sin_cache.index_select(0, positions.long())
-        half = cos_sin.size(-1) // 2
-        cos = cos_sin[..., :half].repeat_interleave(2, dim=-1).contiguous()
-        sin = cos_sin[..., half:].repeat_interleave(2, dim=-1).contiguous()
+        # The compact Python cache stores half-width per-token cos/sin; expand
+        # it to the C++ interleaved [M, rope_head_dim] kernel layout.
+        cos, sin = _expand_half_rope_cos_sin(cos_sin_cache.index_select(0, positions.long()))
         _k.npu_inplace_partial_rotary_mul(q, cos, sin, self.nope_head_dim, self.rope_head_dim)
 
         kv = self.kv_proj(kv_hidden)
@@ -700,7 +713,12 @@ class DeepseekV4Attention(Attention):
         # the whole thing then split for RoPE (matches C++ run_dsv4_preprocess).
         kv = self.kv_a_layernorm(kv)
         kv_tensor = kv.view(kv_hidden.shape[0], 1, self.head_dim)
-        kv_cos, kv_sin = cos, sin
+        if cp_ctx is not None and cp_ctx.enabled():
+            kv_cos, kv_sin = cp_ctx.global_rope(self.cfg.compress_ratios[self.layer_id])
+            if kv_cos is None or kv_sin is None:
+                raise RuntimeError("DeepSeek-V4 prefill CP requires global KV RoPE tables")
+        else:
+            kv_cos, kv_sin = cos, sin
         _k.npu_inplace_partial_rotary_mul(
             kv_tensor,
             kv_cos,
@@ -747,7 +765,14 @@ class DeepseekV4Attention(Attention):
         # identified this as a cause of HCCL deadlock / 507015).
         return o
 
-    def _run_compressor(self, layer_id, layer_cache, dsa, mapping, cmp_block_table, compress_ratio):
+    def _run_compressor(
+        self,
+        layer_id: int,
+        layer_cache: LayerCache,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+        compress_ratio: int,
+    ) -> torch.Tensor | None:
         """Cmp_kv compressor callback (attention-level, head_dim=512).
 
         Mirrors C++ DSAttentionImpl's compressor_->forward
@@ -757,7 +782,6 @@ class DeepseekV4Attention(Attention):
         """
         if not hasattr(self, "cmp_wkv"):
             return None
-        del cmp_block_table
         backend = get_forward_context().attention_backend
         hidden = getattr(backend, "_current_kv_hidden", None)
         if hidden is None:
@@ -779,7 +803,13 @@ class DeepseekV4Attention(Attention):
             norm_eps=self.cfg.rms_norm_eps,
         )
 
-    def _run_indexer(self, layer_id, layer_cache, dsa, mapping, q):
+    def _run_indexer(
+        self,
+        layer_id: int,
+        layer_cache: LayerCache,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+    ) -> torch.Tensor | None:
         """Indexer callback: returns top-k compressed block indices."""
         if self.indexer is not None:
             backend = get_forward_context().attention_backend
@@ -792,7 +822,6 @@ class DeepseekV4Attention(Attention):
                 layer_cache,
                 dsa,
                 mapping,
-                q,
                 qr,
                 qr_pertoken_scale,
                 hidden,
@@ -855,15 +884,14 @@ class DeepseekV4Indexer(nn.Module):
 
     def select_qli_dsv4(
         self,
-        layer_id,
-        layer_cache,
-        dsa,
-        mapping,
-        q,
-        qr,
-        qr_pertoken_scale,
-        hidden,
-        kv_hidden=None,
+        layer_id: int,
+        layer_cache: LayerCache,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+        qr: torch.Tensor | None,
+        qr_pertoken_scale: torch.Tensor | None,
+        hidden: torch.Tensor,
+        kv_hidden: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Quantized lightning indexer: returns top-k compressed block indices.
 
@@ -898,11 +926,9 @@ class DeepseekV4Indexer(nn.Module):
         if cos_table is not None and sin_table is not None and self.rope_dim > 0:
             cos_v = cos_table.reshape(-1, cos_table.size(-1)) if cos_table.dim() > 2 else cos_table
             sin_v = sin_table.reshape(-1, sin_table.size(-1)) if sin_table.dim() > 2 else sin_table
-            # Per-token cos/sin indexed by positions: 2D [M, rope_dim/2] (Python
-            # DeepseekYarnRotaryEmbedding stores half-dim cos/sin, NOT interleaved).
-            pos = dsa.input_positions.to(device).reshape(-1).long()
-            cos_sel = cos_v.index_select(0, pos).to(q_idx.dtype)  # [M, rope_dim/2]
-            sin_sel = sin_v.index_select(0, pos).to(q_idx.dtype)
+            # RoPE rows are request-shaped; absolute positions cannot index them again.
+            cos_sel = cos_v.to(q_idx.dtype)
+            sin_sel = sin_v.to(q_idx.dtype)
             # npu_inplace_partial_rotary_mul (interleave mode) expects cos/sin
             # [M, rope_dim] in C++ interleaved format: freqs.repeat_interleave(2)
             # (rotary_embedding_util.cpp:135-137). The half-dim cos/sin must be
@@ -1095,6 +1121,8 @@ class DeepseekV4MoE(nn.Module):
         # cp=2, ep=8 fail at construction time (attention TP=4, MoE TP=1).
         self.moe_tp_size = cfg.moe_tp_size
         self.moe_tp_rank = cfg.moe_tp_rank
+        self.dp_size = cfg.dp_size
+        self.dp_rank = cfg.dp_rank
         self.num_experts_per_rank = self.num_total_experts // ep_size
         self.start_expert_id = ep_rank * self.num_experts_per_rank
         inter_local = cfg.moe_intermediate_size // self.moe_tp_size
@@ -1208,17 +1236,24 @@ class DeepseekV4MoE(nn.Module):
     def forward(self, hidden: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
         from xllm.python import kernels
 
+        local_tokens = hidden.shape[0]
+        hidden, scatter_state = dp_gather_tokens(hidden, self.dp_size, self.dp_rank)
+
         # Prepare input_ids: reshape to 1D + move to hidden's device (C++ :202-216).
+        # Hash-routing token IDs must use the same gathered layout as hidden rows.
         gate_input_ids = None
-        if input_ids is not None and input_ids.numel() > 0:
+        if self.hash_layer and input_ids is not None and input_ids.numel() > 0:
             flat_ids = input_ids.reshape(-1).to(hidden.device)
             token_count = flat_ids.size(0)
-            hidden_rows = hidden.size(0)
-            if token_count == hidden_rows:
-                gate_input_ids = flat_ids
-            elif token_count > 0 and hidden_rows % token_count == 0:
-                repeat_factor = hidden_rows // token_count
-                gate_input_ids = flat_ids.unsqueeze(1).repeat(1, repeat_factor).reshape(hidden_rows)
+            if token_count == local_tokens:
+                ids_for_gate = flat_ids
+            elif token_count > 0 and local_tokens % token_count == 0:
+                repeat_factor = local_tokens // token_count
+                ids_for_gate = flat_ids.repeat_interleave(repeat_factor)
+            else:
+                ids_for_gate = None
+            if ids_for_gate is not None:
+                gate_input_ids, _ = dp_gather_tokens(ids_for_gate, self.dp_size, self.dp_rank)
 
         # 1) Gate: compute logits + moe_gating_top_k_hash.
         gate_input = hidden.to(torch.float32)
@@ -1362,7 +1397,7 @@ class DeepseekV4MoE(nn.Module):
             shared_out = shared_gate * shared_out
 
         output = self._reduce_moe_outputs(routed_out, shared_out)
-        return output
+        return scatter_state.scatter(output)
 
     def _reduce_moe_outputs(self, routed_out: torch.Tensor, shared_out: torch.Tensor) -> torch.Tensor:
         """Reduce routed/shared results in the C++ ``FusedMoEImpl`` order.
@@ -1459,7 +1494,15 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc.hc_ffn_base,
         )
         ffn_input = self.post_attention_layernorm(ffn_input)
+        dsa = getattr(get_forward_context().metadata, "dsa_metadata", None)
+        cp_ctx = getattr(dsa, "v4_cp_context", None)
+        if cp_ctx is not None and cp_ctx.enabled():
+            # Gather CP query rows before MoE so every expert collective sees the same token set.
+            ffn_input = cp_ctx.gather_restore(ffn_input)
         ffn_output = self.mlp(ffn_input, input_ids) if isinstance(self.mlp, DeepseekV4MoE) else self.mlp(ffn_input)
+        if cp_ctx is not None and cp_ctx.enabled():
+            # Restore CP-local rows before combining with the local residual and gates.
+            ffn_output = cp_ctx.shard_rows(ffn_output)
         hidden = self.hc.hc_post(ffn_output, residual_ffn, post_ffn, comb_ffn)
         # Native C++ resets its optional residual at the start of every layer.
         return hidden, None
@@ -1471,8 +1514,6 @@ class DeepseekV4Model(nn.Module):
     def __init__(self, cfg: DeepseekV4Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.cfg = cfg
-        if cfg.cp_size > 1:
-            raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
         tp = cfg.tp_size
         self.embed_tokens = HiddenParallelEmbedding(
             cfg.vocab_size, cfg.hidden_size // tp, tp, dtype=dtype, device=device
@@ -1531,31 +1572,6 @@ class DeepseekV4Model(nn.Module):
             device=device,
         )
 
-    def attach_rope_tables_to_backend(
-        self,
-        backend,
-        positions: torch.Tensor,
-        graph_bt_cols: int = 0,
-        metadata=None,
-    ) -> None:
-        """Attach default + per-ratio compressed RoPE caches to the backend.
-
-        Called inside model forward after embedding, matching the C++ DSA
-        metadata construction order. Default cache uses rope_theta; c4/c128 use
-        compress_rope_theta with no mscale.
-        """
-        if backend is None or not hasattr(backend, "attach_rope_tables"):
-            raise RuntimeError("DeepSeek-V4 requires a CSA backend with attach_rope_tables")
-        positions = positions.to(torch.int64).contiguous()
-        backend.attach_rope_tables(
-            positions,
-            self.rotary.cos_sin_cache,
-            graph_bt_cols=graph_bt_cols,
-            csa_cos_sin=self.compress_rotary_c4.cos_sin_cache,
-            hca_cos_sin=self.compress_rotary_c128.cos_sin_cache,
-            metadata=metadata,
-        )
-
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
         """Final HyperConnection head.
 
@@ -1580,18 +1596,65 @@ class DeepseekV4Model(nn.Module):
         context = get_forward_context()
         backend = context.attention_backend
         metadata = context.metadata
-        backend.reset_forward(metadata)
-        self.attach_rope_tables_to_backend(backend, positions, metadata=metadata)
-        prepare_dsa = getattr(backend, "prepare_dsa_metadata_for_forward", None)
-        if prepare_dsa is None:
-            raise RuntimeError("DeepSeek-V4 requires prepare_dsa_metadata_for_forward")
-        prepare_dsa(metadata)
-        if self.cfg.cp_size > 1:
-            raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
+        graph_mode = bool(getattr(metadata, "dsa_graph_mode", False))
+        # Replay retains the captured DSA and RoPE storage.
+        if not graph_mode or getattr(metadata, "dsa_metadata", None) is None:
+            backend.reset_forward(metadata)
+            metadata.dsa_graph_mode = graph_mode
+            if backend is None or not hasattr(backend, "attach_rope_tables"):
+                raise RuntimeError("DeepSeek-V4 requires a CSA backend with attach_rope_tables")
+            backend.attach_rope_tables(
+                positions,
+                self.rotary.cos_sin_cache,
+                csa_cos_sin=self.compress_rotary_c4.cos_sin_cache,
+                hca_cos_sin=self.compress_rotary_c128.cos_sin_cache,
+                metadata=metadata,
+            )
+            prepare_dsa = getattr(backend, "prepare_dsa_metadata_for_forward", None)
+            if prepare_dsa is None:
+                raise RuntimeError("DeepSeek-V4 requires prepare_dsa_metadata_for_forward")
+            prepare_dsa(metadata)
+        cp_ctx = None
+        if (
+            not getattr(metadata, "is_dummy", False)
+            and not getattr(metadata, "is_spec_verify", False)
+            and (metadata.is_prefill or metadata.is_chunked_prefill)
+        ):
+            # DeepSeek-V4 needs contiguous per-sequence splits, rather than the FIA zigzag layout.
+            q_seq_lens = getattr(metadata, "q_seq_lens_host", None)
+            kv_seq_lens = metadata.kv_seq_lens_host
+            if self.cfg.cp_size > 1 and q_seq_lens is not None and q_seq_lens.numel() > 0:
+                cp_ctx = build_deepseek_v4_cp_context(
+                    self.cfg.cp_size,
+                    self.cfg.cp_rank,
+                    q_seq_lens.cpu().tolist(),
+                    kv_seq_lens.cpu().tolist(),
+                    positions,
+                )
+                if cp_ctx.enabled():
+                    # Keep global RoPE caches before localizing query metadata.
+                    cp_ctx.set_global_rope_cache(1, self.rotary.cos_sin_cache)
+                    cp_ctx.set_global_rope_cache(4, self.compress_rotary_c4.cos_sin_cache)
+                    cp_ctx.set_global_rope_cache(128, self.compress_rotary_c128.cos_sin_cache)
+                    # Preserve global request-shaped RoPE pairs before rebuilding the query-local map.
+                    dsa = getattr(metadata, "dsa_metadata", None)
+                    global_rope_by_ratio = getattr(dsa, "input_rope_by_ratio", {})
+                    for ratio in (1, 4, 128):
+                        pair = global_rope_by_ratio.get(ratio)
+                        if pair is not None:
+                            cp_ctx.set_global_rope_pair(ratio, pair)
+                    backend.localize_dsa_metadata_for_cp(cp_ctx, metadata)
         # Expand hidden into hc_mult parallel residual streams for the
         # HyperConnection decoder layers (C++ flat_hc does this reshape).
+        if cp_ctx is not None and cp_ctx.enabled():
+            # Queries use CP-local rows; MoE token IDs retain global order.
+            hidden = cp_ctx.shard_rows(hidden)
+            positions = cp_ctx.local_positions
         hidden = hidden.unsqueeze(1).expand(-1, self.cfg.hc_mult, -1).contiguous()
         residual: torch.Tensor | None = None
+        select_layer_rope = getattr(backend, "select_dsa_layer_rope", None)
+        if self.layers and select_layer_rope is None:
+            raise RuntimeError("DeepSeek-V4 requires select_dsa_layer_rope")
         for layer_id, layer in enumerate(self.layers):
             compress_ratio = self.cfg.compress_ratios[layer_id] if layer_id < len(self.cfg.compress_ratios) else 1
             if compress_ratio == 4:
@@ -1603,9 +1666,6 @@ class DeepseekV4Model(nn.Module):
             # The C++ model updates DSAMetadata::cos/sin for every layer before
             # entering the decoder. Layer 2 is the first C4 layer and must not
             # reuse the ratio-1 RoPE table selected during metadata preparation.
-            select_layer_rope = getattr(backend, "select_dsa_layer_rope", None)
-            if select_layer_rope is None:
-                raise RuntimeError("DeepSeek-V4 requires select_dsa_layer_rope")
             select_layer_rope(layer_id, layer_cos_sin_cache, metadata)
             hidden, residual = layer(
                 hidden,
@@ -1615,6 +1675,8 @@ class DeepseekV4Model(nn.Module):
                 input_ids,
             )
             record_layer_event(layer_id)
+        if cp_ctx is not None and cp_ctx.enabled():
+            hidden = cp_ctx.gather_restore(hidden)
         # hc_head: merge the hc_mult streams back into a single hidden vector.
         merged = self._hc_head(residual if residual is not None else hidden)
         hidden = self.norm(merged, None)
@@ -1627,10 +1689,6 @@ class DeepseekV4ForCausalLM(PyModelBase):
     def __init__(self, config: dict) -> None:
         super().__init__()
         self.cfg = DeepseekV4Config.from_dict(config)
-        if self.cfg.dp_size > 1:
-            raise NotImplementedError("DeepSeek-V4 Python does not support dp_size > 1")
-        if self.cfg.cp_size > 1:
-            raise NotImplementedError("DeepSeek-V4 Python CP is reserved for the CP context PR")
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "npu:0"))
         self.model = DeepseekV4Model(self.cfg, dtype, device)

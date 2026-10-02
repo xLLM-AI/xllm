@@ -104,7 +104,6 @@ def test_build_seq_lengths_and_start_pos() -> None:
         kv_seq_lens=[6, 8],
         q_seq_lens=[1, 1],
         positions=torch.tensor([5, 7], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -126,7 +125,6 @@ def test_build_max_lengths_include_attention_metadata_capacity() -> None:
         kv_seq_lens=[6, 8],
         q_seq_lens=[1, 2],
         positions=torch.tensor([5, 6, 7], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
         max_query_len=16,
@@ -149,7 +147,6 @@ def test_build_token_group_slot_committed_rows() -> None:
         kv_seq_lens=[8],
         q_seq_lens=[1],
         positions=torch.tensor([7], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -172,7 +169,6 @@ def test_build_token_group_slot_empty_between_boundaries() -> None:
         kv_seq_lens=[129],
         q_seq_lens=[1],
         positions=torch.tensor([128], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -189,7 +185,6 @@ def test_build_token_group_slot_commits_at_later_boundary() -> None:
         kv_seq_lens=[132],
         q_seq_lens=[1],
         positions=torch.tensor([131], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -209,13 +204,30 @@ def test_build_swa_group_slot_query_tokens_only() -> None:
         kv_seq_lens=[8],
         q_seq_lens=[1],
         positions=torch.tensor([7], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
     # Layer 0 (cr=1): the single SWA cache -> group 0.
     swa_slot = dsa.slot_mappings[0][0]
     assert swa_slot[0].item() == 10 * 128 + 7
+
+
+def test_build_swa_group_uses_scheduler_resolved_slots_for_expanded_decode() -> None:
+    """Expanded MTP decode preserves the scheduler's ring-buffer slot order."""
+    builder, _, _ = _make_builder()
+    swa_bt = torch.tensor([[10], [11]], dtype=torch.int32)
+    token4_bt = torch.tensor([[20], [21]], dtype=torch.int32)
+    dsa = builder.build(
+        multi_block_tables=[swa_bt, token4_bt],
+        kv_seq_lens=[8, 8],
+        q_seq_lens=[2, 2],
+        positions=torch.tensor([6, 7, 6, 7], dtype=torch.int64),
+        is_prefill=False,
+        is_chunked_prefill=False,
+        new_cache_slots=[301, 302, 401, 402],
+    )
+
+    assert dsa.slot_mappings[0][0].tolist() == [301, 302, 401, 402]
 
 
 def test_build_block_tables_shared_within_group() -> None:
@@ -228,7 +240,6 @@ def test_build_block_tables_shared_within_group() -> None:
         kv_seq_lens=[8],
         q_seq_lens=[1],
         positions=torch.tensor([7], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -248,7 +259,6 @@ def test_build_c4_pad_positions() -> None:
         kv_seq_lens=[7],
         q_seq_lens=[4],
         positions=torch.tensor([3, 4, 5, 6], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=True,
         is_chunked_prefill=False,
     )
@@ -264,7 +274,6 @@ def test_graph_compressed_positions_use_zero_padding() -> None:
         kv_seq_lens=[7],
         q_seq_lens=[4],
         positions=torch.tensor([3, 4, 5, 6], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=True,
         is_chunked_prefill=False,
         enable_graph=True,
@@ -281,7 +290,6 @@ def test_empty_batch_preserves_cpp_zero_length_buffers() -> None:
         kv_seq_lens=[],
         q_seq_lens=[],
         positions=torch.empty(0, dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=True,
         is_chunked_prefill=False,
     )
@@ -306,7 +314,6 @@ def test_build_c128_slot_at_compression_boundary() -> None:
         kv_seq_lens=[128],
         q_seq_lens=[1],
         positions=torch.tensor([127], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -325,7 +332,6 @@ def test_multi_batch_slots_are_concatenated_by_sequence() -> None:
         kv_seq_lens=[4, 8],
         q_seq_lens=[1, 1],
         positions=torch.tensor([3, 7], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -342,7 +348,6 @@ def test_packed_manager_block_table_is_unpacked() -> None:
         kv_seq_lens=[128],
         q_seq_lens=[1],
         positions=torch.tensor([127], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -361,7 +366,6 @@ def test_graph_slots_and_block_tables_use_bucket_capacity() -> None:
         kv_seq_lens=[8],
         q_seq_lens=[1],
         positions=torch.tensor([7, 0, 0, 0], dtype=torch.int64),
-        dsa_cos_sin=None,
         is_prefill=False,
         is_chunked_prefill=False,
         enable_graph=True,
@@ -375,25 +379,6 @@ def test_graph_slots_and_block_tables_use_bucket_capacity() -> None:
     assert dsa.block_tables[0][0].shape == (1, 4)
 
 
-def test_rope_cache_is_split_into_contiguous_cos_and_sin_tables() -> None:
-    builder, _, _ = _make_builder()
-    cos_sin = torch.arange(24, dtype=torch.float32).view(3, 8)
-    dsa = builder.build(
-        multi_block_tables=[],
-        kv_seq_lens=[3],
-        q_seq_lens=[3],
-        positions=torch.arange(3, dtype=torch.int64),
-        dsa_cos_sin=cos_sin,
-        is_prefill=True,
-        is_chunked_prefill=False,
-    )
-
-    assert torch.equal(dsa.cos_table, cos_sin[:, :4])
-    assert torch.equal(dsa.sin_table, cos_sin[:, 4:])
-    assert dsa.cos_table.is_contiguous()
-    assert dsa.sin_table.is_contiguous()
-
-
 def test_compressed_positions_preserve_position_dtype() -> None:
     builder, _, _ = _make_builder()
     dsa = builder.build(
@@ -401,7 +386,6 @@ def test_compressed_positions_preserve_position_dtype() -> None:
         kv_seq_lens=[4],
         q_seq_lens=[4],
         positions=torch.arange(4, dtype=torch.int32),
-        dsa_cos_sin=None,
         is_prefill=True,
         is_chunked_prefill=False,
     )
@@ -420,7 +404,6 @@ def test_graph_rejects_block_table_larger_than_bucket_capacity() -> None:
             kv_seq_lens=[8],
             q_seq_lens=[1],
             positions=torch.tensor([7], dtype=torch.int64),
-            dsa_cos_sin=None,
             is_prefill=False,
             is_chunked_prefill=False,
             enable_graph=True,
