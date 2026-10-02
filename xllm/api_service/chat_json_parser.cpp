@@ -221,7 +221,7 @@ std::pair<Status, std::string> LlmChatJsonParser::preprocess(
 std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
     std::string json_str) const {
   try {
-    auto j = nlohmann::json::parse(json_str);
+    auto j = nlohmann::ordered_json::parse(json_str);
     if (!j.is_object()) {
       return {
           Status(StatusCode::INVALID_ARGUMENT, "Request must be a JSON object"),
@@ -259,7 +259,7 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
                       ""};
             }
           }
-          nlohmann::json content_blocks;
+          nlohmann::ordered_json content_blocks;
           content_blocks["blocks"] = content;
           msg["content_blocks"] = content_blocks;
           msg.erase("content");
@@ -277,7 +277,7 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
         j["system_string"] = system.get<std::string>();
         j.erase("system");
       } else if (system.is_array()) {
-        nlohmann::json system_blocks;
+        nlohmann::ordered_json system_blocks;
         system_blocks["blocks"] = system;
         j["system_blocks"] = system_blocks;
         j.erase("system");

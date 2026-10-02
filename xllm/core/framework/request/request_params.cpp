@@ -116,7 +116,10 @@ std::vector<JsonTool> handle_tools(
     }
 
     // Convert input_schema to JSON
-    if (tool.has_input_schema()) {
+    if (tool.has_input_schema_json()) {
+      json_tool.function.parameters =
+          nlohmann::ordered_json::parse(tool.input_schema_json());
+    } else if (tool.has_input_schema()) {
       json_tool.function.parameters = proto_struct_to_json(tool.input_schema());
     } else {
       json_tool.function.parameters = nlohmann::json::object();

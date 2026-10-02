@@ -30,13 +30,13 @@ Status invalid_request(std::string message) {
   return Status(StatusCode::INVALID_ARGUMENT, std::move(message));
 }
 
-void normalize_bool(nlohmann::json& value) {
+void normalize_bool(nlohmann::ordered_json& value) {
   if (value.is_number() && (value == 0 || value == 1)) {
     value = value == 1;
   }
 }
 
-void normalize_block_bools(nlohmann::json& blocks) {
+void normalize_block_bools(nlohmann::ordered_json& blocks) {
   if (!blocks.is_object() || !blocks.contains("blocks") ||
       !blocks["blocks"].is_array()) {
     return;
@@ -100,7 +100,7 @@ void append_tool_result(const proto::AnthropicContentBlock& block,
 Status parse_anthropic_request(const std::string& json,
                                bool count_tokens,
                                proto::AnthropicMessagesRequest& request) {
-  auto body = nlohmann::json::parse(json, nullptr, false);
+  auto body = nlohmann::ordered_json::parse(json, nullptr, false);
   if (!body.is_object() || !body.contains("messages") ||
       !body["messages"].is_array()) {
     return invalid_request("messages is required and must be an array");
@@ -113,6 +113,12 @@ Status parse_anthropic_request(const std::string& json,
       }
       if (tool.contains("defer_loading")) {
         normalize_bool(tool["defer_loading"]);
+      }
+      // Always derive internal metadata from input_schema, never the client.
+      tool.erase("input_schema_json");
+      tool.erase("inputSchemaJson");
+      if (tool.contains("input_schema") && tool["input_schema"].is_object()) {
+        tool["input_schema_json"] = tool["input_schema"].dump();
       }
     }
   }

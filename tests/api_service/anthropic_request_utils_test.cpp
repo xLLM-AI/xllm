@@ -19,6 +19,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "api_service/chat_json_parser.h"
+#include "core/framework/chat_template/jinja_chat_template.h"
+#include "core/framework/request/request_params.h"
 
 namespace xllm {
 namespace {
@@ -218,6 +220,62 @@ TEST(AnthropicRequestUtilsTest, CountTokensIgnoresGenerationOnlyOptions) {
   EXPECT_TRUE(
       api_service::validate_anthropic_request(request, /*count_tokens=*/true)
           .ok());
+}
+
+TEST(AnthropicRequestUtilsTest,
+     PreservesToolSchemaOrderThroughPromptRendering) {
+  const std::vector<std::string> schemas = {
+      R"({"type":"object","properties":{"z":{"description":"last","type":"string"},"a":{"type":"integer"}},"required":["z"]})",
+      R"({"required":["z"],"properties":{"a":{"type":"integer"},"z":{"type":"string","description":"last"}},"type":"object"})",
+      R"({"properties":{"z":{"anyOf":[{"enum":["x","y"],"type":"string"},{"type":"null"}]}},"type":"object"})",
+      R"({"properties":{}})",
+      R"({})"};
+  TokenizerArgs args;
+  args.chat_template("{% for tool in tools %}{{ tool | tojson }}{% endfor %}");
+  JinjaChatTemplate chat_template(args);
+  for (bool count_tokens : {false, true}) {
+    for (const std::string& schema : schemas) {
+      SCOPED_TRACE(schema);
+      auto [status, normalized] = ChatJsonParser::anthropic().preprocess(
+          R"({"model":"test","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"search","input_schema":)" +
+          schema +
+          R"(,"input_schema_json":"malicious","inputSchemaJson":42}]})");
+      ASSERT_TRUE(status.ok()) << status.message();
+      proto::AnthropicMessagesRequest request;
+      status = api_service::parse_anthropic_request(
+          normalized, count_tokens, request);
+      ASSERT_TRUE(status.ok()) << status.message();
+      ASSERT_TRUE(api_service::validate_anthropic_request(request).ok());
+      const RequestParams params(request, "", "");
+      const auto prompt =
+          chat_template.apply(api_service::build_anthropic_messages(request),
+                              params.tools,
+                              params.chat_template_kwargs);
+      ASSERT_TRUE(prompt.has_value());
+      // Compare serialization, since JSON object equality ignores key order.
+      auto expected = nlohmann::ordered_json::parse(schema);
+      if (!expected.contains("type")) {
+        expected["type"] = "object";
+      }
+      EXPECT_EQ(nlohmann::ordered_json::parse(*prompt)["function"]["parameters"]
+                    .dump(),
+                expected.dump());
+    }
+  }
+}
+
+TEST(AnthropicRequestUtilsTest, IgnoresClientSchemaMetadataWithoutSchema) {
+  for (bool count_tokens : {false, true}) {
+    proto::AnthropicMessagesRequest request;
+    const Status status = api_service::parse_anthropic_request(
+        R"({"model":"test","max_tokens":16,"messages":[],"tools":[{"name":"search","input_schema_json":"{}","inputSchemaJson":42}]})",
+        count_tokens,
+        request);
+    ASSERT_TRUE(status.ok()) << status.message();
+    ASSERT_EQ(request.tools_size(), 1);
+    EXPECT_FALSE(request.tools(0).has_input_schema_json());
+    EXPECT_FALSE(api_service::validate_anthropic_request(request).ok());
+  }
 }
 
 TEST(AnthropicRequestUtilsTest, AcceptsPydanticNumericBooleanCoercions) {

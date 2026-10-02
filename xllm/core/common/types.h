@@ -20,6 +20,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common.pb.h"
@@ -339,18 +340,21 @@ struct DeviceStats {
 };
 
 // Function call related types
-struct JsonFunction {
+class JsonFunction final {
+ public:
   std::string name;
   std::string description;
-  nlohmann::json parameters;
+  nlohmann::ordered_json parameters;
 
   std::optional<bool> defer_loading;
 
   JsonFunction() = default;
-  JsonFunction(const std::string& func_name,
-               const std::string& desc,
-               const nlohmann::json& params)
-      : name(func_name), description(desc), parameters(params) {}
+  JsonFunction(std::string func_name,
+               std::string desc,
+               nlohmann::ordered_json params)
+      : name(std::move(func_name)),
+        description(std::move(desc)),
+        parameters(std::move(params)) {}
 };
 
 struct JsonTool {

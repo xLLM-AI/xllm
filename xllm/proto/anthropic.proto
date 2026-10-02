@@ -126,6 +126,9 @@ message AnthropicTool {
   google.protobuf.Struct input_schema = 3;
   reserved 4;
   optional bool defer_loading = 5;
+
+  // Internal HTTP-decoder metadata: Struct cannot retain schema key order.
+  optional string input_schema_json = 6;
 }
 
 message AnthropicToolChoice {
