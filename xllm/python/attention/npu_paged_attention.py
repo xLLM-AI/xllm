@@ -842,7 +842,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         assert metadata is not None, "execute_mla called before prepare()"
         layer_id = layer.layer_id
         layer_cache = self._kv_caches[layer_id]
-        # MLA reuses the K/V slots for the latent (nope) and rope caches.
+        # Packed C8 aliases key/value as [int8 NoPE | bf16 RoPE | fp32 scales].
         nope_cache, rope_cache = layer_cache.key, layer_cache.value
         if nope_cache is None:
             raise RuntimeError(f"MLA latent cache is missing for layer {layer_id}")
@@ -850,6 +850,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("MLA requires a block table")
         if self._mla_actual_seq_q is None or self._mla_actual_seq_kv is None:
             raise RuntimeError("MLA requires query and KV sequence lengths")
+
+        c8_enabled = nope_cache.dtype == torch.int8 and nope_cache.size(-1) > q_latent.size(-1)
+        if c8_enabled and topk is None:
+            raise RuntimeError(
+                "SFA C8 packed KV cache only supports sparse (topk) MLA; "
+                "dense MLA in this configuration has no C8 kernel."
+            )
 
         cp_context = get_forward_context().cp_context
         if cp_context is None:
@@ -864,9 +871,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 if not cache_is_preprocessed:
                     if k_latent_3d is None or k_pe_3d is None:
                         raise RuntimeError("MLA cache inputs are required")
-                    torch.ops.xllm_ops.reshape_paged_cache(
-                        metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
-                    )
+                    if c8_enabled:
+                        self._write_mla_packed_c8_cache(
+                            metadata.slot_mapping,
+                            k_latent_3d,
+                            k_pe_3d,
+                            nope_cache,
+                        )
+                    else:
+                        torch.ops.xllm_ops.reshape_paged_cache(
+                            metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
+                        )
                 # Dense absorbed MLA (indexer disabled, topk is None): fall back to
                 # FIA v2 full attention over the paged latent cache. This is the
                 # mainline path used by DeepSeek-V3.2 when index_topk == 0; keep it
@@ -880,6 +895,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                         rope_cache,
                         self._block_table_i32,
                         layer_id,
+                    )
+                if c8_enabled:
+                    return self._mla_sparse_c8(
+                        q_latent,
+                        q_pe,
+                        nope_cache,
+                        topk,
+                        self._block_table_i32,
+                        layer.scale,
                     )
                 return self._mla_sparse(
                     q_latent,
@@ -918,6 +942,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("CP prefill requires sparse MLA index output")
         if k_latent_3d is None or k_pe_3d is None:
             raise RuntimeError("CP prefill requires MLA cache inputs")
+        if c8_enabled:
+            raise RuntimeError("CP prefill does not support SFA C8 packed KV cache")
         global_latent = cp_gather_kv(k_latent_3d, cp_context).contiguous()
         global_rope = cp_gather_kv(k_pe_3d, cp_context).contiguous()
         cache_slots = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
@@ -959,6 +985,53 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         local_output.index_copy_(0, query_index, output)
         return local_output
 
+    # SFA C8 packed-row tile size. Must stay in sync with the C++
+    # `MlaPackedC8Layout` struct in kv_cache_shape.h.
+    _MLA_PACKED_C8_TILE_SIZE = 128
+
+    def _write_mla_packed_c8_cache(
+        self,
+        slot_mapping: torch.Tensor,
+        k_latent_3d: torch.Tensor,
+        k_pe_3d: torch.Tensor,
+        packed_cache: torch.Tensor,
+    ) -> None:
+        """Write [int8 NoPE | bf16 RoPE | fp32 scales] cache rows."""
+        # The kernel decodes these bytes as bf16; fp16 has the same width but a different representation.
+        if k_pe_3d.dtype != torch.bfloat16:
+            raise RuntimeError(
+                f"SFA C8 packed rope path expects bf16 rope, got dtype={k_pe_3d.dtype} ({k_pe_3d.element_size()} B)."
+            )
+        num_tokens = k_latent_3d.size(0)
+        kv_lora = k_latent_3d.size(-1)
+        rope_dim = k_pe_3d.size(-1)
+        cache_head_dim = packed_cache.size(-1)
+        expected = kv_lora + 2 * rope_dim + 4 * (kv_lora // self._MLA_PACKED_C8_TILE_SIZE)
+        if cache_head_dim != expected:
+            raise RuntimeError(
+                f"SFA C8 packed cache trailing dim mismatch: cache has "
+                f"{cache_head_dim} bytes/row, expected {expected} "
+                f"(kv_lora={kv_lora}, rope_dim={rope_dim}, "
+                f"tile={self._MLA_PACKED_C8_TILE_SIZE}). Python and C++ "
+                f"MlaPackedC8Layout must stay in lockstep."
+            )
+        nope_view = k_latent_3d.contiguous().view(-1, 1, kv_lora)
+        k_nope_i8, k_scale_fp32 = kernels.dynamic_block_quant(
+            nope_view,
+            dst_type=torch.int8,
+            row_block_size=1,
+            col_block_size=self._MLA_PACKED_C8_TILE_SIZE,
+        )
+        # Preserve RoPE and scale bytes in the packed int8 row.
+        k_nope_i8 = k_nope_i8.reshape(num_tokens, kv_lora)
+        k_rope_i8 = k_pe_3d.reshape(num_tokens, rope_dim).view(torch.int8)
+        k_scale_i8 = k_scale_fp32.reshape(num_tokens, -1).view(torch.int8)
+        packed = torch.cat([k_nope_i8, k_rope_i8, k_scale_i8], dim=-1)
+        packed_flat = packed_cache.view(-1, packed_cache.size(-1))
+        # Padding writes belong to the allocator-reserved block 0.
+        indices = slot_mapping.clamp_min(0).reshape(-1, 1).to(torch.int32)
+        kernels.scatter_nd_update(packed_flat, indices, packed)
+
     def mla_preprocess_context(
         self,
         layer: Attention,
@@ -970,6 +1043,10 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         kv_cache, rope_cache = layer_cache.key, layer_cache.value
         if kv_cache is None or rope_cache is None:
             raise RuntimeError(f"MLA latent cache is missing for layer {layer.layer_id}")
+        # Fused MLA preprocessing writes separate latent and RoPE caches.
+        # Packed C8 needs quantization and byte packing in execute_mla instead.
+        if kv_cache.dtype == torch.int8 and kv_cache.size(-1) > layer.kv_lora_rank:
+            return None
         return MlaPreprocessContext(
             kv_cache=kv_cache,
             rope_cache=rope_cache,
@@ -1789,6 +1866,38 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "PA_BSND",
             3,
             out,
+        )  # [T, H, kv_lora]
+
+    def _mla_sparse_c8(
+        self,
+        q_latent: torch.Tensor,
+        q_pe: torch.Tensor,
+        packed_cache: torch.Tensor,
+        topk: torch.Tensor,
+        block_table: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        """Sparse MLA with embedded per-tile scales and the caller's softmax scale."""
+        query = torch.cat([q_latent, q_pe], dim=-1)
+        return kernels.kv_quant_sparse_flash_attention(
+            query=query,
+            key=packed_cache,
+            value=packed_cache,
+            sparse_indices=topk,
+            block_table=block_table,
+            actual_seq_lengths_query=self._mla_actual_seq_q,
+            actual_seq_lengths_kv=self._mla_actual_seq_kv,
+            scale_value=scale,
+            sparse_block_size=1,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=self._MLA_PACKED_C8_TILE_SIZE,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=q_pe.shape[-1],
         )  # [T, H, kv_lora]
 
     def _mla_dense_fia_v2_out(

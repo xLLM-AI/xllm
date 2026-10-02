@@ -94,6 +94,8 @@ _EXPORTS = {
         "vision_rotary_mul",
     ),
     "sparse_attention": (
+        "dynamic_block_quant",
+        "kv_quant_sparse_flash_attention",
         "lightning_indexer",
         "lightning_indexer_out",
         "quant_lightning_indexer",
@@ -162,6 +164,8 @@ __all__ = [
     "supports_quant_matmul_out",
     "quantize_per_tensor",
     "dynamic_quant",
+    "dynamic_block_quant",
+    "kv_quant_sparse_flash_attention",
     "lightning_indexer",
     "lightning_indexer_out",
     "quant_lightning_indexer",
