@@ -1922,6 +1922,24 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
   const int64_t logical_block_size =
       static_cast<int64_t>(options.block_size()) * kv_split_size;
+  if (parallel_args_.cp_size() > 1 &&
+      (!Platform::is_npu() || args.model_type() != "glm_moe_dsa" ||
+       !args.enable_mla() || kv_split_size != 1 ||
+       parallel_args_.dp_size() != 1 ||
+       parallel_args_.layerwise_split_size() != 1 ||
+       parallel_args_.tp_group_ == nullptr ||
+       parallel_args_.cp_group_ == nullptr ||
+       parallel_args_.cp_group_ == parallel_args_.tp_group_ ||
+       (options.enable_speculative_decode() &&
+        (!SpeculativeConfig::is_mtp_algorithm(
+             options.speculative_algorithm()) ||
+         options.enable_adaptive_speculative_decode())))) {
+    return ::xllm::Status(
+        StatusCode::INVALID_ARGUMENT,
+        "Task pipeline prefill CP requires an NPU GLM DSA target, replicated "
+        "KV caches, DP/layerwise sizes of one, orthogonal TP/CP groups and "
+        "ordinary or fixed MTP decoding.");
+  }
   if (kv_split_size > 1 &&
       (args.model_type() != "glm_moe_dsa" || !args.enable_mla() ||
        parallel_args_.cp_size() != 1 || parallel_args_.dp_size() != 1 ||
@@ -1969,6 +1987,10 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   capacity.dp_size = parallel_args_.dp_size();
   capacity.dp_rank = parallel_args_.rank() /
                      (parallel_args_.world_size() / parallel_args_.dp_size());
+  if (parallel_args_.cp_size() > 1) {
+    capacity.sampling_group = parallel_args_.tp_group_;
+    capacity.cp_sampling_group = parallel_args_.cp_group_;
+  }
   if (options.enable_graph()) {
     const int64_t local_sequences =
         (static_cast<int64_t>(options.max_seqs_per_batch()) + capacity.dp_size -

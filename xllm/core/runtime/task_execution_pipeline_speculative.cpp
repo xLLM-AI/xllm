@@ -1294,7 +1294,7 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
         slot.target_prefill->sampling_params().selected_token_idxes);
     sample(*slot.target_sampling, slot.target_logits);
     slot.target_prefill->device_result().lengths.fill_(1);
-    if (block_draft()) {
+    if (block_draft() || capacity_.cp_sampling_group != nullptr) {
       synchronize_samples(slot.target_prefill->device_result());
     } else {
       auto tokens = slot.target_prefill->device_result().tokens;
@@ -1440,7 +1440,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
     result.top_tokens.copy_(accepted.top_tokens);
     result.top_logprobs.copy_(accepted.top_logprobs);
   }
-  if (block_draft()) {
+  if (block_draft() || capacity_.cp_sampling_group != nullptr) {
     synchronize_samples(result);
   } else {
     auto tokens = result.tokens;
@@ -1481,10 +1481,9 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
                             speculative_capacity_->selector_top_k,
                             selector_sampling,
                             device_.unwrap());
-    if (speculative_capacity_->sampling_group != nullptr &&
-        speculative_capacity_->sampling_group->world_size() > 1) {
-      speculative_capacity_->sampling_group->broadcast(slot.block_gumbel,
-                                                       /*root_rank=*/0);
+    if (capacity_.sampling_group != nullptr &&
+        capacity_.sampling_group->world_size() > 1) {
+      capacity_.sampling_group->broadcast(slot.block_gumbel, /*root_rank=*/0);
     }
   }
   invocation.output = draft_->executor.forward(input.tokens(),
@@ -1521,8 +1520,14 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
 
 void TaskExecutionPipeline::synchronize_tokens(torch::Tensor& tokens,
                                                bool all_greedy) {
-  auto* group = speculative_capacity_->sampling_group;
-  if (!all_greedy && group != nullptr && group->world_size() > 1) {
+  if (all_greedy && capacity_.cp_sampling_group == nullptr) {
+    return;
+  }
+  for (ProcessGroup* group :
+       {capacity_.sampling_group, capacity_.cp_sampling_group}) {
+    if (group == nullptr || group->world_size() <= 1) {
+      continue;
+    }
     CHECK(tokens.is_contiguous());
     group->broadcast(tokens, /*root_rank=*/0);
   }
@@ -1530,18 +1535,13 @@ void TaskExecutionPipeline::synchronize_tokens(torch::Tensor& tokens,
 
 void TaskExecutionPipeline::synchronize_samples(
     const TokenResultTensors& result) {
-  if (speculative_capacity_->sampling_group == nullptr ||
-      speculative_capacity_->sampling_group->world_size() == 1) {
-    return;
-  }
   for (const auto* tensor : {&result.tokens,
                              &result.logprobs,
                              &result.top_tokens,
                              &result.top_logprobs}) {
     if (tensor->defined()) {
-      CHECK(tensor->is_contiguous());
       auto view = *tensor;
-      speculative_capacity_->sampling_group->broadcast(view, /*root_rank=*/0);
+      synchronize_tokens(view, /*all_greedy=*/false);
     }
   }
 }

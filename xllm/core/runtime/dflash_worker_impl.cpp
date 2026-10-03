@@ -432,7 +432,7 @@ bool DFlashWorkerImpl::task_models_loaded() const {
       static_cast<uint32_t>(expected_context_hidden_size_);
   capacity.mask_token_id = mask_token_id_;
   capacity.selector_top_k = draft_args.dflash2_selector_top_k();
-  capacity.sampling_group = spec_broadcast_group(parallel_args_);
+  capacity.common.sampling_group = spec_broadcast_group(parallel_args_);
   capacity.draft_sampling_mode = draft_sampling_mode_;
   capacity.fused_rejection = enable_fused_kernel_;
   status = TaskExecutionPipeline::create(threadpool_,

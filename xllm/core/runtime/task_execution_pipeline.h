@@ -31,6 +31,8 @@ limitations under the License.
 
 namespace xllm {
 
+class ProcessGroup;
+
 // The owner establishes these model contracts before admission. Persistent
 // storage is allocated before KV budgeting; KV may be populated afterwards.
 struct LlmTaskCapacity {
@@ -50,6 +52,10 @@ struct LlmTaskCapacity {
   bool enable_mla = false;
   uint32_t dp_size = 1;
   uint32_t dp_rank = 0;
+  // Borrowed groups outlive the pipeline. Orthogonal CP requires consensus
+  // along both axes, including greedy sampling, before publishing tokens.
+  ProcessGroup* sampling_group = nullptr;
+  ProcessGroup* cp_sampling_group = nullptr;
   // DP-local expanded target token limit; zero disables Graph execution.
   uint32_t max_graph_batch_size = 0;
 };
@@ -61,8 +67,6 @@ struct TaskModel {
   std::vector<KVCache>& kv_caches;
 };
 
-class ProcessGroup;
-
 enum class SpeculativeTaskKind : uint8_t { MTP, DFLASH, DFLASH2 };
 
 struct SpeculativeTaskCapacity {
@@ -72,7 +76,6 @@ struct SpeculativeTaskCapacity {
   uint32_t context_hidden_size = 0;
   int32_t mask_token_id = -1;
   uint32_t selector_top_k = 0;
-  ProcessGroup* sampling_group = nullptr;  // Borrowed from the owning Worker.
   uint32_t index_topk = 0;
   bool reuse_topk = false;
   DraftSamplingMode draft_sampling_mode = DraftSamplingMode::GREEDY;

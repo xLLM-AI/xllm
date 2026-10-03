@@ -489,6 +489,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._mla_max_seqlen_k = (
                 _mla_graph_max_seqlen_k(prepared.block_table, self.page_size) if graph_mode else prepared.max_seq_len
             )
+            # Slot input storage is reused across batches. Segment tables
+            # belong to one forward, even when their source view is unchanged.
+            self._mla_cp_block_tables.clear()
             self._mla_quant_indexer_metadata.clear()
             self._kv_owner_representatives = None
             self._materialized_block_table = None
