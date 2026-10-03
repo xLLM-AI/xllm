@@ -843,6 +843,10 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
     context_ = impl_->context_;
     target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
         context_.get_model_args().model_type());
+    if (target_spec_verify_mode_ ==
+        mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY) {
+      adaptive_spec_controller_.reset();
+    }
   }
 
   if (draft_impl_ != nullptr &&

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -54,6 +55,7 @@ class StaticGraphAttentionMetadata:
     kv_cu_seq_lens: torch.Tensor | None = None
     kv_seq_lens_host: torch.Tensor | None = None
     kv_seq_lens_host_values: list[int] | None = None
+    new_cache_slots_host_values: list[int] | None = None
     paged_kv_indptr_host: torch.Tensor | None = None
     paged_kv_last_page_len_host: torch.Tensor | None = None
     block_table: torch.Tensor | None = None
@@ -68,11 +70,20 @@ class StaticGraphAttentionMetadata:
     is_prefill: bool = False
     is_chunked_prefill: bool = False
     is_mixed: bool = False
+    is_dummy: bool = False
     is_spec_verify: bool = False
     local_slot_mapping: torch.Tensor | None = None
     kv_split_size: int = 1
     kv_split_rank: int = 0
     has_kv_shard: bool = False
+    multi_block_tables: Sequence[torch.Tensor | None] = ()
+    dsa_metadata: object | None = None
+    dsa_positions: torch.Tensor | None = None
+    dsa_cos_sin: torch.Tensor | None = None
+    dsa_c4_cos_sin: torch.Tensor | None = None
+    dsa_c128_cos_sin: torch.Tensor | None = None
+    dsa_graph_mode: bool = False
+    dsa_graph_block_table_cols: int = 0
     prepared_attention_state: object | None = None
 
 

@@ -65,11 +65,13 @@ class EagerRunner(BaseRunner):
     ) -> ModelExecutionOutput:
         cp_context = None
         is_mla = self.attention_backend.is_mla
+        is_dummy = bool(getattr(metadata, "is_dummy", False))
         # Speculative verification can carry chunked-prefill metadata, but its
         # rows already describe the global verification batch. Keep it on the
         # same replicated-cache path as decode, including eager graph misses.
         use_cp_context = (
-            self.cp_size > 1
+            not is_dummy
+            and self.cp_size > 1
             and not metadata.is_spec_verify
             and (metadata.is_prefill or (is_mla and metadata.is_chunked_prefill))
         )
@@ -94,13 +96,14 @@ class EagerRunner(BaseRunner):
                     input_embedding.ndim == 0 or input_embedding.shape[0] != packed_rows
                 ):
                     raise ValueError("CP packed input_embedding must contain one embedding per host query row")
-                cp_context = build_cp_context(
-                    q_seq_lens,
-                    kv_seq_lens,
-                    self.cp_size,
-                    self.cp_rank,
-                    self.device,
-                )
+                if self.attention_backend.uses_executor_cp_context:
+                    cp_context = build_cp_context(
+                        q_seq_lens,
+                        kv_seq_lens,
+                        self.cp_size,
+                        self.cp_rank,
+                        self.device,
+                    )
 
         # Admission and context construction must finish before prepare(). A
         # sharded MLA backend enters CP collectives during prepare, so rejecting

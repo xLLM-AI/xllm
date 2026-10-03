@@ -362,6 +362,7 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       std::max(options.max_seqs_per_batch, static_cast<int64_t>(1));
   int64_t burst_budget =
       std::max(options.max_tokens_per_batch, static_cast<int64_t>(0));
+  int64_t publish_unit_blocks = 0;
   if (options.enable_dp_fair_token_budget && options.dp_size > 1 &&
       options.instance_role == InstanceRole::PREFILL) {
     // The scheduler caps each DP group at max_tokens_per_batch / dp_size
@@ -380,8 +381,18 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
       per_group_cap = burst_budget;
     }
     burst_budget = per_group_cap;
+    if (options.enable_prefix_cache) {
+      // Prefix reuse needs the SWA rows of a complete compressed checkpoint.
+      for (const int32_t ratio : compress_ratios) {
+        if (ratio > 1) {
+          publish_unit_blocks =
+              std::max(publish_unit_blocks, static_cast<int64_t>(ratio));
+        }
+      }
+    }
   }
-  const int64_t burst_blocks = util::ceil_div(burst_budget, block_size);
+  const int64_t burst_blocks =
+      std::max(util::ceil_div(burst_budget, block_size), publish_unit_blocks);
   cache_cost.swa_count =
       swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
 
@@ -579,7 +590,7 @@ void init_standard_counts(const ModelArgs& model_args,
   const int64_t full_cache_block_size_in_bytes =
       standard_full_cache_block_size_in_bytes(*kv_cache_cap) +
       options.embedding_context_bytes_per_block;
-  kv_cache_cap->num_linear_state_blocks(
+  int64_t num_linear_state_blocks =
       calculate_linear_state_blocks(kv_cache_cap->cache_size_in_bytes(),
                                     kv_cache_cap->num_linear_attention_layers(),
                                     kv_cache_cap->linear_slot_size(),
@@ -587,7 +598,20 @@ void init_standard_counts(const ModelArgs& model_args,
                                     options.max_seqs_per_batch,
                                     options.max_concurrent_requests,
                                     options.max_linear_state_cache_slots,
-                                    options.enable_prefix_cache));
+                                    options.enable_prefix_cache);
+  CHECK_GE(options.linear_state_cache_block_limit, 0);
+  if (options.linear_state_cache_block_limit > 0 &&
+      kv_cache_cap->num_linear_attention_layers() > 0) {
+    CHECK_LE(options.max_linear_state_cache_slots + kPaddingLinearStateBlocks,
+             options.linear_state_cache_block_limit)
+        << "Selected backend supports at most "
+        << options.linear_state_cache_block_limit
+        << " physical linear-state slots, including "
+        << kPaddingLinearStateBlocks << " padding slots.";
+    num_linear_state_blocks = std::min(num_linear_state_blocks,
+                                       options.linear_state_cache_block_limit);
+  }
+  kv_cache_cap->num_linear_state_blocks(num_linear_state_blocks);
   kv_cache_cap->linear_cache_size_in_bytes(
       kv_cache_cap->num_linear_attention_layers() *
       kv_cache_cap->num_linear_state_blocks() *

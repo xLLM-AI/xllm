@@ -128,6 +128,22 @@ torch::Tensor CompressorImpl::forward(
   const int64_t sin_last_dim = compressed_sin.size(compressed_sin.dim() - 1);
   const int64_t cos_last_dim = compressed_cos.size(compressed_cos.dim() - 1);
 
+  // DSA metadata stores half-width rotary tables for the compressor rope head
+  // dim. The Python adapter expands [T, rope_dim / 2] to [T, rope_dim] before
+  // invoking the compressor kernel; perform the same expansion here so native
+  // and Python pass identical kernel inputs.
+  torch::Tensor rope_sin = compressed_sin.view({-1, sin_last_dim});
+  torch::Tensor rope_cos = compressed_cos.view({-1, cos_last_dim});
+  if (rope_head_dim_ > 0 && sin_last_dim * 2 == rope_head_dim_) {
+    rope_sin = rope_sin.repeat_interleave(2, /*dim=*/-1);
+    rope_cos = rope_cos.repeat_interleave(2, /*dim=*/-1);
+  }
+  // Python converts only the kernel-visible RoPE tensors to the same device,
+  // BF16 dtype and contiguous layout as the hidden-state input. Keep the native
+  // adapter identical before invoking the ACLNN compressor.
+  rope_sin = rope_sin.to(hidden_states.options()).contiguous();
+  rope_cos = rope_cos.to(hidden_states.options()).contiguous();
+
   torch::Tensor compressed_kv;
   // TODO - replace opfunc; cu_seqlens/start_pos need Tensor from DSA metadata
   xllm::kernel::CompressorParams params;
@@ -138,8 +154,8 @@ torch::Tensor CompressorImpl::forward(
   params.score_state = score_state;
   params.ape = cmp_ape_;
   params.norm_weight = cmp_norm_;
-  params.rope_sin = compressed_sin.view({-1, sin_last_dim});
-  params.rope_cos = compressed_cos.view({-1, cos_last_dim});
+  params.rope_sin = rope_sin;
+  params.rope_cos = rope_cos;
   params.kv_block_table = c10::optional<torch::Tensor>(kv_block_table);
   params.score_block_table = c10::optional<torch::Tensor>(score_block_table);
   params.cu_seqlens = c10::optional<torch::Tensor>(actual_seq_lengths_query);

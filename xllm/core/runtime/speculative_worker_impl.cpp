@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/speculative/spec_input_builder.h"
+#include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
 #include "util/hash_util.h"
@@ -184,6 +185,8 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
       static_cast<int64_t>(options.max_tokens_per_chunk_for_prefill());
   estimate_options.max_linear_state_cache_slots =
       options.max_linear_state_cache_slots();
+  estimate_options.linear_state_cache_block_limit =
+      get_npu_linear_state_cache_block_limit(model_args.model_type());
   estimate_options.is_draft_engine = options.is_draft_engine();
   estimate_options.enable_chunked_prefill = options.enable_chunked_prefill();
   estimate_options.enable_schedule_overlap = options.enable_schedule_overlap();

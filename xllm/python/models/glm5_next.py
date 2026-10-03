@@ -1589,15 +1589,7 @@ class Glm5NextExperts(nn.Module):
         # Apply router weights and accumulate in fp32 for determinism.
         current = (current * flat_weights.unsqueeze(-1)).float()
         current = current.view(n_tokens, topk, hidden)
-        final_f32 = torch.zeros(
-            n_tokens,
-            topk,
-            hidden,
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
-        final_f32 = final_f32 + current
-        return final_f32.sum(1).to(hidden_states.dtype)
+        return current.sum(1).to(hidden_states.dtype)
 
 
 class Glm5NextMoE(nn.Module):

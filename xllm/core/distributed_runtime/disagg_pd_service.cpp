@@ -24,6 +24,15 @@ DisaggPDService::DisaggPDService(DisaggPDScheduler* scheduler, Engine* engine) {
       std::make_unique<DisaggPDServiceImpl>(scheduler, engine);
 }
 
+void DisaggPDService::ReleaseReservation(
+    ::google::protobuf::RpcController* /*controller*/,
+    const proto::ReleaseReservationRequest* request,
+    proto::ReleaseReservationResponse* response,
+    ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  disagg_pd_service_impl_->release_reservation(request, response);
+}
+
 void DisaggPDService::AddNewRequests(
     ::google::protobuf::RpcController* controller,
     const proto::DisaggRequests* request,

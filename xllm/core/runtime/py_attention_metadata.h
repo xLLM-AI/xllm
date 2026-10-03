@@ -87,6 +87,7 @@ class PyAttentionMetadataView final {
   pybind11::object kv_cu_seq_lens() const;
   pybind11::object kv_seq_lens_host() const;
   const std::vector<int32_t>& kv_seq_lens_host_values() const;
+  const std::vector<int32_t>& new_cache_slots_host_values() const;
   pybind11::object q_seq_lens_host() const;
   pybind11::list multi_block_tables() const;
   pybind11::object block_table() const;
@@ -120,6 +121,7 @@ class PyAttentionMetadataView final {
   bool is_chunked_prefill() const;
   bool is_mixed() const;
   bool is_spec_verify() const;
+  bool is_dummy() const;
 
  private:
   static torch::Tensor make_host_int32_view(
@@ -129,6 +131,7 @@ class PyAttentionMetadataView final {
   std::shared_ptr<layer::AttentionMetadata> metadata_;
   torch::Tensor kv_seq_lens_host_;
   torch::Tensor q_seq_lens_host_;
+  std::vector<int32_t> new_cache_slots_host_values_;
   std::vector<torch::Tensor> multi_block_tables_;
   torch::Tensor linear_state_indices_;
   std::vector<int32_t> dp_execution_token_counts_;

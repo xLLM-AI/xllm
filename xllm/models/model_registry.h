@@ -15,6 +15,7 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -171,6 +172,8 @@ bool is_npu_model_cp_capable(const std::string& resolved_name);
 
 // Native DCP capability is distinct from prefill CP sharding capability.
 bool is_npu_model_dcp_capable(const std::string& resolved_name);
+
+int64_t get_npu_linear_state_cache_block_limit(const std::string& model_type);
 
 bool is_mlu_model_cp_capable(const std::string& resolved_name);
 

@@ -25,12 +25,16 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from xllm.python.distributed import collectives
+from xllm.python.layers import moe_dp
+from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 from xllm.python.models import deepseek_v4, deepseek_v32
 from xllm.python.models.deepseek_v4 import (
     DeepseekV4Config,
     DeepseekV4DecoderLayer,
     DeepseekV4ForCausalLM,
     DeepseekV4HyperConnection,
+    DeepseekV4Indexer,
     DeepseekV4Model,
     DeepseekV4MoE,
     DeepseekV4RotaryEmbedding,
@@ -163,6 +167,81 @@ def test_rotary_cache_shares_identical_descriptors() -> None:
 
     assert c4.cos_sin_cache.data_ptr() == c128.cos_sin_cache.data_ptr()
     assert c4.cos_sin_cache.data_ptr() != default.cos_sin_cache.data_ptr()
+
+
+def test_qli_decode_uses_request_shaped_rope_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    indexer = SimpleNamespace(
+        n_head=1,
+        head_dim=4,
+        rope_dim=2,
+        topk=1,
+        hadamard_scale=1.0,
+        wq_b=SimpleNamespace(
+            forward_quantized=MagicMock(return_value=torch.ones((1, 4))),
+        ),
+        weights_proj=MagicMock(return_value=torch.ones((1, 1))),
+        _get_hadamard=MagicMock(return_value=torch.empty(0)),
+        _indexer_compress_kv=MagicMock(return_value=None),
+    )
+    layer_cache = SimpleNamespace(
+        index=torch.zeros((1, 1, 4), dtype=torch.int8),
+        indexer_scale=torch.ones((1, 1, 1), dtype=torch.float16),
+    )
+    dsa = SimpleNamespace(
+        cos_table=torch.tensor([[0.25]]),
+        sin_table=torch.tensor([[0.5]]),
+        input_positions=torch.tensor([111]),
+        block_tables=[[torch.tensor([[0]], dtype=torch.int32)]],
+        actual_seq_lengths_query=torch.tensor([1], dtype=torch.int32),
+        actual_seq_lengths_kv=torch.tensor([112], dtype=torch.int32),
+        qli_metadata=torch.tensor([1], dtype=torch.int32),
+    )
+    mapping = SimpleNamespace(index_cache_idx=0)
+    rotary_mul = MagicMock()
+    expected_topk = torch.tensor([[0]], dtype=torch.int32)
+
+    def fake_dynamic_quant(value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        quantized = torch.zeros_like(value, dtype=torch.int8)
+        scale = torch.ones(value.shape[:-1], dtype=torch.float32)
+        return quantized, scale
+
+    monkeypatch.setattr(
+        deepseek_v4.kernels,
+        "npu_inplace_partial_rotary_mul",
+        rotary_mul,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        deepseek_v4.kernels,
+        "dynamic_quant",
+        fake_dynamic_quant,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        deepseek_v4.kernels,
+        "quant_lightning_indexer",
+        MagicMock(return_value=expected_topk),
+        raising=False,
+    )
+
+    output = DeepseekV4Indexer.select_qli_dsv4(
+        indexer,
+        layer_id=0,
+        layer_cache=layer_cache,
+        dsa=dsa,
+        mapping=mapping,
+        qr=torch.ones((1, 1)),
+        qr_pertoken_scale=torch.ones(1),
+        hidden=torch.ones((1, 4)),
+    )
+
+    assert output is expected_topk
+    rotary_mul.assert_called_once()
+    _, cos, sin, rope_start_dim, rope_dim = rotary_mul.call_args.args
+    torch.testing.assert_close(cos, torch.tensor([[0.25, 0.25]]))
+    torch.testing.assert_close(sin, torch.tensor([[0.5, 0.5]]))
+    assert rope_start_dim == 2
+    assert rope_dim == 2
 
 
 def test_registry_resolves_deepseek_v4() -> None:
@@ -326,7 +405,11 @@ def test_dense_mlp_uses_native_aware_tp_reduce(monkeypatch) -> None:
     mlp = DeepseekV3MLP(cfg, cfg.moe_intermediate_size, torch.float32, torch.device("cpu"))
     mlp.gate_up_proj.forward = MagicMock(return_value=torch.ones(1, 2 * mlp.gate_up_proj.out_features))
     mlp.down_proj.forward = MagicMock(return_value=torch.ones(1, cfg.hidden_size))
-    monkeypatch.setattr(deepseek_v32.kernels, "silu_and_mul", lambda tensor: tensor[..., : tensor.shape[-1] // 2])
+    monkeypatch.setattr(
+        deepseek_v32,
+        "_swiglu_with_clamp",
+        lambda tensor, limit: tensor[..., : tensor.shape[-1] // 2],
+    )
     tp_reduce = MagicMock()
     monkeypatch.setattr(deepseek_v32.distributed, "tp_all_reduce", tp_reduce, raising=False)
 
@@ -335,15 +418,15 @@ def test_dense_mlp_uses_native_aware_tp_reduce(monkeypatch) -> None:
     tp_reduce.assert_called_once()
 
 
-def test_model_rejects_cp_until_cp_context_is_available() -> None:
+def test_model_accepts_cp_config() -> None:
     cfg = DeepseekV4Config.from_dict({**_DSV4_CONFIG, "cp_size": 2})
-    with pytest.raises(NotImplementedError, match="CP context PR"):
-        DeepseekV4Model(cfg, torch.float32, torch.device("cpu"))
+    model = DeepseekV4Model(cfg, torch.float32, torch.device("cpu"))
+    assert model.cfg.cp_size == 2
 
 
-def test_causal_lm_rejects_data_parallelism_before_building_model() -> None:
-    with pytest.raises(NotImplementedError, match="dp_size > 1"):
-        DeepseekV4ForCausalLM({**_DSV4_CONFIG, "dp_size": 2})
+def test_causal_lm_accepts_data_parallelism_config() -> None:
+    model = DeepseekV4ForCausalLM({**_DSV4_CONFIG, "dp_size": 2})
+    assert model.cfg.dp_size == 2
 
 
 def test_dense_mlp_loader_maps_dsv4_weight_names() -> None:
@@ -487,3 +570,34 @@ def test_moe_tp_only_combines_before_one_reduce(
 
     assert calls == ["moe_tp"]
     assert torch.equal(output, torch.full((1,), 10.0))
+
+
+def test_v4_o_b_row_parallel_keeps_checkpoint_layout() -> None:
+    """Native o_b consumes [N, K] through F.linear for BF16 parity."""
+    cfg = DeepseekV4Config.from_dict(_DSV4_CONFIG)
+    layer = DeepseekV4DecoderLayer(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu"))
+
+    assert layer.self_attn.o_b_proj._use_checkpoint_layout is True
+    layer.self_attn.o_b_proj.process_weights_after_loading()
+    assert layer.self_attn.o_b_proj._weight_is_transposed is False
+
+
+def test_moe_dp_rejects_metadata_token_count_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DP slicing must never silently consume padding or drop real rows."""
+    monkeypatch.setattr(moe_dp, "distributed", collectives)
+    moe = SimpleNamespace(
+        dp_size=2,
+        dp_rank=0,
+        gate=MagicMock(side_effect=AssertionError("gate should not run")),
+        input_ids=None,
+    )
+    metadata = SimpleNamespace(dp_execution_token_counts=[3, 4])
+    ctx = ForwardContext(
+        attention_backend=MagicMock(),
+        device=torch.device("cpu"),
+        metadata=metadata,
+        layer_caches=[],
+    )
+
+    with forward_context(ctx), pytest.raises(RuntimeError, match="execution token count"):
+        DeepseekV4MoE.forward(moe, torch.randn(4, 8))

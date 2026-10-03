@@ -536,6 +536,55 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
     c10::ArrayRef<int32_t> q_seq_lens = {},
     bool use_qk_l2norm_in_kernel = false);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> npu_mega_gdn_prefill(
+    const torch::Tensor& mixed_qkv,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const torch::Tensor& z,
+    const torch::Tensor& conv_weight,
+    torch::Tensor& conv_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    const torch::Tensor& conv_state_read_indices,
+    const torch::Tensor& conv_state_write_indices,
+    const torch::Tensor& ssm_state_read_indices,
+    const torch::Tensor& ssm_state_write_indices,
+    torch::Tensor& ssm_cache,
+    const torch::Tensor& cu_seqlens,
+    const torch::Tensor& norm_weight,
+    int64_t num_matrices);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+npu_mega_gdn_decode(const torch::Tensor& qkv,
+                    const torch::Tensor& z,
+                    const torch::Tensor& b,
+                    const torch::Tensor& a,
+                    const torch::Tensor& conv_weight,
+                    torch::Tensor& conv_state,
+                    const torch::Tensor& a_log,
+                    const torch::Tensor& dt_bias,
+                    torch::Tensor& ssm_state,
+                    const torch::Tensor& read_state_indices,
+                    const torch::Tensor& write_state_indices,
+                    const torch::Tensor& norm_weight,
+                    bool fla_ssm_state_layout);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+npu_mega_gdn_mtp_decode(const torch::Tensor& qkv,
+                        const torch::Tensor& z,
+                        const torch::Tensor& b,
+                        const torch::Tensor& a,
+                        const torch::Tensor& conv_weight,
+                        torch::Tensor& conv_state,
+                        const torch::Tensor& a_log,
+                        const torch::Tensor& dt_bias,
+                        torch::Tensor& ssm_state,
+                        const torch::Tensor& read_state_indices,
+                        const torch::Tensor& write_state_indices,
+                        const torch::Tensor& num_accepted_tokens,
+                        const torch::Tensor& norm_weight,
+                        bool fla_ssm_state_layout);
+
 torch::Tensor layer_norm_fwd_aclnn(
     const torch::Tensor& x,
     const torch::Tensor& weight,
