@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/platform/platform.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
@@ -72,6 +73,14 @@ Worker::Worker(const ParallelArgs& parallel_args,
     CHECK(!options.enable_graph() || !execution.disable_graph_warmup())
         << "Task pipeline ACL graphs require initialization warmup.";
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+    CHECK(parallel_args.cp_size() == 1 ||
+          (Platform::is_npu() && parallel_args.dp_size() == 1 &&
+           kv_split_size == 1 &&
+           (!options.enable_speculative_decode() ||
+            SpeculativeConfig::is_mtp_algorithm(
+                options.speculative_algorithm()))))
+        << "Task pipeline prefill CP requires NPU, DP=1, replicated KV caches "
+           "and ordinary or fixed MTP decoding.";
     CHECK(kv_split_size == 1 ||
           (kv_split_size > 1 && parallel_args.dp_size() == 1 &&
            (!options.enable_speculative_decode() ||
@@ -94,11 +103,9 @@ Worker::Worker(const ParallelArgs& parallel_args,
           !EPLBConfig::get_instance().enable_eplb() &&
           !KVCacheConfig::get_instance().enable_xtensor() &&
           !LoadConfig::get_instance().enable_rolling_load() &&
-          parallel_args.cp_size() == 1 &&
           parallel_args.layerwise_split_size() == 1)
         << "Task pipeline requires Python LLM or fixed MTP/DFlash/DFlash2 with "
-           "CP/layerwise "
-           "splits of one, without offload or disaggregation.";
+           "a layerwise split of one, without offload or disaggregation.";
   }
   if (options.enable_speculative_decode()) {
     const std::string& algorithm = options.speculative_algorithm();

@@ -19,6 +19,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from scripts.logger import logger
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 from xllm.python.model_executor.forward_context import AclGraphExecutionState, LayerSynchronizer
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
@@ -152,6 +153,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         entry.static_mtp_topk_indices = mtp_topk_indices
         entry.graph_tasks = []
         entry.execution_state = AclGraphExecutionState({})
+        entry.replay_logged = False
         # Retain the exact views independently of the mutable native Slot
         # metadata. Only the original model's inputs are captured here.
         entry.static_metadata = StaticGraphAttentionMetadata(
@@ -200,4 +202,16 @@ class PreparedAclGraphRunner(AclGraphRunner):
         entry.graph.replay()
         self._update_after_replay(entry, stream)
         self.prepared_replays += 1
+        if not entry.replay_logged:
+            logger.info(
+                "Python prepared ACL graph first replay: model=%s bucket=%d physical_rows=%d "
+                "mtp_topk=%s hidden_shape=%s topk_shape=%s",
+                type(self.model).__name__,
+                entry.batch_size,
+                input_ids.numel(),
+                mtp_topk_indices is not None,
+                None if input_embedding is None else tuple(input_embedding.shape),
+                None if mtp_topk_indices is None else tuple(mtp_topk_indices.shape),
+            )
+            entry.replay_logged = True
         return entry.static_output

@@ -242,6 +242,39 @@ def test_prepared_mla_borrows_final_views_without_device_work(
     assert not backend._mla_quant_indexer_metadata
 
 
+@pytest.mark.parametrize("chunked", [False, True])
+def test_prepared_cp_rebuilds_segment_tables_when_slot_storage_is_reused(chunked: bool) -> None:
+    backend = _mla_backend()
+    metadata = _mla_metadata(prefill=not chunked, chunked=chunked)
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+    backend.prepare(metadata)
+    cp_context = SimpleNamespace(segment_seq_indices=torch.tensor([0, 1, 0], dtype=torch.int64))
+    first = backend._segment_block_table(metadata.block_table, cp_context)
+    assert backend._segment_block_table(metadata.block_table, cp_context) is first
+
+    # A subsequent Task uses the same Slot views for different cache pages.
+    # Host-only preparation must leave the active Task's cached table intact;
+    # only Launch may replace the shared backend's per-forward state.
+    metadata.block_table.copy_(torch.tensor([[2], [3]], dtype=torch.int32))
+    state = backend.prepare_metadata(metadata)
+    assert backend._segment_block_table(metadata.block_table, cp_context) is first
+    torch.testing.assert_close(first, torch.tensor([[0], [1], [0]], dtype=torch.int32))
+
+    metadata.prepared_attention_state = state
+    backend.prepare(metadata)
+    second = backend._segment_block_table(metadata.block_table, cp_context)
+    assert second is not first
+    torch.testing.assert_close(second, torch.tensor([[2], [3], [2]], dtype=torch.int32))
+    assert backend._segment_block_table(metadata.block_table, cp_context) is second
+    assert len(backend._mla_cp_block_tables) == 1
+
+    decode = _mla_metadata()
+    decode.prepared_attention_state = backend.prepare_metadata(decode)
+    backend.prepare(decode, graph_mode=True)
+    assert not backend._mla_cp_block_tables
+    assert backend._block_table_i32 is decode.block_table
+
+
 @pytest.mark.parametrize("invalid", ["table", "query_dtype", "kv_shape", "slots"])
 def test_prepared_mla_rejects_invalid_views_before_activation(invalid: str) -> None:
     backend = _mla_backend()

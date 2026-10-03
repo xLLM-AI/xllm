@@ -660,6 +660,9 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
       result.top_tokens.copy_(slot.sample_output.top_tokens);
       result.top_logprobs.copy_(slot.sample_output.top_logprobs);
     }
+    if (capacity_.cp_sampling_group != nullptr) {
+      synchronize_samples(result);
+    }
   }
   // The independent buffer survives Consume and immediate Slot reuse. Copy
   // before output_ready so the existing D2H/Consume fence covers this reader.

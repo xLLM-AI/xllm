@@ -119,24 +119,38 @@ class PreparedTestExecutor final : public ExecutorImpl {
 // inputs and the next round must use these values, including accepted length.
 class LeaderSamples final : public ProcessGroup {
  public:
-  explicit LeaderSamples(const torch::Device& device)
-      : ProcessGroup(/*rank=*/1, /*world_size=*/2, device),
-        values_{torch::tensor({7}, torch::kInt64),
-                torch::tensor({12}, torch::kInt64),
-                torch::tensor({14}, torch::kInt64),
-                torch::tensor({{8, -1, -1}}, torch::kInt64)} {}
+  explicit LeaderSamples(const torch::Device& device,
+                         int64_t token_offset = 0,
+                         int32_t world_size = 2)
+      : ProcessGroup(/*rank=*/world_size - 1, world_size, device),
+        values_{torch::tensor({7 + token_offset}, torch::kInt64),
+                torch::tensor({12 + token_offset}, torch::kInt64),
+                torch::tensor({14 + token_offset}, torch::kInt64),
+                torch::tensor({{8 + token_offset, int64_t{-1}, int64_t{-1}}},
+                              torch::kInt64),
+                torch::tensor({18 + token_offset}, torch::kInt64),
+                torch::tensor({20 + token_offset}, torch::kInt64),
+                torch::tensor({{9 + token_offset, int64_t{-1}, int64_t{-1}}},
+                              torch::kInt64)} {
+    received_.reserve(values_.size());
+  }
 
   void broadcast(torch::Tensor& tensor, int32_t root_rank) override {
     ASSERT_EQ(root_rank, 0);
     ASSERT_LT(next_, values_.size());
     ASSERT_EQ(tensor.numel(), values_[next_].numel());
+    received_.emplace_back(tensor.clone());
     tensor.copy_(values_[next_++].to(tensor.options()).view(tensor.sizes()));
   }
 
   uint32_t consumed() const { return next_; }
+  const torch::Tensor& received(uint32_t index) const {
+    return received_.at(index);
+  }
 
  private:
   std::vector<torch::Tensor> values_;
+  std::vector<torch::Tensor> received_;
   uint32_t next_ = 0;
 };
 
@@ -439,7 +453,7 @@ TEST_F(SpeculativePipelineTest, RejectedTransportDoesNotConsumeRequestContext) {
 TEST_F(SpeculativePipelineTest,
        LeaderSamplesDriveLaterDraftsAndAcceptedContext) {
   LeaderSamples leader(device_);
-  capacity_.sampling_group = &leader;
+  capacity_.common.sampling_group = &leader;
   capacity_.draft_sampling_mode = DraftSamplingMode::PROBABILISTIC;
   create();
   ASSERT_NE(pipeline_, nullptr);
@@ -473,6 +487,107 @@ TEST_F(SpeculativePipelineTest,
   EXPECT_EQ(leader.consumed(), 4U);
   pipeline_.reset();
 }
+
+class CpSpeculativePipelineTest : public SpeculativePipelineTest,
+                                  public ::testing::WithParamInterface<bool> {};
+
+TEST_P(CpSpeculativePipelineTest,
+       CpLeaderSamplesDriveDraftsAndGreedyAcceptedContext) {
+  const bool tensor_parallel = GetParam();
+  LeaderSamples tp_leader(device_,
+                          /*token_offset=*/1,
+                          /*world_size=*/tensor_parallel ? 2 : 1);
+  LeaderSamples cp_leader(device_);
+  capacity_.common.sampling_group = &tp_leader;
+  capacity_.common.cp_sampling_group = &cp_leader;
+  capacity_.draft_sampling_mode = DraftSamplingMode::PROBABILISTIC;
+  create();
+  ASSERT_NE(pipeline_, nullptr);
+  auto prefill = input(false);
+  prefill.sampling_params.do_sample.fill_(true);
+  prefill.sampling_params.all_greedy_sample = false;
+  prefill.sampling_params.all_random_sample = true;
+  const auto first = execute(prefill);
+  ASSERT_TRUE(first.sample_output.next_tokens.defined());
+  EXPECT_EQ(first.sample_output.next_tokens.item<int64_t>(), 7);
+  auto decode = input(true, /*token=*/7, /*position=*/2);
+  decode.sampling_params.do_sample.fill_(true);
+  decode.sampling_params.all_greedy_sample = false;
+  decode.sampling_params.all_random_sample = true;
+  const auto accepted = execute(decode);
+  ASSERT_TRUE(accepted.sample_output.next_tokens.defined());
+  EXPECT_TRUE(torch::equal(accepted.sample_output.next_tokens,
+                           torch::tensor({{8, -1, -1}}, torch::kInt64)));
+  ASSERT_EQ(draft_->forward_inputs.size(), 3U);
+  EXPECT_TRUE(torch::equal(draft_->forward_inputs[0].cpu(),
+                           torch::tensor({2, 7}, torch::kInt32)));
+  EXPECT_EQ(draft_->forward_inputs[2].cpu().item<int32_t>(), 12);
+  EXPECT_TRUE(torch::equal(target_->forward_inputs.back().cpu(),
+                           torch::tensor({7, 12, 14}, torch::kInt32)));
+  EXPECT_EQ(cp_leader.consumed(), 4U);
+  EXPECT_EQ(tp_leader.consumed(), tensor_parallel ? 4U : 0U);
+  EXPECT_EQ(cp_leader.received(0).cpu().item<int64_t>(),
+            tensor_parallel ? 8 : 3);
+  if (tensor_parallel) {
+    EXPECT_TRUE(torch::equal(cp_leader.received(3).cpu(),
+                             torch::tensor({{9, -1, -1}}, torch::kInt64)));
+  }
+
+  // CP also synchronizes greedy rounds; the preceding accepted token and
+  // length must come from the CP leader before the next state is gathered.
+  const auto next = execute(input(true, /*token=*/8, /*position=*/3));
+  ASSERT_TRUE(next.sample_output.next_tokens.defined());
+  EXPECT_TRUE(torch::equal(next.sample_output.next_tokens,
+                           torch::tensor({{9, -1, -1}}, torch::kInt64)));
+  EXPECT_TRUE(torch::equal(target_->forward_inputs.back().cpu(),
+                           torch::tensor({8, 18, 20}, torch::kInt32)));
+  EXPECT_EQ(cp_leader.consumed(), 7U);
+  EXPECT_EQ(tp_leader.consumed(), tensor_parallel ? 7U : 0U);
+  pipeline_.reset();
+}
+
+TEST_P(CpSpeculativePipelineTest, OrdinaryCpLeaderTokensFeedOverlappedDecode) {
+  const bool tensor_parallel = GetParam();
+  LeaderSamples tp_leader(device_,
+                          /*token_offset=*/1,
+                          /*world_size=*/tensor_parallel ? 2 : 1);
+  LeaderSamples cp_leader(device_);
+  capacity_.common.sampling_group = &tp_leader;
+  capacity_.common.cp_sampling_group = &cp_leader;
+  capacity_.common.slot_count = 2;
+  const Status status = TaskExecutionPipeline::create(state_thread_,
+                                                      *target_,
+                                                      *target_executor_,
+                                                      target_cache_,
+                                                      capacity_.common,
+                                                      pipeline_);
+  ASSERT_TRUE(status.ok()) << status.message();
+  auto prefill = input(false);
+  prefill.input_params.embedding = {};
+  auto decode = input(true, /*token=*/-1, /*position=*/2);
+  decode.input_params.embedding = {};
+  const auto first = pipeline_->submit(prefill);
+  ASSERT_TRUE(first.status.ok()) << first.status.message();
+  const auto second = pipeline_->submit(decode);
+  ASSERT_TRUE(second.status.ok()) << second.status.message();
+  const auto first_result = pipeline_->take_result_async(first.task_id).get();
+  ASSERT_TRUE(first_result.status.ok()) << first_result.status.message();
+  const auto second_result = pipeline_->take_result_async(second.task_id).get();
+  ASSERT_TRUE(second_result.status.ok()) << second_result.status.message();
+  EXPECT_EQ(first_result.output.sample_output.next_tokens.item<int64_t>(), 7);
+  EXPECT_EQ(second_result.output.sample_output.next_tokens.item<int64_t>(), 12);
+  EXPECT_TRUE(torch::equal(target_->forward_inputs.back().cpu(),
+                           torch::tensor({7}, torch::kInt32)));
+  EXPECT_EQ(cp_leader.consumed(), 2U);
+  EXPECT_EQ(tp_leader.consumed(), tensor_parallel ? 2U : 0U);
+  EXPECT_EQ(cp_leader.received(0).cpu().item<int64_t>(),
+            tensor_parallel ? 8 : 3);
+  pipeline_.reset();
+}
+
+INSTANTIATE_TEST_SUITE_P(TensorParallel,
+                         CpSpeculativePipelineTest,
+                         ::testing::Values(false, true));
 
 TEST_F(SpeculativePipelineTest, ExpandedModelCountsPreserveIdlePeerMetadata) {
   capacity_.common.dp_size = 2;

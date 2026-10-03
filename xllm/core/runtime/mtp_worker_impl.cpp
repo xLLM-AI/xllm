@@ -801,9 +801,9 @@ bool MTPWorkerImpl::task_models_loaded() const {
   capacity.index_topk = args.index_topk();
   capacity.reuse_topk = args.index_share_for_mtp_iteration();
   if (get_optimization_config().enable_spec_token_broadcast) {
-    capacity.sampling_group = parallel_args_.tp_group_ != nullptr
-                                  ? parallel_args_.tp_group_
-                                  : parallel_args_.process_group_;
+    capacity.common.sampling_group = parallel_args_.tp_group_ != nullptr
+                                         ? parallel_args_.tp_group_
+                                         : parallel_args_.process_group_;
   }
   capacity.draft_sampling_mode = draft_sampling_mode_;
   capacity.fused_rejection = enable_fused_kernel_;

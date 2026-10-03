@@ -271,6 +271,17 @@ class ModelExecutor:
             and prepared_kv_split > 1
             and dcp_size == prepared_kv_split
         )
+        # GLM prefill shards query rows in EagerRunner and gathers every KV
+        # write into replicated caches. Prepared MTP and ACL decode retain
+        # their global rows and never install a prefill CP context.
+        prepared_cp = (
+            current_platform.is_npu()
+            and config.get("model_type") in ("glm_moe_dsa", "glm_moe_dsa_mtp")
+            and cp_size > 1
+            and dp_size == 1
+            and prepared_kv_split == 1
+            and dcp_size == 1
+        )
         self._supports_prepared_metadata = (
             self.attention_backend.supports_prepared_metadata
             and (
@@ -279,7 +290,8 @@ class ModelExecutor:
             )
             and ((prepared_kv_split == 1 and dcp_size == 1) or prepared_dcp)
             and graph_backend in ("", "off", "none", "0", "aclgraph")
-            and all(int(config.get(key, 1)) == 1 for key in ("cp_size", "layerwise_split_size"))
+            and (cp_size == 1 or prepared_cp)
+            and self.layerwise_split_size == 1
         )
         if dp_size > 1 and graph_backend not in (
             "",
