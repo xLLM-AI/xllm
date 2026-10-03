@@ -839,6 +839,13 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
     return false;
   }
 
+  if (args_.has_feature_extractor() &&
+      !load_audio_preprocessor_args(model_weights_path)) {
+    LOG(ERROR) << "Failed to load audio preprocess args from "
+               << model_weights_path;
+    return false;
+  }
+
   // Some hacky logics to support loading of old models
   // always use float16 for quantization
   // TODO: support quantization for other data types
@@ -1365,6 +1372,46 @@ bool HFModelLoader::load_video_preprocessor_args(
     // the token-budget smart_resize is used.
     args_.mm_video_min_tokens() = field_int("min_image_tokens", 0);
     args_.mm_video_max_tokens() = field_int("max_image_tokens", 0);
+  }
+
+  return true;
+}
+
+bool HFModelLoader::load_audio_preprocessor_args(
+    const std::string& model_weights_path) {
+  // audio preprocessor args
+  JsonReader audio_preprocess_reader;
+  const std::string audio_preprocess_file_path =
+      model_weights_path + "/preprocessor_config.json";
+  if (audio_preprocess_reader.parse(audio_preprocess_file_path)) {
+    LOG(INFO) << "Success to parse audio preprocess args file: "
+              << audio_preprocess_file_path;
+
+    if (audio_preprocess_reader.contains("feature_size")) {
+      args_.mm_audio_feature_size() = audio_preprocess_reader.value_or<int64_t>(
+          "feature_size", args_.mm_audio_feature_size());
+    }
+    if (audio_preprocess_reader.contains("sampling_rate")) {
+      args_.mm_audio_sampling_rate() =
+          audio_preprocess_reader.value_or<int64_t>(
+              "sampling_rate", args_.mm_audio_sampling_rate());
+    }
+    if (audio_preprocess_reader.contains("hop_length")) {
+      args_.mm_audio_hop_length() = audio_preprocess_reader.value_or<int64_t>(
+          "hop_length", args_.mm_audio_hop_length());
+    }
+    if (audio_preprocess_reader.contains("chunk_length")) {
+      args_.mm_audio_chunk_length() = audio_preprocess_reader.value_or<int64_t>(
+          "chunk_length", args_.mm_audio_chunk_length());
+    }
+    if (audio_preprocess_reader.contains("n_fft")) {
+      args_.mm_audio_n_fft() = audio_preprocess_reader.value_or<int64_t>(
+          "n_fft", args_.mm_audio_n_fft());
+    }
+    if (audio_preprocess_reader.contains("dither")) {
+      args_.mm_audio_dither() = audio_preprocess_reader.value_or<double>(
+          "dither", args_.mm_audio_dither());
+    }
   }
 
   return true;
