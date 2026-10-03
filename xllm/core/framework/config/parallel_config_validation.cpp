@@ -150,10 +150,10 @@ std::optional<std::string> validate_context_parallel_config(
     // same phase split only to decode-only ACLGraph; other graph backends are
     // rejected below.
     //
-    // The one batch that satisfies both gates is spec-verify chunked prefill.
-    // The graph executor only takes it for hybrid-linear-attention models, and
-    // no CP-capable model is one, so it falls back to eager today; the guard in
-    // AclGraphExecutorImpl::run() keeps that true if a future model is both.
+    // Native spec-verify chunked prefill still follows the admission guard in
+    // AclGraphExecutorImpl::run(). Python handles expanded MTP verification as
+    // replicated decode without CP row sharding, so it requires complete KV
+    // caches as checked below.
     if (options.instance_role() != InstanceRole::DEFAULT &&
         options.instance_role() != InstanceRole::PREFILL) {
       return "Model-side CP supports only DEFAULT or PREFILL roles";
@@ -188,13 +188,6 @@ std::optional<std::string> validate_context_parallel_config(
         return "Python model-side CP does not support model_type=" +
                model_type + "; supported models are qwen3 and glm_moe_dsa.";
       }
-      if (model_type == "glm_moe_dsa" && engine_type == EngineType::SSM &&
-          SpeculativeConfig::is_mtp_algorithm(
-              options.speculative_algorithm())) {
-        return "Python model-side CP does not support MTP speculative "
-               "verification; use the native model executor for GLM MTP on "
-               "a cp_size=1 Decode instance";
-      }
       // On NPU, the Python executor resolves enable_graph=true with an
       // off-like backend to ACLGraph. ACLGraph handles Decode only, so Prefill
       // still runs through EagerRunner and receives cp_context.
@@ -214,6 +207,15 @@ std::optional<std::string> validate_context_parallel_config(
       if (kv_split < 1 || options.cp_size() % kv_split != 0) {
         return "Python CP requires kv_split_size effective value to be a "
                "positive divisor of cp_size";
+      }
+      if (model_type == "glm_moe_dsa" && engine_type == EngineType::SSM &&
+          SpeculativeConfig::is_mtp_algorithm(
+              options.speculative_algorithm()) &&
+          kv_split != 1) {
+        // Prefill gathers the CP shards into each rank's full cache. MTP
+        // verification and draft decode then retain the global token rows.
+        return "Python GLM CP with MTP requires replicated KV caches; use "
+               "kv_split_size=1";
       }
       if (model_type == "glm_moe_dsa" && kv_split > 1 &&
           (!options.enable_disagg_pd() ||

@@ -43,10 +43,12 @@ def _resolve_graph_backend(config: dict) -> str:
 def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> None:
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
-    if model_type not in ("qwen3", "glm_moe_dsa"):
+    algorithm = str(config.get("speculative_algorithm", "mtp")).lower()
+    is_glm_mtp_draft = model_type == "glm_moe_dsa_mtp" and config.get("is_draft_engine", False) and algorithm == "mtp"
+    if model_type not in ("qwen3", "glm_moe_dsa") and not is_glm_mtp_draft:
         raise NotImplementedError(
             f"Python model-side CP does not support model_type={model_type!r}; "
-            "supported models are qwen3 and glm_moe_dsa"
+            "supported models are qwen3, glm_moe_dsa and glm_moe_dsa_mtp draft engines"
         )
     if config.get("task_type", "generate") != "generate":
         raise NotImplementedError("Python model-side CP supports only the generate task")
@@ -54,12 +56,13 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     if role not in ("DEFAULT", "PREFILL"):
         raise NotImplementedError("Python model-side CP supports only DEFAULT or PREFILL roles")
     speculative = int(config.get("num_speculative_tokens", 0)) > 0 or num_decoding_tokens > 1
-    algorithm = str(config.get("speculative_algorithm", "mtp")).lower()
     if speculative and algorithm in ("eagle3", "dflash", "dflash2", "dspark"):
         raise NotImplementedError("Python model-side CP does not support aux-hidden-capture speculative algorithms")
-    if model_type == "glm_moe_dsa" and speculative and algorithm == "mtp":
-        raise NotImplementedError("Python model-side CP does not support MTP speculative verification; use cp_size=1")
     kv_split = int(config.get("kv_split_size", 0)) or int(config["cp_size"])
+    if (is_glm_mtp_draft or (model_type == "glm_moe_dsa" and speculative and algorithm == "mtp")) and kv_split != 1:
+        # Verification and draft decode keep global rows on each CP rank, so
+        # their paged caches must retain every token written by CP prefill.
+        raise NotImplementedError("Python GLM CP with MTP requires replicated KV caches; use kv_split_size=1")
     if model_type == "glm_moe_dsa" and kv_split > 1:
         if not config.get("enable_disagg_pd", False) or role != "PREFILL":
             raise NotImplementedError(

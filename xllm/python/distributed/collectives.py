@@ -42,6 +42,8 @@ def _torch_all_gather(input: torch.Tensor, output: torch.Tensor, group: ProcessG
 _all_gather = _torch_all_gather
 _USE_PYTHON_NPU_GROUPS = current_platform.is_npu()
 if _USE_PYTHON_NPU_GROUPS:
+    import torch_npu
+
     from xllm.python.distributed.npu import all_gather_on_current_stream as _all_gather
     from xllm.python.distributed.npu import all_reduce_on_current_stream as _all_reduce
 
@@ -383,15 +385,27 @@ def _normalize_gather_dim(x: torch.Tensor, dim: int) -> int:
     return dim + x.ndim if dim < 0 else dim
 
 
+def _contiguous_gather_input(x: torch.Tensor) -> torch.Tensor:
+    """Prepare logical tensor values for the ND all-gather transport."""
+    contiguous = x.contiguous()
+    if contiguous.device.type == "npu" and torch_npu.get_npu_format(contiguous) != torch_npu.Format.ND:
+        # RoPE can leave an NCHW-backed view even after squeezing it to TND.
+        # contiguous() alone does not change that storage descriptor. Keep the
+        # explicit NZ byte-gather API separate from this logical-value gather.
+        contiguous = torch_npu.npu_format_cast(contiguous, torch_npu.Format.ND)
+    return contiguous
+
+
 @torch.library.custom_op("xllm_ops::all_gather", mutates_args=())
 def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp") -> torch.Tensor:
     group = _require_group(x, group_name)
     if group.size() != world_size:
         raise RuntimeError(f"{group_name} world-size mismatch: expected {world_size}, got {group.size()}")
     dim = _normalize_gather_dim(x, dim)
+    input = _contiguous_gather_input(x)
     # HCCL receives a flat ND buffer; adding rank to a 3-D shape can select NCHW storage.
-    gathered = x.new_empty((world_size * x.numel(),)).view(world_size, *x.shape)
-    _all_gather(x.contiguous(), gathered, group=group)
+    gathered = input.new_empty((world_size * input.numel(),)).view(world_size, *input.shape)
+    _all_gather(input, gathered, group=group)
     if math.prod(x.shape[:dim]) == 1:
         # Rank-major storage already has concatenation order for this layout.
         shape = list(x.shape)
@@ -434,7 +448,8 @@ def all_gather_variable(
     if local_tokens:
         padded[:local_tokens].copy_(x[:local_tokens])
 
-    gathered = padded.new_empty((len(token_counts), *padded.shape))
+    padded = _contiguous_gather_input(padded)
+    gathered = padded.new_empty((len(token_counts) * padded.numel(),)).view(len(token_counts), *padded.shape)
     _all_gather(padded, gathered, group=group)
     valid_chunks = [chunk[:count] for chunk, count in zip(gathered.unbind(0), token_counts) if count]
     if not valid_chunks:

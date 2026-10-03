@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 
 from xllm.python.layers import ColumnParallelLinear, RMSNorm
-from xllm.python.model_executor.cp_utils import cp_merge_rows
+from xllm.python.model_executor.cp_utils import cp_merge_rows, cp_shard_rows
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3Config,
@@ -116,15 +116,20 @@ class DeepseekV32MtpModel(DeepseekV3Model):
         mtp_topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, None, torch.Tensor | None]:
         assert self.embed_tokens is not None
+        cp_context = self._cp_context()
+        if cp_context is not None and mtp_topk_indices is not None:
+            if mtp_topk_indices.ndim < 2 or mtp_topk_indices.shape[0] != input_ids.shape[0]:
+                raise ValueError("CP MTP top-k indices must have one leading row per global input token")
         token_hidden = self._prepare_token_hidden(self.embed_tokens(input_ids), positions)
         if input_embedding is None:
             input_embedding = token_hidden
         hnorm_input = self.rot(input_embedding) if self.enable_rot else input_embedding
         hidden = self.eh_proj(torch.cat((self.enorm(token_hidden), self.hnorm(hnorm_input)), dim=-1))
-        cp_context = self._cp_context()
         hidden, rope, query_cos_sin = self._prepare_layer_inputs(hidden, positions, cp_context)
         residual: torch.Tensor | None = None
         topk = mtp_topk_indices
+        if cp_context is not None and topk is not None:
+            topk = cp_shard_rows(topk, cp_context)
         for layer_id, layer in enumerate(self.layers):
             reuse = self._reuse_topk_by_layer[layer_id] and topk is not None
             hidden, residual, topk = layer(hidden, residual, *rope, query_cos_sin, topk, reuse)
@@ -132,6 +137,10 @@ class DeepseekV32MtpModel(DeepseekV3Model):
         hidden = self._recurrent_hidden(hidden, residual)
         if cp_context is not None:
             hidden = cp_merge_rows(hidden, cp_context)
+            if topk is not None:
+                # The worker selects next-step rows in global token order,
+                # matching hidden states even after a padded CP prefill.
+                topk = cp_merge_rows(topk, cp_context)
         return self._format_mtp_output(hidden, topk)
 
 

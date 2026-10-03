@@ -41,6 +41,7 @@ from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
     _create_attention_backend,
     _resolve_graph_backend,
+    _validate_npu_cp_model_config,
 )
 from xllm.python.model_executor.forward_context import (  # noqa: E402
     ForwardContext,
@@ -1022,6 +1023,195 @@ class TestBindKvCaches:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("model_type", "is_draft", "speculative_tokens", "decoding_tokens"),
+    [
+        ("glm_moe_dsa", False, 1, 1),
+        ("glm_moe_dsa", False, 0, 3),
+        ("glm_moe_dsa_mtp", True, 0, 1),
+    ],
+)
+@pytest.mark.parametrize("kv_split", [0, 1, 2])
+def test_glm_cp_mtp_admission_requires_replicated_kv(
+    model_type: str,
+    is_draft: bool,
+    speculative_tokens: int,
+    decoding_tokens: int,
+    kv_split: int,
+) -> None:
+    config = {
+        "model_type": model_type,
+        "is_draft_engine": is_draft,
+        "num_speculative_tokens": speculative_tokens,
+        "cp_size": 2,
+        "kv_split_size": kv_split,
+        # Sharded KV is valid for ordinary disaggregated prefill, but not MTP.
+        "instance_role": "PREFILL",
+        "enable_disagg_pd": True,
+    }
+    if kv_split == 1:
+        _validate_npu_cp_model_config(config, decoding_tokens)
+    else:
+        with pytest.raises(NotImplementedError, match="MTP requires replicated KV caches"):
+            _validate_npu_cp_model_config(config, decoding_tokens)
+
+
+@pytest.mark.parametrize(("is_draft", "algorithm"), [(False, "mtp"), (True, "eagle3"), (True, "dflash")])
+def test_glm_cp_draft_admission_requires_mtp_draft_engine(is_draft: bool, algorithm: str) -> None:
+    config = {
+        "model_type": "glm_moe_dsa_mtp",
+        "is_draft_engine": is_draft,
+        "speculative_algorithm": algorithm,
+        "cp_size": 2,
+        "kv_split_size": 1,
+    }
+    with pytest.raises(NotImplementedError, match="does not support model_type"):
+        _validate_npu_cp_model_config(config, 1)
+
+
+def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
+    _validate_npu_cp_model_config(
+        {
+            "model_type": "glm_moe_dsa",
+            "cp_size": 2,
+            "kv_split_size": 2,
+            "instance_role": "PREFILL",
+            "enable_disagg_pd": True,
+        },
+        1,
+    )
+
+
+def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device) -> SimpleNamespace:
+    page_ids = [2, 5, 7, 9]
+    page_counts = [(length + 3) // 4 for length in lengths]
+    indptr = [0]
+    for count in page_counts:
+        indptr.append(indptr[-1] + count)
+    values = {
+        "kv_seq_lens": lengths,
+        "block_table": [page_ids for _ in lengths],
+        "paged_kv_indptr": indptr,
+        "paged_kv_indices": [page for count in page_counts for page in page_ids[:count]],
+        "paged_kv_last_page_len": [(length - 1) % 4 + 1 for length in lengths],
+    }
+    tensors = {name: torch.tensor(value, dtype=torch.int32, device=device) for name, value in values.items()}
+    metadata = SimpleNamespace(
+        **tensors,
+        slot_mapping=torch.tensor(
+            [page_ids[(length - 1) // 4] * 4 + (length - 1) % 4 for length in lengths],
+            dtype=torch.int32,
+            device=device,
+        ),
+        q_cu_seq_lens=torch.arange(len(lengths) + 1, dtype=torch.int32, device=device),
+        kv_cu_seq_lens=None,
+        kv_seq_lens_host_values=lengths,
+        expanded_decode_metadata=None,
+        is_prefill=False,
+        is_chunked_prefill=expanded,
+        is_spec_verify=expanded,
+        dp_execution_token_counts=(),
+    )
+    if expanded:
+        metadata.expanded_decode_metadata = SimpleNamespace(
+            **tensors,
+            enabled=True,
+            paged_attention_tiling_data=None,
+            kv_seq_lens_host=None,
+            kv_seq_lens_host_values=lengths,
+        )
+        # Parent metadata still describes one request. The runner must consume
+        # the expanded per-token lengths and page rows for verification.
+        metadata.block_table = metadata.block_table[-1:]
+        metadata.kv_seq_lens = metadata.kv_seq_lens[-1:]
+        metadata.q_cu_seq_lens = torch.tensor([0, len(lengths)], dtype=torch.int32, device=device)
+    return metadata
+
+
+@torch.inference_mode()
+def test_cp_mtp_decode_acl_replays_persistent_rows_and_detaches_outputs() -> None:
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("requires an NPU")
+
+    class _GraphBackend(_MlaStubAttentionBackend):
+        @property
+        def page_size(self) -> int:
+            return 4
+
+    class _GraphModel(nn.Module):
+        def forward(
+            self,
+            tokens: torch.Tensor,
+            positions: torch.Tensor,
+            hidden: torch.Tensor | None = None,
+            topk: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, None, torch.Tensor]:
+            context = get_forward_context()
+            assert context.cp_context is None
+            metadata = context.metadata
+            indices = positions.view(-1, 1, 1) + 1 if topk is None else topk + 1
+            values = tokens + positions + metadata.slot_mapping + metadata.kv_seq_lens
+            values = values + metadata.block_table[:, 0] * 10
+            values = values + indices.sum(dim=(1, 2))
+            if hidden is None:
+                hidden = torch.zeros_like(tokens, dtype=torch.float32).view(-1, 1).expand(-1, 2)
+            return hidden + values.to(hidden.dtype).view(-1, 1), None, indices
+
+    device = torch.device("npu:0")
+    runner = DecodeAclGraphRunner(_GraphModel(), _GraphBackend(), device, max_batch=4, max_model_len=16)
+    bindings: dict[tuple, tuple[int, ...]] = {}
+    retained: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    # Verify K+1 rows, repair two rows, then draft one row; repeat after a page
+    # boundary and a new request reuses the same graph buckets. No per-replay
+    # CPU synchronization is inserted between these invocations.
+    for cycle in range(3):
+        for phase, rows in enumerate((3, 2, 1)):
+            lengths = [cycle * 4 + 3 + row for row in range(rows)]
+            metadata = _mtp_graph_metadata(lengths, phase == 0, device)
+            tokens_cpu = torch.arange(rows, dtype=torch.int32) + cycle * 10 + phase + 1
+            positions_cpu = torch.tensor(lengths, dtype=torch.int32) - 1
+            hidden_cpu = torch.arange(rows * 2, dtype=torch.float32).view(rows, 2) + cycle * 100
+            topk_cpu = torch.arange(rows * 2, dtype=torch.int32).view(rows, 1, 2) + cycle * 7
+            tokens = tokens_cpu.to(device)
+            positions = positions_cpu.to(device)
+            hidden = None if phase == 0 else hidden_cpu.to(device)
+            topk = topk_cpu.to(device) if phase == 2 else None
+            assert runner.can_execute(tokens, metadata, hidden, topk)
+            with forward_context(ForwardContext(None, device, None, [], cp_context=object())):
+                output, auxiliary, indices = runner.execute(tokens, positions, metadata, hidden, topk)
+            assert auxiliary is None
+            key = runner._graph_key(runner._padded_batch_size(rows, metadata), phase == 0, hidden, topk)
+            entry = runner._graphs[key]
+            buffers = (
+                entry.static_input_ids,
+                entry.static_positions,
+                entry.static_input_embedding,
+                entry.static_mtp_topk_indices,
+                entry.static_metadata.slot_mapping,
+                entry.static_metadata.kv_seq_lens,
+                entry.static_metadata.block_table,
+            )
+            addresses = tuple(tensor.data_ptr() for tensor in buffers if tensor is not None)
+            assert bindings.setdefault(key, addresses) == addresses
+            assert output.data_ptr() != entry.static_output[0].data_ptr()
+            assert indices.data_ptr() != entry.static_output[2].data_ptr()
+            expected_indices = positions_cpu.view(-1, 1, 1) + 1 if phase != 2 else topk_cpu + 1
+            slots_cpu = torch.tensor(
+                [[2, 5, 7, 9][(length - 1) // 4] * 4 + (length - 1) % 4 for length in lengths],
+                dtype=torch.int32,
+            )
+            values = tokens_cpu + positions_cpu + slots_cpu + torch.tensor(lengths, dtype=torch.int32) + 20
+            values = values + expected_indices.sum(dim=(1, 2))
+            expected = (torch.zeros_like(hidden_cpu) if phase == 0 else hidden_cpu) + values.view(-1, 1)
+            retained.append((output, indices, expected, expected_indices))
+
+    assert len(runner._graphs) == 3
+    for output, indices, expected, expected_indices in retained:
+        torch.testing.assert_close(output.cpu(), expected)
+        torch.testing.assert_close(indices.cpu(), expected_indices)
+
+
 def _make_eager_runner(*, is_mla: bool = True) -> EagerRunner:
     runner = object.__new__(EagerRunner)
     backend_type = _MlaStubAttentionBackend if is_mla else StubAttentionBackend
@@ -1124,23 +1314,50 @@ def test_eager_runner_rejects_mixed_cp_before_collective() -> None:
     assert not runner.attention_backend._prepared
 
 
-def test_eager_runner_rejects_mla_spec_verify_cp_before_collective() -> None:
+@pytest.mark.parametrize("cp_size", [2, 4])
+@pytest.mark.parametrize("prefill_flags", [(False, True), (True, False), (False, False)])
+def test_eager_runner_keeps_spec_verify_rows_replicated(cp_size: int, prefill_flags: tuple[bool, bool]) -> None:
     runner = _make_eager_runner()
+    runner.cp_size = cp_size
+    runner.cp_rank = cp_size - 1
+    input_ids = torch.tensor([11, 12, 13, 21, 22, 23], dtype=torch.int32)
+    positions = torch.tensor([126, 127, 128, 7, 8, 9], dtype=torch.int32)
+    embedding = torch.arange(12, dtype=torch.float32).view(6, 2)
+    topk = torch.arange(12, dtype=torch.int32).view(6, 1, 2)
     metadata = SimpleNamespace(
-        is_prefill=False,
-        is_chunked_prefill=True,
+        is_prefill=prefill_flags[0],
+        is_chunked_prefill=prefill_flags[1],
         is_mixed=False,
         is_spec_verify=True,
+        q_seq_lens_host=torch.tensor([3, 3], dtype=torch.int32),
+        kv_seq_lens_host=torch.tensor([129, 10], dtype=torch.int32),
+        slot_mapping=torch.tensor([254, 255, 384, 519, 520, 521], dtype=torch.int32),
     )
 
-    with (
-        patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context,
-        pytest.raises(NotImplementedError, match="MTP speculative verification"),
-    ):
-        runner.execute(torch.zeros(1), torch.zeros(1), metadata)
+    def execute_model(
+        tokens: torch.Tensor,
+        token_positions: torch.Tensor,
+        hidden: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        context = get_forward_context()
+        assert context.cp_context is None
+        assert context.metadata is metadata
+        assert runner.attention_backend._prepared
+        torch.testing.assert_close(tokens, input_ids)
+        torch.testing.assert_close(token_positions, positions)
+        torch.testing.assert_close(indices, topk)
+        return hidden + (tokens + token_positions + context.metadata.slot_mapping).view(-1, 1), indices + 1
 
-    build_context.assert_not_called()
-    assert not runner.attention_backend._prepared
+    runner.model.side_effect = execute_model
+    with patch(
+        "xllm.python.model_executor.runners.eager.build_cp_context",
+        side_effect=AssertionError("verification must not create a prefill CP plan"),
+    ):
+        hidden, indices = runner.execute(input_ids, positions, metadata, embedding, mtp_topk_indices=topk)
+
+    torch.testing.assert_close(hidden, embedding + (input_ids + positions + metadata.slot_mapping).view(-1, 1))
+    torch.testing.assert_close(indices, topk + 1)
 
 
 @pytest.mark.parametrize(

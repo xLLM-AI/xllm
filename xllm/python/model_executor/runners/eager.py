@@ -65,12 +65,16 @@ class EagerRunner(BaseRunner):
     ) -> ModelExecutionOutput:
         cp_context = None
         is_mla = self.attention_backend.is_mla
-        is_mla_cp_prefill = self.cp_size > 1 and is_mla and (metadata.is_prefill or metadata.is_chunked_prefill)
-        if is_mla_cp_prefill and metadata.is_spec_verify:
-            raise NotImplementedError("Python Context-Parallel does not support MTP speculative verification")
-        if is_mla_cp_prefill and metadata.is_mixed:
+        # Speculative verification can carry chunked-prefill metadata, but its
+        # rows already describe the global verification batch. Keep it on the
+        # same replicated-cache path as decode, including eager graph misses.
+        use_cp_context = (
+            self.cp_size > 1
+            and not metadata.is_spec_verify
+            and (metadata.is_prefill or (is_mla and metadata.is_chunked_prefill))
+        )
+        if use_cp_context and is_mla and metadata.is_mixed:
             raise NotImplementedError("Python Context-Parallel does not support mixed batches")
-        use_cp_context = self.cp_size > 1 and (metadata.is_prefill or (is_mla and metadata.is_chunked_prefill))
         if use_cp_context:
             seq_lens = _per_seq_lens_from_metadata(
                 metadata,
