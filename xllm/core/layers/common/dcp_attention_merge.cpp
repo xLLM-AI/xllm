@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "layers/mlu/dcp_attention_merge.h"
+#include "layers/common/dcp_attention_merge.h"
 
 #include <glog/logging.h>
 

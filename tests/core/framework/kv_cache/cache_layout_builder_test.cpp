@@ -19,6 +19,9 @@ limitations under the License.
 
 #include <string>
 
+#include "framework/kv_cache/kv_shard_layout.h"
+#include "layers/common/kv_shard_batch_metadata.h"
+
 namespace xllm {
 
 namespace {
@@ -216,6 +219,32 @@ TEST(CacheLayoutBuilderTest, DescribesCompositeConvState) {
   EXPECT_EQ(descriptor.spans[2].logical_tensor, "conv_key_b");
   EXPECT_EQ(descriptor.spans[4].logical_tensor, "conv_value");
   EXPECT_EQ(descriptor.spans[0].repeat_count, 5U);
+}
+
+TEST(KVShardLayoutTest, MapsTokensAndSlots) {
+  const int64_t dcp4_lengths[] = {128, 128, 1, 0};
+  for (int32_t rank = 0; rank < 4; ++rank) {
+    EXPECT_EQ(KVShardLayout(128, 4, rank).local_token_count(257),
+              dcp4_lengths[rank]);
+  }
+  EXPECT_EQ(KVShardLayout(128, 2, 0).local_token_count(300), 172);
+  EXPECT_EQ(KVShardLayout(128, 2, 1).local_token_count(300), 128);
+
+  const torch::Tensor slots =
+      torch::tensor({-1, 0, 127, 128, 255, 256}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(
+      layer::localize_kv_shard_slots(slots, KVShardLayout(128, 2, 0)),
+      torch::tensor({-1, 0, 127, -1, -1, 128}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      layer::localize_kv_shard_slots(slots, KVShardLayout(128, 2, 1)),
+      torch::tensor({-1, -1, -1, 0, 127, -1}, torch::kInt32)));
+  EXPECT_EQ(layer::localize_kv_shard_slots(torch::empty({0}),
+                                           KVShardLayout(128, 2, 0))
+                .numel(),
+            0);
+  EXPECT_FALSE(
+      layer::localize_kv_shard_slots(torch::Tensor(), KVShardLayout(128, 2, 0))
+          .defined());
 }
 
 }  // namespace

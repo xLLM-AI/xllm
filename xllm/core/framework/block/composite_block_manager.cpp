@@ -605,32 +605,32 @@ TrimOutcome trim_flat_kv(std::vector<ProbeResult> probes) {
   return out;
 }
 
-// FLAT_KV_LINEAR: extract LINEAR's deepest checkpoint as a restore source
-// (its vector is `[inv, ..., deepest_valid]` at chunk stride, so reach in
-// tokens is `blocks.size() * block_size`), then clamp KV shared blocks to
-// that recoverable budget.
+// FLAT_KV_LINEAR: retain only a KV prefix whose token boundary has an exact
+// LINEAR checkpoint.
 TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
   auto linear = take_probe(probes, BlockType::LINEAR);
   CHECK_EQ(probes.size(), 1u)
       << "FLAT_KV_LINEAR expects one KV probe (LINEAR removed above)";
   TrimOutcome out;
 
-  size_t linear_recoverable_tokens = 0;
-  if (linear.has_value()) {
-    linear_recoverable_tokens = linear->blocks.size() * linear->block_size;
-    for (auto it = linear->blocks.rbegin(); it != linear->blocks.rend(); ++it) {
-      if (it->is_valid()) {
-        out.linear_restore_src = std::move(*it);
+  ProbeResult& kv = probes.front();
+  const size_t kv_block_size = kv.block_size;
+  size_t safe_count = 0;
+  if (linear.has_value() && kv_block_size > 0 && linear->block_size > 0) {
+    const size_t checkpoint_count =
+        std::min(linear->blocks.size(),
+                 kv.blocks.size() * kv_block_size / linear->block_size);
+    for (size_t index = checkpoint_count; index > 0; --index) {
+      const size_t checkpoint_tokens = index * linear->block_size;
+      if (checkpoint_tokens % kv_block_size == 0 &&
+          linear->blocks[index - 1].is_valid()) {
+        safe_count = checkpoint_tokens / kv_block_size;
+        out.linear_restore_src = std::move(linear->blocks[index - 1]);
         break;
       }
     }
   }
 
-  ProbeResult& kv = probes.front();
-  const size_t kv_block_size = kv.block_size;
-  const size_t recoverable_blocks =
-      kv_block_size == 0 ? 0 : linear_recoverable_tokens / kv_block_size;
-  const size_t safe_count = std::min(kv.blocks.size(), recoverable_blocks);
   if (safe_count < kv.blocks.size()) {
     ProbeResult drop = {kv.type,
                         kv.leaf,

@@ -34,6 +34,7 @@ limitations under the License.
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #endif
 #include "core/common/metrics.h"
+#include "core/framework/kv_cache/kv_shard_layout.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -56,6 +57,49 @@ constexpr uint64_t kStaticGraphTaskHashSeed = 0x6a09e667f3bcc909ull;
 constexpr size_t kMaxStaticMtpGraphVariantsPerSlot = 16;
 constexpr uint64_t kMlaGraphKeyMask = 1ull << 62;
 constexpr uint64_t kMlaGraphKeyPayloadMask = (1ull << 62) - 1;
+
+void reset_capture_linear_state_to_padding(ModelInputParams& params) {
+  if (params.embedding.linear_state_ids.empty()) {
+    return;
+  }
+  std::fill(params.embedding.linear_state_ids.begin(),
+            params.embedding.linear_state_ids.end(),
+            kPaddingLinearStateId);
+  CHECK(params.embedding.linear_state_indices.defined())
+      << "ACL graph capture requires persistent linear-state indices.";
+  CHECK_EQ(params.embedding.linear_state_indices.numel(),
+           static_cast<int64_t>(params.embedding.linear_state_ids.size()))
+      << "ACL graph capture linear-state host/device sizes must match.";
+  params.embedding.linear_state_indices.fill_(kPaddingLinearStateId);
+  params.linear_state_validity_mask.assign(
+      params.embedding.linear_state_ids.size(), 0);
+}
+
+bool is_qwen3_5_dp_graph_step_supported(const ModelArgs& args,
+                                        const runtime::Options& options,
+                                        const ModelInputParams& params) {
+  const std::vector<int32_t>& dp_token_nums =
+      params.parallel.dp_global_token_nums;
+  if (!is_qwen3_5_target_model_type(args.model_type()) ||
+      dp_token_nums.size() <= 1) {
+    return true;
+  }
+
+  const std::vector<int32_t>& raw_dp_token_nums =
+      params.parallel.raw_dp_global_token_nums;
+  if (!raw_dp_token_nums.empty() &&
+      raw_dp_token_nums.size() != dp_token_nums.size()) {
+    return false;
+  }
+
+  const std::vector<int32_t>& graph_dp_token_nums =
+      raw_dp_token_nums.empty() ? dp_token_nums : raw_dp_token_nums;
+  const int32_t min_dp_token_num = util::min(graph_dp_token_nums);
+  const int32_t max_dp_token_num = util::max(graph_dp_token_nums);
+  return min_dp_token_num > 0 && min_dp_token_num == max_dp_token_num &&
+         !options.enable_graph_mode_decode_no_padding();
+}
+
 bool uses_static_mtp_graph_task_variant(const ModelInputParams& params,
                                         uint32_t bucket_num_tokens,
                                         int64_t block_size) {
@@ -313,6 +357,8 @@ bool AclGraph::capture(CausalLM* model,
                        c10_npu::MempoolId_t graph_pool) {
   // Save bucket num_tokens for this graph instance
   num_tokens_ = bucket_num_tokens;
+  const bool capture_static_graph_tasks = uses_static_mtp_graph_task_variant(
+      params, bucket_num_tokens, options.block_size());
 
   // Get actual num_tokens from tokens tensor
   // const uint32_t actual_num_tokens = tokens.size(0);
@@ -363,6 +409,9 @@ bool AclGraph::capture(CausalLM* model,
   CHECK(graph_params.has_value())
       << "update() should return ModelInputParams when "
          "return_capture_params=true";
+  if (model->is_hybrid_linear_attention()) {
+    reset_capture_linear_state_to_padding(graph_params.value());
+  }
   const auto spec_verify_attention_plan =
       persistent_param_.paged_attention_plan_descriptor(
           actual_num_tokens, params.meta.q_max_seq_len);
@@ -423,8 +472,6 @@ bool AclGraph::capture(CausalLM* model,
     graph_task_context_->begin_capture();
     graph_params->graph.acl_graph_task_update_context = graph_task_context_;
   }
-  const bool capture_static_graph_tasks = uses_static_mtp_graph_task_variant(
-      graph_params.value(), num_tokens_, options.block_size());
   // Synchronize stream to ensure all data is copied to graph persistent buffers
   aclrtSynchronizeStream(stream);
 
@@ -504,16 +551,13 @@ bool AclGraph::capture(CausalLM* model,
           c10_npu::getDefaultNPUStream(tensor_options.device().index()));
     }
   }
-  // Synchronize and test replay to verify graph capture
+  // Capture uses padding state; replay real inputs once after capture finishes.
   aclrtSynchronizeStream(graph_stream_);
-  aclrtSynchronizeStream(stream);
-  graph_.replay();
-  update_graph_tasks(graph_params.value(),
-                     /*update_causal_conv1d_tasks=*/true);
+  first_hybrid_replay_after_capture_ = model->is_hybrid_linear_attention();
+  replay(model, tokens, positions, kv_cache, params);
   if (capture_static_graph_tasks) {
-    capture_static_graph_task_signature(graph_params.value());
+    capture_static_graph_task_signature(params);
   }
-  make_current_stream_wait_for_graph(stream);
   return true;
 }
 
@@ -578,6 +622,14 @@ bool AclGraph::update_graph_tasks(const ModelInputParams& params,
     for (size_t index = 0; index < source_kv_seq_lens.size(); ++index) {
       actual_seq_lengths_kv[index] = source_kv_seq_lens[index];
     }
+    if (first_task.dcp_size > 1) {
+      const KVShardLayout layout(static_cast<int32_t>(first_task.block_size),
+                                 first_task.dcp_size,
+                                 first_task.dcp_rank);
+      for (int64_t& length : actual_seq_lengths_kv) {
+        length = layout.local_token_count(length);
+      }
+    }
   }
 
   auto update_causal_conv1d_task = [&](CausalConv1dGraphTask& task) {
@@ -633,7 +685,8 @@ bool AclGraph::update_graph_tasks(const ModelInputParams& params,
             task.block_size,
             task.workspace,
             task.output,
-            task.softmax_lse);
+            task.softmax_lse,
+            task.dcp_size > 1);
         c10_npu::graph_task_update_end(update_stream);
         if (task.event != nullptr) {
           task.event->record(update_stream);
@@ -694,11 +747,12 @@ bool AclGraph::static_graph_task_signature_matches(
 void AclGraph::capture_static_graph_task_signature(
     const ModelInputParams& params) {
   static_graph_task_signature_ = make_static_graph_task_signature(params);
-  CHECK(static_graph_task_signature_.has_value());
-  LOG(INFO) << "Captured static MTP graph-task signature: linear_state_id="
-            << static_graph_task_signature_->linear_state_id
-            << ", accepted_tokens="
-            << static_graph_task_signature_->num_accepted_tokens;
+  if (static_graph_task_signature_.has_value()) {
+    LOG(INFO) << "Configured static MTP graph-task signature: linear_state_id="
+              << static_graph_task_signature_->linear_state_id
+              << ", accepted_tokens="
+              << static_graph_task_signature_->num_accepted_tokens;
+  }
 }
 
 AclGraph::~AclGraph() {
@@ -875,9 +929,17 @@ ModelOutput AclGraph::replay(CausalLM* model,
 
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-  if (graph_paged_attention_tiling_data_.defined()) {
+  const bool has_dcp_fused_infer_attention_tasks =
+      has_fused_infer_attention_graph_tasks() &&
+      graph_task_context_->fused_infer_attention_tasks.front().dcp_size > 1;
+  // The first hybrid replay must wait for real inputs to replace capture
+  // padding.
+  if (graph_paged_attention_tiling_data_.defined() ||
+      has_dcp_fused_infer_attention_tasks ||
+      first_hybrid_replay_after_capture_) {
     make_graph_wait_for_current_stream(stream);
   }
+  first_hybrid_replay_after_capture_ = false;
   const bool use_static_graph_tasks =
       graph_params.has_value() &&
       static_graph_task_signature_matches(graph_params.value());
@@ -891,9 +953,8 @@ ModelOutput AclGraph::replay(CausalLM* model,
         << "update() should return ModelInputParams for graph task update";
     const bool causal_conv1d_tasks_prepared =
         use_static_graph_tasks && static_graph_tasks_prepared;
-    // Static MTP preparation only signals causal-conv tasks before the final
-    // draft. FIA host parameters remain dynamic and are updated after replay
-    // starts, where their task updates overlap target graph execution.
+    // The first replay after dirty capture dynamically replaces slot-0 host
+    // parameters. Later matching MTP replays may use the existing ready signal.
     update_graph_tasks(
         graph_params.value(),
         /*update_causal_conv1d_tasks=*/!causal_conv1d_tasks_prepared);
@@ -1101,35 +1162,22 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   const std::vector<int32_t>& dp_token_nums =
       params_single.parallel.dp_global_token_nums;
-  if (is_qwen3_5_target_model_type(args_.model_type()) &&
-      dp_token_nums.size() > 1) {
+  if (!is_qwen3_5_dp_graph_step_supported(args_, options_, params_single)) {
     const std::vector<int32_t>& raw_dp_token_nums =
         params_single.parallel.raw_dp_global_token_nums;
-    const bool raw_dp_metadata_complete =
-        raw_dp_token_nums.empty() ||
-        raw_dp_token_nums.size() == dp_token_nums.size();
-    const std::vector<int32_t>& graph_dp_token_nums =
-        raw_dp_token_nums.empty() ? dp_token_nums : raw_dp_token_nums;
-    const int32_t min_dp_token_num = util::min(graph_dp_token_nums);
-    const int32_t max_dp_token_num = util::max(graph_dp_token_nums);
-    const bool balanced_nonempty_dp = raw_dp_metadata_complete &&
-                                      min_dp_token_num > 0 &&
-                                      min_dp_token_num == max_dp_token_num;
     // Qwen3.5 DP graph is currently validated only with decode padding.
     // No-padding changes graph bucketing and MTP input updates, so a locally
     // prewarmed graph does not establish cross-rank replay compatibility.
     const bool decode_no_padding =
         options_.enable_graph_mode_decode_no_padding();
-    if (!balanced_nonempty_dp || decode_no_padding) {
-      LOG_FIRST_N(WARNING, 1)
-          << "Falling back to eager mode because DP ACL graph requires a "
-             "balanced, non-empty token distribution with decode padding. "
-             "dp_global_token_nums="
-          << dp_token_nums << ", raw_dp_global_token_nums=" << raw_dp_token_nums
-          << ", decode_no_padding=" << decode_no_padding;
-      COUNTER_INC(num_model_execution_total_eager);
-      return run_eager();
-    }
+    LOG_FIRST_N(WARNING, 1)
+        << "Falling back to eager mode because DP ACL graph requires a "
+           "balanced, non-empty token distribution with decode padding. "
+           "dp_global_token_nums="
+        << dp_token_nums << ", raw_dp_global_token_nums=" << raw_dp_token_nums
+        << ", decode_no_padding=" << decode_no_padding;
+    COUNTER_INC(num_model_execution_total_eager);
+    return run_eager();
   }
 
   if (in_decoding_phase && dp_token_nums.size() > 1) {
@@ -1408,6 +1456,9 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
       params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill();
   if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
+    return;
+  }
+  if (!is_qwen3_5_dp_graph_step_supported(args_, options_, params)) {
     return;
   }
   if (model_->requires_graph_forward_metadata()) {

@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/npu/utils.h"
+#include "core/platform/platform.h"
 
 namespace {
 
@@ -366,7 +367,8 @@ torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
     int64_t num_heads,
     int64_t num_key_value_heads,
     double scale,
-    int64_t block_size) {
+    int64_t block_size,
+    bool softmax_lse_flag) {
   std::vector<c10::SymInt> actual_seq_lengths_sym =
       to_sym_ints(actual_seq_lengths);
   std::vector<c10::SymInt> actual_seq_lengths_kv_sym =
@@ -415,7 +417,7 @@ torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
           /*antiquant_mode=*/0,
           /*key_antiquant_mode=*/0,
           /*value_antiquant_mode=*/0,
-          /*softmax_lse_flag=*/false);
+          softmax_lse_flag);
 }
 
 void npu_fused_infer_attention_decode_out(
@@ -431,7 +433,8 @@ void npu_fused_infer_attention_decode_out(
     int64_t block_size,
     const torch::Tensor& workspace,
     torch::Tensor& output,
-    torch::Tensor& softmax_lse) {
+    torch::Tensor& softmax_lse,
+    bool softmax_lse_flag) {
   std::vector<c10::SymInt> actual_seq_lengths_sym =
       to_sym_ints(actual_seq_lengths);
   std::vector<c10::SymInt> actual_seq_lengths_kv_sym =
@@ -484,7 +487,7 @@ void npu_fused_infer_attention_decode_out(
           /*antiquant_mode=*/0,
           /*key_antiquant_mode=*/0,
           /*value_antiquant_mode=*/0,
-          /*softmax_lse_flag=*/false,
+          softmax_lse_flag,
           workspace_tensor,
           outputs);
 }
@@ -559,7 +562,8 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
   torch::Tensor softmax_lse =
       infer_softmax_lse(query, num_heads, input_layout, softmax_lse_flag);
 
-  if (is_ascend950() && input_layout == "TND" && !block_table.has_value()) {
+  if (Platform::is_ascend950() && input_layout == "TND" &&
+      !block_table.has_value()) {
     CHECK(!softmax_lse_flag)
         << "Ascend950 torch attention fallback does not return softmax_lse";
     output = ascend950_packed_causal_attention(query,

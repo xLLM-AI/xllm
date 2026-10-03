@@ -85,12 +85,13 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t max_tokens_for_graph_mode,
                                      int64_t max_encoder_cache_size,
                                      int32_t dp_size,
+                                     int32_t ep_size,
+                                     int32_t cp_size,
+                                     int32_t kv_split_size,
                                      int32_t tp_size,
                                      int32_t sp_size,
                                      int32_t cfg_size,
                                      int32_t text_encoder_tp_size,
-                                     int32_t cp_size,
-                                     int32_t ep_size,
                                      const InstanceRole& instance_role,
                                      bool enable_mtp_draft_body_tp1,
                                      const std::string& draft_sampling_mode) {
@@ -145,6 +146,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .dp_size(dp_size)
       .ep_size(ep_size)
       .cp_size(cp_size)
+      .kv_split_size(kv_split_size)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)

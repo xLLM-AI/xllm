@@ -37,23 +37,20 @@ namespace xllm {
 
 namespace {
 
-// Align chunk down to kv_split_size*block_size.
-// TODO: refactor kv-split block mapping to remove this limitation.
 inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
                                           int32_t kv_split_size,
-                                          int32_t block_size,
+                                          int32_t logical_block_size,
                                           size_t remaining_in_seq) {
   if (kv_split_size <= 1) {
     return num_tokens;
   }
-  if (block_size <= 0 || num_tokens == 0) {
+  if (logical_block_size <= 0 || num_tokens == 0) {
     return num_tokens;
   }
   if (num_tokens >= remaining_in_seq) {
     return num_tokens;
   }
-  const size_t kv_term =
-      static_cast<size_t>(kv_split_size) * static_cast<size_t>(block_size);
+  const size_t kv_term = static_cast<size_t>(logical_block_size);
   if (num_tokens < kv_term) {
     return num_tokens;
   }
@@ -1066,8 +1063,10 @@ BatchMode create_batch_mode(const SchedulerOptions& options) {
     mode.enable_chunked_prefill = true;
   }
 
-  // CP/MTP: prefill cannot mix with decode in the same batch.
-  if (options.cp_size() > 1 || options.num_speculative_tokens() > 0) {
+  // CP/KV-sharded decode/MTP: prefill cannot mix with decode in one batch.
+  if (options.cp_size() > 1 ||
+      ParallelConfig::get_instance().kv_split_size_effective() > 1 ||
+      options.num_speculative_tokens() > 0) {
     mode.enable_mix_batch = false;
   }
 

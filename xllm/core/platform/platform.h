@@ -44,6 +44,8 @@ class Platform final {
 #endif
   }
 
+  static bool is_ascend950();
+
   static constexpr bool is_mlu() {
 #if defined(USE_MLU)
     return true;

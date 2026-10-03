@@ -23,6 +23,9 @@ namespace xllm::layer {
 
 torch::Tensor localize_kv_shard_slots(const torch::Tensor& logical_slots,
                                       const KVShardLayout& layout) {
+  if (!logical_slots.defined() || logical_slots.numel() == 0) {
+    return logical_slots;
+  }
   CHECK(logical_slots.scalar_type() == torch::kInt32 ||
         logical_slots.scalar_type() == torch::kInt64)
       << "cache-shard slot mapping must use int32 or int64";
@@ -55,8 +58,7 @@ torch::Tensor localize_kv_shard_context_lens(
   torch::Tensor nonnegative_lens = torch::clamp_min(global_context_lens, 0);
   const int64_t logical_block_size = layout.logical_block_size();
   const int64_t physical_block_size = layout.physical_block_size();
-  const int64_t rank_start =
-      static_cast<int64_t>(layout.dcp_rank()) * physical_block_size;
+  const int64_t rank_start = layout.first_token_index();
   torch::Tensor full_logical_blocks =
       torch::floor_divide(nonnegative_lens, logical_block_size);
   torch::Tensor logical_block_remainder =
@@ -140,7 +142,8 @@ torch::Tensor expand_kv_shard_indexer_block_table(
 
 std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
     const AttentionMetadata& attention_metadata,
-    const KVShardLayout& layout) {
+    const KVShardLayout& layout,
+    const KVShardBatchMetadataBuildOptions& build_options) {
   CHECK(attention_metadata.slot_mapping.defined())
       << "cache-shard batch metadata requires slot mapping";
   auto metadata = std::make_shared<KVShardBatchMetadata>();
@@ -148,10 +151,50 @@ std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
   metadata->kv_split_rank = layout.dcp_rank();
   metadata->local_slot_mapping =
       localize_kv_shard_slots(attention_metadata.slot_mapping, layout);
-  if (attention_metadata.block_table.defined()) {
+  if (build_options.materialize_indexer_block_table &&
+      attention_metadata.block_table.defined()) {
     metadata->expanded_indexer_block_table =
         expand_kv_shard_indexer_block_table(attention_metadata.block_table,
                                             layout);
+  }
+  if (build_options.materialize_attention_lengths) {
+    const auto& global_lengths = attention_metadata.kv_seq_lens_vec;
+    metadata->query_end_offsets = attention_metadata.q_cu_seq_lens_host_vec;
+    if (metadata->query_end_offsets.size() == global_lengths.size() + 1 &&
+        metadata->query_end_offsets.front() == 0) {
+      metadata->query_end_offsets.erase(metadata->query_end_offsets.begin());
+    }
+    CHECK_EQ(metadata->query_end_offsets.size(), global_lengths.size())
+        << "cache-shard query and KV lengths must describe the same batch";
+    const bool is_prefill =
+        attention_metadata.is_prefill || attention_metadata.is_chunked_prefill;
+    metadata->local_kv_lengths.reserve(global_lengths.size());
+    if (is_prefill) {
+      metadata->local_context_lengths.reserve(global_lengths.size());
+    }
+    int64_t previous_query_end = 0;
+    for (size_t index = 0; index < global_lengths.size(); ++index) {
+      const int64_t query_end = metadata->query_end_offsets[index];
+      CHECK_GE(query_end, previous_query_end);
+      CHECK_GE(global_lengths[index], query_end - previous_query_end);
+      metadata->local_kv_lengths.emplace_back(
+          layout.local_token_count(global_lengths[index]));
+      if (is_prefill) {
+        const int64_t context_length =
+            global_lengths[index] - (query_end - previous_query_end);
+        metadata->has_context |= context_length > 0;
+        metadata->local_context_lengths.emplace_back(
+            layout.local_token_count(context_length));
+      }
+      previous_query_end = query_end;
+    }
+#if defined(USE_NPU)
+    if (attention_metadata.paged_attention_tiling_data.defined()) {
+      metadata->empty_shard_mask =
+          (attention_metadata.kv_seq_lens <= layout.first_token_index())
+              .view({-1, 1, 1});
+    }
+#endif
   }
   return metadata;
 }

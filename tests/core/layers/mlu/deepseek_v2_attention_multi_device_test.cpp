@@ -31,7 +31,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model_context.h"
-#include "core/framework/parallel_state/context_parallel_topology.h"
+#include "core/framework/parallel_state/parallel_topology.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -1179,7 +1179,7 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
                                                const std::string& host) {
   // Orthogonal CP x TP: world_size=4, cp_size=2, tp_size=2. The TP group is
   // contiguous ({0,1}/{2,3}) and the CP group is strided ({0,2}/{1,3}),
-  // mirroring collective_communicator + ContextParallelTopology.
+  // mirroring collective_communicator + ParallelTopology.
   constexpr int32_t kCpSize = 2;
   constexpr int32_t kTpSize = 2;
   try {
@@ -1205,12 +1205,12 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
         create_test_self_group(rank, world_size, host, device);
 
     // One TCPStore port per subgroup (mirrors collective_communicator).
-    const xllm::parallel_state::ContextParallelTopology cp_topology(
-        rank,
-        world_size,
-        /*dp_size=*/1,
-        kCpSize,
-        /*dcp_size=*/1);
+    const xllm::parallel_state::ParallelTopology cp_topology(rank,
+                                                             world_size,
+                                                             /*dp_size=*/1,
+                                                             /*ep_size=*/1,
+                                                             kCpSize,
+                                                             /*dcp_size=*/1);
     const int32_t tp_rank = cp_topology.tp_rank();
     const int32_t cp_local_rank = cp_topology.pcp_rank();
     std::unique_ptr<xllm::ProcessGroup> tp_group =

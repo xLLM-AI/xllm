@@ -51,29 +51,6 @@ struct ParallelArgs {
         process_group_(process_group),
         ep_size_(ep_size) {}
 
-#if defined(USE_NPU)
-  ParallelArgs(int32_t rank,
-               int32_t world_size,
-               int32_t dp_size,
-               ProcessGroup* process_group,
-               int32_t ep_size,
-               int32_t cp_size,
-               nlohmann::json mapping_data,
-               atb_speed::base::Mapping mapping,
-               std::string dispatchAndCombinecommDomain,
-               HcclComm dispatchAndCombineHcclComm)
-      : rank_(rank),
-        world_size_(world_size),
-        dp_size_(dp_size),
-        process_group_(process_group),
-        ep_size_(ep_size),
-        cp_size_(cp_size),
-        mapping_data_(mapping_data),
-        mapping_(mapping),
-        dispatchAndCombinecommDomain_(dispatchAndCombinecommDomain),
-        dispatchAndCombineHcclComm_(dispatchAndCombineHcclComm) {}
-#endif
-
   ParallelArgs(int32_t rank,
                int32_t world_size,
                int32_t dp_size,
@@ -149,11 +126,30 @@ struct ParallelArgs {
   // ep size
   PROPERTY(int32_t, ep_size) = 1;
 
-  // Public configuration name for PCP size. See ContextParallelTopology for
+  // Public configuration name for PCP size. See ParallelTopology for
   // the configuration-to-topology mapping.
   PROPERTY(int32_t, cp_size) = 1;
 
+  // Public configuration name for DCP size. 0 means follow cp_size; prefer
+  // kv_split_size_effective().
+  PROPERTY(int32_t, kv_split_size) = 0;
+
   PROPERTY(int32_t, layerwise_split_size) = 1;
+
+  // tp size
+  PROPERTY(int32_t, tp_size) = 1;
+
+  // sp size
+  PROPERTY(int32_t, sp_size) = 1;
+
+  // cfg size
+  PROPERTY(int32_t, cfg_size) = 1;
+
+  // cfg size
+  PROPERTY(int32_t, vae_size) = 1;
+
+  // text encoder tensor parallel size
+  PROPERTY(int32_t, text_encoder_tp_size) = 1;
 
   // Derived PCP rank of the current process within its DP group. The public
   // cp_rank name is retained for compatibility.
@@ -165,10 +161,6 @@ struct ParallelArgs {
     int32_t tp_sz = world_size_ / dp_size_ / cp_size_;
     return (rank_ % (cp_size_ * tp_sz)) / tp_sz;
   }
-
-  // Public configuration name for DCP size. 0 means follow cp_size; prefer
-  // kv_split_size_effective().
-  PROPERTY(int32_t, kv_split_size) = 0;
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
@@ -186,21 +178,6 @@ struct ParallelArgs {
 
     return rank_ / (world_size_ / kv);
   }
-
-  // tp size
-  PROPERTY(int32_t, tp_size) = 1;
-
-  // sp size
-  PROPERTY(int32_t, sp_size) = 1;
-
-  // cfg size
-  PROPERTY(int32_t, cfg_size) = 1;
-
-  // cfg size
-  PROPERTY(int32_t, vae_size) = 1;
-
-  // text encoder tensor parallel size
-  PROPERTY(int32_t, text_encoder_tp_size) = 1;
 
   // atb hccl mapping json data
   PROPERTY(nlohmann::json, mapping_data);

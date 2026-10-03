@@ -64,6 +64,7 @@ cc_library(
     :common
     :config
     :models
+    :parallel_state
     :platform
     :util
     glog::glog

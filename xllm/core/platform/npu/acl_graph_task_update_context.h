@@ -83,6 +83,7 @@ class FusedInferAttentionWorkspaceSignature {
   int64_t num_key_value_heads;
   int64_t block_size;
   double scale;
+  bool softmax_lse_flag = false;
 
   bool operator==(const FusedInferAttentionWorkspaceSignature&) const = default;
 };
@@ -100,6 +101,8 @@ struct FusedInferAttentionGraphTask {
   int64_t num_key_value_heads = 0;
   double scale = 0.0;
   int64_t block_size = 0;
+  int32_t dcp_size = 1;
+  int32_t dcp_rank = 0;
   FusedInferAttentionGraphBranch branch =
       FusedInferAttentionGraphBranch::kDecode;
   uint64_t capture_order = 0;

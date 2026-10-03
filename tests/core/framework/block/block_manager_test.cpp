@@ -1061,25 +1061,29 @@ TEST(BlockManagerPoolTest,
   pool.deallocate_without_cache(&seq2);
 }
 
-TEST(BlockManagerPoolTest, SparseLinearStateCheckpointTrimsSharedKVBlocks) {
+TEST(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
+  constexpr int32_t kCanonicalBlockSize = 256;
+  constexpr int32_t kChunkStride = 128;
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
+  ScopedValue<int32_t> chunk_guard(
+      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(),
+      kChunkStride);
 
-  const auto check_shared_blocks = [](int32_t checkpoint_block_index,
-                                      size_t expected_shared_blocks) {
+  const auto check_prefix = [kCanonicalBlockSize, kChunkStride](
+                                std::initializer_list<size_t> checkpoints,
+                                size_t expected_tokens) {
     BlockManagerPool::Options options;
-    options.num_blocks(48).host_num_blocks(0).block_size(4).enable_prefix_cache(
-        true);
+    options.num_blocks(8)
+        .host_num_blocks(0)
+        .block_size(kCanonicalBlockSize)
+        .enable_prefix_cache(true);
     options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
         .enable_linear_state(true)
-        .linear_state_num_slots(64);
-    ScopedValue<int32_t> chunk_guard(
-        &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
+        .linear_state_num_slots(16);
     BlockManagerPool pool(options, /*dp_size=*/1);
 
-    Sequence cached_seq = make_sequence(
-        0,
-        /*prompt_tokens=*/{
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
+    const std::vector<int32_t> prompt_tokens(513, 1);
+    Sequence cached_seq = make_sequence(0, prompt_tokens);
     ASSERT_TRUE(pool.allocate(&cached_seq));
     cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
     pool.cache(&cached_seq);
@@ -1087,36 +1091,36 @@ TEST(BlockManagerPoolTest, SparseLinearStateCheckpointTrimsSharedKVBlocks) {
     LinearStateBlockManager* prefix_cache =
         BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
     ASSERT_NE(prefix_cache, nullptr);
-    if (checkpoint_block_index > 0) {
-      const size_t boundary_tokens =
-          static_cast<size_t>(checkpoint_block_index) *
-          static_cast<size_t>(options.block_size());
-      const LinearStatePrefixHash checkpoint_hash =
+    int32_t expected_slot = -1;
+    for (size_t checkpoint : checkpoints) {
+      const LinearStatePrefixHash hash =
           compute_linear_state_prefix_hash_for_test(
-              cached_seq.tokens(), options.block_size(), boundary_tokens);
-      EXPECT_GE(insert_linear_state_checkpoint(prefix_cache, checkpoint_hash),
-                1);
+              cached_seq.tokens(), kChunkStride, checkpoint);
+      const int32_t slot = insert_linear_state_checkpoint(prefix_cache, hash);
+      ASSERT_GE(slot, 1);
+      if (checkpoint == expected_tokens) {
+        expected_slot = slot;
+      }
     }
     pool.deallocate_without_cache(&cached_seq);
 
-    Sequence hit_seq = make_sequence(
-        1,
-        /*prompt_tokens=*/{
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17});
+    Sequence hit_seq = make_sequence(1, prompt_tokens);
     ASSERT_TRUE(pool.allocate(&hit_seq, hit_seq.num_tokens()));
+    EXPECT_EQ(hit_seq.kv_state().kv_cache_tokens_num(), expected_tokens);
     EXPECT_EQ(hit_seq.kv_state().shared_blocks_num(BlockType::KV),
-              expected_shared_blocks);
+              expected_tokens / kCanonicalBlockSize);
+    if (expected_tokens == 0) {
+      EXPECT_FALSE(hit_seq.has_linear_restore_src_block());
+    } else {
+      ASSERT_TRUE(hit_seq.has_linear_restore_src_block());
+      EXPECT_EQ(hit_seq.take_linear_restore_src_block()->id(), expected_slot);
+    }
     pool.deallocate_without_cache(&hit_seq);
   };
 
-  // KV prefix cache stores h1-h4. The linear-state cache may store only one of
-  // those shared hashes; reuse must stop at the latest checkpoint-backed hash.
-  check_shared_blocks(/*checkpoint_block_index=*/4,
-                      /*expected_shared_blocks=*/4);
-  check_shared_blocks(/*checkpoint_block_index=*/3,
-                      /*expected_shared_blocks=*/3);
-  check_shared_blocks(/*checkpoint_block_index=*/0,
-                      /*expected_shared_blocks=*/0);
+  check_prefix({384}, 0);
+  check_prefix({256, 384}, 256);
+  check_prefix({512}, 512);
 }
 
 TEST(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {

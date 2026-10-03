@@ -63,6 +63,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    dcp_attention_merge_test
+  SRCS
+    dcp_attention_merge_test.cpp
+  DEPS
+    :common_layers
+    GTest::gtest_main
+)
+
 if(USE_CUDA)
   add_subdirectory(cuda)
 endif()

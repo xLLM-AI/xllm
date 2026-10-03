@@ -16,11 +16,13 @@ limitations under the License.
 #pragma once
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/framework/config/dit_config.h"
 
 namespace xllm {
@@ -31,7 +33,14 @@ group_order: the priority of the sub groups, the group with a
     higher priority will be assigned closer rank ids.
 world_size: the global world_size
 */
-class RankGenerator {
+struct RankGroup {
+  std::vector<int32_t> ranks;
+  int32_t rank = 0;
+  int32_t index = 0;
+  int32_t count = 1;
+};
+
+class RankGenerator final {
  public:
   explicit RankGenerator(int32_t world_size = 1, int32_t rank_offset = 0)
       : rank_offset_(rank_offset), world_size_(world_size) {}
@@ -100,6 +109,57 @@ class RankGenerator {
     return group_mapping;
   }
 
+  // Resolve only the caller's group rather than materializing every group.
+  RankGroup get_rank_group(const std::string& query,
+                           const std::vector<int32_t>& sizes,
+                           const std::vector<std::string>& order,
+                           int32_t global_rank) const {
+    CHECK(!sizes.empty());
+    CHECK_EQ(sizes.size(), order.size());
+    CHECK_GE(global_rank, rank_offset_);
+    CHECK_LT(global_rank - rank_offset_, world_size_);
+    int64_t product = 1;
+    for (const int32_t size : sizes) {
+      CHECK_GT(size, 0);
+      product *= size;
+      CHECK_LE(product, world_size_);
+    }
+    CHECK_EQ(product, world_size_);
+    const std::vector<bool> mask = get_mask(query, order);
+    CHECK(std::find(mask.begin(), mask.end(), true) != mask.end());
+    const std::vector<int32_t> coordinates =
+        decompose(global_rank - rank_offset_, sizes);
+    const std::vector<int32_t> strides = prefix_product(sizes);
+    std::vector<int32_t> selected_sizes;
+    std::vector<int32_t> selected_strides;
+    selected_sizes.reserve(sizes.size());
+    selected_strides.reserve(sizes.size());
+    RankGroup group;
+    int32_t selected_stride = 1;
+    int32_t replica_stride = 1;
+    int32_t base_rank = rank_offset_;
+    for (size_t axis = 0; axis < sizes.size(); ++axis) {
+      if (mask[axis]) {
+        group.rank += coordinates[axis] * selected_stride;
+        selected_stride *= sizes[axis];
+        selected_sizes.emplace_back(sizes[axis]);
+        selected_strides.emplace_back(strides[axis]);
+      } else {
+        group.index += coordinates[axis] * replica_stride;
+        replica_stride *= sizes[axis];
+        base_rank += coordinates[axis] * strides[axis];
+      }
+    }
+    group.count = replica_stride;
+    group.ranks.reserve(static_cast<size_t>(selected_stride));
+    for (int32_t rank = 0; rank < selected_stride; ++rank) {
+      group.ranks.emplace_back(
+          base_rank +
+          inner_product(decompose(rank, selected_sizes), selected_strides));
+    }
+    return group;
+  }
+
   int32_t get_world_size() const { return world_size_; }
 
  private:
@@ -136,8 +196,9 @@ class RankGenerator {
     LOG(INFO) << ss.str();
   }
 
-  std::vector<int32_t> prefix_product(const std::vector<int32_t>& group_size,
-                                      int32_t init = 1) {
+  static std::vector<int32_t> prefix_product(
+      const std::vector<int32_t>& group_size,
+      int32_t init = 1) {
     std::vector<int32_t> prefix_product_sizes;
     prefix_product_sizes.push_back(init);
     for (int32_t size : group_size) {
@@ -147,8 +208,8 @@ class RankGenerator {
     return prefix_product_sizes;
   }
 
-  int32_t inner_product(const std::vector<int32_t>& a,
-                        const std::vector<int32_t>& b) {
+  static int32_t inner_product(const std::vector<int32_t>& a,
+                               const std::vector<int32_t>& b) {
     int32_t result = 0;
     for (size_t i = 0; i < a.size(); i++) {
       result += a[i] * b[i];
@@ -156,9 +217,10 @@ class RankGenerator {
     return result;
   }
 
-  std::vector<int32_t> decompose(int32_t index,
-                                 const std::vector<int32_t>& shape,
-                                 const std::vector<int32_t>& stride = {}) {
+  static std::vector<int32_t> decompose(
+      int32_t index,
+      const std::vector<int32_t>& shape,
+      const std::vector<int32_t>& stride = {}) {
     std::vector<int32_t> idx;
     std::vector<int32_t> actual_stride;
 
@@ -246,8 +308,9 @@ class RankGenerator {
     return ranks;
   }
 
-  std::vector<bool> get_mask(const std::string& group_query,
-                             const std::vector<std::string>& group_order) {
+  static std::vector<bool> get_mask(
+      const std::string& group_query,
+      const std::vector<std::string>& group_order) {
     auto split = [](const std::string& s,
                     char delimiter) -> std::vector<std::string> {
       std::vector<std::string> tokens;

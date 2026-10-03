@@ -271,6 +271,10 @@ bool is_npu_model_cp_capable(const std::string& resolved_name) {
   return kCpCapableModels.contains(resolved_name);
 }
 
+bool is_npu_model_dcp_capable(const std::string& resolved_name) {
+  return ModelRegistry::supports_dcp(resolved_name);
+}
+
 bool is_mlu_model_cp_capable(const std::string& resolved_name) {
   static const std::unordered_set<std::string> kCpCapableModels = {
       "deepseek_v4",
@@ -417,6 +421,16 @@ CpShardingMode ModelRegistry::get_cp_sharding_mode(const std::string& name) {
     return CpShardingMode::NONE;
   }
   return it->second.cp_sharding_mode;
+}
+
+void ModelRegistry::register_dcp_capability(const std::string& name) {
+  get_instance()->model_registry_[name].supports_dcp = true;
+}
+
+bool ModelRegistry::supports_dcp(const std::string& name) {
+  const ModelRegistry* instance = get_instance();
+  const auto it = instance->model_registry_.find(name);
+  return it != instance->model_registry_.end() && it->second.supports_dcp;
 }
 
 CausalLMFactory ModelRegistry::get_causallm_factory(const std::string& name) {

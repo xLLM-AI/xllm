@@ -31,7 +31,6 @@ limitations under the License.
 #include "common/macros.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "disagg_pd.pb.h"
@@ -173,8 +172,6 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name,
   engine->get_cache_info(
       instance_info_.cluster_ids, instance_info_.addrs, instance_info_.ports);
   instance_info_.dp_size = options_.dp_size();
-  instance_info_.kv_split_size =
-      ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
 
   // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)

@@ -19,14 +19,14 @@ limitations under the License.
 
 namespace xllm {
 
-class CollectiveCommunicator : public CollectiveCommunicatorBase {
+class CollectiveCommunicator final : public CollectiveCommunicatorBase {
  public:
-  CollectiveCommunicator(int global_rank,
-                         int world_size,
-                         int dp_size,
-                         int ep_size,
-                         int cp_size);
-  ~CollectiveCommunicator() = default;
+  CollectiveCommunicator(int32_t global_rank,
+                         int32_t world_size,
+                         int32_t dp_size,
+                         int32_t ep_size,
+                         int32_t cp_size);
+  ~CollectiveCommunicator() override = default;
 
   void create_process_groups(const std::string& master_addr,
                              const torch::Device& device) override;

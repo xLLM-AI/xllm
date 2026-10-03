@@ -15,8 +15,10 @@ limitations under the License.
 
 #include "core/framework/parallel_state/collective_communicator.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
-#include <optional>
+#include <utility>
 
 #include "core/framework/parallel_state/mapping_npu.h"
 
@@ -35,8 +37,9 @@ limitations under the License.
 #endif
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/parallel_state/context_parallel_topology.h"
+#include "core/framework/parallel_state/parallel_topology.h"
 #include "core/platform/platform.h"
 #include "parallel_args.h"
 #include "parallel_state.h"
@@ -209,11 +212,6 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
 
 namespace {
 
-void apply_layerwise_split_config(ParallelArgs* parallel_args) {
-  parallel_args->layerwise_split_size(
-      ParallelConfig::get_instance().layerwise_split_size());
-}
-
 std::string get_context_parallel_group_host(int32_t group_root_rank,
                                             const std::string& fallback_host) {
 #if defined(USE_NPU)
@@ -226,42 +224,26 @@ std::string get_context_parallel_group_host(int32_t group_root_rank,
 
 }  // namespace
 
-CollectiveCommunicator::CollectiveCommunicator(int global_rank,
-                                               int world_size,
-                                               int dp_size,
-                                               int ep_size,
-                                               int cp_size)
-    : CollectiveCommunicatorBase(global_rank, world_size) {
+CollectiveCommunicator::CollectiveCommunicator(int32_t global_rank,
+                                               int32_t world_size,
+                                               int32_t dp_size,
+                                               int32_t ep_size,
+                                               int32_t cp_size)
+    : CollectiveCommunicatorBase(global_rank, world_size),
+      parallel_args_(std::make_unique<ParallelArgs>(global_rank,
+                                                    world_size,
+                                                    dp_size,
+                                                    cp_size,
+                                                    nullptr,
+                                                    ep_size)) {
+  const ParallelConfig& config = ParallelConfig::get_instance();
+  parallel_args_->kv_split_size(config.kv_split_size());
+  parallel_args_->layerwise_split_size(config.layerwise_split_size());
 #if defined(USE_NPU)
-  // create hccl process group with hccl_root_info
-  // std::vector<HcclRootInfo> unique_ids;
-  // for (const auto& protoId : uids.comm_unique_ids()) {
-  //   HcclRootInfo id;
-  //   std::memcpy(
-  //       id.internal, protoId.comm_unique_id().data(), sizeof(id.internal));
-  //   unique_ids.push_back(id);
-  // }
-  // HcclComm comm;
-  // auto hccl_result = HcclCommInitRootInfo(
-  //     world_size, &unique_ids[0], global_rank, &comm);
-  // CHECK(hccl_result == HCCL_SUCCESS)
-  //     << "HcclCommInitRootInfo failed, global rank is " <<
-  //     global_rank;
-  // std::unique_ptr<ProcessGroupHCCL> hccl_pg =
-  //     std::make_unique<ProcessGroupHCCL>(
-  //         global_rank, world_size, device, comm);
-
-  // comunicator will be inited in torch.
-  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
-    parallel_args_ = std::make_unique<ParallelArgs>(
-        global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
-    parallel_args_->kv_split_size(
-        ::xllm::ParallelConfig::get_instance().kv_split_size());
-    apply_layerwise_split_config(parallel_args_.get());
+  if (KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
     return;
   }
 
-  // comunicator will be inited in atb.
   // HACK: MappingNPU internally uses a static counter to auto-assign
   // buffer_offset for multi-model scenarios. This is a hack and should be
   // refactored later.
@@ -270,8 +252,7 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   // FLAGS_kv_split_size: 0 -> leave Options::kv_split_size = -1 so that
   // MappingNPU falls back to cp_size (byte-equivalent). >0 -> propagate
   // verbatim; MappingNPU::validate() enforces divisibility against cp_size.
-  const int32_t kv_split_size =
-      ::xllm::ParallelConfig::get_instance().kv_split_size();
+  const int32_t kv_split_size = parallel_args_->kv_split_size();
   const int32_t mapping_kv_split_size = kv_split_size > 0 ? kv_split_size : -1;
   MappingNPU::Options mapping_options;
   mapping_options.dp_size(dp_size)
@@ -282,8 +263,7 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
       .sp_size(1)
       .cp_size(normalized_cp_size)
       .kv_split_size(mapping_kv_split_size)
-      .layerwise_split_size(
-          ::xllm::ParallelConfig::get_instance().layerwise_split_size());
+      .layerwise_split_size(parallel_args_->layerwise_split_size());
   MappingNPU mapping_npu(::xllm::EPLBConfig::get_instance().rank_tablefile(),
                          world_size,
                          global_rank,
@@ -305,25 +285,11 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   auto dispatchAndCombineHcclComm =
       atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommPtr(
           dispatchAndCombinecommDomain);
-  parallel_args_ = std::make_unique<ParallelArgs>(global_rank,
-                                                  world_size,
-                                                  dp_size,
-                                                  nullptr,
-                                                  ep_size,
-                                                  cp_size,
-                                                  mapping_data,
-                                                  mapping,
-                                                  dispatchAndCombinecommDomain,
-                                                  dispatchAndCombineHcclComm);
-  parallel_args_->kv_split_size(
-      ::xllm::ParallelConfig::get_instance().kv_split_size());
-  apply_layerwise_split_config(parallel_args_.get());
-#else
-  parallel_args_ = std::make_unique<ParallelArgs>(
-      global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
-  parallel_args_->kv_split_size(
-      ::xllm::ParallelConfig::get_instance().kv_split_size());
-  apply_layerwise_split_config(parallel_args_.get());
+  parallel_args_->mapping_data(std::move(mapping_data));
+  parallel_args_->mapping(std::move(mapping));
+  parallel_args_->dispatchAndCombinecommDomain(
+      std::move(dispatchAndCombinecommDomain));
+  parallel_args_->dispatchAndCombineHcclComm(dispatchAndCombineHcclComm);
 #endif
 }
 
@@ -379,13 +345,14 @@ void CollectiveCommunicator::create_process_groups(
     // ATB owns TP/DP/EP; build a standalone HCCL CP ProcessGroup for
     // model-side AllGather.
     if (cp_size > 1) {
-      const parallel_state::ContextParallelTopology cp_topology(global_rank,
-                                                                world_size,
-                                                                dp_size,
-                                                                cp_size,
-                                                                /*dcp_size=*/1);
-      const std::vector<int32_t>& cp_ranks = cp_topology.pcp_group_ranks();
-      const int32_t cp_local_rank = cp_topology.pcp_rank();
+      const parallel_state::ParallelTopology topology(global_rank,
+                                                      world_size,
+                                                      dp_size,
+                                                      ep_size,
+                                                      cp_size,
+                                                      /*dcp_size=*/1);
+      const std::vector<int32_t>& cp_ranks = topology.pcp_group_ranks();
+      const int32_t cp_local_rank = topology.pcp_rank();
       CHECK_EQ(cp_ranks.size(), cp_size);
       CHECK_GE(cp_local_rank, 0);
       CHECK_LT(cp_local_rank, cp_size);
@@ -396,7 +363,7 @@ void CollectiveCommunicator::create_process_groups(
                                        cp_ranks,
                                        world_size,
                                        cp_size,
-                                       port + 1 + cp_topology.tp_rank(),
+                                       port + 1 + topology.tp_rank(),
                                        host,
                                        "cp_group",
                                        device);
@@ -428,43 +395,38 @@ void CollectiveCommunicator::create_process_groups(
   // make ranks r and r + tp_size hold the same heads and double-accumulate in
   // the all-reduce, which is a silent numerical error rather than a crash.
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
-  CHECK_EQ(world_size % (dp_size * normalized_cp_size), 0)
-      << "world_size (" << world_size
-      << ") must be divisible by dp_size * cp_size (" << dp_size << " * "
-      << normalized_cp_size << ")";
-  const int32_t tp_size = world_size / (dp_size * normalized_cp_size);
-  std::optional<parallel_state::ContextParallelTopology> cp_topology;
-  if (normalized_cp_size > 1) {
-    cp_topology.emplace(global_rank,
-                        world_size,
-                        dp_size,
-                        normalized_cp_size,
-                        parallel_args_->kv_split_size_effective());
-  }
-  CHECK_GT(tp_size, 0) << "attention tp_size must be positive: world_size="
-                       << world_size << ", dp_size=" << dp_size
-                       << ", cp_size=" << normalized_cp_size;
-  CHECK_EQ(tp_size * dp_size * normalized_cp_size, world_size)
-      << "world_size (" << world_size << ") must equal dp_size * cp_size * "
-      << "tp_size (" << dp_size << " * " << normalized_cp_size << " * "
-      << tp_size << ")";
+  const int32_t kv_split_size = parallel_args_->kv_split_size_effective();
+  const bool native_npu_dcp = Platform::is_npu() &&
+                              !ModelConfig::is_python_model_impl(
+                                  ModelConfig::get_instance().model_impl()) &&
+                              normalized_cp_size == 1 && kv_split_size > 1;
+  // Python owns its pure-DCP groups; the native CP topology still governs TP.
+  const parallel_state::ParallelTopology topology(
+      global_rank,
+      world_size,
+      dp_size,
+      ep_size,
+      normalized_cp_size,
+      normalized_cp_size > 1 || native_npu_dcp ? kv_split_size : 1);
+  const int32_t tp_size = topology.tp_size();
   // Group counts stop tracking dp_size once tp_size narrows, so derive every
   // TCPStore window from the group width instead of assuming world/dp.
-  const int32_t tp_group_count = world_size / tp_size;
-  port_offset = global_rank / tp_size + 1;
+  const int32_t tp_group_count = topology.tp().count;
+  port_offset = topology.tp().index + 1;
   std::string tp_host = host;
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
       tp_group_count > 1) {
-    const int32_t tp_group_start = (global_rank / tp_size) * tp_size;
+    const int32_t tp_group_start = topology.tp().ranks.front();
     tp_host = get_rank_table_server_host(tp_group_start, host);
   }
 #endif
   tp_group_ = create_process_group(global_rank,
+                                   topology.tp().rank,
+                                   topology.tp().ranks,
                                    world_size,
                                    tp_size,
                                    port + port_offset,
-                                   false,
                                    tp_host,
                                    "tp_group",
                                    device);
@@ -499,16 +461,11 @@ void CollectiveCommunicator::create_process_groups(
   }
   port += tp_group_count + single_rank_group_port_gap + single_rank_group_count;
 
-  if (cp_topology.has_value()) {
-    const std::vector<int32_t>& cp_ranks = cp_topology->pcp_group_ranks();
-    const int32_t cp_local_rank = cp_topology->pcp_rank();
-    if constexpr (Platform::is_npu()) {
-      if (normalized_cp_size > 1) {
-        CHECK_EQ(cp_local_rank, parallel_args_->cp_rank());
-      }
-    }
-    const int32_t cp_group_index =
-        cp_topology->dp_rank() * tp_size + cp_topology->tp_rank();
+  if (normalized_cp_size > 1) {
+    const std::vector<int32_t>& cp_ranks = topology.pcp_group_ranks();
+    const int32_t cp_local_rank = topology.pcp_rank();
+    CHECK_EQ(cp_local_rank, parallel_args_->cp_rank());
+    const int32_t cp_group_index = topology.pcp().index;
     cp_group_ = create_process_group(
         global_rank,
         cp_local_rank,
@@ -520,66 +477,70 @@ void CollectiveCommunicator::create_process_groups(
         "cp_group",
         device);
     parallel_args_->cp_group_ = cp_group_.get();
-    port += dp_size * tp_size;
-
-    // Only MLU materializes the logical DCP topology as a collective.
-    if constexpr (Platform::is_mlu()) {
-      if (cp_topology->dcp_size() == 1) {
-        parallel_args_->dcp_group_ = parallel_args_->single_rank_group_;
-      } else if (cp_topology->dcp_size() == cp_topology->pcp_size()) {
-        parallel_args_->dcp_group_ = cp_group_.get();
-      } else {
-        const std::vector<int32_t>& dcp_ranks = cp_topology->dcp_group_ranks();
-        dcp_group_ = create_process_group(
-            global_rank,
-            cp_topology->dcp_rank(),
-            dcp_ranks,
-            world_size,
-            cp_topology->dcp_size(),
-            port + cp_topology->dp_rank() + 1,
-            get_context_parallel_group_host(dcp_ranks.front(), host),
-            "dcp_group",
-            device);
-        parallel_args_->dcp_group_ = dcp_group_.get();
-        port += dp_size;
-      }
-      CHECK_EQ(parallel_args_->dcp_group_->rank(), cp_topology->dcp_rank());
-    }
-    LOG(INFO) << "Context parallel topology: rank=" << global_rank
-              << ", tp_rank=" << cp_topology->tp_rank()
-              << ", tp_size=" << cp_topology->tp_size()
-              << ", pcp_rank=" << cp_topology->pcp_rank()
-              << ", pcp_size=" << cp_topology->pcp_size()
-              << ", dcp_rank=" << cp_topology->dcp_rank()
-              << ", dcp_size=" << cp_topology->dcp_size();
+    port += topology.pcp().count;
   } else {
-    // CP is disabled, so the TP group remains the CP collective handle.
     parallel_args_->cp_group_ = tp_group_.get();
-    if constexpr (Platform::is_mlu()) {
+  }
+
+  // MLU's CP-disabled path retains its existing TP-wide DCP handle.
+  if constexpr (Platform::is_mlu()) {
+    parallel_args_->dcp_group_ = tp_group_.get();
+  }
+  if ((Platform::is_mlu() && normalized_cp_size > 1) || native_npu_dcp) {
+    if (topology.dcp_size() == 1) {
+      parallel_args_->dcp_group_ = parallel_args_->single_rank_group_;
+    } else if (topology.dcp_size() == topology.pcp_size()) {
+      parallel_args_->dcp_group_ = parallel_args_->cp_group_;
+    } else if (normalized_cp_size == 1 && topology.dcp_size() == tp_size) {
       parallel_args_->dcp_group_ = tp_group_.get();
+    } else {
+      const std::vector<int32_t>& dcp_ranks = topology.dcp_group_ranks();
+      dcp_group_ = create_process_group(
+          global_rank,
+          topology.dcp_rank(),
+          dcp_ranks,
+          world_size,
+          topology.dcp_size(),
+          port + topology.dcp().index + 1,
+          get_context_parallel_group_host(dcp_ranks.front(), host),
+          "dcp_group",
+          device);
+      parallel_args_->dcp_group_ = dcp_group_.get();
+      port += topology.dcp().count;
     }
+    CHECK_EQ(parallel_args_->dcp_group_->rank(), topology.dcp_rank());
+  }
+  if (normalized_cp_size > 1 || native_npu_dcp) {
+    LOG(INFO) << "Context parallel topology: rank=" << global_rank
+              << ", tp_rank=" << topology.tp_rank()
+              << ", tp_size=" << topology.tp_size()
+              << ", pcp_rank=" << topology.pcp_rank()
+              << ", pcp_size=" << topology.pcp_size()
+              << ", dcp_rank=" << topology.dcp_rank()
+              << ", dcp_size=" << topology.dcp_size();
   }
 
   if (dp_size > 1) {
     // A DP group varies dp_rank while preserving the full local model-shard
     // index. Under orthogonal CP that index spans cp_rank AND tp_rank, so the
-    // grouping key is global_rank % (world_size / dp_size) -- matching the
-    // `trans` grouping below. Keying on tp_size alone was equivalent only
+    // grouping key is global_rank % (world_size / dp_size). Keying on
+    // tp_size alone was equivalent only
     // while tp_size == world/dp; after narrowing it collides.
-    const int32_t dp_group_count = world_size / dp_size;
-    port_offset = global_rank % dp_group_count + 1;
+    const int32_t dp_group_count = topology.dp().count;
+    port_offset = topology.dp().index + 1;
     std::string dp_host = host;
 #if defined(USE_NPU)
     if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
-      const int32_t dp_group_start = global_rank % dp_group_count;
+      const int32_t dp_group_start = topology.dp().ranks.front();
       dp_host = get_rank_table_server_host(dp_group_start, host);
     }
 #endif
     dp_local_process_group_ = create_process_group(global_rank,
+                                                   topology.dp().rank,
+                                                   topology.dp().ranks,
                                                    world_size,
                                                    dp_size,
                                                    port + port_offset,
-                                                   true,
                                                    dp_host,
                                                    "dp_group",
                                                    device);
@@ -587,50 +548,54 @@ void CollectiveCommunicator::create_process_groups(
     port += dp_group_count;
   }
 
-  int32_t moe_tp_size = world_size / ep_size;
-  CHECK_EQ(moe_tp_size * ep_size, world_size);
+  const int32_t moe_tp_size = topology.moe_tp_size();
   if (ep_size == 1) {
-    parallel_args_->moe_tp_group_ = process_group_.get();
+    // Reuse TP only when it spans the same rank set as the MoE world group.
+    parallel_args_->moe_tp_group_ = dp_size == 1 && tp_size == moe_tp_size
+                                        ? tp_group_.get()
+                                        : process_group_.get();
     parallel_args_->eplb_group_ = process_group_.get();
   } else {
-    port_offset = global_rank / moe_tp_size + 1;
+    port_offset = topology.moe_tp().index + 1;
     std::string moe_tp_host = host;
 #if defined(USE_NPU)
     if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
-      const int32_t moe_tp_group_start =
-          (global_rank / moe_tp_size) * moe_tp_size;
+      const int32_t moe_tp_group_start = topology.moe_tp().ranks.front();
       moe_tp_host = get_rank_table_server_host(moe_tp_group_start, host);
     }
 #endif
     moe_tp_group_ = create_process_group(global_rank,
+                                         topology.moe_tp().rank,
+                                         topology.moe_tp().ranks,
                                          world_size,
                                          moe_tp_size,
                                          port + port_offset,
-                                         false,
                                          moe_tp_host,
                                          "moe_tp_group",
                                          device);
     parallel_args_->moe_tp_group_ = moe_tp_group_.get();
-    port += ep_size;
-    port_offset = global_rank % moe_tp_size + 1;
+    port += topology.moe_tp().count;
+    port_offset = topology.moe_ep().index + 1;
     moe_ep_group_ = create_process_group(global_rank,
+                                         topology.moe_ep().rank,
+                                         topology.moe_ep().ranks,
                                          world_size,
                                          ep_size,
                                          port + port_offset,
-                                         true,
                                          host,
                                          "moe_ep_group",
                                          device);
     parallel_args_->moe_ep_group_ = moe_ep_group_.get();
-    port += moe_tp_size;
+    port += topology.moe_ep().count;
 #if defined(USE_NPU)
     if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
         ::xllm::KernelConfig::get_instance().enable_fused_mc2() > 0) {
       mc2_group_ = create_process_group(global_rank,
+                                        topology.moe_ep().rank,
+                                        topology.moe_ep().ranks,
                                         world_size,
                                         ep_size,
                                         port + port_offset,
-                                        true,
                                         host,
                                         "mc2_group",
                                         device);
@@ -640,15 +605,16 @@ void CollectiveCommunicator::create_process_groups(
       CHECK(!mc2_comm_name.empty())
           << "Fused MC2 process group failed to initialize its HCCL "
              "communicator.";
-      port += moe_tp_size;
+      port += topology.moe_ep().count;
     }
 #endif
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       eplb_group_ = create_process_group(global_rank,
+                                         topology.moe_ep().rank,
+                                         topology.moe_ep().ranks,
                                          world_size,
                                          ep_size,
                                          port + port_offset,
-                                         true,
                                          host,
                                          "eplb_group",
                                          device);
@@ -660,7 +626,7 @@ void CollectiveCommunicator::create_process_groups(
       // with the next MoE dispatch and temporarily invalidate group lookup.
       eplb_group_->warmup_p2p();
 #endif
-      port += moe_tp_size;
+      port += topology.moe_ep().count;
     }
   }
 

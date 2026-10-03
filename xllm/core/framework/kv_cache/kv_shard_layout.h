@@ -38,6 +38,11 @@ class KVShardLayout final {
   bool owns(int64_t global_slot) const;
   int64_t localize(int64_t global_slot) const;
   int64_t globalize(int64_t local_slot) const;
+  // The shard is empty while global_token_count <= first_token_index().
+  int64_t first_token_index() const {
+    return static_cast<int64_t>(dcp_rank_) * physical_block_size_;
+  }
+  int64_t local_token_count(int64_t global_token_count) const;
 
  private:
   int32_t physical_block_size_ = 1;

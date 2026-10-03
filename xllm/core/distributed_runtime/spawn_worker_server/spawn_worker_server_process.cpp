@@ -62,6 +62,7 @@ limitations under the License.
 // @enable_mtp_draft_body_tp1
 // @text_encoder_tp_size
 // @draft_sampling_mode
+// @kv_split_size
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -107,11 +108,22 @@ int main(int argc, char* argv[]) {
   int32_t max_tokens_for_graph_mode = static_cast<int32_t>(atoi(argv[25]));
   int64_t max_encoder_cache_size = static_cast<int64_t>(atoll(argv[26]));
   int32_t dp_size = static_cast<int32_t>(atoi(argv[27]));
+  int32_t ep_size = static_cast<int32_t>(atoi(argv[32]));
+  int32_t cp_size = static_cast<int32_t>(atoi(argv[31]));
+  const int32_t kv_split_size =
+      argc > xllm::spawn_worker_protocol::kKvSplitSizeArgumentIndex
+          ? static_cast<int32_t>(atoi(
+                argv[xllm::spawn_worker_protocol::kKvSplitSizeArgumentIndex]))
+          : 1;
   int32_t tp_size = static_cast<int32_t>(atoi(argv[28]));
   int32_t sp_size = static_cast<int32_t>(atoi(argv[29]));
   int32_t cfg_size = static_cast<int32_t>(atoi(argv[30]));
-  int32_t cp_size = static_cast<int32_t>(atoi(argv[31]));
-  int32_t ep_size = static_cast<int32_t>(atoi(argv[32]));
+  const int32_t text_encoder_tp_size =
+      argc > xllm::spawn_worker_protocol::kTextEncoderTpSizeArgumentIndex
+          ? static_cast<int32_t>(
+                atoi(argv[xllm::spawn_worker_protocol::
+                              kTextEncoderTpSizeArgumentIndex]))
+          : 1;
   std::string instance_role_str = std::string(argv[33]);
   const std::string& indexer_cache_dtype = parsed_indexer_cache_dtype.value();
   const std::string draft_sampling_mode =
@@ -121,19 +133,14 @@ int main(int argc, char* argv[]) {
       static_cast<int32_t>(
           atoi(argv[xllm::spawn_worker_protocol::
                         kEnableMtpDraftBodyTp1ArgumentIndex])) > 0;
-  const int32_t text_encoder_tp_size =
-      argc > xllm::spawn_worker_protocol::kTextEncoderTpSizeArgumentIndex
-          ? static_cast<int32_t>(
-                atoi(argv[xllm::spawn_worker_protocol::
-                              kTextEncoderTpSizeArgumentIndex]))
-          : 1;
   if (world_size < 1 || global_rank < 0 || global_rank >= world_size ||
       cp_size < 1 || ep_size < 1 || text_encoder_tp_size < 1 ||
+      kv_split_size < 0 ||
       (instance_role_str != "DEFAULT" && instance_role_str != "PREFILL" &&
        instance_role_str != "DECODE")) {
     LOG(ERROR) << "Invalid spawn worker topology: global_rank=" << global_rank
                << ", world_size=" << world_size << ", cp_size=" << cp_size
-               << ", ep_size=" << ep_size
+               << ", ep_size=" << ep_size << ", kv_split_size=" << kv_split_size
                << ", instance_role=" << instance_role_str;
     return 1;
   }
@@ -172,7 +179,8 @@ int main(int argc, char* argv[]) {
       << ", text_encoder_tp_size = " << text_encoder_tp_size
       << ", indexer_cache_dtype = " << indexer_cache_dtype
       << ", enable_mtp_draft_body_tp1 = " << enable_mtp_draft_body_tp1
-      << ", draft_sampling_mode = " << draft_sampling_mode << "\n";
+      << ", draft_sampling_mode = " << draft_sampling_mode
+      << ", kv_split_size = " << kv_split_size;
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
@@ -202,12 +210,13 @@ int main(int argc, char* argv[]) {
                                  max_tokens_for_graph_mode,
                                  max_encoder_cache_size,
                                  dp_size,
+                                 ep_size,
+                                 cp_size,
+                                 kv_split_size,
                                  tp_size,
                                  sp_size,
                                  cfg_size,
                                  text_encoder_tp_size,
-                                 cp_size,
-                                 ep_size,
                                  instance_role,
                                  enable_mtp_draft_body_tp1,
                                  draft_sampling_mode);

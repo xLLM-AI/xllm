@@ -222,6 +222,14 @@ REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
                                 /*shared_expert_intermediate_size=*/512);
 });
 
+#if defined(USE_NPU)
+const bool qwen3_5_dcp_registered = []() {
+  ModelRegistry::register_dcp_capability("qwen3_5_text");
+  ModelRegistry::register_dcp_capability("qwen3_5_moe_text");
+  return true;
+}();
+#endif
+
 #undef LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE
 #undef LOAD_QWEN3_5_NEXT_COMPAT_ARGS
 #undef LOAD_QWEN3_5_ROPE_ARG

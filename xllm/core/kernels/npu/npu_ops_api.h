@@ -89,7 +89,8 @@ torch::Tensor npu_fused_infer_attention_decode_get_max_workspace(
     int64_t num_heads,
     int64_t num_key_value_heads,
     double scale,
-    int64_t block_size);
+    int64_t block_size,
+    bool softmax_lse_flag = false);
 
 void npu_fused_infer_attention_decode_out(
     const torch::Tensor& query,
@@ -104,7 +105,8 @@ void npu_fused_infer_attention_decode_out(
     int64_t block_size,
     const torch::Tensor& workspace,
     torch::Tensor& output,
-    torch::Tensor& softmax_lse);
+    torch::Tensor& softmax_lse,
+    bool softmax_lse_flag = false);
 
 void npu_fused_infer_attention_decode_out_cached(
     const torch::Tensor& query,

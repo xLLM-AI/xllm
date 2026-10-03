@@ -15,14 +15,19 @@ limitations under the License.
 
 #include "core/framework/config/parallel_config_validation.h"
 
+#include <glog/logging.h>
+
 #include <boost/algorithm/string.hpp>
 #include <string_view>
 #include <unordered_set>
 
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/parallel_state/parallel_topology.h"
 #include "core/platform/platform.h"
 #include "core/util/utils.h"
 #include "framework/kv_cache/layerwise_split_layout.h"
@@ -78,9 +83,13 @@ std::optional<std::string> validate_context_parallel_config(
     return "cp_size must be greater than or equal to 1";
   }
 
+  const ParallelConfig& parallel_config = ParallelConfig::get_instance();
+  if (parallel_config.kv_split_size() < 0) {
+    return "kv_split_size must be nonnegative; 0 follows cp_size";
+  }
+  const int32_t kv_split = parallel_config.kv_split_size_effective();
+
   if (options.cp_size() == 1) {
-    const int32_t kv_split =
-        ParallelConfig::get_instance().kv_split_size_effective();
     if (Platform::is_npu() &&
         ModelConfig::is_python_model_impl(
             ModelConfig::get_instance().model_impl()) &&
@@ -94,6 +103,56 @@ std::optional<std::string> validate_context_parallel_config(
              ", dp_size=" + std::to_string(options.dp_size()) + ", tp_size=" +
              std::to_string(global_world_size / options.dp_size()) +
              ", cp_size=1, kv_split_size=" + std::to_string(kv_split) + ").";
+    }
+    if (Platform::is_npu() &&
+        !ModelConfig::is_python_model_impl(
+            ModelConfig::get_instance().model_impl()) &&
+        kv_split > 1) {
+      if (const auto error = parallel_state::ParallelTopology::validate_dcp_tp(
+              global_world_size, options.dp_size(), kv_split)) {
+        return error;
+      }
+      std::string effective_backend;
+      std::string resolved_name;
+      std::string resolve_error;
+      if (!resolve_model_registration(model_type,
+                                      options.npu_kernel_backend(),
+                                      &effective_backend,
+                                      &resolved_name,
+                                      &resolve_error)) {
+        return "Native DCP rejected model_type=" + model_type + ": " +
+               resolve_error;
+      }
+      const EPLBConfig& eplb_config = EPLBConfig::get_instance();
+      const bool supported_runtime =
+          effective_backend == "TORCH" && engine_type == EngineType::LLM &&
+          options.task_type() == "generate" && options.ep_size() == 1 &&
+          !options.enable_eplb().value_or(eplb_config.enable_eplb()) &&
+          options.expert_parallel_degree().value_or(
+              eplb_config.expert_parallel_degree()) <= 1 &&
+          options.is_local() &&
+          options.rank_tablefile()
+              .value_or(eplb_config.rank_tablefile())
+              .empty() &&
+          options.host_blocks_factor() <= 1.0 &&
+          !options.enable_kvcache_store() &&
+          !KVCacheConfig::get_instance().enable_xtensor() &&
+          !options.enable_disagg_pd() &&
+          options.instance_role() == InstanceRole::DEFAULT &&
+          options.draft_model_path().value_or("").empty() &&
+          options.num_speculative_tokens() == 0 &&
+          ExecutionConfig::get_instance().enable_fia_decode() &&
+          is_npu_model_dcp_capable(resolved_name);
+      if (!supported_runtime) {
+        return "Qwen3.5 DCP supports only replicated-GQA local NPU TORCH LLM "
+               "generation without CP, EP/EPLB, host/KVStore/XTensor offload, "
+               "P/D, or speculative decoding, and requires "
+               "enable_fia_decode=true";
+      }
+      if (Platform::is_ascend950()) {
+        return "Qwen3.5 DCP is not supported on Ascend950 because its TND "
+               "attention fallback does not return softmax LSE";
+      }
     }
     return std::nullopt;
   }
@@ -118,7 +177,7 @@ std::optional<std::string> validate_context_parallel_config(
       return "MLU CP requires dp_size == 1";
     }
 
-    if (ParallelConfig::get_instance().kv_split_size() != 1) {
+    if (parallel_config.kv_split_size() != 1) {
       return "MLU CP requires kv_split_size == 1";
     }
 
@@ -164,11 +223,10 @@ std::optional<std::string> validate_context_parallel_config(
     // so it bypasses the ATB-backend requirement and the ATB CP capability
     // allowlist below. The safety constraints above (LLM/generate,
     // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
-    // be > 1, sharing world = cp * tp); the collective communicator builds
-    // the narrowed TP group and the strided CP group as separate torch
-    // subgroups off the shared world rendezvous endpoint. DP > 1 stays
-    // unsupported: the Python executor does not implement the dp * cp * tp
-    // rank layout.
+    // be > 1, sharing world = cp * tp); the collective communicator builds the
+    // narrowed TP group and the strided CP group as separate torch subgroups
+    // off the shared world rendezvous endpoint. DP > 1 stays unsupported: the
+    // Python executor does not implement the dp * cp * tp rank layout.
     if (ModelConfig::is_python_model_impl(
             ModelConfig::get_instance().model_impl())) {
       // Only models whose Python forward actually shards the sequence (via
@@ -202,8 +260,6 @@ std::optional<std::string> validate_context_parallel_config(
       if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
         return "Python CP requires world_size divisible by dp_size * cp_size";
       }
-      const int32_t kv_split =
-          ParallelConfig::get_instance().kv_split_size_effective();
       if (kv_split < 1 || options.cp_size() % kv_split != 0) {
         return "Python CP requires kv_split_size effective value to be a "
                "positive divisor of cp_size";
@@ -260,8 +316,6 @@ std::optional<std::string> validate_context_parallel_config(
     if (attn_tp_size < 1) {
       return "NPU CP requires attn_tp_size >= 1";
     }
-    const int32_t kv_split =
-        ParallelConfig::get_instance().kv_split_size_effective();
     if (kv_split < 1 || options.cp_size() % kv_split != 0) {
       return "NPU CP requires kv_split_size effective value to be a positive "
              "divisor of cp_size";

@@ -99,12 +99,6 @@ void check_tensor_shapes_equal(const torch::Tensor& a,
   }
 }
 
-bool is_ascend950() {
-  const char* soc_name = aclrtGetSocName();
-  return soc_name != nullptr &&
-         std::string(soc_name).find("Ascend950") != std::string::npos;
-}
-
 torch::Tensor expand_kv_heads(const torch::Tensor& tensor,
                               int64_t num_heads,
                               int64_t num_kv_heads) {

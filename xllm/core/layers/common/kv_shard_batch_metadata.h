@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "framework/kv_cache/kv_shard_layout.h"
 
@@ -39,6 +40,11 @@ struct KVShardCausalSelectorMetadata {
 struct KVShardBatchMetadata {
   torch::Tensor local_slot_mapping;
   torch::Tensor expanded_indexer_block_table;
+  torch::Tensor empty_shard_mask;
+  std::vector<int64_t> query_end_offsets;
+  std::vector<int64_t> local_kv_lengths;
+  std::vector<int64_t> local_context_lengths;
+  bool has_context = false;
   int32_t kv_split_size = 1;
   int32_t kv_split_rank = 0;
 };
@@ -60,8 +66,14 @@ KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
     const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout);
 
+struct KVShardBatchMetadataBuildOptions {
+  bool materialize_indexer_block_table = true;
+  bool materialize_attention_lengths = false;
+};
+
 std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
     const AttentionMetadata& attention_metadata,
-    const KVShardLayout& layout);
+    const KVShardLayout& layout,
+    const KVShardBatchMetadataBuildOptions& build_options = {});
 
 }  // namespace xllm::layer

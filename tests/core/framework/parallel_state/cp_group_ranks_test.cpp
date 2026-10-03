@@ -18,7 +18,7 @@ limitations under the License.
 #include <set>
 #include <vector>
 
-#include "core/framework/parallel_state/context_parallel_topology.h"
+#include "core/framework/parallel_state/parallel_topology.h"
 
 namespace xllm {
 namespace parallel_state {
@@ -28,11 +28,12 @@ std::vector<int32_t> pcp_group_ranks_for(int32_t global_rank,
                                          int32_t world_size,
                                          int32_t dp_size,
                                          int32_t pcp_size) {
-  return ContextParallelTopology(global_rank,
-                                 world_size,
-                                 dp_size,
-                                 pcp_size,
-                                 /*dcp_size=*/1)
+  return ParallelTopology(global_rank,
+                          world_size,
+                          dp_size,
+                          /*ep_size=*/1,
+                          pcp_size,
+                          /*dcp_size=*/1)
       .pcp_group_ranks();
 }
 
@@ -48,7 +49,7 @@ int32_t expected_cp_rank(int32_t global_rank,
   return (global_rank % (cp_size * attn_tp_size)) / attn_tp_size;
 }
 
-TEST(ContextParallelTopologyTest, PcpSizeTwoTpFourDpOne) {
+TEST(ParallelTopologyTest, PcpSizeTwoTpFourDpOne) {
   const int32_t world_size = 8;
   const int32_t dp_size = 1;
   const int32_t cp_size = 2;
@@ -72,7 +73,7 @@ TEST(ContextParallelTopologyTest, PcpSizeTwoTpFourDpOne) {
   }
 }
 
-TEST(ContextParallelTopologyTest, PcpSizeFourTpTwoDpTwo) {
+TEST(ParallelTopologyTest, PcpSizeFourTpTwoDpTwo) {
   const int32_t world_size = 16;
   const int32_t dp_size = 2;
   const int32_t cp_size = 4;
@@ -93,7 +94,7 @@ TEST(ContextParallelTopologyTest, PcpSizeFourTpTwoDpTwo) {
   }
 }
 
-TEST(ContextParallelTopologyTest, GroupsPartitionWorldAndAreOrthogonalToTp) {
+TEST(ParallelTopologyTest, GroupsPartitionWorldAndAreOrthogonalToTp) {
   const int32_t world_size = 16;
   const int32_t dp_size = 2;
   const int32_t cp_size = 4;
@@ -144,13 +145,14 @@ TEST(ContextParallelTopologyTest, GroupsPartitionWorldAndAreOrthogonalToTp) {
   }
 }
 
-TEST(ContextParallelTopologyTest, RejectsNonIntegralAttnTpSize) {
+TEST(ParallelTopologyTest, RejectsNonIntegralAttnTpSize) {
   // world_size=8, dp_size=2, cp_size=3 => 8 not divisible by 6.
-  EXPECT_DEATH(ContextParallelTopology(/*global_rank=*/0,
-                                       /*world_size=*/8,
-                                       /*dp_size=*/2,
-                                       /*pcp_size=*/3,
-                                       /*dcp_size=*/1),
+  EXPECT_DEATH(ParallelTopology(/*global_rank=*/0,
+                                /*world_size=*/8,
+                                /*dp_size=*/2,
+                                /*ep_size=*/1,
+                                /*pcp_size=*/3,
+                                /*dcp_size=*/1),
                "");
 }
 

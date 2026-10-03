@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "framework/kv_cache/kv_shard_layout.h"
-#include "layers/mlu/dcp_attention_merge.h"
+#include "layers/common/dcp_attention_merge.h"
 #include "layers/mlu/dsa_topk_state.h"
 
 namespace xllm {

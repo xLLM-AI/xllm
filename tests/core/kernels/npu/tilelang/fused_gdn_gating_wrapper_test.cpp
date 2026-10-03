@@ -111,6 +111,12 @@ void run_fused_gdn_gating_case(const FusedGdnGatingTestCase& test_case) {
 TEST_F(TileLangFusedGdnGatingWrapperTest, MatchesTorchReference) {
   const std::vector<FusedGdnGatingTestCase> cases = {
       {
+          .name = "medium_b513_h2",
+          .num_batches = 513,
+          .num_heads = 2,
+          .seed = 100,
+      },
+      {
           .name = "tiny_b1_h8",
           .num_batches = 1,
           .num_heads = 8,

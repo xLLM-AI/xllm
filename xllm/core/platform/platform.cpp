@@ -18,6 +18,7 @@ limitations under the License.
 #include <mutex>
 
 #if defined(USE_NPU)
+#include <acl/acl.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #elif defined(USE_MLU)
 #include <framework/core/device.h>
@@ -70,6 +71,16 @@ torch::DeviceType Platform::type_torch() {
   return torch::kCUDA;
 #elif defined(USE_MUSA)
   return torch::kMUSA;
+#endif
+}
+
+bool Platform::is_ascend950() {
+#if defined(USE_NPU)
+  const char* soc_name = aclrtGetSocName();
+  return soc_name != nullptr &&
+         std::string(soc_name).find("Ascend950") != std::string::npos;
+#else
+  return false;
 #endif
 }
 

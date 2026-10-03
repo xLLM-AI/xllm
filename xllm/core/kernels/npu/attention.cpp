@@ -19,6 +19,7 @@ limitations under the License.
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/npu/utils.h"
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
+#include "core/platform/platform.h"
 #include "ops_npu/npu_ops.h"
 
 namespace {
@@ -88,7 +89,7 @@ void reshape_paged_cache(torch::Tensor& key,
                          const torch::Tensor& slot_mapping) {
   CHECK(value.has_value()) << "NPU reshape_paged_cache requires value.";
   CHECK(v_cache.has_value()) << "NPU reshape_paged_cache requires v_cache.";
-  if (is_ascend950()) {
+  if (Platform::is_ascend950()) {
     reshape_and_cache_a5(
         key, value.value(), k_cache, v_cache.value(), slot_mapping);
     return;
@@ -150,7 +151,7 @@ void batch_decode(const torch::Tensor& query,
   int64_t num_kv_heads = k_cache.size(-2);
   auto q = query.view({-1, num_heads, head_size});
   auto o = output.view({-1, num_heads, head_size});
-  if (is_ascend950()) {
+  if (Platform::is_ascend950()) {
     ascend950_paged_attention(
         q, k_cache, v_cache, scale, block_table, seq_lens, o);
     return;

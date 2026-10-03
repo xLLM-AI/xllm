@@ -24,6 +24,9 @@ limitations under the License.
 #include "layers/common/attention_metadata.h"
 
 namespace xllm {
+
+class ProcessGroup;
+
 namespace layer {
 
 class AttentionImpl : public torch::nn::Module {
@@ -35,7 +38,8 @@ class AttentionImpl : public torch::nn::Module {
                 float scale,
                 int64_t num_kv_heads,
                 int64_t sliding_window,
-                bool enable_fia_decode = false);
+                bool enable_fia_decode = false,
+                ProcessGroup* dcp_group = nullptr);
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
       const AttentionMetadata& attn_metadata,
@@ -65,6 +69,7 @@ class AttentionImpl : public torch::nn::Module {
   int64_t num_kv_heads_;
   int64_t sliding_window_;
   bool enable_fia_decode_ = false;
+  ProcessGroup* dcp_group_ = nullptr;
 };
 TORCH_MODULE(Attention);
 

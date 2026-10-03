@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "core/framework/parallel_state/process_group.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <functional>
 #include <mutex>
@@ -575,13 +577,6 @@ std::unique_ptr<ProcessGroup> create_process_group(
       rank, world_size, rank_size, port, trans, host, group_name, device);
 }
 
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-// We currently support explicit DiT communication groups on NPU, MLU, and DCU.
-// TODO: This function is used by DiT models, since the DiT communication group
-// info have already been calculated by rank_generator, we only need to pass the
-// info to create the process groups. For any device that want to reuse the
-// function and dit process groups, please implement the corresponding
-// ProcessGroupImpl construct function.
 std::unique_ptr<ProcessGroup> create_process_group(
     int32_t global_rank,
     int32_t local_rank,
@@ -592,6 +587,8 @@ std::unique_ptr<ProcessGroup> create_process_group(
     const std::string& host,
     const std::string& group_name,
     const torch::Device& device) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_DCU)
   return std::make_unique<ProcessGroupImpl>(global_rank,
                                             local_rank,
                                             group_ranks,
@@ -601,6 +598,35 @@ std::unique_ptr<ProcessGroup> create_process_group(
                                             host,
                                             group_name,
                                             device);
-}
+#else
+  // Legacy backends accept only regular contiguous or strided groups.
+  CHECK_GT(world_size, 0)
+      << "Legacy process groups require a positive world size";
+  CHECK_GT(rank_size, 0)
+      << "Legacy process groups require a positive group size";
+  CHECK_EQ(world_size % rank_size, 0)
+      << "Legacy process groups must evenly partition the world";
+  CHECK_EQ(static_cast<int64_t>(group_ranks.size()),
+           static_cast<int64_t>(rank_size))
+      << "Explicit rank membership must match the requested group size";
+  const bool trans = rank_size > 1 && group_ranks[1] != group_ranks[0] + 1;
+  const auto [legacy_rank, legacy_ranks] =
+      get_group_rank(world_size, global_rank, rank_size, trans);
+  CHECK_EQ(local_rank, legacy_rank)
+      << "Backend cannot represent the requested local rank";
+  CHECK(std::equal(group_ranks.begin(),
+                   group_ranks.end(),
+                   legacy_ranks.begin(),
+                   legacy_ranks.end()))
+      << "Backend cannot represent the requested rank group";
+  return create_process_group(global_rank,
+                              world_size,
+                              rank_size,
+                              port,
+                              trans,
+                              host,
+                              group_name,
+                              device);
 #endif
+}
 }  // namespace xllm

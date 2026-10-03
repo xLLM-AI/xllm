@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+
 namespace xllm {
 
 KVShardLayout::KVShardLayout(int32_t physical_block_size,
@@ -56,6 +58,14 @@ int64_t KVShardLayout::globalize(int64_t local_slot) const {
   const int64_t local_offset = local_slot % physical_block_size_;
   return (local_block_id * dcp_size_ + dcp_rank_) * physical_block_size_ +
          local_offset;
+}
+
+int64_t KVShardLayout::local_token_count(int64_t global_token_count) const {
+  return global_token_count / logical_block_size() * physical_block_size_ +
+         std::clamp(
+             global_token_count % logical_block_size() - first_token_index(),
+             int64_t{0},
+             static_cast<int64_t>(physical_block_size_));
 }
 
 }  // namespace xllm

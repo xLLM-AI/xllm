@@ -5,7 +5,6 @@ cc_library(
     mlu_layers
   HDRS
     attention.h
-    dcp_attention_merge.h
     dcp_decode_context.h
     dcp_indexer_candidate.h
     dsa_topk_relay.h
@@ -37,7 +36,6 @@ cc_library(
     moe_softplus_topk.h
   SRCS
     attention.cpp
-    dcp_attention_merge.cpp
     dcp_decode_context.cpp
     dcp_indexer_candidate.cpp
     deepseek_v2_attention.cpp

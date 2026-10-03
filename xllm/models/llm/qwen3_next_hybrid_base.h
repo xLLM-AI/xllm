@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <algorithm>
@@ -119,6 +120,23 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     // materializing the unused device bool tensor inside ACL graph capture.
     metadata_build_options.materialize_linear_state_validity =
         !input_params.enable_graph;
+    if (parallel_args_.dcp_group_ != nullptr &&
+        !input_params.prefill_without_cache &&
+        input_params.meta.q_max_seq_len > 0) {
+      for (const KVCache& kv_cache : kv_caches) {
+        const torch::Tensor key_cache = kv_cache.get_k_cache();
+        if (key_cache.defined()) {
+          CHECK_EQ(key_cache.dim(), 4);
+          metadata_build_options.kv_shard_layout.emplace(
+              static_cast<int32_t>(key_cache.size(1)),
+              parallel_args_.dcp_group_->world_size(),
+              parallel_args_.dcp_group_->rank());
+          break;
+        }
+      }
+      CHECK(metadata_build_options.kv_shard_layout.has_value())
+          << "DCP attention requires a paged KV cache";
+    }
 #endif
 #if defined(USE_MUSA)
     layer::AttentionMetadata attn_metadata =

@@ -80,6 +80,7 @@ struct ModelMeta {
   TokenizerArgsLoader tokenizer_args_loader;
   CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
   bool owns_mtp_shared_weights = false;
+  bool supports_dcp = false;
 };
 
 // Model registry is a singleton class that registers all models with the
@@ -125,6 +126,9 @@ class ModelRegistry {
   // `name` is unknown or the model did not opt into model-side CP.
   static CpShardingMode get_cp_sharding_mode(const std::string& name);
 
+  static void register_dcp_capability(const std::string& name);
+  static bool supports_dcp(const std::string& name);
+
   static void register_mtp_shared_weight_owner(const std::string& name);
   static bool owns_mtp_shared_weights(const std::string& name);
 
@@ -164,6 +168,9 @@ bool resolve_model_registration_name(const std::string& model_type,
 // Idempotent. `resolved_name` must already be backend-resolved (see
 // resolve_model_registration) so qwen3_atb etc. are not misclassified.
 bool is_npu_model_cp_capable(const std::string& resolved_name);
+
+// Native DCP capability is distinct from prefill CP sharding capability.
+bool is_npu_model_dcp_capable(const std::string& resolved_name);
 
 bool is_mlu_model_cp_capable(const std::string& resolved_name);
 

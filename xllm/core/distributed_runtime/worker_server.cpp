@@ -270,10 +270,6 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* output_shm_size_ptr = output_shm_size_str.c_str();
   std::string is_local_str = std::to_string(options.is_local());
   const char* is_local_ptr = is_local_str.c_str();
-  std::string cp_size_str = std::to_string(options.cp_size());
-  const char* cp_size_ptr = cp_size_str.c_str();
-  std::string ep_size_str = std::to_string(parallel_args.ep_size());
-  const char* ep_size_ptr = ep_size_str.c_str();
   std::string instance_role_str = options.instance_role().to_string();
   const char* instance_role_ptr = instance_role_str.c_str();
   std::string enable_speculative_decode_str =
@@ -310,6 +306,13 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* max_encoder_cache_size_ptr = max_encoder_cache_size_str.c_str();
   std::string dp_size_str = std::to_string(options.dp_size());
   const char* dp_size_ptr = dp_size_str.c_str();
+  std::string ep_size_str = std::to_string(parallel_args.ep_size());
+  const char* ep_size_ptr = ep_size_str.c_str();
+  std::string cp_size_str = std::to_string(options.cp_size());
+  const char* cp_size_ptr = cp_size_str.c_str();
+  std::string kv_split_size_str =
+      std::to_string(::xllm::ParallelConfig::get_instance().kv_split_size());
+  const char* kv_split_size_ptr = kv_split_size_str.c_str();
   std::string tp_size_str = std::to_string(options.tp_size());
   const char* tp_size_ptr = tp_size_str.c_str();
   std::string sp_size_str = std::to_string(options.sp_size());
@@ -380,6 +383,7 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         enable_mtp_draft_body_tp1_ptr,
                         text_encoder_tp_size_ptr,
                         draft_sampling_mode_ptr,
+                        kv_split_size_ptr,
                         nullptr};
   static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;

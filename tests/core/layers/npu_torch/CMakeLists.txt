@@ -93,3 +93,13 @@ target_link_options(npu_linear_w8a8_dynamic_test PRIVATE
   "-Wl,--whole-archive"
   "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
   "-Wl,--no-whole-archive")
+
+cc_test(
+  NAME
+    npu_dcp_attention_test
+  SRCS
+    dcp_attention_test.cpp
+  DEPS
+    :npu_torch_layers
+    GTest::gtest_main
+)

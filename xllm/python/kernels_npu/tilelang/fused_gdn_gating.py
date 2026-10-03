@@ -22,7 +22,7 @@ REF_CHECK_NUM_BATCHES = 16
 REF_CHECK_NUM_HEADS = (1, 16, 32, 48, 64, 128)
 VEC_NUM = 2
 VECTOR_BYTES_PER_ITER = 256
-SUPPORTED_NUM_HEADS = (4, 6, 8, 12, 16, 24, 32, 48, 64, 128)
+SUPPORTED_NUM_HEADS = (2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128)
 MAX_VEC_CORE_NUM = detect_vec_core_num()
 BATCH_SIZE_SPECIALIZATIONS = tuple(range(2, 49, 2))
 # Dedicated MTE3->MTE2 event for chunk-to-chunk UB reuse. The numeric

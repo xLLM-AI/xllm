@@ -26,6 +26,14 @@ DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
 
 DEFINE_int32(cp_size, 1, "Context parallel size for DSA attention.");
 
+DEFINE_int32(kv_split_size,
+             1,
+             "KV-cache split width. 0 falls back to cp_size (legacy); 1 means "
+             "no KV split (each CP rank stores full KV, skips prefix "
+             "AllGather); with cp_size > 1, other K must divide cp_size; with "
+             "cp_size == 1, K > 1 requests Qwen3.5 decode-context "
+             "parallelism on the supported NPU runtime.");
+
 DEFINE_int32(
     layerwise_split_size,
     1,
@@ -34,13 +42,6 @@ DEFINE_int32(
     "and enable layerwise-split communication. The value must divide attention "
     "TP "
     "size.");
-
-DEFINE_int32(kv_split_size,
-             1,
-             "KV-cache split width. 0 falls back to cp_size (legacy); 1 means "
-             "no KV split (each CP rank stores full KV, skips prefix "
-             "AllGather); other K (K divides cp_size) means KV is sharded "
-             "across K ranks while token-CP still uses cp_size.");
 
 DEFINE_int64(tp_size, 1, "Tensor parallelism size, only used for DiT model.");
 
@@ -88,8 +89,8 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(layerwise_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(layerwise_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cfg_size);
@@ -106,8 +107,8 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(layerwise_split_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_split_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(layerwise_split_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cfg_size);
@@ -127,9 +128,9 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, ep_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, layerwise_split_size);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_split_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, layerwise_split_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, sp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -122,11 +122,11 @@ TEST(NpuCpCapabilityTest, PythonDcpRejectsCrossDpGroupsBeforePcpEarlyReturn) {
                    .has_value());
   parallel_config.kv_split_size(2);
   model_config.model_impl("native");
-  EXPECT_FALSE(validate_context_parallel_config(options,
-                                                EngineType::LLM,
-                                                "glm_moe_dsa",
-                                                /*global_world_size=*/8)
-                   .has_value());
+  EXPECT_TRUE(validate_context_parallel_config(options,
+                                               EngineType::LLM,
+                                               "glm_moe_dsa",
+                                               /*global_world_size=*/8)
+                  .has_value());
 }
 
 TEST(NpuCpCapabilityTest, PythonCpAllowsAclGraphAndRejectsCompileBackends) {

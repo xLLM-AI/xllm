@@ -20,6 +20,8 @@ limitations under the License.
 #include <optional>
 #include <string>
 
+#include "framework/kv_cache/kv_shard_layout.h"
+
 namespace xllm {
 struct ModelArgs;
 struct ModelInputParams;
@@ -30,6 +32,7 @@ struct AttentionMetadata;
 
 struct AttentionMetadataBuildOptions {
   bool materialize_linear_state_validity = true;
+  std::optional<KVShardLayout> kv_shard_layout;
 };
 
 // Builder class for AttentionMetadata to avoid circular dependency.

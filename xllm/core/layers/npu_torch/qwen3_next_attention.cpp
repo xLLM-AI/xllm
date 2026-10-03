@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "common/flash_comm1_context.h"
 #include "core/framework/config/execution_config.h"
+#include "core/platform/platform.h"
 
 namespace xllm {
 namespace layer {
@@ -60,6 +61,17 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
     CHECK(tp_size % total_num_kv_heads == 0);
     num_kv_heads_ = 1;
     num_kv_head_replicas_ = tp_size / total_num_kv_heads;
+  }
+  if (parallel_args.dcp_group_ != nullptr) {
+    CHECK(!Platform::is_ascend950())
+        << "Qwen3.5 DCP is not supported on Ascend950 because its TND "
+           "attention fallback does not return softmax LSE";
+    const int32_t dcp_size = parallel_args.dcp_group_->world_size();
+    CHECK_EQ(num_kv_head_replicas_ % dcp_size, 0)
+        << "Qwen DCP requires dcp_size to divide the replicated KV-head group "
+        << "(dcp_size=" << dcp_size << ", tp_size=" << tp_size
+        << ", total_num_kv_heads=" << total_num_kv_heads
+        << ", num_kv_head_replicas=" << num_kv_head_replicas_ << ")";
   }
 
   head_dim_ = args.head_dim();
@@ -122,7 +134,8 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                 num_kv_heads_,
                 args.sliding_window(),
                 /*enable_fia_decode=*/
-                should_enable_qwen3_5_fia_decode(args.model_type())));
+                should_enable_qwen3_5_fia_decode(args.model_type()),
+                /*dcp_group=*/parallel_args.dcp_group_));
 
   // 7. Fused split_qkv_rmsnorm_mrope kernel setup
   rotary_dim_ = static_cast<int64_t>(head_dim_ * args.partial_rotary_factor());

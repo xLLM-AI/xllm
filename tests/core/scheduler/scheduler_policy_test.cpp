@@ -30,6 +30,7 @@ limitations under the License.
 
 #include "continuous_scheduler.h"
 #include "core/framework/config/kv_cache_store_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
@@ -489,12 +490,17 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 // Three independent prefill requests, according to the configs,
 // verify how many tokens are processed in one scheduling.
 TEST(SchedulerPolicyTest, AddNewRequestBase) {
-  std::vector<int32_t> prompt_len{10, 1024, 2048};
-  std::vector<int32_t> num_blocks{16, 128, 128};
-  std::vector<int32_t> block_size{16, 16, 16};
-  std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 1024};
+  std::vector<int32_t> prompt_len{10, 1024, 2048, 2048};
+  std::vector<int32_t> num_blocks{16, 128, 128, 128};
+  std::vector<int32_t> block_size{16, 16, 16, 256};
+  std::vector<int32_t> chunk_size{1024, 1024, 1024, 768};
+  std::vector<int32_t> kv_split_size{1, 1, 1, 2};
+  std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 1024, 768};
   for (size_t idx = 0; idx < prompt_len.size(); ++idx) {
-    SchedulerOptions opt = create_scheduler_options(10000, 256, 0, 1024, 1);
+    SchedulerOptions opt =
+        create_scheduler_options(10000, 256, 0, chunk_size[idx], 1);
+    ScopedConfigValue<int32_t> kv_split_guard(
+        ParallelConfig::get_instance().kv_split_size(), kv_split_size[idx]);
     auto engine =
         std::make_unique<FakeEngine>(num_blocks[idx], block_size[idx]);
     auto scheduler =

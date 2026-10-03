@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "layers/mlu/dcp_attention_merge.h"
+#include "layers/common/dcp_attention_merge.h"
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
@@ -30,49 +30,6 @@ limitations under the License.
 
 namespace xllm::layer {
 namespace {
-
-TEST(DcpAttentionMergeTest, WeightsPartialOutputsByNaturalLogLse) {
-  torch::Tensor partial_outputs =
-      torch::tensor({2.0f, 4.0f, 6.0f, 8.0f}).reshape({2, 1, 1, 1, 2});
-  torch::Tensor partial_lse =
-      torch::tensor({std::log(2.0f), std::log(6.0f)}).reshape({2, 1, 1, 1});
-
-  const DcpAttentionResult result =
-      merge_dcp_attention_shards(partial_outputs, partial_lse);
-
-  EXPECT_TRUE(torch::allclose(
-      result.output, torch::tensor({5.0f, 7.0f}).reshape({1, 1, 1, 2})));
-  EXPECT_TRUE(torch::allclose(
-      result.lse, torch::tensor({std::log(8.0f)}).reshape({1, 1, 1})));
-}
-
-TEST(DcpAttentionMergeTest, IgnoresEmptyShardAndPreservesFiniteShard) {
-  const float negative_infinity = -std::numeric_limits<float>::infinity();
-  torch::Tensor partial_outputs =
-      torch::tensor({0.0f, 0.0f, 3.0f, 9.0f}).reshape({2, 1, 1, 1, 2});
-  torch::Tensor partial_lse =
-      torch::tensor({negative_infinity, std::log(4.0f)}).reshape({2, 1, 1, 1});
-
-  const DcpAttentionResult result =
-      merge_dcp_attention_shards(partial_outputs, partial_lse);
-
-  EXPECT_TRUE(torch::equal(result.output,
-                           torch::tensor({3.0f, 9.0f}).reshape({1, 1, 1, 2})));
-  EXPECT_TRUE(torch::allclose(
-      result.lse, torch::tensor({std::log(4.0f)}).reshape({1, 1, 1})));
-}
-
-TEST(DcpAttentionMergeTest, ReturnsZeroAndNegativeInfinityWhenAllShardsEmpty) {
-  const float negative_infinity = -std::numeric_limits<float>::infinity();
-  torch::Tensor partial_outputs = torch::ones({2, 1, 1, 2, 3});
-  torch::Tensor partial_lse = torch::full({2, 1, 2, 1}, negative_infinity);
-
-  const DcpAttentionResult result =
-      merge_dcp_attention_shards(partial_outputs, partial_lse);
-
-  EXPECT_TRUE(torch::equal(result.output, torch::zeros({1, 1, 2, 3})));
-  EXPECT_TRUE(torch::isneginf(result.lse).all().item<bool>());
-}
 
 TEST(MluMlaDecodeLseTest, ReturnsFloat32NaturalLogNormalizer) {
   constexpr int64_t kNumHeads = 2;

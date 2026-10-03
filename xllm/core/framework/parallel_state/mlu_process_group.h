@@ -75,7 +75,12 @@ class ProcessGroupImpl : public ProcessGroup {
       ranks_unsigned.push_back(static_cast<size_t>(rank));
     }
     pg_options->global_ranks_in_group = ranks_unsigned;
-    auto store = create_tcp_store(host, port, local_rank);
+    std::string local_host = host;
+    if (world_size != rank_size && group_ranks.front() / local_device_count ==
+                                       global_rank / local_device_count) {
+      local_host = "127.0.0.1";
+    }
+    auto store = create_tcp_store(local_host, port, local_rank);
     pg_ = std::make_unique<torch_mlu::ProcessGroupCNCL>(
         store, local_rank, rank_size, pg_options);
   }

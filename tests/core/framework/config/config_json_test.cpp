@@ -420,14 +420,16 @@ TEST(KVCacheConfigValidationTest, RejectsUnsupportedIndexerCacheDtypes) {
       "indexer_cache_dtype.*auto.*int8");
 }
 
-TEST(ConfigJsonTest, ParallelConfigReadsContextParallelSize) {
+TEST(ConfigJsonTest, ParallelConfigHandlesKvSplitSize) {
   CpSizeFlagGuard flag_guard;
-  const JsonReader json =
-      config::parse_json_string(R"json({"cp_size": 4})json");
+  const JsonReader json = config::parse_json_string(
+      R"json({"cp_size": 1, "kv_split_size": 2})json");
   ParallelConfig parallel_config;
   parallel_config.from_json(json);
 
-  EXPECT_EQ(parallel_config.cp_size(), 4);
+  EXPECT_EQ(parallel_config.cp_size(), 1);
+  EXPECT_EQ(parallel_config.kv_split_size(), 2);
+  EXPECT_EQ(parallel_config.kv_split_size_effective(), 2);
 }
 
 TEST(KVCacheStoreConfigTest, ReadsAndExportsRdmaDevices) {
@@ -451,9 +453,11 @@ TEST(KVCacheStoreConfigTest, ReadsAndExportsRdmaDevices) {
             "mlx5_0,mlx5_1");
 }
 
-TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
+TEST(ConfigJsonTest, RegistersContextParallelCommandLineOptions) {
   google::CommandLineFlagInfo flag_info;
   EXPECT_TRUE(google::GetCommandLineFlagInfo("cp_size", &flag_info));
+  EXPECT_EQ(flag_info.default_value, "1");
+  EXPECT_TRUE(google::GetCommandLineFlagInfo("kv_split_size", &flag_info));
   EXPECT_EQ(flag_info.default_value, "1");
 
   const std::string removed_flag = std::string("enable_") + "prefill_sp";
