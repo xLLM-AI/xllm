@@ -20,6 +20,7 @@ limitations under the License.
 #include "comm_channel.h"
 #include "common/health_check_manager.h"
 #include "core/framework/config/service_config.h"
+#include "core/platform/platform.h"
 #include "distributed_runtime/collective_service.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -119,7 +120,8 @@ void setup_numa_affinity_and_isolation(
   }
 
   if (engine_numa_node >= 0) {
-    if (numa::bind_process_to_numa_node(engine_numa_node) != 0) {
+    if (!Platform::has_cpu_binding() &&
+        numa::bind_process_to_numa_node(engine_numa_node) != 0) {
       LOG(WARNING) << "Failed to pin engine process to NUMA node "
                    << engine_numa_node
                    << ", fallback to per-worker affinity only";

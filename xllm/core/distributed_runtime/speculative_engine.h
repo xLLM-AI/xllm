@@ -38,6 +38,8 @@ class SpeculativeEngineBase : public Engine {
 
   bool init(MasterStatus master_status) override;
 
+  bool finish_cpu_binding() override;
+
   // step the engine forward
   ForwardOutput step(BatchGroup& batch);
 

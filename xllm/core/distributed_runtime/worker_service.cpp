@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
@@ -958,6 +959,18 @@ void WorkerService::Wakeup(::google::protobuf::RpcController* controller,
   });
 
   return;
+}
+
+void WorkerService::FinishCpuBinding(
+    ::google::protobuf::RpcController* /*controller*/,
+    const proto::Empty* /*request*/,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  threadpool_->schedule([response, done]() {
+    brpc::ClosureGuard done_guard(done);
+    Platform::finish_cpu_binding_warmup();
+    response->set_ok(true);
+  });
 }
 
 void WorkerService::StartProfile(::google::protobuf::RpcController* controller,

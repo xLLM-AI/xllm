@@ -356,6 +356,15 @@ folly::SemiFuture<bool> RemoteWorker::wakeup_async(
   return future;
 }
 
+folly::SemiFuture<bool> RemoteWorker::finish_cpu_binding_async() {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
+    promise.setWith([this]() { return channel_->finish_cpu_binding(); });
+  });
+  return future;
+}
+
 folly::SemiFuture<bool> RemoteWorker::start_profile_async() {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();

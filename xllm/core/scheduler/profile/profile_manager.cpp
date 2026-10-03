@@ -147,6 +147,10 @@ ProfileManager::ProfileManager(Engine* engine,
     }
   }
 #endif
+  if (::xllm::ExecutionConfig::get_instance().enable_cpu_binding() &&
+      !engine_->finish_cpu_binding()) {
+    LOG(WARNING) << "CPU binding could not finish on every worker after warmup";
+  }
 }
 
 // --------------------- for test only ---------------------------

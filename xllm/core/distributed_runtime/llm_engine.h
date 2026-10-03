@@ -128,6 +128,8 @@ class LLMEngine : public Engine {
 
   bool wakeup(const WakeupOptions& options) override;
 
+  bool finish_cpu_binding() override;
+
   bool start_profile() override;
 
   bool stop_profile() override;

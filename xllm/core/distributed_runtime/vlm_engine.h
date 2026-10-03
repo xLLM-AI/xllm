@@ -48,6 +48,8 @@ class VLMEngine : public Engine {
 
   bool init(MasterStatus master_status) override;
 
+  bool finish_cpu_binding() override;
+
   void update_last_step_result(BatchGroup& batch);
 
   // return the active activation memory

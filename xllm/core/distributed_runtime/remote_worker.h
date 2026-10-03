@@ -143,6 +143,8 @@ class RemoteWorker : public WorkerClient {
 
   folly::SemiFuture<bool> wakeup_async(const WakeupOptions& options) override;
 
+  folly::SemiFuture<bool> finish_cpu_binding_async() override;
+
   folly::SemiFuture<bool> start_profile_async() override;
 
   folly::SemiFuture<bool> stop_profile_async() override;

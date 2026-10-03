@@ -164,6 +164,9 @@ class Engine {
     return false;
   };
 
+  // Complete process placement after all startup profiling and warmup.
+  virtual bool finish_cpu_binding() { return true; }
+
   // Start/stop online timeline profiling on all workers. CUDA only for now.
   virtual bool start_profile() {
     LOG(ERROR) << "start_profile is not implemented for this engine!";

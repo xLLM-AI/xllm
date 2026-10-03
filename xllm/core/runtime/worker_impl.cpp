@@ -2239,6 +2239,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   status_ = Status::LOADED;
+  Platform::refresh_cpu_binding();
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     // todo: support xtensor
     int32_t num_layers = args.n_layers() - args.first_k_dense_replace();

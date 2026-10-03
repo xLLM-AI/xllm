@@ -15,11 +15,21 @@ limitations under the License.
 
 #include "core/platform/platform.h"
 
+#include <glog/logging.h>
+
 #include <mutex>
+#include <utility>
+
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
+    defined(USE_MUSA) || defined(USE_DCU)
+#include "core/platform/cpu_binding.h"
+#endif
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
+
+#include "core/platform/npu/npu_cpu_topology.h"
 #elif defined(USE_MLU)
 #include <framework/core/device.h>
 #elif defined(USE_CUDA) || defined(USE_ILU)
@@ -81,6 +91,86 @@ bool Platform::is_ascend950() {
          std::string(soc_name).find("Ascend950") != std::string::npos;
 #else
   return false;
+#endif
+}
+
+void Platform::initialize_cpu_binding(int32_t device_index, bool bind_irq) {
+  if (has_cpu_binding()) {
+    return;
+  }
+#if defined(USE_NPU)
+  const char* soc_name = aclrtGetSocName();
+  auto binding = npu::get_npu_cpu_binding(device_index,
+                                          soc_name == nullptr ? "" : soc_name);
+  if (binding) {
+    const auto irq_cpus = binding->plan.reserved_cpus;
+    if (CpuBinding::get_instance().initialize(std::move(binding->plan)) &&
+        bind_irq) {
+      npu::bind_npu_irqs(irq_cpus, binding->device);
+    }
+  }
+#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_MUSA) || \
+    defined(USE_DCU)
+  CpuBindingTopology topology;
+  topology.allowed_cpus = numa::get_thread_cpus();
+  topology.cpu_nodes = numa::get_cpu_numa_nodes();
+  const int32_t count = device_count();
+  topology.device_ids.reserve(count);
+  for (int32_t id = 0; id < count; ++id) {
+    topology.device_ids.emplace_back(id);
+    const int32_t node = numa::get_device_numa_node(id);
+    if (node >= 0) {
+      std::vector<int32_t> cpus;
+      cpus.reserve(topology.allowed_cpus.size());
+      for (int32_t cpu : topology.allowed_cpus) {
+        const auto cpu_node = topology.cpu_nodes.find(cpu);
+        if (cpu_node != topology.cpu_nodes.end() && cpu_node->second == node) {
+          cpus.emplace_back(cpu);
+        }
+      }
+      topology.affinity.emplace(id, std::move(cpus));
+    }
+  }
+  CpuBindingOptions options;
+  std::string error;
+  auto plan = make_cpu_binding_plan(topology, device_index, options, &error);
+  if (!plan) {
+    LOG(WARNING) << "CPU binding skipped: " << error;
+    return;
+  }
+  CpuBinding::get_instance().initialize(std::move(*plan));
+#else
+  LOG(WARNING) << "CPU binding is not supported on this platform";
+#endif
+}
+
+bool Platform::has_cpu_binding() {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
+    defined(USE_MUSA) || defined(USE_DCU)
+  return CpuBinding::get_instance().initialized();
+#else
+  return false;
+#endif
+}
+
+void Platform::refresh_cpu_binding() {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
+    defined(USE_MUSA) || defined(USE_DCU)
+  CpuBinding::get_instance().refresh_threads();
+#endif
+}
+
+void Platform::refresh_cpu_binding_after_first_forward() {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
+    defined(USE_MUSA) || defined(USE_DCU)
+  CpuBinding::get_instance().refresh_after_first_forward();
+#endif
+}
+
+void Platform::finish_cpu_binding_warmup() {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
+    defined(USE_MUSA) || defined(USE_DCU)
+  CpuBinding::get_instance().finish_warmup();
 #endif
 }
 

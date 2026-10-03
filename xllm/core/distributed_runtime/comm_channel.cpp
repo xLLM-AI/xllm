@@ -399,6 +399,18 @@ bool CommChannel::wakeup(const WakeupOptions& options) {
   return true;
 }
 
+bool CommChannel::finish_cpu_binding() {
+  proto::Empty request;
+  proto::Status response;
+  brpc::Controller controller;
+  stub_->FinishCpuBinding(&controller, &request, &response, nullptr);
+  if (controller.Failed() || !response.ok()) {
+    LOG(WARNING) << "FinishCpuBinding failed: " << controller.ErrorText();
+    return false;
+  }
+  return true;
+}
+
 bool CommChannel::start_profile() {
   proto::Empty req;
   proto::Status s;

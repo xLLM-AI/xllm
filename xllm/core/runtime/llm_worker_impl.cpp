@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/platform/platform.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_args.h"
@@ -286,6 +287,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
+  Platform::refresh_cpu_binding_after_first_forward();
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     eplb_executor_->finish_eplb_step();
   }

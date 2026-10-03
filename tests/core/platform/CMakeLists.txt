@@ -1,6 +1,42 @@
 include(cc_test)
 
+if(USE_NPU OR USE_CUDA OR USE_MUSA OR USE_MLU OR USE_DCU)
+  cc_test(
+    NAME
+      numa_utils_test
+    NO_NPU_RUNTIME
+    SRCS
+      numa_utils_test.cpp
+    DEPS
+      :numa_utils
+      GTest::gtest_main
+  )
+  cc_test(
+    NAME
+      cpu_binding_test
+    NO_NPU_RUNTIME
+    SRCS
+      cpu_binding_test.cpp
+    DEPS
+      :cpu_binding
+      GTest::gtest_main
+  )
+endif()
+
 if(USE_NPU)
+  cc_test(
+    NAME
+      npu_cpu_topology_test
+    NO_NPU_RUNTIME
+    SRCS
+      npu_cpu_topology_test.cpp
+      ${PROJECT_SOURCE_DIR}/xllm/core/platform/npu/npu_cpu_topology.cpp
+    DEPS
+      :cpu_binding
+      GTest::gtest_main
+      glog::glog
+  )
+
   cc_test(
     NAME
       npu_torch_profiler_test

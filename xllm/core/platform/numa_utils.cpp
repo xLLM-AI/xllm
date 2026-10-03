@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "numa_utils.h"
+#include "core/platform/numa_utils.h"
 
 #if defined(USE_MUSA)
 #include <musa_runtime.h>
@@ -26,13 +26,16 @@ limitations under the License.
 #endif
 #include <glog/logging.h>
 #include <numa.h>
-#include <pthread.h>
+#include <numaif.h>
 #include <sched.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <charconv>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 
 namespace xllm {
@@ -131,31 +134,240 @@ bool build_cpu_set_for_numa_node(int32_t numa_node,
   return (*nr_cpus > 0);
 }
 
-void apply_process_memory_policy(int32_t numa_node) {
-  struct bitmask* node_mask = numa_allocate_nodemask();
-  if (node_mask == nullptr) {
-    LOG(WARNING) << "Failed to allocate NUMA node mask for memory policy";
-    return;
+bool make_cpu_mask(const std::vector<int32_t>& cpus, cpu_set_t* mask) {
+  CPU_ZERO(mask);
+  if (cpus.empty()) {
+    errno = EINVAL;
+    return false;
   }
-
-  numa_bitmask_clearall(node_mask);
-  numa_bitmask_setbit(node_mask, numa_node);
-
-  struct bitmask* old_mask = numa_get_membind();
-  if (old_mask != nullptr) {
-    long migrate_result = numa_migrate_pages(getpid(), old_mask, node_mask);
-    if (migrate_result < 0) {
-      LOG(WARNING) << "numa_migrate_pages failed: " << strerror(errno);
+  for (int32_t cpu : cpus) {
+    if (cpu < 0 || cpu >= CPU_SETSIZE) {
+      errno = EINVAL;
+      return false;
     }
-    numa_free_nodemask(old_mask);
+    CPU_SET(cpu, mask);
   }
+  return true;
+}
 
-  numa_set_membind(node_mask);
-  numa_set_strict(1);
-  numa_free_nodemask(node_mask);
+int32_t set_thread_affinity(int32_t tid, const cpu_set_t& mask) {
+  if (sched_setaffinity(tid, sizeof(mask), &mask) != 0) {
+    return -1;
+  }
+  cpu_set_t actual;
+  if (sched_getaffinity(tid, sizeof(actual), &actual) != 0) {
+    return -1;
+  }
+  if (!CPU_EQUAL(&actual, &mask)) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+bool is_valid_numa_node(int32_t node) {
+  return node >= 0 && numa_all_nodes_ptr != nullptr &&
+         static_cast<unsigned long>(node) < numa_all_nodes_ptr->size &&
+         numa_bitmask_isbitset(numa_all_nodes_ptr, node);
 }
 
 }  // namespace
+
+std::vector<int32_t> get_thread_cpus(int32_t tid) {
+  cpu_set_t mask;
+  if (tid < 0 || sched_getaffinity(tid, sizeof(mask), &mask) != 0) {
+    return {};
+  }
+  std::vector<int32_t> cpus;
+  cpus.reserve(CPU_COUNT(&mask));
+  for (int32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(cpu, &mask)) {
+      cpus.emplace_back(cpu);
+    }
+  }
+  return cpus;
+}
+
+int32_t bind_thread_to_cpus(const std::vector<int32_t>& cpus, int32_t tid) {
+  cpu_set_t mask;
+  if (tid < 0 || !make_cpu_mask(cpus, &mask)) {
+    return -1;
+  }
+  cpu_set_t previous;
+  if (sched_getaffinity(tid, sizeof(previous), &previous) != 0) {
+    return -1;
+  }
+  if (set_thread_affinity(tid, mask) == 0) {
+    return 0;
+  }
+  const int32_t error = errno;
+  if (sched_setaffinity(tid, sizeof(previous), &previous) != 0 &&
+      errno != ESRCH) {
+    LOG(WARNING) << "Failed to restore CPU affinity for tid=" << tid;
+  }
+  LOG(WARNING) << "Failed to bind CPU affinity for tid=" << tid << ": "
+               << strerror(error);
+  errno = error;
+  return -1;
+}
+
+int32_t bind_process_to_cpus(
+    const std::vector<int32_t>& cpus,
+    const std::unordered_map<std::string, std::vector<int32_t>>& thread_cpus) {
+  cpu_set_t default_mask;
+  if (!make_cpu_mask(cpus, &default_mask)) {
+    return -1;
+  }
+  std::unordered_map<std::string, cpu_set_t> overrides;
+  for (const auto& [name, role_cpus] : thread_cpus) {
+    cpu_set_t mask;
+    if (!make_cpu_mask(role_cpus, &mask)) {
+      return -1;
+    }
+    overrides.emplace(name, mask);
+  }
+  struct ThreadAffinity {
+    int32_t tid;
+    cpu_set_t previous;
+    cpu_set_t requested;
+  };
+  std::vector<ThreadAffinity> threads;
+  threads.reserve(256);
+  std::error_code error;
+  auto directory =
+      std::filesystem::directory_iterator("/proc/self/task", error);
+  if (error) {
+    return -1;
+  }
+  const std::filesystem::directory_iterator end;
+  for (; directory != end; directory.increment(error)) {
+    if (error) {
+      return -1;
+    }
+    const auto& entry = *directory;
+    const std::string name = entry.path().filename().string();
+    int32_t tid = -1;
+    const auto parsed =
+        std::from_chars(name.data(), name.data() + name.size(), tid);
+    if (parsed.ec != std::errc() || tid <= 0) {
+      continue;
+    }
+    cpu_set_t previous;
+    if (sched_getaffinity(tid, sizeof(previous), &previous) != 0) {
+      if (errno == ESRCH) {
+        continue;
+      }
+      return -1;
+    }
+    std::string thread_name;
+    std::ifstream comm(entry.path() / "comm");
+    std::getline(comm, thread_name);
+    const auto role = overrides.find(thread_name);
+    threads.emplace_back(ThreadAffinity{
+        tid, previous, role == overrides.end() ? default_mask : role->second});
+  }
+  if (error || threads.empty()) {
+    return -1;
+  }
+  for (const auto& thread : threads) {
+    if (set_thread_affinity(thread.tid, thread.requested) == 0 ||
+        errno == ESRCH) {
+      continue;
+    }
+    const int32_t bind_error = errno;
+    for (const auto& restore : threads) {
+      if (sched_setaffinity(
+              restore.tid, sizeof(restore.previous), &restore.previous) != 0 &&
+          errno != ESRCH) {
+        LOG(WARNING) << "Failed to restore CPU affinity for tid="
+                     << restore.tid;
+      }
+    }
+    LOG(WARNING) << "Failed to bind process thread tid=" << thread.tid << ": "
+                 << strerror(bind_error) << "; attempted to restore affinity";
+    errno = bind_error;
+    return -1;
+  }
+  return 0;
+}
+
+std::unordered_map<int32_t, int32_t> get_cpu_numa_nodes() {
+  std::unordered_map<int32_t, int32_t> nodes;
+  if (!is_numa_available() || numa_all_cpus_ptr == nullptr) {
+    return nodes;
+  }
+  const int32_t possible_cpus = numa_num_possible_cpus();
+  for (int32_t cpu = 0; cpu < possible_cpus; ++cpu) {
+    if (!numa_bitmask_isbitset(numa_all_cpus_ptr, cpu)) {
+      continue;
+    }
+    const int32_t node = numa_node_of_cpu(cpu);
+    if (node >= 0) {
+      nodes.emplace(cpu, node);
+    }
+  }
+  return nodes;
+}
+
+int32_t migrate_process_memory_to_numa_node(int32_t numa_node) {
+  if (!is_numa_available() || !is_valid_numa_node(numa_node)) {
+    LOG(WARNING) << "Cannot migrate memory to NUMA node " << numa_node;
+    return -1;
+  }
+  using NodeMask =
+      std::unique_ptr<struct bitmask, decltype(&numa_bitmask_free)>;
+  NodeMask target(numa_allocate_nodemask(), numa_bitmask_free);
+  if (!target) {
+    return -1;
+  }
+  numa_bitmask_clearall(target.get());
+  numa_bitmask_setbit(target.get(), numa_node);
+  const long remaining =
+      numa_migrate_pages(getpid(), numa_all_nodes_ptr, target.get());
+  if (remaining != 0) {
+    LOG(WARNING) << "NUMA memory migration incomplete: result=" << remaining
+                 << (remaining < 0 ? std::string(" error=") + strerror(errno)
+                                   : "");
+    return -1;
+  }
+  return 0;
+}
+
+int32_t bind_memory_to_numa_node(int32_t numa_node, MemoryPolicy policy) {
+  if (!is_numa_available() || !is_valid_numa_node(numa_node)) {
+    LOG(WARNING) << "Cannot set memory policy for NUMA node " << numa_node;
+    return -1;
+  }
+  using NodeMask =
+      std::unique_ptr<struct bitmask, decltype(&numa_bitmask_free)>;
+  NodeMask target(numa_allocate_nodemask(), numa_bitmask_free);
+  if (!target) {
+    return -1;
+  }
+  numa_bitmask_clearall(target.get());
+  numa_bitmask_setbit(target.get(), numa_node);
+  NodeMask source(numa_get_membind(), numa_bitmask_free);
+  const int32_t mode =
+      policy == MemoryPolicy::BIND ? MPOL_BIND : MPOL_PREFERRED;
+  // Match libnuma's bitmap convention, including the highest node bit.
+  if (set_mempolicy(mode, target->maskp, target->size + 1) != 0) {
+    LOG(WARNING) << "NUMA memory policy unavailable: " << strerror(errno);
+    return -1;
+  }
+  if (policy == MemoryPolicy::BIND) {
+    numa_set_strict(1);
+  }
+  if (source) {
+    const long remaining =
+        numa_migrate_pages(getpid(), source.get(), target.get());
+    if (remaining != 0) {
+      LOG(WARNING) << "NUMA memory migration incomplete: result=" << remaining
+                   << (remaining < 0 ? std::string(" error=") + strerror(errno)
+                                     : "");
+    }
+  }
+  return 0;
+}
 
 bool is_numa_available() {
   // C++11 guarantees thread-safe initialization for function-local statics.
@@ -248,26 +460,15 @@ int32_t bind_process_to_numa_node(int32_t numa_node) {
     return -1;
   }
 
-  cpu_set_t cpu_set;
-  int32_t nr_cpus = 0;
-  if (!build_cpu_set_for_numa_node(numa_node, &cpu_set, &nr_cpus)) {
-    LOG(ERROR) << "No CPUs available on NUMA node " << numa_node
-               << " after applying affinity constraints";
+  const auto cpus = get_numa_node_cpus(numa_node);
+  if (bind_thread_to_cpus(cpus, getpid()) != 0) {
     return -1;
   }
-
-  pid_t pid = getpid();
-  if (sched_setaffinity(pid, sizeof(cpu_set_t), &cpu_set) != 0) {
-    LOG(ERROR) << "Failed to bind process to NUMA node " << numa_node << ": "
-               << strerror(errno);
-    return -1;
-  }
-
-  apply_process_memory_policy(numa_node);
-
-  LOG(INFO) << "Successfully bound process " << pid << " to NUMA node "
-            << numa_node << " with " << nr_cpus
-            << " CPUs and strict NUMA memory policy";
+  // Preserve the existing API: CPU binding success is returned even when the
+  // container disallows memory-policy syscalls. The memory helper logs failure.
+  bind_memory_to_numa_node(numa_node, MemoryPolicy::BIND);
+  LOG(INFO) << "Bound process main thread to NUMA node " << numa_node
+            << " with " << cpus.size() << " CPUs";
 
   return 0;
 }
@@ -285,24 +486,12 @@ int32_t bind_thread_to_numa_node(int32_t numa_node) {
     return -1;
   }
 
-  cpu_set_t cpu_set;
-  int32_t nr_cpus = 0;
-  if (!build_cpu_set_for_numa_node(numa_node, &cpu_set, &nr_cpus)) {
-    LOG(ERROR) << "No CPUs available on NUMA node " << numa_node
-               << " after applying affinity constraints";
+  const auto cpus = get_numa_node_cpus(numa_node);
+  if (bind_thread_to_cpus(cpus) != 0) {
     return -1;
   }
-
-  pthread_t thread = pthread_self();
-  int32_t ret = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpu_set);
-  if (ret != 0) {
-    LOG(ERROR) << "Failed to bind thread to NUMA node " << numa_node << ": "
-               << strerror(ret);
-    return -1;
-  }
-
-  LOG(INFO) << "Successfully bound thread to NUMA node " << numa_node
-            << " with " << nr_cpus << " CPUs";
+  LOG(INFO) << "Bound current thread to NUMA node " << numa_node << " with "
+            << cpus.size() << " CPUs";
 
   return 0;
 }
@@ -340,9 +529,10 @@ std::vector<int32_t> get_numa_node_cpus(int32_t numa_node) {
     return cpus;
   }
 
+  cpus.reserve(nr_cpus);
   for (int32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
     if (CPU_ISSET(cpu, &cpu_set)) {
-      cpus.push_back(cpu);
+      cpus.emplace_back(cpu);
     }
   }
 

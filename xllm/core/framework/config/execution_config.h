@@ -41,7 +41,9 @@ class ExecutionConfig final {
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
         "EXECUTION OPTIONS",
-        {"enable_task_pipeline",
+        {"enable_cpu_binding",
+         "enable_npu_irq_binding",
+         "enable_task_pipeline",
          "enable_graph",
          "disable_graph_warmup",
          "enable_graph_double_buffer",
@@ -61,6 +63,10 @@ class ExecutionConfig final {
          "enable_attn_dp_weight_sharding"}};
     return kOptionCategory;
   }
+
+  // Dedicated process CPU pools; IRQ tuning additionally changes host state.
+  PROPERTY(bool, enable_cpu_binding) = false;
+  PROPERTY(bool, enable_npu_irq_binding) = false;
 
   // Enable the task pipeline; scheduler overlap determines the slot count.
   PROPERTY(bool, enable_task_pipeline) = false;

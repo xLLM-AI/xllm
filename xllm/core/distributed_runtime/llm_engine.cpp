@@ -1534,6 +1534,26 @@ bool LLMEngine::xtensor_sleep(MasterStatus master_status) {
   return true;
 }
 
+bool LLMEngine::finish_cpu_binding() {
+  std::vector<folly::SemiFuture<bool>> futures;
+  futures.reserve(worker_clients_num_);
+  for (auto& worker : worker_clients_) {
+    futures.emplace_back(worker->finish_cpu_binding_async());
+  }
+  const auto results = folly::collectAll(futures).get();
+  bool success = true;
+  for (const auto& result : results) {
+    if (result.hasException()) {
+      LOG(WARNING) << "CPU binding completion RPC failed: "
+                   << result.exception().what();
+      success = false;
+    } else if (!result.value()) {
+      success = false;
+    }
+  }
+  return success;
+}
+
 bool LLMEngine::start_profile() {
   std::lock_guard<std::mutex> lock(profile_mutex_);
   LOG(INFO) << "Starting profiler on " << worker_clients_num_ << " worker(s).";

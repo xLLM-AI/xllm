@@ -142,6 +142,11 @@ class WorkerService : public proto::DistributeWorker {
               proto::Status* resp,
               ::google::protobuf::Closure* done) override;
 
+  void FinishCpuBinding(::google::protobuf::RpcController* controller,
+                        const proto::Empty* request,
+                        proto::Status* response,
+                        ::google::protobuf::Closure* done) override;
+
   void StartProfile(::google::protobuf::RpcController* controller,
                     const proto::Empty* req,
                     proto::Status* resp,

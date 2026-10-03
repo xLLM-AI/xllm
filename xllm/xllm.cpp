@@ -22,6 +22,7 @@ namespace py = pybind11;
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
+
 #endif
 
 #include <csignal>
@@ -61,6 +62,7 @@ namespace py = pybind11;
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/platform/device_name_utils.h"
+#include "core/platform/platform.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
 #include "core/util/verbose_trace_logger.h"
@@ -298,6 +300,11 @@ void init_npu_python_runtime() {
   CHECK(acl_ret == ACL_SUCCESS || acl_ret == ACL_ERROR_INTERNAL_ERROR)
       << "aclInit failed with error " << acl_ret;
 
+  if (ExecutionConfig::get_instance().enable_cpu_binding()) {
+    Platform::initialize_cpu_binding(
+        device_index, ExecutionConfig::get_instance().enable_npu_irq_binding());
+  }
+
   // We own ACL initialization, so torch_npu will skip aclFinalize. Register
   // before importing torch_npu: Python runs exit hooks in reverse order,
   // releasing its groups, streams and devices before we finalize CANN.
@@ -332,6 +339,7 @@ void init_npu_python_runtime() {
         "_npu_mod._original_pid = os.getpid()\n"
         "torch_npu._C._npu_setDevice(" +
         std::to_string(device_index) + ")\n");
+    Platform::refresh_cpu_binding();
   }
 }
 }  // namespace
@@ -642,6 +650,14 @@ int main(int argc, char** argv) {
   py::scoped_interpreter interpreter(/*init_signal_handlers=*/false);
   init_npu_python_runtime();
   py::gil_scoped_release release;
+#else
+  if (ExecutionConfig::get_instance().enable_cpu_binding()) {
+    const int32_t device_index =
+        DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
+                                        distributed_config.nnodes(),
+                                        Platform::device_count());
+    Platform::initialize_cpu_binding(device_index);
+  }
 #endif
 
   return run();

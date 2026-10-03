@@ -201,6 +201,15 @@ bool SpeculativeEngineBase<TargetEngine>::
   return engine_->set_speculative_validate_time_predictor(predictor);
 }
 
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::finish_cpu_binding() {
+  const bool target_success = engine_->finish_cpu_binding();
+  if (draft_engine_) {
+    return draft_engine_->finish_cpu_binding() && target_success;
+  }
+  return target_success;
+}
+
 // TODO: support dp batches later
 template <typename TargetEngine>
 ForwardOutput SpeculativeEngineBase<TargetEngine>::step(BatchGroup& batches) {

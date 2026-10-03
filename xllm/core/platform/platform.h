@@ -111,6 +111,14 @@ class Platform final {
 #endif
   }
 
+  // Standalone serving owns one device worker per process.
+  static void initialize_cpu_binding(int32_t device_index,
+                                     bool bind_irq = false);
+  static bool has_cpu_binding();
+  static void refresh_cpu_binding();
+  static void refresh_cpu_binding_after_first_forward();
+  static void finish_cpu_binding_warmup();
+
   static int32_t device_count();
   // Returns the logical index of the device bound to the current thread.
   // Valid only after the device has been set (e.g. via Device::set_device).

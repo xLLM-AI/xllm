@@ -99,6 +99,7 @@ void WorkerServer::create_server(const runtime::Options& options,
 #endif
   Device device(d);
   device.set_device();
+  Platform::refresh_cpu_binding();
   LOG(INFO) << "Create worker server with device: " << device.index();
 
   std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager = nullptr;
@@ -107,21 +108,23 @@ void WorkerServer::create_server(const runtime::Options& options,
       startup_parallel_args, options, input_shm_manager, output_shm_manager);
 
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
-  // Bind worker thread to the same NUMA node as the device
-  // This prevents the thread from spanning across NUMA nodes, which would
-  // significantly degrade memory access and other performance aspects
-  int32_t numa_node = numa::get_device_numa_node(device.index());
-  if (numa_node >= 0) {
-    LOG(INFO) << "Worker thread (device " << device.index()
-              << ") binding to NUMA node " << numa_node;
-    int32_t ret = numa::bind_thread_to_numa_node(numa_node);
-    if (ret != 0) {
-      LOG(WARNING) << "Failed to bind worker thread to NUMA node " << numa_node
-                   << ", continuing without NUMA binding";
+  if (!Platform::has_cpu_binding()) {
+    // Bind worker thread to the same NUMA node as the device
+    // This prevents the thread from spanning across NUMA nodes, which would
+    // significantly degrade memory access and other performance aspects
+    int32_t numa_node = numa::get_device_numa_node(device.index());
+    if (numa_node >= 0) {
+      LOG(INFO) << "Worker thread (device " << device.index()
+                << ") binding to NUMA node " << numa_node;
+      const int32_t ret = numa::bind_thread_to_numa_node(numa_node);
+      if (ret != 0) {
+        LOG(WARNING) << "Failed to bind worker thread to NUMA node "
+                     << numa_node << ", continuing without NUMA binding";
+      }
+    } else {
+      LOG(INFO) << "NUMA node detection not available or not needed for device "
+                << device.index();
     }
-  } else {
-    LOG(INFO) << "NUMA node detection not available or not needed for device "
-              << device.index();
   }
 #endif
 

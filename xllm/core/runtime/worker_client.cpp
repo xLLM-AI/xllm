@@ -25,6 +25,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -169,6 +170,11 @@ folly::SemiFuture<bool> WorkerClient::sleep_async(MasterStatus master_status) {
 folly::SemiFuture<bool> WorkerClient::wakeup_async(
     const WakeupOptions& options) {
   return worker_->wakeup_async(options);
+}
+
+folly::SemiFuture<bool> WorkerClient::finish_cpu_binding_async() {
+  Platform::finish_cpu_binding_warmup();
+  return folly::makeSemiFuture(true);
 }
 
 folly::SemiFuture<bool> WorkerClient::start_profile_async() {

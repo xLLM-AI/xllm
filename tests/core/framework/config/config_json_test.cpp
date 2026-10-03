@@ -56,6 +56,36 @@ inline constexpr std::string_view kMalformedConfig = R"json({
   "block_size":
 })json";
 
+TEST(ExecutionConfigTest, CpuBindingDefaultsOffAndSupportsJson) {
+  google::FlagSaver flag_saver;
+  ExecutionConfig execution_config;
+  EXPECT_FALSE(execution_config.enable_cpu_binding());
+  EXPECT_FALSE(execution_config.enable_npu_irq_binding());
+  nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
+  execution_config.append_config_json(serialized);
+  EXPECT_FALSE(serialized.contains("enable_cpu_binding"));
+  EXPECT_FALSE(serialized.contains("enable_npu_irq_binding"));
+  const JsonReader json_config = config::parse_json_string(
+      R"json({"enable_cpu_binding":true,"enable_npu_irq_binding":true})json");
+  execution_config.from_json(json_config);
+  EXPECT_TRUE(execution_config.enable_cpu_binding());
+  EXPECT_TRUE(execution_config.enable_npu_irq_binding());
+  execution_config.append_config_json(serialized);
+  EXPECT_EQ(serialized.at("enable_cpu_binding"), true);
+  EXPECT_EQ(serialized.at("enable_npu_irq_binding"), true);
+}
+
+TEST(ExecutionConfigTest, CpuBindingCliOverridesJson) {
+  google::FlagSaver flag_saver;
+  google::SetCommandLineOption("enable_cpu_binding", "false");
+  const JsonReader json_config =
+      config::parse_json_string(R"json({"enable_cpu_binding":true})json");
+  ExecutionConfig execution_config;
+  execution_config.from_flags();
+  execution_config.from_json(json_config);
+  EXPECT_FALSE(execution_config.enable_cpu_binding());
+}
+
 TEST(ExecutionConfigTest, EnablesDsaMultiStreamFromJson) {
   google::FlagSaver flag_saver;
   JsonReader json_config =

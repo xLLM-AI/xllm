@@ -430,4 +430,5 @@ service DistributeWorker {
   rpc Wakeup (WakeupRequest) returns (Status);
   rpc StartProfile (Empty) returns (Status);
   rpc StopProfile (Empty) returns (Status);
+  rpc FinishCpuBinding (Empty) returns (Status);
 }
