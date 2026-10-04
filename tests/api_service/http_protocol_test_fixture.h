@@ -122,8 +122,7 @@ class HttpProtocolTestFixture : public testing::Test {
             const char* content_type = "application/json");
   int32_t open_socket(const char* path, const std::string& body);
   std::string base_url() const;
-  void run_sdk(const char* python,
-               const char* script,
+  void run_sdk(const char* script,
                const std::string& url,
                const std::string& phase);
 

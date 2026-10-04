@@ -178,6 +178,17 @@ cc_test(
 target_link_libraries(openai_service_test PRIVATE brpc leveldb::leveldb OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf)
 add_dependencies(openai_service_test brpc-static)
 
+option(XLLM_ENABLE_SDK_TESTS
+       "Enable official SDK compatibility tests in CTest"
+       OFF)
+
+foreach(_sdk_client openai_chat_completion_sdk_client.py anthropic_messages_sdk_client.py)
+  configure_file("${_sdk_client}" "${CMAKE_CURRENT_BINARY_DIR}/${_sdk_client}"
+    @ONLY
+    FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                     GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+endforeach()
+
 cc_test(
   NAME chat_completion_protocol_test
   NO_NPU_RUNTIME
@@ -185,7 +196,7 @@ cc_test(
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
 target_compile_definitions(chat_completion_protocol_test PRIVATE
-  XLLM_CHAT_COMPLETION_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/openai_chat_completion_sdk_client.py")
+  XLLM_CHAT_COMPLETION_SDK_CLIENT="${CMAKE_CURRENT_BINARY_DIR}/openai_chat_completion_sdk_client.py")
 
 cc_test(
   NAME text_completion_protocol_test
@@ -210,7 +221,25 @@ cc_test(
     "${_api_json_test_env}"
 )
 target_compile_definitions(anthropic_messages_protocol_test PRIVATE
-  XLLM_MESSAGES_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/anthropic_messages_sdk_client.py")
+  XLLM_MESSAGES_SDK_CLIENT="${CMAKE_CURRENT_BINARY_DIR}/anthropic_messages_sdk_client.py")
+
+set(_sdk_tests
+  ChatCompletionProtocolTest.OfficialSdkCompatibility
+  AnthropicMessagesProtocolTest.OfficialSdkCompatibility)
+set_tests_properties(${_sdk_tests} PROPERTIES LABELS "sdk")
+if(XLLM_ENABLE_SDK_TESTS)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "from openai import OpenAI; from anthropic import Anthropic, DefaultHttpxClient"
+    RESULT_VARIABLE _sdk_import_result
+    ERROR_VARIABLE _sdk_import_error)
+  if(NOT _sdk_import_result STREQUAL "0")
+    message(FATAL_ERROR
+      "XLLM_ENABLE_SDK_TESTS requires the official OpenAI and Anthropic SDKs "
+      "in ${Python3_EXECUTABLE}: ${_sdk_import_error}")
+  endif()
+  set_tests_properties(${_sdk_tests} PROPERTIES DISABLED FALSE)
+endif()
 
 cc_test(
   NAME

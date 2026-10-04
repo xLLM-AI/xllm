@@ -24,7 +24,6 @@ limitations under the License.
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
@@ -576,13 +575,6 @@ class ChatCompletionProtocolTest : public HttpProtocolTestFixture {
     ASSERT_TRUE(service_.wait_released());
     EXPECT_EQ(service_.rate_limiter().get_num_concurrent_requests(), 0);
   }
-  const char* sdk_python_env() const { return "XLLM_OPENAI_SDK_PYTHON"; }
-  void run_sdk(const std::string& phase) {
-    HttpProtocolTestFixture::run_sdk(std::getenv(sdk_python_env()),
-                                     XLLM_CHAT_COMPLETION_SDK_CLIENT,
-                                     base_url() + "/v1",
-                                     phase);
-  }
   ChatCompletionTestService service_;
 };
 
@@ -694,22 +686,18 @@ TEST_F(ChatCompletionProtocolTest,
   }
 }
 
-TEST_F(ChatCompletionProtocolTest,
-       SdkRecognizesRateLimitsAndSuccessfulResponses) {
-  if (std::getenv(sdk_python_env()) == nullptr) {
-    GTEST_SKIP() << "Set " << sdk_python_env()
-                 << " to an interpreter with the official SDK installed";
-  }
-  run_sdk("success");
+TEST_F(ChatCompletionProtocolTest, DISABLED_OfficialSdkCompatibility) {
+  const std::string url = base_url() + "/v1";
+  run_sdk(XLLM_CHAT_COMPLETION_SDK_CLIENT, url, "success");
   ASSERT_TRUE(service_.wait_released());
   butil::fd_guard held(open_socket(/*stream=*/true, "hold"));
   ASSERT_GE(static_cast<int32_t>(held), 0);
   ASSERT_TRUE(service_.wait_held());
-  run_sdk("limited");
+  run_sdk(XLLM_CHAT_COMPLETION_SDK_CLIENT, url, "limited");
   EXPECT_EQ(service_.rate_limiter().get_num_concurrent_requests(), 1);
   service_.release();
   ASSERT_TRUE(service_.wait_released());
-  run_sdk("success");
+  run_sdk(XLLM_CHAT_COMPLETION_SDK_CLIENT, url, "success");
   ASSERT_TRUE(service_.wait_released());
   EXPECT_EQ(service_.rate_limiter().get_num_concurrent_requests(), 0);
 }

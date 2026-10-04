@@ -139,23 +139,17 @@ std::string HttpProtocolTestFixture::base_url() const {
   return "http://127.0.0.1:" + std::to_string(server_.listen_address().port);
 }
 
-void HttpProtocolTestFixture::run_sdk(const char* python,
-                                      const char* script,
+void HttpProtocolTestFixture::run_sdk(const char* script,
                                       const std::string& url,
                                       const std::string& phase) {
-  ASSERT_NE(python, nullptr);
-  std::string interpreter(python);
   std::string script_path(script);
   std::string target_url(url);
   std::string selected_phase(phase);
-  char* args[] = {interpreter.data(),
-                  script_path.data(),
-                  target_url.data(),
-                  selected_phase.data(),
-                  nullptr};
+  char* args[] = {
+      script_path.data(), target_url.data(), selected_phase.data(), nullptr};
   pid_t pid = -1;
   ASSERT_EQ(
-      posix_spawnp(&pid, interpreter.c_str(), nullptr, nullptr, args, environ),
+      posix_spawn(&pid, script_path.c_str(), nullptr, nullptr, args, environ),
       0);
   int32_t status = 0;
   ASSERT_EQ(waitpid(pid, &status, 0), pid);
