@@ -20,15 +20,15 @@ import torch
 import torch.nn as nn
 
 from xllm.python import kernels
+from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
 from xllm.python.layers.qwen3_5.common import Qwen3_5GatedDeltaNetConfig
-from xllm.python.layers.qwen3_5.gated_delta_net import (
-    Qwen3_5GatedDeltaNetBase,
-)
+from xllm.python.layers.qwen3_5.gated_delta_net import load_gdn_weights
 from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 
 
-class CudaQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNetBase):
-    """CUDA graph matching the pre-NPU Qwen3.5 implementation."""
+class CudaQwen3_5GatedDeltaNet(nn.Module):
+    """CUDA-owned Qwen3.5 gated delta network."""
 
     def __init__(
         self,
@@ -37,7 +37,57 @@ class CudaQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNetBase):
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
-        super().__init__(cfg, layer_id, dtype, device)
+        super().__init__()
+        self.cfg = cfg
+        self.layer_id = layer_id
+        self.num_k_heads = cfg.linear_num_key_heads // cfg.tp_size
+        self.num_v_heads = cfg.linear_num_value_heads // cfg.tp_size
+        self.key_head_dim = cfg.linear_key_head_dim
+        self.value_head_dim = cfg.linear_value_head_dim
+        self.key_dim = self.num_k_heads * self.key_head_dim
+        self.value_dim = self.num_v_heads * self.value_head_dim
+        self.conv_dim = 2 * self.key_dim + self.value_dim
+        self.conv_kernel_size = cfg.linear_conv_kernel_dim
+        self.norm_eps = cfg.rms_norm_eps
+
+        self.in_proj_qkv = ColumnParallelLinear(
+            cfg.hidden_size,
+            self.conv_dim,
+            cfg.tp_size,
+            dtype=dtype,
+            device=device,
+        )
+        self.in_proj_z = ColumnParallelLinear(
+            cfg.hidden_size,
+            self.value_dim,
+            cfg.tp_size,
+            dtype=dtype,
+            device=device,
+        )
+        self.in_proj_b = ColumnParallelLinear(
+            cfg.hidden_size,
+            self.num_v_heads,
+            cfg.tp_size,
+            dtype=dtype,
+            device=device,
+        )
+        self.in_proj_a = ColumnParallelLinear(
+            cfg.hidden_size,
+            self.num_v_heads,
+            cfg.tp_size,
+            dtype=dtype,
+            device=device,
+        )
+        self.A_log = nn.Parameter(torch.empty(self.num_v_heads, dtype=torch.float32, device=device))
+        self.dt_bias = nn.Parameter(torch.empty(self.num_v_heads, dtype=dtype, device=device))
+        self.norm_weight = nn.Parameter(torch.ones(self.value_head_dim, dtype=dtype, device=device))
+        self.out_proj = RowParallelLinear(
+            self.value_dim,
+            cfg.hidden_size,
+            cfg.tp_size,
+            dtype=dtype,
+            device=device,
+        )
         self.conv1d_weight = nn.Parameter(
             torch.empty(
                 self.conv_dim,
@@ -47,9 +97,6 @@ class CudaQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNetBase):
             )
         )
         self.gdn_prefill_backend = kernels.resolve_gdn_prefill_backend()
-
-    def _finish_loading(self) -> None:
-        self.out_proj.process_weights_after_loading()
 
     def _cache(self) -> tuple[torch.Tensor, torch.Tensor]:
         cache = get_forward_context().layer_caches[self.layer_id]
@@ -78,11 +125,13 @@ class CudaQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNetBase):
             has_initial_state,
             cu_seqlens,
         )
-        initial_state, cache_indices, null_state, non_null_state = self._prepare_ssm_state(
-            ssm_state,
-            state_indices,
-            has_initial_state,
-        )
+        non_null_state = state_indices > 0
+        use_initial_state = non_null_state & has_initial_state
+        cache_indices = state_indices.to(torch.long)
+        null_state = ssm_state[0].clone()
+        initial_state = ssm_state.index_select(0, cache_indices).float().contiguous()
+        initial_state = torch.where(use_initial_state[:, None, None, None], initial_state, 0.0)
+        del use_initial_state
         q, k, v, g, beta = kernels.fused_gdn_prefill_post_conv(
             mixed_qkv=mixed_qkv,
             a=a,
@@ -103,16 +152,20 @@ class CudaQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNetBase):
             cu_seqlens,
             self.gdn_prefill_backend,
         )
-        return self._finalize_prefill(
-            output,
-            final_state,
-            ssm_state,
-            cache_indices,
-            null_state,
+        sequence_lengths = cu_seqlens.diff()
+        token_mask = torch.repeat_interleave(
             non_null_state,
-            cu_seqlens,
-            mixed_qkv.shape[0],
+            sequence_lengths,
+            output_size=mixed_qkv.shape[0],
         )
+        output = torch.where(token_mask[:, None, None], output, 0.0)
+        ssm_state.index_copy_(
+            0,
+            cache_indices,
+            final_state.to(dtype=ssm_state.dtype),
+        )
+        ssm_state[0].copy_(null_state)
+        return output
 
     def _decode(
         self,
@@ -140,3 +193,68 @@ class CudaQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNetBase):
             self.key_head_dim**-0.5,
         )
         return output.view(-1, self.num_v_heads, self.value_head_dim)
+
+    def load_weights(
+        self,
+        state: ScopedWeightLoader,
+        context: ParallelLoadContext,
+    ) -> None:
+        load_gdn_weights(
+            self,
+            state,
+            context,
+            (
+                self.in_proj_qkv.weight,
+                self.in_proj_z.weight,
+                self.in_proj_b.weight,
+                self.in_proj_a.weight,
+            ),
+        )
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        metadata = get_forward_context().metadata
+        state_indices = metadata.linear_state_indices
+        if state_indices is None:
+            raise RuntimeError("linear_state_indices are required by Qwen3.5")
+        state_indices = state_indices.to(device=hidden.device, dtype=torch.int32)
+        conv_state, ssm_state = self._cache()
+        mixed_qkv = self.in_proj_qkv(hidden)
+        z = self.in_proj_z(hidden).view(
+            -1,
+            self.num_v_heads,
+            self.value_head_dim,
+        )
+        a = self.in_proj_a(hidden)
+        b = self.in_proj_b(hidden)
+        if metadata.is_prefill or metadata.is_chunked_prefill:
+            has_initial_state = metadata.has_initial_state
+            if has_initial_state is None:
+                raise RuntimeError("has_initial_state is required by Qwen3.5 prefill")
+            cu_seqlens = metadata.q_cu_seq_lens
+            if cu_seqlens is None:
+                cu_seqlens = torch.arange(
+                    state_indices.numel() + 1,
+                    dtype=torch.int32,
+                    device=hidden.device,
+                )
+            output = self._prefill(
+                mixed_qkv,
+                a,
+                b,
+                conv_state,
+                ssm_state,
+                state_indices,
+                has_initial_state.to(device=hidden.device, dtype=torch.bool),
+                cu_seqlens,
+            )
+        else:
+            output = self._decode(
+                mixed_qkv,
+                a,
+                b,
+                conv_state,
+                ssm_state,
+                state_indices,
+            )
+        output = kernels.rms_norm_gated(output, z, self.norm_weight, self.norm_eps)
+        return self.out_proj(output.reshape(-1, self.value_dim))

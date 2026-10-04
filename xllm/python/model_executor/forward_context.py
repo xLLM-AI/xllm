@@ -18,7 +18,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 import torch
 
@@ -30,6 +30,14 @@ if TYPE_CHECKING:
     )
     from xllm.python.attention.npu_paged_attention import PagedAttentionGraphState
     from xllm.python.model_executor.cp_utils import CpContext
+
+
+class ExecutionMetadataBuilder(Protocol):
+    metadata_type: type[object]
+
+    def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None: ...
+
+    def build(self, metadata: AttentionMetadata) -> object: ...
 
 
 class LayerSynchronizer(Protocol):
@@ -79,6 +87,10 @@ class ForwardContext:
     # Context-Parallel sharding plan for this forward, or None when CP is off
     # (cp_size <= 1) or the step is decode (CP is prefill-only).
     cp_context: CpContext | None = None
+    # Values derived from per-forward metadata that are shared by multiple
+    # layers. A new ForwardContext gets a new cache, so entries never leak
+    # across requests or graph executions.
+    layer_shared_cache: dict[object, object] = field(default_factory=dict)
 
 
 _current_context: ContextVar[ForwardContext | None] = ContextVar("_current_context", default=None)
@@ -161,3 +173,10 @@ def copy_into_execution_buffer(key: tuple[object, ...], source: torch.Tensor) ->
     if buffer.data_ptr() != source.data_ptr():
         buffer.copy_(source, non_blocking=True)
     return buffer
+
+
+_ExecutionMetadata = TypeVar("_ExecutionMetadata")
+
+
+def get_execution_context(metadata_type: type[_ExecutionMetadata]) -> _ExecutionMetadata | None:
+    return cast(_ExecutionMetadata | None, get_forward_context().layer_shared_cache.get(metadata_type))

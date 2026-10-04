@@ -22,7 +22,6 @@ from typing import Any
 import torch
 
 from xllm.python.attention.backend import LayerCache
-from xllm.python.layers.qwen3_5.gated_delta_net import Qwen3_5GatedDeltaNetBase
 from xllm.python.model_executor.forward_context import ForwardContext
 from xllm.python.models.qwen3_5 import Qwen3_5Config
 
@@ -126,7 +125,7 @@ def make_moe_checkpoint(cfg: Qwen3_5Config) -> dict[str, torch.Tensor]:
 
 
 def install_constant_gdn_projections(
-    layer: Qwen3_5GatedDeltaNetBase,
+    layer: torch.nn.Module,
 ) -> dict[str, torch.Tensor]:
     q = torch.arange(1, 17, dtype=torch.float32).view(2, 8)
     projections = {
@@ -146,6 +145,7 @@ def make_gdn_forward_context(*, is_prefill: bool) -> ForwardContext:
         linear_state_indices=torch.tensor([2, 0] if is_prefill else [2, 1], dtype=torch.int32),
         has_initial_state=(torch.tensor([True, False]) if is_prefill else None),
         q_cu_seq_lens=(torch.tensor([0, 1, 2], dtype=torch.int32) if is_prefill else None),
+        q_seq_lens_host=(torch.tensor([1, 1], dtype=torch.int32) if is_prefill else None),
         is_prefill=is_prefill,
         is_chunked_prefill=False,
     )

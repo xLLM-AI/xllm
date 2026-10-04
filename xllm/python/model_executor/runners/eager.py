@@ -108,6 +108,7 @@ class EagerRunner(BaseRunner):
         # Admission and context construction must finish before prepare(). A
         # sharded MLA backend enters CP collectives during prepare, so rejecting
         # unsupported batches afterwards could leave peer ranks deadlocked.
+        execution_contexts = self._build_execution_contexts(metadata, input_ids)
         self.attention_backend.prepare(metadata)
 
         with forward_context(
@@ -117,6 +118,7 @@ class EagerRunner(BaseRunner):
                 metadata,
                 self.layer_caches,
                 layer_synchronizer=layer_synchronizer,
+                layer_shared_cache=execution_contexts,
                 cp_context=cp_context,
             )
         ):

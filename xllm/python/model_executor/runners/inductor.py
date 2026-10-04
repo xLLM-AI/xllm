@@ -38,6 +38,7 @@ class InductorRunner(BaseRunner):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
+        execution_contexts = self._build_execution_contexts(metadata, input_ids)
         self.attention_backend.prepare(metadata)
         with forward_context(
             ForwardContext(
@@ -46,6 +47,7 @@ class InductorRunner(BaseRunner):
                 metadata,
                 self.layer_caches,
                 layer_synchronizer=layer_synchronizer,
+                layer_shared_cache=execution_contexts,
             )
         ):
             if input_embedding is None:

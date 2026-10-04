@@ -208,6 +208,7 @@ class AclGraphRunner(BaseRunner):
             entry.static_metadata,
             self.layer_caches,
             execution_state=entry.execution_state,
+            layer_shared_cache=self._build_execution_contexts(entry.static_metadata, entry.static_input_ids),
         )
         with forward_context(context), torch.npu.stream(stream):
             for _ in range(_CAPTURE_WARMUP_STEPS):
@@ -222,6 +223,7 @@ class AclGraphRunner(BaseRunner):
             self.layer_caches,
             acl_graph=capture_context,
             execution_state=entry.execution_state,
+            layer_shared_cache=self._build_execution_contexts(entry.static_metadata, entry.static_input_ids),
         )
         with forward_context(context), torch.npu.graph(entry.graph, pool=_get_graph_pool(), stream=stream):
             entry.static_output = self._forward_static(entry)

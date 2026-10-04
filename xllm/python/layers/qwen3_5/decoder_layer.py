@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol, cast
+
 import torch
 import torch.nn as nn
 
@@ -26,9 +28,11 @@ from xllm.python.layers.qwen3_5.common import (
     PartialRotaryEmbedding,
     Qwen3_5DecoderConfig,
 )
-from xllm.python.layers.qwen3_5.gated_delta_net import Qwen3_5GatedDeltaNetBase
-from xllm.python.layers.qwen3_5.moe import Qwen3_5SparseMoEBlockBase
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
+
+
+class _WeightLoadable(Protocol):
+    def load_weights(self, state: ScopedWeightLoader, context: ParallelLoadContext, /) -> None: ...
 
 
 class Qwen3_5DecoderLayer(nn.Module):
@@ -40,12 +44,8 @@ class Qwen3_5DecoderLayer(nn.Module):
     """
 
     attention_cls: type[Qwen3_5Attention]
-    gated_delta_net_cls: type[Qwen3_5GatedDeltaNetBase]
-    sparse_moe_cls: type[Qwen3_5SparseMoEBlockBase]
-
-    self_attn: Qwen3_5Attention
-    linear_attn: Qwen3_5GatedDeltaNetBase
-    mlp: Qwen3_5SparseMoEBlockBase | GatedMLP
+    gated_delta_net_cls: type[nn.Module]
+    sparse_moe_cls: type[nn.Module]
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -129,11 +129,11 @@ class Qwen3_5DecoderLayer(nn.Module):
                 context,
             )
         else:
-            self.linear_attn.load_weights(
+            cast(_WeightLoadable, self.linear_attn).load_weights(
                 state.with_prefix("linear_attn."),
                 context,
             )
-        self.mlp.load_weights(state.with_prefix("mlp."), context)
+        cast(_WeightLoadable, self.mlp).load_weights(state.with_prefix("mlp."), context)
 
     def forward(
         self,

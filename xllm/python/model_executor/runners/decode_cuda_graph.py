@@ -168,6 +168,9 @@ class DecodeCudaGraphRunner(BaseRunner):
                         self.device,
                         entry.static_metadata,
                         self.layer_caches,
+                        layer_shared_cache=self._build_execution_contexts(
+                            entry.static_metadata, entry.static_input_ids
+                        ),
                     )
                 ):
                     self._capture(entry)

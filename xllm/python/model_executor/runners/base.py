@@ -24,7 +24,7 @@ from xllm.python.attention.backend import (
     AttentionMetadata,
     LayerCache,
 )
-from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_executor.forward_context import ExecutionMetadataBuilder, LayerSynchronizer
 
 ModelExecutionOutput = (
     torch.Tensor | tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
@@ -42,9 +42,21 @@ class BaseRunner(ABC):
         self.attention_backend = attention_backend
         self.device = device
         self.layer_caches: list[LayerCache] = []
+        self.execution_metadata_builders: tuple[ExecutionMetadataBuilder, ...] = tuple(
+            getattr(model, "execution_metadata_builders", ())
+        )
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
+        for builder in self.execution_metadata_builders:
+            builder.bind_layer_caches(layer_caches)
         self.layer_caches = layer_caches
+
+    def _build_execution_contexts(self, metadata: AttentionMetadata, input_ids: torch.Tensor) -> dict[object, object]:
+        if self.execution_metadata_builders and (
+            input_ids.ndim != 1 or input_ids.numel() != metadata.slot_mapping.numel()
+        ):
+            raise ValueError("execution metadata must contain one slot per input token")
+        return {builder.metadata_type: builder.build(metadata) for builder in self.execution_metadata_builders}
 
     @abstractmethod
     def execute(

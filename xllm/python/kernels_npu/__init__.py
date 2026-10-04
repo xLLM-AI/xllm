@@ -24,7 +24,11 @@ importable by build tooling without initializing this semantic API.
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .gated_delta_net import mega_gdn_decode, mega_gdn_prefill
+
 
 _EXPORTS = {
     "activation": ("silu_and_mul",),
@@ -38,6 +42,8 @@ _EXPORTS = {
         "chunk_gated_delta_rule",
         "fused_gdn_gating",
         "fused_sigmoid_gating_delta_rule_decode",
+        "mega_gdn_decode",
+        "mega_gdn_prefill",
     ),
     "linear": ("atb_matmul_ein_sum", "prepare_quant_weight", "prepare_row_parallel_weight"),
     "mla": (
@@ -194,6 +200,8 @@ __all__ = [
     "fused_gdn_gating",
     "fused_sigmoid_gating_delta_rule_decode",
     "chunk_gated_delta_rule",
+    "mega_gdn_decode",
+    "mega_gdn_prefill",
 ]
 _runtime_initialized = False
 

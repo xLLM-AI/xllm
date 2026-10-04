@@ -1308,6 +1308,7 @@ def _make_eager_runner(*, is_mla: bool = True) -> EagerRunner:
     runner.cp_rank = 2
     runner.device = torch.device("cpu")
     runner.layer_caches = []
+    runner.execution_metadata_builders = ()
     runner.model = MagicMock(return_value=torch.ones(2))
     return runner
 

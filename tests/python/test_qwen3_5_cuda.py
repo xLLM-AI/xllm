@@ -120,7 +120,8 @@ def test_cuda_decode_uses_cuda_recurrent_kernel(monkeypatch: pytest.MonkeyPatch)
     recurrent = MagicMock(return_value=expected.view(1, 2, 2, 4))
     monkeypatch.setattr(kernels, "causal_conv1d_decode", conv, raising=False)
     monkeypatch.setattr(kernels, "fused_recurrent_gated_delta_rule_packed_decode", recurrent, raising=False)
-    monkeypatch.setattr(kernels, "rms_norm_gated", lambda output, *_args: output, raising=False)
+    rms = MagicMock(side_effect=lambda output, *_args: output)
+    monkeypatch.setattr(kernels, "rms_norm_gated", rms, raising=False)
     with forward_context(context):
         torch.testing.assert_close(layer(torch.ones(2, 8)), expected)
     conv.assert_called_once()
@@ -133,6 +134,7 @@ def test_cuda_decode_uses_cuda_recurrent_kernel(monkeypatch: pytest.MonkeyPatch)
         torch.testing.assert_close(actual, reference)
     assert recurrent.call_args.args[5] is context.layer_caches[0].ssm
     torch.testing.assert_close(recurrent.call_args.args[6], torch.tensor([2, 1], dtype=torch.int32))
+    rms.assert_called_once()
 
 
 def test_cuda_moe_loads_native_weight_order() -> None:

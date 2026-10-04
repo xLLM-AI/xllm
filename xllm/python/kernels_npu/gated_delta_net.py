@@ -12,17 +12,87 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NPU gated-delta-network kernels (PyTorch small-op implementation).
+"""NPU gated-delta-network kernel entry points.
 
-Implements the same semantics as the CUDA Triton references in
-``kernels_cuda/triton/gdn_prefill.py`` and ``kernels_cuda/triton/gated_delta_net.py``
-using only standard PyTorch operations. Performance is not optimized;
-correctness and precision alignment are the goals.
+Prefill uses the production MegaGdn operator. The remaining helpers preserve
+the existing Python composition for paths not migrated to MegaGdn yet.
 """
 
 from __future__ import annotations
 
 import torch
+
+
+def mega_gdn_prefill(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    conv_weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    conv_state_read_indices: torch.Tensor,
+    conv_state_write_indices: torch.Tensor,
+    ssm_state_read_indices: torch.Tensor,
+    ssm_state_write_indices: torch.Tensor,
+    ssm_cache: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    norm_weight: torch.Tensor,
+    num_matrices: int,
+) -> torch.Tensor:
+    """Run the fused Qwen3.5 prefill GDN and update both state caches."""
+    return torch.ops.xllm_ops.mega_gdn_prefill(
+        mixed_qkv,
+        b,
+        a,
+        z,
+        conv_weight,
+        conv_state,
+        a_log,
+        dt_bias,
+        conv_state_read_indices,
+        conv_state_write_indices,
+        ssm_state_read_indices,
+        ssm_state_write_indices,
+        ssm_cache,
+        cu_seqlens,
+        norm_weight,
+        num_matrices,
+    )
+
+
+def mega_gdn_decode(
+    qkv: torch.Tensor,
+    z: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    conv_weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    ssm_state: torch.Tensor,
+    read_state_indices: torch.Tensor,
+    write_state_indices: torch.Tensor,
+    norm_weight: torch.Tensor,
+    fla_ssm_state_layout: bool = True,
+) -> torch.Tensor:
+    """Run fused single-token Qwen3.5 decode and update both state caches."""
+    return torch.ops.xllm_ops.mega_gdn_decode(
+        qkv,
+        z,
+        b,
+        a,
+        conv_weight,
+        conv_state,
+        a_log,
+        dt_bias,
+        ssm_state,
+        read_state_indices,
+        write_state_indices,
+        norm_weight,
+        fla_ssm_state_layout,
+    )
 
 
 def fused_gdn_gating(
@@ -164,6 +234,8 @@ def chunk_gated_delta_rule(
 
 
 __all__ = [
+    "mega_gdn_decode",
+    "mega_gdn_prefill",
     "fused_gdn_gating",
     "fused_sigmoid_gating_delta_rule_decode",
     "chunk_gated_delta_rule",

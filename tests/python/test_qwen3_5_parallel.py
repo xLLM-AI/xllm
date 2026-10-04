@@ -30,12 +30,65 @@ from xllm.python.layers.layernorm import GemmaRMSNorm
 from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
 )
+from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 from xllm.python.model_loader import ScopedWeightLoader
+from xllm.python.models.qwen3_5 import Qwen3_5Model
 
 
 def test_backend_decoder_factory_rejects_unknown_device() -> None:
     with pytest.raises(ValueError, match="no decoder implementation"):
         get_qwen3_5_decoder_layer_class("cpu")
+
+
+def test_model_records_pd_layer_events_in_order() -> None:
+    class DecoderLayer(torch.nn.Module):
+        def forward(
+            self,
+            hidden: torch.Tensor,
+            residual: torch.Tensor | None,
+            _positions: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
+            return hidden + 1, residual
+
+    class FinalNorm(torch.nn.Module):
+        def forward(
+            self,
+            hidden: torch.Tensor,
+            residual: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
+            return hidden, residual
+
+    class LayerSynchronizer:
+        def __init__(self) -> None:
+            self.layer_ids: list[int] = []
+
+        def record_event(self, layer_id: int) -> bool:
+            self.layer_ids.append(layer_id)
+            return True
+
+    model = Qwen3_5Model.__new__(Qwen3_5Model)
+    torch.nn.Module.__init__(model)
+    model.embed_tokens = torch.nn.Identity()
+    model.layers = torch.nn.ModuleList(DecoderLayer() for _ in range(3))
+    model.norm = FinalNorm()
+
+    hidden = torch.zeros(2, 4)
+    positions = torch.arange(2)
+    synchronizer = LayerSynchronizer()
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=None,
+        layer_caches=[],
+        layer_synchronizer=synchronizer,
+    )
+
+    with forward_context(context):
+        actual = model(hidden, positions)
+
+    assert synchronizer.layer_ids == [0, 1, 2]
+    torch.testing.assert_close(actual, hidden + 3)
+    torch.testing.assert_close(model(hidden, positions), hidden + 3)
 
 
 def test_scoped_loader_resolves_supported_model_roots() -> None:

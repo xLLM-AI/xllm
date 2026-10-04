@@ -99,6 +99,7 @@ def test_capture_shares_one_lazy_pool_across_runners_and_shapes(monkeypatch: pyt
         for rows in (4, 2):
             entry = SimpleNamespace(
                 batch_size=rows,
+                static_input_ids=torch.arange(rows, dtype=torch.int32),
                 static_mtp_topk_indices=None,
                 static_metadata=_metadata(rows),
                 execution_state=None,
