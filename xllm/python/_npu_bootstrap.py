@@ -29,6 +29,7 @@ TODO: Remove once libtorch_npu defers the "triton" registration to Python
       (i.e. uses TORCH_LIBRARY_FRAGMENT instead of TORCH_LIBRARY).
 """
 
+import os
 import sys
 import types
 
@@ -50,6 +51,14 @@ class _SafeLibrary(_OrigLibrary):
 
 _torch_library.Library = _SafeLibrary
 import torch  # noqa: E402
+
+# torch_npu supports synchronous Inductor compilation, but its initialization
+# does not propagate this environment setting to PyTorch's config object.
+# Apply the documented single-thread setting after torch is imported safely.
+if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") == "1":
+    import torch._inductor.config as _inductor_config
+
+    _inductor_config.compile_threads = 1
 
 _torch_library.Library = _OrigLibrary
 del _OrigLibrary, _SafeLibrary
