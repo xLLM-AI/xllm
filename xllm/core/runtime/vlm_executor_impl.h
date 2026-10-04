@@ -63,6 +63,10 @@ class VlmExecutorImpl : public ExecutorImpl {
   runtime::Options options_;
   std::unique_ptr<ExecutorImpl> llm_executor_;
   std::unique_ptr<EncoderCache> encoder_cache_;
+
+ private:
+  torch::Tensor collapse_mrope_decode_positions(
+      const torch::Tensor& positions) const;
 };
 // Q: backend device ?
 REGISTER_EXECUTOR("vlm", VlmExecutorImpl);
