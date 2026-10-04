@@ -101,27 +101,6 @@ def test_copy_into_execution_buffer_eager_returns_source() -> None:
         assert out.data_ptr() == source.data_ptr()
 
 
-def test_sfa_dcp_backend_constructs_as_mla_backend() -> None:
-    dcp_group = MagicMock()
-    dcp_group.size.return_value = 2
-    dcp_group.rank.return_value = 0
-
-    backend = SfaDcpAttentionBackend(
-        num_heads=4,
-        num_kv_heads=1,
-        head_dim=128,
-        scale=0.125,
-        sliding_window=0,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        dcp_group=dcp_group,
-        index_topk=512,
-        max_num_reqs=4,
-    )
-
-    assert backend.is_mla
-
-
 def test_mla_index_context_uses_expanded_table_and_preserves_cp_context() -> None:
     backend = object.__new__(SfaDcpAttentionBackend)
     expanded_block_table = torch.tensor([[3, 1]], dtype=torch.int32)
@@ -165,21 +144,17 @@ def test_mla_index_context_uses_expanded_table_and_preserves_cp_context() -> Non
         assert getattr(remapped_context, field.name) is getattr(base_context, field.name)
 
 
-def test_mla_index_materialization_keeps_cache_scale_and_table_together() -> None:
+@pytest.mark.parametrize("with_scale", [False, True])
+def test_mla_index_materialization_keeps_cache_scale_and_table_together(with_scale: bool) -> None:
     backend = object.__new__(NpuPagedAttentionBackend)
     index_cache = torch.empty(1)
-    index_cache_scale = torch.empty(1)
+    index_cache_scale = torch.empty(1) if with_scale else None
     materialized_cache = torch.empty(2)
-    materialized_scale = torch.empty(2)
+    materialized_scale = torch.empty(2) if with_scale else None
     block_table = torch.tensor([[0, 1]], dtype=torch.int32)
     metadata = MagicMock()
     cp_context = SimpleNamespace(segment_seq_indices=torch.tensor([0, 0]))
-    materialize_cp_cache = MagicMock(
-        side_effect=[
-            (materialized_cache, block_table),
-            (materialized_scale, block_table),
-        ]
-    )
+    materialize_cp_cache = MagicMock(side_effect=[(materialized_cache, block_table), (materialized_scale, block_table)])
     backend._materialize_cp_cache = materialize_cp_cache
 
     actual_cache, actual_scale, actual_table = backend._materialize_mla_index_cache(
@@ -192,10 +167,10 @@ def test_mla_index_materialization_keeps_cache_scale_and_table_together() -> Non
     assert actual_cache is materialized_cache
     assert actual_scale is materialized_scale
     torch.testing.assert_close(actual_table, torch.tensor([[0, 1], [0, 1]], dtype=torch.int32))
-    assert [call.args[0] for call in materialize_cp_cache.call_args_list] == [
-        index_cache,
-        index_cache_scale,
-    ]
+    expected_calls = [((index_cache, metadata, cp_context), {})]
+    if with_scale:
+        expected_calls.append(((index_cache_scale, metadata, cp_context), {}))
+    assert materialize_cp_cache.call_args_list == expected_calls
 
 
 def test_cp_block_table_segmentation_reuses_forward_cache() -> None:
@@ -211,29 +186,6 @@ def test_cp_block_table_segmentation_reuses_forward_cache() -> None:
         first,
         torch.tensor([[3, 4], [1, 2]], dtype=torch.int32),
     )
-
-
-def test_mla_index_materialization_without_scale_keeps_legacy_path() -> None:
-    backend = object.__new__(NpuPagedAttentionBackend)
-    index_cache = torch.empty(1)
-    materialized_cache = torch.empty(2)
-    block_table = torch.tensor([[0, 1]], dtype=torch.int32)
-    metadata = MagicMock()
-    cp_context = SimpleNamespace(segment_seq_indices=torch.tensor([0, 0]))
-    materialize_cp_cache = MagicMock(return_value=(materialized_cache, block_table))
-    backend._materialize_cp_cache = materialize_cp_cache
-
-    actual_cache, actual_scale, actual_table = backend._materialize_mla_index_cache(
-        index_cache,
-        None,
-        metadata,
-        cp_context,
-    )
-
-    assert actual_cache is materialized_cache
-    assert actual_scale is None
-    torch.testing.assert_close(actual_table, torch.tensor([[0, 1], [0, 1]], dtype=torch.int32))
-    materialize_cp_cache.assert_called_once_with(index_cache, metadata, cp_context)
 
 
 def test_glm_quant_indexer_without_cp_uses_materialized_scale() -> None:

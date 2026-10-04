@@ -52,20 +52,22 @@ def _make_logical_slots(
     return torch.where(mask, torch.full_like(slots, KVShardLayout.INVALID_SLOT), slots)
 
 
-def test_remap_sparse_indices_packs_owned_slots() -> None:
-    layout = KVShardLayout(physical_block_size=4, dcp_size=2, dcp_rank=0)
-    slots = torch.tensor(
-        [
-            [0, 5, -1, 8],
-            [1, 4, 9, -1],
-        ],
-        dtype=torch.int32,
-    )
+@pytest.mark.parametrize(
+    ("dcp_rank", "logical_slots", "expected"),
+    [
+        (0, [[0, 5, -1, 8], [1, 4, 9, -1]], [[0, 4, -1, -1], [1, 5, -1, -1]]),
+        (1, [[13, 4, -1, 9], [6, 21, 12, -1]], [[5, 0, -1, -1], [2, 9, 4, -1]]),
+    ],
+    ids=["rank0", "rank1-cross-block-order"],
+)
+def test_remap_sparse_indices_packs_owned_slots(
+    dcp_rank: int, logical_slots: list[list[int]], expected: list[list[int]]
+) -> None:
+    layout = KVShardLayout(physical_block_size=4, dcp_size=2, dcp_rank=dcp_rank)
+    slots = torch.tensor(logical_slots, dtype=torch.int32)
     remapped = remap_sparse_indices(slots, layout, index_topk=4)
     assert remapped.shape == slots.shape
-    owned = remapped >= 0
-    assert owned[0].tolist() == [True, True, False, False]
-    assert owned[1].tolist() == [True, True, False, False]
+    torch.testing.assert_close(remapped, torch.tensor(expected, dtype=torch.int32))
 
 
 @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")

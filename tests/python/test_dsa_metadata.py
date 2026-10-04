@@ -136,12 +136,10 @@ def test_build_max_lengths_include_attention_metadata_capacity() -> None:
 
 
 def test_build_token_group_slot_committed_rows() -> None:
-    """A TOKEN cache commits one row per ratio boundary crossed this step."""
-    builder, caches_info, group_infos = _make_builder()
-    # group 0 = SWA, group 1 = TOKEN(4). Give each a [batch=1, cols=4] table.
+    """Decode writes the current SWA token and one shared TOKEN4 row."""
+    builder, _, _ = _make_builder()
     swa_bt = torch.tensor([[10, 11, 12, 13]], dtype=torch.int32)
     token4_bt = torch.tensor([[20, 21, 22, 23]], dtype=torch.int32)
-    # kv_len=8, q_len=1 (decode): prev_ctx_len=7, committed = 8//4 - 7//4 = 2 - 1 = 1.
     dsa = builder.build(
         multi_block_tables=[swa_bt, token4_bt],
         kv_seq_lens=[8],
@@ -150,13 +148,12 @@ def test_build_token_group_slot_committed_rows() -> None:
         is_prefill=False,
         is_chunked_prefill=False,
     )
-    # Layer 1 (cr=4): cmp cache is caches_info[1][0] -> group 1 (TOKEN4).
-    cmp_slot = dsa.slot_mappings[1][0]
-    # One committed row: compressed_idx = prev_committed = 7//4 = 1.
-    # block_idx = 1 // 128 = 0, block_id = token4_bt[0,0] = 20.
-    # slot = 20 * 128 + 1 = 2561.
-    assert cmp_slot.numel() >= 1
-    assert cmp_slot[0].item() == 20 * 128 + 1
+    assert dsa.slot_mappings[0][0].tolist() == [10 * 128 + 7]
+    assert dsa.slot_mappings[1][0].tolist() == [20 * 128 + 1]
+    # TOKEN4 caches 0/1/7 and SWA caches 2/3 share their group storage.
+    assert dsa.slot_mappings[1][0].data_ptr() == dsa.slot_mappings[1][1].data_ptr()
+    assert dsa.slot_mappings[1][0].data_ptr() == dsa.slot_mappings[1][7].data_ptr()
+    assert dsa.slot_mappings[1][2].data_ptr() == dsa.slot_mappings[1][3].data_ptr()
 
 
 def test_build_token_group_slot_empty_between_boundaries() -> None:
@@ -192,26 +189,6 @@ def test_build_token_group_slot_commits_at_later_boundary() -> None:
     assert dsa.slot_mappings[1][0].tolist() == [20 * 128 + 32]
 
 
-def test_build_swa_group_slot_query_tokens_only() -> None:
-    """A SWA cache writes only the current forward's query token."""
-    builder, _, _ = _make_builder()
-    swa_bt = torch.tensor([[10, 11, 12, 13]], dtype=torch.int32)
-    token4_bt = torch.tensor([[20, 21, 22, 23]], dtype=torch.int32)
-    # kv_len=8, q_len=1, q_start=7, pos=7, block_idx = 7//128 % 4 = 0,
-    # block_id = swa_bt[0,0] = 10, offset = 7 % 128 = 7 -> slot = 10*128+7 = 1287.
-    dsa = builder.build(
-        multi_block_tables=[swa_bt, token4_bt],
-        kv_seq_lens=[8],
-        q_seq_lens=[1],
-        positions=torch.tensor([7], dtype=torch.int64),
-        is_prefill=False,
-        is_chunked_prefill=False,
-    )
-    # Layer 0 (cr=1): the single SWA cache -> group 0.
-    swa_slot = dsa.slot_mappings[0][0]
-    assert swa_slot[0].item() == 10 * 128 + 7
-
-
 def test_build_swa_group_uses_scheduler_resolved_slots_for_expanded_decode() -> None:
     """Expanded MTP decode preserves the scheduler's ring-buffer slot order."""
     builder, _, _ = _make_builder()
@@ -230,57 +207,23 @@ def test_build_swa_group_uses_scheduler_resolved_slots_for_expanded_decode() -> 
     assert dsa.slot_mappings[0][0].tolist() == [301, 302, 401, 402]
 
 
-def test_build_block_tables_shared_within_group() -> None:
-    """Caches in the same group share the same underlying tensor."""
+@pytest.mark.parametrize("enable_graph", [False, True])
+def test_build_c4_pad_positions(enable_graph: bool) -> None:
+    """Nonzero compressed positions precede the exact eager/graph padding tail."""
     builder, _, _ = _make_builder()
-    swa_bt = torch.tensor([[10, 11, 12, 13]], dtype=torch.int32)
-    token4_bt = torch.tensor([[20, 21, 22, 23]], dtype=torch.int32)
-    dsa = builder.build(
-        multi_block_tables=[swa_bt, token4_bt],
-        kv_seq_lens=[8],
-        q_seq_lens=[1],
-        positions=torch.tensor([7], dtype=torch.int64),
-        is_prefill=False,
-        is_chunked_prefill=False,
-    )
-    # Layer 1 (cr=4): caches 0,1,7 are TOKEN4 (group 1) -> same slot tensor.
-    assert dsa.slot_mappings[1][0].data_ptr() == dsa.slot_mappings[1][1].data_ptr()
-    assert dsa.slot_mappings[1][0].data_ptr() == dsa.slot_mappings[1][7].data_ptr()
-    # Caches 2-6 are SWA (group 0) -> same slot tensor.
-    assert dsa.slot_mappings[1][2].data_ptr() == dsa.slot_mappings[1][3].data_ptr()
-
-
-def test_build_c4_pad_positions() -> None:
-    """c4_pad_positions records next_pos-4 when (pos+1) % 4 == 0."""
-    builder, _, _ = _make_builder()
-    # q_len=4, q_start=3 -> positions 3,4,5,6. (pos+1)%4==0 at pos=3 (next=4).
+    # Positions 249..256 cross C4 boundaries at 251/255 and C128 at 255.
     dsa = builder.build(
         multi_block_tables=[],
-        kv_seq_lens=[7],
-        q_seq_lens=[4],
-        positions=torch.tensor([3, 4, 5, 6], dtype=torch.int64),
+        kv_seq_lens=[257],
+        q_seq_lens=[8],
+        positions=torch.arange(249, 257, dtype=torch.int64),
         is_prefill=True,
         is_chunked_prefill=False,
-    )
-    # pos=3 -> next_pos=4 -> 4%4==0 -> record 4-4=0.
-    assert 0 in dsa.c4_pad_positions.tolist()
-
-
-def test_graph_compressed_positions_use_zero_padding() -> None:
-    """ACL graph position buffers match C++ vector::resize zero fill."""
-    builder, _, _ = _make_builder()
-    dsa = builder.build(
-        multi_block_tables=[],
-        kv_seq_lens=[7],
-        q_seq_lens=[4],
-        positions=torch.tensor([3, 4, 5, 6], dtype=torch.int64),
-        is_prefill=True,
-        is_chunked_prefill=False,
-        enable_graph=True,
+        enable_graph=enable_graph,
     )
 
-    assert dsa.c4_pad_positions.tolist() == [0, 0, 0, 0]
-    assert dsa.c128_pad_positions.tolist() == [0, 0, 0, 0]
+    assert dsa.c4_pad_positions.tolist() == [248, 252] + [0] * (6 if enable_graph else 1)
+    assert dsa.c128_pad_positions.tolist() == [128] + [0] * (7 if enable_graph else 0)
 
 
 def test_empty_batch_preserves_cpp_zero_length_buffers() -> None:

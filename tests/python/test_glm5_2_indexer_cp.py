@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -28,7 +28,6 @@ from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
 from xllm.python.model_executor.cp_utils import CpContext, cp_shard_positions, cp_shard_rows
 from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 from xllm.python.models import glm5_2
-from xllm.python.models.deepseek_v32 import _gather_half_rope_cos_sin
 
 
 def _indexer_out(select):
@@ -135,93 +134,19 @@ def _quant_matmul(x: torch.Tensor, weight: torch.Tensor, *_args: object) -> torc
 
 
 def _dynamic_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ones_like(x, dtype=torch.int8), torch.ones(x.shape[:-1])
+    return x.round().to(torch.int8), torch.ones(x.shape[:-1], device=x.device)
+
+
+def _reference_quant(rows: torch.Tensor) -> torch.Tensor:
+    """Independent two-dimensional Hadamard rotation followed by our fake quant."""
+    first, second = rows.unbind(-1)
+    return (torch.stack((first + second, first - second), dim=-1) / 2**0.5).round().to(torch.int8)
 
 
 def _scatter(cache: torch.Tensor, indices: torch.Tensor, values: torch.Tensor) -> None:
     for slot, value in zip(indices.flatten().tolist(), values, strict=True):
         if slot >= 0:
             cache[slot].copy_(value)
-
-
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("quantized", [False, True])
-def test_short_prompt_indexer_keeps_queries_local_and_returns_padded_topk(rank: int, quantized: bool) -> None:
-    plan = _three_token_plan(rank)
-    indexer = _indexer()
-    backend, metadata, cache = _backend_and_metadata(quantized)
-    global_hidden = torch.tensor([[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]])
-    local_hidden = cp_shard_rows(global_hidden, plan)
-    local_positions = cp_shard_positions(torch.arange(3), plan)
-    rope = torch.tensor([[1.0, 0.0]]).expand(3, -1)
-    key_cos_sin = _gather_half_rope_cos_sin(rope, local_positions)
-    query_cos_sin = tuple(coefficient.index_select(0, plan.query_index) for coefficient in key_cos_sin)
-    expected = torch.tensor([[[0]], [[-1]]] if rank == 0 else [[[1]], [[2]]], dtype=torch.int32)
-
-    def all_gather(local: torch.Tensor, dim: int, world_size: int, group: str) -> torch.Tensor:
-        assert (dim, world_size, group) == (0, 2, "cp")
-        assert local.shape == (2, 2), "only padded K rows may enter the CP collective"
-        return local.new_tensor([[5, 7], [5, 7], [5, 7], [5, 7]])
-
-    def indexer_metadata(
-        heads_q: int,
-        heads_k: int,
-        head_dim: int,
-        q_ends: torch.Tensor,
-        kv_lengths: torch.Tensor,
-        max_q: int,
-        max_k: int,
-        topk: int,
-        ratio: int,
-    ) -> torch.Tensor:
-        assert (heads_q, heads_k, head_dim, max_q, max_k, topk, ratio) == (64, 1, 2, 1, 1 if rank == 0 else 3, 1, 1)
-        assert q_ends.tolist() == ([1] if rank == 0 else [1, 2])
-        assert kv_lengths.tolist() == ([1] if rank == 0 else [2, 3])
-        return torch.empty(0, dtype=torch.int32)
-
-    def select(query: torch.Tensor, key: torch.Tensor, weights: torch.Tensor, *args: object) -> torch.Tensor:
-        q_ends, kv_lengths, blocks = args[3:6] if quantized else args[:3]
-        assert query.shape[0] == (1 if rank == 0 else 2)
-        assert weights.shape[0] == query.shape[0]
-        assert q_ends.tolist() == ([1] if rank == 0 else [1, 2])
-        assert kv_lengths.tolist() == ([1] if rank == 0 else [2, 3])
-        assert blocks.tolist() == ([[0, 1]] if rank == 0 else [[0, 1], [0, 1]])
-        if not quantized:
-            assert query[:, 0, 0].tolist() == ([1.0] if rank == 0 else [2.0, 3.0])
-        return torch.tensor([[[0]]] if rank == 0 else [[[1]], [[2]]], dtype=torch.int32)
-
-    context = ForwardContext(backend, torch.device("cpu"), metadata, [cache], cp_context=plan)
-    with (
-        forward_context(context),
-        patch.object(glm5_2.kernels, "quantize_per_tensor", side_effect=_quantize, create=True),
-        patch.object(glm5_2.kernels, "quant_matmul", side_effect=_quant_matmul, create=True),
-        patch.object(glm5_2.kernels, "dynamic_quant", side_effect=_dynamic_quant, create=True),
-        patch.object(glm5_2.kernels, "scatter_nd_update", side_effect=_scatter, create=True),
-        patch.object(glm5_2.kernels, "quant_lightning_indexer_metadata", side_effect=indexer_metadata, create=True),
-        patch.object(
-            glm5_2.kernels,
-            "quant_lightning_indexer" if quantized else "lightning_indexer_out",
-            side_effect=select if quantized else _indexer_out(select),
-            create=True,
-        ),
-        patch("xllm.python.model_executor.cp_utils.distributed.all_gather", side_effect=all_gather, create=True),
-    ):
-        backend.prepare(metadata)
-        output = indexer.select_qli(
-            local_hidden.index_select(0, plan.query_index),
-            local_hidden.index_select(0, plan.query_index),
-            backend.mla_index_context(SimpleNamespace(layer_id=0)),
-            query_cos_sin,
-            key_cos_sin,
-            cache_hidden=local_hidden,
-        )
-
-    torch.testing.assert_close(output, expected)
-    expected_keys = torch.ones(3, 2, dtype=torch.int8) if quantized else torch.tensor([[5.0, 7.0]]).expand(3, -1)
-    torch.testing.assert_close(cache.index.view(4, 2)[:3], expected_keys)
-    assert cache.index.view(4, 2)[3].tolist() == [-9, -9]
-    if quantized:
-        assert cache.index_scale.view(-1).tolist() == [1.0, 1.0, 1.0, -9.0]
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -285,83 +210,109 @@ def test_empty_query_rank_still_populates_index_cache(quantized: bool) -> None:
 
     assert output.dtype == torch.int32
     assert output.tolist() == [[[-1]], [[-1]]]
-    assert cache.index.view(4, 2)[0].tolist() == ([1, 1] if quantized else [5.0, 7.0])
+    assert cache.index.view(4, 2)[0].tolist() == ([8, -1] if quantized else [5.0, 7.0])
     assert cache.index.view(4, 2)[1:].tolist() == [[-9, -9]] * 3
     if quantized:
         assert cache.index_scale.view(-1).tolist() == [1.0, -9.0, -9.0, -9.0]
 
 
-@pytest.mark.parametrize("rank", [0, 3])
+@pytest.mark.parametrize(
+    "packed,rank",
+    [(False, 0), (False, 1), (True, 0), (True, 3)],
+    ids=["short-rank0", "short-rank1", "packed-rank0", "packed-rank3"],
+)
 @pytest.mark.parametrize("quantized", [False, True])
-def test_packed_chunked_pcp4_preserves_segment_owners_and_prefix(quantized: bool, rank: int) -> None:
-    # Requests extend prefixes of lengths 3/2 by 5/1 tokens. PCP=4 pads each
-    # request to eight chunks. Rank 0 owns tokens 0/5; rank 3 owns 3/4.
-    shard = [0, -1, 5, -1] if rank == 0 else [3, 4, -1, -1]
-    query_rows = [0, 2] if rank == 0 else [0, 1]
-    visible_lengths = [4, 3] if rank == 0 else [7, 8]
-    sequences = [0, 1] if rank == 0 else [0, 0]
-    plan = replace(
-        _three_token_plan(0),
-        cp_size=4,
-        cp_rank=rank,
-        total_local=4,
-        shard_index=torch.tensor(shard),
-        shard_gather_index=torch.tensor(shard).clamp_min(0),
-        shard_valid_mask=torch.tensor(shard) >= 0,
-        restore_index=torch.tensor([0, 4, 8, 12, 13, 2]),
-        query_index=torch.tensor(query_rows),
-        q_cu_seqlens=[1, 2],
-        q_cu_seqlens_tensor=torch.tensor([1, 2], dtype=torch.int32),
-        kv_gather_index=torch.tensor([0, 5] if rank == 0 else [0, 1, 2, 3, 0, 1, 2, 3, 4]),
-        kv_cu_seqlens=[1, 2] if rank == 0 else [4, 9],
-        segment_seq_indices=torch.tensor(sequences),
-        segment_kv_seq_lens=visible_lengths,
-        segment_kv_seq_lens_tensor=torch.tensor(visible_lengths, dtype=torch.int32),
-        has_prefix=True,
-    )
+def test_cp_indexer_preserves_query_segments_and_cache_order(packed: bool, rank: int, quantized: bool) -> None:
     indexer = _indexer()
-    backend, metadata, cache = _backend_and_metadata(quantized, num_blocks=8)
-    metadata.slot_mapping = torch.tensor([3, 4, 5, 6, 7, 10])
-    metadata.block_table = torch.tensor([[0, 1, 2, 3], [4, 5, -1, -1]], dtype=torch.int32)
-    metadata.kv_seq_lens = torch.tensor([8, 3])
-    metadata.kv_seq_lens_host_values = [8, 3]
-    metadata.q_cu_seq_lens = torch.tensor([0, 5, 6])
-    metadata.q_seq_lens = torch.tensor([5, 1])
-    metadata.is_prefill = False
-    metadata.is_chunked_prefill = True
-    hidden = cp_shard_rows(torch.arange(1, 7).float().unsqueeze(1).expand(-1, 2), plan)
-    positions = cp_shard_positions(torch.tensor([3, 4, 5, 6, 7, 2]), plan)
-    key_cos_sin = _gather_half_rope_cos_sin(torch.tensor([[1.0, 0.0]]).expand(8, -1), positions)
+    backend, metadata, cache = _backend_and_metadata(quantized, num_blocks=8 if packed else 2)
+    if packed:
+        # Prefixes 3/2 extend by 5/1 tokens; PCP4 ranks 0/3 own tokens 0,5/3,4.
+        shard = [0, -1, 5, -1] if rank == 0 else [3, 4, -1, -1]
+        query_rows = [0, 2] if rank == 0 else [0, 1]
+        lengths = [4, 3] if rank == 0 else [7, 8]
+        sequences = [0, 1] if rank == 0 else [0, 0]
+        plan = replace(
+            _three_token_plan(0),
+            cp_size=4,
+            cp_rank=rank,
+            total_local=4,
+            shard_index=torch.tensor(shard),
+            shard_gather_index=torch.tensor(shard).clamp_min(0),
+            shard_valid_mask=torch.tensor(shard) >= 0,
+            restore_index=torch.tensor([0, 4, 8, 12, 13, 2]),
+            query_index=torch.tensor(query_rows),
+            q_cu_seqlens=[1, 2],
+            q_cu_seqlens_tensor=torch.tensor([1, 2], dtype=torch.int32),
+            kv_gather_index=torch.tensor([0, 5] if rank == 0 else [0, 1, 2, 3, 0, 1, 2, 3, 4]),
+            kv_cu_seqlens=[1, 2] if rank == 0 else [4, 9],
+            segment_seq_indices=torch.tensor(sequences),
+            segment_kv_seq_lens=lengths,
+            segment_kv_seq_lens_tensor=torch.tensor(lengths, dtype=torch.int32),
+            has_prefix=True,
+        )
+        slots = [3, 4, 5, 6, 7, 10]
+        pages = [[0, 1, 2, 3], [4, 5, -1, -1]]
+        metadata.slot_mapping = torch.tensor(slots)
+        metadata.block_table = torch.tensor(pages, dtype=torch.int32)
+        metadata.kv_seq_lens = torch.tensor([8, 3])
+        metadata.kv_seq_lens_host_values = [8, 3]
+        metadata.q_cu_seq_lens = torch.tensor([0, 5, 6])
+        metadata.q_seq_lens = torch.tensor([5, 1])
+        metadata.is_prefill = False
+        metadata.is_chunked_prefill = True
+        global_hidden = torch.arange(1, 7).float().unsqueeze(1).expand(-1, 2)
+        global_positions = torch.tensor([3, 4, 5, 6, 7, 2])
+        transport_positions = [3, 0, 2, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 7, 0, 0]
+        owned_tokens = [0, 5] if rank == 0 else [3, 4]
+        topk_rows = [3, 2] if rank == 0 else [6, 7]
+        expected_topk = [3, -1, 2, -1] if rank == 0 else [6, 7, -1, -1]
+    else:
+        plan = _three_token_plan(rank)
+        lengths = [1] if rank == 0 else [2, 3]
+        sequences = [0] if rank == 0 else [0, 0]
+        slots, pages = [0, 1, 2], [[0, 1]]
+        global_hidden = torch.tensor([[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]])
+        global_positions = torch.arange(3)
+        transport_positions = [0, 0, 1, 2]
+        owned_tokens = [0] if rank == 0 else [1, 2]
+        topk_rows = [0] if rank == 0 else [1, 2]
+        expected_topk = [0, -1] if rank == 0 else [1, 2]
+
+    hidden = cp_shard_rows(global_hidden, plan)
+    positions = cp_shard_positions(global_positions, plan)
+    key_cos_sin = ((positions + 1).float().unsqueeze(1), torch.zeros(len(positions), 1))
     query_cos_sin = tuple(coefficient.index_select(0, plan.query_index) for coefficient in key_cos_sin)
+    # Original token order and write slots form the oracle, not restore_index.
+    keys = (global_positions + 1).unsqueeze(1) * torch.tensor([5.0, 7.0])
+    expected_query = global_hidden[owned_tokens] * (global_positions[owned_tokens] + 1).unsqueeze(1)
+    if quantized:
+        keys, expected_query = _reference_quant(keys), _reference_quant(expected_query)
+    expected_cache = torch.full((cache.index.numel() // 2, 2), -9, dtype=keys.dtype)
+    expected_cache[slots] = keys
+    transport_keys = (torch.tensor(transport_positions) + 1).unsqueeze(1) * torch.tensor([5.0, 7.0])
 
     def all_gather(local: torch.Tensor, dim: int, world_size: int, group: str) -> torch.Tensor:
-        assert (dim, world_size, group) == (0, 4, "cp")
-        assert local.shape == (4, 2)
-        return local.new_tensor([[5, 7]] * 16)
+        assert (dim, world_size, group) == (0, plan.cp_size, "cp")
+        start = rank * plan.total_local
+        torch.testing.assert_close(local, transport_keys[start : start + plan.total_local])
+        return transport_keys
 
-    def indexer_metadata(
-        heads_q: int,
-        heads_k: int,
-        head_dim: int,
-        q_ends: torch.Tensor,
-        kv_lengths: torch.Tensor,
-        max_q: int,
-        max_k: int,
-        topk: int,
-        ratio: int,
-    ) -> torch.Tensor:
-        assert (max_q, max_k) == (1, 4 if rank == 0 else 8)
-        assert q_ends.tolist() == [1, 2]
-        assert kv_lengths.tolist() == visible_lengths
+    def indexer_metadata(*args: object) -> torch.Tensor:
+        assert args[:3] == (64, 1, 2)
+        assert args[3].tolist() == list(range(1, len(owned_tokens) + 1))
+        assert args[4].tolist() == lengths
+        assert args[5:] == (1, max(lengths), 1, 1)
         return torch.empty(0, dtype=torch.int32)
 
     def select(query: torch.Tensor, key: torch.Tensor, weights: torch.Tensor, *args: object) -> torch.Tensor:
         q_ends, kv_lengths, blocks = args[3:6] if quantized else args[:3]
-        assert query.shape[0] == weights.shape[0] == 2
-        assert q_ends.tolist() == [1, 2]
-        assert kv_lengths.tolist() == visible_lengths
-        assert blocks.tolist() == ([[0, 1, 2, 3], [4, 5, -1, -1]] if rank == 0 else [[0, 1, 2, 3]] * 2)
-        return torch.tensor([[[3]], [[2]]] if rank == 0 else [[[6]], [[7]]], dtype=torch.int32)
+        assert weights.shape[0] == len(owned_tokens)
+        assert q_ends.tolist() == list(range(1, len(owned_tokens) + 1))
+        assert kv_lengths.tolist() == lengths
+        assert blocks.tolist() == [pages[sequence] for sequence in sequences]
+        torch.testing.assert_close(query[:, 0], expected_query)
+        torch.testing.assert_close(key.view_as(expected_cache), expected_cache)
+        return torch.tensor(topk_rows, dtype=torch.int32).view(-1, 1, 1)
 
     with (
         forward_context(ForwardContext(backend, torch.device("cpu"), metadata, [cache], cp_context=plan)),
@@ -379,20 +330,21 @@ def test_packed_chunked_pcp4_preserves_segment_owners_and_prefix(quantized: bool
         patch("xllm.python.model_executor.cp_utils.distributed.all_gather", side_effect=all_gather, create=True),
     ):
         backend.prepare(metadata)
+        query_hidden = hidden.index_select(0, plan.query_index)
         output = indexer.select_qli(
-            hidden.index_select(0, plan.query_index),
-            hidden.index_select(0, plan.query_index),
+            query_hidden,
+            query_hidden,
             backend.mla_index_context(SimpleNamespace(layer_id=0)),
             query_cos_sin,
             key_cos_sin,
             cache_hidden=hidden,
         )
 
-    assert output.view(-1).tolist() == ([3, -1, 2, -1] if rank == 0 else [6, 7, -1, -1])
-    # Existing prefixes and unused blocks are never rewritten by the chunk.
-    assert cache.index.view(16, 2)[[0, 1, 2, 8, 9, 11, 12, 13, 14, 15]].tolist() == [[-9, -9]] * 10
+    assert output.view(-1).tolist() == expected_topk
     if quantized:
-        assert cache.index_scale.view(-1)[[0, 1, 2, 8, 9, 11, 12, 13, 14, 15]].tolist() == [-9.0] * 10
+        expected_scale = torch.full((expected_cache.shape[0],), -9.0, dtype=torch.float16)
+        expected_scale[slots] = 1.0
+        torch.testing.assert_close(cache.index_scale.view(-1), expected_scale)
 
 
 def test_indexer_fuses_k_and_weight_projections_after_loading() -> None:
@@ -531,60 +483,6 @@ def test_interleaved_indexer_rope_uses_inplace_partial_kernel() -> None:
 
 
 @pytest.mark.parametrize("multi_stream", [False, True])
-def test_indexer_reuses_interleaved_cos_sin_for_query_and_key(multi_stream: bool) -> None:
-    cfg = glm5_2.Glm52Config(
-        hidden_size=2,
-        q_lora_rank=2,
-        index_n_heads=1,
-        index_head_dim=4,
-        qk_rope_head_dim=2,
-        index_topk=1,
-        indexer_rope_interleave=True,
-    )
-    indexer = glm5_2.Glm52Indexer(cfg, torch.float32, torch.device("cpu"))
-    index_cache = torch.zeros(1, 1, 1, 4)
-    if multi_stream:
-        indexer._weights_stream = MagicMock()
-    block_table = torch.zeros(1, 1, dtype=torch.int32)
-    ctx = SimpleNamespace(
-        actual_seq_q=torch.tensor([1]),
-        actual_seq_kv=torch.tensor([1]),
-        cp_context=None,
-        index_cache=index_cache,
-        index_cache_scale=None,
-        materialize_index_cache=lambda: (index_cache, None, block_table),
-    )
-    hidden = torch.ones(1, 2)
-    cos_sin = (torch.ones(1, 1, 1, 2), torch.zeros(1, 1, 1, 2))
-
-    with (
-        patch.object(indexer, "_update_index_cache") as update_cache,
-        patch.object(indexer.wq_b, "forward", return_value=torch.zeros(1, 4)),
-        patch.object(
-            glm5_2.kernels,
-            "npu_inplace_partial_rotary_mul",
-            side_effect=lambda *_args: None,
-            create=True,
-        ),
-        forward_context(ForwardContext(None, torch.device("cpu"), None, [], execution_state=None)),
-        patch.object(
-            glm5_2.kernels,
-            "lightning_indexer_out",
-            side_effect=_indexer_out(lambda *_args: torch.zeros(1, 1, 1, dtype=torch.int32)),
-            create=True,
-        ),
-    ):
-        indexer.select_qli(hidden, hidden, ctx, cos_sin, cos_sin)
-
-    update_cache.assert_called_once_with(
-        hidden,
-        ctx,
-        cos_sin,
-        projected_k=ANY,
-    )
-
-
-@pytest.mark.parametrize("multi_stream", [False, True])
 def test_indexer_consumes_explicit_distinct_query_and_key_cos_sin(multi_stream: bool) -> None:
     cfg = glm5_2.Glm52Config(
         hidden_size=2,
@@ -607,20 +505,27 @@ def test_indexer_consumes_explicit_distinct_query_and_key_cos_sin(multi_stream: 
         index_cache=index_cache,
         index_cache_scale=None,
         materialize_index_cache=lambda: (index_cache, None, block_table),
-        update_index_cache=lambda *_args: None,
+        update_index_cache=MagicMock(),
     )
     hidden = torch.ones(1, 2)
+    projected_k = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
     query_cos_sin = (torch.full((1, 1, 1, 2), 2.0), torch.full((1, 1, 1, 2), 3.0))
     key_cos_sin = (torch.full((1, 1, 1, 2), 4.0), torch.full((1, 1, 1, 2), 5.0))
-    seen: list[tuple[torch.Tensor, torch.Tensor]] = []
 
-    def partial_rope(value: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, *_args: object) -> None:
-        seen.append((cos.clone(), sin.clone()))
+    def partial_rope(value: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, start: int, dim: int) -> None:
+        first, second = value[..., 0].clone(), value[..., 1].clone()
+        value[..., 0] = first * cos[:, :1] - second * sin[:, :1]
+        value[..., 1] = second * cos[:, :1] + first * sin[:, :1]
+
+    def select(query: torch.Tensor, *_args: object) -> torch.Tensor:
+        torch.testing.assert_close(query, torch.tensor([[[1.0, 8.0, 6.0, 7.0]]]))
+        return torch.zeros(1, 1, 1, dtype=torch.int32)
 
     with (
-        patch.object(indexer.wk, "forward", return_value=torch.zeros(1, 4)),
-        patch.object(indexer.k_norm, "forward", return_value=torch.zeros(1, 4)),
-        patch.object(indexer.wq_b, "forward", return_value=torch.zeros(1, 4)),
+        patch.object(indexer, "_update_index_cache", wraps=indexer._update_index_cache) as update_cache,
+        patch.object(indexer.wk, "forward", return_value=projected_k) as project_key,
+        patch.object(indexer.k_norm, "forward", return_value=projected_k.clone()),
+        patch.object(indexer.wq_b, "forward", return_value=torch.tensor([[2.0, 1.0, 6.0, 7.0]])),
         patch.object(
             glm5_2.kernels,
             "npu_inplace_partial_rotary_mul",
@@ -631,21 +536,16 @@ def test_indexer_consumes_explicit_distinct_query_and_key_cos_sin(multi_stream: 
         patch.object(
             glm5_2.kernels,
             "lightning_indexer_out",
-            side_effect=_indexer_out(lambda *_args: torch.zeros(1, 1, 1, dtype=torch.int32)),
+            side_effect=_indexer_out(select),
             create=True,
         ),
     ):
-        indexer.select_qli(
-            hidden,
-            hidden,
-            ctx,
-            query_cos_sin,
-            key_cos_sin,
-            cache_hidden=hidden,
-        )
+        indexer.select_qli(hidden, hidden, ctx, query_cos_sin, key_cos_sin, cache_hidden=hidden)
 
-    expected = (query_cos_sin, key_cos_sin) if multi_stream else (key_cos_sin, query_cos_sin)
-    assert len(seen) == 2
-    for actual_pair, expected_pair in zip(seen, expected):
-        for actual, coefficient in zip(actual_pair, expected_pair):
-            torch.testing.assert_close(actual, coefficient.view(1, 2))
+    project_key.assert_called_once_with(hidden)
+    update_cache.assert_called_once_with(hidden, ctx, key_cos_sin, projected_k=projected_k)
+    assert update_cache.call_args.kwargs["projected_k"] is projected_k
+    ctx.update_index_cache.assert_called_once()
+    key, scale = ctx.update_index_cache.call_args.args
+    torch.testing.assert_close(key, torch.tensor([[-6.0, 13.0, 3.0, 4.0]]))
+    assert scale is None

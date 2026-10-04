@@ -65,6 +65,8 @@ def _prepared_backend() -> SfaDcpAttentionBackend:
         index_topk=2048,
         max_num_reqs=8,
     )
+    # Binding an index cache can set this flag and hide a constructor regression.
+    assert backend.is_mla
     backend.bind_kv_caches(
         [
             LayerCache(
@@ -366,7 +368,7 @@ def test_prepare_uses_expanded_rows_for_mtp_verify(prepared_backend: SfaDcpAtten
         dcp_local_seq_lens_buf = torch.empty(8)
 
         @staticmethod
-        def build(**kwargs):
+        def build(**kwargs: object) -> SimpleNamespace:
             captured.update(kwargs)
             return SimpleNamespace(dcp_context=SimpleNamespace())
 
@@ -402,6 +404,12 @@ def test_prepare_uses_expanded_rows_for_mtp_verify(prepared_backend: SfaDcpAtten
 
     assert captured["num_reqs"] == 4
     assert captured["num_input_tokens"] == 4
-    assert captured["seq_lens"].tolist() == [first_kv_len + offset for offset in (0, 1, 4, 5)]
-    assert captured["block_table"].shape == (4, 2)
+    lengths = captured["seq_lens"].tolist()
+    blocks = captured["block_table"].tolist()
+    assert list(zip(lengths, blocks, strict=True)) == [
+        (first_kv_len, [10, 11]),
+        (first_kv_len + 1, [10, 11]),
+        (first_kv_len + 4, [20, 21]),
+        (first_kv_len + 5, [20, 21]),
+    ]
     assert backend._mla_max_seqlen_k == 1024
