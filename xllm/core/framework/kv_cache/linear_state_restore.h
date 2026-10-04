@@ -19,7 +19,7 @@ limitations under the License.
 #include <vector>
 
 #include "framework/kv_cache/kv_cache.h"
-#include "framework/model/model_input_params.h"
+#include "framework/model/model_input_types.h"
 
 namespace xllm {
 
@@ -30,26 +30,21 @@ LinearStateValidityMask build_linear_state_mask(
     const std::vector<int32_t>& cached_tokens,
     int64_t active_rows);
 
-// Apply each op's restore plan in-place: copy `restore_src_slot_id` into
-// `linear_state_id` across every linear-attention layer present in
-// `kv_caches`, then record each op's outcome into `validity_mask`. The
-// caller sizes `validity_mask` to the active batch and pre-fills it with
-// the kv-cache default; this helper only overrides the entries it must:
-//   - RESTORED:  a checkpoint was copied into the live slot -> set 1 (warm).
-//   - COLD_START: a restore was requested but the checkpoint was unavailable
-//     (miss / out-of-range / copy failure) -> set 0, so the forward does not
-//     treat reused kv blocks as warm recurrent state.
-//   - no restore requested (continued request / no prefix reused) -> left
-//     untouched, so warm continued requests keep the kv-cache default.
-// Slot ownership and LRU eviction live in the scheduler-side
-// LinearStateBlockManager; this helper is purely the worker-side restore copy
-// that cache dictates. Saves require no worker-side copy and are handled by
-// promotion in the scheduler, so this API only covers restores. Copies are
-// enqueued on whichever stream is current at the call site (today this is the
-// worker's dedicated `prepare_stream_`, not the default model-forward stream);
-// the caller is responsible for inserting a stream-event barrier before the
-// model forward consumes the restored slots — see worker_impl.cpp where
-// prepare_stream.record_event() is awaited prior to the forward.
+// Apply each op's linear-state preparation plan across every linear-attention
+// layer in `kv_caches`, then record the outcome in `validity_mask`. The caller
+// sizes the mask to the active batch and pre-fills it with the KV-cache
+// default; this helper only overrides rows that require preparation:
+//   - RESTORED: copy the checkpoint source into the live slot and mark warm.
+//   - DIRECT_READ: keep the checkpoint in its source slot, skip the copy, and
+//     mark warm so the forward reads the source and writes the live slot.
+//   - COLD_START: clear the reused live slot and mark cold.
+//   - continued request / no reused prefix: leave the default unchanged.
+// Slot ownership, source resolution, and save promotion stay scheduler-side;
+// this helper only executes the worker-side reset/restore/direct-read plan.
+// Device copies and clears run on the current stream (today the worker's
+// `prepare_stream_`); the caller inserts the stream-event barrier before model
+// forward. Direct-read rows enqueue no state copy, but their checkpoint source
+// must remain pinned until the forward finishes.
 void restore_linear_state_slots(
     std::vector<KVCache>& kv_caches,
     const std::vector<LinearStateCacheOp>& cache_ops,

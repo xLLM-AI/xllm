@@ -57,8 +57,7 @@ struct SlotRange {
   int64_t length = 0;
 };
 
-std::vector<SlotRange> coalesce_slot_ranges(std::vector<int32_t> slot_ids) {
-  CHECK(!slot_ids.empty());
+std::vector<SlotRange> coalesce_slot_ranges(std::vector<int32_t>& slot_ids) {
   std::sort(slot_ids.begin(), slot_ids.end());
   slot_ids.erase(std::unique(slot_ids.begin(), slot_ids.end()), slot_ids.end());
 
@@ -81,16 +80,14 @@ std::vector<SlotRange> coalesce_slot_ranges(std::vector<int32_t> slot_ids) {
 }
 
 void zero_slots_across_layers(std::vector<KVCache>& kv_caches,
-                              const std::vector<int32_t>& slot_ids) {
+                              std::vector<int32_t>& slot_ids) {
   const std::vector<SlotRange> ranges = coalesce_slot_ranges(slot_ids);
-  bool cleared = false;
   for (const KVCache& kv_cache : kv_caches) {
     const torch::Tensor conv_cache = kv_cache.get_conv_cache();
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
     if (!conv_cache.defined() && !ssm_cache.defined()) {
       continue;
     }
-    CHECK(conv_cache.defined() && ssm_cache.defined());
     const int64_t checkpoint_stride = ssm_cache.size(0) / conv_cache.size(0);
     for (const SlotRange& range : ranges) {
       if (range.length == 1) {
@@ -104,22 +101,18 @@ void zero_slots_across_layers(std::vector<KVCache>& kv_caches,
                   range.length * checkpoint_stride)
           .zero_();
     }
-    cleared = true;
   }
-  CHECK(cleared) << "linear-state reset found no recurrent cache to clear";
 }
 
 void copy_slot_across_layers(std::vector<KVCache>& kv_caches,
                              int32_t dst_slot_id,
                              int32_t src_slot_id) {
-  bool copied = false;
   for (const KVCache& kv_cache : kv_caches) {
     const torch::Tensor conv_cache = kv_cache.get_conv_cache();
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
     if (!conv_cache.defined() && !ssm_cache.defined()) {
       continue;
     }
-    CHECK(conv_cache.defined() && ssm_cache.defined());
     const int64_t checkpoint_stride = ssm_cache.size(0) / conv_cache.size(0);
     conv_cache.select(0, dst_slot_id).copy_(conv_cache.select(0, src_slot_id));
     ssm_cache
@@ -130,9 +123,7 @@ void copy_slot_across_layers(std::vector<KVCache>& kv_caches,
             0,
             static_cast<int64_t>(src_slot_id) * checkpoint_stride,
             checkpoint_stride));
-    copied = true;
   }
-  CHECK(copied) << "linear-state restore found no recurrent cache to copy";
 }
 
 }  // namespace
@@ -191,9 +182,7 @@ void restore_linear_state_slots(
           << "linear-state reset must not carry a restore source";
       continue;
     }
-    if (!cache_op.restore_requested) {
-      CHECK_LT(cache_op.restore_src_slot_id, 0)
-          << "linear-state source requires restore_requested=true";
+    if (!cache_op.restore_requested && cache_op.restore_src_slot_id < 0) {
       continue;
     }
     const int32_t src_slot_id = cache_op.restore_src_slot_id;
@@ -203,39 +192,38 @@ void restore_linear_state_slots(
   }
 
   std::vector<int32_t> pending_reset_slots;
-  std::vector<size_t> pending_reset_rows;
   pending_reset_slots.reserve(cache_ops.size());
-  pending_reset_rows.reserve(cache_ops.size());
   const auto flush_resets = [&]() {
     if (pending_reset_slots.empty()) {
       return;
     }
     zero_slots_across_layers(kv_caches, pending_reset_slots);
-    for (const size_t row : pending_reset_rows) {
-      validity_mask[row] = 0;
-    }
     pending_reset_slots.clear();
-    pending_reset_rows.clear();
   };
 
   for (size_t i = 0; i < cache_ops.size(); ++i) {
     const LinearStateCacheOp& cache_op = cache_ops[i];
     if (cache_op.reset_requested) {
       pending_reset_slots.push_back(cache_op.linear_state_id);
-      pending_reset_rows.push_back(i);
+      validity_mask[i] = 0;
       continue;
     }
-    if (!cache_op.restore_requested) {
+    if (!cache_op.restore_requested && cache_op.restore_src_slot_id < 0) {
       continue;
     }
 
-    flush_resets();
     const int32_t live_slot_id = cache_op.linear_state_id;
     const int32_t src_slot_id = cache_op.restore_src_slot_id;
-    copy_slot_across_layers(kv_caches, live_slot_id, src_slot_id);
+    if (cache_op.restore_requested) {
+      flush_resets();
+      copy_slot_across_layers(kv_caches, live_slot_id, src_slot_id);
+      VLOG(1) << "linear state checkpoint restored; live_slot_id="
+              << live_slot_id << ", src_slot_id=" << src_slot_id;
+    } else {
+      VLOG(1) << "linear state checkpoint read directly; live_slot_id="
+              << live_slot_id << ", src_slot_id=" << src_slot_id;
+    }
     validity_mask[i] = 1;
-    VLOG(1) << "Qwen3.5 linear state checkpoint restored; live_slot_id="
-            << live_slot_id << ", src_slot_id=" << src_slot_id;
   }
   flush_resets();
 }

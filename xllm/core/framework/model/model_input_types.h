@@ -468,12 +468,14 @@ struct LinearStateCacheOp {
   // have been used by an earlier request, so the worker must clear it before
   // the first forward instead of relying on allocator contents.
   bool reset_requested = false;
-  // Restore request flag and the checkpoint slot the scheduler resolved it to.
-  // The worker copies `restore_src_slot_id` -> `linear_state_id`. This mirrors
-  // KV, which sends the worker only a fully resolved block-swap descriptor and
-  // never the prefix hash. A restore request without a valid source is an
-  // invariant violation because the full-attention KV prefix has already been
-  // reused and cannot be paired with a cold recurrent state.
+  // Checkpoint source slot resolved by the scheduler. With
+  // `restore_requested=true`, the worker copies it into `linear_state_id`
+  // before forward. With `restore_requested=false`, a valid source denotes
+  // direct read, only for consumers that support separate read/write slots:
+  // forward reads this checkpoint in place and writes to the live slot.
+  // A source-less row is a continued request/no-op. The
+  // source is invalid for cold-start reset rows and mandatory for physical
+  // restore rows.
   bool restore_requested = false;
   int32_t restore_src_slot_id = -1;
 };

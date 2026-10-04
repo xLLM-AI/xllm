@@ -203,6 +203,49 @@ TEST(MtpAsyncInputBuilderTest, RejectsPageCountBeyondBlockTableWidth) {
                "Expanded KV length exceeds block-table capacity");
 }
 
+TEST(MtpAsyncInputBuilderTest, PybindViewExposesLinearStateReadAndWriteSlots) {
+  ensure_xllm_torch_ops_registered();
+  if (!Py_IsInitialized()) {
+    setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 1);
+    Py_InitializeEx(0);
+  }
+  py::gil_scoped_acquire gil;
+  prepend_python_model_path();
+  py::module_::import("xllm.python._npu_bootstrap");
+  py::module_::import("xllm.python").attr("initialize_runtime")();
+  py::module_ main_module = py::module_::import("__main__");
+  if (!py::hasattr(main_module, "AttentionMetadataView")) {
+    register_attention_metadata_views(main_module);
+  }
+
+  auto metadata = std::make_shared<layer::AttentionMetadata>();
+  metadata->is_prefill = true;
+
+  ModelInputParams params = ModelInputSnapshot(LlmModelParams()).view();
+  params.embedding.linear_state_ids = {3, 7};
+  params.embedding.linear_state_indices = torch::tensor({3, 7}, torch::kInt);
+
+  LinearStateCacheOp direct_read;
+  direct_read.linear_state_id = 3;
+  direct_read.restore_src_slot_id = 2;
+  LinearStateCacheOp legacy_restore;
+  legacy_restore.linear_state_id = 7;
+  legacy_restore.restore_requested = true;
+  legacy_restore.restore_src_slot_id = 6;
+  params.linear_state_cache_ops = {direct_read, legacy_restore};
+
+  py::object py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
+  EXPECT_TRUE(torch::equal(
+      py_metadata.attr("linear_state_indices").cast<torch::Tensor>(),
+      torch::tensor({3, 7}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      py_metadata.attr("linear_state_write_indices").cast<torch::Tensor>(),
+      torch::tensor({3, 7}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      py_metadata.attr("linear_state_read_indices").cast<torch::Tensor>(),
+      torch::tensor({2, 7}, torch::kInt)));
+}
+
 TEST(MtpAsyncInputBuilderTest, PybindViewSelectsExpandedGraphMetadata) {
   ensure_xllm_torch_ops_registered();
   if (!Py_IsInitialized()) {
@@ -214,7 +257,9 @@ TEST(MtpAsyncInputBuilderTest, PybindViewSelectsExpandedGraphMetadata) {
   py::module_::import("xllm.python._npu_bootstrap");
   py::module_::import("xllm.python").attr("initialize_runtime")();
   py::module_ main_module = py::module_::import("__main__");
-  register_attention_metadata_views(main_module);
+  if (!py::hasattr(main_module, "AttentionMetadataView")) {
+    register_attention_metadata_views(main_module);
+  }
 
   auto metadata = std::make_shared<layer::AttentionMetadata>();
   metadata->slot_mapping = torch::arange(4, torch::kInt);

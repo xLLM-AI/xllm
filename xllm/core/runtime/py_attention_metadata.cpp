@@ -18,11 +18,13 @@ limitations under the License.
 #include <pybind11/stl.h>
 #include <torch/python.h>
 
+#include <algorithm>
 #include <utility>
 
 #include "core/framework/model/model_input_params.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/util/pybind_helper.h"
+#include "core/util/tensor_helper.h"
 
 namespace py = pybind11;
 
@@ -114,6 +116,12 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::kv_seq_lens)
       .def_property_readonly("linear_state_indices",
                              &PyAttentionMetadataView::linear_state_indices)
+      .def_property_readonly(
+          "linear_state_read_indices",
+          &PyAttentionMetadataView::linear_state_read_indices)
+      .def_property_readonly(
+          "linear_state_write_indices",
+          &PyAttentionMetadataView::linear_state_write_indices)
       .def_property_readonly("has_initial_state",
                              &PyAttentionMetadataView::has_initial_state)
       .def_property_readonly(
@@ -223,6 +231,35 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   }
   multi_block_tables_ = params.multi_block_tables;
   linear_state_indices_ = params.embedding.linear_state_indices;
+  const auto& cache_ops = params.linear_state_cache_ops;
+  const auto is_direct_read = [](const LinearStateCacheOp& op) {
+    return op.restore_src_slot_id >= 0 && !op.restore_requested &&
+           !op.reset_requested;
+  };
+  const bool has_direct_read =
+      std::any_of(cache_ops.begin(), cache_ops.end(), is_direct_read);
+  if (has_direct_read) {
+    CHECK((metadata_->is_prefill || metadata_->is_chunked_prefill) &&
+          !params.is_spec_verify)
+        << "linear-state direct read is only supported for non-speculative "
+           "prefill";
+    CHECK(linear_state_indices_.defined());
+    CHECK_EQ(cache_ops.size(), params.embedding.linear_state_ids.size())
+        << "direct-read cache ops must align with host linear-state ids";
+    CHECK_EQ(cache_ops.size(),
+             static_cast<size_t>(linear_state_indices_.numel()))
+        << "direct-read cache ops must align with Python metadata rows";
+
+    std::vector<int32_t> read_ids = params.embedding.linear_state_ids;
+    for (size_t i = 0; i < cache_ops.size(); ++i) {
+      const LinearStateCacheOp& cache_op = cache_ops[i];
+      if (is_direct_read(cache_op)) {
+        read_ids[i] = cache_op.restore_src_slot_id;
+      }
+    }
+    linear_state_read_indices_ =
+        make_cpu_tensor(read_ids).to(linear_state_indices_.device());
+  }
   // Python model kernels consume materialized execution rows. Empty DP ranks
   // therefore contribute the worker-created dummy row instead of zero rows.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;
@@ -317,6 +354,14 @@ py::object PyAttentionMetadataView::kv_seq_lens() const {
 }
 
 py::object PyAttentionMetadataView::linear_state_indices() const {
+  return optional_tensor(linear_state_indices_);
+}
+
+py::object PyAttentionMetadataView::linear_state_read_indices() const {
+  return optional_tensor(linear_state_read_indices_);
+}
+
+py::object PyAttentionMetadataView::linear_state_write_indices() const {
   return optional_tensor(linear_state_indices_);
 }
 

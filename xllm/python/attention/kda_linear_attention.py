@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import torch.nn.functional as F
 
+from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.attention.kda_constants import (
     _KDA_NO_COORD,
     _KDA_SEQWISE,
@@ -180,8 +181,10 @@ class KdaLinearAttentionMixin:
         raw_mixed, raw_gate, raw_beta = mixed_qkv, gate, beta
         chain_seqs: dict = {}
 
-        idx = metadata.linear_state_indices
+        read_idx, idx = resolve_linear_state_io_indices(metadata)
+        is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
         num_seqs = idx.shape[0] if idx is not None else batch_size
+        merged_q_cu: Optional[torch.Tensor] = None
         # ACL-graph decode with a flattened batch: the model forward unsqueezes
         # the 1-D ``[num_seqs]`` decode input into ``[1, num_seqs]``, so
         # mixed_qkv arrives as ``[1, conv_dim, num_seqs]`` with idx
@@ -191,7 +194,7 @@ class KdaLinearAttentionMixin:
         # 1]`` and take the simple per-sequence path with static shapes. gate
         # ``[1, T, nh, hd]`` / beta ``[1, T, nh]`` follow the same transpose.
         in_graph = in_acl_graph()
-        is_decode = not metadata.is_prefill and not metadata.is_chunked_prefill
+        is_decode = not is_prefill
         flatten_graph_decode = (
             in_graph
             and is_decode
@@ -242,7 +245,6 @@ class KdaLinearAttentionMixin:
             # position instead (rows==seqs) silently drops the tail rows of
             # every sequence past the first and corrupts the view/layout
             # downstream.
-            merged_q_cu: Optional[torch.Tensor] = None
             merged_row0: list = []
             q_cu_raw = metadata.q_cu_seq_lens
             if (
@@ -535,20 +537,22 @@ class KdaLinearAttentionMixin:
                     )
                     for _bi, (_lid, _sl) in enumerate(_b_scatter):
                         self._kv_caches[_lid].ssm[_sl] = _bst[_bi].to(self._kv_caches[_lid].ssm.dtype)
-            conv_i = conv_cache.index_select(0, idx)
+            # Direct read is only valid before any spec-verify row merge. Once
+            # merged_q_cu is set, idx has one slot per sequence while read_idx
+            # still describes the original per-row metadata.
+            state_read_idx = idx
+            if read_idx is not None and is_prefill and merged_q_cu is None:
+                state_read_idx = read_idx
+            conv_i = conv_cache.index_select(0, state_read_idx)
             conv_i = conv_i.transpose(1, 2).contiguous()
-            ssm_i = ssm_cache.index_select(0, idx)
+            ssm_i = ssm_cache.index_select(0, state_read_idx)
             his = metadata.has_initial_state
             if his is not None and len(his) == num_seqs:
                 if not isinstance(his, torch.Tensor):
                     his = torch.tensor(his, dtype=torch.int64, device=conv_i.device)
-                warm = his.to(torch.bool).view(num_seqs, 1, 1)
-                conv_i = torch.where(warm, conv_i, torch.zeros_like(conv_i))
-                ssm_i = torch.where(
-                    warm.view(num_seqs, 1, 1, 1),
-                    ssm_i,
-                    torch.zeros_like(ssm_i),
-                )
+                cold = ~his.to(torch.bool)
+                conv_i.masked_fill_(cold.view(num_seqs, 1, 1), 0)
+                ssm_i.masked_fill_(cold.view(num_seqs, 1, 1, 1), 0)
             conv_state, ssm_state = conv_i, ssm_i.contiguous()
             if chain_seqs:
                 # Entry snapshots (post consume-advance) for the read-only
@@ -563,7 +567,6 @@ class KdaLinearAttentionMixin:
         # Route on metadata, not seq_len: MTP/spec decode can carry multiple
         # tokens per sequence (seq_len > 1) but is still a decode step; the
         # seq_len heuristic would wrongly send it to the chunked prefill path.
-        is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
         device = mixed_qkv.device
         # Spec-verify (merged same-slot rows) commits lazily via the
         # kv-delta scheme in the flattened branch; see the comments there.

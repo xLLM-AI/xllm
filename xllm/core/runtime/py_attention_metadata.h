@@ -93,6 +93,8 @@ class PyAttentionMetadataView final {
   pybind11::object block_table() const;
   pybind11::object kv_seq_lens() const;
   pybind11::object linear_state_indices() const;
+  pybind11::object linear_state_read_indices() const;
+  pybind11::object linear_state_write_indices() const;
   pybind11::object has_initial_state() const;
   const std::vector<int32_t>& dp_execution_token_counts() const;
   const std::vector<int32_t>& dp_global_sequence_nums() const;
@@ -134,6 +136,7 @@ class PyAttentionMetadataView final {
   std::vector<int32_t> new_cache_slots_host_values_;
   std::vector<torch::Tensor> multi_block_tables_;
   torch::Tensor linear_state_indices_;
+  torch::Tensor linear_state_read_indices_;
   std::vector<int32_t> dp_execution_token_counts_;
   std::vector<int32_t> dp_global_sequence_nums_;
   std::vector<int32_t> dp_is_decode_;

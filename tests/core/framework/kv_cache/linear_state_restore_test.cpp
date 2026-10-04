@@ -20,6 +20,8 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
+#include "framework/model/model_input_params.h"
+
 namespace xllm {
 namespace {
 
@@ -245,6 +247,27 @@ TEST(LinearStateRestoreTest, ResetAndRestoreTogetherFailsClosed) {
   EXPECT_DEATH(
       restore_linear_state_slots(cache.kv_caches, {invalid}, validity_mask),
       "reset and restore are mutually exclusive");
+}
+
+TEST(LinearStateRestoreTest, DirectReadPreservesSourceAndLiveSlots) {
+  LinearStateTestCache cache = make_cache(/*num_slots=*/4,
+                                          /*checkpoint_stride=*/2);
+  cache.conv_cache.select(0, 1).fill_(17.0);
+  cache.conv_cache.select(0, 2).fill_(29.0);
+  cache.ssm_cache.narrow(0, 2, 2).fill_(23.0);
+  cache.ssm_cache.narrow(0, 4, 2).fill_(31.0);
+  const torch::Tensor original_conv = cache.conv_cache.clone();
+  const torch::Tensor original_ssm = cache.ssm_cache.clone();
+
+  LinearStateCacheOp direct_read;
+  direct_read.linear_state_id = 2;
+  direct_read.restore_src_slot_id = 1;
+  std::vector<int64_t> validity_mask = {0};
+  restore_linear_state_slots(cache.kv_caches, {direct_read}, validity_mask);
+
+  EXPECT_EQ(validity_mask[0], 1);
+  EXPECT_TRUE(torch::equal(cache.conv_cache, original_conv));
+  EXPECT_TRUE(torch::equal(cache.ssm_cache, original_ssm));
 }
 
 TEST(LinearStateRestoreTest, ContinuedRequestPreservesStateAndMetadata) {

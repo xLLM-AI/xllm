@@ -122,6 +122,8 @@ class AttentionMetadata(Protocol):
     dsa_graph_block_table_cols: int
     dsa_graph_mode: bool
     linear_state_indices: torch.Tensor | None
+    linear_state_read_indices: torch.Tensor | None
+    linear_state_write_indices: torch.Tensor | None
     has_initial_state: torch.Tensor | None
     dp_execution_token_counts: Sequence[int]
     dp_global_sequence_nums: Sequence[int]
@@ -137,6 +139,29 @@ class AttentionMetadata(Protocol):
     kv_split_size: int
     kv_split_rank: int
     has_kv_shard: bool
+
+
+def resolve_linear_state_io_indices(
+    metadata: AttentionMetadata,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Resolve linear-state read and live/write slots for one forward."""
+    write_indices = getattr(metadata, "linear_state_write_indices", None)
+    if write_indices is None:
+        write_indices = getattr(metadata, "linear_state_indices", None)
+    read_indices = getattr(metadata, "linear_state_read_indices", None)
+    if read_indices is None or read_indices is write_indices:
+        return write_indices, write_indices
+    if write_indices is None:
+        raise RuntimeError("linear-state read indices require write indices")
+    if read_indices.shape != write_indices.shape:
+        raise RuntimeError(
+            "linear-state read/write indices must have the same shape: "
+            f"read={tuple(read_indices.shape)}, write={tuple(write_indices.shape)}"
+        )
+    is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
+    if (not is_prefill or getattr(metadata, "is_spec_verify", False)) and not torch.equal(read_indices, write_indices):
+        raise RuntimeError("linear-state read/write separation is only supported for non-speculative prefill")
+    return read_indices, write_indices
 
 
 @dataclass(frozen=True)
