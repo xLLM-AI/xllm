@@ -23,19 +23,21 @@ limitations under the License.
 
 namespace xllm {
 
-bool RateLimiter::is_limited() {
+Status RateLimiter::acquire() {
   const int32_t max =
       ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
   int32_t expected = num_concurrent_requests_.load(std::memory_order_relaxed);
   while (true) {
     // Check if sleeping.
     if (expected == kSleeping) {
-      return true;
+      return Status(StatusCode::UNAVAILABLE,
+                    "Model is currently in sleep state.");
     }
     // Check rate limit.
     if (max > 0 && expected >= max) {
       COUNTER_INC(server_request_total_limit);
-      return true;
+      return Status(StatusCode::RATE_LIMITED,
+                    "The number of concurrent requests has reached the limit.");
     }
     // Atomic check+increment. On CAS failure, `expected` is refreshed and we
     // retry (re-checking the sleep/limit conditions above with the new value).
@@ -45,7 +47,7 @@ bool RateLimiter::is_limited() {
             std::memory_order_acq_rel,
             std::memory_order_relaxed)) {
       GAUGE_SET(num_concurrent_requests, expected + 1);
-      return false;
+      return Status();
     }
   }
 }

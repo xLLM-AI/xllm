@@ -42,6 +42,7 @@ void RequestOutput::log_request_status() const {
     case StatusCode::DEADLINE_EXCEEDED:
       COUNTER_INC(request_status_total_deadline_exceeded);
       break;
+    case StatusCode::RATE_LIMITED:
     case StatusCode::RESOURCE_EXHAUSTED:
       COUNTER_INC(request_status_total_resource_exhausted);
       break;

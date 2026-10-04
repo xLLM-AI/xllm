@@ -12,8 +12,10 @@
 #include <vector>
 
 #include "core/common/metrics.h"
+#include "core/common/rate_limiter.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 #include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
@@ -305,7 +307,8 @@ std::shared_ptr<Request> generate_request_with_prompt_tokens(
     const std::vector<int32_t>& prompt_token_ids,
     int32_t max_tokens,
     int32_t max_context_len,
-    bool enable_schedule_overlap = false) {
+    bool enable_schedule_overlap = false,
+    RateLimiter* rate_limiter = nullptr) {
   RequestSamplingParam sampling_param;
   SchedulerParam scheduler_param;
 
@@ -330,7 +333,8 @@ std::shared_ptr<Request> generate_request_with_prompt_tokens(
                          nullptr,
                          nullptr);
 
-  return std::make_shared<Request>("1", "1", "1", std::move(req_state), "1");
+  return std::make_shared<Request>(
+      "1", "1", "1", std::move(req_state), "1", "", rate_limiter);
 }
 
 std::shared_ptr<Request> generate_request_with_best_of(
@@ -1024,6 +1028,10 @@ TEST(ContinuousSchedulerTest, PDDecodeBestOfOneSkipsExpansionAndShares) {
 }
 
 TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
+  ScopedConfigValue<int32_t> limit(
+      ServiceConfig::get_instance().max_concurrent_requests(), 1);
+  RateLimiter rate_limiter;
+  ASSERT_TRUE(rate_limiter.acquire().ok());
   SchedulerOptions opt = create_scheduler_options(1024, 16, 0, 1024, 1);
   opt.enable_schedule_overlap() = false;
   auto engine = std::make_unique<FakeEngine>(32, 4);
@@ -1033,7 +1041,8 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
   const size_t initial_free_blocks =
       util::max(block_manager_pool->num_free_blocks());
 
-  auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  auto request = generate_request_with_prompt_tokens(
+      {1, 2, 3, 4}, 4, 30000, /*enable_schedule_overlap=*/false, &rate_limiter);
   request->state().stream = true;
   request->state().output_func = [](const RequestOutput&) { return false; };
   make_request_decode_ready(request);
@@ -1063,15 +1072,29 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
   EXPECT_TRUE(scheduler->get_running_requests().empty());
   EXPECT_EQ(util::max(block_manager_pool->num_free_blocks()),
             initial_free_blocks);
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+  batch = BatchGroup();
+  request.reset();
+  scheduler->wait_for_responses();
+  scheduler.reset();
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
+  ASSERT_TRUE(rate_limiter.acquire().ok());
+  rate_limiter.decrease_one_request();
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
 }
 
 TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
+  ScopedConfigValue<int32_t> limit(
+      ServiceConfig::get_instance().max_concurrent_requests(), 1);
+  RateLimiter rate_limiter;
+  ASSERT_TRUE(rate_limiter.acquire().ok());
   SchedulerOptions opt = create_scheduler_options(1024, 16, 0, 1024, 1);
   opt.enable_schedule_overlap() = false;
   auto engine = std::make_unique<FakeEngine>(32, 4);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  auto request = generate_request_with_prompt_tokens(
+      {1, 2, 3, 4}, 4, 30000, /*enable_schedule_overlap=*/false, &rate_limiter);
   request->state().stream = true;
   make_request_decode_ready(request);
   scheduler->add_request(request);
@@ -1104,6 +1127,14 @@ TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
   (void)scheduler->prepare_batch_test();
   scheduler->wait_for_responses();
   EXPECT_EQ(callback_count, 1);
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+  batch = BatchGroup();
+  request.reset();
+  scheduler.reset();
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
+  ASSERT_TRUE(rate_limiter.acquire().ok());
+  rate_limiter.decrease_one_request();
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
 }
 
 TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {

@@ -283,11 +283,9 @@ void RecCompletionServiceImpl::process_async_impl(
     return;
   }
 
-  // Check if the request is being rate-limited.
-  if (unlikely(master_->get_rate_limiter()->is_limited())) {
-    call->finish_with_error(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.");
+  const Status admission = master_->get_rate_limiter()->acquire();
+  if (unlikely(!admission.ok())) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
 

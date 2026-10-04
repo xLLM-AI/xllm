@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <brpc/callback.h>
 #include <brpc/controller.h>
 #include <butil/iobuf.h>
 #include <glog/logging.h>
@@ -22,6 +23,7 @@ limitations under the License.
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -207,13 +209,19 @@ class StreamCall : public Call {
 
   bool is_disconnected() const override {
     if (stream_) {
-      return connection_status_ != 0;
-    } else {
-      if (controller_) {
-        return controller_->IsCanceled();
+      std::lock_guard<std::mutex> lock(stream_start_mutex_);
+      if (stream_finished_.load(std::memory_order_acquire)) {
+        return false;
       }
-      return true;
+      if (!stream_started_) {
+        return controller_ == nullptr || controller_->IsCanceled();
+      }
+      // The controller may be destroyed by done_->Run(). Only the attachment
+      // and its independently owned stop state remain valid after startup.
+      return stream_stopped_->load(std::memory_order_acquire) ||
+             connection_status_.load(std::memory_order_relaxed) != 0;
     }
+    return controller_ == nullptr || controller_->IsCanceled();
   }
 
   void set_system_fingerprint(std::string fingerprint) {
@@ -251,16 +259,25 @@ class StreamCall : public Call {
     return true;
   }
 
+  static void on_stream_stopped(std::shared_ptr<std::atomic<bool>> stopped) {
+    stopped->store(true, std::memory_order_release);
+  }
+
   std::string system_fingerprint_;
   bool openai_http_ = false;
+  mutable std::mutex stream_start_mutex_;
+  std::shared_ptr<std::atomic<bool>> stream_stopped_;
   proto::Usage stream_usage_;
 
  protected:
   void start_stream() {
+    std::lock_guard<std::mutex> lock(stream_start_mutex_);
     if (stream_started_) {
       return;
     }
     pa_ = controller_->CreateProgressiveAttachment();
+    stream_stopped_ = std::make_shared<std::atomic<bool>>(false);
+    pa_->NotifyOnStopped(brpc::NewCallback(on_stream_stopped, stream_stopped_));
     controller_->http_response().set_content_type(
         "text/event-stream; charset=utf-8");
     controller_->http_response().set_status_code(200);
@@ -284,7 +301,7 @@ class StreamCall : public Call {
 
   json2pb::Pb2JsonOptions json_options_;
 
-  int connection_status_ = 0;
+  std::atomic<int32_t> connection_status_{0};
 };
 
 // Anthropic SSE stream call with custom event formatting
@@ -309,17 +326,24 @@ class AnthropicCall final
             /*defer_stream_start=*/true) {
     // Anthropic responses require empty content arrays to remain visible.
     this->json_options_.jsonify_empty_array = true;
+    if (is_http_request) {
+      this->controller_->http_response().SetHeader("request-id",
+                                                   this->x_request_id_);
+    }
   }
 
   ~AnthropicCall() override = default;
 
   bool finish_with_error(const StatusCode& code, const std::string& message) {
+    if (this->stream_finished_.load(std::memory_order_acquire)) {
+      return false;
+    }
     int32_t http_status = 500;
-    std::string type = "internal_error";
+    std::string type = "api_error";
     if (code == StatusCode::INVALID_ARGUMENT) {
       http_status = 400;
       type = "BadRequestError";
-    } else if (code == StatusCode::RESOURCE_EXHAUSTED) {
+    } else if (code == StatusCode::RATE_LIMITED) {
       http_status = 429;
       type = "rate_limit_error";
     } else if (code == StatusCode::UNAVAILABLE) {
@@ -327,12 +351,16 @@ class AnthropicCall final
       type = "overloaded_error";
     }
     const nlohmann::json error = {
-        {"type", "error"}, {"error", {{"type", type}, {"message", message}}}};
+        {"type", "error"},
+        {"error", {{"type", type}, {"message", message}}},
+        {"request_id", this->x_request_id_}};
     if (!this->stream_started_) {
       this->controller_->http_response().set_status_code(http_status);
+      this->controller_->http_response().set_content_type("application/json");
       this->controller_->response_attachment().clear();
       this->controller_->response_attachment().append(error.dump());
-      return true;
+      this->stream_finished_.store(true, std::memory_order_release);
+      return false;
     }
     bool written = write("error", error.dump());
     finish();
@@ -349,6 +377,9 @@ class AnthropicCall final
 
   template <typename ProtoMessage>
   bool write_and_finish(ProtoMessage& response) {
+    if (this->stream_finished_.load(std::memory_order_acquire)) {
+      return false;
+    }
     std::string json;
     std::string err_msg;
     if (!api_service::proto_to_anthropic_json(

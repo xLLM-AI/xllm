@@ -43,13 +43,28 @@ class StreamTestService final : public proto::XllmAPIService {
     proto::AnthropicMessagesRequest request;
     request.set_stream(mode != "count");
     proto::AnthropicMessagesResponse response;
-    AnthropicCall call(ctrl, done, &request, &response, /*use_arena=*/true);
+    AnthropicCall call(ctrl,
+                       done,
+                       &request,
+                       &response,
+                       /*use_arena=*/true,
+                       /*is_http_request=*/true);
     if (mode == "invalid") {
       call.finish_with_error(StatusCode::INVALID_ARGUMENT, "invalid request");
       return;
     }
-    if (mode == "limited") {
-      call.finish_with_error(StatusCode::RESOURCE_EXHAUSTED, "busy");
+    if (mode == "limited" || mode == "limited_then_write") {
+      EXPECT_FALSE(call.finish_with_error(StatusCode::RATE_LIMITED, "busy"));
+      if (mode == "limited_then_write") {
+        EXPECT_FALSE(call.write_and_finish(response));
+        EXPECT_FALSE(call.write("message_start", std::string("{}")));
+        EXPECT_FALSE(call.finish_with_error(StatusCode::UNKNOWN, "late error"));
+        call.finish();
+      }
+      return;
+    }
+    if (mode == "exhausted") {
+      call.finish_with_error(StatusCode::RESOURCE_EXHAUSTED, "queue full");
       return;
     }
     if (mode == "count") {
@@ -104,6 +119,26 @@ class AnthropicCallTest : public testing::Test {
     channel_.CallMethod(nullptr, &controller, nullptr, nullptr, nullptr);
   }
 
+  static void check_json_error(const brpc::Controller& controller,
+                               int32_t status,
+                               const std::string& type,
+                               const std::string& message) {
+    EXPECT_EQ(controller.http_response().status_code(), status);
+    EXPECT_EQ(controller.http_response().content_type(), "application/json");
+    EXPECT_EQ(controller.http_response().GetHeader("Retry-After"), nullptr);
+    const auto* request_id = controller.http_response().GetHeader("request-id");
+    ASSERT_NE(request_id, nullptr);
+    EXPECT_FALSE(request_id->empty());
+    const std::string body = controller.response_attachment().to_string();
+    EXPECT_EQ(nlohmann::json::parse(body),
+              nlohmann::json({{"type", "error"},
+                              {"error", {{"type", type}, {"message", message}}},
+                              {"request_id", *request_id}}));
+    EXPECT_EQ(body.find("event:"), std::string::npos);
+    EXPECT_EQ(body.find("data:"), std::string::npos);
+    EXPECT_EQ(body.find("[DONE]"), std::string::npos);
+  }
+
   StreamTestService service_;
   brpc::Server server_;
   brpc::Channel channel_;
@@ -112,21 +147,25 @@ class AnthropicCallTest : public testing::Test {
 TEST_F(AnthropicCallTest, ValidationErrorRemainsJsonBeforeStreamStarts) {
   brpc::Controller controller;
   request("invalid", controller);
-  EXPECT_EQ(controller.http_response().status_code(), 400);
-  EXPECT_EQ(controller.http_response().content_type(), "application/json");
-  const auto body =
-      nlohmann::json::parse(controller.response_attachment().to_string());
-  EXPECT_EQ(body["type"], "error");
-  EXPECT_EQ(body["error"]["type"], "BadRequestError");
+  check_json_error(controller, 400, "BadRequestError", "invalid request");
 }
 
 TEST_F(AnthropicCallTest, RateLimitUses429BeforeStreamStarts) {
   brpc::Controller controller;
   request("limited", controller);
-  EXPECT_EQ(controller.http_response().status_code(), 429);
-  const auto body =
-      nlohmann::json::parse(controller.response_attachment().to_string());
-  EXPECT_EQ(body["error"]["type"], "rate_limit_error");
+  check_json_error(controller, 429, "rate_limit_error", "busy");
+}
+
+TEST_F(AnthropicCallTest, ResourceExhaustionIsNotRateLimiting) {
+  brpc::Controller controller;
+  request("exhausted", controller);
+  check_json_error(controller, 500, "api_error", "queue full");
+}
+
+TEST_F(AnthropicCallTest, RejectionPreventsLaterWritesFromStartingStream) {
+  brpc::Controller controller;
+  request("limited_then_write", controller);
+  check_json_error(controller, 429, "rate_limit_error", "busy");
 }
 
 TEST_F(AnthropicCallTest, StreamClosesAfterMessageStopWithoutDoneSentinel) {
@@ -144,9 +183,26 @@ TEST_F(AnthropicCallTest, GenerationErrorIsAnSseEventAndClosesStream) {
   brpc::Controller controller;
   request("stream_error", controller);
   ASSERT_FALSE(controller.Failed()) << controller.ErrorText();
+  EXPECT_EQ(controller.http_response().status_code(), 200);
+  EXPECT_EQ(controller.http_response().content_type(),
+            "text/event-stream; charset=utf-8");
   const std::string body = controller.response_attachment().to_string();
-  EXPECT_NE(body.find("event: error\n"), std::string::npos);
-  EXPECT_NE(body.find("failed generation"), std::string::npos);
+  EXPECT_NE(body.find("event: message_start\n"), std::string::npos);
+  const std::string prefix = "event: error\ndata: ";
+  const size_t offset = body.find(prefix);
+  ASSERT_NE(offset, std::string::npos);
+  const size_t data_start = offset + prefix.size();
+  const size_t data_end = body.find("\n\n", data_start);
+  ASSERT_NE(data_end, std::string::npos);
+  const auto* request_id = controller.http_response().GetHeader("request-id");
+  ASSERT_NE(request_id, nullptr);
+  EXPECT_EQ(
+      nlohmann::json::parse(body.substr(data_start, data_end - data_start)),
+      nlohmann::json(
+          {{"type", "error"},
+           {"error", {{"type", "api_error"}, {"message", "failed generation"}}},
+           {"request_id", *request_id}}));
+  EXPECT_EQ(body.find("event: error\n", data_end), std::string::npos);
   EXPECT_EQ(body.find("[DONE]"), std::string::npos);
 }
 

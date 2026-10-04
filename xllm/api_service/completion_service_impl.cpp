@@ -240,12 +240,12 @@ void CompletionServiceImpl::process_async_rpc_impl(
   };
 
   // Check if the request is being rate-limited.
-  if (unlikely(master->get_rate_limiter()->is_limited())) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.",
-        service_request_id,
-        target_xservice_addr);
+  const Status admission = master->get_rate_limiter()->acquire();
+  if (unlikely(!admission.ok())) {
+    CALLBACK_WITH_ERROR(admission.code(),
+                        admission.message(),
+                        service_request_id,
+                        target_xservice_addr);
     return;
   }
 
@@ -282,17 +282,9 @@ void CompletionServiceImpl::process_async_impl(
     return;
   }
 
-  // Check if the request is being rate-limited or model is sleeping.
-  // is_limited() returns true if sleeping or rate-limited.
-  if (unlikely(master->get_rate_limiter()->is_limited())) {
-    if (master->get_rate_limiter()->is_sleeping()) {
-      call->finish_with_error(StatusCode::UNAVAILABLE,
-                              "Model is currently in sleep state.");
-    } else {
-      call->finish_with_error(
-          StatusCode::RESOURCE_EXHAUSTED,
-          "The number of concurrent requests has reached the limit.");
-    }
+  const Status admission = master->get_rate_limiter()->acquire();
+  if (unlikely(!admission.ok())) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
 

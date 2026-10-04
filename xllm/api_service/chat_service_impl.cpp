@@ -532,10 +532,9 @@ void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
     return;
   }
 
-  if (rec_master_->get_rate_limiter()->is_limited()) {
-    call->finish_with_error(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.");
+  const Status admission = rec_master_->get_rate_limiter()->acquire();
+  if (!admission.ok()) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
 
@@ -664,12 +663,12 @@ void ChatServiceImpl::process_async_rpc_impl(
 
   // LLMMaster path (existing logic)
   // Check if the request is being rate-limited.
-  if (master->get_rate_limiter()->is_limited()) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.",
-        service_request_id,
-        target_xservice_addr);
+  const Status admission = master->get_rate_limiter()->acquire();
+  if (!admission.ok()) {
+    CALLBACK_WITH_ERROR(admission.code(),
+                        admission.message(),
+                        service_request_id,
+                        target_xservice_addr);
     return;
   }
 
@@ -752,18 +751,9 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
                             "model");
     return;
   }
-  // LLMMaster path (existing logic)
-  // Check if the request is being rate-limited or model is sleeping.
-  // is_limited() returns true if sleeping or rate-limited.
-  if (unlikely(master->get_rate_limiter()->is_limited())) {
-    if (master->get_rate_limiter()->is_sleeping()) {
-      call->finish_with_error(StatusCode::UNAVAILABLE,
-                              "Model is currently in sleep state.");
-    } else {
-      call->finish_with_error(
-          StatusCode::RESOURCE_EXHAUSTED,
-          "The number of concurrent requests has reached the limit.");
-    }
+  const Status admission = master->get_rate_limiter()->acquire();
+  if (unlikely(!admission.ok())) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
 
@@ -905,11 +895,9 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
     return;
   }
 
-  // Check if the request is being rate-limited.
-  if (master_->get_rate_limiter()->is_limited()) {
-    call->finish_with_error(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.");
+  const Status admission = master_->get_rate_limiter()->acquire();
+  if (!admission.ok()) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
 

@@ -124,7 +124,7 @@ int32_t openai_http_status(StatusCode code) {
       return 400;
     case StatusCode::NOT_FOUND:
       return 404;
-    case StatusCode::RESOURCE_EXHAUSTED:
+    case StatusCode::RATE_LIMITED:
       return 429;
     case StatusCode::UNAVAILABLE:
       return 503;

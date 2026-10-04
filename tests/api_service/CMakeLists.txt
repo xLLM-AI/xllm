@@ -180,9 +180,13 @@ add_dependencies(openai_service_test brpc-static)
 
 cc_test(
   NAME openai_protocol_test
+  NO_NPU_RUNTIME
   SRCS openai_protocol_test.cpp
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
+target_compile_definitions(openai_protocol_test PRIVATE
+  XLLM_OPENAI_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/openai_sdk_client.py"
+  XLLM_ANTHROPIC_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/anthropic_sdk_client.py")
 
 cc_test(
   NAME
@@ -199,6 +203,7 @@ cc_test(
 cc_test(
   NAME
     anthropic_call_test
+  NO_NPU_RUNTIME
   SRCS
     anthropic_call_test.cpp
   DEPS

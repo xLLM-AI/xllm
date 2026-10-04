@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/master_manager.h"
 #include "core/framework/request/request_params.h"
+#include "core/util/scope_guard.h"
 #include "core/util/uuid.h"
 #include "function_call/function_call.h"
 
@@ -508,16 +509,21 @@ void AnthropicServiceImpl::count_tokens(std::shared_ptr<AnthropicCall> call) {
         "The model `" + request.model() + "` does not exist.");
     return;
   }
-  if (model_master->get_rate_limiter()->is_limited()) {
-    call->finish_with_error(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.");
+  const Status admission = model_master->get_rate_limiter()->acquire();
+  if (!admission.ok()) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
+  ScopeGuard rate_limit_guard([model_master] {
+    model_master->get_rate_limiter()->decrease_one_request();
+  });
   RequestParams params(
       request, call->get_x_request_id(), call->get_x_request_time());
+  std::vector<Message> messages =
+      api_service::build_anthropic_messages(request);
+  rate_limit_guard.dismiss();
   model_master->count_chat_tokens(
-      api_service::build_anthropic_messages(request),
+      std::move(messages),
       std::move(params),
       [call](Status status, int32_t input_tokens) {
         if (!status.ok()) {
@@ -544,12 +550,14 @@ void AnthropicServiceImpl::process_async_impl(
   }
 
   // Check rate limit
-  if (model_master->get_rate_limiter()->is_limited()) {
-    call->finish_with_error(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.");
+  const Status admission = model_master->get_rate_limiter()->acquire();
+  if (!admission.ok()) {
+    call->finish_with_error(admission.code(), admission.message());
     return;
   }
+  ScopeGuard rate_limit_guard([model_master] {
+    model_master->get_rate_limiter()->decrease_one_request();
+  });
 
   // Build request parameters
   RequestParams request_params(
@@ -611,7 +619,6 @@ void AnthropicServiceImpl::process_async_impl(
     if (!model_master->tokenizer().encode(rendered->prompt,
                                           &prompt_tokens.value(),
                                           request_params.add_special_tokens)) {
-      model_master->get_rate_limiter()->decrease_one_request();
       call->finish_with_error(StatusCode::INVALID_ARGUMENT,
                               "Failed to encode prompt");
       return;
@@ -621,7 +628,8 @@ void AnthropicServiceImpl::process_async_impl(
       prompt_tokens.has_value() ? static_cast<int32_t>(prompt_tokens->size())
                                 : 0;
 
-  // Handle request
+  // The master takes ownership of the admitted slot.
+  rate_limit_guard.dismiss();
   model_master->handle_request(
       std::move(messages),
       std::move(prompt_tokens),

@@ -108,6 +108,8 @@ enum class StatusCode : uint8_t {
   UNAVAILABLE = 6,
   // requested model or resource does not exist.
   NOT_FOUND = 7,
+  // concurrent-request admission limit reached.
+  RATE_LIMITED = 8,
 };
 
 class Status final {

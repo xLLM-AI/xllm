@@ -118,16 +118,7 @@ uint32_t get_requested_logprobs(const proto::SampleRequest& request) {
 
 Status get_rate_limit_status(LLMMaster* master) {
   CHECK(master != nullptr);
-  if (!master->get_rate_limiter()->is_limited()) {
-    return Status();
-  }
-
-  if (master->get_rate_limiter()->is_sleeping()) {
-    return Status(StatusCode::UNAVAILABLE,
-                  "Model is currently in sleep state.");
-  }
-  return Status(StatusCode::RESOURCE_EXHAUSTED,
-                "The number of concurrent requests has reached the limit.");
+  return master->get_rate_limiter()->acquire();
 }
 
 }  // namespace

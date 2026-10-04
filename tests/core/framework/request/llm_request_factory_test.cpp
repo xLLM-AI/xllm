@@ -121,7 +121,7 @@ class LLMRequestFactoryTest : public ::testing::Test {
         ServiceConfig::get_instance().enable_json_object_output();
     ServiceConfig::get_instance().enable_json_object_output(true);
     // Simulate the caller (service entry) having acquired a rate-limit slot.
-    rate_limiter_.is_limited();
+    ASSERT_TRUE(rate_limiter_.acquire().ok());
     ASSERT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
   }
 
@@ -272,6 +272,16 @@ TEST_F(LLMRequestFactoryTest,
   // On success the slot stays held; it is later released when the request is
   // completed/destroyed by the scheduler, not by the factory.
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+  auto response_owner = request;
+  request->set_cancel();
+  request->set_cancel();
+  request.reset();
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+  response_owner.reset();
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+  EXPECT_TRUE(rate_limiter_.acquire().ok());
+  rate_limiter_.decrease_one_request();
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
 }
 
 TEST_F(LLMRequestFactoryTest, TaskPipelineRejectsJsonObjectBeforeGrammarSetup) {

@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <atomic>
 
+#include "core/common/types.h"
+
 namespace xllm {
 
 class RateLimiter final {
@@ -28,9 +30,11 @@ class RateLimiter final {
 
   ~RateLimiter() = default;
 
-  // Returns true if request is rate-limited or sleeping.
-  // If not limited and not sleeping, increments the counter.
-  bool is_limited();
+  // Acquires one slot on success; rejection does not change the counter.
+  // The rejection status distinguishes the concurrency limit from sleep.
+  Status acquire();
+
+  bool is_limited() { return !acquire().ok(); }
 
   void decrease_one_request();
 
