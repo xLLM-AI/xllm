@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "framework/kv_cache/kv_shard_layout.h"
@@ -175,8 +177,11 @@ TEST(CacheLayoutBuilderTest, DescribesSequenceScopedSsmHeads) {
   EXPECT_EQ(descriptor.spans[0].repeat_count, 1U);
 }
 
-TEST(CacheLayoutBuilderTest, DescribesCheckpointedSsmRowsPerLogicalSlot) {
+class LinearCacheLayoutTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(LinearCacheLayoutTest, DescribesCheckpointedSsmRowsPerLogicalSlot) {
   CacheTensorLayoutContext context;
+  context.enable_mla = GetParam();
   context.tp_rank = 1;
   context.tp_size = 2;
   context.linear_value_head_count = 4;
@@ -190,14 +195,24 @@ TEST(CacheLayoutBuilderTest, DescribesCheckpointedSsmRowsPerLogicalSlot) {
   ASSERT_TRUE(describe_cache_tensor(context, &tensor, &error)) << error;
   ASSERT_TRUE(tensor.shard_descriptor.has_value());
   const LogicalShardDescriptor& descriptor = *tensor.shard_descriptor;
+  EXPECT_EQ(descriptor.kind, LogicalShardKind::SHARDED);
+  EXPECT_EQ(descriptor.resource_scope, CacheResourceScope::SEQUENCE);
   ASSERT_EQ(descriptor.spans.size(), 2U);
-  EXPECT_EQ(descriptor.spans[0].repeat_count, 3U);
-  EXPECT_EQ(descriptor.spans[0].logical_stride_bytes, 4U * 3U * 4U * 4U);
-  EXPECT_EQ(descriptor.spans[0].physical_stride_bytes, 2U * 3U * 4U * 4U);
+  for (size_t index = 0; index < descriptor.spans.size(); ++index) {
+    const LogicalSpan& span = descriptor.spans[index];
+    EXPECT_EQ(span.owner_tp_rank, 1);
+    EXPECT_EQ(span.logical_offset_bytes, (2U + index) * 3U * 4U * 4U);
+    EXPECT_EQ(span.physical_offset_bytes, index * 3U * 4U * 4U);
+    EXPECT_EQ(span.bytes_per_region, 3U * 4U * 4U);
+    EXPECT_EQ(span.repeat_count, 3U);
+    EXPECT_EQ(span.logical_stride_bytes, 4U * 3U * 4U * 4U);
+    EXPECT_EQ(span.physical_stride_bytes, 2U * 3U * 4U * 4U);
+  }
 }
 
-TEST(CacheLayoutBuilderTest, DescribesCompositeConvState) {
+TEST_P(LinearCacheLayoutTest, DescribesCompositeConvState) {
   CacheTensorLayoutContext context;
+  context.enable_mla = GetParam();
   context.tp_rank = 1;
   context.tp_size = 2;
   context.linear_key_head_count = 4;
@@ -218,8 +233,21 @@ TEST(CacheLayoutBuilderTest, DescribesCompositeConvState) {
   EXPECT_EQ(descriptor.spans[0].logical_tensor, "conv_key_a");
   EXPECT_EQ(descriptor.spans[2].logical_tensor, "conv_key_b");
   EXPECT_EQ(descriptor.spans[4].logical_tensor, "conv_value");
-  EXPECT_EQ(descriptor.spans[0].repeat_count, 5U);
+  const uint64_t logical_offsets[] = {24, 36, 24, 36, 12};
+  for (size_t index = 0; index < descriptor.spans.size(); ++index) {
+    const LogicalSpan& span = descriptor.spans[index];
+    EXPECT_EQ(span.owner_tp_rank, 1);
+    EXPECT_EQ(span.logical_offset_bytes, logical_offsets[index]);
+    EXPECT_EQ(span.physical_offset_bytes, index * 3U * 4U);
+    EXPECT_EQ(span.bytes_per_region, 3U * 4U);
+    EXPECT_EQ(span.repeat_count, 5U);
+    EXPECT_EQ(span.physical_stride_bytes, 15U * 4U);
+  }
 }
+
+INSTANTIATE_TEST_SUITE_P(WithAndWithoutMla,
+                         LinearCacheLayoutTest,
+                         ::testing::Bool());
 
 TEST(KVShardLayoutTest, MapsTokensAndSlots) {
   const int64_t dcp4_lengths[] = {128, 128, 1, 0};

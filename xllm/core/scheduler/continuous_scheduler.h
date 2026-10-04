@@ -133,8 +133,10 @@ class ContinuousSchedulerBase : public Scheduler {
   void drain_prefetch_pipeline();
   void populate_heartbeat_request(
       xllm_service::proto::HeartbeatRequest& request,
-      bool include_xtensor_info) const;
-  virtual void enqueue_ready_request(std::shared_ptr<Request> request);
+      bool include_xtensor_info);
+  // Caller holds prefetch_admission_mutex_ for both admission operations.
+  virtual size_t num_queued_requests() const;
+  virtual bool enqueue_ready_request(std::shared_ptr<Request> request);
   virtual void release_failed_request(const std::shared_ptr<Request>& request) {
   }
 

@@ -30,9 +30,11 @@ limitations under the License.
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "common/metrics.h"
+#include "core/util/scope_guard.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_impl.h"
 #include "framework/block/block_manager_pool.h"
@@ -72,6 +74,28 @@ class FakeTokenizer final : public Tokenizer {
   }
 };
 
+class PrefetchBlockManagerPool final : public BlockManagerPool {
+ public:
+  PrefetchBlockManagerPool(const Options& options, int32_t dp_size)
+      : BlockManagerPool(options, dp_size) {}
+
+  bool has_storage_prefetch() const override {
+    return enable_storage_prefetch_;
+  }
+
+  void set_storage_prefetch_enabled(bool enabled) {
+    enable_storage_prefetch_ = enabled;
+  }
+
+  void prefetch_from_storage(std::shared_ptr<Request> request,
+                             PrefetchDoneCallback done) override {
+    done(std::move(request));
+  }
+
+ private:
+  bool enable_storage_prefetch_ = false;
+};
+
 class FakeEngine final : public Engine {
  public:
   FakeEngine(int32_t num_blocks,
@@ -88,7 +112,8 @@ class FakeEngine final : public Engine {
         .num_embedding_blocks(embedding_blocks == 0 ? num_blocks
                                                     : embedding_blocks);
     tokenizer_ = std::make_unique<FakeTokenizer>();
-    block_manager_ = std::make_unique<BlockManagerPool>(options, dp_size);
+    block_manager_ =
+        std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
   }
 
   std::function<ForwardOutput(BatchGroup&)> forward;
@@ -118,6 +143,10 @@ class FakeEngine final : public Engine {
 
   bool init() override { return true; }
 
+  void set_storage_prefetch_enabled(bool enabled) {
+    block_manager_->set_storage_prefetch_enabled(enabled);
+  }
+
   bool pull_kv_blocks(int32_t /*src_dp_size*/,
                       int32_t /*src_dp_rank*/,
                       const std::vector<uint64_t>& /*src_cluster_ids*/,
@@ -132,12 +161,13 @@ class FakeEngine final : public Engine {
 
  private:
   std::unique_ptr<Tokenizer> tokenizer_;
-  std::unique_ptr<BlockManagerPool> block_manager_;
+  std::unique_ptr<PrefetchBlockManagerPool> block_manager_;
   ModelArgs model_args_;
 };
 
 class TestDisaggPDScheduler final : public DisaggPDScheduler {
  public:
+  using DisaggPDScheduler::enqueue_dispatched_request;
   using DisaggPDScheduler::prepare_batch;
 
   template <typename TargetEngine>
@@ -187,6 +217,22 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   bool pop_decode_request_for_test(std::shared_ptr<Request>* request) {
     return request_queue_.read(*request);
   }
+
+  bool pop_prefill_request_for_test(bool offline,
+                                    std::shared_ptr<Request>* request) {
+    if (offline) {
+      return prefill_request_queue_offline_.try_dequeue(*request);
+    }
+    return prefill_request_queue_.try_dequeue(*request);
+  }
+
+  void drain_prefetch_for_test() { drain_prefetch_pipeline(); }
+
+  void stop_dispatch_for_test() {
+    CHECK(prefill_request_queue_.enqueue(nullptr));
+  }
+
+  void wait_for_responses() { response_processor_->wait_completion(); }
 
   void update_metrics(std::vector<Sequence*>& sequences) {
     scheduler_metrics_->update_token_latency_metrics(sequences);
@@ -439,6 +485,70 @@ bool recv_first_generation(DisaggPDScheduler* scheduler,
 }
 
 }  // namespace
+
+TEST(DisaggPDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
+  for (const bool storage_prefetch : {false, true}) {
+    SCOPED_TRACE(storage_prefetch);
+    for (const bool offline : {false, true}) {
+      SCOPED_TRACE(offline);
+      FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+      engine.set_storage_prefetch_enabled(storage_prefetch);
+      DisaggPDScheduler::Options options = make_options();
+      options.request_queue_size(1);
+      TestDisaggPDScheduler scheduler(&engine, options);
+      std::shared_ptr<Request> first = make_request({1, 2}, "first");
+      first->state().scheduler_param.offline = offline;
+      std::shared_ptr<Request> second = make_request({3, 4}, "second");
+      second->state().scheduler_param.offline = !offline;
+
+      ASSERT_TRUE(scheduler.add_request(first));
+      EXPECT_FALSE(scheduler.add_request(second));
+      EXPECT_EQ(scheduler.has_pending_prefetch(), storage_prefetch);
+
+      // Completing prefetch transfers, rather than releases, its reservation.
+      scheduler.drain_prefetch_for_test();
+      EXPECT_FALSE(scheduler.has_pending_prefetch());
+      EXPECT_FALSE(scheduler.add_request(second));
+      std::shared_ptr<Request> queued;
+      EXPECT_FALSE(scheduler.pop_decode_request_for_test(&queued));
+      EXPECT_FALSE(scheduler.pop_prefill_request_for_test(!offline, &queued));
+      ASSERT_TRUE(scheduler.pop_prefill_request_for_test(offline, &queued));
+      EXPECT_EQ(queued, first);
+      // Popping from the dispatch queue still leaves the allocation in flight.
+      EXPECT_FALSE(scheduler.add_request(second));
+
+      ASSERT_TRUE(scheduler.enqueue_dispatched_request(std::move(queued)));
+      EXPECT_FALSE(scheduler.add_request(second));
+      ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
+      EXPECT_EQ(queued, first);
+
+      std::promise<Status> error;
+      std::future<Status> status = error.get_future();
+      second->state().output_func = [&error](const RequestOutput& output) {
+        error.set_value(output.status.value());
+        return true;
+      };
+      ASSERT_TRUE(scheduler.add_request(second));
+      scheduler.drain_prefetch_for_test();
+      std::shared_ptr<Request> next = make_request({5, 6}, "next");
+      EXPECT_FALSE(scheduler.add_request(next));
+      std::future_status response_status;
+      {
+        // A missing Decode address takes a real early-return dispatch path.
+        std::thread dispatcher([&scheduler] { scheduler.dispatch_requests(); });
+        ScopeGuard stop_dispatch([&scheduler, &dispatcher] {
+          scheduler.stop_dispatch_for_test();
+          dispatcher.join();
+        });
+        response_status = status.wait_for(std::chrono::seconds(5));
+      }
+      scheduler.wait_for_responses();
+      ASSERT_EQ(response_status, std::future_status::ready);
+      EXPECT_EQ(status.get().code(), StatusCode::INVALID_ARGUMENT);
+      EXPECT_TRUE(scheduler.add_request(next));
+    }
+  }
+}
 
 TEST(DisaggPDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
@@ -1115,6 +1225,45 @@ TEST_F(ReservationTest, LostConfirmationRetriesWithoutDoubleFree) {
             (std::vector<size_t>{0, 0}));
   EXPECT_EQ(embedding->num_used_blocks(), 0u);
   EXPECT_EQ(embedding->num_free_blocks(), 15u);
+}
+
+TEST_F(ReservationTest, DispatchQueueOverflowReturnsReservationAndError) {
+  std::shared_ptr<Request> remote = reserve();
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  DisaggPDScheduler::Options options = make_options();
+  options.request_queue_size(1);
+  TestDisaggPDScheduler prefill(&engine, options);
+  std::shared_ptr<Request> request = accepted();
+  std::promise<Status> error;
+  std::future<Status> status = error.get_future();
+  request->state().output_func = [&error](const RequestOutput& output) {
+    error.set_value(output.status.value());
+    return true;
+  };
+  ASSERT_TRUE(prefill.add_request(request));
+  std::shared_ptr<Request> dispatched;
+  ASSERT_TRUE(
+      prefill.pop_prefill_request_for_test(/*offline=*/false, &dispatched));
+
+  // Simulate another producer filling the execution queue during the RPC.
+  std::shared_ptr<Request> occupying = make_request({9, 10}, "occupying");
+  prefill.admit_prefill(occupying);
+  EXPECT_FALSE(prefill.enqueue_dispatched_request(std::move(dispatched)));
+  prefill.wait_notifications();
+  prefill.wait_for_responses();
+  ASSERT_EQ(status.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  EXPECT_EQ(status.get().code(), StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_EQ(service_.released, 1);
+  EXPECT_EQ(remote->sequences()[0]->kv_state().num_blocks(BlockType::KV), 0u);
+
+  std::shared_ptr<Request> next = make_request({11, 12}, "next");
+  EXPECT_FALSE(prefill.add_request(next));
+  std::shared_ptr<Request> queued;
+  ASSERT_TRUE(prefill.pop_decode_request_for_test(&queued));
+  EXPECT_EQ(queued, occupying);
+  EXPECT_TRUE(prefill.add_request(next));
 }
 
 TEST_F(ReservationTest, TransportFailureHasBoundedRetries) {

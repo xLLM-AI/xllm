@@ -387,12 +387,7 @@ bool describe_cache_tensor(const CacheTensorLayoutContext& context,
     return true;
   }
 
-  // MLA caches are logical replicas even when physical cache formats differ
-  // from ordinary K/V layouts. The deterministic TP owner prevents duplicate
-  // writes while every destination replica is still populated.
-  if (context.enable_mla) {
-    return describe_replicated_tensor(cache_tensor, error);
-  }
+  // Hybrid MLA models retain TP-sharded recurrent state on their linear layers.
   if (cache_tensor->role == KVCacheTensorRole::CONV &&
       context.linear_key_head_count > 0 &&
       context.linear_value_head_count > 0) {
@@ -401,6 +396,12 @@ bool describe_cache_tensor(const CacheTensorLayoutContext& context,
   if (cache_tensor->role == KVCacheTensorRole::SSM &&
       context.linear_value_head_count > 0) {
     return describe_ssm(context, cache_tensor, error);
+  }
+  // MLA caches are logical replicas even when physical cache formats differ
+  // from ordinary K/V layouts. The deterministic TP owner prevents duplicate
+  // writes while every destination replica is still populated.
+  if (context.enable_mla) {
+    return describe_replicated_tensor(cache_tensor, error);
   }
   if (is_kv_head_role(cache_tensor->role) && context.kv_head_count > 0) {
     return describe_attention_heads(

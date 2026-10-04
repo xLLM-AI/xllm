@@ -51,7 +51,7 @@ from xllm.python.model_executor.cp_utils import (
     cp_shard_positions,
     cp_shard_rows,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import get_forward_context, record_layer_event
 from xllm.python.model_loader import (
     W8A8WeightLoader,
     mla_head_split,
@@ -2190,7 +2190,7 @@ class DeepseekV3Model(nn.Module):
         return DeepseekV3DecoderLayer(cfg, layer_id, dtype, device)
 
     def _record_layer_event(self, layer_id: int) -> None:
-        pass
+        record_layer_event(layer_id)
 
     def _cp_context(self) -> CpContext | None:
         return None

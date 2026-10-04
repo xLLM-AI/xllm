@@ -50,6 +50,7 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
     get_forward_context_or_none,
     in_acl_graph,
+    record_layer_event,
 )
 
 _has_mhc_fused = hasattr(kernels, "hc_pre") and kernels.hc_pre is not None
@@ -569,10 +570,10 @@ class Glm5NextIndexer(nn.Module):
             # Graph branch (fixed shapes): keep ALL pools. The boolean
             # ``pool_keys[:, keep]`` filter below produces a data-dependent
             # output shape (aclnnNonzeroV2) that ACL graph capture cannot
-            # record. It was only a compaction: select_topk masks invalid
-            # pools to -inf via candidate_valid before the topk and fills
-            # their slots with -1 after it, so retaining them changes neither
-            # the selected valid indices nor the output width.
+            # record. select_topk masks invalid pools before selection and
+            # fills their output slots with -1. Tied valid scores can select
+            # different indices when the candidate width changes, so cached
+            # and rebuilt decode pools must use the same uncompressed width.
             return pool_keys, pool_indices, pool_valid
         keep = pool_valid.any(0)
         return pool_keys[:, keep], pool_indices[:, keep], pool_valid[:, keep]
@@ -881,6 +882,9 @@ class Glm5NextIndexer(nn.Module):
             # kPool index cache is unquantized (no scale side-channel).
             ctx.update_index_cache(packed.reshape(num_tokens, -1), None)
 
+        # PD imports the framework index cache, but not this indexer's private
+        # compressed pool cache. Recompute pools from the imported history on
+        # this configured path, including when running a decode ACL graph.
         pool_cache = None
         if (
             self.index_kpool_compress
@@ -888,6 +892,7 @@ class Glm5NextIndexer(nn.Module):
             and ctx.block_table is not None
             and ctx.slot_mapping is not None
             and ctx.actual_seq_kv is not None
+            and not layer.cache_transfer_enabled
         ):
             pool_cache = self._pool_caches.get(layer.layer_id)
             if pool_cache is None:
@@ -1025,10 +1030,23 @@ class Glm5NextIndexer(nn.Module):
             positions_bsd = positions.reshape(-1).index_select(0, src_flat).view(num_seqs, max_q)
             weights_bsd = weights.reshape(num_tokens, self.n_heads).index_select(0, src_flat).view(num_seqs, max_q, -1)
         kv_len = packed_history.shape[1]
+        pool_data = None
         history_key_valid = None
         if not self.index_kpool_compress:
             history_key_valid = (
                 torch.arange(kv_len, device=packed_history.device)[None, :] < ctx.actual_seq_kv[:num_seqs, None]
+            )
+        elif num_tokens == num_seqs and pool_cache is None:
+            # Match read_pools' full ceil(kv_len / rate) candidate domain,
+            # including an incomplete final pool. Compacting invalid pools
+            # changes topk's tie ordering even when all valid scores agree.
+            history_key_valid = packed_history[..., -1].gt(0)
+            pool_data = _kpool_pooled_states(
+                packed_history,
+                history_key_valid,
+                self.index_kpool_compress_ape,
+                self.head_dim,
+                self.index_kpool,
             )
         topk_indices = self.select_topk(
             qr_bsd,
@@ -1038,6 +1056,7 @@ class Glm5NextIndexer(nn.Module):
             current_length=kv_len,
             packed_states=packed_history,
             projected_weights=weights_bsd,
+            pool_data=pool_data,
             key_valid=history_key_valid,
             query_positions=positions_bsd,
             pool_cache=pool_cache,
@@ -1802,6 +1821,7 @@ class Glm5NextModel(nn.Module):
         prev_topk: Optional[torch.Tensor] = None
         for i, layer in enumerate(self.layers):
             hidden, prev_topk = layer(hidden, position_ids, attention_mask, prev_topk)
+            record_layer_event(i)
         # Final collapse: unweighted mean over the streams, then RMSNorm
         # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
         # Flatten [B, S, D] -> [B*S, D]: the engine's compute_logits does

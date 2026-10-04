@@ -151,7 +151,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(Engine* engine,
 
 void ContinuousSchedulerBase::populate_heartbeat_request(
     xllm_service::proto::HeartbeatRequest& request,
-    bool include_xtensor_info) const {
+    bool include_xtensor_info) {
   request.mutable_load_metrics()->set_gpu_cache_usage_perc(
       resource_engine_->block_manager_pool()->get_gpu_cache_usage_perc());
   request.mutable_load_metrics()->set_waiting_requests_num(
@@ -226,15 +226,14 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
   std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
   const size_t pending_before_reservation =
       prefetching_requests_.load(std::memory_order_relaxed);
-  const size_t queued_requests =
-      static_cast<size_t>(std::max<ssize_t>(request_queue_.size(), 0));
+  const size_t queued_requests = num_queued_requests();
   if (queued_requests + pending_before_reservation >=
       request_queue_.capacity()) {
     return false;
   }
 
   if (!kv_cache_manager_->has_storage_prefetch()) {
-    return request_queue_.write(request);
+    return enqueue_ready_request(request);
   }
 
   prefetching_requests_.fetch_add(1, std::memory_order_relaxed);
@@ -279,7 +278,9 @@ void ContinuousSchedulerBase::drain_completed_prefetches() {
       // Admission observes the queue size and reservation count together.
       std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
       if (!cancelled) {
-        enqueue_ready_request(request);
+        CHECK(enqueue_ready_request(request))
+            << "Reserved request queue slot disappeared before prefetch "
+               "completed.";
       }
       const size_t previous =
           prefetching_requests_.fetch_sub(1, std::memory_order_relaxed);
@@ -291,10 +292,13 @@ void ContinuousSchedulerBase::drain_completed_prefetches() {
   }
 }
 
-void ContinuousSchedulerBase::enqueue_ready_request(
+size_t ContinuousSchedulerBase::num_queued_requests() const {
+  return static_cast<size_t>(std::max<ssize_t>(request_queue_.size(), 0));
+}
+
+bool ContinuousSchedulerBase::enqueue_ready_request(
     std::shared_ptr<Request> request) {
-  CHECK(request_queue_.write(std::move(request)))
-      << "Reserved request queue slot disappeared before prefetch completed.";
+  return request_queue_.write(std::move(request));
 }
 
 void ContinuousSchedulerBase::create_queues(const Options& options) {

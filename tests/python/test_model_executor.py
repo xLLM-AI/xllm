@@ -370,6 +370,16 @@ class TestModelExecutorConstruction:
         else:
             mock_graph_runner.assert_not_called()
 
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_configures_cache_transfer_for_every_attention_layer(self, enabled: bool) -> None:
+        model = _FakeModel(num_layers=3)
+        with patch(
+            "xllm.python.model_executor.executor._create_attention_backend",
+            return_value=StubAttentionBackend(),
+        ):
+            ModelExecutor(model, {"enable_disagg_pd": enabled}, max_seqs_per_batch=4)
+        assert all(layer.cache_transfer_enabled is enabled for layer in model.layers)
+
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
         return_value=StubAttentionBackend(),
@@ -1941,6 +1951,45 @@ def test_prepared_executor_rejects_mtp_state_before_model_execution() -> None:
     with pytest.raises(ValueError, match="MTP top-k"):
         executor.execute(torch.zeros(2), torch.zeros(2), metadata, mtp_topk_indices=torch.zeros(2))
     executor.eager_runner.execute.assert_not_called()
+
+
+@pytest.mark.parametrize("is_mtp", [False, True])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_kv_transfer_uses_eager_and_preserves_step_inputs(prepared: bool, is_mtp: bool) -> None:
+    config = {
+        "model_type": "glm_moe_dsa_mtp" if is_mtp else "glm_moe_dsa",
+        "is_draft_engine": is_mtp,
+    }
+    backend = _PreparedStubAttentionBackend() if prepared else StubAttentionBackend()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    cache = torch.empty(2, 4, 1, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
+    if prepared:
+        executor.prepare_metadata(metadata)
+    tokens = torch.tensor([13, 17], dtype=torch.int32)
+    positions = torch.tensor([7, 19], dtype=torch.int32)
+    hidden = torch.zeros(2, 4) if is_mtp else None
+    topk = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32) if is_mtp else None
+    executor.eager_runner = MagicMock()
+    executor.decode_graph_runner = MagicMock(spec=DecodeAclGraphRunner)
+    executor.decode_graph_runner.can_execute.return_value = True
+    executor.prepared_graph_runner = MagicMock()
+    executor.inductor_runner = MagicMock()
+
+    for _ in range(2):
+        synchronizer = MagicMock()
+        result = executor.execute(tokens, positions, metadata, hidden, synchronizer, topk, enable_graph=True)
+        expected_args = (tokens, positions, metadata, hidden, synchronizer)
+        if not prepared or is_mtp:
+            expected_args += (topk,)
+        executor.eager_runner.execute.assert_called_with(*expected_args)
+        assert result is executor.eager_runner.execute.return_value
+    assert executor.eager_runner.execute.call_count == 2
+    executor.decode_graph_runner.can_execute.assert_not_called()
+    for runner in (executor.decode_graph_runner, executor.prepared_graph_runner, executor.inductor_runner):
+        runner.execute.assert_not_called()
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])

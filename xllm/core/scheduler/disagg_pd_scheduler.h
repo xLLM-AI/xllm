@@ -172,7 +172,10 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
 
   void do_permanent_rejection(const std::shared_ptr<Request>& request);
 
-  void enqueue_ready_request(std::shared_ptr<Request> request) override;
+  size_t num_queued_requests() const override;
+  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
+  bool enqueue_dispatched_request(std::shared_ptr<Request> request);
+  void release_dispatch_admission();
 
   // Pre-execute prefill requests of different lengths at startup and obtain the
   // corresponding TTFT for calculating the estimated TTFT of requests.
@@ -227,6 +230,11 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       prefill_request_queue_;
   moodycamel::BlockingConcurrentQueue<std::shared_ptr<Request>>
       prefill_request_queue_offline_;
+
+  // Includes both dispatch queues, retries and the in-flight allocation RPC.
+  // Guarded by prefetch_admission_mutex_ through the transfer to
+  // request_queue_.
+  size_t pending_dispatch_requests_ = 0;
 
   // Release retries must not delay FirstGeneration or local KV reclamation.
   ThreadPool reservation_release_threadpool_{

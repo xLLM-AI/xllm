@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/util/scope_guard.h"
 #include "disagg_pd.pb.h"
 #include "disagg_pd_scheduler.h"
 #include "distributed_runtime/engine.h"
@@ -395,13 +396,46 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-void DisaggPDScheduler::enqueue_ready_request(
+size_t DisaggPDScheduler::num_queued_requests() const {
+  return ContinuousSchedulerBase::num_queued_requests() +
+         pending_dispatch_requests_;
+}
+
+bool DisaggPDScheduler::enqueue_ready_request(
     std::shared_ptr<Request> request) {
-  if (request->offline()) {
-    prefill_request_queue_offline_.enqueue(std::move(request));
-    return;
+  const bool offline = request->offline();
+  const bool queued =
+      offline ? prefill_request_queue_offline_.enqueue(std::move(request))
+              : prefill_request_queue_.enqueue(std::move(request));
+  if (queued) {
+    ++pending_dispatch_requests_;
   }
-  prefill_request_queue_.enqueue(std::move(request));
+  return queued;
+}
+
+void DisaggPDScheduler::release_dispatch_admission() {
+  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  CHECK_GT(pending_dispatch_requests_, 0u);
+  --pending_dispatch_requests_;
+}
+
+bool DisaggPDScheduler::enqueue_dispatched_request(
+    std::shared_ptr<Request> request) {
+  bool queued = false;
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    CHECK_GT(pending_dispatch_requests_, 0u);
+    queued = ContinuousSchedulerBase::enqueue_ready_request(request);
+    --pending_dispatch_requests_;
+  }
+  if (!queued) {
+    release_failed_request(request);
+    response_processor_->process_failed_request(
+        std::move(request),
+        {StatusCode::RESOURCE_EXHAUSTED,
+         "Prefill request queue is full after Decode allocation"});
+  }
+  return queued;
 }
 
 // prefill send new request to remote instance
@@ -438,6 +472,7 @@ void DisaggPDScheduler::dispatch_requests() {
 
     std::shared_ptr<Request> request = pending.top();
     pending.pop();
+    ScopeGuard release_admission([this] { release_dispatch_admission(); });
 
     std::string selected_instance = request->state().decode_address;
     if (selected_instance.empty()) {
@@ -635,6 +670,7 @@ void DisaggPDScheduler::dispatch_requests() {
         // Keep created_time order: retry from the local pending queue instead
         // of the MPMC queue, which is not FIFO across HTTP threads.
         pending.push(requests[i]);
+        release_admission.dismiss();
 
       } else {
         for (auto& sequence : requests[i]->sequences()) {
@@ -710,7 +746,8 @@ void DisaggPDScheduler::dispatch_requests() {
         requests[i]->state().decode_rpc_address =
             butil::endpoint2str(cntl.remote_side()).c_str();
         // Push to request_queue_; it will be executed by the engine.
-        request_queue_.write(requests[i]);
+        release_admission.dismiss();
+        enqueue_dispatched_request(requests[i]);
       }
     }
     VLOG(1) << "Prefill Decode allocation request_id="

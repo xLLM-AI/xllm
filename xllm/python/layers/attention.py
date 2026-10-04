@@ -55,6 +55,9 @@ class Attention(nn.Module):
         self.fia_pre_tokens = fia_pre_tokens
         self.fia_next_tokens = fia_next_tokens
         self.fia_use_attention_mask = fia_use_attention_mask
+        # External transfers update framework-owned caches only. Derived
+        # model-local caches must be reconstructed from those tensors.
+        self.cache_transfer_enabled = False
 
     def forward(
         self,

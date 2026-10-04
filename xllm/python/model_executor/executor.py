@@ -201,6 +201,8 @@ class ModelExecutor:
         attention_layers = [module for module in model.modules() if isinstance(module, Attention)]
         if not attention_layers:
             raise ValueError("Python model does not contain an Attention layer")
+        for layer in attention_layers:
+            layer.cache_transfer_enabled = bool(config.get("enable_disagg_pd", False))
 
         # GLM-Next mixes DSA (MLA) and KDA (linear-attention) layers with
         # different head/dim configs; the paged backend only serves the DSA
@@ -470,11 +472,14 @@ class ModelExecutor:
         if self.layerwise_split_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
             raise NotImplementedError("Python GLM5.2 layerwise split is decode-only")
 
-        graph_runner = self.decode_graph_runner
+        # Transfer completion events belong to this step. Graph replay cannot
+        # record them through Python, and compilation must not retain a prior
+        # step's synchronizer. Decode steps without a transfer can use graphs.
+        graph_runner = self.decode_graph_runner if layer_synchronizer is None else None
         if getattr(metadata, "prepared_attention_state", None) is not None:
             if mtp_topk_indices is not None and not self._prepared_mtp:
                 raise ValueError("prepared metadata does not support MTP top-k state")
-            if enable_graph:
+            if enable_graph and layer_synchronizer is None:
                 if self.prepared_graph_runner is None:
                     raise RuntimeError("prepared ACL graph runner is not enabled")
                 return self.prepared_graph_runner.execute(
@@ -510,7 +515,7 @@ class ModelExecutor:
                 input_embedding,
                 **graph_kwargs,
             )
-        if mtp_topk_indices is None and self.inductor_runner is not None:
+        if mtp_topk_indices is None and self.inductor_runner is not None and layer_synchronizer is None:
             return self.inductor_runner.execute(
                 input_ids,
                 positions,

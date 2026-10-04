@@ -44,6 +44,7 @@ import torch.nn as nn
 from xllm.python import kernels
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.linear import ColumnParallelLinear
+from xllm.python.model_executor.forward_context import record_layer_event
 from xllm.python.model_loader import QLinearWeightLoader
 from xllm.python.models.glm5_next import (
     Glm5NextConfig,
@@ -208,6 +209,7 @@ class Glm5NextMtpModel(nn.Module):
             device=hidden_states.device,
         )
         hidden_states = self.layers[0](hidden_states, position_ids, attention_mask)
+        record_layer_event(0)
         hidden_states = self.norm(hidden_states)
         return hidden_states.view(-1, self.cfg.hidden_size)
 

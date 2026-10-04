@@ -28,7 +28,13 @@ class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
   explicit ControllablePrefetchBlockManagerPool(const Options& options)
       : BlockManagerPool(options, /*dp_size=*/1) {}
 
-  bool has_storage_prefetch() const override { return true; }
+  bool has_storage_prefetch() const override {
+    return enable_storage_prefetch_;
+  }
+
+  void set_storage_prefetch_enabled(bool enabled) {
+    enable_storage_prefetch_ = enabled;
+  }
 
   void prefetch_from_storage(std::shared_ptr<Request> request,
                              PrefetchDoneCallback done) override {
@@ -56,6 +62,7 @@ class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
   size_t prefetch_calls() const { return prefetch_calls_; }
 
  private:
+  bool enable_storage_prefetch_ = true;
   bool prefetch_ready_ = true;
   size_t prefetch_calls_ = 0;
   std::vector<std::pair<std::shared_ptr<Request>, PrefetchDoneCallback>>
@@ -122,6 +129,10 @@ class FakeEngine : public Engine {
     fake_block_manager_->set_prefetch_ready(ready);
   }
 
+  void set_storage_prefetch_enabled(bool enabled) {
+    fake_block_manager_->set_storage_prefetch_enabled(enabled);
+  }
+
   size_t prefetch_calls() const {
     return fake_block_manager_->prefetch_calls();
   }
@@ -183,6 +194,17 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
     last_batch_ = BatchGroup(/*dp_size=*/1);
     last_batch_.front().add(sequence);
     is_first_step_ = false;
+  }
+};
+
+class RejectingReadyScheduler final : public ContinuousScheduler<> {
+ public:
+  RejectingReadyScheduler(FakeEngine* engine, const Options& options)
+      : ContinuousScheduler<>(engine, options) {}
+
+ protected:
+  bool enqueue_ready_request(std::shared_ptr<Request> /*request*/) override {
+    return false;
   }
 };
 
@@ -567,6 +589,31 @@ TEST(ContinuousSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
     EXPECT_EQ(HISTOGRAM_inter_token_latency_milliseconds.count(),
               itl_ms_count + 1);
   }
+}
+
+TEST(ContinuousSchedulerTest,
+     AdmissionWithoutStoragePrefetchPropagatesFailureAndBoundsCapacity) {
+  SchedulerOptions options = create_scheduler_options(32, 4, 0, 32, 1);
+  options.request_queue_size(1);
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/4);
+  engine.set_storage_prefetch_enabled(false);
+  std::shared_ptr<Request> first = generate_request_with_prompt_tokens(
+      {1, 2}, /*max_tokens=*/4, /*max_context_len=*/32);
+  std::shared_ptr<Request> second = generate_request_with_prompt_tokens(
+      {3, 4}, /*max_tokens=*/4, /*max_context_len=*/32);
+
+  {
+    RejectingReadyScheduler scheduler(&engine, options);
+    EXPECT_FALSE(scheduler.add_request(first));
+    EXPECT_FALSE(scheduler.has_pending_prefetch());
+  }
+
+  TestableContinuousScheduler scheduler(&engine, options);
+  ASSERT_TRUE(scheduler.add_request(first));
+  EXPECT_FALSE(scheduler.add_request(second));
+  EXPECT_EQ(scheduler.scheduler_queue_size(), 1u);
+  EXPECT_FALSE(scheduler.has_pending_prefetch());
+  EXPECT_EQ(engine.prefetch_calls(), 0u);
 }
 
 TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
