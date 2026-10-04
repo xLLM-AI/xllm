@@ -35,6 +35,7 @@ limitations under the License.
 #include "layers/common/rotary_embedding.h"
 #include "layers/mlu/dcp_decode_context.h"
 #include "layers/mlu/deepseek_v32_cp_context.h"
+#include "layers/mlu/glm5_next/glm5_next_kpool_indexer.h"
 #include "layers/mlu/indexer.h"
 #include "platform/stream.h"
 
@@ -223,7 +224,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
     // Sequence-parallel attention works with both replicated (all heads per
     // rank) and TP-sharded (heads / tp_size per rank) attention weights; the
     // top-k metadata (indexer or reused state) is the only hard requirement.
-    return has_indexer_ || reuses_topk;
+    return !use_kpool_indexer_ && (has_indexer_ || reuses_topk);
   }
 
   const HeadInfo& tp_heads() const { return tp_heads_; }
@@ -238,6 +239,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   bool enable_lighting_indexer_ = false;
   bool dcp_spans_tp_ = false;
   bool has_indexer_ = false;
+  bool use_kpool_indexer_ = false;
   bool has_trans_ = false;
   bool interleaved_ = false;
   double eps_;
@@ -276,6 +278,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   std::shared_ptr<RotaryEmbeddingBase> rotary_emb_;
   std::shared_ptr<RotaryEmbeddingBase> indexer_rotary_emb_;
   Indexer indexer_{nullptr};
+  Glm5NextKPoolIndexer glm5_next_kpool_indexer_{nullptr};
   std::shared_ptr<Stream> sp_comm_stream_;
   Attention dcp_full_head_attn_{nullptr};
 };

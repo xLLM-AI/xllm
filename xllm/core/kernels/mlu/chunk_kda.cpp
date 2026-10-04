@@ -32,8 +32,6 @@ namespace {
 
 constexpr int64_t kHeadDim = 128;
 constexpr int64_t kBlockC = 16;
-constexpr int64_t kBlockD = 64;
-constexpr int64_t kLargeKktBlock = 32;
 constexpr int64_t kWorkspaceGroupChunks = 128;
 constexpr int64_t kWorkspaceLimitBytes = 2LL * 1024 * 1024 * 1024;
 constexpr char kKernelPath[] =
@@ -45,7 +43,9 @@ uint32_t grid_size(int64_t job_count, int64_t core_count) {
   return static_cast<uint32_t>(std::min(job_count, core_count));
 }
 
-int64_t configured_prefill_chunk_size() {
+}  // namespace
+
+int64_t kda_prefill_chunk_size() {
   static const int64_t chunk_size = [] {
     const char* env = std::getenv("XLLM_MLU_KDA_CHUNK_SIZE");
     if (env == nullptr) {
@@ -63,14 +63,6 @@ int64_t configured_prefill_chunk_size() {
   return chunk_size;
 }
 
-}  // namespace
-
-int64_t kda_prefill_chunk_size(int64_t num_heads, bool use_qk_l2norm) {
-  CHECK_GT(num_heads, 0);
-  static_cast<void>(use_qk_l2norm);
-  return configured_prefill_chunk_size();
-}
-
 using xllm::triton_jit::JITKernel;
 
 namespace {
@@ -82,25 +74,30 @@ class ChunkKDAWorkspace final {
                     int64_t chunk_size,
                     const torch::TensorOptions& options) {
     const torch::TensorOptions fp32_options = options.dtype(torch::kFloat32);
-    gate_cumsum = torch::empty({slots, heads, kHeadDim}, fp32_options);
-    lower_inverse =
+    lower_inverse_ =
         torch::empty({slots, heads, chunk_size, chunk_size}, fp32_options);
-    aq = torch::empty_like(lower_inverse);
+    aq_ = torch::empty_like(lower_inverse_);
     const std::vector<int64_t> token_shape = {
         slots, heads, chunk_size, kHeadDim};
-    w = torch::empty(token_shape, fp32_options);
-    u = torch::empty(token_shape, fp32_options);
-    qg = torch::empty(token_shape, fp32_options);
-    kg = torch::empty(token_shape, fp32_options);
+    w_ = torch::empty(token_shape, fp32_options);
+    // State multiplies value-major U with the transposed chunk inverse.
+    u_ = torch::empty({slots, heads, kHeadDim, chunk_size}, fp32_options);
+    qg_ = torch::empty(token_shape, fp32_options);
+    kg_ = torch::empty(token_shape, fp32_options);
+    normalized_q_ = torch::empty(token_shape, fp32_options);
+    normalized_k_ = torch::empty(token_shape, fp32_options);
+    cumulative_gate_ = torch::empty(token_shape, fp32_options);
   }
 
-  torch::Tensor gate_cumsum;
-  torch::Tensor lower_inverse;
-  torch::Tensor aq;
-  torch::Tensor w;
-  torch::Tensor u;
-  torch::Tensor qg;
-  torch::Tensor kg;
+  torch::Tensor lower_inverse_;
+  torch::Tensor aq_;
+  torch::Tensor w_;
+  torch::Tensor u_;
+  torch::Tensor qg_;
+  torch::Tensor kg_;
+  torch::Tensor normalized_q_;
+  torch::Tensor normalized_k_;
+  torch::Tensor cumulative_gate_;
 };
 
 void launch_group(const torch::Tensor& q,
@@ -121,107 +118,79 @@ void launch_group(const torch::Tensor& q,
                   int64_t chunk_size,
                   bool use_qk_l2norm,
                   int64_t core_count) {
-  const bool use_small_chunk = chunk_size == ChunkKDAImpl::kDefaultChunkSize;
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
-
-  const int64_t gate_jobs = slots * num_heads;
+  const int64_t chunk_head_jobs = slots * num_heads;
   JITKernel::get(kKernelPath, "tmo_chunk_kda_gate_kernel")
       .launch(static_cast<void*>(queue),
-              /*grid=*/{grid_size(gate_jobs, core_count), 1, 1},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/5},
+              /*grid=*/{grid_size(chunk_head_jobs, core_count), 1, 1},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4},
+              v,
+              beta,
+              workspace.w_,
+              workspace.u_,
+              workspace.qg_,
+              workspace.kg_,
               log_gate,
-              workspace.gate_cumsum,
               q,
               k,
-              workspace.qg,
-              workspace.w,
-              workspace.kg,
+              workspace.normalized_q_,
+              workspace.normalized_k_,
+              workspace.cumulative_gate_,
               cu_seqlens,
               chunk_indices,
               chunk_base,
               slots,
-              static_cast<int32_t>(num_heads),
+              /*H=*/static_cast<int32_t>(num_heads),
               /*BT=*/static_cast<int32_t>(chunk_size),
               /*D=*/static_cast<int32_t>(kHeadDim),
               /*BK=*/static_cast<int32_t>(kHeadDim),
               /*USE_QK_L2NORM=*/use_qk_l2norm ? 1 : 0);
 
-  const int64_t kkt_block = use_small_chunk ? kBlockC : kLargeKktBlock;
-  const int64_t blocks_per_chunk = chunk_size / kkt_block;
-  const int64_t kkt_grid_pairs = blocks_per_chunk * (blocks_per_chunk + 1) / 2;
-  const int64_t kkt_jobs = slots * num_heads * kkt_grid_pairs;
   JITKernel::get(kKernelPath, "tmo_chunk_kda_kkt_kernel")
       .launch(static_cast<void*>(queue),
-              /*grid=*/{grid_size(kkt_jobs, core_count), 1, 1},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/99},
-              workspace.qg,
-              workspace.w,
-              workspace.kg,
+              /*grid=*/{grid_size(chunk_head_jobs, core_count), 1, 1},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/5},
+              workspace.normalized_q_,
+              workspace.normalized_k_,
+              workspace.cumulative_gate_,
               beta,
-              workspace.lower_inverse,
-              workspace.aq,
+              workspace.lower_inverse_,
+              workspace.aq_,
               cu_seqlens,
               chunk_indices,
               chunk_base,
               slots,
-              static_cast<int32_t>(num_heads),
+              /*H=*/static_cast<int32_t>(num_heads),
               /*BT=*/static_cast<int32_t>(chunk_size),
               /*D=*/static_cast<int32_t>(kHeadDim),
-              /*BC=*/static_cast<int32_t>(kkt_block),
+              /*BC=*/static_cast<int32_t>(kBlockC),
+              /*BN=*/static_cast<int32_t>(chunk_size),
               /*BK=*/static_cast<int32_t>(kHeadDim));
 
-  const int64_t chunk_head_jobs = slots * num_heads;
   JITKernel::get(kKernelPath, "tmo_chunk_kda_inverse_kernel")
       .launch(static_cast<void*>(queue),
               /*grid=*/{grid_size(chunk_head_jobs, core_count), 1, 1},
-              /*cfg=*/
-              {/*num_warps=*/1,
-               /*num_stages=*/use_small_chunk ? 3 : 4},
-              workspace.lower_inverse,
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4},
+              workspace.lower_inverse_,
               slots,
-              static_cast<int32_t>(num_heads),
+              /*H=*/static_cast<int32_t>(num_heads),
               /*BT=*/static_cast<int32_t>(chunk_size),
               /*B0=*/static_cast<int32_t>(kBlockC));
 
-  JITKernel::get(kKernelPath, "tmo_chunk_kda_wu_kernel")
-      .launch(static_cast<void*>(queue),
-              /*grid=*/{grid_size(chunk_head_jobs, core_count), 1, 1},
-              /*cfg=*/
-              {/*num_warps=*/1,
-               /*num_stages=*/use_small_chunk ? 99 : 5},
-              k,
-              q,
-              v,
-              workspace.gate_cumsum,
-              beta,
-              workspace.lower_inverse,
-              workspace.w,
-              workspace.u,
-              workspace.qg,
-              workspace.kg,
-              cu_seqlens,
-              chunk_indices,
-              chunk_base,
-              slots,
-              static_cast<int32_t>(num_heads),
-              /*BT=*/static_cast<int32_t>(chunk_size),
-              /*D=*/static_cast<int32_t>(kHeadDim),
-              /*BK=*/static_cast<int32_t>(kHeadDim),
-              /*BV=*/static_cast<int32_t>(kHeadDim));
-
-  const int64_t value_block = use_small_chunk ? 32 : kBlockD;
-  const int64_t value_blocks = (kHeadDim + value_block - 1) / value_block;
-  const int64_t state_jobs = num_sequences * num_heads * value_blocks;
+  constexpr int64_t kValueBlock = 32;
+  const int64_t state_jobs =
+      num_sequences * num_heads * (kHeadDim / kValueBlock);
   JITKernel::get(kKernelPath, "tmo_chunk_kda_state_kernel")
       .launch(static_cast<void*>(queue),
               /*grid=*/{grid_size(state_jobs, core_count), 1, 1},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
-              workspace.w,
-              workspace.u,
-              workspace.qg,
-              workspace.kg,
-              workspace.aq,
-              workspace.gate_cumsum,
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/99},
+              workspace.lower_inverse_,
+              workspace.w_,
+              workspace.u_,
+              workspace.qg_,
+              workspace.kg_,
+              workspace.aq_,
+              workspace.cumulative_gate_,
               input_state,
               final_state,
               output,
@@ -230,11 +199,11 @@ void launch_group(const torch::Tensor& q,
               chunk_base,
               slots,
               num_sequences,
-              static_cast<int32_t>(num_heads),
+              /*H=*/static_cast<int32_t>(num_heads),
               /*BT=*/static_cast<int32_t>(chunk_size),
               /*D=*/static_cast<int32_t>(kHeadDim),
-              /*BK=*/static_cast<int32_t>(kBlockD),
-              /*BV=*/static_cast<int32_t>(value_block));
+              /*BK=*/static_cast<int32_t>(kHeadDim),
+              /*BV=*/static_cast<int32_t>(kValueBlock));
 }
 
 std::tuple<torch::Tensor, torch::Tensor> forward_chunks(
@@ -252,15 +221,20 @@ std::tuple<torch::Tensor, torch::Tensor> forward_chunks(
     bool use_qk_l2norm,
     int64_t core_count) {
   const int64_t total_chunks = chunk_indices.size(0);
-  const int64_t workspace_bytes_per_slot_head =
-      (kHeadDim + 2 * chunk_size * chunk_size + 4 * chunk_size * kHeadDim) *
-      static_cast<int64_t>(sizeof(float));
-  const int64_t max_workspace_slots =
-      kWorkspaceLimitBytes / (num_heads * workspace_bytes_per_slot_head);
-  CHECK_GT(max_workspace_slots, 0)
-      << "Chunk KDA workspace for one all-head chunk exceeds 2 GiB";
+  // Seven token tiles and two chunk matrices.
+  // Budget padded chunks; packed token count excludes tail padding.
+  const int64_t elements_per_chunk_head =
+      7 * chunk_size * kHeadDim + 2 * chunk_size * chunk_size;
+  const int64_t bytes_per_chunk_head =
+      elements_per_chunk_head * static_cast<int64_t>(sizeof(float));
+  CHECK_LE(num_heads, kWorkspaceLimitBytes / bytes_per_chunk_head)
+      << "A single KDA workspace chunk exceeds the 2 GiB budget";
+  const int64_t budget_slots =
+      kWorkspaceLimitBytes / (num_heads * bytes_per_chunk_head);
   const int64_t workspace_slots =
-      std::min({total_chunks, kWorkspaceGroupChunks, max_workspace_slots});
+      total_chunks <= budget_slots
+          ? total_chunks
+          : std::min(kWorkspaceGroupChunks, budget_slots);
 
   ChunkKDAWorkspace workspace(
       workspace_slots, num_heads, chunk_size, q.options());
@@ -378,7 +352,7 @@ std::tuple<torch::Tensor, torch::Tensor> ChunkKDAImpl::forward(
                         chunk_indices_work,
                         output_final_state,
                         num_heads_,
-                        kda_prefill_chunk_size(num_heads_, use_qk_l2norm),
+                        kda_prefill_chunk_size(),
                         use_qk_l2norm,
                         total_core_num_);
 }

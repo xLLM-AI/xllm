@@ -32,6 +32,7 @@ namespace xllm::kernel::mlu {
 namespace {
 
 constexpr int64_t kMaxBlockHv = 32;
+constexpr int64_t kMaxGdnBlockHv = 16;
 constexpr int64_t kMaxBlockN = 4;
 constexpr int64_t kBlockQueryLen = 4;
 constexpr int64_t kSplitBlockV = 64;
@@ -54,24 +55,6 @@ int64_t choose_block_hv(int64_t num_k_heads,
   LOG(FATAL) << "Failed to select BLOCK_HV for H=" << num_k_heads
              << ", HV=" << num_v_heads;
   return heads_per_query;
-}
-
-int64_t choose_kda_head_group(int64_t num_sequences,
-                              int64_t num_heads,
-                              int64_t core_count) {
-  int64_t best_group = num_heads;
-  int64_t best_work =
-      ((num_sequences + core_count - 1) / core_count) * num_heads;
-  // Equal work prefers larger contiguous head tiles, reducing fragmented IO.
-  for (int64_t group = num_heads / 2; group > 0; group /= 2) {
-    int64_t jobs = num_sequences * (num_heads / group);
-    int64_t work = ((jobs + core_count - 1) / core_count) * group;
-    if (work < best_work) {
-      best_group = group;
-      best_work = work;
-    }
-  }
-  return best_group;
 }
 
 }  // namespace
@@ -116,7 +99,6 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
   v = v.contiguous();
   a = a.contiguous();
   b = b.contiguous();
-  initial_state = initial_state;
   int64_t batch_size = k.size(0);
   int64_t seq_len = k.size(1);
   int64_t num_k_heads = k.size(2);
@@ -159,13 +141,10 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
   // batches can leave padded positions unwritten. Only those paths need a
   // zeroed output; dense fixed-length batches write every output element.
   const std::vector<int64_t> output_shape = {
-      1, batch_size, seq_len, num_v_heads, head_v_dim};
-  const torch::TensorOptions output_options = v.options().dtype(v.dtype());
-  torch::Tensor out_storage =
-      (ssm_state_indices.defined() || cu_seqlens.defined())
-          ? torch::zeros(output_shape, output_options)
-          : torch::empty(output_shape, output_options);
-  torch::Tensor out = out_storage.select(/*dim=*/0, /*index=*/0);
+      batch_size, seq_len, num_v_heads, head_v_dim};
+  torch::Tensor out = (ssm_state_indices.defined() || cu_seqlens.defined())
+                          ? torch::zeros(output_shape, v.options())
+                          : torch::empty(output_shape, v.options());
   torch::Tensor final_state =
       inplace_final_state
           ? initial_state
@@ -176,13 +155,10 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
     return std::make_pair(out, final_state);
   }
 
-  torch::Tensor num_accepted_tokens =
+  const std::optional<torch::Tensor> num_accepted_tokens =
       num_accepted_tokens_opt.has_value()
-          ? num_accepted_tokens_opt.value().contiguous().to(torch::kInt32)
-          : torch::Tensor();
-  std::optional<torch::Tensor> num_accepted_tokens_arg =
-      num_accepted_tokens_opt.has_value()
-          ? std::make_optional(num_accepted_tokens)
+          ? std::make_optional(
+                num_accepted_tokens_opt->contiguous().to(torch::kInt32))
           : std::nullopt;
   torch::Tensor state_indices;
   if (ssm_state_indices.defined()) {
@@ -197,59 +173,55 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
   } else {
     state_indices = torch::zeros({num_sequences, 1}, query_start_loc.options());
   }
-  int64_t stride_indices_seq = 1;
-  int64_t stride_indices_tok = 1;
-  if (state_indices.dim() == 1) {
-    stride_indices_seq = state_indices.stride(0);
-  } else {
-    stride_indices_seq = state_indices.stride(0);
-    stride_indices_tok = state_indices.stride(1);
+  if (ssm_state_indices.defined()) {
+    CHECK(state_indices.dim() == 1 || state_indices.dim() == 2)
+        << "state indices must be 1D or 2D";
+    CHECK_GE(state_indices.size(0), num_sequences)
+        << "state indices must cover each active sequence";
+    if (state_indices.dim() == 2) {
+      CHECK_GT(state_indices.size(1), 0)
+          << "state index table must contain an initial slot";
+    }
   }
+  if (num_accepted_tokens.has_value()) {
+    CHECK_EQ(num_accepted_tokens->dim(), 1);
+    CHECK_GE(num_accepted_tokens->size(0), num_sequences)
+        << "accepted tokens must cover each active sequence";
+  }
+  const int64_t stride_indices_seq = state_indices.stride(0);
+  const int64_t stride_indices_tok =
+      state_indices.dim() == 1 ? 1 : state_indices.stride(1);
 
   torch_mlu::DeviceProp* prop =
       torch_mlu::getDeviceProperties(torch_mlu::current_device());
   CHECK(prop != nullptr);
   int64_t core_count = prop->cluster_count * prop->core_num_per_cluster;
 
-  // Small batches need more independent tiles. Low checkpoint-slot occupancy
-  // also benefits from scheduling heads separately. Occupancy only selects a
-  // kernel; token boundaries always come from query_start_loc on the device.
-  const bool sparse_checkpoints =
-      num_accepted_tokens_opt.has_value() && state_indices.dim() == 2 &&
-      state_indices.size(1) > 1 &&
-      batch_size * seq_len * 4 < num_sequences * state_indices.size(1) * 3;
   const bool use_glm_kda =
       is_kda && kda_use_safe_gate && use_qk_l2norm_in_kernel &&
       ssm_state_indices.defined() && num_k_heads == 8 && num_v_heads == 8 &&
       head_k_dim == 128 && head_v_dim == 128 && initial_state.is_contiguous() &&
-      A_log.is_contiguous() && dt_bias.is_contiguous();
-  int64_t kda_head_group =
-      use_glm_kda
-          ? choose_kda_head_group(num_sequences, num_v_heads, core_count)
-          : num_v_heads;
-  // A single head cannot amortize the grouped kernel's token preloading.
-  // Underfilled batches with few tokens similarly favor independent tiles.
-  // Token counts select a layout only; the kernel still reads each CU boundary.
-  const bool short_underfilled_batch = num_sequences < core_count &&
-                                       batch_size * seq_len <= num_sequences &&
-                                       kda_head_group < num_v_heads;
-  const bool use_direct_kda =
-      use_glm_kda && (num_sequences <= core_count / 2 || sparse_checkpoints ||
-                      kda_head_group == 1 || short_underfilled_batch);
-  if (use_direct_kda) {
-    // Sparse verification keeps a full value tile even for one sequence.
-    int64_t direct_block_v =
-        num_sequences == 1 && !sparse_checkpoints ? 32 : 128;
-    int64_t direct_tiles = num_sequences * num_v_heads *
-                           ((head_v_dim + direct_block_v - 1) / direct_block_v);
+      A_log.is_contiguous() && dt_bias.is_contiguous() &&
+      q.scalar_type() == torch::kBFloat16 &&
+      k.scalar_type() == torch::kBFloat16 &&
+      v.scalar_type() == torch::kBFloat16 &&
+      a.scalar_type() == torch::kBFloat16 &&
+      b.scalar_type() == torch::kBFloat16 &&
+      initial_state.scalar_type() == torch::kFloat32 &&
+      A_log.scalar_type() == torch::kFloat32 &&
+      dt_bias.scalar_type() == torch::kFloat32;
+  if (use_glm_kda) {
+    constexpr int32_t kDirectBlockV = 128;
+    const int64_t direct_tiles = num_sequences * num_v_heads;
     cnrtQueue_t queue = torch_mlu::getCurMLUStream();
     JITKernel& direct_kernel = JITKernel::get(
         /*py_path=*/"xllm.core.kernels.mlu.triton_kernel.fused_recurrent_kda",
         /*fn_name=*/"fused_recurrent_kda_kernel");
     direct_kernel.launch(
         static_cast<void*>(queue),
-        /*grid=*/{static_cast<uint32_t>(direct_tiles), 1, 1},
-        /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
+        /*grid=*/
+        {static_cast<uint32_t>(std::min(direct_tiles, core_count)), 1, 1},
+        /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4, /*bottleneck=*/"mv"},
         q,
         k,
         v,
@@ -262,7 +234,7 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
         out,
         query_start_loc,
         state_indices,
-        num_accepted_tokens_arg,
+        num_accepted_tokens,
         /*N=*/static_cast<int32_t>(num_sequences),
         /*H=*/static_cast<int32_t>(num_k_heads),
         /*HV=*/static_cast<int32_t>(num_v_heads),
@@ -272,9 +244,9 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
         /*STRIDE_INDICES_TOK=*/static_cast<int32_t>(stride_indices_tok),
         /*SCALE=*/static_cast<float>(scale),
         /*LOWER_BOUND=*/kda_gate_lower_bound,
-        /*SPEC=*/num_accepted_tokens_opt.has_value() ? 1 : 0,
+        /*SPEC=*/num_accepted_tokens.has_value() ? 1 : 0,
         /*INPLACE=*/inplace_final_state ? 1 : 0,
-        /*BV=*/static_cast<int32_t>(direct_block_v),
+        /*BV=*/kDirectBlockV,
         /*BK=*/static_cast<int32_t>(head_k_dim));
     return std::make_pair(out, final_state);
   }
@@ -292,6 +264,11 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
     }
   }
   int64_t max_block_hv = kMaxBlockHv / block_n;
+  // Bound GDN head tiles to keep four-token Qwen3.5 updates within MLU NRAM.
+  // Preserve the existing KDA launch configuration.
+  if (!is_kda) {
+    max_block_hv = std::min(max_block_hv, kMaxGdnBlockHv);
+  }
 
   int64_t block_hv = choose_block_hv(num_k_heads, num_v_heads, max_block_hv);
   // A single-token KDA update has no recurrence across heads or value rows.
@@ -306,24 +283,8 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       block_v = std::min<int64_t>(head_v_dim, kSplitBlockV);
     }
   }
-  const bool use_factored_kda_reduce =
-      use_glm_kda && block_k == 128 && block_v == 128 && block_n == 1 &&
-      q.scalar_type() == torch::kBFloat16 &&
-      k.scalar_type() == torch::kBFloat16 &&
-      v.scalar_type() == torch::kBFloat16 &&
-      a.scalar_type() == torch::kBFloat16 &&
-      b.scalar_type() == torch::kBFloat16 &&
-      initial_state.scalar_type() == torch::kFloat32 &&
-      A_log.scalar_type() == torch::kFloat32 &&
-      dt_bias.scalar_type() == torch::kFloat32;
-  if (use_glm_kda) {
-    // Three-dimensional update broadcasting keeps all head groups within NRAM.
-    block_hv = kda_head_group;
-  }
-  const bool split_hv =
-      split_single_token || (use_glm_kda && block_hv < num_v_heads);
   int64_t num_hv_blocks =
-      split_hv ? (num_v_heads + block_hv - 1) / block_hv : 1;
+      split_single_token ? (num_v_heads + block_hv - 1) / block_hv : 1;
   int64_t total_blocks = ((head_k_dim + block_k - 1) / block_k) *
                          ((head_v_dim + block_v - 1) / block_v) *
                          num_sequences * num_hv_blocks;
@@ -348,12 +309,12 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            q,
            k,
            v,
-           out_storage,
+           out,
            initial_state,
            final_state,
            query_start_loc,
            state_indices,
-           num_accepted_tokens_arg,
+           num_accepted_tokens,
            static_cast<float>(scale),
            static_cast<int64_t>(num_sequences),
            static_cast<int64_t>(seq_len),
@@ -365,8 +326,8 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            static_cast<int32_t>(head_v_dim),
            /*BK=*/static_cast<int32_t>(block_k),
            /*BV=*/static_cast<int32_t>(block_v),
-           static_cast<int64_t>(initial_state.stride(0)),
-           static_cast<int64_t>(final_state.stride(0)),
+           initial_state.stride(0),
+           final_state.stride(0),
            stride_indices_seq,
            stride_indices_tok,
            /*USE_INITIAL_STATE=*/1,
@@ -374,14 +335,14 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            /*USE_QK_L2NORM_IN_KERNEL=*/use_qk_l2norm_in_kernel ? 1 : 0,
            /*IS_VARLEN=*/cu_seqlens.defined() ? 1 : 0,
            /*IS_CONTINUOUS_BATCHING=*/ssm_state_indices.defined() ? 1 : 0,
-           /*IS_SPEC_DECODING=*/num_accepted_tokens_opt.has_value() ? 1 : 0,
+           /*IS_SPEC_DECODING=*/num_accepted_tokens.has_value() ? 1 : 0,
            /*IS_KDA=*/is_kda ? 1 : 0,
            /*KDA_USE_SAFE_GATE=*/kda_use_safe_gate ? 1 : 0,
            kda_gate_lower_bound,
-           /*SPLIT_HV=*/split_hv ? 1 : 0,
+           /*SPLIT_HV=*/split_single_token ? 1 : 0,
            /*BLOCK_N=*/static_cast<int32_t>(block_n),
            /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen),
-           /*FACTORED_REDUCE=*/use_factored_kda_reduce ? 1 : 0);
+           /*FACTORED_REDUCE=*/0);
 
   return std::make_pair(out, final_state);
 }

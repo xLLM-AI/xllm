@@ -201,6 +201,10 @@ torch::Tensor KVCache::get_k_cache() const { return impl_->get_k_cache(); }
 
 torch::Tensor KVCache::get_v_cache() const { return impl_->get_v_cache(); }
 
+torch::Tensor KVCache::get_kpool_tail() const {
+  return impl_->get_kpool_tail();
+}
+
 torch::Tensor KVCache::get_index_cache() const {
   return impl_->get_index_cache();
 }

@@ -39,7 +39,8 @@ class AttentionHostInputView final {
  public:
   template <typename Owner>
   explicit AttentionHostInputView(Owner& owner)
-      : q_seq_lens(owner.q_seq_lens),
+      : kpool_query_lens(owner.kpool_query_lens),
+        q_seq_lens(owner.q_seq_lens),
         q_cu_seq_lens(owner.q_cu_seq_lens),
         kv_seq_lens(owner.kv_seq_lens),
         kv_cu_seq_lens(owner.kv_cu_seq_lens),
@@ -51,6 +52,7 @@ class AttentionHostInputView final {
         graph_q_seq_lens_data(owner.graph_q_seq_lens_data),
         graph_kv_seq_lens_data(owner.graph_kv_seq_lens_data) {}
 
+  std::vector<int32_t>& kpool_query_lens;
   std::vector<int32_t>& q_seq_lens;
   std::vector<int32_t>& q_cu_seq_lens;
   std::vector<int32_t>& kv_seq_lens;
@@ -343,6 +345,7 @@ class AttentionInputView final {
 namespace detail {
 template <typename Source, typename Target>
 void copy_attention_host_input(const Source& source, Target& target) {
+  target.kpool_query_lens = source.kpool_query_lens;
   target.q_seq_lens = source.q_seq_lens;
   target.q_cu_seq_lens = source.q_cu_seq_lens;
   target.kv_seq_lens = source.kv_seq_lens;

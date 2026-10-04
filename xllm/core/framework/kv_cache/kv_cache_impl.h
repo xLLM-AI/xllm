@@ -46,6 +46,7 @@ class KVCacheImpl {
   virtual std::optional<torch::Tensor> get_v_cache_scale() const;
   virtual std::optional<torch::Tensor> get_indexer_cache_scale() const;
   virtual torch::Tensor get_index_cache() const;
+  virtual torch::Tensor get_kpool_tail() const;
   virtual torch::Tensor get_conv_cache() const;
   virtual torch::Tensor get_ssm_cache() const;
   virtual torch::Tensor get_swa_cache() const;

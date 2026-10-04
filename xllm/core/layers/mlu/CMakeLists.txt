@@ -24,6 +24,7 @@ cc_library(
     deepseek_v4/deepseek_v4_sparse_moe_block.h
     hyper_connection.h
     glm5_next/glm5_next_kda.h
+    glm5_next/glm5_next_kpool_indexer.h
     deepseek_v32_cp_context.h
     deepseek_v32_sp_plan.h
     moe_gate.h
@@ -54,6 +55,7 @@ cc_library(
     deepseek_v4/deepseek_v4_sparse_moe_block.cpp
     hyper_connection.cpp
     glm5_next/glm5_next_kda.cpp
+    glm5_next/glm5_next_kpool_indexer.cpp
     moe_gate.cpp
     fused_moe.cpp
     fused_moe_base.cpp

@@ -69,6 +69,16 @@ struct MegaGdnPrefillIndicesCache {
 };
 #endif
 
+struct KPoolBatchMetadata {
+  std::vector<int32_t> q_seq_lens;
+  std::vector<int32_t> kv_seq_lens;
+  torch::Tensor row_batch;
+  torch::Tensor query_starts;
+  torch::Tensor block_table;
+  torch::Tensor tail_indices;
+  int64_t max_kv_len = 0;
+};
+
 #if defined(USE_CUDA) || defined(USE_MUSA)
 struct PlanInfo {
   int32_t layer_id = -1;
@@ -134,6 +144,10 @@ struct AttentionMetadata {
   std::vector<int32_t> q_seq_lens_vec;
   torch::Tensor block_table;
   torch::Tensor slot_mapping;
+  // Framework-managed cache slot ids.
+  torch::Tensor linear_state_indices;
+  std::vector<int32_t> kpool_query_lens;
+  std::shared_ptr<const KPoolBatchMetadata> kpool_batch_metadata;
   // Cache-shard derivations are immutable batch data shared by all layers.
   std::shared_ptr<const KVShardBatchMetadata> kv_shard_batch_metadata;
   int64_t max_query_len;

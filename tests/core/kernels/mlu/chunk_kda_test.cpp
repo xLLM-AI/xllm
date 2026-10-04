@@ -71,19 +71,15 @@ torch::Tensor make_scaled_identity_states(const torch::Tensor& state_scales,
          state_scales.view({num_sequences, kNumHeads, 1, 1});
 }
 
-TEST(ChunkKDAConfigTest, ChunkSizeDefaultsTo16AndSupports64Override) {
+TEST(ChunkKDAConfigTest, ChunkSizeDefaultsTo64AndSupports16Override) {
   const char* configured_chunk_size = std::getenv("XLLM_MLU_KDA_CHUNK_SIZE");
   const int64_t expected_chunk_size = configured_chunk_size == nullptr
-                                          ? 16
+                                          ? 64
                                           : std::strtoll(configured_chunk_size,
                                                          /*str_end=*/nullptr,
                                                          /*base=*/10);
   ASSERT_TRUE(expected_chunk_size == 16 || expected_chunk_size == 64);
-  EXPECT_EQ(kda_prefill_chunk_size(kNumHeads, /*use_qk_l2norm=*/true),
-            expected_chunk_size);
-  EXPECT_EQ(kda_prefill_chunk_size(/*num_heads=*/1,
-                                   /*use_qk_l2norm=*/false),
-            expected_chunk_size);
+  EXPECT_EQ(kda_prefill_chunk_size(), expected_chunk_size);
 }
 
 TEST(ChunkKDATest,
@@ -92,8 +88,7 @@ TEST(ChunkKDATest,
   torch::DeviceGuard guard(device);
 
   constexpr int64_t kNumSequences = 128;
-  const int64_t chunk_size =
-      kda_prefill_chunk_size(kNumHeads, /*use_qk_l2norm=*/true);
+  const int64_t chunk_size = kda_prefill_chunk_size();
   const std::vector<int64_t> boundary_lengths = {1,
                                                  chunk_size - 1,
                                                  chunk_size,
@@ -177,8 +172,7 @@ TEST(ChunkKDATest, LongContextProcessesAllWorkspaceGroupsAt128K) {
 
   constexpr int64_t kLongContextTokens = 128 * 1024;
   constexpr int64_t kWorkspaceGroupChunks = 128;
-  const int64_t chunk_size =
-      kda_prefill_chunk_size(kNumHeads, /*use_qk_l2norm=*/true);
+  const int64_t chunk_size = kda_prefill_chunk_size();
   const torch::TensorOptions bf16_options =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const torch::TensorOptions fp32_options =
@@ -239,8 +233,7 @@ TEST(ChunkKDATest, Random128KMatchesEightKSegmentedStateChaining) {
 
   constexpr int64_t kLongContextTokens = 128 * 1024;
   constexpr int64_t kSegmentTokens = 8 * 1024;
-  const int64_t chunk_size =
-      kda_prefill_chunk_size(kNumHeads, /*use_qk_l2norm=*/true);
+  const int64_t chunk_size = kda_prefill_chunk_size();
   const torch::TensorOptions bf16_options =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const torch::TensorOptions fp32_options =
@@ -333,8 +326,7 @@ TEST(ChunkKDATest, OmittingFinalStateKeepsOutputContract) {
   torch::Device device(torch::kPrivateUse1, /*index=*/0);
   torch::DeviceGuard guard(device);
 
-  const int64_t chunk_size =
-      kda_prefill_chunk_size(kNumHeads, /*use_qk_l2norm=*/true);
+  const int64_t chunk_size = kda_prefill_chunk_size();
   const int64_t token_count = chunk_size + 1;
   const torch::TensorOptions bf16_options =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);

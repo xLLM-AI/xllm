@@ -49,6 +49,31 @@ const char* hint_tag(SpecHint h) {
     }
   }
 }
+std::string serialize_specs(const SpecList& specs) {
+  std::string s;
+  s.reserve(128);
+  for (const auto& a : specs) {
+    if (!s.empty()) {
+      s += ',';
+    }
+    s += kind_tag(a.kind);
+    s += ':';
+    if (a.kind == Kind::PTR) {
+      s += '*';
+    }
+    s += a.type;
+    s += ':';
+    s += a.specialize ? 's' : 'n';
+    s += ':';
+    s += hint_tag(a.hint);
+    if (a.kind == Kind::CONST) {
+      s += ':';
+      s += a.const_val;
+    }
+  }
+  return s;
+}
+
 }  // namespace
 
 // Deterministic cache key: each field is type-tagged so there is no parsing
@@ -57,31 +82,15 @@ const char* hint_tag(SpecHint h) {
 std::string serialize_key(const SpecList& specs,
                           const LaunchCfg& cfg,
                           int32_t device) {
-  std::string s;
-  s.reserve(128);
-  for (const auto& a : specs) {
-    if (!s.empty()) {
-      s += ',';
-    }
-    s += kind_tag(a.kind);
-    s += ':';
-    if (a.kind == Kind::PTR) {
-      s += '*';
-    }
-    s += a.type;
-    s += ':';
-    s += a.specialize ? 's' : 'n';
-    s += ':';
-    s += hint_tag(a.hint);
-    if (a.kind == Kind::CONST) {
-      s += ':';
-      s += a.const_val;
-    }
-  }
+  std::string s = serialize_specs(specs);
   s += "|w";
   s += std::to_string(cfg.num_warps);
   s += "|s";
   s += std::to_string(cfg.num_stages);
+  if (!cfg.bottleneck.empty()) {
+    s += "|b";
+    s += cfg.bottleneck;
+  }
   s += "|d";
   s += std::to_string(device);
   return s;
@@ -90,27 +99,7 @@ std::string serialize_key(const SpecList& specs,
 // Same as serialize_key but without the launch cfg, so the autotuner can key
 // the winner LaunchCfg by (signature, device) alone.
 std::string serialize_key_base(const SpecList& specs, int32_t device) {
-  std::string s;
-  s.reserve(128);
-  for (const auto& a : specs) {
-    if (!s.empty()) {
-      s += ',';
-    }
-    s += kind_tag(a.kind);
-    s += ':';
-    if (a.kind == Kind::PTR) {
-      s += '*';
-    }
-    s += a.type;
-    s += ':';
-    s += a.specialize ? 's' : 'n';
-    s += ':';
-    s += hint_tag(a.hint);
-    if (a.kind == Kind::CONST) {
-      s += ':';
-      s += a.const_val;
-    }
-  }
+  std::string s = serialize_specs(specs);
   s += "|d";
   s += std::to_string(device);
   return s;

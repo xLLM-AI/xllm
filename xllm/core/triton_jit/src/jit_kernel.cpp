@@ -124,6 +124,9 @@ CompiledKernel& JITKernel::compile_or_get(const SpecList& specs,
     auto w = winners_.find(sig_base);
     if (w != winners_.end()) {
       use_cfg = w->second;
+      if (!cfg.bottleneck.empty()) {
+        use_cfg.bottleneck = cfg.bottleneck;
+      }
     }
   }
   std::string key = serialize_key(specs, use_cfg, dev);

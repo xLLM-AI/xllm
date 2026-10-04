@@ -52,6 +52,28 @@ cc_test(
     "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
 )
 
+cc_test(
+  NAME
+    glm5_next_kpool_indexer_test
+  SRCS
+    glm5_next_kpool_indexer_test.cpp
+  DEPS
+    :speculative
+    :config
+    :mlu_layers
+    :common_layers
+    :block
+    :parallel_state
+    :model
+    :model_context
+    :state_dict
+    glog::glog
+    torch
+    GTest::gtest_main
+  ENVIRONMENT
+    "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
+)
+
 # Add test for MLU layers
 cc_test(
   NAME

@@ -239,8 +239,7 @@ bool load_ct_quant_config(const nlohmann::json& config, QuantArgs& quant_args) {
 }
 
 bool validate_smoothquant_mixed_w4a8(const JsonReader& reader,
-                                     QuantArgs& quant_args,
-                                     bool only_expert_per_group) {
+                                     QuantArgs& quant_args) {
   const auto expert_weight_precision =
       reader.value<std::string>("quantization_config.expert_weight_precision");
   const int64_t experts_weight_bits =
@@ -255,7 +254,7 @@ bool validate_smoothquant_mixed_w4a8(const JsonReader& reader,
 
   quant_args.moe_weight_bits() = 4;
 
-  if (!only_expert_per_group) {
+  if (!quant_args.only_expert_per_group()) {
     LOG(ERROR) << "DeepSeek mixed W4A8 requires "
                   "quantization_config.only_expert_per_group=true.";
     return false;
@@ -513,14 +512,10 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
             .get<std::vector<int64_t>>();
   }
 
-  bool only_expert_per_group = false;
-  if (auto v =
-          reader.value<bool>("quantization_config.only_expert_per_group")) {
-    only_expert_per_group = v.value();
-  }
+  quant_args.only_expert_per_group() =
+      reader.value_or<bool>("quantization_config.only_expert_per_group", false);
 
-  return validate_smoothquant_mixed_w4a8(
-      reader, quant_args, only_expert_per_group);
+  return validate_smoothquant_mixed_w4a8(reader, quant_args);
 }
 
 HFModelLoader::HFModelLoader(const std::string& model_weights_path)

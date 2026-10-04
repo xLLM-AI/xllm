@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MLU Triton kernels for packed variable-length chunk KDA."""
+"""Four-stage packed KDA: gate preparation, local products, solve, state update."""
 
 import triton
 import triton.language as tl
@@ -36,13 +36,18 @@ def _inverse_unit_lower_16(lower: tl.tensor, B0: tl.constexpr) -> tl.tensor:
 
 @triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS"])
 def tmo_chunk_kda_gate_kernel(
+    v: tl.tensor,
+    beta: tl.tensor,
+    w: tl.tensor,
+    u: tl.tensor,
+    qg: tl.tensor,
+    kg: tl.tensor,
     log_gate: tl.tensor,
-    gate_cumsum: tl.tensor,
     q: tl.tensor,
     k: tl.tensor,
-    q_exp: tl.tensor,
-    k_exp: tl.tensor,
-    k_inv_exp: tl.tensor,
+    normalized_q: tl.tensor,
+    normalized_k: tl.tensor,
+    cumulative_gate: tl.tensor,
     cu_seqlens: tl.tensor,
     chunk_indices: tl.tensor,
     CHUNK_BASE: tl.int64,
@@ -60,11 +65,7 @@ def tmo_chunk_kda_gate_kernel(
     row_offsets = tl.arange(0, BT)
     key_offsets = tl.arange(0, BK)
 
-    for physical_job in range(pid, total_jobs, program_count):
-        if BT == 16:
-            flat_job = total_jobs - 1 - physical_job
-        else:
-            flat_job = (physical_job + 8) % total_jobs
+    for flat_job in range(pid, total_jobs, program_count):
         key_block = flat_job % key_blocks
         head = (flat_job // key_blocks) % H
         slot = flat_job // (key_blocks * H)
@@ -97,41 +98,51 @@ def tmo_chunk_kda_gate_kernel(
             ),
             axis=0,
         )
-        gate_last_offsets = (slot * H + head) * D + dimensions
-        tl.store(
-            gate_cumsum + gate_last_offsets,
-            last_cumulative,
-            mask=dimension_mask,
-        )
-        q_values = tl.load(
-            q + input_offsets,
-            mask=output_mask,
-            other=0.0,
-        ).to(tl.float32)
-        k_values = tl.load(
-            k + input_offsets,
-            mask=output_mask,
-            other=0.0,
-        ).to(tl.float32)
+        # Keep cumulative gates in log space: exp(-cumsum) overflows at BT64.
+        positive_decay = tl.extra.mlu.libdevice.fast_expf(cumulative_values)
+        tl.store(cumulative_gate + output_offsets, cumulative_values, mask=output_mask)
+        q_values = tl.load(q + input_offsets, mask=output_mask, other=0.0).to(tl.float32)
         if USE_QK_L2NORM:
             q_inverse_norm = tl.rsqrt(tl.sum(q_values * q_values, axis=1) + 1.0e-6)
-            k_inverse_norm = tl.rsqrt(tl.sum(k_values * k_values, axis=1) + 1.0e-6)
             q_values *= q_inverse_norm[:, None]
+        scaled_q = q_values * 0.08838834764831845
+        tl.store(normalized_q + output_offsets, scaled_q, mask=output_mask)
+        tl.store(
+            qg + output_offsets,
+            tl.where(output_mask, scaled_q * positive_decay, 0.0),
+        )
+        beta_values = tl.load(
+            beta + (sequence_begin + chunk_start + rows) * H + head,
+            mask=row_mask,
+            other=0.0,
+        ).to(tl.float32)
+        k_values = tl.load(k + input_offsets, mask=output_mask, other=0.0).to(tl.float32)
+        if USE_QK_L2NORM:
+            k_inverse_norm = tl.rsqrt(tl.sum(k_values * k_values, axis=1) + 1.0e-6)
             k_values *= k_inverse_norm[:, None]
-        q_values *= 0.08838834764831845
-        # Keep normalized operands and the log-space cumulative gate separate.
-        # Materializing exp(-cumulative_values) overflows for the public
-        # log_gate range [-5, 0] because one 64-token chunk can reach -320.
-        tl.store(q_exp + output_offsets, q_values, mask=output_mask)
-        tl.store(k_exp + output_offsets, k_values, mask=output_mask)
-        tl.store(k_inv_exp + output_offsets, cumulative_values, mask=output_mask)
+        tl.store(normalized_k + output_offsets, k_values, mask=output_mask)
+        tl.store(
+            w + output_offsets,
+            tl.where(output_mask, k_values * positive_decay * beta_values[:, None], 0.0),
+        )
+        relative_decay = tl.extra.mlu.libdevice.fast_expf(last_cumulative[None, :] - cumulative_values)
+        tl.store(
+            kg + output_offsets,
+            tl.where(output_mask, k_values * relative_decay, 0.0),
+        )
+        v_values = tl.load(v + input_offsets, mask=output_mask, other=0.0).to(tl.float32)
+        u_output_offsets = (slot * H + head) * BT * D + dimensions[None, :] * BT + rows[:, None]
+        tl.store(
+            u + u_output_offsets,
+            tl.where(output_mask, v_values * beta_values[:, None], 0.0),
+        )
 
 
 @triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS"])
 def tmo_chunk_kda_kkt_kernel(
-    q_exp: tl.tensor,
-    k_exp: tl.tensor,
-    k_inv_exp: tl.tensor,
+    normalized_q: tl.tensor,
+    normalized_k: tl.tensor,
+    cumulative_gate: tl.tensor,
     beta: tl.tensor,
     lower: tl.tensor,
     aq: tl.tensor,
@@ -143,42 +154,18 @@ def tmo_chunk_kda_kkt_kernel(
     BT: tl.constexpr,
     D: tl.constexpr,
     BC: tl.constexpr,
+    BN: tl.constexpr,
     BK: tl.constexpr,
 ) -> None:
     pid = tl.program_id(0)
     program_count = tl.num_programs(0)
-    chunk_blocks: tl.constexpr = triton.cdiv(BT, BC)
-    block_pairs: tl.constexpr = chunk_blocks * (chunk_blocks + 1) // 2
-    total_jobs = SLOTS * H * block_pairs
+    total_jobs = SLOTS * H
+    columns = tl.arange(0, BN)
+    keys = tl.arange(0, BK)
     block_offsets = tl.arange(0, BC)
-
-    for physical_job in range(pid, total_jobs, program_count):
-        if BT == 64:
-            flat_job = (physical_job + 8) % total_jobs
-        else:
-            flat_job = physical_job
-        pair = flat_job % block_pairs
-        if BC == 32:
-            slot = (flat_job // block_pairs) % SLOTS
-            head = flat_job // (block_pairs * SLOTS)
-            row_block = tl.where(pair == 0, 0, 1)
-            column_block = tl.where(pair == 2, 1, 0)
-        elif BT == BC:
-            head = (flat_job // block_pairs) % H
-            slot = flat_job // (block_pairs * H)
-            row_block = 0
-            column_block = 0
-        else:
-            head = (flat_job // block_pairs) % H
-            slot = flat_job // (block_pairs * H)
-            linear_pair = pair
-            linear_pair += tl.where(pair >= 1, 3, 0)
-            linear_pair += tl.where(pair >= 3, 2, 0)
-            linear_pair += tl.where(pair >= 6, 1, 0)
-            row_block = linear_pair // chunk_blocks
-            column_block = linear_pair % chunk_blocks
-        row_start = row_block * BC
-        column_start = column_block * BC
+    for flat_job in range(pid, total_jobs, program_count):
+        head = flat_job % H
+        slot = flat_job // H
         metadata_slot = CHUNK_BASE + slot
         sequence = tl.load(chunk_indices + metadata_slot * 2).to(tl.int32)
         local_chunk = tl.load(chunk_indices + metadata_slot * 2 + 1).to(tl.int32)
@@ -186,86 +173,52 @@ def tmo_chunk_kda_kkt_kernel(
         sequence_end = tl.load(cu_seqlens + sequence + 1).to(tl.int32)
         chunk_start = local_chunk * BT
         valid_rows = tl.minimum(BT, sequence_end - sequence_begin - chunk_start)
-
-        rows = row_start + block_offsets
-        columns = column_start + block_offsets
-        row_mask = rows < valid_rows
-        column_mask = columns < valid_rows
-        lower_values = tl.zeros((BC, BC), dtype=tl.float32)
-        aq_values = tl.zeros((BC, BC), dtype=tl.float32)
-
-        if True:
-            workspace_base = (slot * H + head) * BT * D
-            for key_start in range(0, D, BK):
-                keys = key_start + tl.arange(0, BK)
-                key_mask = keys < D
-                row_offsets = workspace_base + rows[:, None] * D + keys[None, :]
-                column_offsets = workspace_base + columns[:, None] * D + keys[None, :]
-                q_rows = tl.load(
-                    q_exp + row_offsets,
-                    mask=row_mask[:, None] & key_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                k_rows = tl.load(
-                    k_exp + row_offsets,
-                    mask=row_mask[:, None] & key_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                k_columns = tl.load(
-                    k_exp + column_offsets,
-                    mask=column_mask[:, None] & key_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                gate_rows = tl.load(
-                    k_inv_exp + row_offsets,
-                    mask=row_mask[:, None] & key_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                gate_columns = tl.load(
-                    k_inv_exp + column_offsets,
-                    mask=column_mask[:, None] & key_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                anchor_offsets = workspace_base + row_start * D + keys
-                anchor_gate = tl.load(
-                    k_inv_exp + anchor_offsets,
-                    mask=(row_start < valid_rows) & key_mask,
-                    other=0.0,
-                ).to(tl.float32)
-                row_decay = tl.extra.mlu.libdevice.fast_expf(gate_rows - anchor_gate[None, :])
-                column_decay = tl.extra.mlu.libdevice.fast_expf(anchor_gate[:, None] - tl.trans(gate_columns))
-                q_rows *= row_decay
-                k_rows *= row_decay
-                k_columns = tl.trans(tl.trans(k_columns) * column_decay)
-                aq_values += tl.dot(q_rows, tl.trans(k_columns), allow_tf32=False)
-                lower_values += tl.dot(
-                    k_rows,
-                    tl.trans(k_columns),
-                    allow_tf32=False,
-                )
-
-            global_rows = sequence_begin + chunk_start + rows
+        workspace_base = (slot * H + head) * BT * D
+        column_offsets = workspace_base + columns[:, None] * D + keys[None, :]
+        k_columns = tl.load(normalized_k + column_offsets, mask=(columns < valid_rows)[:, None], other=0.0).to(
+            tl.float32
+        )
+        gate_columns = tl.load(cumulative_gate + column_offsets, mask=(columns < valid_rows)[:, None], other=0.0).to(
+            tl.float32
+        )
+        for row_block in range(0, BT // BC):
+            row_start = row_block * BC
+            rows = row_start + block_offsets
+            row_mask = rows < valid_rows
+            column_mask = (columns < valid_rows) & (columns < row_start + BC)
+            row_offsets = workspace_base + rows[:, None] * D + keys[None, :]
+            q_rows = tl.load(normalized_q + row_offsets, mask=row_mask[:, None], other=0.0).to(tl.float32)
+            k_rows = tl.load(normalized_k + row_offsets, mask=row_mask[:, None], other=0.0).to(tl.float32)
+            gate_rows = tl.load(cumulative_gate + row_offsets, mask=row_mask[:, None], other=0.0).to(tl.float32)
+            # A 16-row anchor bounds positive exponent differences by 75
+            # for the supported log_gate range [-5, 0], including BT64.
+            anchor = tl.load(
+                cumulative_gate + workspace_base + row_start * D + keys,
+                mask=row_start < valid_rows,
+                other=0.0,
+            ).to(tl.float32)
+            row_decay = tl.extra.mlu.libdevice.fast_expf(gate_rows - anchor[None, :])
+            safe_column_gate = tl.where(
+                (column_mask & (row_start < valid_rows))[None, :],
+                tl.trans(gate_columns),
+                0.0,
+            )
+            column_decay = tl.extra.mlu.libdevice.fast_expf(anchor[:, None] - safe_column_gate)
+            weighted_columns = tl.where(column_mask[None, :], tl.trans(k_columns) * column_decay, 0.0)
+            aq_values = tl.dot(q_rows * row_decay, weighted_columns, allow_tf32=False)
+            lower_values = tl.dot(k_rows * row_decay, weighted_columns, allow_tf32=False)
             beta_values = tl.load(
-                beta + global_rows * H + head,
+                beta + (sequence_begin + chunk_start + rows) * H + head,
                 mask=row_mask,
                 other=0.0,
             ).to(tl.float32)
             lower_values *= beta_values[:, None]
             valid_matrix = row_mask[:, None] & column_mask[None, :]
-            lower_values = tl.where(
-                valid_matrix & (rows[:, None] > columns[None, :]),
-                lower_values,
-                0.0,
-            )
-            aq_values = tl.where(
-                valid_matrix & (rows[:, None] >= columns[None, :]),
-                aq_values,
-                0.0,
-            )
-
-        matrix_offsets = (slot * H + head) * BT * BT + rows[:, None] * BT + columns[None, :]
-        tl.store(lower + matrix_offsets, lower_values)
-        tl.store(aq + matrix_offsets, aq_values)
+            lower_values = tl.where(valid_matrix & (rows[:, None] > columns[None, :]), lower_values, 0.0)
+            aq_values = tl.where(valid_matrix & (rows[:, None] >= columns[None, :]), aq_values, 0.0)
+            matrix_offsets = (slot * H + head) * BT * BT + rows[:, None] * BT + columns[None, :]
+            tl.store(lower + matrix_offsets, lower_values)
+            tl.store(aq + matrix_offsets, aq_values)
 
 
 @triton.jit(do_not_specialize=["SLOTS"])
@@ -281,11 +234,7 @@ def tmo_chunk_kda_inverse_kernel(
     total_jobs = SLOTS * H
     block_offsets = tl.arange(0, B0)
 
-    for physical_job in range(pid, total_jobs, program_count):
-        if BT == 64:
-            flat_job = (physical_job + 6) % total_jobs
-        else:
-            flat_job = physical_job
+    for flat_job in range(pid, total_jobs, program_count):
         head = flat_job % H
         slot = flat_job // H
         matrix_base = (slot * H + head) * BT * BT
@@ -362,129 +311,15 @@ def tmo_chunk_kda_inverse_kernel(
             tl.store(lower_inverse + offsets_43, inverse_43)
 
 
-@triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS"])
-def tmo_chunk_kda_wu_kernel(
-    k_normalized: tl.tensor,
-    q_scaled: tl.tensor,
-    v: tl.tensor,
-    gate_cumsum: tl.tensor,
-    beta: tl.tensor,
+@triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS", "N"])
+def tmo_chunk_kda_state_kernel(
     inverse: tl.tensor,
     w: tl.tensor,
     u: tl.tensor,
     qg: tl.tensor,
     kg: tl.tensor,
-    cu_seqlens: tl.tensor,
-    chunk_indices: tl.tensor,
-    CHUNK_BASE: tl.int64,
-    SLOTS: tl.int64,
-    H: tl.constexpr,
-    BT: tl.constexpr,
-    D: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-) -> None:
-    pid = tl.program_id(0)
-    program_count = tl.num_programs(0)
-    total_jobs = SLOTS * H
-    row_offsets = tl.arange(0, BT)
-    matrix_offsets = row_offsets[:, None] * BT + row_offsets[None, :]
-
-    for physical_job in range(pid, total_jobs, program_count):
-        if BT == 64:
-            flat_job = (physical_job + 7) % total_jobs
-        else:
-            flat_job = physical_job
-        head = flat_job % H
-        slot = flat_job // H
-        metadata_slot = CHUNK_BASE + slot
-        sequence = tl.load(chunk_indices + metadata_slot * 2).to(tl.int32)
-        local_chunk = tl.load(chunk_indices + metadata_slot * 2 + 1).to(tl.int32)
-        sequence_begin = tl.load(cu_seqlens + sequence).to(tl.int32)
-        sequence_end = tl.load(cu_seqlens + sequence + 1).to(tl.int32)
-        chunk_start = local_chunk * BT
-        valid_rows = tl.minimum(BT, sequence_end - sequence_begin - chunk_start)
-        row_mask = row_offsets < valid_rows
-        global_tokens = sequence_begin + chunk_start + row_offsets
-        beta_values = tl.load(
-            beta + global_tokens * H + head,
-            mask=row_mask,
-            other=0.0,
-        ).to(tl.float32)
-        matrix_base = (slot * H + head) * BT * BT
-        inverse_values = tl.load(inverse + matrix_base + matrix_offsets).to(tl.float32)
-        inverse_values = tl.where(
-            row_offsets[:, None] >= row_offsets[None, :],
-            inverse_values,
-            0.0,
-        )
-        workspace_base = (slot * H + head) * BT * D
-
-        for value_start in range(0, D, BV):
-            value_offsets = value_start + tl.arange(0, BV)
-            value_mask = value_offsets < D
-            input_offsets = global_tokens[:, None] * H * D + head * D + value_offsets[None, :]
-            value_values = tl.load(
-                v + input_offsets,
-                mask=row_mask[:, None] & value_mask[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            u_seed = value_values * beta_values[:, None]
-            u_values = tl.dot(inverse_values, u_seed, allow_tf32=False)
-            output_offsets = workspace_base + row_offsets[:, None] * D + value_offsets[None, :]
-            tl.store(
-                u + output_offsets,
-                tl.where(row_mask[:, None] & value_mask[None, :], u_values, 0.0),
-            )
-
-        last_row = valid_rows - 1
-        for key_start in range(0, D, BK):
-            key_offsets = key_start + tl.arange(0, BK)
-            key_mask = key_offsets < D
-            workspace_offsets = workspace_base + row_offsets[:, None] * D + key_offsets[None, :]
-            normalized_key = tl.load(
-                w + workspace_offsets,
-                mask=row_mask[:, None] & key_mask[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            gate_values = tl.load(
-                kg + workspace_offsets,
-                mask=row_mask[:, None] & key_mask[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            last_gate = tl.load(
-                gate_cumsum + (slot * H + head) * D + key_offsets,
-                mask=key_mask,
-                other=0.0,
-            ).to(tl.float32)
-            positive_decay = tl.extra.mlu.libdevice.fast_expf(gate_values)
-            relative_last_decay = tl.extra.mlu.libdevice.fast_expf(last_gate[None, :] - gate_values)
-            w_seed = normalized_key * positive_decay * beta_values[:, None]
-            w_values = tl.dot(inverse_values, w_seed, allow_tf32=False)
-            kg_values = normalized_key * relative_last_decay
-            normalized_q = tl.load(
-                qg + workspace_offsets,
-                mask=row_mask[:, None] & key_mask[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            qg_values = normalized_q * positive_decay
-            output_mask = row_mask[:, None] & key_mask[None, :]
-            tl.store(
-                qg + workspace_offsets,
-                tl.where(output_mask, qg_values, 0.0),
-            )
-            tl.store(w + workspace_offsets, tl.where(output_mask, w_values, 0.0))
-            tl.store(kg + workspace_offsets, tl.where(output_mask, kg_values, 0.0))
-
-
-@triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS", "N"])
-def tmo_chunk_kda_state_kernel(
-    w: tl.tensor,
-    u: tl.tensor,
-    qg: tl.tensor,
-    kg: tl.tensor,
     aq: tl.tensor,
-    gate_cumsum: tl.tensor,
+    cumulative_gate: tl.tensor,
     input_state: tl.tensor,
     final_state: tl.tensor,
     output: tl.tensor,
@@ -507,11 +342,7 @@ def tmo_chunk_kda_state_kernel(
     key_offsets = tl.arange(0, BK)
     value_offsets = tl.arange(0, BV)
 
-    for physical_job in range(pid, total_jobs, program_count):
-        if BT == 64:
-            flat_job = (physical_job + 5) % total_jobs
-        else:
-            flat_job = physical_job
+    for flat_job in range(pid, total_jobs, program_count):
         value_block = flat_job % value_blocks
         head = (flat_job // value_blocks) % H
         sequence = flat_job // (value_blocks * H)
@@ -519,37 +350,19 @@ def tmo_chunk_kda_state_kernel(
         value_mask = values < D
         state_base = (sequence * H + head) * D * D
         state_one_offsets = state_base + values[:, None] * D + key_offsets[None, :]
-        state_two_offsets = state_base + values[:, None] * D + BK + key_offsets[None, :]
-        if BT == 64:
-            state_two = tl.load(
-                input_state + state_two_offsets,
-                mask=value_mask[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            state_one = tl.load(
-                input_state + state_one_offsets,
-                mask=value_mask[:, None],
-                other=0.0,
-            ).to(tl.float32)
-        else:
-            state_one = tl.load(
-                input_state + state_one_offsets,
-                mask=value_mask[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            state_two = tl.load(
-                input_state + state_two_offsets,
-                mask=value_mask[:, None],
-                other=0.0,
-            ).to(tl.float32)
+        state_one = tl.load(
+            input_state + state_one_offsets,
+            mask=value_mask[:, None],
+            other=0.0,
+        ).to(tl.float32)
 
+        sequence_begin = tl.load(cu_seqlens + sequence).to(tl.int32)
+        sequence_end = tl.load(cu_seqlens + sequence + 1).to(tl.int32)
         for slot in range(0, SLOTS):
             metadata_slot = CHUNK_BASE + slot
             chunk_sequence = tl.load(chunk_indices + metadata_slot * 2).to(tl.int32)
             if chunk_sequence == sequence:
                 local_chunk = tl.load(chunk_indices + metadata_slot * 2 + 1).to(tl.int32)
-                sequence_begin = tl.load(cu_seqlens + sequence).to(tl.int32)
-                sequence_end = tl.load(cu_seqlens + sequence + 1).to(tl.int32)
                 chunk_start = local_chunk * BT
                 valid_rows = tl.minimum(
                     BT,
@@ -558,104 +371,70 @@ def tmo_chunk_kda_state_kernel(
                 row_mask = row_offsets < valid_rows
                 workspace_base = (slot * H + head) * BT * D
                 w_one_offsets = workspace_base + row_offsets[:, None] * D + key_offsets[None, :]
-                w_two_offsets = w_one_offsets + BK
                 w_one = tl.load(
                     w + w_one_offsets,
                     mask=row_mask[:, None],
                     other=0.0,
                 ).to(tl.float32)
-                w_two = tl.load(
-                    w + w_two_offsets,
-                    mask=row_mask[:, None],
-                    other=0.0,
-                ).to(tl.float32)
-                u_offsets = workspace_base + row_offsets[:, None] * D + values[None, :]
+                u_offsets = workspace_base + values[:, None] * BT + row_offsets[None, :]
                 u_values = tl.load(
                     u + u_offsets,
-                    mask=row_mask[:, None] & value_mask[None, :],
+                    mask=value_mask[:, None] & row_mask[None, :],
                     other=0.0,
                 ).to(tl.float32)
                 new_values = u_values - tl.dot(
-                    w_one,
-                    tl.trans(state_one),
+                    state_one,
+                    tl.trans(w_one),
                     allow_tf32=False,
                 )
-                new_values -= tl.dot(
-                    w_two,
-                    tl.trans(state_two),
-                    allow_tf32=False,
-                )
+
+                matrix_base = (slot * H + head) * BT * BT
+                matrix_offsets = matrix_base + row_offsets[:, None] * BT + row_offsets[None, :]
+                causal_mask = row_offsets[:, None] >= row_offsets[None, :]
+                inverse_values = tl.load(inverse + matrix_offsets).to(tl.float32)
+                inverse_values = tl.where(causal_mask, inverse_values, 0.0)
+                new_values = tl.dot(new_values, tl.trans(inverse_values), allow_tf32=False)
 
                 qg_one = tl.load(
                     qg + w_one_offsets,
                     mask=row_mask[:, None],
                     other=0.0,
                 ).to(tl.float32)
-                qg_two = tl.load(
-                    qg + w_two_offsets,
-                    mask=row_mask[:, None],
-                    other=0.0,
-                ).to(tl.float32)
                 output_values = tl.dot(
-                    qg_one,
-                    tl.trans(state_one),
+                    state_one,
+                    tl.trans(qg_one),
                     allow_tf32=False,
                 )
+                aq_values = tl.load(aq + matrix_offsets).to(tl.float32)
+                aq_values = tl.where(causal_mask, aq_values, 0.0)
                 output_values += tl.dot(
-                    qg_two,
-                    tl.trans(state_two),
-                    allow_tf32=False,
-                )
-                aq_base = (slot * H + head) * BT * BT
-                aq_offsets = aq_base + row_offsets[:, None] * BT + row_offsets[None, :]
-                aq_values = tl.load(aq + aq_offsets).to(tl.float32)
-                aq_values = tl.where(
-                    row_offsets[:, None] >= row_offsets[None, :],
-                    aq_values,
-                    0.0,
-                )
-                output_values += tl.dot(
-                    aq_values,
                     new_values,
+                    tl.trans(aq_values),
                     allow_tf32=False,
                 )
                 global_tokens = sequence_begin + chunk_start + row_offsets
                 output_offsets = global_tokens[:, None] * H * D + head * D + values[None, :]
                 tl.store(
                     output + output_offsets,
-                    output_values,
+                    tl.trans(output_values),
                     mask=row_mask[:, None] & value_mask[None, :],
                 )
 
-                last_row = valid_rows - 1
                 last_gate_one = tl.load(
-                    gate_cumsum + (slot * H + head) * D + key_offsets,
-                ).to(tl.float32)
-                last_gate_two = tl.load(
-                    gate_cumsum + (slot * H + head) * D + BK + key_offsets,
+                    cumulative_gate + workspace_base + (valid_rows - 1) * D + key_offsets,
+                    mask=valid_rows > 0,
+                    other=0.0,
                 ).to(tl.float32)
                 state_one *= tl.extra.mlu.libdevice.fast_expf(last_gate_one)[None, :]
-                state_two *= tl.extra.mlu.libdevice.fast_expf(last_gate_two)[None, :]
                 kg_one = tl.load(
                     kg + w_one_offsets,
                     mask=row_mask[:, None],
                     other=0.0,
                 ).to(tl.float32)
-                kg_two = tl.load(
-                    kg + w_two_offsets,
-                    mask=row_mask[:, None],
-                    other=0.0,
-                ).to(tl.float32)
-                state_one += tl.trans(tl.dot(tl.trans(kg_one), new_values, allow_tf32=False))
-                state_two += tl.trans(tl.dot(tl.trans(kg_two), new_values, allow_tf32=False))
+                state_one += tl.dot(new_values, kg_one, allow_tf32=False)
 
         tl.store(
             final_state + state_one_offsets,
             state_one,
-            mask=value_mask[:, None],
-        )
-        tl.store(
-            final_state + state_two_offsets,
-            state_two,
             mask=value_mask[:, None],
         )

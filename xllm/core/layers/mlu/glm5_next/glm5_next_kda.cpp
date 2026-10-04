@@ -596,9 +596,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
         {~attn_metadata.has_initial_states, torch::indexing::Ellipsis}, 0.0f);
     torch::Tensor cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
     torch::Tensor chunk_indices = make_kda_chunk_indices(
-        cu_seqlens,
-        kernel::mlu::kda_prefill_chunk_size(local_num_heads_,
-                                            /*use_qk_l2norm=*/true));
+        cu_seqlens, kernel::mlu::kda_prefill_chunk_size());
     torch::Tensor final_state;
     std::tie(core_output, final_state) =
         chunk_kda_->forward(q,

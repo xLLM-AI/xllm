@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "kernels/mlu/mlu_ops_api.h"
+#include "triton_jit/include/spec.h"
 
 namespace xllm {
 namespace {
@@ -542,6 +543,34 @@ TEST(FusedSigmoidUpdateTest, BatchedKdaShapeFitsMluNram) {
             torch::IntArrayRef({1, kNumSequences, kNumHeads, kHeadDim}));
   EXPECT_TRUE(torch::equal(out, torch::zeros_like(out)));
   EXPECT_TRUE(torch::equal(final_state, initial_state));
+}
+
+TEST(FusedSigmoidUpdateTest, CompileHintsSeparateKernelCacheEntries) {
+  const triton_jit::SpecList specs;
+  const triton_jit::LaunchCfg default_cfg{1, 4};
+  const triton_jit::LaunchCfg mv_cfg{1, 4, "mv"};
+  EXPECT_NE(triton_jit::serialize_key(specs, default_cfg, /*device=*/0),
+            triton_jit::serialize_key(specs, mv_cfg, /*device=*/0));
+}
+
+TEST(FusedSigmoidUpdateTest, PersistentKdaBatchesMatchFp32Checkpoints) {
+  for (int64_t batch_size : {1, 2, 16, 32}) {
+    SCOPED_TRACE(batch_size);
+    std::vector<int32_t> lengths(batch_size, 4);
+    std::vector<int32_t> accepted;
+    accepted.reserve(batch_size);
+    for (int64_t sequence = 0; sequence < batch_size; ++sequence) {
+      accepted.emplace_back(static_cast<int32_t>(sequence % 4 + 1));
+    }
+    expect_sparse_kda_matches_reference(lengths,
+                                        accepted,
+                                        /*inplace_final_state=*/true,
+                                        /*include_invalid_slots=*/false);
+    expect_sparse_kda_matches_reference(lengths,
+                                        accepted,
+                                        /*inplace_final_state=*/false,
+                                        /*include_invalid_slots=*/false);
+  }
 }
 
 TEST(FusedSigmoidUpdateTest, SingleTokenKdaEightHeadsMatchesReference) {

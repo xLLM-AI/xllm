@@ -142,8 +142,10 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
                 state_idxs = tl.load(
                     ssm_state_indices
                     + (rangeN * stride_indices_seq)[:, None]
-                    + tl.arange(0, stride_indices_seq)[None, :],
-                    mask=mask_N[:, None],
+                    + tl.arange(0, triton.next_power_of_2(stride_indices_seq))[None, :],
+                    mask=mask_N[:, None]
+                    & (tl.arange(0, triton.next_power_of_2(stride_indices_seq))[None, :] < stride_indices_seq),
+                    other=0,
                 ).to(tl.int32)
                 if IS_SPEC_DECODING:
                     i_t_inits = tl.load(num_accepted_tokens + rangeN, mask=mask_N)
@@ -151,11 +153,9 @@ def tmo_fused_sigmoid_gating_delta_rule_update_kernel(
         if IS_VARLEN:
             # The global position of the first token in this segment is cu_seqlens_[0].
             max_block_query_len = cu_seqlens_[numN] - cu_seqlens_[0]
-            all = T
             start_T = cu_seqlens_[0]
         else:
             max_block_query_len = numN * T
-            all = B * T
             start_T = i_n * T
 
         # for b_token in range(0,tl.cdiv(max_block_query_len/BLOCK_QUERY_LEN),BLOCK_QUERY_LEN):

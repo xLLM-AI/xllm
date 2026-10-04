@@ -323,6 +323,8 @@ AttentionMetadata build_attention_metadata(
   attn_metadata.kv_seq_lens_vec = params.attention.host.kv_seq_lens;
   attn_metadata.q_seq_lens_vec = params.attention.host.q_seq_lens;
   attn_metadata.slot_mapping = params.attention.device.new_cache_slots;
+  attn_metadata.linear_state_indices = params.embedding.linear_state_indices;
+  attn_metadata.kpool_query_lens = params.attention.host.kpool_query_lens;
   attn_metadata.compute_dtype = compute_dtype;
 #if defined(USE_DCU)
   attn_metadata.use_dense_flash_attention =

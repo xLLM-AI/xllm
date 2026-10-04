@@ -51,6 +51,7 @@ class KVCache final {
   torch::Tensor get_k_cache() const;
   torch::Tensor get_v_cache() const;
   torch::Tensor get_index_cache() const;
+  torch::Tensor get_kpool_tail() const;
 
   std::optional<torch::Tensor> get_k_cache_scale() const;
   std::optional<torch::Tensor> get_v_cache_scale() const;

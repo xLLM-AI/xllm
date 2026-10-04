@@ -58,6 +58,7 @@ struct AttentionMetadata;
 }  // namespace layer
 
 struct LlmAttentionHostInput final {
+  std::vector<int32_t> kpool_query_lens;
   std::vector<int32_t> q_seq_lens;
   std::vector<int32_t> q_cu_seq_lens;
   std::vector<int32_t> kv_seq_lens;
@@ -73,6 +74,7 @@ struct LlmAttentionHostInput final {
 };
 
 struct VlmAttentionHostInput final {
+  std::vector<int32_t> kpool_query_lens;
   std::vector<int32_t> q_seq_lens;
   std::vector<int32_t> q_cu_seq_lens;
   std::vector<int32_t> kv_seq_lens;
@@ -88,6 +90,7 @@ struct VlmAttentionHostInput final {
 };
 
 struct RecAttentionHostInput final {
+  std::vector<int32_t> kpool_query_lens;
   std::vector<int32_t> q_seq_lens;
   std::vector<int32_t> q_cu_seq_lens;
   std::vector<int32_t> kv_seq_lens;

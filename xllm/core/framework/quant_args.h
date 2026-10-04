@@ -73,6 +73,8 @@ struct QuantArgs {
   PROPERTY(int64_t, bits) = 0;
   // MoE routed experts weight bits for DeepSeek-style SmoothQuant mixed W4A8.
   PROPERTY(int64_t, moe_weight_bits) = 8;
+  // Whether per-group quantization applies only to routed experts.
+  PROPERTY(bool, only_expert_per_group) = false;
 
   // quantization group size
   PROPERTY(int64_t, group_size) = 0;
@@ -309,6 +311,7 @@ inline std::ostream& operator<<(std::ostream& os, const QuantArgs& args) {
   os << ", quantize_type: " << args.quantize_type();
   os << ", bits: " << args.bits();
   os << ", moe_weight_bits: " << args.moe_weight_bits();
+  os << ", only_expert_per_group: " << args.only_expert_per_group();
   os << ", group_size: " << args.group_size();
   os << ", desc_act: " << args.desc_act();
   os << ", is_sym: " << args.is_sym();

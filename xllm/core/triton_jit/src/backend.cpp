@@ -334,6 +334,9 @@ std::string TritonBackend::compile(const std::string& path,
   py::module_ mod = py::module_::import(kTritonCompileModule);
   py::list args_spec = specs_to_py(specs);
   py::dict options = options_to_py(compile_options_json());
+  if (!cfg.bottleneck.empty()) {
+    options["bottleneck"] = cfg.bottleneck;
+  }
   py::object result = mod.attr("compile")(path,
                                           name,
                                           args_spec,

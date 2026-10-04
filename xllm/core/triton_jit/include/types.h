@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace xllm::triton_jit {
 
@@ -30,6 +31,7 @@ struct Grid {
 struct LaunchCfg {
   int32_t num_warps = 1;
   int32_t num_stages = 1;
+  std::string bottleneck = "";
 };
 
 }  // namespace xllm::triton_jit
