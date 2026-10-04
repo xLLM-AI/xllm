@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Official Anthropic SDK client of the native, model-free HTTP fixture."""
+"""Official Messages SDK client of the model-free HTTP fixture."""
 
 import json
 import sys

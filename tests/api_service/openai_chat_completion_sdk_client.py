@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Actual SDK client of OpenAICallTest's native, model-free HTTP fixture."""
+"""Official Chat Completions SDK client of the model-free HTTP fixture."""
 
 import json
 import sys

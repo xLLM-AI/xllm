@@ -179,33 +179,44 @@ target_link_libraries(openai_service_test PRIVATE brpc leveldb::leveldb OpenSSL:
 add_dependencies(openai_service_test brpc-static)
 
 cc_test(
-  NAME openai_protocol_test
+  NAME chat_completion_protocol_test
   NO_NPU_RUNTIME
-  SRCS openai_protocol_test.cpp
+  SRCS chat_completion_protocol_test.cpp http_protocol_test_fixture.cpp
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
-target_compile_definitions(openai_protocol_test PRIVATE
-  XLLM_OPENAI_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/openai_sdk_client.py"
-  XLLM_ANTHROPIC_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/anthropic_sdk_client.py")
+target_compile_definitions(chat_completion_protocol_test PRIVATE
+  XLLM_CHAT_COMPLETION_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/openai_chat_completion_sdk_client.py")
+
+cc_test(
+  NAME text_completion_protocol_test
+  NO_NPU_RUNTIME
+  SRCS text_completion_protocol_test.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME embeddings_protocol_test
+  NO_NPU_RUNTIME
+  SRCS embeddings_protocol_test.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME anthropic_messages_protocol_test
+  NO_NPU_RUNTIME
+  SRCS anthropic_messages_protocol_test.cpp http_protocol_test_fixture.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+  ENVIRONMENT
+    "${_api_json_test_env}"
+)
+target_compile_definitions(anthropic_messages_protocol_test PRIVATE
+  XLLM_MESSAGES_SDK_CLIENT="${CMAKE_CURRENT_SOURCE_DIR}/anthropic_messages_sdk_client.py")
 
 cc_test(
   NAME
     anthropic_request_utils_test
   SRCS
     anthropic_request_utils_test.cpp
-  DEPS
-    api_service
-    GTest::gtest_main
-  ENVIRONMENT
-    "${_api_json_test_env}"
-)
-
-cc_test(
-  NAME
-    anthropic_call_test
-  NO_NPU_RUNTIME
-  SRCS
-    anthropic_call_test.cpp
   DEPS
     api_service
     GTest::gtest_main
