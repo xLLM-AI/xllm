@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <limits>
 #include <memory>
@@ -51,10 +52,24 @@ class CountingModel final : public CausalLM {
     forward_positions.emplace_back(positions.clone());
     forward_slots.emplace_back(params.attention.device.new_cache_slots.clone());
     forward_counts.emplace_back(params.parallel.dp_global_token_nums);
+    forward_embeddings.emplace_back(
+        params.embedding.input_embedding.defined()
+            ? params.embedding.input_embedding.clone()
+            : torch::Tensor());
+    forward_had_sync.emplace_back(params.parallel.layer_synchronizer !=
+                                  nullptr);
     auto hidden = (block_draft ? positions : tokens).to(options_).view({-1, 1});
     // Two columns exercise block drafts whose captured context is wider than
     // either model's hidden state. MTP ignores these auxiliary rows.
     auto auxiliary = torch::cat({hidden, hidden + 100}, /*dim=*/1);
+    if (params.parallel.layer_synchronizer != nullptr) {
+      CHECK(!params.enable_graph);
+      CHECK(params.parallel.layer_synchronizer->record_event(
+          /*layer_index=*/0, options_.device().index()));
+    }
+    if (after_forward) {
+      after_forward();
+    }
     return ModelOutput(hidden, torch::Tensor(), auxiliary);
   }
 
@@ -94,6 +109,9 @@ class CountingModel final : public CausalLM {
   std::vector<torch::Tensor> forward_positions;
   std::vector<torch::Tensor> forward_slots;
   std::vector<std::vector<int32_t>> forward_counts;
+  std::vector<torch::Tensor> forward_embeddings;
+  std::vector<bool> forward_had_sync;
+  std::function<void()> after_forward;
   std::vector<torch::Tensor> context_hidden;
   std::vector<torch::Tensor> context_positions;
   std::vector<torch::Tensor> context_slots;
@@ -324,11 +342,11 @@ class SpeculativePipelineTest : public ::testing::Test {
     ModelConfig::get_instance().model_impl(previous_model_impl_);
   }
 
-  void create() {
+  void create(TaskKVPush target_push = {}, TaskKVPush draft_push = {}) {
     const Status status = TaskExecutionPipeline::create(
         state_thread_,
-        {*target_, *target_executor_, target_cache_},
-        {*draft_, *draft_executor_, draft_cache_},
+        {*target_, *target_executor_, target_cache_, std::move(target_push)},
+        {*draft_, *draft_executor_, draft_cache_, std::move(draft_push)},
         capacity_,
         pipeline_);
     ASSERT_TRUE(status.ok()) << status.message();
@@ -421,6 +439,228 @@ class SpeculativePipelineTest : public ::testing::Test {
   SpeculativeTaskCapacity capacity_;
   std::unique_ptr<TaskExecutionPipeline> pipeline_;
 };
+
+TransferKVInfo push_info() {
+  TransferKVInfo info;
+  info.request_id = "pd-request";
+  info.rank_local_mapping = true;
+  info.mappings.emplace_back(KVTransferMapping{0, {1}, {3}, 0});
+  return info;
+}
+
+TEST_F(SpeculativePipelineTest,
+       OrdinaryKvPushOwnsMappingsAndGatesResultAndSlotReuse) {
+  capacity_.common.enable_kv_push = true;
+  std::promise<void> push_started;
+  auto started = push_started.get_future();
+  std::promise<void> read_mappings;
+  auto readable = read_mappings.get_future();
+  std::promise<void> model_finished;
+  auto finished = model_finished.get_future();
+  folly::Promise<bool> transfer_finished;
+  std::vector<TransferKVInfo> observed;
+  std::weak_ptr<NPULayerSynchronizerImpl> synchronizer;
+  target_->after_forward = [&model_finished]() { model_finished.set_value(); };
+  TaskKVPush push = [&](const std::vector<TransferKVInfo>& infos,
+                        ModelInputParams& params) {
+    push_started.set_value();
+    readable.wait();
+    observed = infos;
+    params.parallel.layer_synchronizer =
+        std::make_shared<NPULayerSynchronizerImpl>(/*num_layers=*/1);
+    synchronizer = params.parallel.layer_synchronizer;
+    return transfer_finished.getSemiFuture();
+  };
+  ASSERT_TRUE(TaskExecutionPipeline::create(
+                  state_thread_,
+                  {*target_, *target_executor_, target_cache_, std::move(push)},
+                  capacity_.common,
+                  pipeline_)
+                  .ok());
+  auto prefill = input(false);
+  prefill.input_params.embedding = {};
+  prefill.transfer_kv_infos.emplace_back(push_info());
+  const auto submitted = pipeline_->submit(prefill);
+  ASSERT_TRUE(submitted.status.ok()) << submitted.status.message();
+  EXPECT_EQ(started.wait_for(std::chrono::seconds(10)),
+            std::future_status::ready);
+  // Submit acknowledges ownership of nested transfer mappings, even while
+  // Launch has not read them and the caller immediately reuses its storage.
+  prefill.transfer_kv_infos.front().request_id = "replacement";
+  prefill.transfer_kv_infos.front().mappings.front().local_ids.front() = 99;
+  prefill.transfer_kv_infos.clear();
+  read_mappings.set_value();
+  EXPECT_EQ(finished.wait_for(std::chrono::seconds(10)),
+            std::future_status::ready);
+  EXPECT_FALSE(pipeline_->submit(prefill).status.ok());
+  auto pending = pipeline_->take_result_async(submitted.task_id);
+  auto result =
+      std::async(std::launch::async, [future = std::move(pending)]() mutable {
+        return std::move(future).get();
+      });
+  EXPECT_EQ(result.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  transfer_finished.setValue(true);
+  const auto completed = result.get();
+  ASSERT_TRUE(completed.status.ok()) << completed.status.message();
+  ASSERT_EQ(observed.size(), 1U);
+  EXPECT_EQ(observed.front().request_id, "pd-request");
+  ASSERT_EQ(observed.front().mappings.size(), 1U);
+  EXPECT_EQ(observed.front().mappings.front().local_ids,
+            (std::vector<uint64_t>{1}));
+  EXPECT_EQ(observed.front().mappings.front().remote_ids,
+            (std::vector<uint64_t>{3}));
+  EXPECT_TRUE(synchronizer.expired());
+  target_->after_forward = {};
+  const auto reused = execute(prefill);
+  EXPECT_TRUE(torch::equal(reused.sample_output.next_tokens,
+                           completed.output.sample_output.next_tokens));
+  EXPECT_EQ(target_->forward_had_sync, (std::vector<bool>{true, false}));
+}
+
+class MtpKvPushPipelineTest : public SpeculativePipelineTest,
+                              public ::testing::WithParamInterface<bool> {};
+
+TEST_P(MtpKvPushPipelineTest,
+       MtpKvPushWaitsForIndependentTargetAndDraftEvents) {
+  capacity_.common.enable_kv_push = true;
+  folly::Promise<bool> target_transfer;
+  folly::Promise<bool> draft_transfer;
+  std::promise<void> draft_finished;
+  auto finished = draft_finished.get_future();
+  std::weak_ptr<NPULayerSynchronizerImpl> target_sync;
+  std::weak_ptr<NPULayerSynchronizerImpl> draft_sync;
+  const auto push =
+      [](folly::Promise<bool>& completion,
+         std::weak_ptr<NPULayerSynchronizerImpl>& observed) -> TaskKVPush {
+    return [&completion, &observed](const std::vector<TransferKVInfo>& infos,
+                                    ModelInputParams& params) {
+      EXPECT_EQ(infos.size(), 1U);
+      params.parallel.layer_synchronizer =
+          std::make_shared<NPULayerSynchronizerImpl>(/*num_layers=*/1);
+      observed = params.parallel.layer_synchronizer;
+      return completion.getSemiFuture();
+    };
+  };
+  draft_->after_forward = [&draft_finished]() { draft_finished.set_value(); };
+  create(push(target_transfer, target_sync), push(draft_transfer, draft_sync));
+  auto prefill = input(false);
+  prefill.transfer_kv_infos.emplace_back(push_info());
+  const auto submitted = pipeline_->submit(prefill);
+  ASSERT_TRUE(submitted.status.ok()) << submitted.status.message();
+  const std::future_status forward_status =
+      finished.wait_for(std::chrono::seconds(10));
+  EXPECT_EQ(forward_status, std::future_status::ready);
+  if (forward_status == std::future_status::ready) {
+    const auto target = target_sync.lock();
+    const auto draft = draft_sync.lock();
+    EXPECT_NE(target, nullptr);
+    EXPECT_NE(draft, nullptr);
+    EXPECT_NE(target, draft);
+    if (target != nullptr && draft != nullptr) {
+      EXPECT_TRUE(target->get_event_flag(0)->load());
+      EXPECT_TRUE(draft->get_event_flag(0)->load());
+    }
+  }
+  auto pending = pipeline_->take_result_async(submitted.task_id);
+  auto result =
+      std::async(std::launch::async, [future = std::move(pending)]() mutable {
+        return std::move(future).get();
+      });
+  folly::Promise<bool>& first_transfer =
+      GetParam() ? target_transfer : draft_transfer;
+  folly::Promise<bool>& second_transfer =
+      GetParam() ? draft_transfer : target_transfer;
+  first_transfer.setValue(true);
+  EXPECT_EQ(result.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  second_transfer.setValue(true);
+  const auto completed = result.get();
+  ASSERT_TRUE(completed.status.ok()) << completed.status.message();
+  EXPECT_TRUE(torch::equal(completed.output.sample_output.embeddings,
+                           torch::tensor({{2.0f}})));
+  EXPECT_TRUE(target_sync.expired());
+  EXPECT_TRUE(draft_sync.expired());
+  draft_->after_forward = {};
+  const auto decoded = execute(input(true));
+  EXPECT_TRUE(torch::equal(decoded.sample_output.next_tokens,
+                           torch::tensor({{4, 5, 6}}, torch::kInt64)));
+  EXPECT_EQ(target_->forward_had_sync, (std::vector<bool>{true, false}));
+  EXPECT_EQ(draft_->forward_had_sync, (std::vector<bool>{true, false, false}));
+}
+
+INSTANTIATE_TEST_SUITE_P(CompletionOrder,
+                         MtpKvPushPipelineTest,
+                         ::testing::Bool());
+
+TEST_F(SpeculativePipelineTest,
+       UnfinishedMtpPrefillPushesBothCachesWithoutSampling) {
+  capacity_.common.enable_kv_push = true;
+  capacity_.common.chunked_prefill = true;
+  uint32_t target_pushes = 0;
+  uint32_t draft_pushes = 0;
+  const auto push = [](uint32_t& count) -> TaskKVPush {
+    return [&count](const std::vector<TransferKVInfo>& infos,
+                    ModelInputParams& params) {
+      EXPECT_EQ(infos.size(), 1U);
+      ++count;
+      params.parallel.layer_synchronizer =
+          std::make_shared<NPULayerSynchronizerImpl>(/*num_layers=*/1);
+      return folly::makeSemiFuture(true);
+    };
+  };
+  create(push(target_pushes), push(draft_pushes));
+  auto unfinished = input(false);
+  unfinished.input_params.meta.batch_forward_type =
+      BatchForwardType::CHUNKED_PREFILL;
+  unfinished.input_params.embedding.extra_token_ids = {3};
+  unfinished.input_params.embedding.embedding_ids.clear();
+  unfinished.input_params.embedding.request_ids.clear();
+  unfinished.sampling_params = {};
+  unfinished.transfer_kv_infos.emplace_back(push_info());
+  unfinished.input_params.parallel.layer_synchronizer =
+      std::make_shared<NPULayerSynchronizerImpl>(/*num_layers=*/1);
+  EXPECT_FALSE(pipeline_->submit(unfinished).status.ok());
+  unfinished.input_params.parallel.layer_synchronizer.reset();
+  const auto output = execute(unfinished);
+  EXPECT_FALSE(output.sample_output.next_tokens.defined());
+  EXPECT_FALSE(output.sample_output.embeddings.defined());
+  EXPECT_EQ(target_pushes, 1U);
+  EXPECT_EQ(draft_pushes, 1U);
+  EXPECT_EQ(target_->logits_calls.load(), 0);
+  EXPECT_EQ(draft_->logits_calls.load(), 0);
+}
+
+TEST_F(SpeculativePipelineTest,
+       FreshDecodeImportsBootstrapAndReplacesReusedRequest) {
+  create();
+  auto decode = input(true);
+  EXPECT_FALSE(pipeline_->submit(decode).status.ok());
+  decode.input_params.embedding.mtp_bootstrap_row_idxes = {0};
+  decode.input_params.embedding.mtp_bootstrap_embeddings =
+      torch::tensor({{2.0f}});
+  const auto first = execute(decode);
+  EXPECT_TRUE(torch::equal(first.sample_output.next_tokens,
+                           torch::tensor({{4, 5, 6}}, torch::kInt64)));
+  ASSERT_EQ(draft_->forward_embeddings.size(), 2U);
+  EXPECT_TRUE(torch::equal(draft_->forward_embeddings.front().cpu(),
+                           torch::tensor({{0.0f}, {2.0f}})));
+
+  auto replacement = input(true, /*token=*/10, /*position=*/5);
+  replacement.input_params.embedding.request_ids = {"new-pd-request"};
+  EXPECT_FALSE(pipeline_->submit(replacement).status.ok());
+  replacement.input_params.embedding.mtp_bootstrap_row_idxes = {0};
+  replacement.input_params.embedding.mtp_bootstrap_embeddings =
+      torch::tensor({{9.0f}});
+  const auto second = execute(replacement);
+  EXPECT_TRUE(torch::equal(second.sample_output.next_tokens,
+                           torch::tensor({{11, 12, 13}}, torch::kInt64)));
+  ASSERT_EQ(draft_->forward_embeddings.size(), 4U);
+  EXPECT_TRUE(torch::equal(draft_->forward_embeddings[2].cpu(),
+                           torch::tensor({{0.0f}, {9.0f}})));
+  EXPECT_TRUE(torch::equal(first.sample_output.next_tokens,
+                           torch::tensor({{4, 5, 6}}, torch::kInt64)));
+}
 
 TEST_F(SpeculativePipelineTest, PrefillDecodeAndSlotReuseKeepAcceptedContext) {
   create();

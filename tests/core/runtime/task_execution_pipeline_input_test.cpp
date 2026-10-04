@@ -161,6 +161,35 @@ TEST_F(TaskExecutionPipelineInputTest, EmptyInputAndAbsentSamplingAreValid) {
 }
 
 TEST_F(TaskExecutionPipelineInputTest,
+       KvPushRequiresEnabledNonemptyServingPrefill) {
+  auto source = ordinary_input();
+  source.transfer_kv_infos.emplace_back();
+  source.transfer_kv_infos.front().request_id = "pd-request";
+  EXPECT_FALSE(validate_input(source).ok());
+
+  LlmTaskCapacity capacity;
+  capacity.enable_kv_push = true;
+  EXPECT_TRUE(validate_input(source, capacity).ok());
+  source.input_params.meta.batch_forward_type =
+      BatchForwardType::CHUNKED_PREFILL;
+  source.sampling_params = {};
+  EXPECT_TRUE(validate_input(source, capacity).ok());
+
+  source.input_params.meta.is_graph_warmup = true;
+  EXPECT_FALSE(validate_input(source, capacity).ok());
+  auto decode = ordinary_input(1, BatchForwardType::DECODE);
+  decode.transfer_kv_infos = source.transfer_kv_infos;
+  EXPECT_FALSE(validate_input(decode, capacity).ok());
+  auto empty = ordinary_input(0);
+  empty.transfer_kv_infos = source.transfer_kv_infos;
+  EXPECT_FALSE(validate_input(empty, capacity).ok());
+
+  // A Decode worker can enable PD without pushing during its own forward.
+  decode.transfer_kv_infos.clear();
+  EXPECT_TRUE(validate_input(decode, capacity).ok());
+}
+
+TEST_F(TaskExecutionPipelineInputTest,
        RejectsInvalidTransportAndAlgorithmFields) {
   const auto rejected = [](const LlmForwardInput& invalid) {
     EXPECT_FALSE(validate_input(invalid).ok());

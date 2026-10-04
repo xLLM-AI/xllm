@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <thread>
 
@@ -52,6 +53,8 @@ struct LlmTaskCapacity {
   torch::ScalarType parameter_dtype = torch::kFloat32;
   bool chunked_prefill = false;
   bool enable_mla = false;
+  // Only a PD Prefill owner may attach per-step KV PUSH mappings.
+  bool enable_kv_push = false;
   uint32_t dp_size = 1;
   uint32_t dp_rank = 0;
   // Borrowed groups outlive the pipeline. Orthogonal CP requires consensus
@@ -62,11 +65,17 @@ struct LlmTaskCapacity {
   uint32_t max_graph_batch_size = 0;
 };
 
-// Borrowed resources outlive the pipeline.
+using TaskKVPush =
+    std::function<folly::SemiFuture<bool>(const std::vector<TransferKVInfo>&,
+                                          ModelInputParams&)>;
+
+// Borrowed resources outlive the pipeline. PUSH binds a fresh layer
+// synchronizer to the invocation and resolves KV resources at Launch time.
 struct TaskModel {
   CausalLM& model;
   Executor& executor;
   std::vector<KVCache>& kv_caches;
+  TaskKVPush push_kv = {};
 };
 
 class ProcessGroup;
@@ -114,6 +123,10 @@ class TaskExecutionPipeline final {
                        CausalLM& model,
                        Executor& executor,
                        std::vector<KVCache>& kv_caches,
+                       const LlmTaskCapacity& capacity,
+                       std::unique_ptr<TaskExecutionPipeline>& output);
+  static Status create(ThreadPool& state_executor,
+                       TaskModel model,
                        const LlmTaskCapacity& capacity,
                        std::unique_ptr<TaskExecutionPipeline>& output);
   static Status create(ThreadPool& state_executor,
@@ -222,6 +235,7 @@ class TaskExecutionPipeline final {
     Step step;
     Step expected_producer;
     bool is_warmup = false;
+    std::vector<TransferKVInfo> transfer_kv_infos;
     StreamEventPtr input_ready;
     StreamEventPtr output_ready;
     std::unique_ptr<SlotBuffer> buffer;
@@ -250,6 +264,7 @@ class TaskExecutionPipeline final {
                         Executor& executor,
                         std::vector<KVCache>& kv_caches,
                         LlmTaskCapacity capacity,
+                        TaskKVPush push_kv,
                         WorkerImpl* worker_pipeline = nullptr);
   Status validate(const Slot& slot, const LlmForwardInput& input) const;
   Status prepare(uint32_t slot_id, const LlmForwardInput& input);
@@ -309,6 +324,7 @@ class TaskExecutionPipeline final {
   CausalLM& model_;
   Executor& executor_;
   std::vector<KVCache>& kv_caches_;
+  TaskKVPush push_kv_;
   LlmTaskCapacity capacity_;
   Device device_;
   Stream prepare_stream_;

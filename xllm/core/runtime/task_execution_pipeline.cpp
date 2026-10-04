@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 
+#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/task_execution_pipeline_speculative.h"
@@ -40,11 +41,13 @@ TaskExecutionPipeline::TaskExecutionPipeline(ThreadPool& state_executor,
                                              Executor& executor,
                                              std::vector<KVCache>& kv_caches,
                                              LlmTaskCapacity capacity,
+                                             TaskKVPush push_kv,
                                              WorkerImpl* worker_pipeline)
     : worker_pipeline_(worker_pipeline),
       model_(model),
       executor_(executor),
       kv_caches_(kv_caches),
+      push_kv_(std::move(push_kv)),
       capacity_(std::move(capacity)),
       device_(model.device()),
       prepare_stream_(device_.unwrap()),
@@ -61,12 +64,26 @@ Status TaskExecutionPipeline::create(
     std::vector<KVCache>& kv_caches,
     const LlmTaskCapacity& capacity,
     std::unique_ptr<TaskExecutionPipeline>& output) {
+  return create(
+      state_executor, TaskModel{model, executor, kv_caches}, capacity, output);
+}
+
+Status TaskExecutionPipeline::create(
+    ThreadPool& state_executor,
+    TaskModel resources,
+    const LlmTaskCapacity& capacity,
+    std::unique_ptr<TaskExecutionPipeline>& output) {
+  auto& model = resources.model;
+  auto& executor = resources.executor;
   if (state_executor.size() != 1) {
     return invalid("Task pipeline requires one state thread.");
   }
   if (!executor.supports_prepared_attention_metadata()) {
     return invalid(
         "LLM task pipeline requires supported Python prepared metadata.");
+  }
+  if (capacity.enable_kv_push && !resources.push_kv) {
+    return invalid("PD Prefill requires a model KV PUSH provider.");
   }
   if (capacity.slot_count == 0 || capacity.slot_count > 2 ||
       capacity.dp_size == 0 || capacity.dp_rank >= capacity.dp_size ||
@@ -81,9 +98,13 @@ Status TaskExecutionPipeline::create(
     return invalid("Invalid ordinary LLM capacity or indexed device.");
   }
   c10::DeviceGuard guard(model.device());
-  auto pipeline =
-      std::unique_ptr<TaskExecutionPipeline>(new TaskExecutionPipeline(
-          state_executor, model, executor, kv_caches, capacity));
+  auto pipeline = std::unique_ptr<TaskExecutionPipeline>(
+      new TaskExecutionPipeline(state_executor,
+                                model,
+                                executor,
+                                resources.kv_caches,
+                                capacity,
+                                std::move(resources.push_kv)));
   pipeline->graph_batch_sizes_ = graph_batch_sizes(capacity);
   pipeline->captured_graph_batch_sizes_.reserve(
       pipeline->graph_batch_sizes_.size());
@@ -147,6 +168,7 @@ Status TaskExecutionPipeline::create(
                                 target.executor,
                                 target.kv_caches,
                                 capacity,
+                                std::move(target.push_kv),
                                 &worker));
   pipeline->slots_.reserve(capacity.slot_count);
   for (uint32_t slot_id = 0; slot_id < capacity.slot_count; ++slot_id) {
@@ -185,7 +207,7 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       source.runtime.metadata_ready_event != nullptr ||
       !source.runtime.retained_device_tensors.empty() ||
       source.skip_sampling_for_logits_only || source.return_selected_hidden ||
-      !source.transfer_kv_infos.empty() || !source.json_object_states.empty() ||
+      !source.json_object_states.empty() ||
       !source.json_object_state_snapshots.empty() ||
       !source.json_object_invalid_draft.empty() ||
       !source.json_object_errors.empty() || params.is_spec_verify ||
@@ -204,7 +226,7 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       !host.ring_cur_seqlen.empty() || !host.ring_cache_seqlen.empty()) {
     return Status(StatusCode::INVALID_ARGUMENT,
                   "Task pipeline requires CPU input without pre-expanded, "
-                  "structured, transfer or recurrent state.");
+                  "structured or recurrent state.");
   }
   if (!speculative && (params.mtp_shifted_token_ids.defined() ||
                        embedding.mtp_shifted_token_ids.defined() ||
@@ -232,6 +254,14 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
         "Task pipeline does not support active linear-attention state.");
   }
   const auto& tokens = source.host_token_ids();
+  if (!source.transfer_kv_infos.empty() &&
+      (!capacity.enable_kv_push || meta.is_graph_warmup || !tokens.defined() ||
+       tokens.numel() == 0 ||
+       (!meta.batch_forward_type.is_prefill() &&
+        !meta.batch_forward_type.is_chunked_prefill() &&
+        !meta.batch_forward_type.is_mixed()))) {
+    return invalid("KV PUSH requires a nonempty PD Prefill task.");
+  }
   const auto& slots = params.attention.device.new_cache_slots;
   if (source.runtime.input_host_buffer_has_layout ||
       (tokens.defined() && !is_cpu_int_tensor(tokens, /*dimensions=*/1)) ||
@@ -600,7 +630,11 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
         return status;
       }
     }
-    return prepare_speculative(slot_id, input);
+    const Status status = prepare_speculative(slot_id, input);
+    if (status.ok()) {
+      slots_[slot_id]->transfer_kv_infos = input.transfer_kv_infos;
+    }
+    return status;
   }
   if (slot_id >= slots_.size()) {
     return invalid("Invalid LLM Slot index.");
@@ -630,6 +664,8 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
     }
   }
   slot.buffer->prepare(input, prepare_stream_, padded_batch_size);
+  slot.buffer->model_params().parallel.layer_synchronizer.reset();
+  slot.transfer_kv_infos = input.transfer_kv_infos;
   if (slot.buffer->tokens().numel() != 0) {
     executor_.prepare_attention_metadata(kv_caches_,
                                          slot.buffer->model_params());
@@ -696,6 +732,11 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
     CHECK_GT(published_tail_.sample_rows, 0);
     slot.buffer->patch_previous_tokens(previous_tokens_);
   }
+  KVTransferCompletion kv_transfers;
+  if (!slot.transfer_kv_infos.empty()) {
+    kv_transfers.add(
+        push_kv_(slot.transfer_kv_infos, slot.buffer->model_params()));
+  }
   if (slot.buffer->tokens().numel() != 0) {
     slot.model_output = executor_.forward(slot.buffer->tokens(),
                                           slot.buffer->positions(),
@@ -732,6 +773,9 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
     previous_tokens_.narrow(/*dim=*/0, /*start=*/0, slot.step.sample_rows)
         .copy_(slot.buffer->device_result().tokens);
   }
+  // Every worker must finish its PUSH before the Prefill result permits
+  // Decode to run or the scheduler to release source KV blocks.
+  CHECK(kv_transfers.wait()) << "Task pipeline KV cache push failed";
   published_tail_ = slot.step;  // Zero rows invalidate all previous tokens.
   task_stream_.record_event(*slot.output_ready);
   const Status status =
@@ -801,6 +845,8 @@ void TaskExecutionPipeline::discard(uint32_t slot_id) {
 }
 
 void TaskExecutionPipeline::release_outputs(Slot& slot) {
+  slot.buffer->model_params().parallel.layer_synchronizer.reset();
+  slot.transfer_kv_infos.clear();
   slot.logits = torch::Tensor();
   slot.model_output = ModelOutput();
   slot.sample_output = SampleOutput();

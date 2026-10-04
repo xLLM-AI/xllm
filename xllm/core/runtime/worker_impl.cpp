@@ -2186,6 +2186,9 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   capacity.parameter_dtype = options.enable_shm() ? torch::kFloat32 : dtype_;
   capacity.chunked_prefill = options.enable_chunked_prefill();
   capacity.enable_mla = args.enable_mla();
+  capacity.enable_kv_push = Platform::is_npu() && options.enable_disagg_pd() &&
+                            options.instance_role() == InstanceRole::PREFILL &&
+                            options.kv_cache_transfer_mode() == "PUSH";
   capacity.dp_size = parallel_args_.dp_size();
   capacity.dp_rank = parallel_args_.rank() /
                      (parallel_args_.world_size() / parallel_args_.dp_size());
@@ -2219,7 +2222,29 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
 TaskModel WorkerImpl::task_model() {
   CHECK(status_ == Status::LOADED || status_ == Status::READY);
   CHECK(model_ != nullptr && model_executor_ != nullptr);
-  return {*model_, *model_executor_, kv_caches_};
+  TaskModel task{*model_, *model_executor_, kv_caches_};
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  if (options_.enable_disagg_pd() &&
+      options_.instance_role() == InstanceRole::PREFILL &&
+      options_.kv_cache_transfer_mode() == "PUSH") {
+    // The pipeline is created before KV allocation. Resolve the transfer
+    // backend only when Launch runs; this worker outlives its pipeline.
+    task.push_kv = [this](const std::vector<TransferKVInfo>& transfer_kv_infos,
+                          ModelInputParams& params) {
+      CHECK(kv_cache_transfer_ != nullptr) << "PD KV cache is not allocated.";
+      std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer =
+          std::make_shared<KVPushSynchronizerImpl>(
+              context_.get_model_args().n_layers());
+      params.parallel.layer_synchronizer = layer_synchronizer;
+      return kv_cache_transfer_->push_kv_blocks_async(
+          transfer_kv_infos,
+          context_.get_parallel_args(),
+          std::move(layer_synchronizer),
+          is_spec_draft_);
+    };
+  }
+#endif
+  return task;
 }
 
 ::xllm::Status WorkerImpl::create_task_pipeline(
@@ -2230,7 +2255,7 @@ TaskModel WorkerImpl::task_model() {
     return status;
   }
   status = TaskExecutionPipeline::create(
-      threadpool_, *model_, *model_executor_, kv_caches_, capacity, output);
+      threadpool_, task_model(), capacity, output);
   if (!status.ok()) {
     return status;
   }

@@ -92,6 +92,21 @@ Worker::Worker(const ParallelArgs& parallel_args,
                 options.speculative_algorithm()))))
         << "Task pipeline DCP requires DP=1 and ordinary or fixed MTP "
            "decoding.";
+    if (options.enable_disagg_pd()) {
+      CHECK(Platform::is_npu() && options.kv_cache_transfer_mode() == "PUSH" &&
+            kv_split_size == 1 &&
+            (options.instance_role() == InstanceRole::PREFILL ||
+             options.instance_role() == InstanceRole::DECODE) &&
+            (!options.enable_speculative_decode() ||
+             (SpeculativeConfig::is_mtp_algorithm(
+                  options.speculative_algorithm()) &&
+              !options.enable_adaptive_speculative_decode())))
+          << "Task pipeline PD requires NPU PUSH, PREFILL or DECODE roles, "
+             "replicated KV caches and ordinary or fixed MTP decoding.";
+      CHECK(options.instance_role() != InstanceRole::PREFILL ||
+            !options.enable_schedule_overlap())
+          << "Task pipeline PD requires schedule overlap disabled on PREFILL.";
+    }
     CHECK(worker_type == WorkerType::LLM && options.task_type() == "generate" &&
           (!options.enable_speculative_decode() ||
            ((SpeculativeConfig::is_mtp_algorithm(
@@ -101,7 +116,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
                  options.speculative_algorithm())) &&
             !options.enable_adaptive_speculative_decode())) &&
           !options.enable_prefill_piecewise_graph() &&
-          !options.enable_disagg_pd() && options.host_blocks_factor() <= 1.0 &&
+          options.host_blocks_factor() <= 1.0 &&
           !options.enable_kvcache_store() &&
           !options.enable_offline_inference() &&
           !EPLBConfig::get_instance().enable_eplb() &&
@@ -109,7 +124,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
           !LoadConfig::get_instance().enable_rolling_load() &&
           parallel_args.layerwise_split_size() == 1)
         << "Task pipeline requires Python LLM or fixed MTP/DFlash/DFlash2 with "
-           "a layerwise split of one, without offload or disaggregation.";
+           "a layerwise split of one, without offload.";
   }
   if (options.enable_speculative_decode()) {
     const std::string& algorithm = options.speculative_algorithm();

@@ -21,6 +21,7 @@ limitations under the License.
 #include <array>
 #include <limits>
 
+#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/dflash2_sampling.h"
 #include "core/framework/sampling/gumbel_sampling.h"
@@ -182,6 +183,11 @@ Status TaskExecutionPipeline::create(
       static_cast<uint64_t>(capacity.num_speculative_tokens) + 1;
   const uint64_t rows =
       static_cast<uint64_t>(common.model.max_sequences) * width;
+  if (common.enable_kv_push && (capacity.kind != SpeculativeTaskKind::MTP ||
+                                !target.push_kv || !draft.push_kv)) {
+    return invalid(
+        "PD MTP Prefill requires Target and Draft KV PUSH providers.");
+  }
   if (state_executor.size() != 1 || common.slot_count == 0 ||
       common.slot_count > 2 || common.model.max_sequences == 0 ||
       common.model.max_tokens == 0 || common.max_positions == 0 ||
@@ -220,10 +226,11 @@ Status TaskExecutionPipeline::create(
                                 target.model,
                                 target.executor,
                                 target.kv_caches,
-                                common));
+                                common,
+                                std::move(target.push_kv)));
   program->speculative_capacity_ =
       std::make_unique<SpeculativeTaskCapacity>(capacity);
-  program->draft_ = std::make_unique<TaskModel>(draft);
+  program->draft_ = std::make_unique<TaskModel>(std::move(draft));
   program->hidden_dtype_ = target.model.options().dtype().toScalarType();
   Status status = program->initialize_speculative();
   if (!status.ok()) {
@@ -964,6 +971,8 @@ Status TaskExecutionPipeline::prepare_speculative(
     return invalid("Invalid MTP SpeculativeSlot index.");
   }
   SpeculativeSlot& slot = *slots_[slot_id]->speculative;
+  slot.target_prefill->model_params().parallel.layer_synchronizer.reset();
+  slot.draft_prefill->model_params().parallel.layer_synchronizer.reset();
   Status status = validate_input(slot, input);
   if (!status.ok()) {
     return status;
@@ -1580,6 +1589,14 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
   c10::DeviceGuard device_guard(device_.unwrap());
   auto guard = task_stream_.set_stream_guard();
   CHECK(task_stream_.wait_event(slots_[slot_id]->input_ready));
+  KVTransferCompletion kv_transfers;
+  const auto& transfers = slots_[slot_id]->transfer_kv_infos;
+  if (!transfers.empty()) {
+    CHECK(!slot.decode && !block_draft() && slot.rows != 0);
+    kv_transfers.add(push_kv_(transfers, slot.target_prefill->model_params()));
+    kv_transfers.add(
+        draft_->push_kv(transfers, slot.draft_prefill->model_params()));
+  }
   if (slot.rows == 0 && slot.run_models) {
     launch_empty_shard(slot);
   } else if (slot.rows != 0) {
@@ -1589,6 +1606,9 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
       launch_prefill(slot);
     }
   }
+  // Target and Draft have independent layer events and cache namespaces.
+  // Both transfers must finish before publishing tokens/bootstrap hidden.
+  CHECK(kv_transfers.wait()) << "Task pipeline MTP KV cache push failed";
   record(task_stream_, slots_[slot_id]->output_ready);
   if (!slot.decode && slot.samples != 0) {
     CHECK(result_stream_.wait_event(slots_[slot_id]->output_ready));
@@ -1634,6 +1654,7 @@ ForwardOutput TaskExecutionPipeline::consume_speculative(uint32_t slot_id) {
     output.sample_output.embeddings.copy_(slot.host_hidden);
   }
   release_outputs(slot);
+  slots_[slot_id]->transfer_kv_infos.clear();
   return output;
 }
 
@@ -1643,9 +1664,12 @@ void TaskExecutionPipeline::discard_speculative(uint32_t slot_id) {
   c10::DeviceGuard guard(device_.unwrap());
   slot.target_prefill->discard_result();
   release_outputs(slot);
+  slots_[slot_id]->transfer_kv_infos.clear();
 }
 
 void TaskExecutionPipeline::release_outputs(SpeculativeSlot& slot) {
+  slot.target_prefill->model_params().parallel.layer_synchronizer.reset();
+  slot.draft_prefill->model_params().parallel.layer_synchronizer.reset();
   context_release(*slot.state);
   slot.draft_prefill->model_params().embedding.input_embedding =
       torch::Tensor();
