@@ -116,10 +116,10 @@ def test_capture_and_replay_bind_each_slot_without_input_copies(runner: Prepared
     from xllm.python.model_executor.forward_context import get_forward_context
 
     inputs = []
-    for _ in range(2):
-        tokens = torch.arange(4, dtype=torch.int32)
-        positions = torch.zeros(4, dtype=torch.int32)
-        metadata = _metadata(4)
+    for rows in (4, 4, 2, 2):
+        tokens = torch.arange(rows, dtype=torch.int32)
+        positions = torch.zeros_like(tokens)
+        metadata = _metadata(rows)
         runner.warmup_prepared(tokens, positions, metadata)
         runner.warmup_prepared(tokens, positions, metadata)
         inputs.append((tokens, positions, metadata))
@@ -131,7 +131,7 @@ def test_capture_and_replay_bind_each_slot_without_input_copies(runner: Prepared
         assert entry.static_metadata.slot_mapping is metadata.slot_mapping
         assert entry.static_metadata.block_table is metadata.block_table
         entries.append(entry)
-    assert entries[0] is not entries[1]
+    assert len({id(entry) for entry in entries}) == 4
     runner._allocate_entry.assert_not_called()
     runner._fill_entry.assert_not_called()
     runner.attention_backend.prepare_graph_replay.assert_not_called()
@@ -142,16 +142,18 @@ def test_capture_and_replay_bind_each_slot_without_input_copies(runner: Prepared
         installed.append((get_forward_context().execution_state, list(metadata.kv_seq_lens_host_values)))
 
     runner.attention_backend.prepare_graph_replay.side_effect = install_replay
-    for step, index in enumerate((0, 1, 0)):
+    for step, index in enumerate((0, 1, 2, 3, 0)):
         tokens, positions, metadata = inputs[index]
         lengths = [7 + step + row for row in range(len(tokens))]
         metadata.kv_seq_lens_host_values[:] = lengths
         runner.execute(tokens, positions, metadata)
         assert installed[-1][0] is entries[index].execution_state
         assert installed[-1][1] == lengths
+    for entry, calls in zip(entries, (2, 1, 1, 1)):
+        assert entry.graph.replay.call_count == calls
     runner.attention_backend.prepare.assert_not_called()
-    assert runner.attention_backend.prepare_graph_replay.call_count == 3
-    assert runner._capture.call_count == 2
+    assert runner.attention_backend.prepare_graph_replay.call_count == 5
+    assert runner._capture.call_count == 4
 
 
 @pytest.mark.parametrize("prepared", [True, False], ids=["pipeline", "legacy"])
@@ -303,8 +305,16 @@ def test_prepare_keeps_previous_graph_metadata_independent(runner: PreparedAclGr
     assert runner.execute(tokens, positions, metadata) is entry.static_output
     runner.attention_backend.prepare.assert_called_with(metadata, graph_mode=True)
     assert runner.prepared_replays == 1
+    entry.graph.replay.assert_called_once()
     with pytest.raises(RuntimeError, match="warmed Slot binding"):
         runner.execute(tokens, positions.clone(), metadata)
+    with pytest.raises(RuntimeError, match="warmed Slot binding"):
+        runner.execute(tokens.clone(), positions, metadata)
+    runner.attention_backend.prepare.reset_mock()
+    runner.warmup_prepared(tokens, positions, metadata)
+    assert runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)] is entry
+    runner.attention_backend.prepare.assert_not_called()
+    assert runner._capture.call_count == 1
 
 
 def test_prepared_executor_obeys_admission_and_propagates_replay_failure(runner: PreparedAclGraphRunner) -> None:
@@ -404,32 +414,21 @@ def test_prepared_dp_rejects_invalid_peers_and_missing_local_binding(runner: Pre
     metadata.dp_execution_token_counts = (2, 2)
     metadata.dp_is_decode = (1, 1)
     runner.warmup_prepared(tokens, positions, metadata)
+    entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)]
     metadata.dp_execution_token_counts = (2, 7)
     with pytest.raises(ValueError, match="same decode batch size"):
         runner.execute(tokens, positions, metadata)
+    entry.graph.replay.assert_not_called()
     metadata.dp_execution_token_counts = (2, 2)
     metadata.dp_is_decode = (1, 0)
     with pytest.raises(ValueError, match="same decode batch size"):
         runner.execute(tokens, positions, metadata)
+    entry.graph.replay.assert_not_called()
     metadata.dp_is_decode = (1, 1)
     with pytest.raises(RuntimeError, match="Slot binding"):
         runner.execute(tokens.clone(), positions, metadata)
-    assert runner._capture.call_count == 1
-
-
-def test_prepared_dp_rejects_changed_collectives_before_replay(runner: PreparedAclGraphRunner) -> None:
-    runner.dp_size = 2
-    tokens = torch.ones(2, dtype=torch.int32)
-    positions = torch.zeros_like(tokens)
-    metadata = _metadata(2)
-    metadata.dp_execution_token_counts = (2, 2)
-    metadata.dp_is_decode = (1, 1)
-    runner.warmup_prepared(tokens, positions, metadata)
-    entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)]
-    metadata.dp_execution_token_counts = (2, 4)
-    with pytest.raises(ValueError, match="same decode batch size"):
-        runner.execute(tokens, positions, metadata)
     entry.graph.replay.assert_not_called()
+    assert runner._capture.call_count == 1
 
 
 @pytest.mark.parametrize("counts,phases", [((1,), (1, 1)), ((1, 0), (1, 1)), ((1, 1), (1,)), ((2, 2), (1, 1))])
@@ -457,42 +456,6 @@ def test_prepared_capture_accepts_native_sizes_within_capacity(runner: PreparedA
         runner.warmup_prepared(tokens, positions, metadata)
         runner.execute(tokens, positions, metadata)
     assert runner._capture.call_count == capacity
-
-
-def test_warmup_immediately_replays_and_reuses_captured_binding(runner: PreparedAclGraphRunner) -> None:
-    tokens = torch.arange(2, dtype=torch.int32)
-    positions = torch.zeros_like(tokens)
-    metadata = _metadata(2)
-    runner.warmup_prepared(tokens, positions, metadata)
-    entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)]
-    entry.static_output = torch.ones(2, 8)
-    output = runner.execute(tokens, positions, metadata)
-    assert output is entry.static_output
-    entry.graph.replay.assert_called_once()
-    with pytest.raises(RuntimeError, match="warmed Slot binding"):
-        runner.execute(tokens.clone(), positions, metadata)
-    runner.attention_backend.prepare.reset_mock()
-    runner.warmup_prepared(tokens, positions, metadata)
-    assert runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)] is entry
-    runner.attention_backend.prepare.assert_not_called()
-    assert runner._capture.call_count == 1
-
-
-def test_later_warmup_adds_buckets_without_replacing_previous_entries(runner: PreparedAclGraphRunner) -> None:
-    inputs = []
-    entries = []
-    for rows in [4, 4, 2, 2]:
-        tokens = torch.arange(rows, dtype=torch.int32)
-        positions = torch.zeros_like(tokens)
-        metadata = _metadata(rows)
-        runner.warmup_prepared(tokens, positions, metadata)
-        inputs.append((tokens, positions, metadata))
-        entries.append(runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)])
-    for (tokens, positions, metadata), entry in zip(inputs, entries):
-        runner.execute(tokens, positions, metadata)
-        entry.graph.replay.assert_called_once()
-    assert len({id(entry) for entry in entries}) == 4
-    assert runner._capture.call_count == 4
 
 
 def test_capture_failure_propagates_without_publishing_a_graph(runner: PreparedAclGraphRunner) -> None:

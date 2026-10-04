@@ -40,21 +40,21 @@ def _runner() -> DecodeAclGraphRunner:
 
 
 def _metadata(linear_state_indices: torch.Tensor) -> SimpleNamespace:
+    rows = linear_state_indices.numel()
+    lengths = torch.arange(1, rows + 1, dtype=torch.int32)
+    pages = lengths * 10
     return SimpleNamespace(
-        slot_mapping=torch.arange(4, dtype=torch.int32),
-        paged_kv_indptr=torch.arange(5, dtype=torch.int32),
-        paged_kv_indices=torch.tensor([10, 20, 30, 40], dtype=torch.int32),
-        paged_kv_last_page_len=torch.arange(1, 5, dtype=torch.int32),
-        block_table=torch.tensor(
-            [[10, 0], [20, 0], [30, 0], [40, 0]],
-            dtype=torch.int32,
-        ),
-        kv_seq_lens=torch.arange(1, 5, dtype=torch.int32),
-        kv_seq_lens_host_values=[1, 2, 3, 4],
-        kv_cu_seq_lens=torch.tensor([0, 1, 3, 6, 10], dtype=torch.int32),
+        slot_mapping=torch.arange(rows, dtype=torch.int32),
+        paged_kv_indptr=torch.arange(rows + 1, dtype=torch.int32),
+        paged_kv_indices=pages,
+        paged_kv_last_page_len=lengths,
+        block_table=torch.stack((pages, torch.zeros_like(pages)), dim=1),
+        kv_seq_lens=lengths,
+        kv_seq_lens_host_values=lengths.tolist(),
+        kv_cu_seq_lens=torch.cat((torch.zeros(1, dtype=torch.int32), lengths.cumsum(0, dtype=torch.int32))),
+        q_cu_seq_lens=None,
         linear_state_indices=linear_state_indices,
         expanded_decode_metadata=None,
-        q_cu_seq_lens=None,
         is_prefill=False,
         is_chunked_prefill=False,
         is_spec_verify=False,
@@ -239,87 +239,40 @@ def test_dsa_graph_positions_are_refreshed_from_current_input() -> None:
     assert entry.static_metadata.dsa_positions.tolist() == [20, 21, 0, 0]
 
 
-def _dp_metadata(
-    token_counts: tuple[int, int],
-    dp_is_decode: tuple[int, int] = (1, 1),
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        is_prefill=False,
-        is_chunked_prefill=False,
-        dp_execution_token_counts=tuple(1 if count == 0 else count for count in token_counts),
-        dp_is_decode=dp_is_decode,
-    )
+@pytest.mark.parametrize(
+    "capacity,peer_rows,padded_rows",
+    [(8, 5, 8), (8, 8, 8), (7, 5, 7), (8, 9, None)],
+    ids=["peer-bucket", "at-capacity", "partial-bucket", "over-capacity"],
+)
+def test_dp_empty_rank_uses_group_wide_acl_graph_bucket(capacity: int, peer_rows: int, padded_rows: int | None) -> None:
+    runner = _runner()
+    runner.dp_size = 2
+    runner.dp_rank = 1
+    runner.max_batch = capacity
+    metadata = _metadata(torch.zeros(1, dtype=torch.int32))
+    metadata.dp_execution_token_counts = (peer_rows, 1)
+    metadata.dp_is_decode = (1, 1)
+    input_ids = torch.zeros(1, dtype=torch.int32)
+    assert runner.can_execute(input_ids, metadata) is (padded_rows is not None)
+    if padded_rows is None:
+        with pytest.raises(ValueError, match="decode batch exceeds ACL graph capacity"):
+            runner._padded_batch_size(1, metadata)
+    else:
+        assert runner._padded_batch_size(1, metadata) == padded_rows
 
 
-def test_dp_empty_rank_uses_group_wide_acl_graph_bucket() -> None:
-    attention_backend = SimpleNamespace(page_size=4, is_mla=False, create_graph_block_tables=lambda *_: ())
-    runner = DecodeAclGraphRunner(
-        nn.Identity(),
-        attention_backend,
-        torch.device("cpu"),
-        max_batch=16,
-        max_model_len=8,
-        dp_size=2,
-        dp_rank=1,
-    )
-
-    with patch.object(
-        runner,
-        "_has_compatible_decode_metadata",
-        return_value=True,
-    ):
-        assert runner.can_execute(
-            torch.zeros(1, dtype=torch.int32),
-            _dp_metadata((5, 0)),
-        )
-
-
-def test_dp_mixed_step_does_not_enter_acl_decode_graph() -> None:
-    attention_backend = SimpleNamespace(page_size=4, is_mla=False, create_graph_block_tables=lambda *_: ())
-    runner = DecodeAclGraphRunner(
-        nn.Identity(),
-        attention_backend,
-        torch.device("cpu"),
-        max_batch=16,
-        max_model_len=8,
-        dp_size=2,
-        dp_rank=0,
-    )
-
-    with patch.object(
-        runner,
-        "_has_compatible_decode_metadata",
-        return_value=True,
-    ):
-        assert not runner.can_execute(
-            torch.zeros(3, dtype=torch.int32),
-            _dp_metadata((3, 2), dp_is_decode=(0, 1)),
-        )
-
-
-def test_dp_acl_graph_requires_group_wide_token_counts() -> None:
-    attention_backend = SimpleNamespace(page_size=4, is_mla=False, create_graph_block_tables=lambda *_: ())
-    runner = DecodeAclGraphRunner(
-        nn.Identity(),
-        attention_backend,
-        torch.device("cpu"),
-        max_batch=16,
-        max_model_len=8,
-        dp_size=2,
-        dp_rank=0,
-    )
-    metadata = _dp_metadata((3, 2))
-    metadata.dp_execution_token_counts = (3,)
-
-    with (
-        patch.object(
-            runner,
-            "_has_compatible_decode_metadata",
-            return_value=True,
-        ),
-        pytest.raises(RuntimeError, match="valid dp_execution_token_counts"),
-    ):
-        runner.can_execute(torch.zeros(3, dtype=torch.int32), metadata)
+@pytest.mark.parametrize("counts,phases", [((3, 2), (0, 1)), ((3,), (1, 1))])
+def test_dp_acl_graph_rejects_invalid_peers(counts: tuple[int, ...], phases: tuple[int, ...]) -> None:
+    runner = _runner()
+    runner.dp_size = 2
+    metadata = _metadata(torch.arange(3, dtype=torch.int32))
+    metadata.dp_execution_token_counts = counts
+    metadata.dp_is_decode = phases
+    if len(counts) != 2:
+        with pytest.raises(RuntimeError, match="valid dp_execution_token_counts"):
+            runner.can_execute(torch.zeros(3, dtype=torch.int32), metadata)
+    else:
+        assert not runner.can_execute(torch.zeros(3, dtype=torch.int32), metadata)
 
 
 def test_dp_graph_variant_ids_distinguish_mtp_input_signatures() -> None:
@@ -327,19 +280,19 @@ def test_dp_graph_variant_ids_distinguish_mtp_input_signatures() -> None:
     runner.dp_size = 2
     ids = torch.ones(1, dtype=torch.int32)
     topk = torch.ones((1, 1, 4), dtype=torch.int32)
-    seen = []
-
-    def gather_variants(value: torch.Tensor, **kwargs: object) -> torch.Tensor:
-        seen.append(value.item())
-        return value.repeat(2)
-
     with (
         patch("torch.distributed.is_initialized", return_value=True),
-        patch("xllm.python.distributed.all_gather", side_effect=gather_variants, create=True),
+        patch("xllm.python.distributed.all_gather") as gather,
     ):
-        for indices in (None, topk, None):
-            runner._synchronize_dp_graph_key(runner._graph_key(2, False, None, indices), ids)
-    assert seen == [1, 2, 1]
+        keys = []
+        for indices, variants in ((None, (1, 7)), (topk, (2, 11)), (None, (1, 13))):
+            gather.return_value = torch.tensor(variants, dtype=torch.int32)
+            local_key = runner._graph_key(2, False, None, indices)
+            key = runner._synchronize_dp_graph_key(local_key, ids)
+            assert key == (*local_key[:-1], variants)
+            keys.append(key)
+        assert keys[0] != keys[2]
+    assert [int(call.args[0].item()) for call in gather.call_args_list] == [1, 2, 1]
 
 
 def test_mtp_graph_output_slices_and_detaches_replay_buffers() -> None:

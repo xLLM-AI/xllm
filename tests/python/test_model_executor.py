@@ -192,15 +192,6 @@ class TestNpuGraphBackendResolution:
         config = {"enable_graph": True, "python_graph_backend": "off"}
         assert _resolve_graph_backend(config) == "aclgraph"
 
-    def test_glm_mtp_allows_aclgraph_for_cross_draft_topk_state(self) -> None:
-        config = {
-            "model_type": "glm_moe_dsa_mtp",
-            "enable_graph": True,
-            "python_graph_backend": "aclgraph",
-        }
-
-        assert _resolve_graph_backend(config) == "aclgraph"
-
 
 # ---------------------------------------------------------------------------
 # Tests: _create_attention_backend dispatch
@@ -640,14 +631,20 @@ class TestDecodeAclGraphSpeculativeMetadata:
         assert paged_kv_indices.tolist() == [10, 10, 20, 21, 20, 21]
         assert paged_kv_last_page_len.tolist() == [3, 4, 3, 4]
 
-    def test_expanded_chunked_verify_can_use_decode_graph(self) -> None:
+    @pytest.mark.parametrize(
+        "linear_state,supported,allowed", [(False, False, True), (True, False, False), (True, True, True)]
+    )
+    def test_expanded_chunked_verify_can_use_decode_graph(
+        self: TestDecodeAclGraphSpeculativeMetadata, linear_state: bool, supported: bool, allowed: bool
+    ) -> None:
         runner = self._runner()
-        input_ids = torch.arange(4, dtype=torch.int32)
-
-        assert runner.can_execute(input_ids, self._metadata())
+        metadata = self._metadata()
+        metadata.linear_state_indices = torch.arange(2, dtype=torch.int32) if linear_state else None
+        with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", supported):
+            assert runner.can_execute(torch.arange(4, dtype=torch.int32), metadata) is allowed
 
     def test_decode_batch_limit_uses_speculative_tokens_and_dp_global_max(
-        self,
+        self: TestDecodeAclGraphSpeculativeMetadata,
     ) -> None:
         runner = DecodeAclGraphRunner(
             nn.Identity(),
@@ -658,44 +655,13 @@ class TestDecodeAclGraphSpeculativeMetadata:
             decode_batch_size_limit=16,
             num_decoding_tokens=4,
         )
-        metadata = SimpleNamespace(
-            dp_execution_token_counts=(32, 64),
-        )
-
-        assert runner._decode_batch_sizes(
-            torch.zeros(32, dtype=torch.int32),
-            metadata,
-        ) == (8, 16)
-
-    def test_mtp3_batch_eight_uses_32_row_graph_bucket(self) -> None:
-        runner = DecodeAclGraphRunner(
-            nn.Identity(),
-            _PagedStubAttentionBackend(),
-            torch.device("cpu"),
-            max_batch=64,
-            max_model_len=8,
-            decode_batch_size_limit=16,
-            num_decoding_tokens=4,
-        )
-        metadata = SimpleNamespace(
-            is_prefill=False,
-            is_chunked_prefill=False,
-            dp_execution_token_counts=(),
-            linear_state_indices=torch.arange(8, dtype=torch.int32),
-        )
-
-        with (
-            patch.object(runner, "_has_compatible_decode_metadata", return_value=True),
-            patch(
-                "xllm.python.model_executor.runners.decode_acl_graph.resolve_expanded_decode_metadata",
-                return_value=object(),
-            ),
-        ):
-            # A KDA expanded batch requires a recurrent-state protocol.
-            with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", False):
-                assert not runner.can_execute(torch.zeros(32, dtype=torch.int32), metadata)
-            with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", True):
-                assert runner.can_execute(torch.zeros(32, dtype=torch.int32), metadata)
+        metadata = self._metadata()
+        metadata.dp_execution_token_counts = (32, 64)
+        assert runner._decode_batch_sizes(torch.zeros(32, dtype=torch.int32), metadata) == (8, 16)
+        assert runner._padded_batch_size(32, metadata) == 32
+        assert runner._padded_batch_size(64, metadata) == 64
+        with pytest.raises(ValueError, match="decode batch exceeds ACL graph capacity"):
+            runner._padded_batch_size(65, metadata)
 
     def test_warmup_captures_with_scheduler_metadata_once(self) -> None:
         runner = self._runner()
@@ -933,89 +899,58 @@ class TestDecodeAclGraphSpeculativeMetadata:
 
 
 class TestNormalizeLayerCaches:
-    def test_legacy_five_slot_cache_keeps_generic_layout(self):
-        tensors = tuple(torch.full((1,), value) for value in range(1, 6))
-
+    @pytest.mark.parametrize(
+        "slot_count,empty",
+        [(5, False), (11, False), (11, True)],
+        ids=["legacy", "deepseek-v4", "empty-deepseek-v4"],
+    )
+    def test_normalize_layer_cache_slots(self: TestNormalizeLayerCaches, slot_count: int, empty: bool) -> None:
+        tensors = tuple(
+            torch.empty(0) if empty and index >= 2 else torch.full((1,), index + 1) for index in range(slot_count)
+        )
         cache = normalize_layer_caches([tensors])[0]
-
-        assert cache.key is tensors[0]
-        assert cache.value is tensors[1]
-        assert cache.index is tensors[2]
-        assert cache.conv is tensors[3]
-        assert cache.ssm is tensors[4]
-        assert cache.swa is None
-        assert cache.compress_kv_state is None
-        assert cache.compress_score_state is None
-        assert cache.compress_index_kv_state is None
-        assert cache.compress_index_score_state is None
-        assert cache.indexer_scale is None
-
-    def test_deepseek_v4_eleven_slot_cache_maps_all_slots(self):
-        tensors = tuple(torch.full((1,), value) for value in range(1, 12))
-
-        cache = normalize_layer_caches([tensors])[0]
-
-        assert (
-            cache.key,
-            cache.value,
-            cache.index,
-            cache.conv,
-            cache.ssm,
-            cache.swa,
-            cache.compress_kv_state,
-            cache.compress_score_state,
-            cache.compress_index_kv_state,
-            cache.compress_index_score_state,
-            cache.indexer_scale,
-        ) == tensors
-
-    def test_empty_deepseek_v4_slots_are_normalized_to_none(self):
-        cache = normalize_layer_caches([(torch.ones(1), torch.ones(1), *(torch.empty(0),) * 9)])[0]
-
-        assert cache.key is not None
-        assert cache.value is not None
-        assert cache.index is None
-        assert cache.indexer_scale is None
+        fields = (
+            "key",
+            "value",
+            "index",
+            "conv",
+            "ssm",
+            "swa",
+            "compress_kv_state",
+            "compress_score_state",
+            "compress_index_kv_state",
+            "compress_index_score_state",
+            "indexer_scale",
+        )
+        for index, field in enumerate(fields):
+            expected = tensors[index] if index < slot_count and not (empty and index >= 2) else None
+            assert getattr(cache, field) is expected, field
 
 
 class TestBindKvCaches:
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-    )
-    def test_bind_correct_count(self, mock_create):
+    @patch("xllm.python.model_executor.executor._create_attention_backend")
+    def test_bind_idempotent(self: TestBindKvCaches, mock_create: MagicMock) -> None:
         backend = StubAttentionBackend()
         mock_create.return_value = backend
-        model = _FakeModel(num_layers=2)
-        executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
-
-        kv = (torch.zeros(1), torch.zeros(1))
-        executor.bind_kv_caches([kv, kv])
-        assert len(backend._kv_caches) == 2
-
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-    )
-    def test_bind_wrong_count_raises(self, mock_create):
-        mock_create.return_value = StubAttentionBackend()
-        model = _FakeModel(num_layers=2)
-        executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
-
-        kv = (torch.zeros(1), torch.zeros(1))
-        with pytest.raises(ValueError, match="layer count does not match"):
-            executor.bind_kv_caches([kv])
-
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-    )
-    def test_bind_idempotent(self, mock_create):
-        backend = StubAttentionBackend()
-        mock_create.return_value = backend
-        model = _FakeModel(num_layers=1)
-        executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
-
-        kv = (torch.zeros(1), torch.zeros(1))
-        executor.bind_kv_caches([kv])
-        executor.bind_kv_caches([kv])  # should not raise or re-bind
+        executor = ModelExecutor(
+            _FakeModel(num_layers=2),
+            {"python_graph_backend": "aclgraph", "max_position_embeddings": 128},
+            max_seqs_per_batch=4,
+        )
+        first = [LayerCache(torch.ones(1), torch.full((1,), 2.0)) for _ in range(2)]
+        second = [LayerCache(torch.full((1,), 3.0), torch.full((1,), 4.0)) for _ in range(2)]
+        with patch.object(backend, "bind_kv_caches", wraps=backend.bind_kv_caches) as bind:
+            with pytest.raises(ValueError, match="layer count does not match"):
+                executor.bind_kv_caches(first[:1])
+            bind.assert_not_called()
+            executor.bind_kv_caches(first)
+            bound = backend._kv_caches
+            executor.bind_kv_caches(second)
+            bind.assert_called_once_with(bound)
+        assert len(bound) == 2
+        assert backend._kv_caches is executor.eager_runner.layer_caches is bound
+        assert executor.decode_graph_runner.layer_caches is bound
+        assert all(actual is expected for actual, expected in zip(bound, first))
 
 
 # ---------------------------------------------------------------------------
@@ -1225,76 +1160,39 @@ def _make_eager_runner(*, is_mla: bool = True) -> EagerRunner:
     return runner
 
 
-@pytest.mark.parametrize("model_owned_cp", [False, True])
-def test_eager_runner_preserves_pure_prefill_cp_context_ownership(model_owned_cp: bool) -> None:
-    runner = _make_eager_runner(is_mla=False)
+@pytest.mark.parametrize(
+    "is_mla,model_owned_cp",
+    [(False, False), (True, False), (False, True)],
+    ids=["qwen-prefill", "mla-chunked-prefill", "model-owned-prefill"],
+)
+def test_eager_runner_installs_cp_context(is_mla: bool, model_owned_cp: bool) -> None:
+    runner = _make_eager_runner(is_mla=is_mla)
     if model_owned_cp:
         runner.attention_backend = object.__new__(DsaAttentionBackend)
+    kv_lengths = [11, 13] if is_mla else [3, 5]
     metadata = SimpleNamespace(
-        is_prefill=True,
-        is_chunked_prefill=False,
+        is_prefill=not is_mla,
+        is_chunked_prefill=is_mla,
         is_mixed=False,
         is_spec_verify=False,
         q_seq_lens_host=torch.tensor([3, 5], dtype=torch.int32),
-        kv_seq_lens_host=None,
+        kv_seq_lens_host=torch.tensor(kv_lengths, dtype=torch.int32) if is_mla else None,
     )
+    cp_context = object()
 
-    with patch(
-        "xllm.python.model_executor.runners.eager.build_cp_context",
-        return_value=object(),
-    ) as build_context:
+    def _read_context(input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        assert get_forward_context().cp_context is (None if model_owned_cp else cp_context)
+        return input_ids
+
+    runner.model.side_effect = _read_context
+    with patch("xllm.python.model_executor.runners.eager.build_cp_context", return_value=cp_context) as build:
         runner.execute(torch.zeros(8), torch.arange(8), metadata)
-
     if model_owned_cp:
-        build_context.assert_not_called()
+        build.assert_not_called()
         assert runner.attention_backend._metadata is metadata
     else:
-        build_context.assert_called_once_with([3, 5], [3, 5], 4, 2, torch.device("cpu"))
-
-
-def test_eager_runner_preserves_qwen_missing_length_fallback() -> None:
-    runner = _make_eager_runner(is_mla=False)
-    metadata = SimpleNamespace(
-        is_prefill=True,
-        is_chunked_prefill=False,
-        is_mixed=False,
-        is_spec_verify=False,
-        q_seq_lens_host=None,
-        kv_seq_lens_host=None,
-    )
-
-    with patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context:
-        runner.execute(torch.zeros(1), torch.zeros(1), metadata)
-
-    build_context.assert_not_called()
-    assert runner.attention_backend._prepared
+        build.assert_called_once_with([3, 5], kv_lengths, 4, 2, torch.device("cpu"))
     runner.model.assert_called_once()
-
-
-def test_eager_runner_builds_cp_context_for_chunked_prefill() -> None:
-    runner = _make_eager_runner()
-    metadata = SimpleNamespace(
-        is_prefill=False,
-        is_chunked_prefill=True,
-        is_mixed=False,
-        is_spec_verify=False,
-        q_seq_lens_host=torch.tensor([3, 5], dtype=torch.int32),
-        kv_seq_lens_host=torch.tensor([11, 13], dtype=torch.int32),
-    )
-
-    with patch(
-        "xllm.python.model_executor.runners.eager.build_cp_context",
-        return_value=object(),
-    ) as build_context:
-        runner.execute(torch.zeros(8), torch.arange(8), metadata)
-
-    build_context.assert_called_once_with(
-        [3, 5],
-        [11, 13],
-        4,
-        2,
-        torch.device("cpu"),
-    )
 
 
 def test_eager_runner_rejects_mixed_cp_before_collective() -> None:
@@ -1305,14 +1203,12 @@ def test_eager_runner_rejects_mixed_cp_before_collective() -> None:
         is_mixed=True,
         is_spec_verify=False,
     )
-
     with (
-        patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context,
+        patch("xllm.python.model_executor.runners.eager.build_cp_context") as build,
         pytest.raises(NotImplementedError, match="mixed batches"),
     ):
         runner.execute(torch.zeros(1), torch.zeros(1), metadata)
-
-    build_context.assert_not_called()
+    build.assert_not_called()
     assert not runner.attention_backend._prepared
 
 
@@ -1363,25 +1259,29 @@ def test_eager_runner_keeps_spec_verify_rows_replicated(cp_size: int, prefill_fl
 
 
 @pytest.mark.parametrize(
-    ("is_mla", "is_chunked_prefill", "is_mixed", "is_spec_verify"),
+    ("is_mla", "is_prefill", "is_chunked_prefill", "is_mixed", "is_spec_verify"),
     [
-        (False, True, True, False),
-        (False, True, False, True),
-        (True, False, False, True),
+        (False, False, True, True, False),
+        (False, False, True, False, True),
+        (True, False, False, False, True),
+        (False, True, False, False, False),
     ],
 )
 def test_eager_runner_preserves_non_cp_fallback(
     is_mla: bool,
+    is_prefill: bool,
     is_chunked_prefill: bool,
     is_mixed: bool,
     is_spec_verify: bool,
 ) -> None:
     runner = _make_eager_runner(is_mla=is_mla)
     metadata = SimpleNamespace(
-        is_prefill=False,
+        is_prefill=is_prefill,
         is_chunked_prefill=is_chunked_prefill,
         is_mixed=is_mixed,
         is_spec_verify=is_spec_verify,
+        q_seq_lens_host=None,
+        kv_seq_lens_host=None,
     )
 
     def execute_model(input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

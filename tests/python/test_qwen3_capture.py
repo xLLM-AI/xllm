@@ -113,6 +113,7 @@ def test_qwen3_model_returns_tensor_when_capture_is_disabled(monkeypatch: pytest
     output = model(torch.tensor([1, 2]), torch.tensor([0, 1]))
 
     assert isinstance(output, torch.Tensor)
+    torch.testing.assert_close(output, torch.tensor([[7.0, 17.0], [8.0, 18.0]]))
 
 
 def test_aux_hidden_capture_snapshots_hidden_without_residual() -> None:
