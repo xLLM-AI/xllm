@@ -117,6 +117,14 @@ def test_projection(
         assert torch.isfinite(current).all()
         torch.testing.assert_close(current.float(), reference, rtol=_RTOL, atol=_ATOL)
         torch.testing.assert_close(actual, legacy, rtol=_RTOL, atol=_ATOL)
+        if tokens == 4 and mode == "eager" and scale == 1.0 and layout != "v_narrow":
+            baseline = torch.ops.npu.npu_transpose_batchmatmul(
+                x, weight, perm_x1=(1, 0, 2), perm_x2=(0, 1, 2), perm_y=(1, 0, 2)
+            )
+            torch.testing.assert_close(baseline.cpu().float(), reference, rtol=_RTOL, atol=_ATOL)
+            max_abs = (current.float() - baseline.cpu().float()).abs().max().item()
+            limit = 0 if layout.startswith("q_") else 0.25
+            assert max_abs <= limit, f"ATB/TBMM {layout} max_abs={max_abs}"
         torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
         torch.testing.assert_close(weight.cpu(), expected_weight, rtol=0, atol=0)
         if graph is not None:
@@ -125,27 +133,3 @@ def test_projection(
             assert not torch.equal(current, previous), "Projection reused stale input values"
         previous = current
     torch.npu.synchronize()
-
-
-@pytest.mark.parametrize("layout", ("q_contiguous", "q_split", "q_offset", "v_contiguous"))
-@pytest.mark.parametrize("heads,q_dim,v_dim", ((4, 192, 256), (8, 128, 128)), ids=("glm", "deepseek"))
-def test_atb_ein_sum_projection(
-    project: _Project,
-    layout: str,
-    heads: int,
-    q_dim: int,
-    v_dim: int,
-) -> None:
-    _, x, weight = _make_inputs(4, layout, heads, q_dim, v_dim)
-    actual = project(x, weight)
-    baseline = torch.ops.npu.npu_transpose_batchmatmul(
-        x, weight, perm_x1=(1, 0, 2), perm_x2=(0, 1, 2), perm_y=(1, 0, 2)
-    )
-    torch.npu.synchronize()
-    reference = torch.einsum("thd,hdo->tho", x.cpu().float(), weight.cpu().float())
-    assert actual.shape == reference.shape
-    assert actual.dtype == x.dtype and actual.device == x.device and actual.is_contiguous()
-    torch.testing.assert_close(actual.cpu().float(), reference, rtol=_RTOL, atol=_ATOL)
-    torch.testing.assert_close(baseline.cpu().float(), reference, rtol=_RTOL, atol=_ATOL)
-    max_abs = (actual.float() - baseline.float()).abs().max().item()
-    assert max_abs <= (0 if layout.startswith("q_") else 0.25), f"ATB/TBMM {layout} max_abs={max_abs}"

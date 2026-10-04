@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+from itertools import product
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+
+from xllm.python import kernels
 
 
 @pytest.fixture(scope="module")
@@ -41,6 +44,11 @@ def rotary(runtime: tuple[Any, Any]) -> torch.nn.Module:
     )
 
 
+@pytest.fixture(scope="module")
+def raw_cache(rotary: torch.nn.Module) -> torch.Tensor:
+    return rotary.cos_sin_cache.cpu().clone()
+
+
 def _positions(rows: int, step: int = 0) -> torch.Tensor:
     # Noncontiguous input, repeated positions, zero/padding and the last valid row.
     values = torch.tensor([0, 32768, 32768, 1048575, 1, 65536, 17, 0], dtype=torch.int64)
@@ -48,26 +56,53 @@ def _positions(rows: int, step: int = 0) -> torch.Tensor:
     return torch.stack((values, values), dim=-1).npu()[:, 0]
 
 
-@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
-def test_coefficients_equal_legacy_gather(runtime: tuple[Any, Any], rotary: torch.nn.Module, rows: int) -> None:
-    _, ds = runtime
-    positions = _positions(rows)
-    actual = rotary(positions.to(torch.int64).contiguous())
+def _reference_coefficients(
+    raw_cache: torch.Tensor, positions: torch.Tensor, actual: tuple[torch.Tensor, ...]
+) -> tuple[torch.Tensor, ...]:
+    # CPU indexing/splitting only; no production gather/expand or rotary forward.
+    cos, sin = raw_cache.index_select(0, positions.cpu().to(torch.int64)).split(32, dim=-1)
     expected = (
-        *ds._gather_half_rope_cos_sin(rotary.cos_sin_cache, positions),
-        *ds._gather_interleave_cos_sin(rotary.cos_sin_cache, positions),
+        cos,
+        sin,
+        torch.cat((cos, cos), -1).reshape(-1, 1, 1, 64),
+        torch.cat((sin, sin), -1).reshape(-1, 1, 1, 64),
     )
-    for value, reference in zip(actual, expected):
-        torch.testing.assert_close(value, reference, rtol=0, atol=0)
-    assert actual[0].stride() == (64, 1)
-    assert actual[2].shape == (rows, 1, 1, 64)
+    for value, reference in zip(actual, expected, strict=True):
+        assert value.shape == reference.shape and value.stride() == reference.stride()
+        assert value.dtype == reference.dtype
+        torch.testing.assert_close(value.cpu(), reference, rtol=0, atol=0)
+    return expected
 
 
-@pytest.mark.parametrize("interleaved", [False, True])
-@pytest.mark.parametrize("quantized", [False, True])
-@pytest.mark.parametrize("rows", [1, 2, 4])
-def test_indexer_query_and_cache_equal_legacy(
-    runtime: tuple[Any, Any], rotary: torch.nn.Module, interleaved: bool, quantized: bool, rows: int
+def _reference_indexer_rope(
+    value: torch.Tensor,
+    coefficients: tuple[torch.Tensor, ...],
+    interleaved: bool,
+) -> torch.Tensor:
+    # Feed independently selected rows to the primitive so BF16 arithmetic stays
+    # identical; the production coefficient selection and consumer helpers are
+    # deliberately not part of this reference.
+    value = value.clone()
+    if interleaved:
+        cos, sin = (coefficient.to(value.device).view(-1, 64) for coefficient in coefficients[2:])
+        kernels.npu_inplace_partial_rotary_mul(value, cos, sin, 0, 64)
+        return value
+    cos, sin = (coefficient.to(value.device).unsqueeze(1) for coefficient in coefficients[:2])
+    first, second = value[..., :32], value[..., 32:64]
+    return torch.cat((first * cos - second * sin, second * cos + first * sin, value[..., 64:]), dim=-1)
+
+
+@pytest.mark.parametrize(
+    "rows,interleaved,quantized",
+    [*product((1, 2, 4), (False, True), (False, True)), (8, False, False), (16, False, False)],
+)
+def test_indexer_query_and_cache_equal_raw_cache_reference(
+    runtime: tuple[Any, Any],
+    rotary: torch.nn.Module,
+    raw_cache: torch.Tensor,
+    interleaved: bool,
+    quantized: bool,
+    rows: int,
 ) -> None:
     glm, ds = runtime
     cfg = glm.Glm52Config(
@@ -84,20 +119,12 @@ def test_indexer_query_and_cache_equal_legacy(
     hidden = torch.randn(rows, 128, dtype=torch.bfloat16, device="npu:0")
     positions = _positions(rows, 1)
     coefficients = rotary(positions.contiguous())
+    reference_coefficients = _reference_coefficients(raw_cache, positions, coefficients)
     cos_sin = ds._select_indexer_query_cos_sin(interleaved, *coefficients, None)
     q = indexer.wq_b(hidden).view(rows, 4, 128)
     k = indexer.k_norm(indexer.wk(hidden))
-
-    def legacy(value: torch.Tensor) -> torch.Tensor:
-        if interleaved:
-            cos, sin = ds._gather_interleave_cos_sin(rotary.cos_sin_cache, positions)
-            glm.kernels.npu_inplace_partial_rotary_mul(value, cos.view(rows, 64), sin.view(rows, 64), 0, 64)
-            return value
-        rotated = ds._apply_half_rope(rotary.cos_sin_cache, value[..., :64], positions)
-        return torch.cat((rotated, value[..., 64:]), dim=-1)
-
-    expected_q = legacy(q.clone())
-    expected_k = legacy(k[:, None, :].clone()).squeeze(1)
+    expected_q = _reference_indexer_rope(q, reference_coefficients, interleaved)
+    expected_k = _reference_indexer_rope(k[:, None, :], reference_coefficients, interleaved).squeeze(1)
     expected_scale = None
     if quantized:
         expected_k = torch.matmul(expected_k, indexer.hadamard) * 128**-0.5
@@ -110,25 +137,31 @@ def test_indexer_query_and_cache_equal_legacy(
         index_cache_scale=torch.empty(rows, 1, device=hidden.device) if quantized else None,
         update_index_cache=lambda key, scale: written.append((key.clone(), None if scale is None else scale.clone())),
     )
-    before = tuple(coefficient.clone() for coefficient in cos_sin)
+    before = tuple(coefficient.clone() for coefficient in coefficients)
     actual_q = indexer._project_query(hidden, cos_sin)
     indexer._update_index_cache(hidden, ctx, cos_sin)
     torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
+    torch.testing.assert_close(actual_q[..., 64:], q[..., 64:], rtol=0, atol=0)
+    assert len(written) == 1
     torch.testing.assert_close(written[0][0], expected_k, rtol=0, atol=0)
     if quantized:
         torch.testing.assert_close(written[0][1], expected_scale, rtol=0, atol=0)
-    for coefficient, unchanged in zip(cos_sin, before):
-        torch.testing.assert_close(coefficient, unchanged, rtol=0, atol=0)
+    else:
+        assert written[0][1] is None
+        torch.testing.assert_close(written[0][0][..., 64:], k[..., 64:], rtol=0, atol=0)
     if interleaved:
         value = q.clone()
         output = indexer._apply_interleaved_rope(value, cos_sin)
         assert output.data_ptr() == value.data_ptr()
+        torch.testing.assert_close(output, expected_q, rtol=0, atol=0)
         torch.testing.assert_close(output[..., 64:], q[..., 64:], rtol=0, atol=0)
+    for coefficient, unchanged in zip(coefficients, before, strict=True):
+        torch.testing.assert_close(coefficient, unchanged, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("interleaved", [False, True])
 def test_aclgraph_changed_positions_and_alternating_target_draft_buckets(
-    runtime: tuple[Any, Any], rotary: torch.nn.Module, interleaved: bool
+    runtime: tuple[Any, Any], rotary: torch.nn.Module, raw_cache: torch.Tensor, interleaved: bool
 ) -> None:
     glm, ds = runtime
     # Separate graph allocations; target and each draft step own their coefficients.
@@ -184,23 +217,35 @@ def test_aclgraph_changed_positions_and_alternating_target_draft_buckets(
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
             outputs = forward()
-        entries.append((positions, forward, graph, outputs))
+        entries.append((positions, query, key, indexer, ctx, consumers, graph, outputs))
 
     # Update static positions in place, then revisit every captured graph. Retain
     # all graph outputs so allocator reuse cannot hide cross-entry corruption.
     snapshots = {}
     for step in range(1, 4):
         for entry_id in (0, 1, 2, 3, 1, 0):
-            positions, forward, graph, outputs = entries[entry_id]
+            positions, query, key, indexer, ctx, consumers, graph, outputs = entries[entry_id]
             positions.copy_(_positions(positions.shape[0], step))
             graph.replay()
             torch.npu.synchronize()
-            expected = forward()
-            torch.npu.synchronize()
-            for actual, reference in zip(outputs, expected):
+            reference_coefficients = _reference_coefficients(raw_cache, positions, outputs[:4])
+            reference_cos, reference_sin = (coefficient.to(query.device) for coefficient in reference_coefficients[2:])
+            expected_value = query.clone()
+            for _ in range(consumers):
+                expected_attention = kernels.interleaved_rotary_embedding(
+                    expected_value[..., :64], reference_cos, reference_sin
+                )
+                expected_value = _reference_indexer_rope(expected_value, reference_coefficients, interleaved)
+            expected_cache = _reference_indexer_rope(
+                indexer.k_norm(key)[:, None, :], reference_coefficients, interleaved
+            ).squeeze(1)
+            for actual, reference in zip(
+                outputs[4:], (expected_attention, expected_value, expected_cache), strict=True
+            ):
                 torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+            torch.testing.assert_close(outputs[5][..., 64:], query[..., 64:], rtol=0, atol=0)
             for previous_id, previous in snapshots.items():
                 if previous_id != entry_id:
-                    for actual, reference in zip(entries[previous_id][3], previous):
+                    for actual, reference in zip(entries[previous_id][-1], previous, strict=True):
                         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
             snapshots[entry_id] = tuple(value.clone() for value in outputs)

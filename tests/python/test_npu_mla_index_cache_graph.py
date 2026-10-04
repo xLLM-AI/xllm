@@ -12,133 +12,149 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Real NPU scatter/cache regressions; conftest owns native initialization.
+
+Migrated native-scatter/context cases keep XLLM_TEST_NPU_DEVICE as a resource
+opt-in. The former native-library bootstrap is replaced by the normal runner.
+Static-helper replay still executes without that opt-in.
+"""
+
 from __future__ import annotations
 
-import importlib.util
 import os
-import sys
-from pathlib import Path
+from contextlib import nullcontext
+from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 pytest.importorskip("torch_npu", reason="MLA index-cache graph tests require torch_npu")
 
-if not hasattr(torch, "npu") or not torch.npu.is_available():
-    pytest.skip("MLA index-cache graph tests require an available NPU", allow_module_level=True)
+from xllm.python import kernels
+from xllm.python.attention.backend import LayerCache
+from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 
 
-def _load_xllm_export() -> None:
-    artifact = os.environ.get("XLLM_EXPORT_PATH")
-    if artifact is None:
-        pytest.skip("XLLM_EXPORT_PATH must identify the native extension", allow_module_level=True)
-
-    artifact_path = Path(artifact).resolve()
-    if not artifact_path.is_file():
-        raise FileNotFoundError(f"xllm_export artifact does not exist: {artifact_path}")
-    spec = importlib.util.spec_from_file_location("xllm_export", artifact_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"failed to create import spec for {artifact_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["xllm_export"] = module
-    spec.loader.exec_module(module)
+@pytest.fixture(scope="module")
+def npu_device() -> torch.device:
+    assert torch.npu.is_available(), "MLA index-cache tests require an available NPU"
+    device_index = os.environ.get("XLLM_TEST_NPU_DEVICE")
+    if device_index is not None:
+        torch.npu.set_device(int(device_index))
+    return torch.device("npu", torch.npu.current_device())
 
 
-_load_xllm_export()
-from xllm.python import kernels  # noqa: E402
-from xllm.python.kernels_npu.sparse_attention import scatter_nd_update  # noqa: E402
-
-kernels.scatter_nd_update = scatter_nd_update
-
-from xllm.python.attention.npu_paged_attention import (  # noqa: E402
-    NpuPagedAttentionBackend,
-)
+def _apply_expected(cache: torch.Tensor, slots: torch.Tensor, values: torch.Tensor) -> None:
+    for slot, value in zip(slots.tolist(), values, strict=True):
+        if slot >= 0:
+            cache[slot].copy_(value)
 
 
-def _apply_reference_update(
-    cache: torch.Tensor,
-    scale_cache: torch.Tensor | None,
-    slots: torch.Tensor,
-    values: torch.Tensor,
-    scales: torch.Tensor | None,
-) -> None:
-    cache_view = cache.view(-1, cache.size(-1))
-    scale_view = scale_cache.view(-1, scale_cache.size(-1)) if scale_cache is not None else None
-    for row, slot in enumerate(slots.tolist()):
-        if slot < 0:
-            continue
-        cache_view[slot].copy_(values[row])
-        if scale_view is not None and scales is not None:
-            scale_view[slot].copy_(scales[row])
+@pytest.mark.parametrize("dtype", (torch.int8, torch.bfloat16, torch.float16))
+@pytest.mark.parametrize("width", (1, 128))
+def test_native_index_scatter_skips_negative_slots(npu_device: torch.device, dtype: torch.dtype, width: int) -> None:
+    if os.environ.get("XLLM_TEST_NPU_DEVICE") is None:
+        pytest.skip("set XLLM_TEST_NPU_DEVICE to execute migrated native-scatter tests")
+    expected = torch.full((128, width), -77, dtype=dtype)
+    actual = expected.to(npu_device)
+    slots = torch.tensor([0, -1, 127, -1], dtype=torch.int64)
+    values = torch.arange(4 * width).reshape(4, width).remainder(61).to(dtype)
+    kernels.scatter_nd_update(actual, slots.to(npu_device).view(-1, 1), values.to(npu_device))
+    _apply_expected(expected, slots, values)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
-    ("cache_dtype", "with_scales"),
-    [
-        pytest.param(torch.float16, False, id="float"),
-        pytest.param(torch.int8, True, id="w8a8"),
-    ],
+    "owner,dtype,width,with_scales",
+    (
+        ("static-helper", torch.float16, 2, False),
+        ("static-helper", torch.int8, 2, True),
+        ("context", torch.int8, 128, True),
+        ("context", torch.bfloat16, 128, True),
+        ("context", torch.float16, 128, True),
+    ),
 )
 def test_mla_index_cache_update_replays_dynamic_valid_rows(
-    cache_dtype: torch.dtype,
-    with_scales: bool,
+    npu_device: torch.device, owner: str, dtype: torch.dtype, width: int, with_scales: bool
 ) -> None:
-    device = torch.device("npu", torch.npu.current_device())
-    initial_cache = torch.arange(16, dtype=cache_dtype).view(2, 4, 1, 2)
-    initial_scale_cache = torch.arange(8, dtype=torch.float16).view(2, 4, 1) if with_scales else None
-    cache = initial_cache.to(device)
-    scale_cache = initial_scale_cache.to(device) if initial_scale_cache is not None else None
-    static_slots = torch.full((4,), -1, dtype=torch.int64, device=device)
-    static_values = torch.zeros((4, 2), dtype=cache_dtype, device=device)
-    static_scales = torch.zeros((4, 1), dtype=torch.float16, device=device) if with_scales else None
-
-    stream = torch.npu.Stream()
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph, stream=stream):
-        NpuPagedAttentionBackend._update_mla_index_cache(
-            cache,
-            scale_cache,
-            static_slots,
-            static_values,
-            static_scales,
+    if owner == "context" and os.environ.get("XLLM_TEST_NPU_DEVICE") is None:
+        pytest.skip("set XLLM_TEST_NPU_DEVICE to execute migrated context tests")
+    blocks, block_size = (2, 4) if owner == "static-helper" else (8, 16)
+    initial = torch.full((blocks, block_size, 1, width), -77, dtype=dtype)
+    scale_shape = (blocks, block_size, 1) if owner == "static-helper" else (blocks, block_size, 1, 1)
+    initial_scale = torch.full(scale_shape, -77, dtype=torch.float16) if with_scales else None
+    cache = initial.to(npu_device)
+    scale_cache = initial_scale.to(npu_device) if initial_scale is not None else None
+    host_slots = torch.tensor([-1] * 4 if owner == "static-helper" else [0, 17, -1, -1], dtype=torch.int64)
+    slots = host_slots.to(npu_device)
+    values = torch.zeros(4, width, dtype=dtype, device=npu_device)
+    scales = torch.ones(4, 1, dtype=torch.float16, device=npu_device) if with_scales else None
+    patterns = ([4, 6, 7, -1], [4, 5, 6, 7], [5, -1, 4, 6], [-1] * 4, [0, -1, 7, -1])
+    context = None
+    update = partial(NpuPagedAttentionBackend._update_mla_index_cache, cache, scale_cache, slots)
+    if owner == "context":
+        layer_cache = LayerCache(
+            key=torch.zeros(blocks, block_size, 1, 128, dtype=torch.bfloat16, device=npu_device),
+            value=torch.zeros(blocks, block_size, 1, 128, dtype=torch.bfloat16, device=npu_device),
+            index=cache,
+            indexer_scale=scale_cache,
         )
-    torch.npu.synchronize()
-
-    block_size = initial_cache.size(1)
-    expected_cache = initial_cache.clone()
-    expected_scale_cache = initial_scale_cache.clone() if initial_scale_cache is not None else None
-    replay_slots = (
-        [4, 6, 7, -1],
-        [4, 5, 6, 7],
-        [5, -1, 4, 6],
-        [-1, -1, -1, -1],
-    )
-    for replay_id, slots in enumerate(replay_slots):
-        value_base = 20 * (replay_id + 1)
-        host_slots = torch.tensor(slots, dtype=torch.int64)
-        host_values = torch.arange(value_base, value_base + 8, dtype=cache_dtype).view(4, 2)
-        host_scales = torch.arange(value_base, value_base + 4, dtype=torch.float16).view(4, 1) if with_scales else None
-        static_slots.copy_(host_slots)
-        static_values.copy_(host_values)
-        if static_scales is not None and host_scales is not None:
-            static_scales.copy_(host_scales)
-
-        graph.replay()
+        backend = NpuPagedAttentionBackend(1, 1, 128, 1.0, -1, True, npu_device, torch.bfloat16)
+        backend.bind_kv_caches([layer_cache])
+        metadata = SimpleNamespace(
+            slot_mapping=slots,
+            block_table=torch.zeros(4, blocks, dtype=torch.int32, device=npu_device),
+            kv_seq_lens=torch.ones(4, dtype=torch.int32, device=npu_device),
+            kv_seq_lens_host_values=[1] * 4,
+            q_cu_seq_lens=None,
+            expanded_decode_metadata=None,
+            is_prefill=False,
+            is_chunked_prefill=False,
+            has_kv_shard=False,
+        )
+        context = ForwardContext(backend, npu_device, metadata, [layer_cache])
+        patterns = ([34, -1, 0, 17], [-1] * 4, [127, 126, 125, 0], [-1, 0, -1, 1]) * 3
+    # CPU expectations precede all updates and never come from actual cache state.
+    expected = initial.clone().view(-1, width)
+    expected_scale = initial_scale.clone().view(-1, 1) if initial_scale is not None else None
+    _apply_expected(expected, host_slots, torch.zeros(4, width, dtype=dtype))
+    if expected_scale is not None:
+        _apply_expected(expected_scale, host_slots, torch.ones(4, 1, dtype=torch.float16))
+    with forward_context(context) if context is not None else nullcontext():
+        if owner == "context":
+            backend.prepare(metadata)
+            index_context = backend.mla_index_context(SimpleNamespace(layer_id=0))
+            assert index_context.index_cache is cache and index_context.index_cache_scale is scale_cache
+            assert index_context.slot_mapping is slots
+            update = index_context.update_index_cache
+        update(values, scales)
         torch.npu.synchronize()
-
-        _apply_reference_update(
-            expected_cache,
-            expected_scale_cache,
-            host_slots,
-            host_values,
-            host_scales,
-        )
-        torch.testing.assert_close(
-            cache.cpu().view(-1, cache.size(-1))[block_size:],
-            expected_cache.view(-1, expected_cache.size(-1))[block_size:],
-        )
-        if scale_cache is not None and expected_scale_cache is not None:
-            torch.testing.assert_close(
-                scale_cache.cpu().view(-1, scale_cache.size(-1))[block_size:],
-                expected_scale_cache.view(-1, expected_scale_cache.size(-1))[block_size:],
-            )
+        torch.testing.assert_close(cache.cpu().view(-1, width), expected, rtol=0, atol=0)
+        if scale_cache is not None:
+            torch.testing.assert_close(scale_cache.cpu().view(-1, 1), expected_scale, rtol=0, atol=0)
+        graph = torch.npu.NPUGraph()
+        stream = torch.npu.Stream()
+        with torch.npu.graph(graph, stream=stream):
+            update(values, scales)
+        torch.npu.synchronize()
+        torch.testing.assert_close(cache.cpu().view(-1, width), expected, rtol=0, atol=0)
+        if scale_cache is not None:
+            torch.testing.assert_close(scale_cache.cpu().view(-1, 1), expected_scale, rtol=0, atol=0)
+        for step, pattern in enumerate(patterns, 1):
+            host_slots = torch.tensor(pattern, dtype=torch.int64)
+            host_values = (torch.arange(4 * width).view(4, width).remainder(61) + step).to(dtype)
+            host_scales = torch.arange(4, dtype=torch.float16).view(4, 1) + step
+            slots.copy_(host_slots)
+            values.copy_(host_values)
+            if scales is not None:
+                scales.copy_(host_scales)
+            torch.npu.synchronize()
+            graph.replay()
+            torch.npu.synchronize()
+            _apply_expected(expected, host_slots, host_values)
+            torch.testing.assert_close(cache.cpu().view(-1, width), expected, rtol=0, atol=0)
+            if scale_cache is not None:
+                _apply_expected(expected_scale, host_slots, host_scales)
+                torch.testing.assert_close(scale_cache.cpu().view(-1, 1), expected_scale, rtol=0, atol=0)
