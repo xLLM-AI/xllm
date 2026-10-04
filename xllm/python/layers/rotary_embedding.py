@@ -22,6 +22,16 @@ import torch
 import torch.nn as nn
 
 
+def _expand_half_rope_cos_sin(
+    cos_sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expand a compact half-width cache row for partial-rotary kernels."""
+    half = cos_sin.size(-1) // 2
+    cos = cos_sin[..., :half].repeat_interleave(2, dim=-1).contiguous()
+    sin = cos_sin[..., half:].repeat_interleave(2, dim=-1).contiguous()
+    return cos, sin
+
+
 class RotaryEmbedding(nn.Module):
     """Holds the NEOX-style RoPE cos/sin cache in the exact layout the fused
     ``xllm_ops.fused_qk_norm_rope`` kernel expects.

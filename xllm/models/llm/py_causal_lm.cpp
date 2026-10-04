@@ -111,7 +111,10 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   ep_rank_ = (moe_ep_group_ != nullptr) ? moe_ep_group_->rank() : 0;
 
   py::gil_scoped_acquire gil;
-  if (model_args_.model_type() != "deepseek_v4") {
+  const bool is_deepseek_v4 = model_args_.model_type() == "deepseek_v4";
+  const bool needs_python_process_group =
+      !is_deepseek_v4 || dp_size_ > 1 || cp_size_ > 1;
+  if (needs_python_process_group) {
     py::object init_process_group =
         py::module_::import("xllm.python.distributed")
             .attr("init_process_group");
@@ -119,7 +122,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
     CHECK_GT(parallel_args.python_rendezvous_port_, 0);
     const int32_t global_rank = parallel_args.rank();
     const int32_t global_world_size = parallel_args.world_size();
-    if (tp_size_ > 1) {
+    if (!is_deepseek_v4 && tp_size_ > 1) {
       init_process_group("tp",
                          parallel_args.python_rendezvous_host_,
                          parallel_args.python_rendezvous_port_,
@@ -141,7 +144,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          global_world_size,
                          global_rank % tp_size_);
     }
-    if (moe_tp_size_ > 1) {
+    if (!is_deepseek_v4 && moe_tp_size_ > 1) {
       init_process_group("moe_tp",
                          parallel_args.python_rendezvous_host_,
                          parallel_args.python_rendezvous_port_,
@@ -152,7 +155,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          global_world_size,
                          global_rank / moe_tp_size_);
     }
-    if (ep_size_ > 1) {
+    if (!is_deepseek_v4 && ep_size_ > 1) {
       init_process_group("moe_ep",
                          parallel_args.python_rendezvous_host_,
                          parallel_args.python_rendezvous_port_,
@@ -178,7 +181,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          cp_group_index);
     }
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
-    if (cp_size_ == 1 && kv_split_size > 1) {
+    if (!is_deepseek_v4 && cp_size_ == 1 && kv_split_size > 1) {
       const int32_t dcp_rank = parallel_args.kv_split_rank();
       const int32_t dcp_group_index =
           global_rank % (global_world_size / kv_split_size);
@@ -192,7 +195,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          global_world_size,
                          dcp_group_index);
     }
-    if (layerwise_split_size_ > 1) {
+    if (!is_deepseek_v4 && layerwise_split_size_ > 1) {
       CHECK_EQ(tp_size_ % layerwise_split_size_, 0)
           << "layerwise_split_size must divide Python attention TP size";
       const int32_t layerwise_group_index =

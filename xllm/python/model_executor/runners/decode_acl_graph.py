@@ -247,10 +247,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
         """Return per-row KV and paging metadata for decode graph replay."""
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self._logical_page_size)
         block_table = expanded.block_table if expanded is not None else metadata.block_table
+        if block_table is None:
+            multi_block_tables = getattr(metadata, "multi_block_tables", ()) or ()
+            block_table = multi_block_tables[0] if multi_block_tables else None
         kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         if block_table is None or kv_seq_lens is None:
             raise RuntimeError("decode graph requires block and KV metadata")
-        block_table = block_table.to(torch.int32)
+        block_table = block_table.to(device=kv_seq_lens.device, dtype=torch.int32).contiguous()
         kv_seq_lens = kv_seq_lens.to(torch.int32)
         is_mla = getattr(self.attention_backend, "is_mla", False)
         requires_host_kv_lengths = not is_mla or getattr(
@@ -407,12 +410,19 @@ class DecodeAclGraphRunner(AclGraphRunner):
             _,
             _,
         ) = self._decode_metadata(metadata)
-        self._validate_decode_token_layout(
-            input_ids,
-            None,
-            metadata.slot_mapping,
-            block_table.shape[0],
-        )
+        slot_mapping = getattr(metadata, "slot_mapping", None)
+        if slot_mapping is None or slot_mapping.numel() == 0:
+            # Admission only needs the host layout; defer slot upload until fill.
+            host_slots = getattr(metadata, "new_cache_slots_host_values", None)
+            if (
+                input_ids.dim() != 1
+                or input_ids.numel() != block_table.shape[0]
+                or host_slots is None
+                or len(host_slots) != input_ids.numel()
+            ):
+                return False
+        else:
+            self._validate_decode_token_layout(input_ids, None, slot_mapping, block_table.shape[0])
         batch_size = input_ids.numel()
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
         if not is_expanded and metadata.kv_cu_seq_lens is not None:
@@ -766,7 +776,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             mtp_topk_indices,
         )
 
-        self._prepare_attention(entry, entry.static_metadata)
+        self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
 
         if first_capture:
             self._capture(entry, self._stream)
@@ -858,7 +868,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         entry.static_metadata = StaticGraphAttentionMetadata(
             slot_mapping=torch.zeros(
                 padded_batch_size,
-                dtype=metadata.slot_mapping.dtype,
+                dtype=torch.int32,
                 device=device,
             ),
             paged_kv_indptr=torch.zeros(
@@ -915,6 +925,15 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     else None
                 ),
             )
+        entry.static_metadata.multi_block_tables = self.attention_backend.create_graph_block_tables(
+            padded_batch_size,
+            self.max_model_len,
+            self._max_blocks_per_sequence,
+        )
+        if entry.static_metadata.multi_block_tables:
+            entry.static_metadata.new_cache_slots_host_values = []
+            entry.static_metadata.dsa_graph_block_table_cols = self._max_blocks_per_sequence
+            entry.static_metadata.dsa_graph_mode = True
         return entry
 
     def _fill_entry(
@@ -929,6 +948,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
     ) -> None:
         padded_batch_size = entry.batch_size
         static_metadata = entry.static_metadata
+        static_metadata.is_dummy = bool(getattr(metadata, "is_dummy", False))
+        slot_mapping = self._effective_slot_mapping(metadata, batch_size, input_ids.device)
         (
             block_table,
             kv_seq_lens,
@@ -937,12 +958,14 @@ class DecodeAclGraphRunner(AclGraphRunner):
             paged_kv_indices,
             paged_kv_last_page_len,
         ) = self._decode_metadata(metadata)
+        if entry.static_metadata.multi_block_tables:
+            self._fill_graph_dsa_positions(entry, positions)
         if batch_size != block_table.shape[0]:
             raise RuntimeError("ACL graph decode batch size must match metadata sequences")
         self._validate_decode_token_layout(
             input_ids,
             positions,
-            metadata.slot_mapping,
+            slot_mapping,
             block_table.shape[0],
         )
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
@@ -954,7 +977,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         kernels.update_decode_graph_metadata(
             input_ids,
             graph_positions,
-            metadata.slot_mapping,
+            slot_mapping,
             cumulative_kv_seq_lens,
             paged_kv_indptr,
             paged_kv_indices,
@@ -1001,6 +1024,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if padded_batch_size > batch_size:
             static_metadata.linear_state_indices[batch_size:].zero_()
         self._fill_host_metadata(entry, kv_seq_lens_host_values, batch_size)
+        self._fill_new_cache_slots_host_metadata(entry, metadata, batch_size)
 
         if input_embedding is not None:
             if input_embedding.shape[0] != batch_size:
@@ -1051,6 +1075,75 @@ class DecodeAclGraphRunner(AclGraphRunner):
             static_metadata.slot_mapping[batch_size:].fill_(-1)
             entry.kv_seq_lens_delta[batch_size:].fill_(1)
 
+        self._fill_dsa_block_tables(
+            static_metadata,
+            metadata,
+            batch_size,
+        )
+
+    def _fill_dsa_block_tables(
+        self,
+        static_metadata: StaticGraphAttentionMetadata,
+        metadata: AttentionMetadata,
+        batch_size: int,
+    ) -> None:
+        """Refresh every stable DSA manager table for the current decode."""
+        static_tables = static_metadata.multi_block_tables
+        if not static_tables:
+            return
+        source_tables = getattr(metadata, "multi_block_tables", ()) or ()
+        if not source_tables:
+            if getattr(metadata, "is_dummy", False):
+                for table in static_tables:
+                    table.zero_()
+                return
+            raise RuntimeError("ACL graph requires all captured manager block tables")
+        if len(source_tables) < len(static_tables):
+            raise RuntimeError(f"ACL graph DSA manager count changed: {len(source_tables)} < {len(static_tables)}")
+        # MTP draft layers consume a prefix of the target's cache managers.
+        source_tables = source_tables[: len(static_tables)]
+
+        for manager_id, (target, source) in enumerate(zip(static_tables, source_tables, strict=True)):
+            target.zero_()
+            if source is None:
+                continue
+            if source.dim() != 2:
+                raise RuntimeError(f"ACL graph DSA manager {manager_id} block table must be two-dimensional")
+            source_rows = int(source.shape[0])
+            if source_rows != batch_size:
+                if source_rows <= 0 or batch_size % source_rows != 0:
+                    raise RuntimeError(
+                        f"ACL graph DSA manager {manager_id} row count "
+                        f"{source_rows} does not match batch size {batch_size}"
+                    )
+                source = source.repeat_interleave(batch_size // source_rows, dim=0)
+            if source.shape[1] > target.shape[1]:
+                raise RuntimeError(
+                    f"ACL graph DSA manager {manager_id} requires {source.shape[1]} "
+                    f"columns, capacity is {target.shape[1]}"
+                )
+            target[:batch_size, : source.shape[1]].copy_(source[:batch_size])
+
+    def _fill_graph_dsa_positions(
+        self,
+        entry: AclGraphEntry,
+        positions: torch.Tensor,
+    ) -> None:
+        """Keep a stable DSA position tensor synced with the static bucket."""
+        static_metadata = entry.static_metadata
+        padded_batch_size = entry.batch_size
+        if static_metadata.dsa_positions is None:
+            static_metadata.dsa_positions = torch.zeros(
+                padded_batch_size,
+                dtype=torch.int64,
+                device=entry.static_positions.device,
+            )
+        graph_positions = positions.to(device=entry.static_positions.device, dtype=torch.int64)
+        copy_count = min(int(graph_positions.numel()), padded_batch_size)
+        static_metadata.dsa_positions[:copy_count].copy_(graph_positions[:copy_count])
+        if padded_batch_size > copy_count:
+            static_metadata.dsa_positions[copy_count:].zero_()
+
     def _fill_host_metadata(
         self,
         entry: AclGraphEntry,
@@ -1076,3 +1169,38 @@ class DecodeAclGraphRunner(AclGraphRunner):
         static_kv_seq_lens[:batch_size] = kv_seq_lens
         if padded_batch_size > batch_size:
             static_kv_seq_lens[batch_size:] = [1] * (padded_batch_size - batch_size)
+
+    @staticmethod
+    def _effective_slot_mapping(
+        metadata: AttentionMetadata,
+        token_count: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Resolve scheduler cache slots when DSV4 omits the top-level tensor."""
+        slot_mapping = getattr(metadata, "slot_mapping", None)
+        if slot_mapping is not None and slot_mapping.dim() == 1 and slot_mapping.numel() == token_count:
+            return slot_mapping.to(device=device, dtype=torch.int32).contiguous()
+        host_slots = getattr(metadata, "new_cache_slots_host_values", None)
+        if host_slots is None or len(host_slots) != token_count:
+            raise RuntimeError("ACL graph decode requires one scheduler cache slot per token")
+        return torch.tensor(host_slots, dtype=torch.int32, device=device)
+
+    @staticmethod
+    def _fill_new_cache_slots_host_metadata(
+        entry: AclGraphEntry,
+        metadata: AttentionMetadata,
+        batch_size: int,
+    ) -> None:
+        """Copy scheduler-resolved physical DSA slots into graph metadata."""
+        source_slots = getattr(metadata, "new_cache_slots_host_values", None)
+        target_slots = entry.static_metadata.new_cache_slots_host_values
+        if target_slots is None:
+            return
+        if source_slots is None or (not source_slots and getattr(metadata, "is_dummy", False)):
+            entry.static_metadata.new_cache_slots_host_values = []
+            return
+        if len(source_slots) < batch_size:
+            raise RuntimeError("decode ACL graph requires one host cache slot per token")
+        real_slots = [int(slot) for slot in source_slots[:batch_size]]
+        padding_slots = [0] * (entry.batch_size - batch_size)
+        entry.static_metadata.new_cache_slots_host_values = real_slots + padding_slots

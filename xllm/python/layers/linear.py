@@ -91,10 +91,12 @@ class RowParallelLinear(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
         reduce_results: bool = True,
+        use_checkpoint_layout: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self._weight_is_transposed = False
+        self._use_checkpoint_layout = use_checkpoint_layout
         self.reduce_results = reduce_results
         if bias and not reduce_results:
             # The bias is replicated and must be added exactly once, which is
@@ -115,7 +117,7 @@ class RowParallelLinear(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         """Prepare the weight layout selected by the active device backend."""
-        if self._weight_is_transposed:
+        if self._use_checkpoint_layout or self._weight_is_transposed:
             return
         prepared, is_transposed = kernels.prepare_row_parallel_weight(self.weight.data)
         self.weight.data = prepared

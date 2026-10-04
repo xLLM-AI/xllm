@@ -198,7 +198,8 @@ std::optional<std::string> validate_context_parallel_config(
     if (engine_type == EngineType::SSM &&
         SpeculativeConfig::requires_aux_hidden_capture(
             options.speculative_algorithm()) &&
-        !is_dsv4_model) {
+        (!is_dsv4_model || ModelConfig::is_python_model_impl(
+                               ModelConfig::get_instance().model_impl()))) {
       return "Current model-side CP does not support aux-hidden-capture "
              "speculative algorithms (Eagle3/DFlash/DSpark); run speculative "
              "decoding on a cp_size=1 Decode instance.";
@@ -240,11 +241,13 @@ std::optional<std::string> validate_context_parallel_config(
       static const std::unordered_set<std::string> kPythonCpCapableModels = {
           "qwen3",
           "glm_moe_dsa",
+          "deepseek_v4",
       };
       if (kPythonCpCapableModels.find(model_type) ==
           kPythonCpCapableModels.end()) {
         return "Python model-side CP does not support model_type=" +
-               model_type + "; supported models are qwen3 and glm_moe_dsa.";
+               model_type +
+               "; supported models are qwen3, glm_moe_dsa and deepseek_v4.";
       }
       // On NPU, the Python executor resolves enable_graph=true with an
       // off-like backend to ACLGraph. ACLGraph handles Decode only, so Prefill
@@ -263,6 +266,10 @@ std::optional<std::string> validate_context_parallel_config(
       if (kv_split < 1 || options.cp_size() % kv_split != 0) {
         return "Python CP requires kv_split_size effective value to be a "
                "positive divisor of cp_size";
+      }
+      if (model_type == "deepseek_v4" && kv_split != 1) {
+        return "Python DeepSeek-V4 CP requires replicated KV caches; use "
+               "kv_split_size=1";
       }
       if (model_type == "glm_moe_dsa" && engine_type == EngineType::SSM &&
           SpeculativeConfig::is_mtp_algorithm(

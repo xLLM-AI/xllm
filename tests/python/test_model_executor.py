@@ -36,6 +36,7 @@ from xllm.python.attention.backend import (  # noqa: E402
     LayerCache,
     normalize_layer_caches,
 )
+from xllm.python.attention.csa_attention import DsaAttentionBackend  # noqa: E402
 from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
@@ -871,6 +872,8 @@ class TestDecodeAclGraphSpeculativeMetadata:
 
     def test_replay_returns_detached_static_output(self) -> None:
         runner = self._runner()
+        prepare_replay = MagicMock()
+        runner.attention_backend.prepare_graph_replay = prepare_replay
         batch_size = 3
         padded_batch_size = 4
         static_output = torch.arange(12).reshape(padded_batch_size, 3)
@@ -906,11 +909,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
 
         with (
             patch.object(torch, "npu", fake_npu, create=True),
-            patch.object(
-                runner,
-                "_prepare_graph_entry",
-                return_value=entry,
-            ),
+            patch.object(runner, "_fill_entry"),
         ):
             output = runner.execute(
                 torch.arange(batch_size, dtype=torch.int32),
@@ -925,6 +924,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
         replay_stream.wait_stream.assert_called_once_with(current_stream)
         current_stream.wait_stream.assert_called_once_with(replay_stream)
         graph.replay.assert_called_once_with()
+        prepare_replay.assert_called_once_with(entry.static_metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -1029,10 +1029,12 @@ class TestBindKvCaches:
         ("glm_moe_dsa", False, 1, 1),
         ("glm_moe_dsa", False, 0, 3),
         ("glm_moe_dsa_mtp", True, 0, 1),
+        ("deepseek_v4", False, 0, 1),
+        ("deepseek_v4", False, 1, 1),
     ],
 )
 @pytest.mark.parametrize("kv_split", [0, 1, 2])
-def test_glm_cp_mtp_admission_requires_replicated_kv(
+def test_cp_admission_requires_replicated_kv(
     model_type: str,
     is_draft: bool,
     speculative_tokens: int,
@@ -1045,14 +1047,13 @@ def test_glm_cp_mtp_admission_requires_replicated_kv(
         "num_speculative_tokens": speculative_tokens,
         "cp_size": 2,
         "kv_split_size": kv_split,
-        # Sharded KV is valid for ordinary disaggregated prefill, but not MTP.
         "instance_role": "PREFILL",
         "enable_disagg_pd": True,
     }
     if kv_split == 1:
         _validate_npu_cp_model_config(config, decoding_tokens)
     else:
-        with pytest.raises(NotImplementedError, match="MTP requires replicated KV caches"):
+        with pytest.raises(NotImplementedError, match="requires replicated KV caches"):
             _validate_npu_cp_model_config(config, decoding_tokens)
 
 
@@ -1224,8 +1225,11 @@ def _make_eager_runner(*, is_mla: bool = True) -> EagerRunner:
     return runner
 
 
-def test_eager_runner_preserves_qwen_pure_prefill_cp_context_contract() -> None:
+@pytest.mark.parametrize("model_owned_cp", [False, True])
+def test_eager_runner_preserves_pure_prefill_cp_context_ownership(model_owned_cp: bool) -> None:
     runner = _make_eager_runner(is_mla=False)
+    if model_owned_cp:
+        runner.attention_backend = object.__new__(DsaAttentionBackend)
     metadata = SimpleNamespace(
         is_prefill=True,
         is_chunked_prefill=False,
@@ -1241,13 +1245,11 @@ def test_eager_runner_preserves_qwen_pure_prefill_cp_context_contract() -> None:
     ) as build_context:
         runner.execute(torch.zeros(8), torch.arange(8), metadata)
 
-    build_context.assert_called_once_with(
-        [3, 5],
-        [3, 5],
-        4,
-        2,
-        torch.device("cpu"),
-    )
+    if model_owned_cp:
+        build_context.assert_not_called()
+        assert runner.attention_backend._metadata is metadata
+    else:
+        build_context.assert_called_once_with([3, 5], [3, 5], 4, 2, torch.device("cpu"))
 
 
 def test_eager_runner_preserves_qwen_missing_length_fallback() -> None:
@@ -1980,3 +1982,23 @@ def test_executor_selects_acl_graph_input_owner(model_type: str, dp_size: int, p
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
     runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
     assert len(runner.layer_caches) == 2
+
+
+def test_eager_runner_skips_cp_for_empty_rank() -> None:
+    runner = _make_eager_runner()
+    metadata = SimpleNamespace(
+        is_prefill=True,
+        is_chunked_prefill=False,
+        is_mixed=False,
+        is_spec_verify=False,
+        is_dummy=True,
+        q_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+        kv_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+    )
+
+    with patch("xllm.python.model_executor.runners.eager.build_cp_context") as build_context:
+        runner.execute(torch.ones(1), torch.zeros(1), metadata)
+
+    build_context.assert_not_called()
+    assert runner.attention_backend._prepared
+    runner.model.assert_called_once()
