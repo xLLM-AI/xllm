@@ -478,18 +478,24 @@ class Glm5NextConfig:
 # ---------------------------------------------------------------------------
 # KDA (Kimi Delta Attention) linear-attention layer
 # ---------------------------------------------------------------------------
+_KDA_IN_PROJ = (
+    ("q_proj", "qkv_dim", 0),
+    ("k_proj", "qkv_dim", 0),
+    ("v_proj", "qkv_dim", 0),
+    ("b_proj", "num_heads_local", 0),
+    ("forget_gate.f_a_proj", "head_dim", None),
+    ("g_a_proj", "head_dim", None),
+)
+
+
 class Glm5NextForgetGate(nn.Module):
-    """KDA forget gate with optional bounded decay."""
+    """KDA forget gate consuming the merged projection latent."""
 
     def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.head_dim = cfg.kda_head_dim
-        # Head-sharded TP (mirrors DSA): each rank owns kda_num_heads//tp heads.
-        # f_b_proj / A_log / dt_bias are per-head (column-parallel, dim 0);
-        # f_a_proj feeds the shared head_dim latent so it stays replicated.
         self.num_heads = cfg.kda_num_heads // cfg.tp_size  # local per-rank
         self.qkv_dim = self.head_dim * self.num_heads
-        self.f_a_proj = nn.Linear(cfg.hidden_size, self.head_dim, bias=False)
         self.f_b_proj = nn.Linear(self.head_dim, self.qkv_dim, bias=False)
         self.dt_bias = nn.Parameter(torch.zeros(self.qkv_dim, dtype=torch.float32))
         self.A_log = nn.Parameter(torch.zeros(self.num_heads, dtype=torch.float32))
@@ -504,10 +510,10 @@ class Glm5NextForgetGate(nn.Module):
         self.dt_bias.data = dt_bias.to(device=self.dt_bias.device, dtype=torch.float32)
         return self
 
-    def raw_projection(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Project forget logits as ``[B, S, num_heads, head_dim]``."""
-        hidden_shape = (*hidden_states.shape[:2], -1, self.head_dim)
-        return self.f_b_proj(self.f_a_proj(hidden_states)).view(hidden_shape)
+    def raw_projection(self, forget_latent: torch.Tensor) -> torch.Tensor:
+        """Project the replicated latent into per-head forget logits."""
+        hidden_shape = (*forget_latent.shape[:2], -1, self.head_dim)
+        return self.f_b_proj(forget_latent).view(hidden_shape)
 
     def gate_from_raw(self, raw: torch.Tensor) -> torch.Tensor:
         """Apply bounded sigmoid decay, or unbounded softplus when no bound is set."""
@@ -516,9 +522,6 @@ class Glm5NextForgetGate(nn.Module):
         if self.safe_gate_lower_bound is not None:
             return self.safe_gate_lower_bound * torch.sigmoid(decay_rate * g)
         return -decay_rate * F.softplus(g)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.gate_from_raw(self.raw_projection(hidden_states))
 
 
 class Glm5NextKdaAttention(Attention):
@@ -568,11 +571,10 @@ class Glm5NextKdaAttention(Attention):
         self.activation = cfg.hidden_act
         self.eps = cfg.rms_norm_eps
 
-        # q/k/v: column-parallel (per-head, dim 0) — each rank produces its
-        # head-subset's qkv_dim_local channels.
-        self.q_proj = nn.Linear(self.hidden_size, self.qkv_dim, bias=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.qkv_dim, bias=False)
-        self.v_proj = nn.Linear(self.hidden_size, self.qkv_dim, bias=False)
+        projection_sizes = tuple(getattr(self, size_attr) for _, size_attr, _ in _KDA_IN_PROJ)
+        # Follow checkpoint row order; equal-sized f_a/g_a blocks must not be exchanged.
+        self.input_projection_sizes = (sum(projection_sizes[:3]), *projection_sizes[3:])
+        self.in_proj_qkvbfg_a = nn.Linear(self.hidden_size, sum(self.input_projection_sizes), bias=False)
         # conv1d: depthwise over the LOCAL conv_dim (groups=conv_dim_local); the
         # loader shards each of q/k/v_conv1d by head then cats so the channel
         # order [q_loc|k_loc|v_loc] matches mixed_qkv. fp32 in transformers.
@@ -586,8 +588,6 @@ class Glm5NextKdaAttention(Attention):
         )
         self.conv1d.weight = nn.Parameter(self.conv1d.weight.detach().to(torch.float32))
         self.forget_gate = Glm5NextForgetGate(cfg, dtype, device)
-        self.b_proj = nn.Linear(self.hidden_size, self.num_heads_local, bias=False)
-        self.g_a_proj = nn.Linear(self.hidden_size, self.head_dim, bias=False)
         self.g_b_proj = nn.Linear(self.head_dim, self.qkv_dim, bias=False)
         self.o_norm = _RMSNormGated(self.head_dim, self.eps, dtype, device)
         # o_proj: row-parallel + all_reduce. With KDA now head-sharded, each
@@ -613,13 +613,12 @@ class Glm5NextKdaAttention(Attention):
         batch_size, seq_len = hidden_states.shape[:2]
         hidden_shape = (batch_size, seq_len, -1, self.head_dim)
 
-        mixed_qkv = torch.cat(
-            [self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)],
-            dim=-1,
-        ).transpose(1, 2)  # [B, 3*qkv_dim, S]
+        projected = self.in_proj_qkvbfg_a(hidden_states)
+        mixed_qkv, beta_raw, forget_latent, output_latent = projected.split(self.input_projection_sizes, dim=-1)
+        mixed_qkv = mixed_qkv.transpose(1, 2)
 
-        g_raw = self.forget_gate.raw_projection(hidden_states)
-        beta = torch.sigmoid(self.b_proj(hidden_states))
+        g_raw = self.forget_gate.raw_projection(forget_latent)
+        beta = torch.sigmoid(beta_raw.float())
 
         # KDA conv1d + delta-rule + conv/ssm state is owned by the backend
         # (NpuPagedAttentionBackend.execute_linear). No self-contained fallback
@@ -632,7 +631,7 @@ class Glm5NextKdaAttention(Attention):
             )
         core_attn_out = backend.execute_linear(mixed_qkv, beta, self, raw_gate_proj=g_raw)
 
-        gate = self.g_b_proj(self.g_a_proj(hidden_states)).view(hidden_shape)
+        gate = self.g_b_proj(output_latent).view(hidden_shape)
         output = self.o_norm(core_attn_out, gate).reshape(batch_size, seq_len, -1)
         # KDA is head-sharded: each rank's o_proj (row-parallel, input
         # qkv_dim_local) yields a partial hidden summed over its head-subset;
@@ -2100,17 +2099,25 @@ class Glm5NextForCausalLM(PyModelBase):
         _call_process_weights_after_loading(self.model.layers[i].self_attn)
 
     def _load_kda_attn(self, L, attn: str, i: int) -> None:
-        # KDA is head-sharded (mirrors DSA). q/k/v/b/g_b are per-head projections
-        # -> column-parallel (shard dim 0, the head/output dim); g_a_proj feeds
-        # the shared head_dim latent -> replicated. The loader's shard() narrows
-        # to this rank's contiguous head block, matching the framework's
-        # head-sharded conv/ssm slots (kv_cache_shape.cpp divides
-        # linear_num_key_heads by world_size).
-        L.copy_shard(attn + "q_proj.weight", dim=0)
-        L.copy_shard(attn + "k_proj.weight", dim=0)
-        L.copy_shard(attn + "v_proj.weight", dim=0)
-        L.copy_shard(attn + "b_proj.weight", dim=0)
-        L.copy_replicated(attn + "g_a_proj.weight")  # replicated (head_dim)
+        """Load floating-point KDA inputs; per-projection W8A8 is not supported here."""
+        layer = self.get_submodule(attn.rstrip("."))
+        input_weights = []
+        for projection, size_attr, shard_dim in _KDA_IN_PROJ:
+            weight = L.get_tensor(attn + projection + ".weight")
+            if not weight.is_floating_point() or L.probe_quant(attn, projection):
+                raise ValueError(
+                    f"KDA input projection {attn}{projection} requires floating-point weights "
+                    f"without W8A8 metadata, got {weight.dtype}"
+                )
+            if shard_dim is not None:
+                weight = L.shard(weight, dim=shard_dim)
+            expected_shape = (getattr(layer, size_attr), layer.hidden_size)
+            if weight.shape != expected_shape:
+                raise ValueError(
+                    f"checkpoint tensor {attn}{projection}.weight has shape {tuple(weight.shape)}, expected {expected_shape}"
+                )
+            input_weights.append(weight)
+        L.copy_in(attn + "in_proj_qkvbfg_a.weight", torch.cat(input_weights, dim=0))
         L.copy_shard(attn + "g_b_proj.weight", dim=0)
         # conv1d: depthwise over [q|k|v] (conv_dim = 3*qkv_dim). The model holds
         # the LOCAL conv_dim (3*qkv_dim_local); to shard by head each of q/k/v
@@ -2124,9 +2131,7 @@ class Glm5NextForCausalLM(PyModelBase):
                 conv = L.shard(conv, dim=0)
         else:
             parts = [L.get_tensor(attn + n + "_conv1d.weight") for n in ("q", "k", "v")]
-            if L.tp_size > 1:
-                parts = [L.shard(p, dim=0) for p in parts]
-            conv = torch.cat(parts, dim=0)
+            conv = torch.cat([L.shard(p, dim=0) for p in parts] if L.tp_size > 1 else parts, dim=0)
         L.copy_in(attn + "conv1d.weight", conv)
         # o_proj: row-parallel QLinear — shard the INPUT dim (dim 1, qkv_dim) so
         # each rank's [hidden, qkv_dim_local] weight consumes its head-subset's
@@ -2135,8 +2140,6 @@ class Glm5NextForCausalLM(PyModelBase):
         # forget_gate: model nests under forget_gate.*, real ckpt is flat
         # (self_attn.f_a_proj / f_b_proj / dt_bias / A_log). load_tensor goes
         # through the alias wrapper, so the bare name resolves to the flat key.
-        # f_a_proj replicated (head_dim); f_b_proj/dt_bias/A_log per-head (dim 0).
-        L.copy_replicated(attn + "forget_gate.f_a_proj.weight")
         L.copy_shard(attn + "forget_gate.f_b_proj.weight", dim=0)
         L.copy_shard(attn + "forget_gate.dt_bias", dim=0)
         L.copy_shard(attn + "forget_gate.A_log", dim=0)
