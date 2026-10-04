@@ -55,11 +55,6 @@ void wait_input_ready_events(const LlmForwardInput& input,
       << "failed to wait LlmForwardInput metadata ready event";
 }
 
-StreamEventPtr record_current_stream_event(const Device& device) {
-  std::unique_ptr<Stream> stream = device.current_stream();
-  return stream->record_event_or_sync();
-}
-
 }  // namespace
 
 LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
@@ -213,18 +208,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const LlmForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const LlmForwardInput& input) {
-  // Restore live recurrent-state slots from saved checkpoints here (worker
-  // thread, on compute_stream_) instead of in prepare_work_before_execute on
-  // prepare_stream_. The single-threaded worker pool guarantees the previous
-  // chunk's forward kernels are already enqueued on compute_stream_ before
-  // this task runs, so the restore copy is automatically stream-ordered
-  // after those writes without needing a cross-stream barrier.
+  // The worker thread orders checkpoint restores after the preceding chunk's
+  // writes on compute_stream_, rather than preparing them on prepare_stream_.
   if (has_linear_attention_layers(context_.get_model_args())) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
-    auto& mutable_params = input.input_params;
-    restore_linear_state_slots(kv_caches_,
-                               mutable_params.linear_state_cache_ops,
-                               mutable_params.linear_state_validity_mask);
+    try_restore_linear_state_slots(ModelInputParams(input.input_params));
   }
   return execute_no_sync_on_stream(input, *compute_stream_);
 }
@@ -235,6 +223,7 @@ LLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
       << "failed to wait last step output ready event";
+  wait_input_ready_events(input, *compute_stream_);
   return WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
       input);
 }
@@ -417,7 +406,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.retained_inputs.emplace_back(
         std::make_shared<LlmForwardInput>(input.clone()));
     if (enable_schedule_overlap() && record_ready_event) {
-      output.ready_event = record_current_stream_event(device_);
+      output.ready_event = device_.current_stream()->record_event_or_sync();
     }
     return output;
   }

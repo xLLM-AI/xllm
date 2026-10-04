@@ -378,6 +378,11 @@ class WorkerImpl {
       const VlmForwardInput& input);
   virtual VlmForwardInput update_input_by_last_step_output_for_schedule_overlap(
       VlmForwardInput& input);
+  // Restore on the caller's current stream only when this worker owns recurrent
+  // caches. Overlap callers must use compute_stream_ after the preceding
+  // forward.
+  void try_restore_linear_state_slots(const ModelInputParams& params);
+  bool owns_recurrent_cache() const;
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
   void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);
@@ -447,6 +452,9 @@ class WorkerImpl {
 #endif
 
  private:
+  template <typename Input>
+  std::optional<ForwardOutput> step_for_schedule_overlap_impl(
+      const Input& input);
   template <typename Input>
   bool can_use_last_step_output_for_schedule_overlap_impl(
       const Input& input) const;

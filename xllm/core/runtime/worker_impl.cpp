@@ -886,15 +886,49 @@ Input WorkerImpl::update_input_by_last_step_output_impl(Input& inputs) {
   return inputs.clone();
 }
 
+bool WorkerImpl::owns_recurrent_cache() const {
+  return std::any_of(
+      kv_caches_.begin(), kv_caches_.end(), [](const KVCache& kv_cache) {
+        return kv_cache.get_ssm_cache().defined();
+      });
+}
+
+void WorkerImpl::try_restore_linear_state_slots(
+    const ModelInputParams& params) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_MUSA)
+  // Composite speculative workers restore through their cache-owning workers.
+  if (!has_linear_attention_layers(context_.get_model_args()) ||
+      !owns_recurrent_cache()) {
+    return;
+  }
+  restore_linear_state_slots(kv_caches_,
+                             params.linear_state_cache_ops,
+                             params.linear_state_validity_mask);
+#endif
+}
+
+template <typename Input>
+std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap_impl(
+    const Input& input) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_MUSA)
+  // Restore on compute_stream_ after the previous chunk's forward. Composite
+  // speculative workers defer this to their cache-owning inner workers.
+  if (owns_recurrent_cache()) {
+    c10::StreamGuard compute_guard = compute_stream_->set_stream_guard();
+    CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event))
+        << "failed to wait input metadata ready event on compute stream";
+    try_restore_linear_state_slots(ModelInputParams(input.input_params));
+    return step(input);
+  }
+#endif
+  return step(input);
+}
+
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
     const LlmForwardInput& input) {
-  // No linear-state restore here on purpose. LLMWorkerImpl overrides this to
-  // copy checkpoints on compute_stream_; speculative/MTP workers keep this base
-  // version but run every forward through an inner LLMWorkerImpl built with
-  // schedule-overlap off, so the checkpoint copy fires on that inner worker's
-  // non-overlap prepare_work_before_execute_on_stream path. The outer
-  // speculative worker owns no kv_caches_, so restoring here would be a no-op.
-  return step(input);
+  return step_for_schedule_overlap_impl(input);
 }
 
 LlmForwardInput
@@ -1398,26 +1432,10 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     if (!kv_caches_.empty() &&
         has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(input_params);
-      // A composite worker (e.g. MTPWorkerImpl) carries the TARGET model args
-      // but never allocates its own kv_caches_ — its inner impls each own
-      // caches and run their own restore. Skip the restore when this worker
-      // holds no recurrent cache; restoring into an unallocated pool is a
-      // hard CHECK inside restore_linear_state_slots.
-      const bool owns_recurrent_cache = std::any_of(
-          kv_caches_.begin(), kv_caches_.end(), [](const KVCache& kv_cache) {
-            return kv_cache.get_ssm_cache().defined();
-          });
-      // Under schedule_overlap chunked prefill the previous chunk's forward
-      // runs on compute_stream_ from a worker thread that may not have
-      // enqueued its kernels yet when this prepare runs on the main thread.
-      // Defer the slot-restore copy to step_for_schedule_overlap (worker
-      // thread, on compute_stream_) so stream ordering between chunk N-1
-      // writes and chunk N restore is automatic.
-      if (restore_linear_state && !enable_schedule_overlap() &&
-          owns_recurrent_cache) {
-        restore_linear_state_slots(kv_caches_,
-                                   input_params.linear_state_cache_ops,
-                                   input_params.linear_state_validity_mask);
+      // Overlap restores in the worker thread on compute_stream_, after the
+      // preceding chunk finishes writing its live slots.
+      if (restore_linear_state && !enable_schedule_overlap()) {
+        try_restore_linear_state_slots(ModelInputParams(input_params));
       }
     }
 #endif
@@ -2919,7 +2937,7 @@ std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
     const VlmForwardInput& input) {
-  return step(input);
+  return step_for_schedule_overlap_impl(input);
 }
 
 VlmForwardInput

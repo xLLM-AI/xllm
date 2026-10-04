@@ -42,15 +42,6 @@ void wait_input_ready_events(const VlmForwardInput& input,
       << "failed to wait VlmForwardInput metadata ready event";
 }
 
-StreamEventPtr record_current_stream_event(const Device& device) {
-  std::unique_ptr<Stream> stream = device.current_stream();
-  StreamEventPtr event = stream->record_event();
-  if (event == nullptr) {
-    stream->synchronize();
-  }
-  return event;
-}
-
 }  // namespace
 
 VLMWorkerImpl::VLMWorkerImpl(const ParallelArgs& parallel_args,
@@ -222,7 +213,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     output.retained_inputs.emplace_back(
         std::make_shared<VlmForwardInput>(input.clone()));
     if (record_ready_event && enable_schedule_overlap()) {
-      output.ready_event = record_current_stream_event(device_);
+      output.ready_event = device_.current_stream()->record_event_or_sync();
     }
     return output;
   }
@@ -234,8 +225,12 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
 
 std::optional<ForwardOutput> VLMWorkerImpl::step_for_schedule_overlap(
     const VlmForwardInput& input) {
-  // VLM has no linear-attention recurrent state to restore, so the LLM
-  // worker's slot-restore preamble is unnecessary here.
+  // Linear-attention VLMs need the same compute-stream restore ordering as
+  // LLMs.
+  if (has_linear_attention_layers(context_.get_model_args())) {
+    c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
+    try_restore_linear_state_slots(ModelInputParams(input.input_params));
+  }
   return execute_no_sync_on_stream(input, *compute_stream_);
 }
 
@@ -245,6 +240,7 @@ VLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
       << "failed to wait last step output ready event";
+  wait_input_ready_events(input, *compute_stream_);
   return update_input_by_last_step_output(input);
 }
 
