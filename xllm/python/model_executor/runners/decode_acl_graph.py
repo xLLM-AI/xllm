@@ -892,8 +892,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 dtype=torch.int32,
                 device=device,
             ),
-            paged_kv_indptr_host=torch.zeros(padded_batch_size + 1, dtype=torch.int32, device="cpu"),
-            paged_kv_last_page_len_host=torch.ones(padded_batch_size, dtype=torch.int32, device="cpu"),
             kv_seq_lens_host_values=[1] * padded_batch_size,
             block_table=static_block_table,
             dp_execution_token_counts=(padded_batch_size,) * self.dp_size if self.dp_size > 1 else (),

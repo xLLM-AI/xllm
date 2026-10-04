@@ -1,4 +1,4 @@
-# Copyright 2026 The xLLM Authors. All Rights Reserved.
+# Copyright 2026 The xLLM Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -299,7 +299,7 @@ def _causal_conv1d_update_graph(
     bf16 — emulating the fp32 conv contract here returns a wrong-SHAPE
     tensor (bf16 view(int32) halves the last dim) and crashes capture.
     """
-    _, hidden_size, seq_len = mixed_qkv.shape
+    seq_len = mixed_qkv.shape[-1]
     state_len = conv_state.shape[-1]
     hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
     conv_state.copy_(hidden_states_new[:, :, -state_len:])
@@ -1389,19 +1389,15 @@ class Glm5NextMlaAttention(Attention):
             topk = prev_topk_indices.reshape(num_tokens, 1, -1).to(torch.int32)
 
         q = self.q_b_proj(q_c).view(num_tokens, self.num_heads_local, self.qk_head_dim)
-        q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope = q.narrow(-1, 0, self.qk_nope_head_dim)
         q_latent = torch.bmm(q_nope.transpose(0, 1), self.W_UK).transpose(0, 1)
 
-        # NoPE: qk_rope_head_dim == 0 -> q_rope/k_rope are empty -> q_pe/k_pe None.
-        q_pe = None
-
         kv = self.kv_a_proj_with_mqa(hidden)
-        k_latent_raw, k_rope_raw = kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        k_latent_raw = kv.narrow(-1, 0, self.kv_lora_rank)
         k_latent = self.kv_a_layernorm(k_latent_raw)
         k_latent_3d = k_latent.view(num_tokens, 1, self.kv_lora_rank)
-        k_pe = None
 
-        attn_out = backend.execute_mla(q_latent, q_pe, k_latent_3d, k_pe, self, topk=topk)
+        attn_out = backend.execute_mla(q_latent, None, k_latent_3d, None, self, topk=topk)
         v_full = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
         v_full = v_full.reshape(num_tokens, self.num_heads_local * self.v_head_dim)
         o = self.o_proj(v_full)
@@ -1556,7 +1552,6 @@ class Glm5NextExperts(nn.Module):
         """
         n_tokens, topk = top_k_index.shape
         hidden = hidden_states.shape[-1]
-        N = n_tokens * topk  # total number of token-expert assignments
 
         flat_indices = top_k_index.flatten()  # [N]
         flat_weights = top_k_weights.flatten()  # [N]
