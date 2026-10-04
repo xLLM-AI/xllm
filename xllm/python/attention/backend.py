@@ -326,17 +326,20 @@ class AttentionBackend(ABC):
     def execute_linear(
         self,
         mixed_qkv: torch.Tensor,
-        gate: torch.Tensor,
         beta: torch.Tensor,
         layer: Attention,
+        raw_gate_proj: torch.Tensor,
     ) -> torch.Tensor:
         """KDA linear attention (conv1d + delta-rule) over framework state.
 
         ``mixed_qkv`` is ``[B, 3*qkv_dim, S]`` (q/k/v concatenated, the local
-        head-subset already sharded). ``gate`` is the KDA forget gate ``g``
-        shaped ``[B, S, num_heads_local, head_dim]``; ``beta`` is
-        ``[B, S, num_heads_local]``. Returns the core attention output
-        ``[B, S, num_heads_local, head_dim]`` for the caller to gate + project.
+        head-subset already sharded). ``raw_gate_proj`` is the pre-gate forget
+        projection ``f_b(f_a(x))`` shaped ``[B, S, num_heads_local, head_dim]``;
+        the plain decode/prefill kernels fuse the safe-gate from it in-kernel,
+        while the MTP verify / cross-layer / mask paths materialize the gate
+        from it on demand. ``beta`` is ``[B, S, num_heads_local]``. Returns the
+        core attention output ``[B, S, num_heads_local, head_dim]`` for the
+        caller to gate + project.
 
         The backend owns the per-layer conv/ssm state (the conv/ssm slots of
         ``LayerCache``) and reads/advances/writes it via the

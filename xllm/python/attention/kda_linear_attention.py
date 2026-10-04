@@ -138,23 +138,22 @@ class KdaLinearAttentionMixin:
     def execute_linear(
         self,
         mixed_qkv: torch.Tensor,
-        gate: torch.Tensor,
         beta: torch.Tensor,
         layer: Attention,
+        raw_gate_proj: torch.Tensor,
     ) -> torch.Tensor:
-        """KDA delta-rule over framework conv/ssm slots.
+        """Run KDA and update the framework's convolution/recurrent state slots.
 
-        Returns ``[B, S, num_heads_local, head_dim]``. The conv1d + delta-rule
-        math is identical to the model-layer self-contained path (validated
-        against the transformers reference); only the state I/O moved here so
-        both attention layer types dispatch through the backend.
+        ``raw_gate_proj`` is ``[B, S, num_heads_local, head_dim]``. Plain
+        steps fuse its safe-gate in the kernel; speculative verification
+        materializes the gate lazily. Returns output with the same shape.
         """
         from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
 
+        from xllm.python import kernels
         from xllm.python.models.glm5_next import (
             _causal_conv1d_fn,
             _causal_conv1d_update,
-            _l2norm,
         )
 
         metadata = self._metadata
@@ -174,11 +173,18 @@ class KdaLinearAttentionMixin:
         qkv_dim = layer.qkv_dim
         hidden_shape = (batch_size, seq_len, -1, head_dim)
 
-        # Raw (pre-conv) projections for the lazy-commit stash, kept alive
-        # across the branches below (mixed_qkv is reassigned post-conv), and
-        # the per-seq read-only chain bookkeeping for plain steps (see the
-        # non-verify branch).
-        raw_mixed, raw_gate, raw_beta = mixed_qkv, gate, beta
+        fg = layer.forget_gate
+        gate_lb = fg.safe_gate_lower_bound
+        gate_cache: Optional[torch.Tensor] = None
+
+        def _materialized_gate() -> torch.Tensor:
+            nonlocal gate_cache
+            if gate_cache is None:
+                gate_cache = fg.gate_from_raw(raw_gate_proj)
+            return gate_cache
+
+        # Retain pre-convolution projections for MTP state commits.
+        raw_mixed, raw_beta = mixed_qkv, beta
         chain_seqs: dict = {}
 
         read_idx, idx = resolve_linear_state_io_indices(metadata)
@@ -211,8 +217,8 @@ class KdaLinearAttentionMixin:
             mixed_qkv = mixed_qkv.transpose(0, 2)  # [1, C, T] -> [T, C, 1]
             batch_size, _, seq_len = mixed_qkv.shape
             hidden_shape = (batch_size, seq_len, -1, head_dim)
-            gate = gate.transpose(0, 1)  # [1, T, nh, hd] -> [T, 1, nh, hd]
             beta = beta.transpose(0, 1)  # [1, T, nh] -> [T, 1, nh]
+            raw_gate_proj = raw_gate_proj.transpose(0, 1)  # [1, T, nh, hd] -> [T, 1, nh, hd]
         if idx is None:
             device = mixed_qkv.device
             conv_state = torch.zeros(
@@ -273,7 +279,17 @@ class KdaLinearAttentionMixin:
                     )
 
                     _fn = self._spec_verify_v3 if _KDA_VERIFY_V3 else self._spec_verify_v2
-                    return _fn(mixed_qkv, raw_gate, raw_beta, layer, group_idx, metadata, conv_cache, ssm_cache, _rk)
+                    return _fn(
+                        mixed_qkv,
+                        _materialized_gate(),
+                        raw_beta,
+                        layer,
+                        group_idx,
+                        metadata,
+                        conv_cache,
+                        ssm_cache,
+                        _rk,
+                    )
             # The row-merge + lazy-commit bookkeeping below is MTP-spec-verify
             # tracking that relies on device->host syncs (.item()/.tolist()),
             # which are forbidden on a captured ACL-graph stream. The graph
@@ -328,11 +344,13 @@ class KdaLinearAttentionMixin:
                     from fla_npu.ops.ascendc import recurrent_kda as _rk
 
                     _fn = self._spec_verify_v3 if _KDA_VERIFY_V3 else self._spec_verify_v2
-                    return _fn(mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk)
+                    return _fn(
+                        mixed_qkv, _materialized_gate(), raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
+                    )
             else:
                 if _KDA_VERIFY_V3:
                     _v3_states = self.__dict__.get("_kda_v3", {})
-                    if metadata.is_prefill or metadata.is_chunked_prefill:
+                    if is_prefill:
                         if idx is not None:
                             self.disarm_kda_v3_slots(idx)
                     elif (
@@ -349,11 +367,11 @@ class KdaLinearAttentionMixin:
                         from fla_npu.ops.ascendc import recurrent_kda as _rk
 
                         return self._spec_verify_v3(
-                            mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
+                            mixed_qkv, _materialized_gate(), raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
                         )
                 if _KDA_VERIFY_V2:
                     _v2_states = self.__dict__.get("_kda_v2", {})
-                    if metadata.is_prefill or metadata.is_chunked_prefill:
+                    if is_prefill:
                         # Prefill restarts the chain from a fresh state —
                         # per-slot, so concurrent decode sequences keep
                         # their stashes.
@@ -373,7 +391,7 @@ class KdaLinearAttentionMixin:
                         from fla_npu.ops.ascendc import recurrent_kda as _rk
 
                         return self._spec_verify_v2(
-                            mixed_qkv, raw_gate, raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
+                            mixed_qkv, _materialized_gate(), raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
                         )
                 # Non-verify path (plain decode / prefill): states are
                 # committed wholesale the regular way, plus lazy-commit
@@ -405,11 +423,10 @@ class KdaLinearAttentionMixin:
                     # path below, so this lazy-commit bookkeeping is eager-only.
                     _kv_list = metadata.kv_seq_lens.tolist() if metadata.kv_seq_lens is not None else None
                     _active = getattr(self, "_mtp_seen_verify", False)
-                    _is_pf = metadata.is_prefill or metadata.is_chunked_prefill
                     _cw = layer.conv1d.weight.squeeze(1)
                     for s, slot in enumerate(idx.tolist()):
                         slot = int(slot)
-                        if _is_pf or _kv_list is None or s >= len(_kv_list):
+                        if is_prefill or _kv_list is None or s >= len(_kv_list):
                             _lp.pop(slot, None)
                             continue
                         prev = _lp.get(slot)
@@ -417,7 +434,7 @@ class KdaLinearAttentionMixin:
                             _lp[slot] = (
                                 int(_kv_list[s]),
                                 mixed_qkv[:, :, 0:0],
-                                gate[:, 0:0],
+                                raw_gate_proj[:, 0:0],
                                 beta[:, 0:0],
                                 _cw,
                                 layer.activation,
@@ -462,7 +479,7 @@ class KdaLinearAttentionMixin:
                         _lp[slot] = (
                             int(_kv_list[s]),
                             mixed_qkv[:, :, 0:0],
-                            gate[:, 0:0],
+                            raw_gate_proj[:, 0:0],
                             beta[:, 0:0],
                             _cw,
                             layer.activation,
@@ -654,8 +671,7 @@ class KdaLinearAttentionMixin:
                 for slot in list(pending.keys()):
                     if slot not in live_slots:
                         del pending[slot]
-                gate_raw = gate.view(1, -1, -1) if gate.dim() == 2 else gate
-                beta_raw = beta.view(1, -1, -1) if beta.dim() == 2 else beta
+                mat_gate = _materialized_gate()
                 adv_seg: list = []  # raw qkv [1, conv_dim, m]
                 adv_g: list = []
                 adv_b: list = []
@@ -682,8 +698,8 @@ class KdaLinearAttentionMixin:
                         pending[slot] = (
                             base_now + lead,
                             mixed_qkv[:, :, t0 + lead : t1].clone(),
-                            gate_raw[:, t0 + lead : t1].clone(),
-                            beta_raw[:, t0 + lead : t1].clone(),
+                            mat_gate[:, t0 + lead : t1].clone(),
+                            beta[:, t0 + lead : t1].clone(),
                             conv_weight,
                             activation,
                         )
@@ -702,7 +718,6 @@ class KdaLinearAttentionMixin:
                     a_cu = [0]
                     for length in a_lengths:
                         a_cu.append(a_cu[-1] + length)
-                    a_total = a_cu[-1]
                     a_split = torch.split(adv_qkv.transpose(1, 2), [qkv_dim] * 3, dim=-1)
                     aq = a_split[0].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
                     ak = a_split[1].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
@@ -806,7 +821,6 @@ class KdaLinearAttentionMixin:
         key = key.view(hidden_shape)
         value = value.view(hidden_shape)
 
-        g = gate if num_seqs == batch_size else gate.view(hidden_shape)
         # ``beta`` arrives as [B, S, nh] and is already correct for both
         # layouts: per-sequence [num_seqs, per_seq_len, nh] when the batch rows
         # map 1:1 to sequences, and flattened [1, T, nh] (T = sum of q_cu) for
@@ -814,11 +828,24 @@ class KdaLinearAttentionMixin:
         # (num_seqs, seq_len, nh) assumes a uniform per-seq length == the
         # flattened total and crashes on multi-sequence decode batches
         # (e.g. 2 concurrent requests: view [2, 2, 4] on 8 elements).
-        b = beta
         # fla_npu KDA ops require fp32 gate/beta (the pure-torch reference also
         # upcasts them); the model hands them in bf16.
-        g = g.to(torch.float32)
-        b = b.to(torch.float32)
+        b = beta.to(torch.float32)
+        # Verify masks need materialized gates: gate == 0 leaves state unchanged.
+        # AscendC safe-gate fusion supports lower bounds in [-5, 0).
+        fuse_gate = merged_q_cu is None and gate_lb is not None and -5.0 <= gate_lb < 0.0
+        g = (raw_gate_proj if fuse_gate else _materialized_gate()).view(hidden_shape).to(torch.float32)
+        _gate_kwargs = (
+            {
+                "A_log": fg.A_log.contiguous(),
+                "dt_bias": fg.dt_bias.contiguous(),
+                "use_gate_in_kernel": True,
+                "safe_gate": True,
+                "lower_bound": gate_lb,
+            }
+            if fuse_gate
+            else {"use_gate_in_kernel": False}
+        )
         if not is_prefill:
             # decode (incl. MTP multi-token-per-seq varlen): recurrent_kda on
             # packed TND [T, nh, hd] with cu_seqlens.
@@ -843,7 +870,7 @@ class KdaLinearAttentionMixin:
                     cu_seqlens = torch.arange(num_seqs + 1, dtype=torch.int32, device=device)
             else:
                 cu_seqlens = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
-            if commit_first_only and not is_prefill and not _MTP_FULL_COMMIT:
+            if commit_first_only and not _MTP_FULL_COMMIT:
                 # Spec-verify: the state was already ADVANCED by the
                 # previous step's confirmed tokens (see the flattened
                 # branch). Chain the current rows read-only from that state
@@ -925,9 +952,9 @@ class KdaLinearAttentionMixin:
                     output_final_state=True,
                     inplace_final_state=False,
                     use_qk_l2norm_in_kernel=True,
-                    use_gate_in_kernel=False,
                     use_beta_sigmoid_in_kernel=False,
                     state_v_first=True,
+                    **_gate_kwargs,
                 )
             # recurrent_kda returns the packed TND [T, nh, hd] layout of its
             # inputs; restore the [B, S, nh, hd] grouping the model layer
@@ -937,8 +964,8 @@ class KdaLinearAttentionMixin:
             # concurrent requests flattened to [1, 2, ...]) surfaced it.
             core_attn_out = core_attn_out.to(query.dtype).reshape(hidden_shape)
         else:
-            q_in = _l2norm(query.float(), dim=-1, eps=1e-6).to(torch.bfloat16).contiguous()
-            k_in = _l2norm(key.float(), dim=-1, eps=1e-6).to(torch.bfloat16).contiguous()
+            q_in = kernels.l2_norm(query).to(torch.bfloat16).contiguous()
+            k_in = kernels.l2_norm(key).to(torch.bfloat16).contiguous()
             v_in = value.to(torch.bfloat16).contiguous()
             cu_seqlens = (
                 q_cu.to(torch.int32)
@@ -972,9 +999,9 @@ class KdaLinearAttentionMixin:
                         initial_state=ssm_state[s : s + 1],
                         output_final_state=True,
                         cu_seqlens=torch.tensor([0, int(t1 - t0)], dtype=torch.int32, device=device),
-                        use_gate_in_kernel=False,
                         return_intermediate_states=False,
                         state_v_first=True,
+                        **_gate_kwargs,
                     )
                     _pout.append(_r[0])
                     _pstates.append(_r[1])
@@ -1001,9 +1028,9 @@ class KdaLinearAttentionMixin:
                     initial_state=ssm_state,
                     output_final_state=True,
                     cu_seqlens=cu_seqlens,
-                    use_gate_in_kernel=False,
                     return_intermediate_states=False,
                     state_v_first=True,
+                    **_gate_kwargs,
                 )
                 core_attn_out = result[0].to(query.dtype)
                 final_state = result[1]
@@ -1015,17 +1042,22 @@ class KdaLinearAttentionMixin:
                 # the next verify's advance commits them exactly once.
                 _pend = self._mtp_pending[layer.layer_id]
                 _kv_tail = metadata.kv_seq_lens.tolist() if metadata.kv_seq_lens is not None else None
+                # chain_seqs is only populated on the eager MTP coordination
+                # path (host-sync bookkeeping, never in-graph), so raw_gate_proj
+                # is un-transposed here and the materialized gate shares its
+                # layout.
+                mat_gate = _materialized_gate()
                 for i, slot in chain_seqs.items():
                     conv_state[i] = _entry_conv[i]
                     final_state[i] = _entry_ssm[i]
                     if num_seqs != batch_size:
                         t0, t1 = q_cu_list[i], q_cu_list[i + 1]
                         seg = raw_mixed[:, :, t0:t1]
-                        gseg = raw_gate[:, t0:t1]
+                        gseg = mat_gate[:, t0:t1]
                         bseg = raw_beta[:, t0:t1]
                     else:
                         seg = raw_mixed[i : i + 1]
-                        gseg = raw_gate[i : i + 1]
+                        gseg = mat_gate[i : i + 1]
                         bseg = raw_beta[i : i + 1]
                     _pend[slot] = (
                         int(_kv_tail[i]) - seg.shape[2],

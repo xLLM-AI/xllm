@@ -20,31 +20,10 @@ indexer. MLP is dense SwiGLU for the first ``first_k_dense_replace`` layers and
 DeepSeek-V2-style MoE (sigmoid + noaux_tc) thereafter. bf16 throughout, matching
 the patched HuggingFace ``Glm5NextForCausalLM`` reference for tensor alignment.
 
-This is a faithful pure-torch port of the transformers implementation
-(``transformers/src/transformers/models/glm5_next/modeling_glm5_next.py``) so
-that per-tensor alignment against the reference is exact (same ops, same fp32
-cast points, same eps, same interleaved RoPE, same scatter-based mask).
-
-KDA goes through the stable ``fused_recurrent_kda`` /
-``chunk_kda`` interfaces (same signatures as the transformers
-``@use_kernel_func_from_hub``-decorated functions). Today those run the faithful
-pure-torch delta-rule bodies (matching transformers' recurrent/chunk paths for
-alignment); an NPU small-kernel implementation can later be swapped in behind
-the same interface without touching the layer. No fla_npu dependency.
-
-Per-layer linear state (conv_state + recurrent_state) is managed by the
-framework: the executor binds per-sequence ``(conv_cache, ssm_cache)`` slots
-onto each KDA layer and the layer reads/advances/writes them via the
-``linear_state_indices`` / ``has_initial_state`` metadata view, giving correct
-multi-sequence batch and cross-step decode. When no metadata/slots are
-available (standalone align path) every call is treated as a fresh full
-prefill.
-
-v1 runs purely on torch/torch_npu with no xllm_ops / paged backend, so
-the model is alignable standalone. Framework-layer / ops / TP / paged-cache
-integration is a follow-up. The mHC (multi-residual-stream) hyper-connection
-residual is implemented and always on, matching the patched transformers
-reference (the ``mhc`` config field is not consulted by the reference forward).
+KDA runs through the attention backend's fused NPU operators. The executor
+binds per-sequence convolution and recurrent-state cache slots, and the
+backend manages their reads, updates, and speculative verification.
+The mHC residual follows the patched transformers reference.
 """
 
 from __future__ import annotations
@@ -53,7 +32,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -110,15 +89,6 @@ except ImportError:  # pragma: no cover - stub-loader path
 
 # Paged pool cache: write-time incremental compression + direct pool read
 # (see glm5_next_kpool.py).
-
-
-# ---------------------------------------------------------------------------
-# Small faithful helpers (mirror transformers modeling_glm5_next exactly).
-# ---------------------------------------------------------------------------
-def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
-    """FLA-style l2norm: sqrt(sum(x^2)+eps) then divide (NOT F.normalize)."""
-    inv_norm = torch.sqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-    return x / inv_norm
 
 
 # Upper bound on the flattened seq dim (T = total tokens across every sequence
@@ -321,152 +291,6 @@ def _causal_conv1d_update_graph(
     return out.to(mixed_qkv.dtype)
 
 
-def fused_recurrent_kda(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = True,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """KDA fused recurrent delta-rule (single-token decode path).
-
-    Stable interface matching transformers ``fused_recurrent_kda``
-    (``@use_kernel_func_from_hub_with_fallback``-decorated); the pure-torch body is the
-    faithful port of the reference fallback. An NPU small kernel can be swapped
-    in behind this interface without changing the layer.
-    """
-    initial_dtype = query.dtype
-    # transformers recurrent path: NO transpose; shapes stay [B, S, nh, hd].
-    query, key, value, beta, g = [x.contiguous().to(torch.float32) for x in (query, key, value, beta, g)]
-    if use_qk_l2norm_in_kernel:
-        query = _l2norm(query, dim=-1, eps=1e-6)
-        key = _l2norm(key, dim=-1, eps=1e-6)
-    batch_size, sequence_length, num_heads, k_head_dim = key.shape
-    v_head_dim = value.shape[-1]
-    scale = 1.0 / (query.shape[-1] ** 0.5)
-    query = query * scale
-    core_attn_out = torch.zeros(
-        batch_size,
-        sequence_length,
-        num_heads,
-        v_head_dim,
-        dtype=value.dtype,
-        device=value.device,
-    )
-    last_recurrent_state = (
-        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim, dtype=value.dtype, device=value.device)
-        if initial_state is None
-        else initial_state.to(value)
-    )
-    for i in range(sequence_length):
-        q_i = query[:, i]
-        k_i = key[:, i]
-        v_i = value[:, i]
-        g_i = g[:, i][..., None].exp()
-        b_i = beta[:, i][..., None]
-        last_recurrent_state = last_recurrent_state * g_i
-        kv_mem = (last_recurrent_state * k_i[..., None]).sum(dim=-2)
-        delta = (v_i - kv_mem) * b_i
-        last_recurrent_state = last_recurrent_state + k_i.unsqueeze(-1) * delta.unsqueeze(-2)
-        core_attn_out[:, i] = (last_recurrent_state * q_i.unsqueeze(-1)).sum(dim=-2)
-    final_state = last_recurrent_state if output_final_state else None
-    return core_attn_out.to(initial_dtype), final_state
-
-
-def chunk_kda(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    chunk_size: int = 64,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = True,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """KDA chunked delta-rule (multi-token prefill path).
-
-    Stable interface matching transformers ``chunk_kda``
-    (``@use_kernel_func_from_hub_with_fallback``-decorated); the pure-torch body is the
-    faithful port of the reference fallback. An NPU small kernel can be swapped
-    in behind this interface without changing the layer.
-    """
-    initial_dtype = query.dtype
-    query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
-    ]
-    if use_qk_l2norm_in_kernel:
-        query = _l2norm(query, dim=-1, eps=1e-6)
-        key = _l2norm(key, dim=-1, eps=1e-6)
-
-    batch_size, num_heads, sequence_length, k_head_dim = key.shape
-    v_head_dim = value.shape[-1]
-    scale = 1.0 / (query.shape[-1] ** 0.5)
-    pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
-    total_sequence_length = sequence_length + pad_size
-
-    query = F.pad(query, (0, 0, 0, pad_size)) * scale
-    key = F.pad(key, (0, 0, 0, pad_size))
-    value = F.pad(value, (0, 0, 0, pad_size))
-    g = F.pad(g, (0, 0, 0, pad_size))
-    beta = F.pad(beta, (0, pad_size))
-    v_beta = value * beta.unsqueeze(-1)
-    k_beta = key * beta.unsqueeze(-1)
-
-    query, key, value, g, k_beta, v_beta = [
-        x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, g, k_beta, v_beta)
-    ]
-    beta = beta.reshape(beta.shape[0], beta.shape[1], -1, chunk_size)
-
-    # Intra chunk
-    g = g.cumsum(dim=-2)
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0)
-    decay_mask = (g.unsqueeze(-2) - g.unsqueeze(-3)).exp().float()
-    attn = -(k_beta.unsqueeze(-2) * key.unsqueeze(-3) * decay_mask).sum(dim=-1).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        row = attn[..., i, :i].clone()
-        sub = attn[..., :i, :i].clone()
-        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
-
-    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
-    value = attn @ v_beta
-    k_cumdecay = attn @ (k_beta * g.exp())
-
-    last_recurrent_state = (
-        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim, dtype=value.dtype, device=value.device)
-        if initial_state is None
-        else initial_state.to(value)
-    )
-    core_attn_out = torch.zeros_like(value)
-
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1)
-    for i in range(total_sequence_length // chunk_size):
-        q_i = query[:, :, i]
-        k_i = key[:, :, i]
-        v_i = value[:, :, i]
-        g_i = g[:, :, i]
-
-        attn_inter = (q_i * g_i.exp()) @ last_recurrent_state
-        attn_intra = (q_i.unsqueeze(-2) * k_i.unsqueeze(-3) * decay_mask[:, :, i]).sum(dim=-1).masked_fill(mask, 0)
-        v_prime = k_cumdecay[:, :, i] @ last_recurrent_state
-        v_new = v_i - v_prime
-
-        core_attn_out[:, :, i] = attn_inter + attn_intra @ v_new
-        last_recurrent_state = (
-            last_recurrent_state * g_i[:, :, -1].exp().unsqueeze(-1)
-            + (k_i * (g_i[:, :, -1:] - g_i).exp()).transpose(-1, -2) @ v_new
-        )
-
-    final_state = last_recurrent_state if output_final_state else None
-    core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1])
-    core_attn_out = core_attn_out[:, :, :sequence_length]
-    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
-    return core_attn_out, final_state
-
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -655,7 +479,7 @@ class Glm5NextConfig:
 # KDA (Kimi Delta Attention) linear-attention layer
 # ---------------------------------------------------------------------------
 class Glm5NextForgetGate(nn.Module):
-    """forget gate: g = -exp(A_log) * softplus(f_b(f_a(x)) + dt_bias)."""
+    """KDA forget gate with optional bounded decay."""
 
     def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
@@ -671,21 +495,30 @@ class Glm5NextForgetGate(nn.Module):
         self.A_log = nn.Parameter(torch.zeros(self.num_heads, dtype=torch.float32))
         self.safe_gate_lower_bound = cfg.linear_lower_bound
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_shape = (*hidden_states.shape[:2], -1, self.head_dim)
-        forget_gate = self.f_b_proj(self.f_a_proj(hidden_states))
-        g = (forget_gate.float() + self.dt_bias.float().view(1, 1, -1)).view(hidden_shape)
-        decay_rate = torch.exp(self.A_log.float().view(1, 1, self.num_heads, 1))
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True) -> Glm5NextForgetGate:
+        a_log = self.A_log.detach()
+        dt_bias = self.dt_bias.detach()
+        super()._apply(fn, recurse)
+        # Preserve FP32 constants across the model's global dtype conversion.
+        self.A_log.data = a_log.to(device=self.A_log.device, dtype=torch.float32)
+        self.dt_bias.data = dt_bias.to(device=self.dt_bias.device, dtype=torch.float32)
+        return self
 
-        # Safe lower bound decay (reference Glm5NextTextForgetGate): when a bound
-        # is set, the gate is `-bound * sigmoid(decay_rate * g)` instead of the
-        # softplus form. For the default config linear_lower_bound=-5.0 -> this
-        # branch is taken.
+    def raw_projection(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Project forget logits as ``[B, S, num_heads, head_dim]``."""
+        hidden_shape = (*hidden_states.shape[:2], -1, self.head_dim)
+        return self.f_b_proj(self.f_a_proj(hidden_states)).view(hidden_shape)
+
+    def gate_from_raw(self, raw: torch.Tensor) -> torch.Tensor:
+        """Apply bounded sigmoid decay, or unbounded softplus when no bound is set."""
+        g = raw.float() + self.dt_bias.view(1, 1, self.num_heads, self.head_dim)
+        decay_rate = torch.exp(self.A_log.view(1, 1, self.num_heads, 1))
         if self.safe_gate_lower_bound is not None:
             return self.safe_gate_lower_bound * torch.sigmoid(decay_rate * g)
+        return -decay_rate * F.softplus(g)
 
-        g_softplus = torch.where(g > 20.0, g, torch.log(1.0 + torch.exp(g)))
-        return -decay_rate * g_softplus
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.gate_from_raw(self.raw_projection(hidden_states))
 
 
 class Glm5NextKdaAttention(Attention):
@@ -699,9 +532,8 @@ class Glm5NextKdaAttention(Attention):
     ssm_cache: ``[num_slots, nh, k_hd, v_hd]`` fp32) and the per-sequence
     slot/cold-start view (``linear_state_indices`` / ``has_initial_state``).
 
-    The KDA math goes through the stable ``fused_recurrent_kda`` /
-    ``chunk_kda`` interfaces (or fla_npu fused ops when
-    ``GLM5NEXT_KDA_BACKEND=fla_npu``); see their docstrings.
+    KDA math is dispatched through ``NpuPagedAttentionBackend`` to fused
+    ``fla_npu`` operators.
     """
 
     def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
@@ -786,7 +618,7 @@ class Glm5NextKdaAttention(Attention):
             dim=-1,
         ).transpose(1, 2)  # [B, 3*qkv_dim, S]
 
-        g = self.forget_gate(hidden_states)
+        g_raw = self.forget_gate.raw_projection(hidden_states)
         beta = torch.sigmoid(self.b_proj(hidden_states))
 
         # KDA conv1d + delta-rule + conv/ssm state is owned by the backend
@@ -798,7 +630,7 @@ class Glm5NextKdaAttention(Attention):
             raise RuntimeError(
                 "Glm5NextKdaAttention requires an attention backend with execute_linear; run inside the engine."
             )
-        core_attn_out = backend.execute_linear(mixed_qkv, g, beta, self)
+        core_attn_out = backend.execute_linear(mixed_qkv, beta, self, raw_gate_proj=g_raw)
 
         gate = self.g_b_proj(self.g_a_proj(hidden_states)).view(hidden_shape)
         output = self.o_norm(core_attn_out, gate).reshape(batch_size, seq_len, -1)
