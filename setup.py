@@ -1,3 +1,18 @@
+# Copyright 2025-2026 The xLLM Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 import argparse
 import glob
 import os
@@ -244,18 +259,32 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
 
 
 def _stage_mooncake_runtime_binaries(cmake_dir: str, extdir: str) -> None:
-    """Stage the mooncake runtime shared library into the wheel.
+    """Stage Mooncake runtime libraries beside the binaries for their $ORIGIN rpath."""
+    libraries = {
+        "libasio.so": os.path.join(cmake_dir, "mooncake-common", "libasio.so"),
+    }
+    with open(os.path.join(cmake_dir, "CMakeCache.txt"), encoding="utf-8") as cache_file:
+        cache = dict(
+            line.strip().split("=", 1)
+            for line in cache_file
+            if line.startswith(("URING_LIB:FILEPATH=", "URING_INCLUDE:PATH="))
+        )
+    uring_library = cache.get("URING_LIB:FILEPATH", "")
+    uring_include = cache.get("URING_INCLUDE:PATH", "")
+    if all(
+        value and not value.endswith("-NOTFOUND") for value in (uring_library, uring_include)
+    ) and not uring_library.endswith(".a"):
+        dynamic_section = subprocess.check_output(["readelf", "-d", uring_library], text=True)
+        soname = re.search(r"\(SONAME\).*?\[([^\]]+)\]", dynamic_section)
+        if soname is None:
+            raise RuntimeError(f"Mooncake runtime library has no SONAME: {uring_library}")
+        libraries[soname.group(1)] = uring_library
 
-    The xllm binaries link against ``mooncake-common/libasio.so``, which only
-    exists in the build tree. Without staging it, the installed package
-    misses the shared object on machines without the build tree; with the
-    binaries' ``$ORIGIN`` rpath entry the copy placed next to them resolves.
-    """
-    source = os.path.join(cmake_dir, "mooncake-common", "libasio.so")
-    if not os.path.isfile(source):
-        raise RuntimeError(f"libasio.so was not built: {source}")
-    shutil.copy2(source, os.path.join(extdir, "libasio.so"))
-    logger.info("Staged mooncake runtime library libasio.so into extdir")
+    for name, source in libraries.items():
+        if not os.path.isfile(source):
+            raise RuntimeError(f"Mooncake runtime library was not found: {source}")
+        shutil.copy2(source, os.path.join(extdir, name))
+        logger.info(f"Staged Mooncake runtime library {name} into extdir")
 
 
 def _stage_auto_tuning_config(base_dir: str, extdir: str) -> None:
@@ -533,9 +562,8 @@ class ExtBuild(build_ext):
         build_targets = [ext.name, "mooncake_master", "mooncake_client"]
         if self.enable_ha:
             build_targets.append("stage_mooncake_ha_runtime")
-        subprocess.check_call(
-            [cmake_cmd, "--build", ".", "--verbose"] + build_args + ["--target", *build_targets], cwd=cmake_dir
-        )
+        build_cmd = [cmake_cmd, "--build", ".", "--verbose"] + build_args + ["--target"]
+        subprocess.check_call(build_cmd + build_targets, cwd=cmake_dir)
 
         server_output_dir = os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/")
         os.makedirs(server_output_dir, exist_ok=True)
@@ -581,15 +609,11 @@ class ExtBuild(build_ext):
 
         if BUILD_EXPORT:
             # build export module
-            subprocess.check_call(
-                [cmake_cmd, "--build", ".", "--verbose"] + build_args + ["--target", "export_module"], cwd=cmake_dir
-            )
+            subprocess.check_call(build_cmd + ["export_module"], cwd=cmake_dir)
 
         if BUILD_TEST_FILE:
             # build tests target
-            subprocess.check_call(
-                [cmake_cmd, "--build", ".", "--verbose"] + build_args + ["--target", "all_tests"], cwd=cmake_dir
-            )
+            subprocess.check_call(build_cmd + ["all_tests"], cwd=cmake_dir)
 
 
 class ExtBuildSingleTest(ExtBuild):
@@ -1135,6 +1159,7 @@ if __name__ == "__main__":
             "xllm/pybind/params",
             "xllm/pybind/errors",
             "xllm/pybind/mm_utils",
+            "xllm/pybind/multimodal",
         ],
         python_requires=">=3.10",
     )
