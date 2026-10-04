@@ -23,9 +23,6 @@ from tests.python.qwen3_5_test_utils import (
     StateDict as _StateDict,
 )
 from tests.python.qwen3_5_test_utils import (
-    gemma_rms_norm as _gemma_rms_norm,
-)
-from tests.python.qwen3_5_test_utils import (
     make_config as _config,
 )
 from xllm.python import kernels
@@ -34,8 +31,6 @@ from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
 )
 from xllm.python.model_loader import ScopedWeightLoader
-
-kernels.gemma_rms_norm = _gemma_rms_norm
 
 
 def test_backend_decoder_factory_rejects_unknown_device() -> None:
@@ -121,26 +116,6 @@ def test_full_attention_rejects_invalid_kv_replication() -> None:
         cfg.validate()
 
 
-def test_gemma_rms_norm_matches_fp32_weight_reference():
-    layer = GemmaRMSNorm(4, dtype=torch.bfloat16, device=torch.device("cpu"))
-    with torch.no_grad():
-        layer.weight.copy_(torch.tensor([0.3242, -0.8164, 2.4844, -0.2383]))
-
-    hidden = torch.tensor([[0.4258, -0.2656, 1.4922, -0.7344]], dtype=torch.bfloat16)
-    residual = torch.tensor([[-0.1064, 0.9844, -0.3789, 0.5469]], dtype=torch.bfloat16)
-    actual, actual_residual = layer(hidden, residual)
-
-    summed = hidden.float() + residual.float()
-    expected_residual = summed.to(torch.bfloat16)
-    variance = summed.pow(2).mean(dim=-1, keepdim=True)
-    expected = summed * torch.rsqrt(variance + layer.eps)
-    expected = (expected * (layer.weight + 1.0)).to(torch.bfloat16)
-
-    assert layer.weight.dtype == torch.float32
-    torch.testing.assert_close(actual_residual, expected_residual, rtol=0, atol=0)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
 def test_gemma_rms_norm_delegates_to_backend_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -162,8 +137,10 @@ def test_gemma_rms_norm_delegates_to_backend_kernel(
         raising=False,
     )
     layer = GemmaRMSNorm(4, dtype=torch.bfloat16, device=torch.device("cpu"))
+    weight = torch.tensor([0.3242, -0.8164, 2.4844, -0.2383], dtype=torch.float32)
+    assert layer.weight.dtype == torch.float32
     with torch.no_grad():
-        layer.weight.copy_(torch.tensor([0.3242, -0.8164, 2.4844, -0.2383]))
+        layer.weight.copy_(weight)
 
     hidden = torch.tensor(
         [[0.4258, -0.2656, 1.4922, -0.7344]],
@@ -175,24 +152,20 @@ def test_gemma_rms_norm_delegates_to_backend_kernel(
     )
     actual, actual_residual = layer(hidden, residual)
 
+    summed = hidden.float() + residual.float()
+    expected_residual = summed.to(torch.bfloat16)
+    variance = summed.pow(2).mean(dim=-1, keepdim=True)
+    expected = summed * torch.rsqrt(variance + layer.eps)
+    expected = (expected * (weight + 1.0)).to(torch.bfloat16)
+
     assert len(calls) == 1
     native_input, native_weight, native_eps = calls[0]
-    torch.testing.assert_close(
-        native_input,
-        hidden.float() + residual.float(),
-        rtol=0,
-        atol=0,
-    )
+    torch.testing.assert_close(native_input, summed, rtol=0, atol=0)
     assert native_input.dtype == torch.float32
     assert native_weight is layer.weight
+    torch.testing.assert_close(native_weight, weight, rtol=0, atol=0)
     assert native_eps == layer.eps
-    torch.testing.assert_close(
-        actual_residual,
-        native_input.to(torch.bfloat16),
-        rtol=0,
-        atol=0,
-    )
-    variance = native_input.pow(2).mean(dim=-1, keepdim=True)
-    expected = native_input * torch.rsqrt(variance + native_eps)
-    expected = (expected * (native_weight + 1.0)).to(torch.bfloat16)
+    assert actual.dtype == hidden.dtype
+    assert actual_residual.dtype == hidden.dtype
+    torch.testing.assert_close(actual_residual, expected_residual, rtol=0, atol=0)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)

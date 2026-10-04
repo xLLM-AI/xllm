@@ -172,24 +172,18 @@ def test_candidate_selector_builds_topk_edge_logits() -> None:
         device=torch.device("cpu"),
     )
     with torch.no_grad():
-        selector.hidden_projection.weight.zero_()
-        selector.predecessor_codebook.zero_()
-        selector.successor_codebook.zero_()
+        selector.hidden_projection.weight.copy_(torch.tensor([[1.0, 2.0, 0.0, -1.0], [0.0, -1.0, 1.0, 2.0]]))
+        selector.predecessor_codebook.copy_(torch.tensor([[1.0, 2.0], [3.0, -1.0], [-2.0, 1.0], [2.0, 4.0]]))
+        selector.successor_codebook.copy_(torch.tensor([[2.0, 1.0], [-1.0, 3.0], [4.0, -2.0], [1.0, 2.0]]))
+    hidden = torch.tensor([[[1.0, 0.0, 2.0, 0.0], [0.0, 1.0, 0.0, 1.0]]])
     logits = torch.tensor([[[0.0, 3.0, 1.0, 2.0], [4.0, 1.0, 5.0, 0.0]]])
+    candidate_ids, edge_logits = selector(hidden, logits, torch.tensor([2]))
 
-    candidate_ids, edge_logits = selector(
-        torch.ones(1, 2, 4),
-        logits,
-        torch.tensor([1]),
-    )
-
-    expected_ids = torch.tensor([[[1, 3], [2, 0]]])
-    expected_values = torch.tensor([[[3.0, 2.0], [5.0, 4.0]]])
-    torch.testing.assert_close(candidate_ids, expected_ids)
-    torch.testing.assert_close(
-        edge_logits,
-        expected_values.unsqueeze(2).expand(1, 2, 2, 2),
-    )
+    # Projections are (1,2), (1,1); edge axes are predecessor/successor.
+    # First edge: unary 3 + (-2*1*-1 + 1*2*3) = 11.
+    expected_edges = torch.tensor([[[[11.0, 4.0], [11.0, 4.0]], [[19.0, 9.0], [5.0, 12.0]]]])
+    torch.testing.assert_close(candidate_ids, torch.tensor([[[1, 3], [2, 0]]]), rtol=0, atol=0)
+    torch.testing.assert_close(edge_logits, expected_edges, rtol=0, atol=0)
 
 
 def test_dflash2_model_uses_band_attention_and_shared_target_weights() -> None:

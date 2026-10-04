@@ -149,59 +149,57 @@ def test_context_projection_uses_tensor_parallel_output_shard(
     assert all_gather.call_args.kwargs == {"dim": -1, "world_size": 2}
 
 
-def test_context_projection_writes_each_layer_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = _config()
+def test_context_projection_writes_each_layer_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(hidden_size=2, head_dim=2, num_hidden_layers=2)
     model = DFlashQwen3Model(config, torch.float32, torch.device("cpu"))
-    attention = model.layers[0].self_attn
+    key_weights = torch.tensor([[[1.0, 0.0], [0.0, 2.0]], [[0.0, 1.0], [3.0, 0.0]]])
     with torch.no_grad():
-        model.fc.load_weight(torch.eye(config.hidden_size), tp_rank=0)
-        model.hidden_norm.weight.fill_(1.0)
-        attention.qkv_proj.weight.zero_()
-        attention.qkv_proj.weight[attention.q_size : attention.q_size + attention.kv_size].copy_(
-            torch.eye(config.hidden_size)
-        )
-        attention.qkv_proj.weight[attention.q_size + attention.kv_size :].copy_(2.0 * torch.eye(config.hidden_size))
-        attention.k_norm.weight.fill_(1.0)
+        model.fc.load_weight(torch.eye(2), tp_rank=0)
+        for layer_id, layer in enumerate(model.layers):
+            value_weight = (layer_id + 2) * torch.eye(2)
+            layer.self_attn.qkv_proj.weight.copy_(torch.cat((torch.zeros(2, 2), key_weights[layer_id], value_weight)))
         model._build_context_kv_buffers()
-    monkeypatch.setattr(
-        kernels,
-        "rms_norm",
-        lambda hidden, weight, eps: hidden
-        * torch.rsqrt(hidden.float().pow(2).mean(dim=-1, keepdim=True) + eps)
-        * weight,
-        raising=False,
-    )
-    reshape_paged_cache = Mock()
-    monkeypatch.setattr(
-        kernels,
-        "reshape_paged_cache",
-        reshape_paged_cache,
-        raising=False,
-    )
-    synchronizer = Mock()
-    key_cache = torch.empty(1, 1, 1, config.head_dim)
-    value_cache = torch.empty_like(key_cache)
-    target_hidden = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
 
-    projected = model.write_context_kv(
-        target_hidden,
-        torch.tensor([0]),
-        torch.tensor([0], dtype=torch.int32),
-        [(key_cache, value_cache, None, None, None)],
-        synchronizer,
-    )
+    def _rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        return hidden * torch.rsqrt(hidden.square().mean(-1, keepdim=True) + eps) * weight
 
-    reshape_paged_cache.assert_called_once()
-    call_args = reshape_paged_cache.call_args.args
-    torch.testing.assert_close(
-        call_args[2],
-        2.0 * projected.view(1, 1, config.head_dim),
-    )
-    assert call_args[3] is key_cache
-    assert call_args[4] is value_cache
-    synchronizer.record_event.assert_called_once_with(0)
+    trace: list[tuple[str, int]] = []
+    caches = [(torch.full((1, 4, 1, 2), -10.0), torch.full((1, 4, 1, 2), -20.0)) for _ in range(2)]
+
+    def _write_cache(
+        slots: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+    ) -> None:
+        key_cache.view(4, 1, 2).index_copy_(0, slots.long(), keys)
+        value_cache.view(4, 1, 2).index_copy_(0, slots.long(), values)
+        trace.append(("cache", next(i for i, cache in enumerate(caches) if cache[0] is key_cache)))
+
+    def _record_event(layer_id: int) -> None:
+        trace.append(("event", layer_id))
+
+    monkeypatch.setattr(kernels, "rms_norm", _rms_norm, raising=False)
+    monkeypatch.setattr(kernels, "reshape_paged_cache", _write_cache, raising=False)
+    synchronizer = Mock(record_event=Mock(side_effect=_record_event))
+    hidden = torch.tensor([[2.0, 2.0], [2.0, -2.0]])
+    positions, slots = torch.tensor([1, 2]), torch.tensor([3, 1], dtype=torch.int32)
+    projected = model.write_context_kv(hidden, positions, slots, caches, synchronizer)
+
+    expected_hidden = hidden / (4.0 + config.rms_norm_eps) ** 0.5
+    torch.testing.assert_close(projected, expected_hidden)
+    for layer_id, (key_cache, value_cache) in enumerate(caches):
+        keys = expected_hidden @ key_weights[layer_id].T
+        keys /= torch.sqrt(keys.square().mean(-1, keepdim=True) + config.rms_norm_eps)
+        cos, sin = positions.float().cos(), positions.float().sin()
+        rotated = torch.stack((keys[:, 0] * cos - keys[:, 1] * sin, keys[:, 1] * cos + keys[:, 0] * sin), dim=-1)
+        expected_keys, expected_values = torch.full((1, 4, 1, 2), -10.0), torch.full((1, 4, 1, 2), -20.0)
+        expected_keys[0, [3, 1]] = rotated.unsqueeze(1)
+        expected_values[0, [3, 1]] = ((layer_id + 2) * expected_hidden).unsqueeze(1)
+        torch.testing.assert_close(key_cache, expected_keys)
+        torch.testing.assert_close(value_cache, expected_values)
+    assert trace == [("cache", 0), ("event", 0), ("cache", 1), ("event", 1)]
 
 
 def test_checkpoint_weight_names_load_into_fused_modules(

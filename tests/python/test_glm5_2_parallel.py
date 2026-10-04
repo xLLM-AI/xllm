@@ -577,13 +577,13 @@ class _RecordingLoader(W8A8WeightLoader):
         expert_id = int(name.split(".experts.")[1].split(".")[0])
         if name.endswith(("gate_proj.weight", "up_proj.weight")):
             value = expert_id + (11 if name.endswith("up_proj.weight") else 1)
-            return torch.full((8, 16), value, dtype=torch.int8)
+            return torch.arange(8, dtype=torch.int8).view(8, 1).expand(8, 16) + value
         if name.endswith(("gate_proj.weight_scale", "up_proj.weight_scale")):
             return torch.zeros(8, 1)
         if name.endswith(("gate_proj.weight_offset", "up_proj.weight_offset")):
             return torch.zeros(8, 1)
         if name.endswith("down_proj.weight"):
-            return torch.full((16, 8), expert_id + 21, dtype=torch.int8)
+            return torch.arange(8, dtype=torch.int8).view(1, 8).expand(16, 8) + expert_id + 21
         if name.endswith(("down_proj.weight_scale", "down_proj.weight_offset")):
             return torch.zeros(16, 1)
         raise AssertionError(f"unexpected expert tensor: {name}")
@@ -735,13 +735,18 @@ def test_dynamic_attention_prepares_one_fused_qkv_projection() -> None:
     assert attention._fused_mla_ready is True
 
 
-@pytest.mark.parametrize("ep_rank", [0, 2, 3])
-def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch: pytest.MonkeyPatch, ep_rank: int) -> None:
-    model = Glm52ForCausalLM(_config(ep_rank=ep_rank))
+@pytest.mark.parametrize(
+    ("ep_size", "ep_rank", "moe_tp_size", "moe_tp_rank"),
+    [(4, 0, 1, 0), (4, 2, 1, 0), (4, 3, 1, 0), (2, 1, 2, 1)],
+)
+def test_glm_weight_loader_reads_only_local_ep_experts(
+    monkeypatch: pytest.MonkeyPatch, ep_size: int, ep_rank: int, moe_tp_size: int, moe_tp_rank: int
+) -> None:
+    values = _config(ep_size=ep_size, ep_rank=ep_rank, moe_tp_size=moe_tp_size, moe_tp_rank=moe_tp_rank)
+    model = Glm52ForCausalLM(values)
     moe = model.model.layers[0].mlp
     model.model.layers[0].self_attn.process_weights_after_loading = MagicMock()
     moe.shared_experts.process_weights_after_loading = MagicMock()
-
     monkeypatch.setattr(glm5_2, "W8A8WeightLoader", _RecordingLoader)
     formatted_shapes: list[tuple[int, ...]] = []
 
@@ -753,63 +758,27 @@ def test_glm_weight_loader_reads_only_local_ep_experts(monkeypatch: pytest.Monke
         return weight
 
     monkeypatch.setattr(glm5_2.kernels, "format_cast_nz", _format_cast_nz, raising=False)
-
     model.load_weights([], tp_rank=0, tp_size=2)
-
     loader = _RecordingLoader.latest
     assert loader is not None
-    expert_names = [name for name in loader.loaded if ".mlp.experts." in name]
-    assert expert_names
-    expert_ids = {int(name.split(".experts.")[1].split(".")[0]) for name in expert_names}
-    assert expert_ids == {2 * ep_rank, 2 * ep_rank + 1}
-    assert formatted_shapes == [(2, 16, 16), (2, 8, 16)]
+    expert_ids = {int(name.split(".experts.")[1].split(".")[0]) for name in loader.loaded if ".mlp.experts." in name}
+    count, width = 8 // ep_size, 8 // moe_tp_size
+    assert expert_ids == set(range(count * ep_rank, count * (ep_rank + 1)))
+    assert formatted_shapes == [(count, 16, 2 * width), (count, width, 16)]
+    intermediate = torch.arange(width * moe_tp_rank, width * (moe_tp_rank + 1), dtype=torch.int8).view(-1, 1)
     for local_idx, expert_id in enumerate(sorted(expert_ids)):
-        expected_w13 = (
-            torch.cat(
-                [
-                    torch.full((8, 16), expert_id + 1, dtype=torch.int8),
-                    torch.full((8, 16), expert_id + 11, dtype=torch.int8),
-                ]
-            )
-            .t()
-            .contiguous()
-        )
-        torch.testing.assert_close(moe.experts_w13[local_idx], expected_w13)
-        torch.testing.assert_close(moe.experts_w2[local_idx], torch.full((8, 16), expert_id + 21, dtype=torch.int8))
+        gate, up = intermediate + expert_id + 1, intermediate + expert_id + 11
+        expected_w13 = torch.cat((gate, up)).expand(-1, 16).T
+        expected_w2 = (intermediate + expert_id + 21).expand(-1, 16)
+        torch.testing.assert_close(moe.experts_w13[local_idx], expected_w13, rtol=0, atol=0)
+        torch.testing.assert_close(moe.experts_w2[local_idx], expected_w2, rtol=0, atol=0)
     moe.shared_experts.process_weights_after_loading.assert_called_once_with()
-    assert loader.tp_size == 2
-    assert loader.tp_rank == 0
-    attention_prefix = "model.layers.0.self_attn."
-    attention_projections = [name for name in loader.loaded if name.startswith(attention_prefix)]
+    assert (loader.tp_size, loader.tp_rank) == (2, 0)
     assert all(
-        name in attention_projections
-        for name in [
-            attention_prefix + "q_a_proj",
-            attention_prefix + "q_b_proj",
-            attention_prefix + "kv_a_proj_with_mqa",
-        ]
+        "model.layers.0.self_attn." + proj in loader.loaded for proj in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa")
     )
     assert loader.fused_projections == []
-    assert loader.shared_shards == [("model.layers.0.mlp.shared_experts.", 1, 0)]
-
-
-def test_glm_weight_loader_shards_proper_divisor_ep_with_moe_tp(monkeypatch) -> None:
-    values = _config(ep_size=2, ep_rank=1, moe_tp_size=2, moe_tp_rank=1)
-    model = Glm52ForCausalLM(values)
-    model.model.layers[0].self_attn.process_weights_after_loading = MagicMock()
-    model.model.layers[0].mlp.process_experts_w13_after_loading = MagicMock()
-    model.model.layers[0].mlp.process_experts_w2_after_loading = MagicMock()
-    model.model.layers[0].mlp.shared_experts.process_weights_after_loading = MagicMock()
-    monkeypatch.setattr(glm5_2, "W8A8WeightLoader", _RecordingLoader)
-
-    model.load_weights([], tp_rank=0, tp_size=2)
-
-    loader = _RecordingLoader.latest
-    assert loader is not None
-    expert_names = [name for name in loader.loaded if ".mlp.experts." in name]
-    assert expert_names
-    assert all(any(f".experts.{expert}." in name for expert in range(4, 8)) for name in expert_names)
-    assert loader.shared_shards == [("model.layers.0.mlp.shared_experts.", 2, 1)]
+    assert loader.shared_shards == [("model.layers.0.mlp.shared_experts.", moe_tp_size, moe_tp_rank)]
 
 
 @pytest.mark.parametrize("dynamic_activation", [False, True])
