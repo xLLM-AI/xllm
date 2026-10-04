@@ -211,7 +211,7 @@ TEST(ProcessGroupBatchTest, ContiguousOffsetViewUsesOwnedStaging) {
   EXPECT_NE(process_group.backend().data_ptrs().front(), expected_data_ptr);
 }
 
-TEST(ProcessGroupBatchTest, LimitsOutstandingPayloadToOneWave) {
+TEST(ProcessGroupBatchTest, CallerOwnedBuffersPostAcrossPayloadLimit) {
   RecordingProcessGroup process_group(
       /*rank=*/0, /*world_size=*/2, /*max_wave_payload_bytes=*/8);
   std::vector<std::string> op_types = {"send", "recv", "send", "recv"};
@@ -221,6 +221,35 @@ TEST(ProcessGroupBatchTest, LimitsOutstandingPayloadToOneWave) {
       torch::zeros({2}, torch::kFloat32),
       torch::zeros({2}, torch::kFloat32),
   };
+  std::vector<int64_t> remote_ranks(op_types.size(), 1);
+
+  c10::intrusive_ptr<c10d::Work> work =
+      process_group.batch_isend_irecv(op_types, tensors, remote_ranks);
+
+  ASSERT_NE(work, nullptr);
+  EXPECT_EQ(process_group.backend().posted_operation_count(), op_types.size());
+  EXPECT_TRUE(work->wait());
+  ASSERT_EQ(process_group.backend().wait_posted_counts().size(),
+            op_types.size());
+  EXPECT_EQ(process_group.backend().wait_posted_counts(),
+            (std::vector<size_t>{4, 4, 4, 4}));
+}
+
+TEST(ProcessGroupBatchTest, StagingBuffersRespectPayloadLimit) {
+  RecordingProcessGroup process_group(
+      /*rank=*/0, /*world_size=*/2, /*max_wave_payload_bytes=*/8);
+  std::vector<std::string> op_types = {"send", "recv", "send", "recv"};
+  std::vector<torch::Tensor> storage = {
+      torch::zeros({3}, torch::kFloat32),
+      torch::zeros({3}, torch::kFloat32),
+      torch::zeros({3}, torch::kFloat32),
+      torch::zeros({3}, torch::kFloat32),
+  };
+  std::vector<torch::Tensor> tensors;
+  tensors.reserve(storage.size());
+  for (torch::Tensor& tensor : storage) {
+    tensors.emplace_back(tensor.narrow(/*dim=*/0, /*start=*/1, /*length=*/2));
+  }
   std::vector<int64_t> remote_ranks(op_types.size(), 1);
 
   c10::intrusive_ptr<c10d::Work> work =

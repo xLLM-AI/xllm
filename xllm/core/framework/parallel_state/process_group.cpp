@@ -522,24 +522,43 @@ c10::intrusive_ptr<c10d::Work> ProcessGroup::batch_isend_irecv(
     return nullptr;
   }
 
-  const int64_t max_wave_payload_bytes = max_p2p_wave_payload_bytes();
-  CHECK_GT(max_wave_payload_bytes, 0);
+  const bool caller_owns_all_communication_buffers =
+      std::all_of(ordered_operations.begin(),
+                  ordered_operations.end(),
+                  [](const PreparedP2POperation& operation) {
+                    return !operation.needs_staging;
+                  });
   std::vector<P2PWave> waves;
-  P2PWave current_wave;
-  int64_t current_wave_payload_bytes = 0;
-  for (PreparedP2POperation& operation : ordered_operations) {
-    if (!current_wave.empty() &&
-        current_wave_payload_bytes + operation.payload_bytes >
-            max_wave_payload_bytes) {
-      waves.emplace_back(std::move(current_wave));
-      current_wave = P2PWave();
-      current_wave_payload_bytes = 0;
+  if (caller_owns_all_communication_buffers) {
+    // EPLB plans are asymmetric across ranks. Splitting each rank by its own
+    // payload budget can put matching sends and receives in different waves,
+    // which leaves both wave frontiers waiting on the other rank. The caller
+    // owns these zero-offset contiguous tensors, so posting the full globally
+    // ordered plan does not require additional staging allocations here.
+    waves.emplace_back(std::move(ordered_operations));
+  } else {
+    const int64_t max_wave_payload_bytes = max_p2p_wave_payload_bytes();
+    CHECK_GT(max_wave_payload_bytes, 0);
+    P2PWave current_wave;
+    int64_t current_wave_payload_bytes = 0;
+    for (PreparedP2POperation& operation : ordered_operations) {
+      // Keep matching send/recv wave boundaries identical across each rank
+      // pair.
+      if (!current_wave.empty() &&
+          (current_wave.back().peer_rank != operation.peer_rank ||
+           current_wave.back().is_recv != operation.is_recv ||
+           current_wave_payload_bytes + operation.payload_bytes >
+               max_wave_payload_bytes)) {
+        waves.emplace_back(std::move(current_wave));
+        current_wave = P2PWave();
+        current_wave_payload_bytes = 0;
+      }
+      current_wave_payload_bytes += operation.payload_bytes;
+      current_wave.emplace_back(std::move(operation));
     }
-    current_wave_payload_bytes += operation.payload_bytes;
-    current_wave.emplace_back(std::move(operation));
-  }
-  if (!current_wave.empty()) {
-    waves.emplace_back(std::move(current_wave));
+    if (!current_wave.empty()) {
+      waves.emplace_back(std::move(current_wave));
+    }
   }
 
   return c10::make_intrusive<BatchedP2PWork>(
