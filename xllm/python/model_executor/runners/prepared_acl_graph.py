@@ -43,10 +43,12 @@ class PreparedAclGraphRunner(AclGraphRunner):
         max_batch: int,
         dp_size: int = 1,
         dp_rank: int = 0,
+        enable_mega_moe_token_mask: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
         self.dp_rank = dp_rank
+        self._enable_mega_moe_token_mask = enable_mega_moe_token_mask
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self._prepared_graphs: dict[tuple[object, ...], AclGraphEntry] = {}
         self.prepared_replays = 0
@@ -154,6 +156,12 @@ class PreparedAclGraphRunner(AclGraphRunner):
         entry.graph_tasks = []
         entry.execution_state = AclGraphExecutionState({})
         entry.replay_logged = False
+        mega_moe_token_mask = None
+        if self._enable_mega_moe_token_mask:
+            entry.mega_moe_token_counts = (entry.batch_size,) * self.dp_size
+            # The borrowed-input runner also supports direct replay outside inference mode.
+            with torch.inference_mode(False):
+                mega_moe_token_mask = torch.ones(entry.batch_size * self.dp_size, dtype=torch.int8, device=self.device)
         # Retain the exact views independently of the mutable native Slot
         # metadata. Only the original model's inputs are captured here.
         entry.static_metadata = StaticGraphAttentionMetadata(
@@ -168,10 +176,13 @@ class PreparedAclGraphRunner(AclGraphRunner):
             kv_seq_lens_host_values=list(metadata.kv_seq_lens_host_values),
             dp_execution_token_counts=tuple(getattr(metadata, "dp_execution_token_counts", ())),
             dp_is_decode=tuple(getattr(metadata, "dp_is_decode", ())),
+            mega_moe_token_mask=mega_moe_token_mask,
             prepared_attention_state=(
                 metadata.prepared_attention_state if getattr(self.attention_backend, "is_mla", False) else None
             ),
         )
+        if mega_moe_token_mask is not None:
+            self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
         self._prepare_attention(entry, entry.static_metadata)
         self._capture(entry, torch.npu.current_stream(self.device))
         self._prepared_graphs[binding] = entry
@@ -197,6 +208,9 @@ class PreparedAclGraphRunner(AclGraphRunner):
             raise RuntimeError("prepared ACL replay requires a warmed Slot binding")
         # Only serialized Launch installs shared backend state. This path
         # selects entry-owned buffers and refreshes its captured Host lists.
+        if entry.static_metadata.mega_moe_token_mask is not None:
+            # Counts precede native Slot padding; execution counts are physical.
+            self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
         self._prepare_attention(entry, metadata, replay=True)
         stream = torch.npu.current_stream(self.device)
         entry.graph.replay()

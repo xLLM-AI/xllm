@@ -82,6 +82,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         dp_rank: int = 0,
         decode_batch_size_limit: int | None = None,
         num_decoding_tokens: int = 1,
+        enable_mega_moe_token_mask: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -93,6 +94,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._batch_limit_warning_logged = False
         self._graphs: dict[_GraphKey, AclGraphEntry] = {}
         self._dp_graph_variants: dict[_GraphKey, int] = {}
+        self._enable_mega_moe_token_mask = enable_mega_moe_token_mask
         self._paged_kv_indices_buffer: torch.Tensor | None = None
         self._max_blocks_per_sequence: int = 0
         self._stream: torch.npu.Stream | None = None
@@ -897,6 +899,18 @@ class DecodeAclGraphRunner(AclGraphRunner):
             dp_execution_token_counts=(padded_batch_size,) * self.dp_size if self.dp_size > 1 else (),
             dp_global_sequence_nums=(),
             dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
+            # One mask slot per padded row across all DP ranks. aclnnMegaMoe
+            # dispatches the fixed graph shape over EP, so padded lanes must be
+            # marked inactive or they are routed as real tokens.
+            mega_moe_token_mask=(
+                torch.zeros(
+                    padded_batch_size * self.dp_size,
+                    dtype=torch.int8,
+                    device=device,
+                )
+                if self._enable_mega_moe_token_mask
+                else None
+            ),
         )
         is_expanded = resolve_expanded_decode_metadata(metadata) is not None
         entry.kv_seq_lens_delta = torch.empty(padded_batch_size, dtype=torch.int32, device=device)
@@ -1078,6 +1092,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
             metadata,
             batch_size,
         )
+        if static_metadata.mega_moe_token_mask is not None:
+            self._fill_mega_moe_token_mask(
+                entry, (batch_size,) if self.dp_size == 1 else metadata.dp_execution_token_counts
+            )
 
     def _fill_dsa_block_tables(
         self,

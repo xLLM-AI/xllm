@@ -71,6 +71,7 @@ class StaticGraphAttentionMetadata:
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None
     is_prefill: bool = False
     is_chunked_prefill: bool = False
+    mega_moe_token_mask: torch.Tensor | None = None
     is_mixed: bool = False
     is_dummy: bool = False
     is_spec_verify: bool = False
@@ -92,6 +93,7 @@ class StaticGraphAttentionMetadata:
 class AclGraphEntry:
     __slots__ = (
         "batch_size",
+        "mega_moe_token_counts",
         "graph",
         "static_output",
         "static_input_ids",
@@ -113,6 +115,28 @@ class AclGraphRunner(BaseRunner):
         super().__init__(model, attention_backend, device)
         self._update_stream: torch.npu.Stream | None = None
         self._replay_done_event: torch.npu.Event | None = None
+
+    @staticmethod
+    def _fill_mega_moe_token_mask(entry: AclGraphEntry, token_counts: Sequence[int]) -> None:
+        mask = entry.static_metadata.mega_moe_token_mask
+        if mask is None:
+            return
+        token_counts = tuple(token_counts)
+        padded_batch_size = entry.batch_size
+        dp_size = mask.numel() // padded_batch_size
+        if len(token_counts) != dp_size or any(count < 0 or count > padded_batch_size for count in token_counts):
+            raise RuntimeError(
+                f"MegaMoe token counts must fit {dp_size} ACL graph batch buckets: "
+                f"counts={token_counts}, bucket={padded_batch_size}"
+            )
+        if token_counts == getattr(entry, "mega_moe_token_counts", None):
+            return
+        mask.zero_()
+        for rank, count in enumerate(token_counts):
+            if count:
+                start = rank * padded_batch_size
+                mask[start : start + count].fill_(1)
+        entry.mega_moe_token_counts = token_counts
 
     def _initialize_task_updates(self) -> None:
         if self._update_stream is None:

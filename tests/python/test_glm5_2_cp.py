@@ -1,10 +1,10 @@
-# Copyright 2026 The xLLM Authors. All Rights Reserved.
+# Copyright 2026 The xLLM Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -284,7 +284,7 @@ def test_glm_ep1_moe_reduces_only_on_ordinary_tp_group() -> None:
     shared = torch.tensor([[10.0], [20.0]])
 
     with patch.object(glm5_2.distributed, "all_reduce_", create=True) as reduce:
-        output = moe._combine_expert_outputs(routed, shared)
+        output = moe._combine_expert_outputs(routed, shared, False)
 
     reduce.assert_called_once_with(output, "tp")
     torch.testing.assert_close(output, routed + shared)
@@ -303,9 +303,9 @@ def test_glm_ep_moe_preserves_parent_combine_behavior() -> None:
         "_combine_expert_outputs",
         return_value=expected,
     ) as parent_combine:
-        output = moe._combine_expert_outputs(routed, shared)
+        output = moe._combine_expert_outputs(routed, shared, False)
 
-    parent_combine.assert_called_once_with(routed, shared)
+    parent_combine.assert_called_once_with(routed, shared, False)
     assert output is expected
 
 

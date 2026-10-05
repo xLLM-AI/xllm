@@ -466,6 +466,16 @@ void causal_conv1d_out(const torch::Tensor& output,
                        int64_t pad_slot_id,
                        int64_t run_mode);
 
+// MegaMoe dispatch-quant modes and the op's own dtype codes shared between the
+// kernel implementation and its op registration. These dtype codes are the
+// MegaMoe operator's own encoding, not aclDataType values (e.g. the bf16 code
+// 28 differs from ACL_BF16 == 27), so they must not be replaced with SDK enums.
+inline constexpr int64_t kMegaMoeDispatchQuantModeNone = 0;
+inline constexpr int64_t kMegaMoeDispatchQuantModeDynamic = 2;
+inline constexpr int64_t kMegaMoeCombineQuantModeNone = 0;
+inline constexpr int64_t kMegaMoeDtypeInt8 = 2;
+inline constexpr int64_t kMegaMoeDtypeBFloat16 = 28;
+
 bool has_mega_moe();
 
 std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(

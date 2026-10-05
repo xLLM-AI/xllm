@@ -12,9 +12,17 @@ if(USE_NPU)
       models
       GTest::gtest_main
   )
-  target_link_libraries(model_registry_test
-                        PUBLIC $<$<BOOL:${USE_NPU}>:ascendcl>
-                               $<$<BOOL:${USE_NPU}>:hccl>
-                               $<$<BOOL:${USE_NPU}>:c_sec>
-                               $<$<BOOL:${USE_NPU}>:nnopbase>)
+  set(npu_model_test_libs ascendcl hccl c_sec nnopbase)
+  target_link_libraries(model_registry_test PUBLIC ${npu_model_test_libs})
+
+  cc_test(
+    NAME
+      py_causal_lm_test
+    SRCS
+      py_causal_lm_test.cpp
+    DEPS
+      models
+      GTest::gtest_main
+  )
+  target_link_libraries(py_causal_lm_test PUBLIC Python::Python ${npu_model_test_libs})
 endif()

@@ -169,6 +169,30 @@ def _silu_and_mul_fake(input: torch.Tensor) -> torch.Tensor:
     return input.new_empty(shape)
 
 
+def _mega_moe_fake(
+    context: torch.Tensor,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    weight1: list[torch.Tensor],
+    weight2: list[torch.Tensor],
+    weight_scales1: list[torch.Tensor],
+    weight_scales2: list[torch.Tensor],
+    moe_expert_num: int,
+    ep_world_size: int,
+    ccl_buffer_size: int,
+    num_max_tokens_per_rank: int,
+    x_active_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    y = torch.empty_like(x)
+    expert_token_nums = torch.empty(
+        moe_expert_num // ep_world_size,
+        dtype=torch.int32,
+        device=x.device,
+    )
+    return y, expert_token_nums
+
+
 def _reshape_paged_cache_fake(
     slot_mapping: torch.Tensor,
     keys: torch.Tensor,
@@ -1070,6 +1094,7 @@ register_fake(
 )
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
+register_fake("xllm_ops::mega_moe", _mega_moe_fake)
 register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
 register_fake("xllm_ops::mla_preprocess_v2", _mla_preprocess_v2_fake)
 register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake)

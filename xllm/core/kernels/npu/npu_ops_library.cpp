@@ -22,9 +22,11 @@ limitations under the License.
 // underlying NPU kernel API. Data preparation (reshaping, dtype alignment)
 // belongs in the Python caller, not here.
 
+#include <c10/util/Exception.h>
 #include <torch/library.h>
 #include <torch/torch.h>
 
+#include <limits>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -199,6 +201,45 @@ torch::Tensor silu_and_mul_npu(const torch::Tensor& input) {
   return xllm::kernel::npu::active(input, "swiglu");
 }
 
+std::tuple<torch::Tensor, torch::Tensor> mega_moe_npu(
+    const torch::Tensor& context,
+    const torch::Tensor& x,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& topk_weights,
+    const torch::TensorList weight1,
+    const torch::TensorList weight2,
+    const torch::TensorList weight_scales1,
+    const torch::TensorList weight_scales2,
+    int64_t moe_expert_num,
+    int64_t ep_world_size,
+    int64_t ccl_buffer_size,
+    int64_t num_max_tokens_per_rank,
+    const std::optional<torch::Tensor>& x_active_mask) {
+  return xllm::kernel::npu::apply_npu_mega_moe(
+      context,
+      x,
+      topk_ids,
+      topk_weights,
+      weight1,
+      weight2,
+      moe_expert_num,
+      ep_world_size,
+      ccl_buffer_size,
+      weight_scales1,
+      weight_scales2,
+      /*bias1=*/std::nullopt,
+      /*bias2=*/std::nullopt,
+      x_active_mask,
+      /*max_recv_token_num=*/0,
+      xllm::kernel::npu::kMegaMoeDispatchQuantModeDynamic,
+      xllm::kernel::npu::kMegaMoeCombineQuantModeNone,
+      /*comm_alg=*/"",
+      num_max_tokens_per_rank,
+      /*activation=*/"swiglu",
+      /*activation_clamp=*/std::numeric_limits<float>::max(),
+      xllm::kernel::npu::kMegaMoeDtypeInt8);
+}
+
 void inplace_partial_rotary_mul_npu(torch::Tensor& input,
                                     const torch::Tensor& cosine,
                                     const torch::Tensor& sine,
@@ -312,7 +353,10 @@ build_cp_context_npu(const std::vector<int64_t>& q_seq_lens,
                      int64_t cp_size,
                      int64_t cp_rank,
                      c10::Device device) {
-  TORCH_CHECK(cp_size > 1, "build_cp_context requires cp_size > 1");
+  if (cp_size <= 1) {
+    throw c10::Error({__func__, __FILE__, __LINE__},
+                     "build_cp_context requires cp_size > 1");
+  }
   CHECK_EQ(q_seq_lens.size(), kv_seq_lens.size())
       << "query and KV sequence lengths must have the same size";
 
@@ -510,6 +554,12 @@ TORCH_LIBRARY(xllm_ops, m) {
       "str rotary_mode, int[] partial_slice) -> ()");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   m.def(
+      "mega_moe(Tensor context, Tensor x, Tensor topk_ids, Tensor "
+      "topk_weights, Tensor[] weight1, Tensor[] weight2, Tensor[] "
+      "weight_scales1, Tensor[] weight_scales2, int moe_expert_num, int "
+      "ep_world_size, int ccl_buffer_size, int num_max_tokens_per_rank, "
+      "Tensor? x_active_mask=None) -> (Tensor, Tensor)");
+  m.def(
       "inplace_partial_rotary_mul(Tensor(a!) input, Tensor cosine, Tensor "
       "sine, str rotary_mode, int[] partial_slice) -> ()");
   m.def(
@@ -701,6 +751,7 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("npu_inplace_partial_rotary_mul",
          TORCH_FN(xllm::kernel::npu::npu_inplace_partial_rotary_mul));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul_npu));
+  m.impl("mega_moe", TORCH_FN(xllm::mega_moe_npu));
   m.impl("inplace_partial_rotary_mul",
          TORCH_FN(xllm::inplace_partial_rotary_mul_npu));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_npu));

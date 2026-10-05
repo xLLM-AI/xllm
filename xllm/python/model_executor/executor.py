@@ -348,7 +348,13 @@ class ModelExecutor:
                 if not self._supports_prepared_metadata or self._prepared_block_draft:
                     raise ValueError("prepared ACL graphs require a supported target or MTP model")
                 self.prepared_graph_runner = PreparedAclGraphRunner(
-                    execution_model, self.attention_backend, device, max_graph_tokens, dp_size, dp_rank
+                    execution_model,
+                    self.attention_backend,
+                    device,
+                    max_graph_tokens,
+                    dp_size,
+                    dp_rank,
+                    enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                 )
             else:
                 if config.get("model_type") == "DSparkDraftModel":
@@ -372,6 +378,7 @@ class ModelExecutor:
                         dp_rank,
                         decode_batch_size_limit,
                         num_decoding_tokens,
+                        enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                     )
         else:
             if self.layerwise_split_size > 1:

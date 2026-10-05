@@ -153,7 +153,7 @@ def _run_glm_ep1_tp_collective(global_rank: int, rendezvous_path: str) -> None:
                 create=True,
             ),
         ):
-            output = glm5_2.Glm52MoE._combine_expert_outputs(moe, routed, shared)
+            output = glm5_2.Glm52MoE._combine_expert_outputs(moe, routed, shared, False)
 
         expected = torch.tensor([[33.0 if cp_rank == 0 else 253.0]])
         torch.testing.assert_close(output, expected)

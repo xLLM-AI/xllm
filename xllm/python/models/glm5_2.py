@@ -189,6 +189,10 @@ class Glm52Config:
     enable_mlapo: bool = True
     enable_attn_dp_weight_sharding: bool = False
     layers_to_capture: tuple[int, ...] = ()
+    enable_mega_moe: bool = False
+    mega_moe_context: torch.Tensor | None = None
+    mega_moe_ccl_buffer_size: int = 0
+    mega_moe_num_max_tokens_per_rank: int = 0
 
     @classmethod
     def from_dict(cls, d: dict) -> Glm52Config:
@@ -295,6 +299,10 @@ class Glm52Config:
             enable_mlapo=bool(pick("enable_mlapo", default=True)),
             enable_attn_dp_weight_sharding=bool(pick("enable_attn_dp_weight_sharding", default=False)),
             layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
+            enable_mega_moe=bool(pick("enable_mega_moe", default=False)),
+            mega_moe_context=pick("mega_moe_context", default=None),
+            mega_moe_ccl_buffer_size=int(pick("mega_moe_ccl_buffer_size", default=0)),
+            mega_moe_num_max_tokens_per_rank=int(pick("mega_moe_num_max_tokens_per_rank", default=0)),
         )
         cfg._resolve_indexer_types()
         cfg._resolve_mlp_layer_types()
@@ -886,9 +894,10 @@ class Glm52MoE(DeepseekV3MoE):
         self,
         routed: torch.Tensor,
         shared: torch.Tensor,
+        use_mega_moe: bool,
     ) -> torch.Tensor:
         if self.ep_size > 1:
-            return super()._combine_expert_outputs(routed, shared)
+            return super()._combine_expert_outputs(routed, shared, use_mega_moe)
 
         final = routed + shared
         if getattr(self.cfg, "enable_attn_dp_weight_sharding", False):
@@ -901,12 +910,15 @@ class Glm52MoE(DeepseekV3MoE):
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         if self.cfg.enable_attn_dp_weight_sharding:
+            use_mega_moe = self._should_use_mega_moe()
             # The model already materialized padded DP rows for all layers.
             if self._fine_overlap_enabled:
                 return self._forward_fine_grained_parallel(hidden)
             if self._expert_parallel_enabled:
-                return self._forward_parallel(hidden)
-            return self._combine_expert_outputs(self._run_routed_experts(hidden), self._run_shared_experts(hidden))
+                return self._forward_parallel(hidden, use_mega_moe)
+            return self._combine_expert_outputs(
+                self._run_routed_experts(hidden, use_mega_moe), self._run_shared_experts(hidden), use_mega_moe
+            )
         cp_context = get_forward_context().cp_context
         if cp_context is None or self.ep_size == 1:
             return super().forward(hidden)

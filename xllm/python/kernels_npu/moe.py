@@ -65,6 +65,23 @@ def _enable_internal_format() -> None:
     torch.npu.config.allow_internal_format = True
 
 
+def encode_mega_moe_scale(scale: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
+    """Pack W8A8 weight scale/offset into the int64 encoding aclnnMegaMoe expects."""
+    if scale.shape != offset.shape:
+        raise ValueError(
+            f"MegaMoE weight scale and offset shapes must match: {tuple(scale.shape)} != {tuple(offset.shape)}"
+        )
+    original_shape = scale.shape
+    encoded = torch_npu.npu_trans_quant_param(
+        scale.to(torch.float32).contiguous().reshape(-1),
+        offset.to(torch.float32).contiguous().reshape(-1),
+        round_mode=0,
+    )
+    if encoded.dtype != torch.int64:
+        raise RuntimeError(f"MegaMoE encoded weight scale must use int64 storage, got {encoded.dtype}")
+    return encoded.reshape(original_shape).contiguous()
+
+
 def _grouped_matmul_swiglu_quant_v2(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -821,6 +838,40 @@ def moe_gate_routing(
     return topk_weights, topk_ids
 
 
+def mega_moe(
+    context: torch.Tensor,
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    num_experts: int,
+    ep_size: int,
+    ccl_buffer_size: int,
+    num_max_tokens_per_rank: int,
+    x_active_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fuse EP dispatch + W8A8 SwiGLU experts + combine for decode MegaMoe."""
+    output, _ = torch.ops.xllm_ops.mega_moe(
+        context,
+        hidden_states,
+        topk_ids,
+        topk_weights,
+        [w13],
+        [w2],
+        [w13_scale],
+        [w2_scale],
+        num_experts,
+        ep_size,
+        ccl_buffer_size,
+        num_max_tokens_per_rank,
+        x_active_mask,
+    )
+    return output
+
+
 @moe_gate_routing.register_fake
 def _moe_gate_routing_fake(
     gating_output: torch.Tensor,
@@ -1025,6 +1076,8 @@ __all__ = [
     "prepare_grouped_moe_weights",
     "grouped_moe",
     "moe_gate_routing",
+    "mega_moe",
+    "encode_mega_moe_scale",
     "moe_expert_compute",
     "grouped_moe_with_selected_experts",
     "moe_fused_topk",

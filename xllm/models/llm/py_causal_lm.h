@@ -19,6 +19,7 @@ limitations under the License.
 #include <pybind11/pybind11.h>
 #include <torch/types.h>
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -30,10 +31,17 @@ limitations under the License.
 namespace xllm {
 
 class ProcessGroup;
+#if defined(USE_NPU)
+class MegaMoeCommResource;
+#endif
 
 namespace detail {
 void share_python_model_weights(pybind11::object& draft_model,
                                 const pybind11::object& target_model);
+
+int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
+                                                int64_t num_speculative_tokens,
+                                                int64_t dp_size);
 }  // namespace detail
 
 // Inherits CausalVLM so that ``--backend vlm --model_impl python`` can route a
@@ -142,6 +150,9 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   ProcessGroup* tp_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
+#if defined(USE_NPU)
+  std::shared_ptr<MegaMoeCommResource> mega_moe_comm_resource_;
+#endif
 
   pybind11::object py_model_;
   pybind11::object config_dict_;

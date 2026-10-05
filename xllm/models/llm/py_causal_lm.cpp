@@ -19,6 +19,7 @@ limitations under the License.
 #include <pybind11/stl.h>
 #include <torch/python.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 
@@ -29,9 +30,15 @@ limitations under the License.
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/util/pybind_helper.h"
+#include "core/util/utils.h"
 #include "models/py_model_helper.h"
 
 #if defined(USE_NPU)
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/parallel_state/mega_moe_comm_resource.h"
+#include "core/framework/parallel_state/process_group.h"
+#include "core/kernels/npu/npu_ops_api.h"
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
 
@@ -52,6 +59,21 @@ void share_python_model_weights(py::object& draft_model,
   if (draft_body.attr("embed_tokens").is_none()) {
     draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
   }
+}
+
+int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
+                                                int64_t num_speculative_tokens,
+                                                int64_t dp_size) {
+  CHECK_GT(max_seqs_per_batch, 0);
+  CHECK_GE(num_speculative_tokens, 0);
+  CHECK_GT(dp_size, 0);
+
+  const int64_t speculative_width = num_speculative_tokens + 1;
+  // Graph pads sequences before expanding speculative rows; eager also keeps
+  // one dummy row on each empty DP rank. The fixed buffer must cover both.
+  return std::max(
+      util::align_up(max_seqs_per_batch, dp_size) * speculative_width,
+      max_seqs_per_batch * speculative_width + dp_size - 1);
 }
 
 }  // namespace detail
@@ -109,6 +131,34 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   moe_tp_size_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->world_size() : 1;
   moe_tp_rank_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->rank() : 0;
   ep_rank_ = (moe_ep_group_ != nullptr) ? moe_ep_group_->rank() : 0;
+
+#if defined(USE_NPU)
+  const auto& kernel_config = KernelConfig::get_instance();
+  const auto& eplb_config = EPLBConfig::get_instance();
+  const bool enable_mega_moe =
+      kernel_config.enable_mega_moe() &&
+      model_args_.model_type() == "glm_moe_dsa" && ep_size_ > 1 &&
+      eplb_config.expert_parallel_degree() == 2 && !eplb_config.enable_eplb();
+  if (enable_mega_moe) {
+    CHECK(kernel::npu::has_mega_moe())
+        << "Python MegaMoE requires aclnnMegaMoe.";
+    MegaMoeCommSpec comm_spec;
+    comm_spec.group_name = moe_ep_group_->hccl_comm_name(/*init_comm=*/true);
+    comm_spec.hccl_comm = moe_ep_group_->hccl_comm();
+    comm_spec.ep_world_size = moe_ep_group_->world_size();
+    comm_spec.device_index = device_.index();
+    comm_spec.max_num_tokens_per_rank =
+        detail::python_mega_moe_max_num_tokens_per_rank(
+            static_cast<int64_t>(
+                SchedulerConfig::get_instance().max_seqs_per_batch()),
+            static_cast<int64_t>(model_args_.num_speculative_tokens()),
+            dp_size_);
+    mega_moe_comm_resource_ =
+        moe_ep_group_->acquire_mega_moe_comm_resource(comm_spec);
+    CHECK(mega_moe_comm_resource_ != nullptr)
+        << "Failed to acquire Python MegaMoE communication resource.";
+  }
+#endif
 
   py::gil_scoped_acquire gil;
   const bool is_deepseek_v4 = model_args_.model_type() == "deepseek_v4";
@@ -282,6 +332,13 @@ py::dict PyCausalLM::build_config_dict(
           : ExecutionConfig::get_instance().python_graph_backend();
 #if defined(USE_NPU)
   d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
+  if (mega_moe_comm_resource_ != nullptr) {
+    d["enable_mega_moe"] = true;
+    d["mega_moe_context"] = mega_moe_comm_resource_->context_tensor();
+    d["mega_moe_ccl_buffer_size"] = mega_moe_comm_resource_->ccl_buffer_size();
+    d["mega_moe_num_max_tokens_per_rank"] =
+        mega_moe_comm_resource_->max_num_tokens_per_rank();
+  }
 #endif
   return d;
 }

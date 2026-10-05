@@ -127,6 +127,9 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly(
           "dp_execution_token_counts",
           &PyAttentionMetadataView::dp_execution_token_counts)
+      .def_property_readonly(
+          "raw_dp_execution_token_counts",
+          &PyAttentionMetadataView::raw_dp_execution_token_counts)
       .def_property_readonly("dp_global_sequence_nums",
                              &PyAttentionMetadataView::dp_global_sequence_nums)
       .def_property_readonly("dp_is_decode",
@@ -270,6 +273,18 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     }
   }
   dp_is_decode_ = params.parallel.dp_is_decode;
+  if (params.enable_graph) {
+    raw_dp_execution_token_counts_ =
+        params.parallel.raw_dp_global_token_nums.empty()
+            ? params.parallel.dp_global_token_nums
+            : params.parallel.raw_dp_global_token_nums;
+    // Prepared ordinary decode has one token per actual sequence, before
+    // padding.
+    if (raw_dp_execution_token_counts_.empty()) {
+      raw_dp_execution_token_counts_.push_back(
+          params.meta.actual_num_sequences);
+    }
+  }
 }
 
 const torch::Tensor& PyAttentionMetadataView::slot_mapping() const {
@@ -372,6 +387,11 @@ py::object PyAttentionMetadataView::has_initial_state() const {
 const std::vector<int32_t>& PyAttentionMetadataView::dp_execution_token_counts()
     const {
   return dp_execution_token_counts_;
+}
+
+const std::vector<int32_t>&
+PyAttentionMetadataView::raw_dp_execution_token_counts() const {
+  return raw_dp_execution_token_counts_;
 }
 
 const std::vector<int32_t>& PyAttentionMetadataView::dp_global_sequence_nums()
