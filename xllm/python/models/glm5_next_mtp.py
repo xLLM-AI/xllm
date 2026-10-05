@@ -42,7 +42,7 @@ import torch.nn as nn
 
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.linear import ColumnParallelLinear
-from xllm.python.layers.qlinear import QLinearWeightLoader
+from xllm.python.model_loader import QLinearWeightLoader
 from xllm.python.models.glm5_next import (
     Glm5NextConfig,
     Glm5NextForCausalLM,
@@ -192,19 +192,19 @@ class Glm5NextMtpForCausalLM(Glm5NextForCausalLM):
         """
         L = QLinearWeightLoader(self, state_dicts, tp_size, tp_rank)
         # embed_tokens: HiddenParallelEmbedding — shard the hidden dim.
-        L.load_fp("model.embed_tokens.weight", dim=1)
+        L.copy_shard("model.embed_tokens.weight", dim=1)
         p = "model.layers.0."
-        L.load_fp(p + "input_layernorm.weight")
-        L.load_fp(p + "post_attention_layernorm.weight")
+        L.copy_replicated(p + "input_layernorm.weight")
+        L.copy_replicated(p + "post_attention_layernorm.weight")
         self._load_dsa_attn(L, p + "self_attn.", 0)
         self._load_mlp(L, p + "mlp.", 0)
-        L.load_fp("model.norm.weight")
+        L.copy_replicated("model.norm.weight")
         # lm_head: ColumnParallelLinear — shard the vocab dim.
-        L.load_fp("lm_head.weight", dim=0)
+        L.copy_shard("lm_head.weight", dim=0)
         # MTP-specific: replicated norms + column-parallel fusion projection.
-        L.load_fp("model.enorm.weight")
-        L.load_fp("model.hnorm.weight")
-        L.load_fp("model.eh_proj.weight", dim=0)
+        L.copy_replicated("model.enorm.weight")
+        L.copy_replicated("model.hnorm.weight")
+        L.copy_shard("model.eh_proj.weight", dim=0)
 
 
 # Registration is centralised in xllm.python.registry; import there.

@@ -20,7 +20,7 @@ model's ``load_weights``, independent of how the weights are copied in.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     import torch
@@ -101,3 +101,27 @@ def shard_tensor(
     chunk_size = t.size(dim) // world_size
     shard = t.narrow(dim, rank * chunk_size, chunk_size)
     return shard.contiguous() if contiguous else shard
+
+
+class MoeParallelConfig(Protocol):
+    """Structural config contract read by the MoE sharding helpers."""
+
+    ep_size: int
+    tp_size: int
+    tp_rank: int
+    moe_tp_size: int
+    moe_tp_rank: int
+
+
+def mla_head_split(n_heads: int, tp_size: int) -> tuple[int, int]:
+    """Per-rank ``(num_heads, 1)`` for MLA attention (single latent KV head per rank)."""
+    if n_heads % tp_size:
+        raise ValueError(f"n_heads {n_heads} not divisible by tp_size {tp_size}")
+    return n_heads // tp_size, 1
+
+
+def moe_shard(cfg: MoeParallelConfig) -> tuple[int, int]:
+    """(world, rank) for sharding routed-expert / shared-expert weights."""
+    if cfg.ep_size > 1 or getattr(cfg, "enable_attn_dp_weight_sharding", False):
+        return cfg.moe_tp_size, cfg.moe_tp_rank
+    return cfg.tp_size, cfg.tp_rank

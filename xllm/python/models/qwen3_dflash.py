@@ -24,21 +24,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from xllm.python import distributed, kernels
-from xllm.python.layers import HiddenParallelEmbedding, RMSNorm
+from xllm.python.layers import RMSNorm
 from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_loader import (
+    ParallelLoadContext,
+    ScopedWeightLoader,
+    load_causal_lm_weights,
+    load_draft_embedding_if_present,
+    load_draft_lm_head_if_present,
+    load_missing_draft_vocab_from_quarot_target,
+    shard_tensor,
+)
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.qwen3 import (
-    Qwen3Config,
-    Qwen3DecoderLayer,
-    Qwen3Model,
-    load_qwen3_backbone,
-)
-from xllm.python.models.weight_utils import (
-    WeightLoader,
-    kv_replica_shard,
-    load_own_weight,
-    maybe_load_own_lm_head,
-)
+from xllm.python.models.qwen3 import Qwen3Config, Qwen3DecoderLayer, Qwen3Model
 
 
 def _load_reference_quarot_rotation(
@@ -117,12 +115,7 @@ class DFlashContextProjection(nn.Module):
     def load_weight(self, weight: torch.Tensor, tp_rank: int) -> None:
         if weight.dim() != 2 or weight.size(0) != self.out_features:
             raise ValueError("DFlash fc.weight has an invalid shape")
-        local_out_features = self.out_features // self.tp_size
-        weight = weight.narrow(
-            0,
-            tp_rank * local_out_features,
-            local_out_features,
-        )
+        weight = shard_tensor(weight, 0, tp_rank, self.tp_size, name="fc.weight", contiguous=False)
         self.weight = nn.Parameter(weight.to(dtype=self.weight.dtype, device=self.weight.device).contiguous())
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -283,88 +276,55 @@ class DFlashQwen3Model(Qwen3Model):
                     return None
         return projected_hidden
 
-    def load_weights(
-        self,
-        state_dicts: list,
-        tp_rank: int,
-        tp_size: int,
-        *,
-        load_own_embedding: bool = True,
-    ) -> WeightLoader:
-        cfg = self.cfg
-        # Load the draft's own embed_tokens (trained mask-token row) when the
-        # checkpoint ships one; else None -> C++ bridge shares the target's.
-        if load_own_embedding:
-            loader = load_own_weight(
-                self,
-                state_dicts,
-                tp_rank,
-                tp_size,
-                "embed_tokens.weight",
-                "embed_tokens",
-                lambda: HiddenParallelEmbedding(
-                    cfg.vocab_size,
-                    cfg.hidden_size // tp_size,
-                    tp_size,
-                    dtype=self.dtype,
-                    device=self.device,
-                ),
-                shard_dim=1,
-            )
-        else:
-            loader = WeightLoader(
-                self,
-                state_dicts,
-                tp_size,
-                tp_rank,
-                src_prefixes=("", "model."),
-            )
-        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
-
-        self.fc.load_weight(loader.load_tensor("fc.weight"), tp_rank)
-        loader.copy_replicated("hidden_norm.weight")
-
-        load_qwen3_backbone(
-            loader,
-            self.layers,
-            kv_world=kv_world,
-            kv_rank=kv_rank,
-            attention_bias=cfg.attention_bias,
-            dst_prefix="",
-        )
-
-        loader.copy_replicated("norm.weight")
+    def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> ScopedWeightLoader:
+        all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("", "model."))
+        ctx = ParallelLoadContext(tp_rank, tp_size)
+        load_causal_lm_weights(self, None, all_weights, ctx, tie_word_embeddings=False, load_embedding=False)
+        load_draft_embedding_if_present(self, all_weights, context=ctx)
+        self.fc.load_weight(all_weights.get_tensor("fc.weight"), ctx.tp_rank)
+        all_weights.load_tensor(self.hidden_norm.weight, "hidden_norm.weight")
         self._build_context_kv_buffers()
-        return loader
+        return all_weights
 
     def adapt_weights_for_reference_model(
         self,
         reference_model_path: str,
-    ) -> None:
+    ) -> torch.Tensor | None:
         rotation = _load_reference_quarot_rotation(reference_model_path)
         if rotation is not None:
             self.fc.apply_input_rotation(rotation)
+        return rotation
 
 
 class DFlashQwen3ForCausalLM(PyModelBase):
+    model: DFlashQwen3Model
+    config_cls: type[DFlashQwen3Config] = DFlashQwen3Config
+    model_cls: type[DFlashQwen3Model] = DFlashQwen3Model
+
     def __init__(self, config: dict) -> None:
         super().__init__()
-        self.cfg = DFlashQwen3Config.from_dict(config)
+        self.cfg = self.config_cls.from_dict(config)
         self.cfg.validate()
         self.dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         self.device = torch.device(config.get("device", "npu"))
-        self.model = DFlashQwen3Model(self.cfg, self.dtype, self.device)
-        self.lm_head: nn.Module | None = None
+        self.model = self.model_cls(self.cfg, self.dtype, self.device)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.lm_head: nn.Module | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        self.model.load_weights(state_dicts, tp_rank, tp_size)
-        maybe_load_own_lm_head(self, state_dicts, tp_rank, tp_size)
+        all_weights = self.model.load_weights(state_dicts, tp_rank, tp_size)
+        load_draft_lm_head_if_present(
+            self,
+            all_weights,
+            context=ParallelLoadContext(tp_rank, tp_size),
+        )
 
     def adapt_weights_for_reference_model(
         self,
         reference_model_path: str,
     ) -> None:
-        self.model.adapt_weights_for_reference_model(reference_model_path)
+        rotation = self.model.adapt_weights_for_reference_model(reference_model_path)
+        if rotation is not None:
+            load_missing_draft_vocab_from_quarot_target(self, reference_model_path, rotation)
 
     def write_context_kv(
         self,

@@ -52,14 +52,13 @@ from xllm.python.model_executor.cp_utils import (
     cp_shard_rows,
 )
 from xllm.python.model_executor.forward_context import get_forward_context
-from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.base import PyModelBase
-from xllm.python.models.weight_utils import (
+from xllm.python.model_loader import (
     W8A8WeightLoader,
-    effective_moe_tp,
     mla_head_split,
     moe_shard,
 )
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
+from xllm.python.models.base import PyModelBase
 
 _SHARED_EXPERT_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
 
@@ -1571,7 +1570,7 @@ class DeepseekV3MoE(nn.Module):
         self.dp_rank = cfg.dp_rank
         self.moe_tp_size = cfg.moe_tp_size
 
-        tp = effective_moe_tp(cfg)
+        tp = moe_shard(cfg)[0]
         assert self.moe_inter % tp == 0
         self.inter_local = self.moe_inter // tp
 
@@ -1710,7 +1709,7 @@ class DeepseekV3MoE(nn.Module):
         loader.copy_replicated(mlp_prefix + "gate.weight")
         loader.copy_in(
             mlp_prefix + "e_score_correction_bias",
-            loader.load_tensor(mlp_prefix + "gate.e_score_correction_bias"),
+            loader.get_tensor(mlp_prefix + "gate.e_score_correction_bias"),
         )
         self.shared_experts.load_from_checkpoint(loader, mlp_prefix + "shared_experts.", world=world, rank=rank)
 
@@ -2205,10 +2204,12 @@ class DeepseekV3ForCausalLM(PyModelBase):
                 ("kv_a_proj_with_mqa", "q_a_proj"),
             )
             loader.copy_replicated(attn + "q_a_layernorm.weight")
-            loader.load_w8a8_projection(attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0})
+            loader.load_compatible_w8a8_projection(
+                attn, "q_b_proj", {"weight": 0, "deq_scale": 0, "quant_bias": 0}, dynamic_activation=False
+            )
             loader.copy_replicated(attn + "kv_a_layernorm.weight")
             loader.copy_shard(attn + "kv_b_proj.weight", dim=0)
-            loader.load_w8a8_projection(attn, "o_proj", {"weight": 1})
+            loader.load_compatible_w8a8_projection(attn, "o_proj", {"weight": 1}, dynamic_activation=False)
             if cfg.index_topk > 0:
                 idx = attn + "indexer."
                 loader.copy_replicated(idx + "wq_b.weight")
@@ -2216,8 +2217,8 @@ class DeepseekV3ForCausalLM(PyModelBase):
                     idx + "wk_weights_proj.weight",
                     torch.cat(
                         [
-                            loader.load_tensor(idx + "wk.weight"),
-                            loader.load_tensor(idx + "weights_proj.weight"),
+                            loader.get_tensor(idx + "wk.weight"),
+                            loader.get_tensor(idx + "weights_proj.weight"),
                         ],
                         dim=0,
                     ),

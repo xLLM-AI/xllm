@@ -446,7 +446,7 @@ def test_dense_mlp_loader_maps_dsv4_weight_names() -> None:
         def __init__(self) -> None:
             self.loaded: dict[str, torch.Tensor] = {}
 
-        def load_tensor(self, name: str) -> torch.Tensor:
+        def get_tensor(self, name: str) -> torch.Tensor:
             return tensors[name]
 
         def shard(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:

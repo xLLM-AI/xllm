@@ -58,6 +58,7 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
     record_layer_event,
 )
+from xllm.python.model_loader import W8A8WeightLoader, mla_head_split, moe_shard
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
@@ -75,7 +76,6 @@ from xllm.python.models.deepseek_v32 import (
 from xllm.python.models.deepseek_v32 import (
     DeepseekYarnRotaryEmbedding as Glm52YarnRotaryEmbedding,
 )
-from xllm.python.models.weight_utils import W8A8WeightLoader, effective_moe_tp, mla_head_split
 
 _MLAPO_V2_Q_LORA_RANK = 1536
 _MLAPO_V2_KV_LORA_RANK = 512
@@ -313,7 +313,7 @@ class Glm52Config:
                 raise ValueError("n_routed_experts must be divisible by ep_size")
             if self.moe_tp_size * self.ep_size != self.world_size:
                 raise ValueError("world_size must equal moe_tp_size * ep_size")
-        if self.moe_intermediate_size % effective_moe_tp(self):
+        if self.moe_intermediate_size % moe_shard(self)[0]:
             raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
         if not 0 <= self.tp_rank < self.tp_size:
             raise ValueError("tp_rank must be in [0, tp_size)")

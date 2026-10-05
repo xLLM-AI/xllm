@@ -26,9 +26,9 @@ import torch
 
 from xllm.python.device_stream import get_device_stream
 from xllm.python.model_executor.forward_context import AclGraphExecutionState, ForwardContext, forward_context
+from xllm.python.model_loader import W8A8WeightLoader
 from xllm.python.models import deepseek_v32, glm5_2
 from xllm.python.models.glm5_2 import Glm52Config, Glm52ForCausalLM
-from xllm.python.models.weight_utils import W8A8WeightLoader
 
 
 def _config(**overrides) -> dict:
@@ -608,7 +608,7 @@ class _RecordingLoader(W8A8WeightLoader):
         self.shared_shards: list[tuple[str, int, int]] = []
         type(self).latest = self
 
-    def load_tensor(self, name: str) -> torch.Tensor:
+    def get_tensor(self, name: str) -> torch.Tensor:
         self.loaded.append(name)
         if ".mlp.experts." not in name:
             return torch.zeros(32, 32)

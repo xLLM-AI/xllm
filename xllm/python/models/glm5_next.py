@@ -1905,20 +1905,8 @@ class Glm5NextModel(nn.Module):
         return h
 
 
-def _resolve_module(root: nn.Module, dotted: str) -> nn.Module:
-    """Walk a dotted parameter name (``model.layers.0.self_attn.q_a_proj``)
-    to the owning submodule, handling integer ``ModuleList`` indices."""
-    obj: nn.Module = root
-    for part in dotted.rstrip(".").split("."):
-        if part.isdigit():
-            obj = obj[int(part)]  # type: ignore[index]
-        else:
-            obj = getattr(obj, part)
-    return obj
-
-
 def _w8a8_shard_dims(fp_dim: Optional[int]) -> Optional[dict]:
-    """Static-W8A8 shard map for ``QLinear.load_w8a8`` from the fp shard dim.
+    """Static-W8A8 projection shard map from the fp shard dim.
 
     - ``fp_dim is None`` (replicated, e.g. q_a_proj / kv_a_proj): no shard.
     - ``fp_dim == 0`` (column-parallel, e.g. q_b_proj): weight + deq_scale +
@@ -2019,46 +2007,22 @@ class Glm5NextForCausalLM(PyModelBase):
 
     # -- weight loading ---------------------------------------------------
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        from xllm.python.layers.qlinear import QLinearWeightLoader
+        from xllm.python.model_loader import QLinearWeightLoader
 
-        L = QLinearWeightLoader(self, state_dicts, tp_size, tp_rank)
-
-        # Wrap the underlying loader's find/load_tensor with real-checkpoint key
-        # aliasing (model. -> model.language_model. + mHC {site}_hc.{param} ->
-        # hc_{site}_{param}). Exact key (fake weights) is tried first, then the
-        # real-ckpt aliases, so both fake and real checkpoints load. load_tensor
-        # must resolve to the aliased name too (it calls sd.get_tensor(name)).
-        _orig_find = L._w8.find
-        _orig_load_tensor = L._w8.load_tensor
-
-        def _resolve(name):
-            if _orig_find(name) is not None:
-                return name
-            for alias in _real_ckpt_aliases(name):
-                if _orig_find(alias) is not None:
-                    return alias
-            return None
-
-        def _aliased_find(name):
-            resolved = _resolve(name)
-            return _orig_find(resolved) if resolved is not None else None
-
-        def _aliased_load_tensor(name):
-            resolved = _resolve(name)
-            assert resolved is not None, f"checkpoint tensor not found: {name}"
-            return _orig_load_tensor(resolved)
-
-        L._w8.find = _aliased_find
-        L._w8.load_tensor = _aliased_load_tensor
-        L.find = _aliased_find
-        L.load_tensor = _aliased_load_tensor
+        L = QLinearWeightLoader(
+            self,
+            state_dicts,
+            tp_size,
+            tp_rank,
+            name_aliases=lambda name: (name, *_real_ckpt_aliases(name)),
+        )
 
         # embed_tokens: HiddenParallelEmbedding — shard the hidden dim (dim 1).
-        L.load_fp("model.embed_tokens.weight", dim=1)
+        L.copy_shard("model.embed_tokens.weight", dim=1)
         for i in range(self.cfg.n_layers):
             p = f"model.layers.{i}."
-            L.load_fp(p + "input_layernorm.weight")
-            L.load_fp(p + "post_attention_layernorm.weight")
+            L.copy_replicated(p + "input_layernorm.weight")
+            L.copy_replicated(p + "post_attention_layernorm.weight")
             attn = p + "self_attn."
             if self.cfg.is_dsa(i):
                 self._load_dsa_attn(L, attn, i)
@@ -2068,10 +2032,10 @@ class Glm5NextForCausalLM(PyModelBase):
             # mHC residual sites (always on, replicated).
             for hc in ("attn_hc", "ffn_hc"):
                 for w in ("fn", "base", "scale"):
-                    L.load_fp(p + hc + "." + w)
-        L.load_fp("model.norm.weight")
+                    L.copy_replicated(p + hc + "." + w)
+        L.copy_replicated("model.norm.weight")
         # lm_head: ColumnParallelLinear — shard the vocab dim (dim 0).
-        L.load_fp("lm_head.weight", dim=0)
+        L.copy_shard("lm_head.weight", dim=0)
 
     def _load_qlinear(
         self,
@@ -2084,21 +2048,29 @@ class Glm5NextForCausalLM(PyModelBase):
 
         ``fp_dim`` is the TP shard dim for the fp ``.weight`` (None = replicated,
         0 = column-parallel, 1 = row-parallel). The w8a8 path routes static
-        projections through ``load_w8a8_into_qlinear``, which writes into the
-        QLinear's ``_w8a8`` submodule; dynamic ones never reach here (MLP uses
-        ``_load_mlp_fp_or_w8a8`` -> ``load_w8a8_mlp_into_qlinear``). The w8a8
+        projections into the QLinear's ``_w8a8`` submodule through
+        ``load_projection``; dynamic ones never reach here (MLP uses
+        ``_load_mlp_fp_or_w8a8`` -> ``load_w8a8_mlp``). The w8a8
         branch is NOT exercised until real w8a8 checkpoints exist (Task 10); it
         is written to match deepseek_v32's documented shard-dim contract.
         """
-        mod = _resolve_module(self, prefix + proj)
-        assert isinstance(mod, QLinear), f"{prefix}{proj} is not a QLinear"
+        name = prefix + proj
+        mod = self.get_submodule(name)
+        assert isinstance(mod, QLinear), f"{name} is not a QLinear"
         if L.probe_quant(prefix, proj):
             mod.resolve_quant(True)
-            shard_dims = _w8a8_shard_dims(fp_dim)
-            mod.load_w8a8(L, prefix, proj, shard_dims)
+            L.load_projection(
+                name,
+                name + "._w8a8",
+                ("weight", "deq_scale", "quant_bias", "input_scale", "input_offset"),
+                _w8a8_shard_dims(fp_dim),
+            )
         else:
             mod.resolve_quant(False)
-            L.load_fp(prefix + proj + ".weight", dim=fp_dim)
+            if fp_dim is None:
+                L.copy_replicated(name + ".weight")
+            else:
+                L.copy_shard(name + ".weight", dim=fp_dim)
 
     def _load_dsa_attn(self, L, attn: str, i: int) -> None:
         # q_a_proj / kv_a_proj_with_mqa: replicated QLinear (no shard).
@@ -2109,9 +2081,9 @@ class Glm5NextForCausalLM(PyModelBase):
         # o_proj: row-parallel QLinear (shard dim 1).
         self._load_qlinear(L, attn, "o_proj", 1)
         # kv_b_proj: fp ColumnParallelLinear (NOT a QLinear) — column-parallel.
-        L.load_fp(attn + "kv_b_proj.weight", dim=0)
-        L.load_fp(attn + "q_a_layernorm.weight")
-        L.load_fp(attn + "kv_a_layernorm.weight")
+        L.copy_shard(attn + "kv_b_proj.weight", dim=0)
+        L.copy_replicated(attn + "q_a_layernorm.weight")
+        L.copy_replicated(attn + "kv_a_layernorm.weight")
         if not self.cfg.indexer_shared(i):
             idx = attn + "indexer."
             # Indexer projections are plain nn.Linear and stay replicated: the
@@ -2119,11 +2091,11 @@ class Glm5NextForCausalLM(PyModelBase):
             # head-subset to the SAME mask), so wq_b/wk/weights_proj hold the
             # full index-head tensors on every rank.
             for w in ("wq_b.weight", "wk.weight", "weights_proj.weight"):
-                L.load_fp(idx + w)
-            L.load_fp(idx + "index_kpool_compress_gate")
-            L.load_fp(idx + "k_norm.weight")
-            L.load_fp(idx + "k_norm.bias")
-            L.load_fp(idx + "index_kpool_compress_ape")
+                L.copy_replicated(idx + w)
+            L.copy_replicated(idx + "index_kpool_compress_gate")
+            L.copy_replicated(idx + "k_norm.weight")
+            L.copy_replicated(idx + "k_norm.bias")
+            L.copy_replicated(idx + "index_kpool_compress_ape")
         # Splits kv_b_proj.weight into absorbed W_UK / W_UV (NoPE path).
         _call_process_weights_after_loading(self.model.layers[i].self_attn)
 
@@ -2134,12 +2106,12 @@ class Glm5NextForCausalLM(PyModelBase):
         # to this rank's contiguous head block, matching the framework's
         # head-sharded conv/ssm slots (kv_cache_shape.cpp divides
         # linear_num_key_heads by world_size).
-        L.load_fp(attn + "q_proj.weight", dim=0)
-        L.load_fp(attn + "k_proj.weight", dim=0)
-        L.load_fp(attn + "v_proj.weight", dim=0)
-        L.load_fp(attn + "b_proj.weight", dim=0)
-        L.load_fp(attn + "g_a_proj.weight")  # replicated (head_dim)
-        L.load_fp(attn + "g_b_proj.weight", dim=0)
+        L.copy_shard(attn + "q_proj.weight", dim=0)
+        L.copy_shard(attn + "k_proj.weight", dim=0)
+        L.copy_shard(attn + "v_proj.weight", dim=0)
+        L.copy_shard(attn + "b_proj.weight", dim=0)
+        L.copy_replicated(attn + "g_a_proj.weight")  # replicated (head_dim)
+        L.copy_shard(attn + "g_b_proj.weight", dim=0)
         # conv1d: depthwise over [q|k|v] (conv_dim = 3*qkv_dim). The model holds
         # the LOCAL conv_dim (3*qkv_dim_local); to shard by head each of q/k/v
         # must be narrowed on dim 0 (its head block) BEFORE cat, so the channel
@@ -2147,11 +2119,11 @@ class Glm5NextForCausalLM(PyModelBase):
         # narrow of the cat'd tensor would cross the q/k boundary.) Fake
         # single-key checkpoint is only run at tp==1, where the shard is a no-op.
         if L.find(attn + "conv1d.weight") is not None:
-            conv = L.load_tensor(attn + "conv1d.weight")
+            conv = L.get_tensor(attn + "conv1d.weight")
             if L.tp_size > 1:
                 conv = L.shard(conv, dim=0)
         else:
-            parts = [L.load_tensor(attn + n + "_conv1d.weight") for n in ("q", "k", "v")]
+            parts = [L.get_tensor(attn + n + "_conv1d.weight") for n in ("q", "k", "v")]
             if L.tp_size > 1:
                 parts = [L.shard(p, dim=0) for p in parts]
             conv = torch.cat(parts, dim=0)
@@ -2164,11 +2136,11 @@ class Glm5NextForCausalLM(PyModelBase):
         # (self_attn.f_a_proj / f_b_proj / dt_bias / A_log). load_tensor goes
         # through the alias wrapper, so the bare name resolves to the flat key.
         # f_a_proj replicated (head_dim); f_b_proj/dt_bias/A_log per-head (dim 0).
-        L.load_fp(attn + "forget_gate.f_a_proj.weight")
-        L.load_fp(attn + "forget_gate.f_b_proj.weight", dim=0)
-        L.load_fp(attn + "forget_gate.dt_bias", dim=0)
-        L.load_fp(attn + "forget_gate.A_log", dim=0)
-        L.load_fp(attn + "o_norm.weight")
+        L.copy_replicated(attn + "forget_gate.f_a_proj.weight")
+        L.copy_shard(attn + "forget_gate.f_b_proj.weight", dim=0)
+        L.copy_shard(attn + "forget_gate.dt_bias", dim=0)
+        L.copy_shard(attn + "forget_gate.A_log", dim=0)
+        L.copy_replicated(attn + "o_norm.weight")
         _call_process_weights_after_loading(self.model.layers[i].self_attn)
 
     def _load_mlp_fp_or_w8a8(self, L, mlp_pfx: str) -> None:
@@ -2177,12 +2149,12 @@ class Glm5NextForCausalLM(PyModelBase):
 
         fp path: cat gate+up on dim 0, shard dim 0 -> ``gate_up_proj.weight``;
         ``down_proj.weight`` shards dim 1 (row-parallel). w8a8 dynamic path:
-        ``load_w8a8_mlp_into_qlinear`` does the same cat+shard for the quant
+        ``load_w8a8_mlp`` does the same cat+shard for the quant
         tensors, writing into each QLinear's ``_w8a8`` submodule (NOT exercised
         until real w8a8 checkpoints exist, Task 10).
         """
-        gate_mod = _resolve_module(self, mlp_pfx + "gate_up_proj")
-        down_mod = _resolve_module(self, mlp_pfx + "down_proj")
+        gate_mod = self.get_submodule(mlp_pfx + "gate_up_proj")
+        down_mod = self.get_submodule(mlp_pfx + "down_proj")
         assert isinstance(gate_mod, QLinear) and isinstance(down_mod, QLinear), (
             f"{mlp_pfx}gate_up_proj/down_proj must be QLinear"
         )
@@ -2192,24 +2164,19 @@ class Glm5NextForCausalLM(PyModelBase):
             or L.probe_quant(mlp_pfx, "down_proj")
         )
         if is_w8a8:
-            # dynamic w8a8: route through load_w8a8_mlp_into_qlinear (cat
+            # dynamic w8a8: route through load_w8a8_mlp (cat
             # gate+up, shard dim 0; down shard dim 1), NOT the per-projection
-            # QLinear.load_w8a8 which only handles static per-projection
+            # load_projection path above which handles static per-projection
             # tensors. resolve_quant builds the w8a8 submodules; the loader
             # writes into ``_w8a8``.
             gate_mod.resolve_quant(True)
             down_mod.resolve_quant(True)
-            L.load_w8a8_mlp_into_qlinear(mlp_pfx)
+            L.load_w8a8_mlp(mlp_pfx, destination_suffix="._w8a8")
         else:
             gate_mod.resolve_quant(False)
             down_mod.resolve_quant(False)
-            gw = L.load_tensor(mlp_pfx + "gate_proj.weight")
-            uw = L.load_tensor(mlp_pfx + "up_proj.weight")
-            L.copy_in(
-                mlp_pfx + "gate_up_proj.weight",
-                torch.cat([L.shard(gw, dim=0), L.shard(uw, dim=0)], dim=0).contiguous(),
-            )
-            L.load_fp(mlp_pfx + "down_proj.weight", dim=1)
+            L.copy_in(mlp_pfx + "gate_up_proj.weight", L.pack_gate_up(mlp_pfx))
+            L.copy_in(mlp_pfx + "down_proj.weight", L.load_shard(mlp_pfx + "down_proj.weight", 1))
 
     def _load_experts_w8a8(self, L, mlp: str, n: int) -> None:
         """W8A8 expert load (mirrors DeepseekV3MoE loop, deepseek_v32.py:1018-1044).
@@ -2257,21 +2224,14 @@ class Glm5NextForCausalLM(PyModelBase):
         w2s = self.get_buffer(mlp + "experts_w2_scale")
         w2o = self.get_buffer(mlp + "experts_w2_offset")
         for j in range(n):
-            gw = L.load_tensor(se + f"{j}.gate_proj.weight")
-            gs = L.load_tensor(se + f"{j}.gate_proj.weight_scale")
-            go = L.load_tensor(se + f"{j}.gate_proj.weight_offset")
-            uw = L.load_tensor(se + f"{j}.up_proj.weight")
-            us = L.load_tensor(se + f"{j}.up_proj.weight_scale")
-            uo = L.load_tensor(se + f"{j}.up_proj.weight_offset")
-            dw = L.load_tensor(se + f"{j}.down_proj.weight")
-            ds = L.load_tensor(se + f"{j}.down_proj.weight_scale")
-            do_ = L.load_tensor(se + f"{j}.down_proj.weight_offset")
-            w13.data[j].copy_(torch.cat([L.shard(gw, 0), L.shard(uw, 0)], dim=0).contiguous())
-            w13s.data[j].copy_(torch.cat([L.shard(gs, 0), L.shard(us, 0)], dim=0).contiguous())
-            w13o.data[j].copy_(torch.cat([L.shard(go, 0), L.shard(uo, 0)], dim=0).contiguous())
-            w2.data[j].copy_(L.shard(dw, 1).contiguous())
-            w2s.data[j].copy_(ds.contiguous())
-            w2o.data[j].copy_(do_.contiguous())
+            prefix = se + f"{j}."
+            w13.data[j].copy_(L.pack_gate_up(prefix))
+            w13s.data[j].copy_(L.pack_gate_up(prefix, "weight_scale"))
+            w13o.data[j].copy_(L.pack_gate_up(prefix, "weight_offset"))
+            down, scale = L.load_w8a8_down(prefix)
+            w2.data[j].copy_(down.contiguous())
+            w2s.data[j].copy_(scale.contiguous())
+            w2o.data[j].copy_(L.get_tensor(prefix + "down_proj.weight_offset").contiguous())
 
     def _load_experts_bf16(self, L, mlp: str, n: int) -> None:
         """bf16 expert load (existing 3D cat-stack path, extracted from _load_mlp).
@@ -2296,19 +2256,19 @@ class Glm5NextForCausalLM(PyModelBase):
         # (see _load_mlp comment: a contiguous shard of the cat'd tensor crosses
         # the gate/up boundary). At tp==1 the shard is a no-op.
         if L.find(mlp + "experts.gate_up_proj") is not None:
-            gu = L.load_tensor(mlp + "experts.gate_up_proj")
+            gu = L.get_tensor(mlp + "experts.gate_up_proj")
             gate_full, up_full = gu.split([gu.size(1) // 2, gu.size(1) // 2], dim=1)
         else:
-            gate_full = torch.stack([L.load_tensor(mlp + f"experts.{e}.gate_proj.weight") for e in range(n)], dim=0)
-            up_full = torch.stack([L.load_tensor(mlp + f"experts.{e}.up_proj.weight") for e in range(n)], dim=0)
+            gate_full = torch.stack([L.get_tensor(mlp + f"experts.{e}.gate_proj.weight") for e in range(n)], dim=0)
+            up_full = torch.stack([L.get_tensor(mlp + f"experts.{e}.up_proj.weight") for e in range(n)], dim=0)
         gate = L.shard(gate_full, dim=1)
         up = L.shard(up_full, dim=1)
         gu = torch.cat([gate, up], dim=1)
         L.copy_in(mlp + "experts.gate_up_proj", gu)
         if L.find(mlp + "experts.down_proj") is not None:
-            dn = L.load_tensor(mlp + "experts.down_proj")
+            dn = L.get_tensor(mlp + "experts.down_proj")
         else:
-            dn = torch.stack([L.load_tensor(mlp + f"experts.{e}.down_proj.weight") for e in range(n)], dim=0)
+            dn = torch.stack([L.get_tensor(mlp + f"experts.{e}.down_proj.weight") for e in range(n)], dim=0)
         L.copy_in(mlp + "experts.down_proj", L.shard(dn, dim=2))
 
     def _load_mlp(self, L, mlp: str, i: int) -> None:
@@ -2316,10 +2276,10 @@ class Glm5NextForCausalLM(PyModelBase):
             n = self.cfg.n_routed_experts
             moe = self.model.layers[i].mlp
             # Router (FLOAT, shared by both branches).
-            L.load_fp(mlp + "gate.weight")
+            L.copy_replicated(mlp + "gate.weight")
             # e_score_correction_bias quirk: checkpoint key lives under
             # ``gate.e_score_correction_bias`` but the buffer is ``e_score_...``.
-            e = L.load_tensor(mlp + "gate.e_score_correction_bias")
+            e = L.get_tensor(mlp + "gate.e_score_correction_bias")
             L.copy_in(mlp + "e_score_correction_bias", e)
             # Expert branch: probe exp0's gate_proj for a weight_scale tensor.
             # Real W8A8 checkpoints carry weight_scale; bf16 checkpoints do not.

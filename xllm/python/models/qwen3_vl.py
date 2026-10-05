@@ -27,7 +27,9 @@ Deepstack flow:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -40,13 +42,16 @@ from xllm.python.layers import (
     RMSNorm,
     RotaryEmbedding,
 )
+from xllm.python.model_loader import (
+    ParallelLoadContext,
+    ScopedWeightLoader,
+    load_causal_lm_weights,
+)
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.qwen3 import (
     Qwen3Config,
     Qwen3DecoderLayer,
-    load_qwen3_backbone,
 )
-from xllm.python.models.weight_utils import WeightLoader, kv_replica_shard
 
 # ---------------------------------------------------------------------------
 # Vision config
@@ -72,7 +77,7 @@ class Qwen3VLVisionConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3VLVisionConfig:
-        def pick(*keys, default=None):
+        def pick(*keys: str, default: Any = None) -> Any:
             for k in keys:
                 if k in d and d[k] is not None:
                     return d[k]
@@ -122,6 +127,9 @@ class Qwen3VLVisionRotaryEmbedding(nn.Module):
     split into two halves: the first half encodes the *height* position and
     the second half encodes the *width* position (2-D rotary).
     """
+
+    cos_cache: torch.Tensor
+    sin_cache: torch.Tensor
 
     def __init__(
         self,
@@ -488,7 +496,6 @@ class Qwen3VLVisionTransformer(nn.Module):
         return torch.stack([hpos_ids, wpos_ids], dim=-1)
 
     def _compute_rot_pos_emb(self, grid_thw_list: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
-        max_grid_size = max(max(h, w) for _, h, w in grid_thw_list)
         pos_ids = []
         for t, h, w in grid_thw_list:
             ids = self._rot_pos_ids(h, w, self.spatial_merge_size, self.device)
@@ -700,7 +707,10 @@ class Qwen3VLModel(nn.Module):
                 ),
                 persistent=False,
             )
-        self.layers = nn.ModuleList([Qwen3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
+        self.layers = cast(
+            Sequence[Qwen3DecoderLayer],
+            nn.ModuleList([Qwen3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)]),
+        )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         # Set externally by get_input_embeddings before the runner kicks in.
         self._inputs_embeds: torch.Tensor | None = None
@@ -778,6 +788,7 @@ def _scatter_multimodal(
         multiscale = None
     inputs_embeds[mask] = main.to(inputs_embeds.dtype)
     if multiscale is not None:
+        assert deepstack_acc is not None
         deepstack_acc[mask] = multiscale.to(deepstack_acc.dtype)
 
 
@@ -789,6 +800,9 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
     in :meth:`encode` and :meth:`get_input_embeddings`, which are called
     before the runner drives ``self.model``.
     """
+
+    model: Qwen3VLModel
+    lm_head: ColumnParallelLinear
 
     def __init__(self, config: dict) -> None:
         super().__init__()
@@ -829,12 +843,12 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device)
 
         # LLM (self.model is required by PyModelBase / the executor runner)
-        self.model = Qwen3VLModel(text_cfg, dtype=dtype, device=device)
+        self.model = Qwen3VLModel(text_cfg, dtype=dtype, device=device)  # pyright: ignore[reportIncompatibleVariableOverride]
 
         # LM head
         tp = text_cfg.tp_size
         assert text_cfg.vocab_size % tp == 0
-        self.lm_head = ColumnParallelLinear(
+        self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
             text_cfg.hidden_size,
             text_cfg.vocab_size // tp,
             tp,
@@ -941,20 +955,21 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         Key layout: ``model.visual.*`` -> ``vision_model.*``,
         ``model.language_model.*`` -> ``model.*``, ``lm_head.*`` -> ``lm_head.*``.
         """
-        self._load_vision_weights(WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("model.visual.",)))
-        # LLM loader also carries `""` so `lm_head.weight` (unprefixed) resolves.
-        llm_loader = WeightLoader(
-            self, state_dicts, tp_size, tp_rank, src_prefixes=("model.language_model.", "model.", "")
+        self._load_vision_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)))
+        all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.language_model.", "model.", ""))
+        load_causal_lm_weights(
+            self.model,
+            self.lm_head.weight,
+            all_weights,
+            ParallelLoadContext(tp_rank, tp_size),
+            tie_word_embeddings=self.text_cfg.tie_word_embeddings,
         )
-        self._load_llm_weights(llm_loader)
-        if not self.text_cfg.tie_word_embeddings:
-            llm_loader.copy_shard("lm_head.weight", dim=0)
 
-    def _load_vision_weights(self, loader: WeightLoader) -> None:
+    def _load_vision_weights(self, weights: ScopedWeightLoader) -> None:
         """Load vision tower weights (replicated, no TP sharding)."""
 
         def copy(param_name: str, ckpt_name: str | None = None) -> None:
-            loader.copy_in("vision_model." + param_name, loader.load_tensor(ckpt_name or param_name))
+            weights.load_tensor(self.vision_model.get_parameter(param_name), ckpt_name or param_name)
 
         # patch_embed (Conv3d): checkpoint names carry an extra ".proj".
         copy("patch_embed.weight", "patch_embed.proj.weight")
@@ -992,19 +1007,3 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         for i in range(len(self.vision_cfg.deepstack_visual_indexes)):
             for t in merger_ts:
                 copy(f"deepstack_merger_list.{i}.{t}")
-
-    def _load_llm_weights(self, loader: WeightLoader) -> None:
-        cfg = self.text_cfg
-        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, loader.tp_rank, loader.tp_size)
-
-        loader.copy_in("model.embed_tokens.weight", loader.load_shard("embed_tokens.weight", dim=1))
-
-        load_qwen3_backbone(
-            loader,
-            self.model.layers,
-            kv_world=kv_world,
-            kv_rank=kv_rank,
-            attention_bias=cfg.attention_bias,
-        )
-
-        loader.copy_in("model.norm.weight", loader.load_tensor("norm.weight"))

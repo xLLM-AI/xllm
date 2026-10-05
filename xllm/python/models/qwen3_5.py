@@ -16,14 +16,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 
 from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
-from xllm.python.layers.qwen3_5.decoder_layer import get_qwen3_5_decoder_layer_class
+from xllm.python.layers.qwen3_5.decoder_layer import Qwen3_5DecoderLayer, get_qwen3_5_decoder_layer_class
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,
@@ -74,7 +76,7 @@ class Qwen3_5Config:
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3_5Config:
-        def pick(*keys, default=None):
+        def pick(*keys: str, default: Any = None) -> Any:
             for key in keys:
                 if key in d and d[key] is not None:
                     return d[key]
@@ -214,7 +216,10 @@ class Qwen3_5Model(nn.Module):
             device,
         )
         decoder_layer_cls = get_qwen3_5_decoder_layer_class(device)
-        self.layers = nn.ModuleList(decoder_layer_cls(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers))
+        self.layers = cast(
+            Sequence[Qwen3_5DecoderLayer],
+            nn.ModuleList(decoder_layer_cls(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers)),
+        )
         self.norm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -227,6 +232,9 @@ class Qwen3_5Model(nn.Module):
 
 
 class Qwen3_5ForCausalLM(PyModelBase):
+    model: Qwen3_5Model
+    lm_head: ColumnParallelLinear
+
     def __init__(self, config: dict) -> None:
         super().__init__()
         self.cfg = Qwen3_5Config.from_dict(config)
@@ -237,8 +245,8 @@ class Qwen3_5ForCausalLM(PyModelBase):
         self.device = device
         if self.cfg.vocab_size % self.cfg.tp_size:
             raise ValueError("vocab_size must be divisible by tp_size")
-        self.model = Qwen3_5Model(self.cfg, dtype, device)
-        self.lm_head = ColumnParallelLinear(
+        self.model = Qwen3_5Model(self.cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
             self.cfg.hidden_size,
             self.cfg.vocab_size // self.cfg.tp_size,
             self.cfg.tp_size,

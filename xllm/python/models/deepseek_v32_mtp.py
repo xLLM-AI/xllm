@@ -29,6 +29,7 @@ import torch.nn as nn
 
 from xllm.python.layers import ColumnParallelLinear, RMSNorm
 from xllm.python.model_executor.cp_utils import cp_merge_rows, cp_shard_rows
+from xllm.python.model_loader import W8A8WeightLoader
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3Config,
@@ -36,7 +37,6 @@ from xllm.python.models.deepseek_v32 import (
     DeepseekV3Model,
     DeepseekYarnRotaryEmbedding,
 )
-from xllm.python.models.weight_utils import W8A8WeightLoader
 
 # The loader strips "model.", so a bare "shared_head.norm.weight" needs no entry.
 _MTP_NORM_ALIASES: dict[str, tuple[str, ...]] = {
@@ -186,7 +186,7 @@ def _load_mtp_weights(
             if required:
                 raise KeyError(f"missing required MTP weight: {key}")
             return False
-        tensor = loader.load_tensor(key)
+        tensor = loader.get_tensor(key)
         parameter = model.get_parameter("model." + key)
         if tensor.shape != parameter.shape and tensor.dim() == 2:
             tensor = loader.shard(tensor, dim=0)

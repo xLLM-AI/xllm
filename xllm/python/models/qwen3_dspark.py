@@ -22,12 +22,16 @@ import torch
 import torch.nn as nn
 
 from xllm.python.model_executor.forward_context import LayerSynchronizer
+from xllm.python.model_loader import (
+    ParallelLoadContext,
+    load_draft_lm_head_if_present,
+    load_missing_draft_vocab_from_quarot_target,
+)
 from xllm.python.models.dspark import DSparkForCausalLMBase
 from xllm.python.models.qwen3_dflash import (
     DFlashQwen3Config,
     DFlashQwen3Model,
 )
-from xllm.python.models.weight_utils import maybe_load_own_lm_head
 
 
 @dataclass
@@ -57,6 +61,8 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
+    model: Qwen3DSparkModel
+
     def __init__(self, config: dict) -> None:
         cfg = Qwen3DSparkConfig.from_dict(config)
         cfg.validate()
@@ -75,23 +81,29 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
         self.cfg = cfg
         self.dtype = dtype
         self.device = device
-        self.model = Qwen3DSparkModel(cfg, dtype, device)
-        self.lm_head: nn.Module | None = None
+        self.model = Qwen3DSparkModel(cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.lm_head: nn.Module | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        self.model.load_weights(state_dicts, tp_rank, tp_size)
-        loader = maybe_load_own_lm_head(self, state_dicts, tp_rank, tp_size)
-        loader.copy_replicated("markov_head.markov_w1.weight")
-        loader.copy_replicated("markov_head.markov_w2.weight")
+        all_weights = self.model.load_weights(state_dicts, tp_rank, tp_size)
+        load_draft_lm_head_if_present(
+            self,
+            all_weights,
+            context=ParallelLoadContext(tp_rank, tp_size),
+        )
+        all_weights.load_tensor(self.markov_head.markov_w1.weight, "markov_head.markov_w1.weight")
+        all_weights.load_tensor(self.markov_head.markov_w2.weight, "markov_head.markov_w2.weight")
         if self.confidence_head is not None:
-            loader.copy_replicated("confidence_head.proj.weight")
-            loader.copy_replicated("confidence_head.proj.bias")
+            all_weights.load_tensor(self.confidence_head.proj.weight, "confidence_head.proj.weight")
+            all_weights.load_tensor(self.confidence_head.proj.bias, "confidence_head.proj.bias")
 
     def adapt_weights_for_reference_model(
         self,
         reference_model_path: str,
     ) -> None:
-        self.model.adapt_weights_for_reference_model(reference_model_path)
+        rotation = self.model.adapt_weights_for_reference_model(reference_model_path)
+        if rotation is not None:
+            load_missing_draft_vocab_from_quarot_target(self, reference_model_path, rotation)
 
     def write_context_kv(
         self,

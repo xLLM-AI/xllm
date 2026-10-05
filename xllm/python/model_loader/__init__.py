@@ -14,11 +14,18 @@
 
 """Public interfaces for Python model weight loading."""
 
+from .draft_weight_loader import (
+    load_draft_embedding_if_present,
+    load_draft_lm_head_if_present,
+    load_missing_draft_vocab_from_quarot_target,
+)
+from .model_weight_loader import ModelWeightLoader
 from .module_loaders import (
     load_causal_lm_weights,
     load_gqa_fused_attention,
 )
 from .parallel_load_context import ParallelLoadContext
+from .quantized_weight_loader import QLinearWeightLoader, W8A8WeightLoader
 from .scoped_weight_loader import (
     ScopedWeightLoader,
     StateDictLike,
@@ -26,14 +33,26 @@ from .scoped_weight_loader import (
 from .sharding import (
     gqa_head_split,
     gqa_qkv_shards,
+    mla_head_split,
+    moe_shard,
+    shard_tensor,
 )
 
 __all__ = [
     "ParallelLoadContext",
+    "QLinearWeightLoader",
+    "W8A8WeightLoader",
+    "ModelWeightLoader",
+    "mla_head_split",
+    "moe_shard",
     "ScopedWeightLoader",
     "StateDictLike",
     "gqa_head_split",
     "gqa_qkv_shards",
     "load_causal_lm_weights",
     "load_gqa_fused_attention",
+    "load_draft_lm_head_if_present",
+    "load_missing_draft_vocab_from_quarot_target",
+    "load_draft_embedding_if_present",
+    "shard_tensor",
 ]

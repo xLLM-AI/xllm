@@ -77,5 +77,9 @@ class GatedMLP(nn.Module):
             world_size=context.tp_size,
         )
 
+    def process_weights_after_loading(self) -> None:
+        # Qwen3.5's plain (TileLang/CANN) layout deliberately skips this.
+        self.down_proj.process_weights_after_loading()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.down_proj(kernels.silu_and_mul(self.gate_up_proj(hidden_states)))

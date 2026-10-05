@@ -59,6 +59,7 @@ from xllm.python.model_executor.forward_context import (
     record_layer_event,
 )
 from xllm.python.model_executor.v4_cp_context import build_deepseek_v4_cp_context
+from xllm.python.model_loader import W8A8WeightLoader
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP,
@@ -66,7 +67,6 @@ from xllm.python.models.deepseek_v32 import (
     W8A8DynamicLinear,
     _tp_rank_from_device,
 )
-from xllm.python.models.weight_utils import W8A8WeightLoader
 
 try:
     from xllm.python import distributed
@@ -1229,7 +1229,8 @@ class DeepseekV4MoE(nn.Module):
             self.experts_w13.data = self.experts_w13.data.transpose(1, 2).contiguous()
             self.experts_w2.data = self.experts_w2.data.transpose(1, 2).contiguous()
             self.experts_w13_scale.data = self.experts_w13_scale.data.squeeze(-1).contiguous()
-            self.experts_w2_scale.data = self.experts_w2_scale.data.squeeze(-1).contiguous()
+            scale_dtype = torch.bfloat16 if self.shared_expert_gate.weight.dtype == torch.bfloat16 else torch.float32
+            self.experts_w2_scale.data = self.experts_w2_scale.data.squeeze(-1).to(scale_dtype).contiguous()
         self.shared_experts.gate_up_proj.process_weights_after_loading()
         self.shared_experts.down_proj.process_weights_after_loading()
 
@@ -1704,33 +1705,29 @@ class DeepseekV4ForCausalLM(PyModelBase):
 
     def load_weights(self, state_dicts, tp_rank: int, tp_size: int) -> None:
         cfg = self.cfg
-        loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
+        loader = W8A8WeightLoader(
+            self,
+            state_dicts,
+            cfg.tp_size,
+            cfg.tp_rank,
+            name_aliases={
+                "lm_head.weight": (
+                    "lm_head.weight",
+                    "model.lm_head.weight",
+                    "model.head.weight",
+                    "head.weight",
+                ),
+            },
+        )
 
-        def _has(name: str) -> bool:
-            return loader.has(name)
-
-        def _w8a8(ckpt_prefix: str, param_prefix: str, shard_dims: dict | None = None) -> None:
-            """Load a W8A8-dynamic projection.
-
-            DSV4's checkpoint stores ``weight`` (int8) + ``weight_scale`` +
-            ``weight_offset`` (per-output-channel), which is the
-            ``W8A8DynamicLinear`` format -- NOT the static deq_scale/quant_bias
-            format of ``W8A8StaticLinear``.
-            """
-            for suffix in ("weight", "weight_scale", "weight_offset"):
-                ckpt_key = ckpt_prefix + "." + suffix
-                if not _has(ckpt_key):
-                    continue
-                t = loader.load_tensor(ckpt_key)
-                dim = (shard_dims or {}).get(suffix)
-                if dim is not None:
-                    t = loader.shard(t, dim=dim)
-                loader.copy_in(param_prefix + "." + suffix, t)
+        # Dynamic W8A8 uses int8 weights and per-channel scale/offset;
+        # static W8A8 uses deq_scale/quant_bias instead.
+        w8a8_suffixes = ("weight", "weight_scale", "weight_offset")
 
         # --- Embedding (checkpoint: embed.weight). ---
         loader.copy_in(
             "model.embed_tokens.weight",
-            loader.shard(loader.load_tensor("embed.weight"), dim=1),
+            loader.shard(loader.get_tensor("embed.weight"), dim=1),
         )
 
         # --- Per-layer weights (checkpoint: layers.N.<...>). ---
@@ -1739,37 +1736,38 @@ class DeepseekV4ForCausalLM(PyModelBase):
             pm = f"model.layers.{i}."  # parameter prefix
             attn = self.model.layers[i].self_attn
             # Attention W8A8 projections (ckpt name -> module name).
-            _w8a8(ck + "attn.wq_a", pm + "self_attn.q_a_proj")
-            _w8a8(
+            loader.load_projection(ck + "attn.wq_a", pm + "self_attn.q_a_proj", w8a8_suffixes)
+            loader.load_projection(
                 ck + "attn.wq_b",
                 pm + "self_attn.q_b_proj",
+                w8a8_suffixes,
                 {"weight": 0, "weight_scale": 0, "weight_offset": 0},
             )
-            _w8a8(ck + "attn.wkv", pm + "self_attn.kv_proj")
+            loader.load_projection(ck + "attn.wkv", pm + "self_attn.kv_proj", w8a8_suffixes)
             # o_a/o_b are bf16 (unquantized) column/row-parallel weights, not W8A8.
             loader.copy_in(
                 pm + "self_attn.o_a_proj.weight",
-                loader.shard(loader.load_tensor(ck + "attn.wo_a.weight"), dim=0),
+                loader.shard(loader.get_tensor(ck + "attn.wo_a.weight"), dim=0),
             )
             loader.copy_in(
                 pm + "self_attn.o_b_proj.weight",
-                loader.shard(loader.load_tensor(ck + "attn.wo_b.weight"), dim=1),
+                loader.shard(loader.get_tensor(ck + "attn.wo_b.weight"), dim=1),
             )
             # Attention layernorms + sink.
             loader.copy_in(
                 pm + "self_attn.q_a_layernorm.weight",
-                loader.load_tensor(ck + "attn.q_norm.weight"),
+                loader.get_tensor(ck + "attn.q_norm.weight"),
             )
             loader.copy_in(
                 pm + "self_attn.kv_a_layernorm.weight",
-                loader.load_tensor(ck + "attn.kv_norm.weight"),
+                loader.get_tensor(ck + "attn.kv_norm.weight"),
             )
             # attn_sink (parameter): load either bare tensor or .weight form.
             sink_key = ck + "attn.attn_sink"
-            if not _has(sink_key):
+            if not loader.has(sink_key):
                 sink_key = ck + "attn.attn_sink.weight"
-            if _has(sink_key):
-                sink = loader.load_tensor(sink_key)
+            if loader.has(sink_key):
+                sink = loader.get_tensor(sink_key)
                 if sink.dim() == 1 and sink.size(0) == cfg.n_heads and cfg.tp_size > 1:
                     shard_size = cfg.n_heads // cfg.tp_size
                     sink = sink.narrow(0, cfg.tp_rank * shard_size, shard_size)
@@ -1778,97 +1776,80 @@ class DeepseekV4ForCausalLM(PyModelBase):
             # Layer layernorms (ckpt attn_norm/ffn_norm -> input/post_attention).
             loader.copy_in(
                 pm + "input_layernorm.weight",
-                loader.load_tensor(ck + "attn_norm.weight"),
+                loader.get_tensor(ck + "attn_norm.weight"),
             )
             loader.copy_in(
                 pm + "post_attention_layernorm.weight",
-                loader.load_tensor(ck + "ffn_norm.weight"),
+                loader.get_tensor(ck + "ffn_norm.weight"),
             )
             # HyperConnection weights (ckpt layers.N.hc_* -> model.layers.N.hc.hc_*).
             for part in ("attn", "ffn"):
                 for suffix in ("fn", "scale", "base"):
                     name = f"hc_{part}_{suffix}"
-                    loader.copy_in(pm + "hc." + name, loader.load_tensor(ck + name))
+                    loader.copy_in(pm + "hc." + name, loader.get_tensor(ck + name))
             # Indexer weights (ckpt layers.N.attn.indexer.*).
-            if attn.indexer is not None and _has(ck + "attn.indexer.wq_b.weight"):
+            if attn.indexer is not None and loader.has(ck + "attn.indexer.wq_b.weight"):
                 # Indexer wq_b (ReplicatedLinear, not sharded) + weights_proj.
-                _w8a8(ck + "attn.indexer.wq_b", pm + "self_attn.indexer.wq_b")
+                loader.load_projection(ck + "attn.indexer.wq_b", pm + "self_attn.indexer.wq_b", w8a8_suffixes)
                 loader.copy_in(
                     pm + "self_attn.indexer.weights_proj.weight",
-                    loader.load_tensor(ck + "attn.indexer.weights_proj.weight"),
+                    loader.get_tensor(ck + "attn.indexer.weights_proj.weight"),
                 )
                 # Compressor sub-module: wkv (unquantized f32 fused wk+wv) +
                 # wgate + ape + norm (all f32, not W8A8).
                 loader.copy_in(
                     pm + "self_attn.indexer.compressor_wkv.weight",
-                    loader.load_tensor(ck + "attn.indexer.compressor.wkv.weight"),
+                    loader.get_tensor(ck + "attn.indexer.compressor.wkv.weight"),
                 )
                 loader.copy_in(
                     pm + "self_attn.indexer.compressor_wgate.weight",
-                    loader.load_tensor(ck + "attn.indexer.compressor.wgate.weight"),
+                    loader.get_tensor(ck + "attn.indexer.compressor.wgate.weight"),
                 )
                 loader.copy_in(
                     pm + "self_attn.indexer.compressor_ape",
-                    loader.load_tensor(ck + "attn.indexer.compressor.ape"),
+                    loader.get_tensor(ck + "attn.indexer.compressor.ape"),
                 )
                 loader.copy_in(
                     pm + "self_attn.indexer.compressor_norm.weight",
-                    loader.load_tensor(ck + "attn.indexer.compressor.norm.weight"),
+                    loader.get_tensor(ck + "attn.indexer.compressor.norm.weight"),
                 )
             # Attention-level cmp_kv compressor (head_dim=512, separate from the
             # indexer compressor at head_dim=128). Ckpt: attn.compressor.*.
             # Mirrors C++ DSAttentionImpl compressor_ (compressor.cpp:590-597).
-            if hasattr(attn, "cmp_wkv") and _has(ck + "attn.compressor.wkv.weight"):
-                _w = loader.load_tensor(ck + "attn.compressor.wkv.weight")
+            if hasattr(attn, "cmp_wkv") and loader.has(ck + "attn.compressor.wkv.weight"):
+                _w = loader.get_tensor(ck + "attn.compressor.wkv.weight")
                 loader.copy_in(pm + "self_attn.cmp_wkv.weight", _w)
                 loader.copy_in(
                     pm + "self_attn.cmp_wgate.weight",
-                    loader.load_tensor(ck + "attn.compressor.wgate.weight"),
+                    loader.get_tensor(ck + "attn.compressor.wgate.weight"),
                 )
                 loader.copy_in(
                     pm + "self_attn.cmp_ape",
-                    loader.load_tensor(ck + "attn.compressor.ape"),
+                    loader.get_tensor(ck + "attn.compressor.ape"),
                 )
                 loader.copy_in(
                     pm + "self_attn.cmp_norm.weight",
-                    loader.load_tensor(ck + "attn.compressor.norm.weight"),
+                    loader.get_tensor(ck + "attn.compressor.norm.weight"),
                 )
             attn.process_weights_after_loading()
             # MoE / dense MLP weights. MoE layers use hash routing
             # (gate.weight + gate.tid2eid) and per-expert w1/w2/w3, while dense
             # layers use the fused W8A8 MLP loader below.
             mlp = self.model.layers[i].mlp
-            if hasattr(mlp, "experts_w13") and _has(ck + "ffn.experts.0.w1.weight"):
+            if hasattr(mlp, "experts_w13") and loader.has(ck + "ffn.experts.0.w1.weight"):
                 self._load_dsv4_moe(loader, ck, pm, i)
                 mlp.process_weights_after_loading()
             elif isinstance(mlp, DeepseekV3MLP):
                 self._load_dsv4_dense_mlp(loader, ck, pm, mlp)
 
         # --- Final norm + hc_head + lm_head. ---
-        loader.copy_in("model.norm.weight", loader.load_tensor("norm.weight"))
-        loader.copy_in("model.hc_head_fn", loader.load_tensor("hc_head_fn"))
-        loader.copy_in("model.hc_head_base", loader.load_tensor("hc_head_base"))
-        loader.copy_in("model.hc_head_scale", loader.load_tensor("hc_head_scale"))
-        # Match LlmForCausalLMImplBase's non-tied output-head lookup order.  The
-        # Flash checkpoint uses ``head.weight`` rather than ``lm_head.weight``.
-        lm_head_key = next(
-            (
-                name
-                for name in (
-                    "lm_head.weight",
-                    "model.lm_head.weight",
-                    "model.head.weight",
-                    "head.weight",
-                )
-                if _has(name)
-            ),
-            None,
-        )
-        assert lm_head_key is not None, "checkpoint output-head weight not found"
-        loader.copy_in(
-            "lm_head.weight",
-            loader.shard(loader.load_tensor(lm_head_key), dim=0),
-        )
+        loader.copy_in("model.norm.weight", loader.get_tensor("norm.weight"))
+        loader.copy_in("model.hc_head_fn", loader.get_tensor("hc_head_fn"))
+        loader.copy_in("model.hc_head_base", loader.get_tensor("hc_head_base"))
+        loader.copy_in("model.hc_head_scale", loader.get_tensor("hc_head_scale"))
+        # Match LlmForCausalLMImplBase's non-tied output-head lookup order.
+        assert loader.has("lm_head.weight"), "checkpoint output-head weight not found"
+        loader.copy_shard("lm_head.weight", dim=0)
 
     @staticmethod
     def _load_dsv4_dense_mlp(
@@ -1881,10 +1862,10 @@ class DeepseekV4ForCausalLM(PyModelBase):
         gate_up_prefix = parameter_prefix + "mlp.gate_up_proj."
         down_prefix = parameter_prefix + "mlp.down_proj."
         for suffix in ("weight", "weight_scale", "weight_offset"):
-            w1 = loader.shard(loader.load_tensor(checkpoint_prefix + "ffn.w1." + suffix), dim=0)
-            w3 = loader.shard(loader.load_tensor(checkpoint_prefix + "ffn.w3." + suffix), dim=0)
+            w1 = loader.shard(loader.get_tensor(checkpoint_prefix + "ffn.w1." + suffix), dim=0)
+            w3 = loader.shard(loader.get_tensor(checkpoint_prefix + "ffn.w3." + suffix), dim=0)
             loader.copy_in(gate_up_prefix + suffix, torch.cat([w1, w3], dim=0))
-            w2 = loader.load_tensor(checkpoint_prefix + "ffn.w2." + suffix)
+            w2 = loader.get_tensor(checkpoint_prefix + "ffn.w2." + suffix)
             if suffix == "weight":
                 w2 = loader.shard(w2, dim=1)
             loader.copy_in(down_prefix + suffix, w2)
@@ -1898,32 +1879,29 @@ class DeepseekV4ForCausalLM(PyModelBase):
         Mirrors C++ FusedMoEImpl::load_experts (fused_moe.cpp:1938+).
         """
 
-        def _has(name: str) -> bool:
-            return loader.has(name)
-
         cfg = self.cfg
         mlp = self.model.layers[layer_id].mlp
         # Gate weight [n_total_experts, hidden] float32 (replicated, not EP-sharded).
-        loader.copy_in(pm + "mlp.gate.weight", loader.load_tensor(ck + "ffn.gate.weight"))
+        loader.copy_in(pm + "mlp.gate.weight", loader.get_tensor(ck + "ffn.gate.weight"))
         if mlp.hash_layer:
             # C++ DeepseekV4GateImpl requires tid2eid for every hash layer.
             tid2eid_key = ck + "ffn.gate.tid2eid"
-            if not _has(tid2eid_key):
+            if not loader.has(tid2eid_key):
                 tid2eid_key += ".weight"
-            assert _has(tid2eid_key), f"hash gate checkpoint tensor not found: {tid2eid_key}"
-            loader.copy_in(pm + "mlp.tid2eid", loader.load_tensor(tid2eid_key))
+            assert loader.has(tid2eid_key), f"hash gate checkpoint tensor not found: {tid2eid_key}"
+            loader.copy_in(pm + "mlp.tid2eid", loader.get_tensor(tid2eid_key))
         else:
             # Match DeepseekV4GateImpl::load_state_dict: the correction bias is
             # mandatory for non-hash routing, with the legacy key as fallback.
             bias_key = ck + "ffn.gate.bias"
-            if not _has(bias_key):
+            if not loader.has(bias_key):
                 bias_key = ck + "ffn.gate.e_score_correction_bias"
-            assert _has(bias_key), (
+            assert loader.has(bias_key), (
                 f"non-hash gate checkpoint tensor not found: {ck}ffn.gate.bias (or e_score_correction_bias)"
             )
             loader.copy_in(
                 pm + "mlp.e_score_correction_bias",
-                loader.load_tensor(bias_key),
+                loader.get_tensor(bias_key),
             )
         # Per-expert w1+w3 -> fused w13, w2 -> w2 (int8 + scale).
         # EP: only load local experts [start_expert_id, start_expert_id + num_experts_per_rank).
@@ -1950,7 +1928,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             return torch.cat([first, second], dim=0)
 
         probe = ck + f"ffn.experts.{start}."
-        probe_w1 = loader.load_tensor(probe + "w1.weight")
+        probe_w1 = loader.get_tensor(probe + "w1.weight")
         # W4A8 stores two 4-bit output values per int8 row.  The checkpoint
         # therefore has half as many physical rows as the logical expert
         # intermediate size; W8A8 has one row per logical output value.
@@ -1973,7 +1951,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             w13_scale_bias.data = torch.empty(
                 nepr, 2 * (cfg.moe_intermediate_size // tp), 1, dtype=torch.float32, device=device
             )
-            sb2 = loader.load_tensor(probe + "w2.scale_bias")
+            sb2 = loader.get_tensor(probe + "w2.scale_bias")
             if tp > 1:
                 sb2 = loader.shard(sb2, dim=1, world=tp, rank=tp_rank)
             w2_scale_bias.data = torch.empty(nepr, *sb2.shape, dtype=torch.float32, device=device)
@@ -1988,46 +1966,46 @@ class DeepseekV4ForCausalLM(PyModelBase):
         for local_idx in range(nepr):
             global_id = start + local_idx
             e = ck + f"ffn.experts.{global_id}."
-            w1 = probe_w1 if local_idx == 0 else loader.load_tensor(e + "w1.weight")
-            w3 = loader.load_tensor(e + "w3.weight")
+            w1 = probe_w1 if local_idx == 0 else loader.get_tensor(e + "w1.weight")
+            w3 = loader.get_tensor(e + "w3.weight")
             w13_j = _shard_fused(w1, w3)
-            w2_j = loader.load_tensor(e + "w2.weight")
+            w2_j = loader.get_tensor(e + "w2.weight")
             if tp > 1:
                 w2_j = loader.shard(w2_j, dim=1, world=tp, rank=tp_rank)
             w13[local_idx].copy_(w13_j.to(w13.dtype))
             w2[local_idx].copy_(w2_j.to(w2.dtype))
-            if _has(e + "w1.weight_scale"):
-                s1 = loader.load_tensor(e + "w1.weight_scale")
-                s3 = loader.load_tensor(e + "w3.weight_scale") if _has(e + "w3.weight_scale") else s1
+            if loader.has(e + "w1.weight_scale"):
+                s1 = loader.get_tensor(e + "w1.weight_scale")
+                s3 = loader.get_tensor(e + "w3.weight_scale") if loader.has(e + "w3.weight_scale") else s1
                 s13 = _shard_fused(s1, s3)
                 w13_scale[local_idx].copy_(s13)
             if is_w4a8:
-                if _has(e + "w1.weight_scale_second"):
-                    s1_second = loader.load_tensor(e + "w1.weight_scale_second")
+                if loader.has(e + "w1.weight_scale_second"):
+                    s1_second = loader.get_tensor(e + "w1.weight_scale_second")
                     s3_second = (
-                        loader.load_tensor(e + "w3.weight_scale_second")
-                        if _has(e + "w3.weight_scale_second")
+                        loader.get_tensor(e + "w3.weight_scale_second")
+                        if loader.has(e + "w3.weight_scale_second")
                         else s1_second
                     )
                     s13_second = _shard_fused(s1_second, s3_second)
                     if w13_scale_second.numel() == 0:
                         w13_scale_second.data = torch.empty(nepr, *s13_second.shape, dtype=torch.float32, device=device)
                     w13_scale_second[local_idx].copy_(s13_second)
-                sb1 = loader.load_tensor(e + "w1.scale_bias")
-                sb3 = loader.load_tensor(e + "w3.scale_bias")
+                sb1 = loader.get_tensor(e + "w1.scale_bias")
+                sb3 = loader.get_tensor(e + "w3.scale_bias")
                 sb13 = _shard_fused(sb1, sb3)
                 w13_scale_bias[local_idx].copy_(sb13)
-            if _has(e + "w2.weight_scale"):
-                w2_scale[local_idx].copy_(loader.load_tensor(e + "w2.weight_scale"))
+            if loader.has(e + "w2.weight_scale"):
+                w2_scale[local_idx].copy_(loader.get_tensor(e + "w2.weight_scale"))
             if is_w4a8:
-                if _has(e + "w2.weight_scale_second"):
-                    s2_second = loader.load_tensor(e + "w2.weight_scale_second")
+                if loader.has(e + "w2.weight_scale_second"):
+                    s2_second = loader.get_tensor(e + "w2.weight_scale_second")
                     if tp > 1:
                         s2_second = loader.shard(s2_second, dim=1, world=tp, rank=tp_rank)
                     if w2_scale_second.numel() == 0:
                         w2_scale_second.data = torch.empty(nepr, *s2_second.shape, dtype=torch.float32, device=device)
                     w2_scale_second[local_idx].copy_(s2_second)
-                s2_bias = loader.load_tensor(e + "w2.scale_bias")
+                s2_bias = loader.get_tensor(e + "w2.scale_bias")
                 if tp > 1:
                     s2_bias = loader.shard(s2_bias, dim=1, world=tp, rank=tp_rank)
                 w2_scale_bias[local_idx].copy_(s2_bias)
@@ -2038,40 +2016,40 @@ class DeepseekV4ForCausalLM(PyModelBase):
             ck + "ffn.shared_experts_gate.weight",
         )
         for shared_gate_key in shared_gate_keys:
-            if _has(shared_gate_key):
+            if loader.has(shared_gate_key):
                 loader.copy_in(
                     pm + "mlp.shared_expert_gate.weight",
-                    loader.load_tensor(shared_gate_key),
+                    loader.get_tensor(shared_gate_key),
                 )
                 mlp.shared_expert_gate_is_loaded = True
                 break
-        if _has(se + "w1.weight"):
-            se_w1 = loader.load_tensor(se + "w1.weight")
-            se_w3 = loader.load_tensor(se + "w3.weight")
+        if loader.has(se + "w1.weight"):
+            se_w1 = loader.get_tensor(se + "w1.weight")
+            se_w3 = loader.get_tensor(se + "w3.weight")
             se_w13 = _shard_fused(se_w1, se_w3)
             loader.copy_in(pm + "mlp.shared_experts.gate_up_proj.weight", se_w13)
-            if _has(se + "w1.weight_scale"):
-                s1 = loader.load_tensor(se + "w1.weight_scale")
-                s3 = loader.load_tensor(se + "w3.weight_scale")
+            if loader.has(se + "w1.weight_scale"):
+                s1 = loader.get_tensor(se + "w1.weight_scale")
+                s3 = loader.get_tensor(se + "w3.weight_scale")
                 se_s13 = _shard_fused(s1, s3)
                 loader.copy_in(pm + "mlp.shared_experts.gate_up_proj.weight_scale", se_s13[: se_w13.size(0)])
-            if _has(se + "w1.weight_offset"):
-                o1 = loader.load_tensor(se + "w1.weight_offset")
-                o3 = loader.load_tensor(se + "w3.weight_offset")
+            if loader.has(se + "w1.weight_offset"):
+                o1 = loader.get_tensor(se + "w1.weight_offset")
+                o3 = loader.get_tensor(se + "w3.weight_offset")
                 loader.copy_in(
                     pm + "mlp.shared_experts.gate_up_proj.weight_offset", _shard_fused(o1, o3)[: se_w13.size(0)]
                 )
-            se_w2 = loader.load_tensor(se + "w2.weight")
+            se_w2 = loader.get_tensor(se + "w2.weight")
             if tp > 1:
                 se_w2 = loader.shard(se_w2, dim=1, world=tp, rank=tp_rank)
             loader.copy_in(pm + "mlp.shared_experts.down_proj.weight", se_w2)
-            if _has(se + "w2.weight_scale"):
+            if loader.has(se + "w2.weight_scale"):
                 loader.copy_in(
-                    pm + "mlp.shared_experts.down_proj.weight_scale", loader.load_tensor(se + "w2.weight_scale")
+                    pm + "mlp.shared_experts.down_proj.weight_scale", loader.get_tensor(se + "w2.weight_scale")
                 )
-            if _has(se + "w2.weight_offset"):
+            if loader.has(se + "w2.weight_offset"):
                 loader.copy_in(
-                    pm + "mlp.shared_experts.down_proj.weight_offset", loader.load_tensor(se + "w2.weight_offset")
+                    pm + "mlp.shared_experts.down_proj.weight_offset", loader.get_tensor(se + "w2.weight_offset")
                 )
             # NOTE: shared_experts.{gate_up,down}_proj.process_weights_after_loading
             # is NOT called here. It is called exactly once via

@@ -23,11 +23,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from xllm.python.layers import DFlash2GroupedConv
-from xllm.python.model_executor.forward_context import LayerSynchronizer
-from xllm.python.models.base import PyModelBase
+from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 from xllm.python.models.qwen3 import Qwen3DecoderLayer
 from xllm.python.models.qwen3_dflash import (
     DFlashQwen3Config,
+    DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
 
@@ -195,6 +195,13 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
         hidden = self.mlp_conv.finish(hidden, mlp_coefficients)
         return hidden, residual
 
+    def load_weights(self, weights: ScopedWeightLoader, context: ParallelLoadContext) -> None:
+        super().load_weights(weights, context)
+        for name in ("attention_conv", "mlp_conv"):
+            module = getattr(self, name)
+            weights.load_tensor(module.base_kernel, f"{name}.base_kernel")
+            weights.load_tensor(module.kernel_projection.weight, f"{name}.kernel_projection.weight")
+
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
     def __init__(self, cfg: DFlash2Qwen3Config, dtype: torch.dtype, device: torch.device) -> None:
@@ -213,66 +220,21 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
             device,
         )
 
-    def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        loader = super().load_weights(
-            state_dicts,
-            tp_rank,
-            tp_size,
-            load_own_embedding=False,
-        )
-        loader.copy_replicated("candidate_selector.hidden_projection.weight")
-        loader.copy_replicated("candidate_selector.predecessor_codebook")
-        loader.copy_replicated("candidate_selector.successor_codebook")
-        for layer_id in range(self.cfg.n_layers):
-            prefix = f"layers.{layer_id}."
-            for conv_name in ("attention_conv", "mlp_conv"):
-                conv_prefix = prefix + conv_name + "."
-                loader.copy_replicated(conv_prefix + "base_kernel")
-                loader.copy_replicated(conv_prefix + "kernel_projection.weight")
-
-    def candidates(
-        self,
-        hidden_states: torch.Tensor,
-        unary_logits: torch.Tensor,
-        anchor_token_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.candidate_selector(hidden_states, unary_logits, anchor_token_ids)
+    def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> ScopedWeightLoader:
+        weights = super().load_weights(state_dicts, tp_rank, tp_size)
+        for name in (
+            "candidate_selector.hidden_projection.weight",
+            "candidate_selector.predecessor_codebook",
+            "candidate_selector.successor_codebook",
+        ):
+            weights.load_tensor(self.get_parameter(name), name)
+        return weights
 
 
-class DFlash2Qwen3ForCausalLM(PyModelBase):
-    def __init__(self, config: dict) -> None:
-        super().__init__()
-        self.cfg = DFlash2Qwen3Config.from_dict(config)
-        self.cfg.validate()
-        self.dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
-        self.device = torch.device(config.get("device", "npu"))
-        self.model = DFlash2Qwen3Model(self.cfg, self.dtype, self.device)
-        self.lm_head: nn.Module | None = None
-
-    def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        self.model.load_weights(state_dicts, tp_rank, tp_size)
-
-    def adapt_weights_for_reference_model(
-        self,
-        reference_model_path: str,
-    ) -> None:
-        self.model.adapt_weights_for_reference_model(reference_model_path)
-
-    def write_context_kv(
-        self,
-        target_hidden: torch.Tensor,
-        positions: torch.Tensor,
-        cache_slots: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor | None, ...]],
-        layer_synchronizer: LayerSynchronizer | None,
-    ) -> torch.Tensor | None:
-        return self.model.write_context_kv(
-            target_hidden,
-            positions,
-            cache_slots,
-            kv_caches,
-            layer_synchronizer,
-        )
+class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
+    model: DFlash2Qwen3Model
+    config_cls = DFlash2Qwen3Config
+    model_cls = DFlash2Qwen3Model
 
     def dflash2_candidates(
         self,
@@ -280,4 +242,4 @@ class DFlash2Qwen3ForCausalLM(PyModelBase):
         unary_logits: torch.Tensor,
         anchor_token_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model.candidates(hidden_states, unary_logits, anchor_token_ids)
+        return self.model.candidate_selector(hidden_states, unary_logits, anchor_token_ids)

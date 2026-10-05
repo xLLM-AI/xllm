@@ -199,7 +199,7 @@ def test_dflash2_model_uses_band_attention_and_shared_target_weights() -> None:
     assert attention.fia_use_attention_mask
 
 
-def test_checkpoint_weights_load_without_draft_embedding_or_lm_head(
+def test_checkpoint_preserves_draft_owned_vocabulary_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -237,8 +237,8 @@ def test_checkpoint_weights_load_without_draft_embedding_or_lm_head(
 
     model.load_weights([_StateDict(tensors)], tp_rank=0, tp_size=1)
 
-    assert model.model.embed_tokens is None
-    assert model.lm_head is None
+    torch.testing.assert_close(model.model.embed_tokens.weight, tensors["embed_tokens.weight"])
+    torch.testing.assert_close(model.lm_head.weight, tensors["lm_head.weight"])
     torch.testing.assert_close(
         model.model.candidate_selector.hidden_projection.weight,
         tensors["candidate_selector.hidden_projection.weight"],

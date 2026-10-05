@@ -23,7 +23,9 @@ The model does not import FlashInfer, own wrappers, or call plan.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -43,10 +45,15 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
     record_layer_event,
 )  # noqa: F401
-from xllm.python.model_loader import gqa_head_split
+from xllm.python.model_loader import (
+    ParallelLoadContext,
+    ScopedWeightLoader,
+    gqa_head_split,
+    load_causal_lm_weights,
+    load_gqa_fused_attention,
+)
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.weight_utils import WeightLoader, kv_replica_shard
 
 
 @dataclass
@@ -69,10 +76,11 @@ class Qwen3Config:
     dp_size: int = 1
     dp_rank: int = 0
     layers_to_capture: tuple[int, ...] = ()
+    mrope_section: Sequence[int] = ()
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3Config:
-        def pick(*keys, default=None):
+        def pick(*keys: str, default: Any = None) -> Any:
             for k in keys:
                 if k in d and d[k] is not None:
                     return d[k]
@@ -107,6 +115,11 @@ class Qwen3Config:
 
 
 class Qwen3Attention(nn.Module):
+    qkv_proj: ColumnParallelLinear
+    o_proj: RowParallelLinear
+    q_norm: RMSNorm
+    k_norm: RMSNorm
+
     def __init__(
         self,
         cfg: Qwen3Config,
@@ -117,6 +130,7 @@ class Qwen3Attention(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
+        self.cfg = cfg
         num_heads, num_kv_heads = cfg.head_split()
         tp = cfg.tp_size
         self.num_heads = num_heads
@@ -211,6 +225,10 @@ class Qwen3Attention(nn.Module):
         attn_out = self.attn(q, k, v)
         return self.o_proj(attn_out)
 
+    def load_weights(self, weights: ScopedWeightLoader, context: ParallelLoadContext) -> None:
+        load_gqa_fused_attention(self, weights, context, self.cfg.n_kv_heads)
+        self.o_proj.process_weights_after_loading()
+
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
@@ -243,7 +261,7 @@ class Qwen3DecoderLayer(nn.Module):
         cos: torch.Tensor | None,
         sin: torch.Tensor | None,
         mrope_section: list[int] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if residual is None:
             residual = hidden
             hidden = self.input_layernorm(hidden)
@@ -255,6 +273,13 @@ class Qwen3DecoderLayer(nn.Module):
         hidden, residual = self.post_attention_layernorm(hidden, residual)
         hidden = self.mlp(hidden)
         return hidden, residual
+
+    def load_weights(self, weights: ScopedWeightLoader, context: ParallelLoadContext) -> None:
+        weights.load_tensor(self.input_layernorm.weight, "input_layernorm.weight")
+        weights.load_tensor(self.post_attention_layernorm.weight, "post_attention_layernorm.weight")
+        self.self_attn.load_weights(weights.with_prefix("self_attn."), context)
+        self.mlp.load_weights(weights.with_prefix("mlp."), context)
+        self.mlp.process_weights_after_loading()
 
 
 class Qwen3Model(nn.Module):
@@ -287,8 +312,9 @@ class Qwen3Model(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.layers = nn.ModuleList(
-            decoder_layer_type(cfg, i, dtype, device, causal=causal) for i in range(cfg.n_layers)
+        self.layers = cast(
+            Sequence[Qwen3DecoderLayer],
+            nn.ModuleList(decoder_layer_type(cfg, i, dtype, device, causal=causal) for i in range(cfg.n_layers)),
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
@@ -337,66 +363,11 @@ class Qwen3Model(nn.Module):
         return self.aux_hidden_capture.finalize(hidden, aux_hidden_buffer)
 
 
-def load_qwen3_attention(
-    loader: WeightLoader,
-    src: str,
-    dst: str,
-    *,
-    kv_world: int,
-    kv_rank: int,
-    attention_bias: bool = False,
-) -> None:
-    """Load one GQA self-attention block: q/k norm, fused qkv, o_proj, optional bias."""
-    loader.copy_in(dst + "self_attn.q_norm.weight", loader.load_tensor(src + "self_attn.q_norm.weight"))
-    loader.copy_in(dst + "self_attn.k_norm.weight", loader.load_tensor(src + "self_attn.k_norm.weight"))
-
-    q = loader.load_shard(src + "self_attn.q_proj.weight", 0)
-    k = loader.load_shard(src + "self_attn.k_proj.weight", 0, world=kv_world, rank=kv_rank)
-    v = loader.load_shard(src + "self_attn.v_proj.weight", 0, world=kv_world, rank=kv_rank)
-    loader.copy_in(dst + "self_attn.qkv_proj.weight", torch.cat([q, k, v], dim=0))
-    loader.copy_in(dst + "self_attn.o_proj.weight", loader.load_shard(src + "self_attn.o_proj.weight", 1))
-
-    if attention_bias:
-        qb = loader.load_shard(src + "self_attn.q_proj.bias", 0)
-        kb = loader.load_shard(src + "self_attn.k_proj.bias", 0, world=kv_world, rank=kv_rank)
-        vb = loader.load_shard(src + "self_attn.v_proj.bias", 0, world=kv_world, rank=kv_rank)
-        loader.copy_in(dst + "self_attn.qkv_proj.bias", torch.cat([qb, kb, vb], dim=0))
-        # o_proj bias is replicated and added after the all-reduce, so every
-        # rank loads the full (unsharded) bias.
-        loader.copy_in(dst + "self_attn.o_proj.bias", loader.load_tensor(src + "self_attn.o_proj.bias"))
-
-
-def load_qwen3_backbone(
-    loader: WeightLoader,
-    layers: nn.ModuleList,
-    *,
-    kv_world: int,
-    kv_rank: int,
-    attention_bias: bool = False,
-    dst_prefix: str = "model.",
-) -> None:
-    """Load every Qwen3-dense decoder layer (norms, attention, MLP), then finalize.
-
-    ``dst_prefix``: ``"model."`` for a top-level CausalLM, ``""`` when the loader
-    targets the decoder module directly.
-    """
-    for i, layer in enumerate(layers):
-        src = f"layers.{i}."
-        dst = f"{dst_prefix}layers.{i}."
-        loader.copy_in(dst + "input_layernorm.weight", loader.load_tensor(src + "input_layernorm.weight"))
-        loader.copy_in(
-            dst + "post_attention_layernorm.weight",
-            loader.load_tensor(src + "post_attention_layernorm.weight"),
-        )
-        load_qwen3_attention(loader, src, dst, kv_world=kv_world, kv_rank=kv_rank, attention_bias=attention_bias)
-        loader.load_gated_mlp(dst + "mlp.", src + "mlp.")
-
-        layer.self_attn.o_proj.process_weights_after_loading()
-        layer.mlp.down_proj.process_weights_after_loading()
-
-
 class Qwen3ForCausalLM(PyModelBase):
     """Top-level entry the C++ PyCausalLM drives."""
+
+    model: Qwen3Model
+    lm_head: ColumnParallelLinear
 
     def __init__(self, config: dict) -> None:
         super().__init__()
@@ -413,8 +384,8 @@ class Qwen3ForCausalLM(PyModelBase):
         if not 0 <= self.cfg.dp_rank < dp:
             raise ValueError("dp_rank must be in [0, dp_size)")
         assert self.cfg.vocab_size % tp == 0
-        self.model = Qwen3Model(self.cfg, dtype, device)
-        self.lm_head = ColumnParallelLinear(
+        self.model = Qwen3Model(self.cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
             self.cfg.hidden_size,
             self.cfg.vocab_size // tp,
             tp,
@@ -430,22 +401,8 @@ class Qwen3ForCausalLM(PyModelBase):
         tp_rank: int,
         tp_size: int,
     ) -> None:
-        cfg = self.cfg
-
-        kv_world, kv_rank = kv_replica_shard(cfg.n_kv_heads, tp_rank, tp_size)
-        loader = WeightLoader(self, state_dicts, tp_size, tp_rank, src_prefixes=("model.", ""))
-
-        loader.copy_shard("model.embed_tokens.weight", dim=1)
-
-        load_qwen3_backbone(
-            loader,
-            self.model.layers,
-            kv_world=kv_world,
-            kv_rank=kv_rank,
-            attention_bias=cfg.attention_bias,
+        all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.", ""))
+        ctx = ParallelLoadContext(tp_rank, tp_size)
+        load_causal_lm_weights(
+            self.model, self.lm_head.weight, all_weights, ctx, tie_word_embeddings=self.cfg.tie_word_embeddings
         )
-
-        loader.copy_replicated("model.norm.weight")
-
-        lm_name = "embed_tokens.weight" if cfg.tie_word_embeddings else "lm_head.weight"
-        loader.copy_in("lm_head.weight", loader.load_shard(lm_name, dim=0))

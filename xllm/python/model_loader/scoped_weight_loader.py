@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-independent helpers for scoped checkpoint access."""
+"""Checkpoint tensor lookup and explicit tensor-destination loading."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
 import torch
@@ -31,25 +31,25 @@ class StateDictLike(Protocol):
 
 
 class ScopedWeightLoader:
-    """A lightweight view over one or more checkpoint shards."""
+    """Load checkpoint tensors into explicit tensor destinations with exact shape checks."""
 
     def __init__(
         self,
         state_dicts: Sequence[StateDictLike],
         prefix: str = "",
         src_prefixes: Sequence[str] = ("",),
-        name_aliases: Mapping[str, Sequence[str]] | None = None,
+        name_aliases: Mapping[str, Sequence[str]] | Callable[[str], Sequence[str]] | None = None,
+        *,
+        strip_src_prefixes: bool = False,
     ) -> None:
         self._state_dicts = state_dicts
         self._prefix = prefix
         self._src_prefixes = tuple(src_prefixes)
-        # Per requested name, resolution tries each alias under each src prefix
-        # prepended; bare names match both prefixed and unprefixed checkpoints.
-        self._name_aliases: Mapping[str, Sequence[str]] = name_aliases or {}
-
-    @property
-    def prefix(self) -> str:
-        return self._prefix
+        # Resolve aliases in order, then source prefixes and checkpoint shards.
+        # Named model loaders also accept checkpoint keys with a source prefix removed.
+        self._name_aliases = {} if name_aliases is None else name_aliases
+        self._name_aliases_callable = callable(self._name_aliases)
+        self._strip_src_prefixes = strip_src_prefixes
 
     def with_prefix(self, prefix: str) -> ScopedWeightLoader:
         return ScopedWeightLoader(
@@ -57,29 +57,35 @@ class ScopedWeightLoader:
             self._prefix + prefix,
             src_prefixes=self._src_prefixes,
             name_aliases=self._name_aliases,
+            strip_src_prefixes=self._strip_src_prefixes,
         )
 
     def _resolve(self, local_name: str) -> tuple[StateDictLike, str] | None:
         """First present ``(state_dict, resolved_name)`` for the scoped name,
-        trying each alias under each ``src_prefix`` prepended."""
+        trying prepended source prefixes, then optional stripped prefixes per alias."""
         name = self._prefix + local_name
-        for alias in self._name_aliases.get(name, (name,)):
+        aliases = self._name_aliases(name) if self._name_aliases_callable else self._name_aliases.get(name, (name,))
+        for alias in aliases:
             for prefix in self._src_prefixes:
                 full = prefix + alias
                 for state in self._state_dicts:
                     if state.has(full):
                         return state, full
+            if self._strip_src_prefixes:
+                for prefix in self._src_prefixes:
+                    if prefix and alias.startswith(prefix):
+                        stripped = alias[len(prefix) :]
+                        for state in self._state_dicts:
+                            if state.has(stripped):
+                                return state, stripped
         return None
+
+    def find(self, local_name: str) -> StateDictLike | None:
+        resolved = self._resolve(local_name)
+        return resolved[0] if resolved is not None else None
 
     def has(self, local_name: str) -> bool:
         return self._resolve(local_name) is not None
-
-    def first_present(self, local_names: Sequence[str]) -> str | None:
-        """First of ``local_names`` present in the checkpoint, or ``None``."""
-        for name in local_names:
-            if self.has(name):
-                return name
-        return None
 
     def bind_source_root(self, probe: str) -> ScopedWeightLoader:
         """Lock to the single ``src_prefix`` whose scope contains ``probe``.
@@ -87,7 +93,8 @@ class ScopedWeightLoader:
         A multi-root loader tries every ``src_prefix`` per tensor; once the model
         root is chosen by a probe (e.g. ``embed_tokens.weight``), backbone weights
         must all resolve under that one root instead of silently mixing roots.
-        Probing honors ``name_aliases`` (via :meth:`has`), matching normal resolution.
+        Probing honors ``name_aliases`` and only accepts prepended prefixes; the
+        returned loader never strips prefixes, so all reads stay under the chosen root.
         """
         for prefix in self._src_prefixes:
             candidate = ScopedWeightLoader(
@@ -125,26 +132,6 @@ class ScopedWeightLoader:
             contiguous=contiguous,
         )
 
-    def _fuse(
-        self,
-        sources: Sequence[str | tuple[str, int, int]],
-        rank: int | None,
-        world_size: int | None,
-    ) -> torch.Tensor:
-        """Column-fuse (concat on dim 0) sharded projections into one packed tensor.
-
-        Each source is either a name sharded by the shared ``(rank, world_size)``
-        (gate_up), or a ``(name, rank, world_size)`` triple carrying its own split
-        (GQA qkv: q on the attention split, k/v on the replicated-kv split).
-        """
-        shards = []
-        for src in sources:
-            name, r, w = (src, rank, world_size) if isinstance(src, str) else src
-            if r is None or w is None:
-                raise ValueError(f"fuse source {name!r} needs an explicit (rank, world_size)")
-            shards.append(self._shard(name, 0, r, w, contiguous=False))
-        return torch.cat(shards, dim=0)
-
     def load_fused(
         self,
         param: torch.Tensor,
@@ -161,7 +148,13 @@ class ScopedWeightLoader:
         ``(rank, world_size)`` (gate_up), or a ``(name, rank, world_size)`` triple carrying
         its own split (GQA qkv: q on the attention split, k/v on the replicated-kv split).
         """
-        _copy_parameter(param, self._fuse(sources, rank, world_size), self._prefix + name)
+        shards = []
+        for src in sources:
+            source_name, source_rank, source_world = (src, rank, world_size) if isinstance(src, str) else src
+            if source_rank is None or source_world is None:
+                raise ValueError(f"fuse source {source_name!r} needs an explicit (rank, world_size)")
+            shards.append(self._shard(source_name, 0, source_rank, source_world, contiguous=False))
+        _copy_parameter(param, torch.cat(shards, dim=0), self._prefix + name)
 
     def load_tensor(
         self,
