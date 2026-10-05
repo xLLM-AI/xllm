@@ -143,8 +143,25 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
     const std::vector<int64_t>& validity_mask,
     int64_t checkpoint_stride,
     int64_t num_slots,
-    const torch::Device& device) {
+    const torch::Device& device,
+    const std::vector<LinearStateCacheOp>& cache_ops) {
   const int64_t batch_size = static_cast<int64_t>(live_slots.size());
+  CHECK(cache_ops.empty() ||
+        static_cast<int64_t>(cache_ops.size()) == batch_size)
+      << "linear_state_cache_ops must be empty or sequence-scoped.";
+  const auto read_slot_at = [&](int64_t row) {
+    int32_t slot = validity_mask[row] == 0 ? -1 : live_slots[row];
+    if (!cache_ops.empty()) {
+      const LinearStateCacheOp& op = cache_ops[row];
+      CHECK_EQ(op.linear_state_id, live_slots[row]);
+      if (!op.restore_requested && op.restore_src_slot_id >= 0) {
+        CHECK_GT(op.restore_src_slot_id, kPaddingLinearStateId);
+        CHECK_LT(op.restore_src_slot_id, num_slots);
+        slot = op.restore_src_slot_id;
+      }
+    }
+    return slot;
+  };
   const auto& cache = attn_metadata.mega_gdn_prefill_indices;
   if (cache.has_value()) {
     const auto& key = cache->key;
@@ -159,6 +176,10 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
         << "linear state ids changed within one forward";
     CHECK(key.linear_state_validity_mask == validity_mask)
         << "validity changed within one forward";
+    for (int64_t row = 0; row < batch_size; ++row) {
+      CHECK_EQ(key.linear_state_read_slots[row], read_slot_at(row))
+          << "linear state read slots changed within one forward";
+    }
     return cache.value();
   }
 
@@ -185,7 +206,7 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
     CHECK(validity_mask[i] == 0 || validity_mask[i] == 1)
         << "linear state validity must be 0 or 1.";
     const int32_t live_slot = live_slots[i];
-    const int32_t read_slot = validity_mask[i] == 0 ? -1 : live_slot;
+    const int32_t read_slot = read_slot_at(i);
     conv_read.emplace_back(read_slot);
     ssm_read.emplace_back(read_slot < 0 ? -1 : read_slot * stride);
     ssm_write.emplace_back(live_slot * stride);
@@ -196,6 +217,7 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
               .num_slots = num_slots,
               .checkpoint_stride = checkpoint_stride,
               .linear_state_ids = live_slots,
+              .linear_state_read_slots = conv_read,
               .linear_state_validity_mask = validity_mask}};
   indices.conv_read = slots_to_device(conv_read, device);
   indices.conv_write = slots_to_device(live_slots, device);
@@ -482,7 +504,8 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
             input_params.linear_state_validity_mask,
             checkpoint_stride,
             num_slots,
-            device);
+            device,
+            input_params.linear_state_cache_ops);
     xllm::kernel::MegaGdnPrefillParams params;
     params.mixed_qkv = packed_qkv.contiguous();
     params.b = packed_b.view({total_tokens, local_value_heads}).contiguous();

@@ -800,6 +800,9 @@ TEST(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
       make_sequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9});
   ASSERT_TRUE(pool.allocate(&hit_seq, hit_seq.num_tokens()));
   EXPECT_EQ(hit_seq.kv_state().shared_blocks_num(BlockType::KV), 2u);
+  ASSERT_TRUE(hit_seq.has_linear_restore_src_block());
+  std::optional<Block> restore_src = hit_seq.take_linear_restore_src_block();
+  EXPECT_TRUE(restore_src.has_value());
   pool.deallocate_without_cache(&hit_seq);
 }
 
@@ -901,6 +904,34 @@ TEST(BlockManagerPoolTest,
   // (block-carried, no scheduler-side find()): the next build consumes it to
   // fill restore_src_slot_id. It must point at the old (checkpointed) slot.
   ASSERT_TRUE(sequence.has_linear_restore_src_block());
+  std::optional<Block> restore_src = sequence.take_linear_restore_src_block();
+  ASSERT_TRUE(restore_src.has_value());
+  EXPECT_EQ(restore_src->id(), old_live_slot);
+
+  pool.deallocate_without_cache(&sequence);
+}
+
+TEST(BlockManagerPoolTest, PendingLinearSaveBeforeDecodeCarriesRestoreSource) {
+  ScopedValue<int32_t> chunk_guard(
+      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
+  BlockManagerPool pool(make_linear_state_pool_options(
+                            /*linear_state_num_slots=*/3),
+                        /*dp_size=*/1);
+
+  Sequence sequence =
+      make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
+  ASSERT_TRUE(pool.allocate(&sequence, sequence.num_tokens()));
+  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_tokens());
+  const int32_t old_live_slot = sequence.get_linear_state_slot_id();
+  sequence.set_pending_linear_save(XXH3Key(make_prefix_hash(12).data()));
+
+  std::vector<Sequence*> sequences = {&sequence};
+  LinearStateBlockManager* prefix_cache =
+      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
+  ASSERT_NE(prefix_cache, nullptr);
+  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
+
+  EXPECT_NE(sequence.get_linear_state_slot_id(), old_live_slot);
   std::optional<Block> restore_src = sequence.take_linear_restore_src_block();
   ASSERT_TRUE(restore_src.has_value());
   EXPECT_EQ(restore_src->id(), old_live_slot);
@@ -1113,7 +1144,10 @@ TEST(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
       EXPECT_FALSE(hit_seq.has_linear_restore_src_block());
     } else {
       ASSERT_TRUE(hit_seq.has_linear_restore_src_block());
-      EXPECT_EQ(hit_seq.take_linear_restore_src_block()->id(), expected_slot);
+      std::optional<Block> restore_src_block =
+          hit_seq.take_linear_restore_src_block();
+      ASSERT_TRUE(restore_src_block.has_value());
+      EXPECT_EQ(restore_src_block->id(), expected_slot);
     }
     pool.deallocate_without_cache(&hit_seq);
   };

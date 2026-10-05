@@ -175,7 +175,7 @@ class KVCacheState {
   // then transfers used sources to the owning Batch. This block-carried
   // transport replaces the former scheduler-side find() in resolve. Cleared by
   // erase_blocks(LINEAR) and reset().
-  void set_linear_restore_src_block(Block&& block) {
+  void set_linear_restore_src_block(Block block) {
     linear_restore_src_block_ = std::move(block);
   }
   bool has_linear_restore_src_block() const {

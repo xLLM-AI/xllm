@@ -30,6 +30,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/forward_input_builder.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "framework/block/block.h"
 #include "framework/block/block_manager_impl.h"
@@ -305,6 +306,35 @@ class BatchSpeculativeStatsTest : public ::testing::Test {
  private:
   bool original_overlap_ = false;
   bool original_chunked_prefill_ = false;
+};
+
+class ScopedLinearStateOutOfPlace final {
+ public:
+  explicit ScopedLinearStateOutOfPlace(bool enabled)
+      : previous_(SchedulerConfig::get_instance()
+                      .enable_linear_state_out_of_place()) {
+    SchedulerConfig::get_instance().enable_linear_state_out_of_place(enabled);
+  }
+
+  ~ScopedLinearStateOutOfPlace() {
+    SchedulerConfig::get_instance().enable_linear_state_out_of_place(previous_);
+  }
+
+ private:
+  bool previous_;
+};
+
+class ScopedModelImpl final {
+ public:
+  explicit ScopedModelImpl(std::string model_impl)
+      : previous_(ModelConfig::get_instance().model_impl()) {
+    ModelConfig::get_instance().model_impl(std::move(model_impl));
+  }
+
+  ~ScopedModelImpl() { ModelConfig::get_instance().model_impl(previous_); }
+
+ private:
+  std::string previous_;
 };
 
 class ScopedJsonObjectOutput final {
@@ -2643,6 +2673,8 @@ TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   // so set the chunk stride to block_size to keep them chunk-aligned and the
   // per-chunk hash chain identical to the per-block helper below.
   ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("native");
 
   torch::Device device(Platform::type_torch(), 0);
   const uint32_t n_blocks = 22;
@@ -2729,7 +2761,7 @@ TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   batch->add(&decode_seq, /*allowed_max_token=*/1);
 
   ModelArgs args;
-  args.layer_types({"linear_attention"});
+  args.model_type("qwen3_5").layer_types({"linear_attention"});
   LlmForwardInput forward_input = batch->prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
 
@@ -2738,8 +2770,8 @@ TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   // The save decision now lands on the sequence (pending save), not the cache
   // op; the LINEAR leaf executes it at the next step. The restore no longer
   // rides a hash on the cache op: the builder resolves the checkpoint to a
-  // source slot and sets restore_requested, mirroring KV's resolved swap
-  // descriptor (the worker's copy-in keys off that bit + src slot).
+  // source slot and chooses direct read only for the supported native Qwen3.5
+  // NPU prefill path.
   const LinearStatePrefixHash aligned_save_expected =
       compute_linear_state_prefix_hash_for_test(
           aligned_tokens, aligned_blocks, /*boundary_tokens=*/16);
@@ -2748,9 +2780,8 @@ TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   ASSERT_TRUE(aligned_save.has_value());
   EXPECT_EQ(*aligned_save, XXH3Key(aligned_save_expected.data()));
 
-  // restore_seq restores at boundary 16 (the same hash aligned_seq saved) and
-  // saves at boundary 20.
-  EXPECT_TRUE(cache_ops[1].restore_requested);
+  // Restore boundary 16, then save the new live state at boundary 20.
+  EXPECT_EQ(cache_ops[1].restore_requested, !Platform::is_npu());
   EXPECT_GE(cache_ops[1].restore_src_slot_id, 0);
   const LinearStatePrefixHash restore_save_expected =
       compute_linear_state_prefix_hash_for_test(
@@ -2811,6 +2842,53 @@ TEST(BatchTest, UnusedLinearRestoreSourceIsReleasedDuringBuild) {
   EXPECT_FALSE(
       forward_input.input_params.linear_state_cache_ops[0].restore_requested);
   EXPECT_EQ(manager.allocate(1).size(), 1u);
+}
+
+TEST(BatchTest, DecodeConsumesRestoreSourceWithD2DCopy) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("native");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/4).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(20);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 32;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+
+  IncrementalDecoder decoder("", 4, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*token_ids=*/{1, 2, 3, 4},
+                    /*input_embedding=*/torch::Tensor(),
+                    /*mm_data=*/MMData(),
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  sequence.append_token(5);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  const int32_t restore_src_slot_id = restore_sources[0].id();
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&sequence, /*allowed_max_token=*/1);
+  ModelArgs args;
+  args.model_type("qwen3_5").layer_types({"linear_attention"});
+  auto forward_input = batch->prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  const LinearStateCacheOp& cache_op =
+      forward_input.input_params.linear_state_cache_ops[0];
+  EXPECT_TRUE(cache_op.restore_requested);
+  EXPECT_EQ(cache_op.restore_src_slot_id, restore_src_slot_id);
 }
 
 TEST(BatchTest, ThreadedBatchPinsEveryLinearRestoreSourceUntilRelease) {
@@ -3534,7 +3612,7 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
       .max_seqs_per_batch(max_seqs_per_batch)
       .manager_types({1, 0, 0})
       .compress_ratios({0, 4, 128});
-  CompositeBlockManager manager(build_composite_leaves(options));
+  CompositeBlockManager manager(build_composite_leaves(options), options);
 
   RequestSamplingParam sampling_param;
   StoppingChecker stopping_checker;

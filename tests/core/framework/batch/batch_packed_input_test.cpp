@@ -505,11 +505,11 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
   restore_op.restore_requested = true;
   restore_op.restore_src_slot_id = 3;
 
-  LinearStateCacheOp no_restore_op;
-  no_restore_op.linear_state_id = 8;
-  no_restore_op.reset_requested = true;
+  LinearStateCacheOp direct_read_op;
+  direct_read_op.linear_state_id = 8;
+  direct_read_op.restore_src_slot_id = 4;
 
-  input.input_params.linear_state_cache_ops = {restore_op, no_restore_op};
+  input.input_params.linear_state_cache_ops = {restore_op, direct_read_op};
 
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(forward_input_to_packed_proto(input, &packed_input));
@@ -521,7 +521,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
   EXPECT_TRUE(lazy_input.runtime.input_host_buffer_has_layout);
 
   LlmForwardInput unpacked_input;
-  unpacked_input.input_params.linear_state_cache_ops = {no_restore_op};
+  unpacked_input.input_params.linear_state_cache_ops = {direct_read_op};
   ASSERT_TRUE(detail::unpack_from_input_host_buffer(lazy_input,
                                                     torch::Device(torch::kCPU),
                                                     torch::kFloat32,
@@ -531,7 +531,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
   expect_linear_state_cache_op_eq(
       unpacked_input.input_params.linear_state_cache_ops[0], restore_op);
   expect_linear_state_cache_op_eq(
-      unpacked_input.input_params.linear_state_cache_ops[1], no_restore_op);
+      unpacked_input.input_params.linear_state_cache_ops[1], direct_read_op);
 }
 
 TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {

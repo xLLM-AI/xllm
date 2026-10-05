@@ -182,13 +182,16 @@ void restore_linear_state_slots(
           << "linear-state reset must not carry a restore source";
       continue;
     }
-    if (!cache_op.restore_requested && cache_op.restore_src_slot_id < 0) {
-      continue;
-    }
     const int32_t src_slot_id = cache_op.restore_src_slot_id;
-    CHECK(is_real_slot(src_slot_id))
-        << "linear-state restore source must be a real non-padding slot, slot="
-        << src_slot_id << ", num_slots=" << num_slots;
+    if (src_slot_id >= 0) {
+      CHECK(is_real_slot(src_slot_id))
+          << "linear-state source must be a real non-padding slot, slot="
+          << src_slot_id << ", num_slots=" << num_slots;
+    }
+    if (cache_op.restore_requested) {
+      CHECK_GE(src_slot_id, 0)
+          << "linear-state restore requires a valid source slot";
+    }
   }
 
   std::vector<int32_t> pending_reset_slots;

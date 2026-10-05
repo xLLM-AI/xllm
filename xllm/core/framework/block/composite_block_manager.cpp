@@ -106,6 +106,168 @@ std::unique_ptr<BlockManager> make_kv_leaf(const BlockManager::Options& kv_opts,
                                                    kv_opts.model_id());
 }
 
+using ProbeResult = CompositeBlockManager::ProbeResult;
+
+// Trim outcome. `to_mount` feeds the shape's mount step; `to_drop` goes to
+// leaf->deallocate() (cache release, not physical free).
+// `linear_restore_src`, when set, is the LINEAR checkpoint that the caller
+// stashes via Sequence::set_linear_restore_src_block.
+struct TrimOutcome {
+  std::vector<ProbeResult> to_mount;
+  std::vector<ProbeResult> to_drop;
+  size_t safe_hit_tokens = 0;
+  std::optional<Block> linear_restore_src;
+};
+
+std::optional<ProbeResult> take_probe(std::vector<ProbeResult>& probes,
+                                      BlockType type) {
+  for (auto it = probes.begin(); it != probes.end(); ++it) {
+    if (it->type == type) {
+      ProbeResult r = std::move(*it);
+      probes.erase(it);
+      return r;
+    }
+  }
+  return std::nullopt;
+}
+
+// FLAT_KV: no trim; Sequence::add_shared_blocks owns replace + exact-repeat.
+TrimOutcome trim_flat_kv(std::vector<ProbeResult> probes) {
+  CHECK_EQ(probes.size(), 1u) << "FLAT_KV expects a single KV probe";
+  TrimOutcome out;
+  out.to_mount = std::move(probes);
+  return out;
+}
+
+// FLAT_KV_LINEAR: retain only a KV prefix whose token boundary has an exact
+// LINEAR checkpoint.
+TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
+  auto linear = take_probe(probes, BlockType::LINEAR);
+  CHECK_EQ(probes.size(), 1u)
+      << "FLAT_KV_LINEAR expects one KV probe (LINEAR removed above)";
+  TrimOutcome out;
+
+  ProbeResult& kv = probes.front();
+  const size_t kv_block_size = kv.block_size;
+  size_t safe_count = 0;
+  if (linear.has_value() && kv_block_size > 0 && linear->block_size > 0) {
+    const size_t checkpoint_count =
+        std::min(linear->blocks.size(),
+                 kv.blocks.size() * kv_block_size / linear->block_size);
+    for (size_t index = checkpoint_count; index > 0; --index) {
+      const size_t checkpoint_tokens = index * linear->block_size;
+      if (checkpoint_tokens % kv_block_size == 0 &&
+          linear->blocks[index - 1].is_valid()) {
+        safe_count = checkpoint_tokens / kv_block_size;
+        out.linear_restore_src = std::move(linear->blocks[index - 1]);
+        break;
+      }
+    }
+  }
+
+  if (safe_count < kv.blocks.size()) {
+    ProbeResult drop = {kv.type,
+                        kv.leaf,
+                        /*blocks=*/{},
+                        /*block_size=*/kv.block_size};
+    drop.blocks.reserve(kv.blocks.size() - safe_count);
+    for (size_t i = safe_count; i < kv.blocks.size(); ++i) {
+      drop.blocks.emplace_back(std::move(kv.blocks[i]));
+    }
+    kv.blocks.resize(safe_count);
+    out.to_drop.emplace_back(std::move(drop));
+  }
+  out.safe_hit_tokens = safe_count * kv_block_size;
+  out.to_mount = std::move(probes);
+  return out;
+}
+
+// SWA_COMPRESSED: cross-leaf min -> C128-stride clamp -> SWA tail-continuity
+// (fallback in C128 steps) -> exact-repeat pop -> per-leaf trim.
+TrimOutcome trim_swa_compressed(std::vector<ProbeResult> probes,
+                                size_t prompt_tokens) {
+  TrimOutcome out;
+  size_t c128_block_size = 0;
+  for (const auto& p : probes) {
+    if (p.type == BlockType::C128) {
+      c128_block_size = p.block_size;
+    }
+  }
+  CHECK_GT(c128_block_size, 0u)
+      << "SWA_COMPRESSED trim requires a C128 leaf with non-zero block_size";
+
+  size_t safe_hit_tokens = std::numeric_limits<size_t>::max();
+  for (const auto& p : probes) {
+    safe_hit_tokens = std::min(safe_hit_tokens, p.blocks.size() * p.block_size);
+  }
+  safe_hit_tokens = (safe_hit_tokens / c128_block_size) * c128_block_size;
+
+  // SWA attention reads the last `swa_blocks_per_seq` base blocks; a middle
+  // invalid placeholder in that tail means garbage KV. Fall back in C128
+  // steps until the tail is fully valid.
+  auto swa_it =
+      std::find_if(probes.begin(), probes.end(), [](const ProbeResult& p) {
+        return p.type == BlockType::SWA;
+      });
+  if (swa_it != probes.end() && safe_hit_tokens > 0) {
+    const size_t swa_block_size = swa_it->block_size;
+    const size_t tail_required =
+        static_cast<size_t>(swa_it->leaf->options().swa_blocks_per_seq());
+    const std::vector<Block>& swa_vector = swa_it->blocks;
+    if (swa_block_size > 0 && tail_required > 0) {
+      while (safe_hit_tokens >= c128_block_size) {
+        const size_t trimmed_len = safe_hit_tokens / swa_block_size;
+        bool tail_ok = trimmed_len >= tail_required;
+        if (tail_ok) {
+          for (size_t i = trimmed_len - tail_required; i < trimmed_len; ++i) {
+            if (i >= swa_vector.size() || !swa_vector[i].is_valid()) {
+              tail_ok = false;
+              break;
+            }
+          }
+        }
+        if (tail_ok) {
+          break;
+        }
+        safe_hit_tokens -= c128_block_size;
+      }
+      if (safe_hit_tokens < c128_block_size) {
+        safe_hit_tokens = 0;
+      }
+    }
+  }
+
+  // Exact-repeat pop: forward needs at least one C128 block to compute.
+  if (safe_hit_tokens == prompt_tokens && safe_hit_tokens >= c128_block_size) {
+    safe_hit_tokens -= c128_block_size;
+  }
+
+  if (safe_hit_tokens == 0) {
+    out.to_drop = std::move(probes);
+    return out;
+  }
+
+  out.to_mount.reserve(probes.size());
+  for (auto& p : probes) {
+    const size_t target_len = safe_hit_tokens / p.block_size;
+    if (p.blocks.size() > target_len) {
+      ProbeResult drop = {p.type,
+                          p.leaf,
+                          /*blocks=*/{},
+                          /*block_size=*/p.block_size};
+      drop.blocks.reserve(p.blocks.size() - target_len);
+      for (size_t i = target_len; i < p.blocks.size(); ++i) {
+        drop.blocks.emplace_back(std::move(p.blocks[i]));
+      }
+      p.blocks.resize(target_len);
+      out.to_drop.emplace_back(std::move(drop));
+    }
+    out.to_mount.emplace_back(std::move(p));
+  }
+  out.safe_hit_tokens = safe_hit_tokens;
+  return out;
+}
+
 }  // namespace
 
 CompositeBlockManager::LeafMap build_composite_leaves(
@@ -249,8 +411,10 @@ CompositeBlockManager::LeafMap build_composite_leaves(
   return leaves;
 }
 
-CompositeBlockManager::CompositeBlockManager(LeafMap leaves)
-    : BlockManager(BlockManager::Options()),
+CompositeBlockManager::CompositeBlockManager(
+    LeafMap leaves,
+    const BlockManager::Options& options)
+    : BlockManager(options),
       leaves_(std::move(leaves)),
       combination_(classify_leaf_combination(leaves_)) {
   CHECK(!leaves_.empty()) << "CompositeBlockManager requires at least one leaf";
@@ -569,172 +733,6 @@ void CompositeBlockManager::release_probes(std::vector<ProbeResult>* probes) {
   }
   probes->clear();
 }
-
-namespace {
-
-using ProbeResult = CompositeBlockManager::ProbeResult;
-
-// Trim outcome. `to_mount` feeds the shape's mount step; `to_drop` goes to
-// leaf->deallocate() (cache release, not physical free).
-// `linear_restore_src`, when set, is the LINEAR checkpoint that the caller
-// stashes via Sequence::set_linear_restore_src_block.
-struct TrimOutcome {
-  std::vector<ProbeResult> to_mount;
-  std::vector<ProbeResult> to_drop;
-  size_t safe_hit_tokens = 0;
-  std::optional<Block> linear_restore_src;
-};
-
-std::optional<ProbeResult> take_probe(std::vector<ProbeResult>& probes,
-                                      BlockType type) {
-  for (auto it = probes.begin(); it != probes.end(); ++it) {
-    if (it->type == type) {
-      ProbeResult r = std::move(*it);
-      probes.erase(it);
-      return r;
-    }
-  }
-  return std::nullopt;
-}
-
-// FLAT_KV: no trim; Sequence::add_shared_blocks owns replace + exact-repeat.
-TrimOutcome trim_flat_kv(std::vector<ProbeResult> probes) {
-  CHECK_EQ(probes.size(), 1u) << "FLAT_KV expects a single KV probe";
-  TrimOutcome out;
-  out.to_mount = std::move(probes);
-  return out;
-}
-
-// FLAT_KV_LINEAR: retain only a KV prefix whose token boundary has an exact
-// LINEAR checkpoint.
-TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
-  auto linear = take_probe(probes, BlockType::LINEAR);
-  CHECK_EQ(probes.size(), 1u)
-      << "FLAT_KV_LINEAR expects one KV probe (LINEAR removed above)";
-  TrimOutcome out;
-
-  ProbeResult& kv = probes.front();
-  const size_t kv_block_size = kv.block_size;
-  size_t safe_count = 0;
-  if (linear.has_value() && kv_block_size > 0 && linear->block_size > 0) {
-    const size_t checkpoint_count =
-        std::min(linear->blocks.size(),
-                 kv.blocks.size() * kv_block_size / linear->block_size);
-    for (size_t index = checkpoint_count; index > 0; --index) {
-      const size_t checkpoint_tokens = index * linear->block_size;
-      if (checkpoint_tokens % kv_block_size == 0 &&
-          linear->blocks[index - 1].is_valid()) {
-        safe_count = checkpoint_tokens / kv_block_size;
-        out.linear_restore_src = std::move(linear->blocks[index - 1]);
-        break;
-      }
-    }
-  }
-
-  if (safe_count < kv.blocks.size()) {
-    ProbeResult drop = {kv.type,
-                        kv.leaf,
-                        /*blocks=*/{},
-                        /*block_size=*/kv.block_size};
-    drop.blocks.reserve(kv.blocks.size() - safe_count);
-    for (size_t i = safe_count; i < kv.blocks.size(); ++i) {
-      drop.blocks.emplace_back(std::move(kv.blocks[i]));
-    }
-    kv.blocks.resize(safe_count);
-    out.to_drop.emplace_back(std::move(drop));
-  }
-  out.safe_hit_tokens = safe_count * kv_block_size;
-  out.to_mount = std::move(probes);
-  return out;
-}
-
-// SWA_COMPRESSED: cross-leaf min -> C128-stride clamp -> SWA tail-continuity
-// (fallback in C128 steps) -> exact-repeat pop -> per-leaf trim.
-TrimOutcome trim_swa_compressed(std::vector<ProbeResult> probes,
-                                size_t prompt_tokens) {
-  TrimOutcome out;
-  size_t c128_block_size = 0;
-  for (const auto& p : probes) {
-    if (p.type == BlockType::C128) {
-      c128_block_size = p.block_size;
-    }
-  }
-  CHECK_GT(c128_block_size, 0u)
-      << "SWA_COMPRESSED trim requires a C128 leaf with non-zero block_size";
-
-  size_t safe_hit_tokens = std::numeric_limits<size_t>::max();
-  for (const auto& p : probes) {
-    safe_hit_tokens = std::min(safe_hit_tokens, p.blocks.size() * p.block_size);
-  }
-  safe_hit_tokens = (safe_hit_tokens / c128_block_size) * c128_block_size;
-
-  // SWA attention reads the last `swa_blocks_per_seq` base blocks; a middle
-  // invalid placeholder in that tail means garbage KV. Fall back in C128
-  // steps until the tail is fully valid.
-  auto swa_it =
-      std::find_if(probes.begin(), probes.end(), [](const ProbeResult& p) {
-        return p.type == BlockType::SWA;
-      });
-  if (swa_it != probes.end() && safe_hit_tokens > 0) {
-    const size_t swa_block_size = swa_it->block_size;
-    const size_t tail_required =
-        static_cast<size_t>(swa_it->leaf->options().swa_blocks_per_seq());
-    const std::vector<Block>& swa_vector = swa_it->blocks;
-    if (swa_block_size > 0 && tail_required > 0) {
-      while (safe_hit_tokens >= c128_block_size) {
-        const size_t trimmed_len = safe_hit_tokens / swa_block_size;
-        bool tail_ok = trimmed_len >= tail_required;
-        if (tail_ok) {
-          for (size_t i = trimmed_len - tail_required; i < trimmed_len; ++i) {
-            if (i >= swa_vector.size() || !swa_vector[i].is_valid()) {
-              tail_ok = false;
-              break;
-            }
-          }
-        }
-        if (tail_ok) {
-          break;
-        }
-        safe_hit_tokens -= c128_block_size;
-      }
-      if (safe_hit_tokens < c128_block_size) {
-        safe_hit_tokens = 0;
-      }
-    }
-  }
-
-  // Exact-repeat pop: forward needs at least one C128 block to compute.
-  if (safe_hit_tokens == prompt_tokens && safe_hit_tokens >= c128_block_size) {
-    safe_hit_tokens -= c128_block_size;
-  }
-
-  if (safe_hit_tokens == 0) {
-    out.to_drop = std::move(probes);
-    return out;
-  }
-
-  out.to_mount.reserve(probes.size());
-  for (auto& p : probes) {
-    const size_t target_len = safe_hit_tokens / p.block_size;
-    if (p.blocks.size() > target_len) {
-      ProbeResult drop = {p.type,
-                          p.leaf,
-                          /*blocks=*/{},
-                          /*block_size=*/p.block_size};
-      drop.blocks.reserve(p.blocks.size() - target_len);
-      for (size_t i = target_len; i < p.blocks.size(); ++i) {
-        drop.blocks.emplace_back(std::move(p.blocks[i]));
-      }
-      p.blocks.resize(target_len);
-      out.to_drop.emplace_back(std::move(drop));
-    }
-    out.to_mount.emplace_back(std::move(p));
-  }
-  out.safe_hit_tokens = safe_hit_tokens;
-  return out;
-}
-
-}  // namespace
 
 void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   // Shared flow: probe -> trim -> mount. Trim strategy is per-shape (see

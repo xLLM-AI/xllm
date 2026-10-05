@@ -36,6 +36,12 @@ DEFINE_int32(max_tokens_per_chunk_for_prefill,
              -1,
              "Max number of token per chunk in prefill stage.");
 
+DEFINE_bool(enable_linear_state_out_of_place,
+            true,
+            "Whether prefill reads a linear-state checkpoint out of place. "
+            "When enabled, the new operator reads the checkpoint slot directly "
+            "and writes the live slot without a restore D2D copy.");
+
 DEFINE_int32(chunked_match_frequency,
              2,
              "Number of sequence prefix cache match frequency.");
@@ -89,6 +95,7 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(prefill_scheduling_memory_usage_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_tokens_per_chunk_for_prefill);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_linear_state_out_of_place);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(chunked_match_frequency);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_zero_evict);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_decode_token_per_sequence);
@@ -108,6 +115,7 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(prefill_scheduling_memory_usage_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_tokens_per_chunk_for_prefill);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_linear_state_out_of_place);
   XLLM_CONFIG_ASSIGN_FROM_JSON(chunked_match_frequency);
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_zero_evict);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_decode_token_per_sequence);
@@ -135,6 +143,8 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, enable_chunked_prefill);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, max_tokens_per_chunk_for_prefill);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_linear_state_out_of_place);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, chunked_match_frequency);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

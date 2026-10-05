@@ -41,6 +41,7 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "enable_prefix_cache": false,
   "max_tokens_per_batch": 8192,
   "max_seqs_per_batch": 64,
+  "enable_linear_state_out_of_place": true,
   "model_impl": "py",
   "disable_graph_warmup": true,
   "python_graph_backend": "cudagraphs",
@@ -179,6 +180,8 @@ class ConfigFlagGuard final {
         old_enable_prefix_cache_(FLAGS_enable_prefix_cache),
         old_max_tokens_per_batch_(FLAGS_max_tokens_per_batch),
         old_max_seqs_per_batch_(FLAGS_max_seqs_per_batch),
+        old_enable_linear_state_out_of_place_(
+            FLAGS_enable_linear_state_out_of_place),
         old_model_impl_(FLAGS_model_impl),
         old_python_model_path_(FLAGS_python_model_path),
         old_disable_graph_warmup_(FLAGS_disable_graph_warmup),
@@ -191,6 +194,8 @@ class ConfigFlagGuard final {
     FLAGS_enable_prefix_cache = old_enable_prefix_cache_;
     FLAGS_max_tokens_per_batch = old_max_tokens_per_batch_;
     FLAGS_max_seqs_per_batch = old_max_seqs_per_batch_;
+    FLAGS_enable_linear_state_out_of_place =
+        old_enable_linear_state_out_of_place_;
     FLAGS_model_impl = old_model_impl_;
     FLAGS_python_model_path = old_python_model_path_;
     FLAGS_disable_graph_warmup = old_disable_graph_warmup_;
@@ -204,6 +209,7 @@ class ConfigFlagGuard final {
   bool old_enable_prefix_cache_;
   int32_t old_max_tokens_per_batch_;
   int32_t old_max_seqs_per_batch_;
+  bool old_enable_linear_state_out_of_place_;
   std::string old_model_impl_;
   std::string old_python_model_path_;
   bool old_disable_graph_warmup_;
@@ -226,8 +232,9 @@ class StartupConfigGuard final {
         old_enable_prefix_cache_(kv_cache_config_.enable_prefix_cache()),
         old_max_tokens_per_batch_(scheduler_config_.max_tokens_per_batch()),
         old_max_seqs_per_batch_(scheduler_config_.max_seqs_per_batch()),
-        old_enable_chunked_prefill_(
-            scheduler_config_.enable_chunked_prefill()) {}
+        old_enable_chunked_prefill_(scheduler_config_.enable_chunked_prefill()),
+        old_enable_linear_state_out_of_place_(
+            scheduler_config_.enable_linear_state_out_of_place()) {}
 
   ~StartupConfigGuard() {
     model_config_.model_impl(old_model_impl_)
@@ -238,7 +245,9 @@ class StartupConfigGuard final {
         .enable_prefix_cache(old_enable_prefix_cache_);
     scheduler_config_.max_tokens_per_batch(old_max_tokens_per_batch_)
         .max_seqs_per_batch(old_max_seqs_per_batch_)
-        .enable_chunked_prefill(old_enable_chunked_prefill_);
+        .enable_chunked_prefill(old_enable_chunked_prefill_)
+        .enable_linear_state_out_of_place(
+            old_enable_linear_state_out_of_place_);
   }
 
  private:
@@ -255,6 +264,7 @@ class StartupConfigGuard final {
   int32_t old_max_tokens_per_batch_;
   int32_t old_max_seqs_per_batch_;
   bool old_enable_chunked_prefill_;
+  bool old_enable_linear_state_out_of_place_;
 };
 
 void write_config_file(const std::filesystem::path& config_path,
@@ -357,6 +367,7 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
+  EXPECT_TRUE(scheduler_config.enable_linear_state_out_of_place());
   // model_impl is no longer canonicalized: the raw "py" alias is preserved and
   // recognized via is_python_model_impl(). from_json still mirrors it into the
   // matching gflag.
@@ -384,6 +395,12 @@ TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {
   const ExecutionConfig execution_config;
 
   EXPECT_FALSE(execution_config.disable_graph_warmup());
+}
+
+TEST(SchedulerConfigTest, LinearStateOutOfPlaceIsEnabledByDefault) {
+  const SchedulerConfig scheduler_config;
+
+  EXPECT_TRUE(scheduler_config.enable_linear_state_out_of_place());
 }
 
 TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {

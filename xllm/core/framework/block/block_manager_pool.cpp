@@ -89,8 +89,8 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
                                            /*participates_in_admission=*/false,
                                            /*supports_prefix_cache=*/false});
     }
-    block_managers_.emplace_back(
-        std::make_unique<CompositeBlockManager>(std::move(leaves)));
+    block_managers_.emplace_back(std::make_unique<CompositeBlockManager>(
+        std::move(leaves), block_options));
   }
   swap_block_transfer_infos_.clear();
   swap_block_transfer_infos_.resize(block_managers_.size());

@@ -153,7 +153,7 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_SingleSeq) {
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, base_block_size, window_size, max_seqs_per_batch);
 
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
   EXPECT_TRUE(manager.is_composite());
   EXPECT_EQ(manager.num_sub_managers(), 3u);
 
@@ -201,7 +201,7 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_DifferentBatchSeqs) {
 
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   // Seq1: 1024 tokens. Ratio 4: ceil(1024/512)=2; ratio 128:
   // ceil(1024/16384)=1.
@@ -254,7 +254,7 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_GrowSameSeq) {
 
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1, 2, 3});
   // 600 tokens: ratio 4 needs ceil(600/512)=2 blocks, ratio 128 needs 1 block.
@@ -281,7 +281,7 @@ TEST(CompositeBlockManagerTest, AllocateContinuesAfterSatisfiedTokenManager) {
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
   opts.compress_ratios({0, 128, 4});
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
   EXPECT_TRUE(manager.allocate_sequence(&seq, 1024));
@@ -298,7 +298,7 @@ TEST(CompositeBlockManagerTest, AllocateContinuesAfterSatisfiedTokenManager) {
 TEST(CompositeBlockManagerTest, AllocateForSequence_NullSeqReturnsFalse) {
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
   EXPECT_FALSE(manager.allocate_sequence(nullptr, 10));
 }
 
@@ -307,7 +307,7 @@ TEST(CompositeBlockManagerTest, FailedGrowthRollsBackNewBlocks) {
                                                     kBaseBlockSize,
                                                     /*window_size=*/12,
                                                     /*max_seqs_per_batch=*/4);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
   ASSERT_TRUE(manager.allocate_sequence(&seq, 1024));
@@ -345,7 +345,7 @@ TEST(CompositeBlockManagerTest, DeallocateToleratesRolledBackEmptySequence) {
                                                     kBaseBlockSize,
                                                     /*window_size=*/12,
                                                     /*max_seqs_per_batch=*/4);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
 
@@ -364,7 +364,7 @@ TEST(CompositeBlockManagerTest, TokenIncrease_AddsBlocksIncrementally) {
 
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
   std::vector<size_t> token_steps = {100, 600, 1200, 2000, 2400};
@@ -412,7 +412,7 @@ TEST(CompositeBlockManagerTest, SlidingWindowReleasesSkippedPhysicalBlocks) {
 
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
   const size_t window_tokens =
@@ -460,7 +460,7 @@ TEST(CompositeBlockManagerTest, DeallocateSliceDispatchesToOwnerManagers) {
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
   opts.enable_prefix_cache(false);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
   EXPECT_TRUE(manager.allocate_sequence(&seq, 1500));
@@ -484,7 +484,7 @@ TEST(CompositeBlockManagerTest,
      DeallocateSliceDispatchesWithoutInflatingRefCount) {
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
   EXPECT_TRUE(manager.allocate_sequence(&seq, 1500));
@@ -527,7 +527,7 @@ TEST(CompositeBlockManagerTest, CapacityStatsUseFinestAdmissionLeaf) {
   //                         C128: 4096/128=32 blocks (bs=16384).
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   // num_total_blocks must equal the C4 leaf's total (1024 - padding), i.e. far
   // larger than C128's 32. Assert it is well above the C128 count so a min/sum
@@ -569,7 +569,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheHitOnRepeatedPrefix) {
   // does not exceed the SWA burst budget.
   set_swa_capacity_for_token_budget(&opts, 3 * kBlockSizeRatio128);
   ASSERT_TRUE(opts.enable_prefix_cache());
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   // First sequence: a 2*C128 prompt (32768 tokens) so both C4 and C128 have
   // multiple full blocks worth of cacheable prefix. Mark all tokens as
@@ -616,7 +616,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheMissCleanly) {
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
   set_swa_capacity_for_token_budget(&opts, 3 * kBlockSizeRatio128);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t num_tokens = 2 * kBlockSizeRatio128;
   const std::vector<int32_t> prompt_a(num_tokens, 7);
@@ -649,7 +649,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheEvictsAtC128Capacity) {
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, /*max_seqs_per_batch=*/1);
   set_swa_capacity_for_token_budget(&opts, 2 * kBlockSizeRatio128);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t num_tokens = 2 * kBlockSizeRatio128;
   for (int32_t value : {11, 22, 33}) {
@@ -684,7 +684,7 @@ TEST(CompositeBlockManagerTest, SlidingWindowSlidOutBlocksEnterPrefixCache) {
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
   set_swa_capacity_for_token_budget(&opts, 3 * kBlockSizeRatio128);
   ASSERT_TRUE(opts.enable_prefix_cache());
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   // Prompt spans two full C128 blocks so the min-across-leaves gate can
   // survive AND the exact-repeat pop (one c128 stride) still leaves shared
@@ -720,7 +720,7 @@ TEST(CompositeBlockManagerTest,
       /*max_seqs_per_batch=*/1);
   opts.enable_prefix_cache(true).swa_num_blocks(
       /*three live blocks plus padding=*/4);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t first_chunk_tokens = 3 * kBaseBlockSize;
   const size_t second_chunk_tokens = 4 * kBaseBlockSize;
@@ -758,7 +758,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCachePostGrowCursorAdvances) {
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
   set_swa_capacity_for_token_budget(&opts, 4 * kBlockSizeRatio128);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   // Two-chunk prompt (2*C128). Chunk 1 is a single C128 block wide.
   const size_t chunk = kBlockSizeRatio128;
@@ -805,7 +805,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheSkipsPartialCacheUnitTail) {
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
   set_swa_capacity_for_token_budget(&opts, 2 * kBlockSizeRatio128);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t completed_tokens = kBlockSizeRatio128 + kBlockSizeRatio4;
   Sequence seq =
@@ -846,7 +846,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheExactRepeatPopsOneC128) {
   BlockManager::Options opts = MakeCompositeOptions(
       base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
   set_swa_capacity_for_token_budget(&opts, 4 * kBlockSizeRatio128);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t num_tokens = 3 * kBlockSizeRatio128;
   const std::vector<int32_t> prompt(num_tokens, 42);
@@ -882,7 +882,7 @@ TEST(CompositeBlockManagerTest, DecodeRoleSkipsSwaPrefixCache) {
   // hash space via the same leaf construction path.
   ASSERT_TRUE(opts.enable_prefix_cache());
   {
-    CompositeBlockManager prefill_manager(build_composite_leaves(opts));
+    CompositeBlockManager prefill_manager(build_composite_leaves(opts), opts);
     const size_t num_tokens = 2 * kBlockSizeRatio128;
     const std::vector<int32_t> prompt(num_tokens, 7);
     Sequence seq_seed = MakeTestSequence(0, prompt);
@@ -907,7 +907,8 @@ TEST(CompositeBlockManagerTest, DecodeRoleSkipsSwaPrefixCache) {
   // SWA_COMPRESSED (C4+C128 remain prefix-cache-on).
   BlockManager::Options decode_opts = opts;
   decode_opts.instance_is_decode(true);
-  CompositeBlockManager decode_manager(build_composite_leaves(decode_opts));
+  CompositeBlockManager decode_manager(build_composite_leaves(decode_opts),
+                                       decode_opts);
   const size_t num_tokens = 2 * kBlockSizeRatio128;
   const std::vector<int32_t> prompt(num_tokens, 7);
   Sequence seq_d = MakeTestSequence(2, prompt);
@@ -933,7 +934,7 @@ TEST(CompositeBlockManagerTest, DecodeInitialSwaAllocationKeepsOnlyWindowTail) {
       /*max_seqs_per_batch=*/1);
   opts.instance_is_decode(true).enable_prefix_cache(false).swa_num_blocks(
       /*two windows plus padding=*/5);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t logical_blocks = 10;
   const size_t num_tokens = logical_blocks * kBaseBlockSize;
@@ -963,7 +964,7 @@ TEST(CompositeBlockManagerTest,
       .enable_prefix_cache(false)
       .num_speculative_tokens(5)
       .swa_num_blocks(/*two windows plus padding=*/5);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t num_tokens = 10000;
   const size_t logical_blocks =
@@ -994,7 +995,7 @@ TEST(CompositeBlockManagerTest,
       .enable_prefix_cache(false)
       .num_speculative_tokens(0)
       .swa_num_blocks(/*two windows plus padding=*/5);
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const size_t num_tokens = 2 * kBaseBlockSize - 1;
   Sequence seq = MakeTestSequence(0, std::vector<int32_t>(num_tokens, 7));
@@ -1032,7 +1033,7 @@ TEST(CompositeBlockManagerTest, DecodeRoleSkipsLinearPrefixCache) {
       .instance_is_decode(true);
   // No manager_types → flat KV shape. LINEAR is added on top by
   // build_composite_leaves.
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const std::vector<int32_t> prompt(4 * block_size, 5);
   Sequence seq = MakeTestSequence(0, prompt);
@@ -1073,7 +1074,7 @@ TEST(CompositeBlockManagerTest, DecodeRoleLinearDefaultStrideDoesNotAbort) {
       .instance_is_decode(true);
   // Construction must succeed (no FATAL) with the default stride on the decode
   // role, and a fresh sequence must still get a working LINEAR slot.
-  CompositeBlockManager manager(build_composite_leaves(opts));
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   const std::vector<int32_t> prompt(4 * block_size, 5);
   Sequence seq = MakeTestSequence(0, prompt);

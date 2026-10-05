@@ -47,6 +47,7 @@ class SchedulerConfig final {
          "prefill_scheduling_memory_usage_threshold",
          "enable_chunked_prefill",
          "max_tokens_per_chunk_for_prefill",
+         "enable_linear_state_out_of_place",
          "chunked_match_frequency",
          "use_zero_evict",
          "max_decode_token_per_sequence",
@@ -71,6 +72,8 @@ class SchedulerConfig final {
   PROPERTY(bool, enable_chunked_prefill) = true;
 
   PROPERTY(int32_t, max_tokens_per_chunk_for_prefill) = -1;
+
+  PROPERTY(bool, enable_linear_state_out_of_place) = true;
 
   PROPERTY(int32_t, chunked_match_frequency) = 2;
 

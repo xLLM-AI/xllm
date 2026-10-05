@@ -70,6 +70,7 @@ DECLARE_int32(max_tokens_per_batch);
 DECLARE_int32(max_seqs_per_batch);
 
 DECLARE_int32(max_tokens_per_chunk_for_prefill);
+DECLARE_bool(enable_linear_state_out_of_place);
 
 // --- speculative inference config ---
 DECLARE_string(draft_model);

@@ -35,7 +35,8 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
     const std::vector<int64_t>& validity_mask,
     int64_t checkpoint_stride,
     int64_t num_slots,
-    const torch::Device& device);
+    const torch::Device& device,
+    const std::vector<LinearStateCacheOp>& cache_ops = {});
 
 }  // namespace qwen3_5_gdn_internal
 

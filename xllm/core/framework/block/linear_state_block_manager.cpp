@@ -84,9 +84,10 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   if (new_live_slot.is_valid()) {
     // Pin the warm slot into the checkpoint index (refcount+1) and mount a
     // second alias as the class-B restore source the next step's builder
-    // consumes (copy old->new). copy_block leaves the slot in the sequence too.
+    // consumes. The descriptor selects direct read or copy old->new later;
+    // copy_block leaves the slot in the sequence too.
     Block checkpoint_slot = seq->copy_block(BlockType::LINEAR);
-    seq->set_linear_restore_src_block(Block(checkpoint_slot));
+    seq->set_linear_restore_src_block(checkpoint_slot);
     insert_with_recorded_hash(std::move(checkpoint_slot), *pending_hash);
     // Retire the old slot through the standard deallocate path: its refcount is
     // still 3 (index + restore src + sequence), above the <=2u threshold, so

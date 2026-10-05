@@ -66,7 +66,7 @@ class CompositeBlockManager : public BlockManager {
     UNSUPPORTED,
   };
 
-  explicit CompositeBlockManager(LeafMap leaves);
+  CompositeBlockManager(LeafMap leaves, const BlockManager::Options& options);
   ~CompositeBlockManager() override = default;
 
   bool is_composite() const override { return true; }

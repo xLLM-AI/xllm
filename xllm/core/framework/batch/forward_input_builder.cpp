@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model/model_args.h"
@@ -42,6 +43,7 @@ limitations under the License.
 #if defined(USE_MUSA)
 #include "layers/common/attention_metadata.h"
 #endif
+#include "core/platform/platform.h"
 #include "core/runtime/params_utils.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/tensor_helper.h"
@@ -178,12 +180,16 @@ BlockCopyKernelInputData build_block_copy_kernel_input_data(
   return input_data;
 }
 
-torch::Tensor build_pinned_int_tensor(const std::vector<int32_t>& values) {
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
+// Native Qwen3.5 prefill on NPU can read the checkpoint slot directly without
+// a restore D2D copy when out-of-place linear state is enabled.
+bool should_read_linear_state_out_of_place(const ModelArgs* args,
+                                           const Sequence* sequence) {
+  return args != nullptr && sequence != nullptr &&
+         sequence->is_prefill_stage() && Platform::is_npu() &&
+         !ModelConfig::is_python_model_impl(
+             ModelConfig::get_instance().model_impl()) &&
+         is_qwen3_5_target_model_type(args->model_type()) &&
+         SchedulerConfig::get_instance().enable_linear_state_out_of_place();
 }
 
 // Whether the current prefill step end should hold a linear-state checkpoint.
@@ -928,18 +934,13 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   // an unset (<= 0) stride so a misconfigured run simply skips cache ops.
   const int32_t chunk_stride = ::xllm::SchedulerConfig::get_instance()
                                    .max_tokens_per_chunk_for_prefill();
-  // Cold-start restore: emit a restore hash only when a restore source
-  // checkpoint is mounted on this sequence -- class A at admission
-  // (allocate_shared_for_sequence) or class B at the previous step's
-  // save-rotation (allocate_for_sequence) -- AND the reused prefix lands
-  // on a chunk-end boundary, where the recurrent state lives in a checkpoint.
-  // A mounted source is present exactly on a slot that is cold and needs
-  // copy-in; continued forwards keep their live slot warm with no source
-  // mounted, so they emit no restore and are not reset to cold by the worker.
-  // The source slot id is taken from that mounted block below.
-  const bool needs_restore_hash = sequence->has_linear_restore_src_block() &&
-                                  n_kv_cache_tokens > 0 && chunk_stride > 0 &&
+  const bool has_restore_source = sequence->has_linear_restore_src_block();
+  const bool needs_restore_hash = has_restore_source && n_kv_cache_tokens > 0 &&
+                                  chunk_stride > 0 &&
                                   n_kv_cache_tokens % chunk_stride == 0;
+  const bool needs_restore =
+      has_restore_source &&
+      (needs_restore_hash || !sequence->is_prefill_stage());
   // Exit-boundary save: persist the live state only when this prefill step
   // lands on a chunk-end boundary, so the linear-state cache stays a sparse
   // per-chunk overlay on top of the per-block KV cache.
@@ -962,15 +963,18 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   // then the owning Batch, which pins it until the worker result is consumed.
   std::optional<Block> mounted_restore_src =
       sequence->take_linear_restore_src_block();
-  if (needs_restore_hash) {
-    const size_t restore_chunk_idx =
-        static_cast<size_t>(n_kv_cache_tokens) / chunk_stride - 1;
-    CHECK_LT(restore_chunk_idx, linear_state_hashes.size())
-        << "mounted linear-state checkpoint must have a matching chunk hash";
+  if (needs_restore) {
+    if (needs_restore_hash) {
+      const size_t restore_chunk_idx =
+          static_cast<size_t>(n_kv_cache_tokens) / chunk_stride - 1;
+      CHECK_LT(restore_chunk_idx, linear_state_hashes.size())
+          << "mounted linear-state checkpoint must have a matching chunk hash";
+    }
     CHECK(mounted_restore_src.has_value())
         << "linear-state restore must resolve its checkpoint slot before "
            "building worker input";
-    linear_state_cache_op.restore_requested = true;
+    linear_state_cache_op.restore_requested =
+        !should_read_linear_state_out_of_place(args_, sequence);
     linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
     state.linear_restore_src_blocks.emplace_back(
         std::move(*mounted_restore_src));
@@ -1436,22 +1440,22 @@ void ForwardInputBuilder::process_swap_block_infos(Input& forward_input) {
                                            /*detect_overlap=*/true);
     if (!kernel_input.has_overlap) {
       input_params.block_copy.src_block_indices =
-          build_pinned_int_tensor(kernel_input.src_indices);
+          make_pinned_cpu_tensor(kernel_input.src_indices);
       input_params.block_copy.dst_block_indices =
-          build_pinned_int_tensor(kernel_input.dst_indices);
+          make_pinned_cpu_tensor(kernel_input.dst_indices);
       input_params.block_copy.cum_sum =
-          build_pinned_int_tensor(kernel_input.cum_sum);
+          make_pinned_cpu_tensor(kernel_input.cum_sum);
     }
 #else
     const BlockCopyKernelInputData kernel_input =
         build_block_copy_kernel_input_data(swap_blocks,
                                            /*detect_overlap=*/false);
     input_params.block_copy.src_block_indices =
-        build_pinned_int_tensor(kernel_input.src_indices);
+        make_pinned_cpu_tensor(kernel_input.src_indices);
     input_params.block_copy.dst_block_indices =
-        build_pinned_int_tensor(kernel_input.dst_indices);
+        make_pinned_cpu_tensor(kernel_input.dst_indices);
     input_params.block_copy.cum_sum =
-        build_pinned_int_tensor(kernel_input.cum_sum);
+        make_pinned_cpu_tensor(kernel_input.cum_sum);
 #endif
   } else {
     input_params.block_copy.swap_blocks.insert(
