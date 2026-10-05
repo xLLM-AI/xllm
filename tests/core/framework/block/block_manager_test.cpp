@@ -124,39 +124,44 @@ void apply_pending_linear_saves_via_leaf(
   }
 }
 
-Sequence make_sequence(size_t index,
-                       const std::vector<int32_t>& prompt_tokens) {
-  RequestSamplingParam sampling_param;
-  sampling_param.beam_width = 0;
-  sampling_param.is_embeddings = false;
+class BlockManagerPoolTest : public ::testing::Test {
+ protected:
+  BlockManagerPoolTest() {
+    sampling_param_.beam_width = 0;
+    sampling_param_.is_embeddings = false;
+  }
 
-  StoppingChecker stopping_checker;
+  Sequence make_sequence(size_t index,
+                         const std::vector<int32_t>& prompt_tokens) {
+    SequenceParams params;
+    params.seq_capacity = prompt_tokens.size() + 8;
+    params.echo = false;
+    params.skip_special_tokens = true;
+    params.streaming = false;
+    params.enable_schedule_overlap = false;
+    params.rec_type = RecType::kNone;
+    params.bos_token_id = 0;
+    params.request_id = "block_manager_pool_test";
+    params.sampling_param = &sampling_param_;
+    params.stopping_checker = &stopping_checker_;
 
-  SequenceParams params;
-  params.seq_capacity = prompt_tokens.size() + 8;
-  params.echo = false;
-  params.skip_special_tokens = true;
-  params.streaming = false;
-  params.enable_schedule_overlap = false;
-  params.rec_type = RecType::kNone;
-  params.bos_token_id = 0;
-  params.request_id = "block_manager_pool_test";
-  params.sampling_param = &sampling_param;
-  params.stopping_checker = &stopping_checker;
+    IncrementalDecoder decoder(
+        /*prompt=*/"prompt",
+        /*num_prompt_tokens=*/prompt_tokens.size(),
+        /*echo=*/params.echo,
+        /*skip_special_tokens=*/params.skip_special_tokens);
 
-  IncrementalDecoder decoder(
-      /*prompt=*/"prompt",
-      /*num_prompt_tokens=*/prompt_tokens.size(),
-      /*echo=*/params.echo,
-      /*skip_special_tokens=*/params.skip_special_tokens);
+    return Sequence(index,
+                    prompt_tokens,
+                    /*input_embedding=*/torch::Tensor(),
+                    /*mm_data=*/MMData(),
+                    decoder,
+                    params);
+  }
 
-  return Sequence(index,
-                  prompt_tokens,
-                  /*input_embedding=*/torch::Tensor(),
-                  /*mm_data=*/MMData(),
-                  decoder,
-                  params);
-}
+  RequestSamplingParam sampling_param_;
+  StoppingChecker stopping_checker_;
+};
 
 BlockManagerPool::Options make_linear_state_pool_options(
     int32_t linear_state_num_slots) {
@@ -171,6 +176,24 @@ BlockManagerPool::Options make_linear_state_pool_options(
       .enable_linear_state(true)
       .linear_state_num_slots(linear_state_num_slots);
   return options;
+}
+
+// Independently compute the chained block hashes for `tokens`, mirroring
+// xxh3_128bits_hash() so we can check Sequence::update_block_hashes().
+std::vector<XXH3Key> ExpectedChain(const std::vector<int32_t>& tokens,
+                                   uint32_t block_size) {
+  const size_t n_blocks = tokens.size() / block_size;
+  std::vector<XXH3Key> hashes;
+  hashes.reserve(n_blocks);
+  const Slice<int32_t> slice(tokens);
+  for (size_t b = 0; b < n_blocks; ++b) {
+    XXH3Key key;
+    const uint8_t* pre = (b == 0) ? nullptr : hashes.back().data;
+    xxh3_128bits_hash(
+        pre, slice.slice(b * block_size, (b + 1) * block_size), key.data);
+    hashes.emplace_back(key);
+  }
+  return hashes;
 }
 
 }  // namespace
@@ -274,7 +297,7 @@ TEST(BlockManagerTest, Basic) {
   }
 }
 
-TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
+TEST_F(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 0);
 
@@ -297,7 +320,7 @@ TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
   EXPECT_GT(seq.get_embedding_block_id(), 0);
 }
 
-TEST(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
+TEST_F(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
   BlockManagerPool::Options options;
   options.num_blocks(1).block_size(1).enable_prefix_cache(false);
   BlockManagerPool pool(options, /*dp_size=*/3);
@@ -308,7 +331,7 @@ TEST(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
   EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 0);
 }
 
-TEST(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
+TEST_F(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool::Options options;
@@ -355,7 +378,8 @@ TEST(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
   pool.deallocate_without_cache(&second);
 }
 
-TEST(BlockManagerPoolTest, DpSelectionCountsEvictablePrefixBlocksAsAvailable) {
+TEST_F(BlockManagerPoolTest,
+       DpSelectionCountsEvictablePrefixBlocksAsAvailable) {
   BlockManagerPool::Options options;
   options.num_blocks(4).block_size(1).enable_prefix_cache(true);
   BlockManagerPool pool(options, /*dp_size=*/2);
@@ -381,7 +405,7 @@ TEST(BlockManagerPoolTest, DpSelectionCountsEvictablePrefixBlocksAsAvailable) {
   pool.deallocate(&active);
 }
 
-TEST(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
+TEST_F(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 0);
 
@@ -407,7 +431,7 @@ TEST(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
   EXPECT_EQ(seq2.get_embedding_block_id(), id1);
 }
 
-TEST(BlockManagerPoolTest, EmbeddingBlockCapacityUsesNumEmbeddingBlocks) {
+TEST_F(BlockManagerPoolTest, EmbeddingBlockCapacityUsesNumEmbeddingBlocks) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 0);
 
@@ -436,7 +460,7 @@ TEST(BlockManagerPoolTest, EmbeddingBlockCapacityUsesNumEmbeddingBlocks) {
   }
 }
 
-TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
+TEST_F(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
   BlockManagerPool::Options options;
   options.num_blocks(3).host_num_blocks(0).block_size(1).enable_prefix_cache(
       false);
@@ -470,7 +494,7 @@ TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
   EXPECT_TRUE(seq2.get_embedding_block_id() >= 0);
 }
 
-TEST(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
+TEST_F(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
   BlockManagerPool::Options options;
   // The EMBEDDING pool is sized directly by num_embedding_blocks, independent
   // of max_seqs_per_batch. id 0 is reserved for padding, so 4 exposes 3 usable
@@ -504,7 +528,7 @@ TEST(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
   EXPECT_FALSE(seq3.get_embedding_block_id() >= 0);
 }
 
-TEST(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
+TEST_F(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 2 exposes 1 usable block per
   // rank. Zero out max_seqs_per_batch so num_embedding_blocks alone drives the
@@ -531,7 +555,8 @@ TEST(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
   EXPECT_EQ(seq1.dp_rank(), 1);
 }
 
-TEST(BlockManagerPoolTest, SingleBlockExhaustionBehavesLikeKvBlockExhaustion) {
+TEST_F(BlockManagerPoolTest,
+       SingleBlockExhaustionBehavesLikeKvBlockExhaustion) {
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 2 exposes 1 usable block per
   // rank. Zero out max_seqs_per_batch so num_embedding_blocks alone drives the
@@ -566,7 +591,8 @@ TEST(BlockManagerPoolTest, SingleBlockExhaustionBehavesLikeKvBlockExhaustion) {
   EXPECT_EQ(retry.dp_rank(), retry_dp_rank);
 }
 
-TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenLinearStateDisabled) {
+TEST_F(BlockManagerPoolTest,
+       AllocateAssignsSingleBlockWhenLinearStateDisabled) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
 
@@ -581,7 +607,7 @@ TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenLinearStateDisabled) {
   EXPECT_TRUE(seq.get_embedding_block_id() >= 0);
 }
 
-TEST(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
+TEST_F(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
 
   // KV blocks are coarse (block_size=8) while the LINEAR leaf's slot pool has
@@ -613,7 +639,7 @@ TEST(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
   EXPECT_LT(free[0], static_cast<size_t>(kLinearStateSlots));
 }
 
-TEST(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
+TEST_F(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
 
@@ -648,7 +674,7 @@ TEST(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
   EXPECT_NE(clone.get_linear_state_slot_id(), src_linear_state_slot_id);
 }
 
-TEST(BlockManagerPoolTest, AllocateAfterPrefixCacheHitAllocatesSuffixBlocks) {
+TEST_F(BlockManagerPoolTest, AllocateAfterPrefixCacheHitAllocatesSuffixBlocks) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 2);
 
   BlockManagerPool::Options options;
@@ -671,7 +697,8 @@ TEST(BlockManagerPoolTest, AllocateAfterPrefixCacheHitAllocatesSuffixBlocks) {
             hit_seq.num_tokens());
 }
 
-TEST(BlockManagerPoolTest, LinearStateBlockManagerMatchesOnlyCheckpointHashes) {
+TEST_F(BlockManagerPoolTest,
+       LinearStateBlockManagerMatchesOnlyCheckpointHashes) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
 
   BlockManagerPool::Options options;
@@ -727,7 +754,7 @@ TEST(BlockManagerPoolTest, LinearStateBlockManagerMatchesOnlyCheckpointHashes) {
 // The matched tail boundary (h2 here) is checkpointed, but reusing it would pop
 // back to the previous, uncheckpointed boundary (h1) and lose restorable state,
 // so prefix reuse must be 0 instead.
-TEST(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
+TEST_F(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
 
   BlockManagerPool::Options options;
@@ -766,7 +793,7 @@ TEST(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
 
 // One token past the checkpoint boundary leaves work for the current forward,
 // so the checkpointed boundary becomes reusable.
-TEST(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
+TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
 
   BlockManagerPool::Options options;
@@ -806,8 +833,8 @@ TEST(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
   pool.deallocate_without_cache(&hit_seq);
 }
 
-TEST(BlockManagerPoolTest,
-     PendingLinearSaveEvictsUnpinnedCheckpointButNotPinned) {
+TEST_F(BlockManagerPoolTest,
+       PendingLinearSaveEvictsUnpinnedCheckpointButNotPinned) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(
@@ -859,8 +886,8 @@ TEST(BlockManagerPoolTest,
   pool.deallocate_without_cache(&saving_seq);
 }
 
-TEST(BlockManagerPoolTest,
-     PendingLinearSavePromotesLiveSlotAndMountsRestoreSrc) {
+TEST_F(BlockManagerPoolTest,
+       PendingLinearSavePromotesLiveSlotAndMountsRestoreSrc) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(
@@ -911,7 +938,8 @@ TEST(BlockManagerPoolTest,
   pool.deallocate_without_cache(&sequence);
 }
 
-TEST(BlockManagerPoolTest, PendingLinearSaveBeforeDecodeCarriesRestoreSource) {
+TEST_F(BlockManagerPoolTest,
+       PendingLinearSaveBeforeDecodeCarriesRestoreSource) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(
@@ -939,7 +967,8 @@ TEST(BlockManagerPoolTest, PendingLinearSaveBeforeDecodeCarriesRestoreSource) {
   pool.deallocate_without_cache(&sequence);
 }
 
-TEST(BlockManagerPoolTest, PendingLinearSaveSkipsWhenCheckpointAlreadyExists) {
+TEST_F(BlockManagerPoolTest,
+       PendingLinearSaveSkipsWhenCheckpointAlreadyExists) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(
@@ -985,7 +1014,7 @@ TEST(BlockManagerPoolTest, PendingLinearSaveSkipsWhenCheckpointAlreadyExists) {
   pool.deallocate_without_cache(&sequence);
 }
 
-TEST(BlockManagerPoolTest, ApplyPendingSaveSkipsWhenSlotRemoved) {
+TEST_F(BlockManagerPoolTest, ApplyPendingSaveSkipsWhenSlotRemoved) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(
@@ -1031,8 +1060,8 @@ TEST(BlockManagerPoolTest, ApplyPendingSaveSkipsWhenSlotRemoved) {
   pool.deallocate_without_cache(&sequence);
 }
 
-TEST(BlockManagerPoolTest,
-     PendingLinearSaveDedupsDuplicateSavesAcrossSequences) {
+TEST_F(BlockManagerPoolTest,
+       PendingLinearSaveDedupsDuplicateSavesAcrossSequences) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(
@@ -1092,7 +1121,7 @@ TEST(BlockManagerPoolTest,
   pool.deallocate_without_cache(&seq2);
 }
 
-TEST(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
+TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
   constexpr int32_t kCanonicalBlockSize = 256;
   constexpr int32_t kChunkStride = 128;
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
@@ -1100,7 +1129,7 @@ TEST(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(),
       kChunkStride);
 
-  const auto check_prefix = [kCanonicalBlockSize, kChunkStride](
+  const auto check_prefix = [this, kCanonicalBlockSize, kChunkStride](
                                 std::initializer_list<size_t> checkpoints,
                                 size_t expected_tokens) {
     BlockManagerPool::Options options;
@@ -1157,7 +1186,7 @@ TEST(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
   check_prefix({512}, 512);
 }
 
-TEST(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
+TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
 
   BlockManagerPool::Options options;
@@ -1207,7 +1236,7 @@ TEST(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
   pool.deallocate_without_cache(&hit_seq);
 }
 
-TEST(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
+TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
 
   BlockManagerPool::Options options;
@@ -1253,31 +1282,9 @@ TEST(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
   pool.deallocate_without_cache(&exact_seq);
 }
 
-namespace {
-
-// Independently compute the chained block hashes for `tokens`, mirroring
-// xxh3_128bits_hash() so we can check Sequence::update_block_hashes().
-std::vector<XXH3Key> ExpectedChain(const std::vector<int32_t>& tokens,
-                                   uint32_t block_size) {
-  const size_t n_blocks = tokens.size() / block_size;
-  std::vector<XXH3Key> hashes;
-  hashes.reserve(n_blocks);
-  const Slice<int32_t> slice(tokens);
-  for (size_t b = 0; b < n_blocks; ++b) {
-    XXH3Key key;
-    const uint8_t* pre = (b == 0) ? nullptr : hashes.back().data;
-    xxh3_128bits_hash(
-        pre, slice.slice(b * block_size, (b + 1) * block_size), key.data);
-    hashes.emplace_back(key);
-  }
-  return hashes;
-}
-
-}  // namespace
-
 // Validates the production hash builder Sequence::update_block_hashes():
 // correct chain, idempotency, and invalidation after a token rewrite.
-TEST(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
+TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
   const uint32_t block_size = 4;
   const uint32_t n_blocks = 5;
   std::vector<int32_t> prompt;
@@ -1348,8 +1355,8 @@ TEST(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
 // In-batch prefix cache publishes only the full blocks covered by the given
 // token budget. When the budget is overestimated, cache() must clamp to the
 // sequence's own tokens and register just the complete blocks.
-TEST(BlockManagerPoolTest,
-     CachePrefixClampsToSequenceTokensWhenBudgetIsOverestimated) {
+TEST_F(BlockManagerPoolTest,
+       CachePrefixClampsToSequenceTokensWhenBudgetIsOverestimated) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
 

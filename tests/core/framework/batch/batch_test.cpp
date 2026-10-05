@@ -331,7 +331,9 @@ class ScopedModelImpl final {
     ModelConfig::get_instance().model_impl(std::move(model_impl));
   }
 
-  ~ScopedModelImpl() { ModelConfig::get_instance().model_impl(previous_); }
+  ~ScopedModelImpl() {
+    ModelConfig::get_instance().model_impl(std::move(previous_));
+  }
 
  private:
   std::string previous_;
@@ -2801,6 +2803,264 @@ TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   batch.reset();
   EXPECT_EQ(manager.allocate(1).size(), 1u);
 }
+
+#if defined(USE_NPU)
+TEST(BatchTest, Glm53PrefillUsesCheckpointAsDirectReadSource) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("python");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  std::vector<Block> live_blocks = manager.allocate(1);
+  ASSERT_EQ(live_blocks.size(), 1u);
+  const int32_t live_id = live_blocks[0].id();
+  sequence.add_blocks(BlockType::LINEAR, std::move(live_blocks));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  const int32_t source_id = restore_sources[0].id();
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&sequence, /*allowed_max_token=*/4);
+  ModelArgs args;
+  args.model_type("glm5_next");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch->prepare_forward_input(
+      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  const LinearStateCacheOp& cache_op =
+      forward_input.input_params.linear_state_cache_ops[0];
+  EXPECT_FALSE(cache_op.reset_requested);
+  EXPECT_FALSE(cache_op.restore_requested);
+  EXPECT_EQ(cache_op.restore_src_slot_id, source_id);
+  EXPECT_EQ(cache_op.linear_state_id, live_id);
+  EXPECT_NE(cache_op.linear_state_id, source_id);
+  std::vector<Block> remaining = manager.allocate(1);
+  ASSERT_EQ(remaining.size(), 1u);
+  EXPECT_TRUE(manager.allocate(1).empty());
+  batch.reset();
+  EXPECT_EQ(manager.allocate(1).size(), 1u);
+}
+
+TEST(BatchTest, Glm53PrefillKeepsCheckpointRestoreD2DWhenDisabled) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/false);
+  ScopedModelImpl model_impl("python");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  const int32_t source_id = restore_sources[0].id();
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  Batch batch;
+  batch.add(&sequence, /*allowed_max_token=*/4);
+  ModelArgs args;
+  args.model_type("glm5_next");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  const LinearStateCacheOp& cache_op =
+      forward_input.input_params.linear_state_cache_ops[0];
+  EXPECT_TRUE(cache_op.restore_requested);
+  EXPECT_EQ(cache_op.restore_src_slot_id, source_id);
+}
+
+TEST(BatchTest, Glm53MixedBatchKeepsPrefillCheckpointRestoreD2D) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("python");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/10).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  Sequence prefill = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
+  prefill.add_blocks(BlockType::KV, manager.allocate(2));
+  prefill.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  prefill.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  std::vector<Block> prefill_restore_sources = manager.allocate(1);
+  ASSERT_EQ(prefill_restore_sources.size(), 1u);
+  const int32_t prefill_source_id = prefill_restore_sources[0].id();
+  prefill.set_linear_restore_src_block(std::move(prefill_restore_sources[0]));
+
+  Sequence decode = make_basic_sequence({9, 10, 11, 12, 13, 14, 15, 16});
+  decode.add_blocks(BlockType::KV, manager.allocate(3));
+  decode.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  decode.kv_state().incr_kv_cache_tokens_num(/*size=*/8);
+  decode.append_token(17);
+
+  Batch batch;
+  batch.add(&prefill, /*allowed_max_token=*/4);
+  batch.add(&decode, /*allowed_max_token=*/1);
+  ModelArgs args;
+  args.model_type("glm5_next");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
+
+  const auto& cache_ops = forward_input.input_params.linear_state_cache_ops;
+  ASSERT_EQ(cache_ops.size(), 2u);
+  EXPECT_EQ(cache_ops[0].restore_src_slot_id, prefill_source_id);
+  EXPECT_TRUE(cache_ops[0].restore_requested);
+  EXPECT_EQ(cache_ops[1].restore_src_slot_id, -1);
+  EXPECT_FALSE(cache_ops[1].restore_requested);
+}
+
+TEST(BatchTest, Glm53NativeExecutorKeepsCheckpointRestoreD2D) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("native");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  Batch batch;
+  batch.add(&sequence, /*allowed_max_token=*/4);
+  ModelArgs args;
+  args.model_type("glm5_next");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  EXPECT_TRUE(
+      forward_input.input_params.linear_state_cache_ops[0].restore_requested);
+}
+
+TEST(BatchTest, OtherLinearModelKeepsCheckpointRestoreD2D) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("python");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&sequence, /*allowed_max_token=*/4);
+  ModelArgs args;
+  args.model_type("qwen3_5");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch->prepare_forward_input(
+      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  EXPECT_TRUE(
+      forward_input.input_params.linear_state_cache_ops[0].restore_requested);
+}
+
+TEST(BatchTest, Glm53DecodeKeepsCheckpointRestoreD2D) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("python");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(2);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 10;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+
+  IncrementalDecoder decoder("", 8, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*token_ids=*/{1, 2, 3, 4, 5, 6, 7, 8},
+                    /*input_embedding=*/torch::Tensor(),
+                    /*mm_data=*/MMData(),
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_blocks(BlockType::KV, manager.allocate(3));
+  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/8);
+  sequence.append_token(9);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&sequence, /*allowed_max_token=*/1);
+  ModelArgs args;
+  args.model_type("glm5_next");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch->prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  EXPECT_TRUE(
+      forward_input.input_params.linear_state_cache_ops[0].restore_requested);
+}
+#else
+TEST(BatchTest, Glm53PrefillKeepsCheckpointRestoreD2DOutsideNpu) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+  ScopedLinearStateOutOfPlace out_of_place(/*enabled=*/true);
+  ScopedModelImpl model_impl("python");
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  Batch batch;
+  batch.add(&sequence, /*allowed_max_token=*/4);
+  ModelArgs args;
+  args.model_type("glm5_next");
+  args.layer_types({"linear_attention"});
+  auto forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  EXPECT_TRUE(
+      forward_input.input_params.linear_state_cache_ops[0].restore_requested);
+}
+#endif
 
 TEST(BatchTest, UnusedLinearRestoreSourceIsReleasedDuringBuild) {
   ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);

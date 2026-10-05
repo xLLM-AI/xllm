@@ -180,30 +180,29 @@ BlockCopyKernelInputData build_block_copy_kernel_input_data(
   return input_data;
 }
 
-// Native Qwen3.5 prefill on NPU can read the checkpoint slot directly without
-// a restore D2D copy when out-of-place linear state is enabled.
+// Pick the direct-read path for NPU prefill when out-of-place linear state is
+// enabled. Native Qwen3.5 kernels support per-row selection in mixed batches;
+// Python glm5_next requires the whole batch to contain no decode rows, matching
+// the batch-level invariant enforced while building Python attention metadata.
 bool should_read_linear_state_out_of_place(const ModelArgs* args,
+                                           const BatchForwardType& forward_type,
                                            const Sequence* sequence) {
-  return args != nullptr && sequence != nullptr &&
-         sequence->is_prefill_stage() && Platform::is_npu() &&
-         !ModelConfig::is_python_model_impl(
-             ModelConfig::get_instance().model_impl()) &&
-         is_qwen3_5_target_model_type(args->model_type()) &&
-         SchedulerConfig::get_instance().enable_linear_state_out_of_place();
-}
-
-// Whether the current prefill step end should hold a linear-state checkpoint.
-// Checkpoints are saved at prefill step ends that land on a chunk-end boundary
-// (stride = max_tokens_per_chunk_for_prefill). The linear-state cache is a
-// sparse per-chunk overlay: KV may cache every block boundary while
-// linear-state saves only at chunk ends.
-bool should_save_linear_checkpoint(Sequence* sequence,
-                                   uint32_t boundary_tokens,
-                                   uint32_t chunk_stride) {
-  if (sequence == nullptr || !sequence->is_prefill_stage()) {
+  if (args == nullptr || sequence == nullptr || !sequence->is_prefill_stage() ||
+      !Platform::is_npu() ||
+      !SchedulerConfig::get_instance().enable_linear_state_out_of_place()) {
     return false;
   }
-  if (boundary_tokens == 0 || chunk_stride == 0) {
+
+  const bool is_python_model = ModelConfig::is_python_model_impl(
+      ModelConfig::get_instance().model_impl());
+  return (is_python_model && args->model_type() == "glm5_next" &&
+          forward_type.no_decode()) ||
+         (!is_python_model && is_qwen3_5_target_model_type(args->model_type()));
+}
+
+bool is_linear_checkpoint_boundary(uint32_t boundary_tokens,
+                                   int32_t chunk_stride) {
+  if (boundary_tokens == 0 || chunk_stride <= 0) {
     return false;
   }
   return boundary_tokens % chunk_stride == 0;
@@ -934,18 +933,18 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   // an unset (<= 0) stride so a misconfigured run simply skips cache ops.
   const int32_t chunk_stride = ::xllm::SchedulerConfig::get_instance()
                                    .max_tokens_per_chunk_for_prefill();
+  const bool is_prefill = sequence->is_prefill_stage();
   const bool has_restore_source = sequence->has_linear_restore_src_block();
-  const bool needs_restore_hash = has_restore_source && n_kv_cache_tokens > 0 &&
-                                  chunk_stride > 0 &&
-                                  n_kv_cache_tokens % chunk_stride == 0;
+  const bool needs_restore_hash =
+      has_restore_source && is_prefill &&
+      is_linear_checkpoint_boundary(n_kv_cache_tokens, chunk_stride);
   const bool needs_restore =
-      has_restore_source &&
-      (needs_restore_hash || !sequence->is_prefill_stage());
+      has_restore_source && (needs_restore_hash || !is_prefill);
   // Exit-boundary save: persist the live state only when this prefill step
   // lands on a chunk-end boundary, so the linear-state cache stays a sparse
   // per-chunk overlay on top of the per-block KV cache.
   const bool needs_save_hash =
-      should_save_linear_checkpoint(sequence, seq_len, chunk_stride);
+      is_prefill && is_linear_checkpoint_boundary(seq_len, chunk_stride);
   // Refresh the sequence's cached chunk hashes to cover this step's deepest
   // boundary, then read them back. The cache is chained and incremental, so
   // this only hashes chunks not seen on a previous step; the match probe and
@@ -974,7 +973,8 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
         << "linear-state restore must resolve its checkpoint slot before "
            "building worker input";
     linear_state_cache_op.restore_requested =
-        !should_read_linear_state_out_of_place(args_, sequence);
+        !should_read_linear_state_out_of_place(
+            args_, state.batch_forward_type, sequence);
     linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
     state.linear_restore_src_blocks.emplace_back(
         std::move(*mounted_restore_src));
@@ -1208,13 +1208,11 @@ Input ForwardInputBuilder::state_to_forward_input() {
   Input forward_input;
 
   // Create tensors
-  forward_input.token_ids =
-      torch::tensor(state_.flatten_tokens_vec, torch::kInt);
+  forward_input.token_ids = make_cpu_tensor(state_.flatten_tokens_vec);
   forward_input.token_ids_host = forward_input.token_ids;
 
   if (!use_mrope_) {
-    forward_input.positions =
-        torch::tensor(state_.flatten_positions_vec, torch::kInt);
+    forward_input.positions = make_cpu_tensor(state_.flatten_positions_vec);
   } else {
     forward_input.positions = torch::cat(state_.mrope_positions_vec, 1);
   }
@@ -1226,30 +1224,26 @@ Input ForwardInputBuilder::state_to_forward_input() {
   input_params.meta.kv_max_seq_len = state_.max_seq_len;
   input_params.meta.q_max_seq_len = state_.q_max_seq_len;
   input_params.meta.is_graph_warmup = is_graph_warmup_;
-  input_params.attention.device.kv_seq_lens =
-      torch::tensor(state_.seq_lens, torch::kInt);
+  input_params.attention.device.kv_seq_lens = make_cpu_tensor(state_.seq_lens);
   input_params.attention.device.kv_cache_tokens_nums =
-      torch::tensor(state_.kv_cache_tokens_nums, torch::kInt);
-  input_params.attention.device.q_seq_lens =
-      torch::tensor(state_.q_seq_lens, torch::kInt);
+      make_cpu_tensor(state_.kv_cache_tokens_nums);
+  input_params.attention.device.q_seq_lens = make_cpu_tensor(state_.q_seq_lens);
   std::vector<int32_t> q_cu_seq_lens =
       build_q_cu_seq_lens_vec(state_.q_seq_lens);
-  input_params.attention.device.q_cu_seq_lens =
-      torch::tensor(q_cu_seq_lens, torch::kInt);
+  input_params.attention.device.q_cu_seq_lens = make_cpu_tensor(q_cu_seq_lens);
   input_params.attention.host.kv_cache_tokens_nums =
       std::move(state_.kv_cache_tokens_nums);
   input_params.attention.host.kv_seq_lens = std::move(state_.seq_lens);
   input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens);
   input_params.attention.host.q_seq_lens = std::move(state_.q_seq_lens);
   input_params.attention.device.new_cache_slots =
-      torch::tensor(state_.new_token_slot_ids, torch::kInt);
+      make_cpu_tensor(state_.new_token_slot_ids);
 
 #if defined(USE_MUSA)
-  auto paged_kv_indptr_cpu = torch::tensor(state_.paged_kv_indptr, torch::kInt);
-  auto paged_kv_indices_cpu =
-      torch::tensor(state_.paged_kv_indices, torch::kInt);
+  auto paged_kv_indptr_cpu = make_cpu_tensor(state_.paged_kv_indptr);
+  auto paged_kv_indices_cpu = make_cpu_tensor(state_.paged_kv_indices);
   auto paged_kv_last_page_len_cpu =
-      torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
+      make_cpu_tensor(state_.paged_kv_last_page_len);
   input_params.attention.device.paged_kv_indptr = paged_kv_indptr_cpu;
   input_params.attention.device.paged_kv_indices = paged_kv_indices_cpu;
   input_params.attention.device.paged_kv_last_page_len =
@@ -1264,11 +1258,11 @@ Input ForwardInputBuilder::state_to_forward_input() {
 #else
   // for flashinfer
   input_params.attention.device.paged_kv_indptr =
-      torch::tensor(state_.paged_kv_indptr, torch::kInt);
+      make_cpu_tensor(state_.paged_kv_indptr);
   input_params.attention.device.paged_kv_indices =
-      torch::tensor(state_.paged_kv_indices, torch::kInt);
+      make_cpu_tensor(state_.paged_kv_indices);
   input_params.attention.device.paged_kv_last_page_len =
-      torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
+      make_cpu_tensor(state_.paged_kv_last_page_len);
 #endif
 
   if constexpr (std::is_same_v<Input, VlmForwardInput> ||
@@ -1311,7 +1305,7 @@ Input ForwardInputBuilder::state_to_forward_input() {
       std::move(state_.linear_state_cache_ops);
   if (!input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
-        torch::tensor(input_params.embedding.linear_state_ids, torch::kInt);
+        make_cpu_tensor(input_params.embedding.linear_state_ids);
   }
   input_params.embedding.request_ids = std::move(state_.request_ids);
   if constexpr (!std::is_same_v<Input, RecForwardInput>) {
@@ -1319,10 +1313,9 @@ Input ForwardInputBuilder::state_to_forward_input() {
     if (!state_.mtp_shifted_token_ids.empty()) {
       // Write both the upstream "root" path (consumed by non-CP MTP code paths
       // and by the existing shm serializer) and the CP-specific embedding path
-      // (consumed by mtp_worker_impl). Both tensors share storage via
-      // from_blob; the cost is one extra tensor handle, not a copy.
-      auto mtp_tensor =
-          torch::tensor(state_.mtp_shifted_token_ids, torch::kInt);
+      // (consumed by mtp_worker_impl). Both fields share the same tensor
+      // storage; assigning the second handle does not copy the values.
+      auto mtp_tensor = make_cpu_tensor(state_.mtp_shifted_token_ids);
       input_params.embedding.mtp_shifted_token_ids = mtp_tensor;
       input_params.mtp_shifted_token_ids = mtp_tensor;
     }
