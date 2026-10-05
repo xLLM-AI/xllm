@@ -23,7 +23,7 @@ limitations under the License.
 #include <iomanip>
 #include <sstream>
 
-#include "core/framework/model/mtp_utils.h"
+#include "core/framework/speculative/mtp_utils.h"
 #include "framework/request/sequence.h"
 
 namespace xllm {

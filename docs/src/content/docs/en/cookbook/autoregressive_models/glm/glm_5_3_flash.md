@@ -72,11 +72,15 @@ for i in range(8):
     torch_npu.npu.set_device(i)"
 ```
 
-### Export MTP Weights
+### Load MTP Weights Directly
 
-```bash
-python tools/export_mtp_glm5_3_flash.py --input-dir ${W4A8/W8A8_WEIGHT_DIR} --output-dir ${EXPORTED_MTP_WEIGHT_DIR}
-```
+GLM-5.3-Flash-W8A8 does not require a separate MTP export. Point `--draft_model`
+and `--model` at the same original checkpoint directory; `--draft_model` must
+still be explicitly specified to enable MTP. The runtime locates the appended
+layer using `text_config.num_hidden_layers` and maps it to a single DSA/MoE draft,
+including its own embedding, `shared_head`, and quantization tensors. No weight
+files are rewritten or copied. Currently, `num_nextn_predict_layers=1` is supported.
+Previously exported `glm5_next_mtp` directories remain supported.
 
 ## 4. Start the Service
 
@@ -84,7 +88,7 @@ python tools/export_mtp_glm5_3_flash.py --input-dir ${W4A8/W8A8_WEIGHT_DIR} --ou
 
 ```bash
 export MODEL_PATH="/path/to/GLM-5.3-Flash-W8A8"
-export DRAFT_MODEL_PATH="/path/to/GLM-5.3-Flash-W8A8-MTP"
+export DRAFT_MODEL_PATH="$MODEL_PATH"
 export XLLM_PATH="/export/home/xllm/build/xllm/core/server/xllm"
 ```
 

@@ -19,11 +19,16 @@ limitations under the License.
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
+#include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/framework/kv_cache/kv_cache_shape.h"
 #include "core/framework/model/rec_causal_lm.h"
+#include "core/framework/speculative/mtp_utils.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
+#include "core/runtime/options.h"
 #include "core/util/model_config_utils.h"
 #include "models/model_registry.h"
 
@@ -243,6 +248,230 @@ TEST(HFModelLoaderTest, RecFactoryCreatesRecCausalLmInstance) {
 
 #if defined(USE_NPU) || defined(USE_MLU)
 #if defined(USE_NPU)
+TEST(HFModelLoaderTest, Glm5NextNativeMtpUsesAppendedLayer) {
+  auto loader = ModelRegistry::get_model_args_loader("glm5_next");
+  ASSERT_NE(loader, nullptr);
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json({
+    "model_type": "glm5_next",
+    "text_config": {
+      "num_hidden_layers": 45,
+      "num_nextn_predict_layers": 1,
+      "first_k_dense_replace": 3,
+      "index_share_for_mtp_iteration": true,
+      "index_topk_freq": 1
+    }
+  })json"));
+  ModelArgs target_args;
+  ASSERT_TRUE(loader(reader, &target_args));
+  EXPECT_EQ(target_args.num_nextn_predict_layers(), 1);
+  EXPECT_EQ(target_args.mtp_start_layer_idx(), -1);
+  EXPECT_FALSE(configure_glm5_next_mtp_args(target_args,
+                                            /*speculative_algorithm=*/"MTP",
+                                            /*is_draft_engine=*/false));
+  ModelArgs draft_args = target_args;
+  ASSERT_TRUE(configure_glm5_next_mtp_args(draft_args,
+                                           /*speculative_algorithm=*/"MTP",
+                                           /*is_draft_engine=*/true));
+  EXPECT_EQ(target_args.model_type(), "glm5_next");
+  EXPECT_EQ(target_args.n_layers(), 45);
+  EXPECT_EQ(draft_args.model_type(), "glm5_next_mtp");
+  EXPECT_EQ(draft_args.n_layers(), 1);
+  EXPECT_EQ(draft_args.mtp_start_layer_idx(), 45);
+  EXPECT_EQ(draft_args.first_k_dense_replace(), 0);
+  EXPECT_EQ(draft_args.layer_types(),
+            std::vector<std::string>({"deepseek_sparse_attention"}));
+  EXPECT_EQ(draft_args.full_attn_layers(), std::vector<int32_t>({0}));
+  EXPECT_EQ(draft_args.mlp_layer_types(), std::vector<std::string>({"sparse"}));
+  EXPECT_EQ(draft_args.indexer_types(), std::vector<std::string>({"full"}));
+  EXPECT_EQ(draft_args.index_topk_freq(), 2);
+  EXPECT_EQ(draft_args.index_skip_topk_offset(), 0);
+  EXPECT_EQ(draft_args.index_topk_pattern(), "S");
+}
+
+TEST(HFModelLoaderTest, Glm5NextExportedMtpKeepsNativeKeys) {
+  auto loader = ModelRegistry::get_model_args_loader("glm5_next_mtp");
+  ASSERT_NE(loader, nullptr);
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json({
+    "model_type": "glm5_next_mtp",
+    "text_config": {
+      "num_hidden_layers": 1,
+      "num_nextn_predict_layers": 1,
+      "first_k_dense_replace": 0,
+      "layer_types": ["deepseek_sparse_attention"],
+      "mlp_layer_types": ["sparse"],
+      "indexer_types": ["full"]
+    }
+  })json"));
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_FALSE(configure_glm5_next_mtp_args(args,
+                                            /*speculative_algorithm=*/"MTP",
+                                            /*is_draft_engine=*/true));
+  EXPECT_EQ(args.model_type(), "glm5_next_mtp");
+  EXPECT_EQ(args.n_layers(), 1);
+  EXPECT_EQ(args.mtp_start_layer_idx(), -1);
+}
+
+TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIsIdempotent) {
+  ModelArgs args;
+  args.model_type("glm5_next").n_layers(45).num_nextn_predict_layers(1);
+  ASSERT_TRUE(configure_glm5_next_mtp_args(args,
+                                           /*speculative_algorithm=*/"MTP",
+                                           /*is_draft_engine=*/true));
+  EXPECT_FALSE(configure_glm5_next_mtp_args(args,
+                                            /*speculative_algorithm=*/"MTP",
+                                            /*is_draft_engine=*/true));
+  EXPECT_EQ(args.model_type(), "glm5_next_mtp");
+  EXPECT_EQ(args.n_layers(), 1);
+  EXPECT_EQ(args.mtp_start_layer_idx(), 45);
+}
+
+TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherAlgorithms) {
+  for (const std::string_view algorithm : {"", "Eagle3", "DFlash", "DSpark"}) {
+    SCOPED_TRACE(algorithm);
+    ModelArgs args;
+    args.model_type("glm5_next").n_layers(45).num_nextn_predict_layers(1);
+    EXPECT_FALSE(configure_glm5_next_mtp_args(
+        args, algorithm, /*is_draft_engine=*/true));
+    EXPECT_EQ(args.model_type(), "glm5_next");
+    EXPECT_EQ(args.n_layers(), 45);
+    EXPECT_EQ(args.mtp_start_layer_idx(), -1);
+  }
+}
+
+TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherModels) {
+  for (const std::string model_type : {"deepseek_v3", "qwen3_5_text"}) {
+    SCOPED_TRACE(model_type);
+    ModelArgs args;
+    args.model_type(model_type).n_layers(45).num_nextn_predict_layers(1);
+    EXPECT_FALSE(configure_glm5_next_mtp_args(args,
+                                              /*speculative_algorithm=*/"MTP",
+                                              /*is_draft_engine=*/true));
+    EXPECT_EQ(args.model_type(), model_type);
+    EXPECT_EQ(args.n_layers(), 45);
+    EXPECT_EQ(args.mtp_start_layer_idx(), -1);
+  }
+}
+
+TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
+  auto loader = ModelRegistry::get_model_args_loader("glm5_next");
+  ASSERT_NE(loader, nullptr);
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json({
+    "model_type": "glm5_next",
+    "text_config": {
+      "num_hidden_layers": 45,
+      "num_nextn_predict_layers": 1,
+      "index_share_for_mtp_iteration": true,
+      "index_kpool_compress": true,
+      "linear_attn_config": {
+        "num_heads": 64,
+        "head_dim": 128,
+        "short_conv_kernel_size": 4
+      }
+    }
+  })json"));
+  ModelArgs engine_args;
+  ASSERT_TRUE(loader(reader, &engine_args));
+  ASSERT_TRUE(has_linear_attention_layers(engine_args));
+  engine_args.enable_mla(true);
+  ModelArgs worker_args = engine_args;
+  runtime::Options engine_options;
+  engine_options.is_draft_engine(true)
+      .speculative_algorithm("mTp")
+      .enable_speculative_decode(false);
+  runtime::Options worker_options = engine_options;
+  worker_options.enable_speculative_decode(true);
+  ASSERT_TRUE(
+      configure_glm5_next_mtp_args(engine_args,
+                                   engine_options.speculative_algorithm(),
+                                   engine_options.is_draft_engine()));
+  ASSERT_TRUE(
+      configure_glm5_next_mtp_args(worker_args,
+                                   worker_options.speculative_algorithm(),
+                                   worker_options.is_draft_engine()));
+
+  JsonReader exported_reader;
+  ASSERT_TRUE(exported_reader.parse_text(R"json({
+    "model_type": "glm5_next_mtp",
+    "text_config": {
+      "num_hidden_layers": 1,
+      "num_nextn_predict_layers": 1,
+      "first_k_dense_replace": 0,
+      "layer_types": ["deepseek_sparse_attention"],
+      "mlp_layer_types": ["sparse"],
+      "indexer_types": ["full"],
+      "index_kpool_compress": true,
+      "linear_attn_config": {
+        "num_heads": 64,
+        "head_dim": 128,
+        "short_conv_kernel_size": 4
+      }
+    }
+  })json"));
+  ModelArgs exported_args;
+  ASSERT_TRUE(loader(exported_reader, &exported_args));
+  exported_args.enable_mla(true);
+  EXPECT_FALSE(
+      configure_glm5_next_mtp_args(exported_args,
+                                   engine_options.speculative_algorithm(),
+                                   engine_options.is_draft_engine()));
+
+  KVCacheEstimateOptions cache_options;
+  cache_options.cache_size_in_bytes = 1024 * 1024;
+  cache_options.block_size = 128;
+  cache_options.world_size = 8;
+  cache_options.n_local_kv_heads = 8;
+  cache_options.max_seqs_per_batch = 16;
+  cache_options.is_draft_engine = true;
+  const KVCacheCapacity exported_capacity =
+      estimate_kv_cache_capacity(exported_args, cache_options);
+  const KVCacheShape exported_shape(
+      exported_capacity, exported_args, cache_options.world_size);
+  for (const ModelArgs* model_args : {&engine_args, &worker_args}) {
+    EXPECT_FALSE(has_linear_attention_layers(*model_args));
+    EXPECT_EQ(model_args->mtp_start_layer_idx(), 45);
+    const KVCacheCapacity capacity =
+        estimate_kv_cache_capacity(*model_args, cache_options);
+    EXPECT_EQ(capacity.n_layers(), 1);
+    EXPECT_EQ(capacity.num_full_attention_layers(), 1);
+    EXPECT_EQ(capacity.num_linear_attention_layers(), 0);
+    EXPECT_EQ(capacity.num_indexer_layers(), 1);
+    EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 0);
+    EXPECT_EQ(capacity.n_blocks(), exported_capacity.n_blocks());
+    EXPECT_EQ(capacity.slot_size(), exported_capacity.slot_size());
+    EXPECT_EQ(capacity.index_slot_size(), exported_capacity.index_slot_size());
+    const KVCacheShape shape(capacity, *model_args, cache_options.world_size);
+    EXPECT_EQ(shape.key_cache_shape(), exported_shape.key_cache_shape());
+    EXPECT_EQ(shape.value_cache_shape(), exported_shape.value_cache_shape());
+    ASSERT_TRUE(shape.has_index_cache_shape());
+    EXPECT_EQ(shape.index_cache_shape(), exported_shape.index_cache_shape());
+    EXPECT_FALSE(shape.has_conv_cache_shape());
+    EXPECT_FALSE(shape.has_ssm_cache_shape());
+  }
+}
+
+TEST(HFModelLoaderTest, Glm5NextNativeMtpRejectsUnsupportedLayerCounts) {
+  ModelArgs args;
+  args.model_type("glm5_next").n_layers(45);
+  EXPECT_DEATH(configure_glm5_next_mtp_args(args,
+                                            /*speculative_algorithm=*/"MTP",
+                                            /*is_draft_engine=*/true),
+               "exactly one");
+  args.num_nextn_predict_layers(2);
+  EXPECT_DEATH(configure_glm5_next_mtp_args(args,
+                                            /*speculative_algorithm=*/"MTP",
+                                            /*is_draft_engine=*/true),
+               "exactly one");
+  args.num_nextn_predict_layers(1).n_layers(0);
+  EXPECT_DEATH(configure_glm5_next_mtp_args(args,
+                                            /*speculative_algorithm=*/"MTP",
+                                            /*is_draft_engine=*/true),
+               "n_layers");
+}
+
 TEST(HFModelLoaderTest, Qwen3DSparkFieldsFromTorchConfig) {
   auto loader = ModelRegistry::get_model_args_loader("qwen3");
   ASSERT_NE(loader, nullptr);

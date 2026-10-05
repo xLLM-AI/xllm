@@ -40,8 +40,8 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
-#include "core/framework/model/mtp_utils.h"
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/speculative/mtp_utils.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"

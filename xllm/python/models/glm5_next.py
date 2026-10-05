@@ -2212,7 +2212,7 @@ class Glm5NextForCausalLM(PyModelBase):
                 torch.empty(num_experts, hidden, inter_local, dtype=torch.int8, device=ref.device), requires_grad=False
             )
             moe_mod.register_buffer(
-                "experts_w2_scale", torch.empty(num_experts, hidden, 1, dtype=torch.float32, device=ref.device)
+                "experts_w2_scale", torch.empty(num_experts, hidden, 1, dtype=torch.bfloat16, device=ref.device)
             )
             moe_mod.register_buffer(
                 "experts_w2_offset", torch.zeros(num_experts, hidden, 1, dtype=torch.float32, device=ref.device)

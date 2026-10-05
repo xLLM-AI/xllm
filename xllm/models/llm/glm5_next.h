@@ -57,6 +57,8 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
   LOAD_ARG_OR(vocab_size, "text_config.vocab_size", 154880);
   LOAD_ARG_OR(hidden_size, "text_config.hidden_size", 4096);
   LOAD_ARG_OR(n_layers, "text_config.num_hidden_layers", 45);
+  LOAD_ARG_OR(
+      num_nextn_predict_layers, "text_config.num_nextn_predict_layers", 0);
   LOAD_ARG_OR(n_heads, "text_config.num_attention_heads", 64);
   LOAD_ARG_OR(n_kv_heads, "text_config.num_key_value_heads", 64);
   LOAD_ARG_OR(intermediate_size, "text_config.intermediate_size", 12288);
@@ -98,6 +100,9 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
               "text_config.index_kpool_always_select_tail",
               false);
   LOAD_ARG_OR(index_topk_freq, "text_config.index_topk_freq", 1);
+  LOAD_ARG_OR(index_share_for_mtp_iteration,
+              "text_config.index_share_for_mtp_iteration",
+              false);
   LOAD_ARG_OR(index_skip_topk_offset, "text_config.index_skip_topk_offset", 1);
   LOAD_ARG_OR(
       indexer_types, "text_config.indexer_types", std::vector<std::string>());

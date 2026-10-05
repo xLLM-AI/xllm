@@ -35,6 +35,7 @@ python MTP scheme (``deepseek_v32_mtp.py``):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -52,7 +53,32 @@ from xllm.python.models.glm5_next import (
 )
 
 if TYPE_CHECKING:
-    from xllm_weight_loader import StateDict
+    from xllm.python.model_loader import StateDictLike
+
+
+def _get_mtp_name_aliases(
+    state_dicts: list[StateDictLike], start_layer: int
+) -> Callable[[str], tuple[str, ...]] | None:
+    if start_layer < 0:
+        return None
+    for prefix in (f"model.language_model.layers.{start_layer}.", f"model.layers.{start_layer}."):
+        if any(state_dict.has(prefix + "enorm.weight") for state_dict in state_dicts):
+            break
+    else:
+        raise ValueError(f"GLM MTP checkpoint is missing appended layer {start_layer}")
+
+    def _checkpoint_names(name: str) -> tuple[str, ...]:
+        for source, destination in (
+            ("model.layers.0.", ""),
+            ("model.norm.", "shared_head.norm."),
+            ("lm_head.", "shared_head.head."),
+            ("model.", ""),
+        ):
+            if name.startswith(source):
+                return (prefix + destination + name[len(source) :],)
+        raise ValueError(f"Unsupported GLM MTP parameter: {name}")
+
+    return _checkpoint_names
 
 
 class Glm5NextMtpDecoderLayer(nn.Module):
@@ -177,20 +203,20 @@ class Glm5NextMtpForCausalLM(Glm5NextForCausalLM):
     """GLM-5.3-Flash MTP draft calculator; scheduling stays in the C++ worker."""
 
     def __init__(self, config: dict) -> None:
+        self._mtp_start_layer_idx = int(config.get("mtp_start_layer_idx", -1))
         super().__init__(config, build_model=False)
         self.model = Glm5NextMtpModel(self.cfg, self.dtype, self.device)
         self.to(device=self.device, dtype=self.dtype)
 
-    def load_weights(self, state_dicts: list[StateDict], tp_rank: int, tp_size: int) -> None:
-        """Load the exported MTP draft checkpoint (loader-native key names).
-
-        The exporter (tools/export_mtp.py) remaps the appended checkpoint layer
-        ``model.language_model.layers.<n>`` to ``model.layers.0`` plus top-level
-        ``model.{enorm,hnorm,eh_proj}``, ``model.norm`` (shared_head.norm),
-        ``model.embed_tokens`` and ``lm_head``, so no real-checkpoint aliasing
-        is needed here.
-        """
-        L = QLinearWeightLoader(self, state_dicts, tp_size, tp_rank)
+    def load_weights(self, state_dicts: list[StateDictLike], tp_rank: int, tp_size: int) -> None:
+        """Load exported keys or resolve the original appended MTP layer aliases."""
+        L = QLinearWeightLoader(
+            self,
+            state_dicts,
+            tp_size,
+            tp_rank,
+            name_aliases=_get_mtp_name_aliases(state_dicts, self._mtp_start_layer_idx),
+        )
         # embed_tokens: HiddenParallelEmbedding — shard the hidden dim.
         L.copy_shard("model.embed_tokens.weight", dim=1)
         p = "model.layers.0."

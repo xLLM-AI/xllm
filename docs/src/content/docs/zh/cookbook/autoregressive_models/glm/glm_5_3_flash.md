@@ -72,11 +72,13 @@ for i in range(8):
     torch_npu.npu.set_device(i)"
 ```
 
-### 导出MTP权重
+### 直接读取 MTP 权重
 
-```bash
-python tools/export_mtp_glm5_3_flash.py --input-dir ${W4A8/W8A8权重目录} --output-dir ${导出MTP权重目录}
-```
+GLM-5.3-Flash-W8A8 无需单独导出 MTP。将 `--draft_model` 和 `--model`
+指向同一个原始权重目录即可；启用 MTP 时仍需显式指定 `--draft_model`。
+运行时按 `text_config.num_hidden_layers` 定位附加层，并将其映射为单层 DSA/MoE draft，
+同时读取该层自己的 embedding、`shared_head` 和量化参数，不会改写或复制权重文件。
+目前支持 `num_nextn_predict_layers=1`。已经导出的 `glm5_next_mtp` 目录仍可使用。
 
 ## 4. 启动服务
 
@@ -84,7 +86,7 @@ python tools/export_mtp_glm5_3_flash.py --input-dir ${W4A8/W8A8权重目录} --o
 
 ```bash
 export MODEL_PATH="/path/to/GLM-5.3-Flash-W8A8"
-export DRAFT_MODEL_PATH="/path/to/GLM-5.3-Flash-W8A8-MTP"
+export DRAFT_MODEL_PATH="$MODEL_PATH"
 export XLLM_PATH="/export/home/xllm/build/xllm/core/server/xllm"
 ```
 

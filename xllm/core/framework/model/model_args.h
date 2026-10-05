@@ -178,6 +178,7 @@ struct ModelArgs {
   PROPERTY(int32_t, kv_lora_rank) = 0;
   // deepseek v3/v3.2 MTP
   PROPERTY(int32_t, num_nextn_predict_layers) = 0;
+  PROPERTY(int64_t, mtp_start_layer_idx) = -1;
   PROPERTY(std::string, mtp_mlp_type) = "moe";
 
   // deepseek v3.2 indexer
