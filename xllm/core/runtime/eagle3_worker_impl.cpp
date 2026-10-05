@@ -106,7 +106,7 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 }
 
 template <typename TargetInput>
-int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() {
+int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
   const int64_t target_hidden = context_.get_model_args().hidden_size();
   return 3 * target_hidden;
 }

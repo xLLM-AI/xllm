@@ -472,4 +472,31 @@ const std::vector<int64_t>& KVCacheShape::empty_shape() {
   return kEmptyShape;
 }
 
+KVCacheShape build_speculative_draft_kv_cache_shape(
+    const KVCacheShape& target_kv_cache_shape,
+    KVCacheCapacity draft_capacity,
+    const ModelArgs& draft_model_args,
+    int64_t block_size,
+    int64_t draft_world_size,
+    const std::string& kv_cache_dtype) {
+  CHECK(!target_kv_cache_shape.key_cache_shape().empty())
+      << "target KV cache shape must contain key cache shape";
+  if (target_kv_cache_shape.has_grouped_cache_layout()) {
+    return target_kv_cache_shape;
+  }
+
+  // Derive the draft layout from its model type and the configured KV dtype.
+  const bool draft_mla_packed_c8 =
+      draft_model_args.enable_mla() &&
+      util::enable_mla_packed_c8(kv_cache_dtype == "int8",
+                                 draft_model_args.model_type());
+  CHECK(!has_linear_attention_layers(draft_model_args) ||
+        draft_capacity.num_linear_state_blocks() > 0)
+      << "Linear drafts require an explicit linear-state capacity.";
+  draft_capacity.n_blocks(target_kv_cache_shape.key_cache_shape()[0])
+      .block_size(block_size)
+      .enable_mla_kv_cache_quant(draft_mla_packed_c8);
+  return KVCacheShape(draft_capacity, draft_model_args, draft_world_size);
+}
+
 }  // namespace xllm

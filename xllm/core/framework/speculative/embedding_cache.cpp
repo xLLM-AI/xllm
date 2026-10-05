@@ -81,16 +81,15 @@ void EmbeddingCache::write_mtp_bootstrap_context(
     const torch::Tensor& embedding) {
   CHECK(embedding.defined()) << "MTP bootstrap embedding is undefined";
   CHECK_GE(token_id, 0) << "MTP bootstrap token should be valid";
-
+  DecodeState& tail = mutable_tail(embedding_id);
+  if (tail.valid && !request_id.empty() && tail.request_id == request_id) {
+    return;
+  }
   DecodeState state;
   state.valid = true;
   state.request_id = request_id;
-  state.all_draft_accepted = false;
   state.token_id = token_id;
-  state.position_offset = 0;
   state.embedding = clone_contiguous_detached_tensor(embedding);
-
-  DecodeState& tail = mutable_tail(embedding_id);
   tail = std::move(state);
 }
 
@@ -99,7 +98,8 @@ void EmbeddingCache::write_target_context(
     const std::vector<std::string>& request_ids,
     const torch::Tensor& accepted_tokens,
     const torch::Tensor& accepted_embeddings,
-    int32_t num_speculative_tokens) {
+    int32_t num_speculative_tokens,
+    bool retain_previous_embedding) {
   CHECK(accepted_tokens.defined()) << "accepted target tokens are undefined";
   CHECK(accepted_embeddings.defined())
       << "accepted target embeddings are undefined";
@@ -157,7 +157,7 @@ void EmbeddingCache::write_target_context(
     state.correction_position_offset = correction_offset;
     state.embedding = clone_contiguous_detached_tensor(
         accepted_embeddings.select(/*dim=*/0, i).select(/*dim=*/0, last_idx));
-    if (last_idx > 0) {
+    if (retain_previous_embedding && last_idx > 0) {
       const int64_t prev_token =
           accepted_tokens_data[row_offset + last_idx - 1];
       state.prev_token_id = static_cast<int32_t>(prev_token);

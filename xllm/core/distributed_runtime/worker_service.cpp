@@ -42,10 +42,10 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
+#include "framework/speculative/spec_verify.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
 #include "runtime/rec_forward_params.h"
-#include "runtime/speculative_worker_impl.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/timer.h"
 

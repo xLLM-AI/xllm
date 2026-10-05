@@ -18,6 +18,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/model/domain_attention_input.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
@@ -79,8 +80,7 @@ class LlmModelParams final {
     if (!params.embedding.linear_state_indices.defined() &&
         !params.embedding.linear_state_ids.empty()) {
       params.embedding.linear_state_indices =
-          torch::tensor(params.embedding.linear_state_ids, torch::kInt)
-              .to(device);
+          make_cpu_tensor(params.embedding.linear_state_ids).to(device);
     }
 #if defined(USE_MUSA)
     params.attn_metadata = attn_metadata;

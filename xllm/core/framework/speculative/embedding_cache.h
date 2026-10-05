@@ -64,15 +64,14 @@ class EmbeddingCache final {
   // disable copy, move and assign
   DISALLOW_COPY_AND_ASSIGN(EmbeddingCache);
 
-  // Writes target prefill output after target model generates the first token.
-  // Draft prefill output is intentionally ignored and must not be written here.
-  // embeddings must already contain one selected hidden row per sequence.
+  // Seed target context from prefill output or PD handoff. The embeddings
+  // contain one selected hidden row per sequence; draft output is excluded.
   void write_prefill_target_context(const std::vector<int32_t>& embedding_ids,
                                     const std::vector<std::string>& request_ids,
                                     const torch::Tensor& next_tokens,
                                     const torch::Tensor& embeddings);
 
-  // Writes PD handoff bootstrap target context for the first MTP decode step.
+  // Seeds PD handoff context without replacing an active request tail.
   void write_mtp_bootstrap_context(int32_t embedding_id,
                                    const std::string& request_id,
                                    int32_t token_id,
@@ -85,7 +84,8 @@ class EmbeddingCache final {
                             const std::vector<std::string>& request_ids,
                             const torch::Tensor& accepted_tokens,
                             const torch::Tensor& accepted_embeddings,
-                            int32_t num_speculative_tokens);
+                            int32_t num_speculative_tokens,
+                            bool retain_previous_embedding = true);
 
   // Algorithm-specific placeholder embedding for missing target context, e.g.
   // PD first decode. MTP uses hidden_size; Eagle3 uses 3 * hidden_size.

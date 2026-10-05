@@ -87,7 +87,7 @@ inline torch::Tensor make_cpu_tensor_with_options(
     for (size_t i = 0; i < values.size(); ++i) {
       data[i] = values[i];
     }
-  } else {
+  } else if (!values.empty()) {
     std::memcpy(tensor.data_ptr<T>(), values.data(), values.size() * sizeof(T));
   }
   return tensor;
@@ -127,6 +127,17 @@ inline torch::Tensor safe_to(const torch::Tensor& t,
                              const torch::TensorOptions& options,
                              bool non_blocking = false) {
   return t.defined() ? t.to(options, non_blocking) : t;
+}
+
+// Repeat defined tensors while preserving undefined optional fields. Repeats
+// can be a scalar count or a tensor of per-row counts; dim follows LibTorch.
+template <typename Repeats>
+inline void repeat_interleave_if_defined(torch::Tensor& tensor,
+                                         const Repeats& repeats,
+                                         int64_t dim = 0) {
+  if (tensor.defined()) {
+    tensor = tensor.repeat_interleave(repeats, dim);
+  }
 }
 
 // Copies directly into independent contiguous storage, detached from autograd.
@@ -171,10 +182,17 @@ inline torch::Tensor arange_indices(int64_t count,
 // that stream active (e.g. via its stream guard) until the copy is ordered
 // before any consumer, and must synchronize before reading the result on
 // the host.
+template <typename T, typename Options>
+  requires std::is_same_v<Options, torch::TensorOptions>
+inline torch::Tensor async_h2d_tensor(const std::vector<T>& values,
+                                      const Options& options) {
+  return make_pinned_cpu_tensor(values).to(options, /*non_blocking=*/true);
+}
+
 template <typename T>
 inline torch::Tensor async_h2d_tensor(const std::vector<T>& values,
                                       const torch::Device& device) {
-  return make_pinned_cpu_tensor(values).to(device, /*non_blocking=*/true);
+  return async_h2d_tensor(values, torch::TensorOptions().device(device));
 }
 
 inline std::vector<char> get_the_bytes(std::string filename) {

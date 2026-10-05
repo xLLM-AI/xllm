@@ -364,6 +364,7 @@ TEST(SpeculativeDraftKVCacheShapeTest, ReusesGroupedTargetPoolCounts) {
 
   const KVCacheShape draft_shape =
       build_speculative_draft_kv_cache_shape(target_shape,
+                                             KVCacheCapacity(),
                                              draft_model_args,
                                              kBlockSize,
                                              /*draft_world_size=*/1,
@@ -830,6 +831,7 @@ TEST(SpeculativeDraftKVCacheShapeTest,
 
   const KVCacheShape draft_shape =
       build_speculative_draft_kv_cache_shape(target_shape,
+                                             KVCacheCapacity(),
                                              draft_args,
                                              kMtpTestBlockSize,
                                              /*draft_world_size=*/1,
@@ -859,6 +861,7 @@ TEST(SpeculativeDraftKVCacheShapeTest, KeepsBf16LayoutWhenKvCacheDtypeIsAuto) {
 
   const KVCacheShape draft_shape =
       build_speculative_draft_kv_cache_shape(target_shape,
+                                             KVCacheCapacity(),
                                              draft_args,
                                              kMtpTestBlockSize,
                                              /*draft_world_size=*/1,

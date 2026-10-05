@@ -107,9 +107,9 @@ PrunedPrefixMasks build_pruned_prefix_masks(
     const torch::Device& device) {
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   torch::Tensor prefix_lengths =
-      safe_to(make_pinned_cpu_tensor(pruned_prefix_lengths),
-              torch::TensorOptions().dtype(torch::kLong).device(device),
-              /*non_blocking=*/true)
+      async_h2d_tensor(
+          pruned_prefix_lengths,
+          torch::TensorOptions().dtype(torch::kLong).device(device))
           .clamp(0, num_speculative_tokens);
   torch::Tensor positions =
       torch::arange(num_val_tokens, prefix_lengths.options());

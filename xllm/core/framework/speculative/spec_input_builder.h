@@ -144,6 +144,18 @@ int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
 // Appends one q/kv length element using current backend layout policy.
 void append_seq_len_by_layout(std::vector<int32_t>& vec, int32_t len);
 
+// Rebuilds leading-zero query offsets from the backend-neutral length accessor.
+template <typename Params>
+void rebuild_q_cu_seq_lens(Params& params) {
+  auto& q_cu_seq_lens = params.attention.host.q_cu_seq_lens;
+  q_cu_seq_lens.clear();
+  q_cu_seq_lens.reserve(params.meta.num_sequences + 1);
+  q_cu_seq_lens.emplace_back(0);
+  for (int32_t i = 0; i < params.meta.num_sequences; ++i) {
+    q_cu_seq_lens.emplace_back(q_cu_seq_lens.back() + params.get_q_seq_len(i));
+  }
+}
+
 // Appends one q length and the matching cumulative q length.
 void append_q_seq_len(std::vector<int32_t>& q_seq_lens,
                       std::vector<int32_t>& q_cu_seq_lens,

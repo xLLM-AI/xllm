@@ -181,7 +181,10 @@ TEST(EmbeddingCacheTest, WriteMtpBootstrapContextStoresExactDecodeState) {
   torch::Tensor embedding = torch::tensor({1.0f, 2.0f, 3.0f});
 
   cache.write_mtp_bootstrap_context(
-      /*embedding_id=*/1, "req_bootstrap", /*token_id=*/17, embedding);
+      /*embedding_id=*/1,
+      /*request_id=*/"req_bootstrap",
+      /*token_id=*/17,
+      embedding);
 
   std::vector<EmbeddingCache::DecodeState> states =
       cache.read_decode_states({1}, {"req_bootstrap"});

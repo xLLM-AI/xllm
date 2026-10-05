@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/kernels/npu/xllm_ops/mega_gdn_constants.h"
 #include "core/kernels/ops_api.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm {
@@ -66,8 +67,7 @@ void check_live_slots(const std::vector<int32_t>& live_slots,
 
 torch::Tensor slots_to_device(const std::vector<int32_t>& slots,
                               const torch::Device& device) {
-  return torch::tensor(slots, torch::TensorOptions().dtype(torch::kInt))
-      .to(device);
+  return make_cpu_tensor(slots).to(device);
 }
 
 torch::Tensor graph_safe_indices(const torch::Tensor& indices,

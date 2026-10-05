@@ -33,9 +33,6 @@ limitations under the License.
 #include <unordered_set>
 
 #include "common/metrics.h"
-#if defined(USE_NPU) || defined(USE_MLU)
-#include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
-#endif
 #include "core/framework/block/block_utils.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -50,6 +47,7 @@ limitations under the License.
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
 #include "core/framework/speculative/adaptive_pruning_helpers.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/framework/speculative/mtp_async_state.h"
@@ -791,15 +789,18 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(
     const runtime::Options& draft_options,
     WorkerType worker_type,
     bool enable_adaptive_speculative_decode)
-    : SpeculativeWorkerImpl<TargetInput>(parallel_args,
-                                         device,
-                                         options,
-                                         target_options,
-                                         worker_type) {
-  draft_impl_ = std::make_unique<LLMWorkerImpl>(
-      mtp_draft_parallel_args(parallel_args, options),
-      device,
-      mtp_draft_options(draft_options));
+    : DraftModelSpecWorkerImpl<TargetInput>(
+          parallel_args,
+          device,
+          options,
+          target_options,
+          worker_type,
+          [&parallel_args, &device, &options, &draft_options] {
+            return std::make_unique<LLMWorkerImpl>(
+                mtp_draft_parallel_args(parallel_args, options),
+                device,
+                draft_options);
+          }) {
   if (enable_adaptive_speculative_decode) {
     adaptive_spec_controller_ =
         std::make_unique<AdaptiveSpeculativeController>(options);
@@ -808,13 +809,6 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(
 
 template <typename TargetInput>
 MTPWorkerImpl<TargetInput>::~MTPWorkerImpl() = default;
-
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::task_models_loaded() const {
-  return impl_ != nullptr && draft_impl_ != nullptr &&
-         impl_->get_status() == WorkerImpl::Status::LOADED &&
-         draft_impl_->get_status() == WorkerImpl::Status::LOADED;
-}
 
 template <typename TargetInput>
 ::xllm::Status MTPWorkerImpl<TargetInput>::create_task_pipeline(
@@ -865,21 +859,10 @@ bool MTPWorkerImpl<TargetInput>::init_model(
     const std::string& model_weights_path,
     int32_t random_seed,
     MasterStatus master_status) {
-  // Load target model via base class
-  bool result = true;
-  const bool loading_target =
-      impl_->get_status() == WorkerImpl::Status::UNINITIALIZED;
-  if (loading_target) {
-    result = SpeculativeWorkerImpl<TargetInput>::init_model(
-        model_weights_path, random_seed, master_status);
-  } else {
-    CHECK_EQ(draft_impl_->get_status(), WorkerImpl::Status::UNINITIALIZED);
-    result = draft_impl_->WorkerImpl::init_model(
-        model_weights_path, random_seed, master_status);
-  }
+  const bool result = DraftModelSpecWorkerImpl<TargetInput>::init_model(
+      model_weights_path, random_seed, master_status);
 
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
-    context_ = impl_->context_;
     target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
         context_.get_model_args().model_type());
     if (target_spec_verify_mode_ ==
@@ -951,33 +934,22 @@ template <typename TargetInput>
 std::tuple<int64_t, int64_t>
 MTPWorkerImpl<TargetInput>::estimate_kv_cache_capacity() {
   CHECK(impl_ != nullptr);
-  CHECK(draft_impl_ != nullptr);
-  return estimate_kv_cache_capacity_with_draft(
-      *draft_impl_, mtp_target_options(options_), mtp_draft_options(options_));
+  return estimate_kv_cache_capacity_with_draft(mtp_target_options(options_),
+                                               mtp_draft_options(options_));
 }
 
 template <typename TargetInput>
-int64_t MTPWorkerImpl<TargetInput>::get_embedding_placeholder_size() {
+int64_t MTPWorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
   // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
   // [num_tokens, hc_mult*hidden], so the cache placeholder must cover
   // hc_mult*hidden per row.
-  if (impl_ != nullptr) {
-    const ModelArgs& args = impl_->context_.get_model_args();
-    return mtp_hidden_state_width(args);
-  }
-  return static_cast<int64_t>(embedding_size_);
-}
-
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::should_use_separate_draft_kv_cache_shape()
-    const {
-  return uses_embedded_eagle3_draft();
+  return mtp_hidden_state_width(impl_->context_.get_model_args());
 }
 
 template <typename TargetInput>
 KVCacheShape MTPWorkerImpl<TargetInput>::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
-  if (should_use_separate_draft_kv_cache_shape()) {
+  if (uses_embedded_eagle3_draft()) {
     return build_draft_kv_cache_shape(target_kv_cache_shape);
   }
   if (options_.enable_mtp_draft_body_tp1()) {
@@ -1140,121 +1112,11 @@ int32_t MTPWorkerImpl<TargetInput>::logical_block_size() const {
 }
 
 template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::allocate_kv_cache(
-    const KVCacheShape& kv_cache_shape) {
-  const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
-  // init_model() must run first so dtype_/embedding_size_ are initialized.
-  embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
-  if (embedding_cache_) {
-    int64_t size = get_embedding_placeholder_size();
-    if (size > 0) {
-      embedding_cache_->set_placeholder(
-          torch::zeros({size}, torch::dtype(dtype_).device(device_)));
-    }
-  }
-  CHECK(impl_ != nullptr);
-  CHECK(draft_impl_ != nullptr);
-  prepare_hierarchy_kv_cache_transfers();
-
-  bool target_allocated = true;
-  const auto target_status = impl_->get_status();
-  if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = impl_->allocate_kv_cache(kv_cache_shape);
-  } else {
-    CHECK_EQ(target_status, WorkerImpl::Status::READY);
-  }
-
-  bool draft_allocated = true;
-  const auto draft_status = draft_impl_->get_status();
-  if (draft_status == WorkerImpl::Status::LOADED) {
-    draft_allocated =
-        draft_impl_->allocate_kv_cache(draft_kv_cache_shape(kv_cache_shape));
-  } else {
-    CHECK_EQ(draft_status, WorkerImpl::Status::READY);
-  }
-
-  const bool allocated = target_allocated && draft_allocated;
-  if (allocated) {
-    finalize_hierarchy_kv_cache_transfers();
-  }
-  return allocated;
-}
-
-#if defined(USE_NPU) || defined(USE_MLU)
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
-    const KVCacheShape& kv_cache_shape) {
-  const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
-  CHECK(impl_ != nullptr);
-  CHECK(draft_impl_ != nullptr);
-  prepare_hierarchy_kv_cache_transfers();
-
-  if (kv_cache_transfer_ == nullptr) {
-    kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
-        device_.index(),
-        options_.transfer_listen_port(),
-        device_,
-        context_.get_model_args().model_type());
-
-    int32_t device_id = device_.index();
-    kv_cache_transfer_->initialize(device_id);
-  }
-
-  bool target_allocated = true;
-  const auto target_status = impl_->get_status();
-  if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = impl_->allocate_kv_cache_with_transfer(
-        kv_cache_transfer_, kv_cache_shape);
-  } else {
-    CHECK_EQ(target_status, WorkerImpl::Status::READY);
-  }
-
-  bool draft_allocated = true;
-  const auto draft_status = draft_impl_->get_status();
-  if (draft_status == WorkerImpl::Status::LOADED) {
-    draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
-        kv_cache_transfer_, draft_kv_cache_shape(kv_cache_shape));
-  } else {
-    CHECK_EQ(draft_status, WorkerImpl::Status::READY);
-  }
-
-  embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
-  if (embedding_cache_) {
-    int64_t size = get_embedding_placeholder_size();
-    if (size > 0) {
-      embedding_cache_->set_placeholder(
-          torch::zeros({size}, torch::dtype(dtype_).device(device_)));
-    }
-  }
-  const bool allocated = target_allocated && draft_allocated;
-  if (allocated) {
-    finalize_hierarchy_kv_cache_transfers();
-  }
-  return allocated;
-}
-#endif
-
-template <typename TargetInput>
-TargetInput MTPWorkerImpl<TargetInput>::update_input_by_last_step_output(
-    TargetInput& inputs) {
-  return inputs.clone();
-}
-
-template <typename TargetInput>
 TargetInput MTPWorkerImpl<TargetInput>::
     update_input_by_last_step_output_for_schedule_overlap(TargetInput& inputs) {
   update_json_object_states_by_last_step_output(inputs);
   sanitize_json_object_error_inputs(inputs);
   return update_input_by_last_step_output(inputs);
-}
-
-template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::prepare_work_before_execute(
-    const TargetInput& input,
-    TargetInput& processed_input) {
-  // Composite skips CP prepare; leaves run it on their execution streams.
-  SpeculativeWorkerImpl<TargetInput>::prepare_work_before_execute(
-      input, processed_input);
 }
 
 template <typename TargetInput>
@@ -1562,41 +1424,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   Timer timer;
   CHECK(embedding_cache_ != nullptr) << "MTP embedding cache is not allocated";
 
-  const auto& embedding = input.input_params.embedding;
-  if (embedding.mtp_bootstrap_embeddings.defined()) {
-    CHECK(input.token_ids_host.defined())
-        << "MTP bootstrap requires host token ids";
-    CHECK(input.token_ids_host.device().is_cpu())
-        << "MTP bootstrap host token ids must be on CPU";
-    CHECK_EQ(input.token_ids_host.scalar_type(), torch::kInt)
-        << "MTP bootstrap host token ids must be int32";
-
-    torch::Tensor bootstrap_embeddings =
-        safe_to(embedding.mtp_bootstrap_embeddings,
-                torch::dtype(dtype_).device(device_));
-    CHECK_EQ(bootstrap_embeddings.size(0),
-             static_cast<int64_t>(embedding.mtp_bootstrap_row_idxes.size()))
-        << "MTP bootstrap row count mismatch";
-
-    Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-    for (int32_t i = 0;
-         i < static_cast<int32_t>(embedding.mtp_bootstrap_row_idxes.size());
-         ++i) {
-      const int32_t row_idx = embedding.mtp_bootstrap_row_idxes[i];
-      CHECK_GE(row_idx, 0) << "MTP bootstrap row index should be valid";
-      CHECK_LT(row_idx, static_cast<int32_t>(embedding.embedding_ids.size()))
-          << "MTP bootstrap row index exceeds embedding ids";
-      CHECK_LT(row_idx, static_cast<int32_t>(embedding.request_ids.size()))
-          << "MTP bootstrap row index exceeds request ids";
-      CHECK_LT(static_cast<int64_t>(row_idx), input.token_ids_host.numel())
-          << "MTP bootstrap row index exceeds token ids";
-      embedding_cache_->write_mtp_bootstrap_context(
-          embedding.embedding_ids[row_idx],
-          embedding.request_ids[row_idx],
-          token_ids[row_idx],
-          bootstrap_embeddings[i]);
-    }
-  }
+  prepare_draft_input(input);
 
   TargetInput metadata_template = input.clone();
   if (use_prelaunched_first_draft) {
@@ -1607,48 +1435,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   } else if (use_device_target_context) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
-    // Clone host tensors before mutating the shallow-copied template.
-    metadata_template.token_ids_host =
-        clone_host_tensor(metadata_template.token_ids_host);
-    metadata_template.positions_host =
-        clone_host_tensor(metadata_template.positions_host);
-
-    // Build fixed-shape host metadata immediately while target verification is
-    // still running. Use the maximum accepted draft offset for conservative
-    // graph planning; actual values replace every device tensor below.
-    int32_t* template_positions =
-        metadata_template.positions_host.template data_ptr<int32_t>();
-    int32_t* template_tokens =
-        metadata_template.token_ids_host.template data_ptr<int32_t>();
-    auto& template_kv_lens =
-        metadata_template.input_params.attention.host.kv_seq_lens;
-    for (int32_t seq_id = 0;
-         seq_id < metadata_template.input_params.meta.num_sequences;
-         ++seq_id) {
-      template_positions[seq_id] += num_speculative_tokens;
-      template_kv_lens[seq_id] += num_speculative_tokens;
-      if (template_tokens[seq_id] < 0) {
-        template_tokens[seq_id] = 0;
-      }
-    }
-
-    std::vector<EmbeddingCache::DecodeState> template_states(
-        metadata_template.input_params.meta.num_sequences);
-    const torch::Tensor& placeholder =
-        embedding_cache_->embedding_placeholder();
-    for (int32_t seq_id = 0;
-         seq_id < metadata_template.input_params.meta.num_sequences;
-         ++seq_id) {
-      template_states[seq_id].valid = true;
-      template_states[seq_id].request_id =
-          metadata_template.input_params.embedding.request_ids[seq_id];
-      template_states[seq_id].token_id = template_tokens[seq_id];
-      template_states[seq_id].embedding = placeholder;
-    }
-    prepare_draft_extend_inputs(metadata_template,
-                                template_states,
-                                current_draft_input,
-                                /*force_two_rows=*/true);
+    prepare_first_draft_template(metadata_template,
+                                 current_draft_input,
+                                 /*wait_for_compute_stream=*/true);
     wait_metadata_ready_event(current_draft_input, *compute_stream_);
     clear_ready_events(current_draft_input);
 
@@ -2342,7 +2131,11 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     // auxiliary stream while target verification is still executing; the
     // compute stream consumes it through a device-side event after rejection
     // sampling, with no host synchronization.
-    prepare_next_first_draft_template(input, next_first_draft_input);
+    TargetInput next_metadata_template = input.clone();
+    prepare_first_draft_template(next_metadata_template,
+                                 next_first_draft_input,
+                                 /*wait_for_compute_stream=*/false);
+    next_first_draft_input.skip_sampling_for_logits_only = false;
   }
 
   // verify the proposals with target and update the batch
@@ -2388,10 +2181,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
       return std::nullopt;
     }
-    clear_all_output_embeddings(target_output);
-    val_output.embeddings = torch::Tensor();
-    target_output.sample_output = val_output;
-    return target_output;
+    return finalize_verify_output(std::move(target_output),
+                                  std::move(val_output));
   }
 
   const int64_t num_val_tokens = options_.num_speculative_tokens() + 1;
@@ -2542,10 +2333,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
-  clear_all_output_embeddings(target_output);
-  val_output.embeddings = torch::Tensor();
-  target_output.sample_output = val_output;
-  return target_output;
+  return finalize_verify_output(std::move(target_output),
+                                std::move(val_output));
 }
 
 template <typename TargetInput>
@@ -2807,12 +2596,12 @@ bool MTPWorkerImpl<TargetInput>::can_prelaunch_next_first_draft(
 }
 
 template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::prepare_next_first_draft_template(
-    const TargetInput& input,
-    LlmForwardInput& combined_input) {
+void MTPWorkerImpl<TargetInput>::prepare_first_draft_template(
+    TargetInput& metadata_template,
+    LlmForwardInput& combined_input,
+    bool wait_for_compute_stream) {
   CHECK(embedding_cache_ != nullptr);
 
-  TargetInput metadata_template = input.clone();
   // Clone host tensors before mutating the shallow-copied template.
   metadata_template.token_ids_host =
       clone_host_tensor(metadata_template.token_ids_host);
@@ -2852,8 +2641,7 @@ void MTPWorkerImpl<TargetInput>::prepare_next_first_draft_template(
                               template_states,
                               combined_input,
                               /*force_two_rows=*/true,
-                              /*wait_for_compute_stream=*/false);
-  combined_input.skip_sampling_for_logits_only = false;
+                              wait_for_compute_stream);
 }
 
 template <typename TargetInput>
@@ -2966,8 +2754,8 @@ void MTPWorkerImpl<TargetInput>::record_validate_metrics(
     }
   }
   validate_output.speculative_token_stats =
-      calculate_mtp_speculative_token_stats(validate_output.next_tokens,
-                                            proposed_tokens);
+      calculate_contiguous_speculative_token_stats(validate_output.next_tokens,
+                                                   proposed_tokens);
   int64_t num_draft_tokens = 0;
   int64_t accepted_count = 0;
   for (const SpeculativeTokenStats& stats :
@@ -3925,15 +3713,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
                                      /*update_block_tables=*/true);
   }
   if (supports_explicit_spec_verify_replay_update()) {
-    input_params.attention.host.q_cu_seq_lens.clear();
-    input_params.attention.host.q_cu_seq_lens.reserve(
-        input_params.meta.num_sequences + 1);
-    input_params.attention.host.q_cu_seq_lens.emplace_back(0);
-    for (int32_t i = 0; i < input_params.meta.num_sequences; ++i) {
-      input_params.attention.host.q_cu_seq_lens.emplace_back(
-          input_params.attention.host.q_cu_seq_lens.back() +
-          input_params.get_q_seq_len(i));
-    }
+    specBuilder::rebuild_q_cu_seq_lens(input_params);
   }
   input_params.attention.rebuild_device_buffer(device_);
 
@@ -3978,9 +3758,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
         idx_options);
   } else {
     params.selected_token_idxes =
-        safe_to(specBuilder::make_cpu_int_tensor(selected_row_idx),
-                idx_options,
-                /*non_blocking=*/true);
+        async_h2d_tensor(selected_row_idx, idx_options);
   }
   if (!params.sample_idxes.defined()) {
     // This control tensor is always the identity mapping. Generate it directly
@@ -4038,15 +3816,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
       buf.meta.kv_max_seq_len,
       std::move(buf.out_kv_seq_lens));
   if (supports_explicit_spec_verify_replay_update()) {
-    input_params.attention.host.q_cu_seq_lens.clear();
-    input_params.attention.host.q_cu_seq_lens.reserve(
-        input_params.meta.num_sequences + 1);
-    input_params.attention.host.q_cu_seq_lens.emplace_back(0);
-    for (int32_t i = 0; i < input_params.meta.num_sequences; ++i) {
-      input_params.attention.host.q_cu_seq_lens.emplace_back(
-          input_params.attention.host.q_cu_seq_lens.back() +
-          input_params.get_q_seq_len(i));
-    }
+    specBuilder::rebuild_q_cu_seq_lens(input_params);
   }
   input_params.attention.rebuild_device_buffer(device_);
 #if defined(USE_NPU)

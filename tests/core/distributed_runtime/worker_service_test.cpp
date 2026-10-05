@@ -27,8 +27,8 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/sampling/rejection_sampler.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "core/runtime/options.h"
-#include "core/runtime/speculative_worker_impl.h"
 
 namespace xllm {
 
@@ -72,7 +72,7 @@ TEST(SpeculativeTokenStatsTest, CountsAdaptiveTokensPerSequence) {
   const std::vector<int32_t> proposed_tokens = {4, 2, 0};
 
   const std::vector<SpeculativeTokenStats> mtp_stats =
-      calculate_mtp_speculative_token_stats(tokens, proposed_tokens);
+      calculate_contiguous_speculative_token_stats(tokens, proposed_tokens);
   ASSERT_EQ(mtp_stats.size(), 3);
   EXPECT_EQ(mtp_stats[0].accepted_tokens, 2);
   EXPECT_EQ(mtp_stats[0].proposed_tokens, 4);
@@ -80,16 +80,6 @@ TEST(SpeculativeTokenStatsTest, CountsAdaptiveTokensPerSequence) {
   EXPECT_EQ(mtp_stats[1].proposed_tokens, 2);
   EXPECT_EQ(mtp_stats[2].accepted_tokens, 0);
   EXPECT_EQ(mtp_stats[2].proposed_tokens, 0);
-
-  const std::vector<SpeculativeTokenStats> block_stats =
-      calculate_block_speculative_token_stats(tokens, proposed_tokens);
-  ASSERT_EQ(block_stats.size(), 3);
-  EXPECT_EQ(block_stats[0].accepted_tokens, 2);
-  EXPECT_EQ(block_stats[0].proposed_tokens, 4);
-  EXPECT_EQ(block_stats[1].accepted_tokens, 2);
-  EXPECT_EQ(block_stats[1].proposed_tokens, 2);
-  EXPECT_EQ(block_stats[2].accepted_tokens, 0);
-  EXPECT_EQ(block_stats[2].proposed_tokens, 0);
 }
 
 TEST(SpeculativeTokenStatsTest, MtpUsesActualProposalWidths) {
@@ -97,7 +87,7 @@ TEST(SpeculativeTokenStatsTest, MtpUsesActualProposalWidths) {
       {{10, -1, -1, -1}, {20, 21, -1, -1}, {30, 31, 32, 33}}, torch::kInt32);
   const std::vector<int32_t> proposed_tokens = {0, 1, 3};
   const auto stats =
-      calculate_mtp_speculative_token_stats(tokens, proposed_tokens);
+      calculate_contiguous_speculative_token_stats(tokens, proposed_tokens);
 
   ASSERT_EQ(stats.size(), proposed_tokens.size());
   int64_t total_proposed = 0;
@@ -129,19 +119,14 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
           torch::kInt64)));
 
   const auto stats =
-      calculate_block_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
-  const auto mtp_stats =
-      calculate_mtp_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
+      calculate_contiguous_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
   const auto output_stats = calculate_speculative_output_stats(
       masked_tokens, /*num_speculative_tokens=*/3);
   ASSERT_EQ(stats.size(), 4);
-  ASSERT_EQ(mtp_stats.size(), 4);
   ASSERT_EQ(output_stats.sequence_stats.size(), 4);
   for (size_t row = 0; row < stats.size(); ++row) {
     EXPECT_EQ(stats[row].accepted_tokens, static_cast<int64_t>(row));
     EXPECT_EQ(stats[row].proposed_tokens, 3);
-    EXPECT_EQ(mtp_stats[row].accepted_tokens, static_cast<int64_t>(row));
-    EXPECT_EQ(mtp_stats[row].proposed_tokens, 3);
     EXPECT_EQ(output_stats.sequence_stats[row].accepted_tokens,
               static_cast<int64_t>(row));
     EXPECT_EQ(output_stats.sequence_stats[row].proposed_tokens, 3);
@@ -179,7 +164,7 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
           torch::kInt64)));
 
   const auto stats =
-      calculate_block_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
+      calculate_contiguous_speculative_token_stats(masked_tokens, {3, 3, 3, 3});
   ASSERT_EQ(stats.size(), 4);
   for (size_t row = 0; row < stats.size(); ++row) {
     EXPECT_EQ(stats[row].accepted_tokens, static_cast<int64_t>(row));
@@ -196,8 +181,8 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
       target_tokens,
       bonus_tokens,
       /*mask_out_rejected_tokens=*/true);
-  const auto stats =
-      calculate_block_speculative_token_stats(std::get<1>(sampled), {1, 1});
+  const auto stats = calculate_contiguous_speculative_token_stats(
+      std::get<1>(sampled), {1, 1});
   ASSERT_EQ(stats.size(), 2);
   EXPECT_EQ(stats[0].accepted_tokens, 0);
   EXPECT_EQ(stats[0].proposed_tokens, 1);
@@ -212,8 +197,8 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
       bonus_tokens,
       /*mask_out_rejected_tokens=*/true);
   ASSERT_TRUE(torch::equal(std::get<1>(bonus_only), bonus_tokens));
-  const auto zero_stats =
-      calculate_block_speculative_token_stats(std::get<1>(bonus_only), {0, 0});
+  const auto zero_stats = calculate_contiguous_speculative_token_stats(
+      std::get<1>(bonus_only), {0, 0});
   ASSERT_EQ(zero_stats.size(), 2);
   for (const SpeculativeTokenStats& row_stats : zero_stats) {
     EXPECT_EQ(row_stats.accepted_tokens, 0);
@@ -312,7 +297,7 @@ TEST(WorkerServiceMetricsTest, StaticMtpRecordsTokenTotals) {
 TEST(WorkerServiceMetricsTest, BlockDiffusionPreservesInlineMetrics) {
   const torch::Tensor tokens = torch::tensor({{10, 11, -1, -1}}, torch::kInt32);
   const std::vector<SpeculativeTokenStats> output_stats =
-      calculate_block_speculative_token_stats(tokens, {3});
+      calculate_contiguous_speculative_token_stats(tokens, {3});
   const double drafts_before = COUNTER_VALUE(speculative_num_drafts_total);
   const double proposed_before =
       COUNTER_VALUE(speculative_num_draft_tokens_total);

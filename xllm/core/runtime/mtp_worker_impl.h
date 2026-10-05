@@ -22,12 +22,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/mtp_json_object_state.h"
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
-#include "runtime/speculative_worker_impl.h"
+#include "runtime/draft_model_spec_worker_impl.h"
 
 namespace xllm {
 
@@ -41,7 +39,7 @@ class NpuJsonDraftTokenHandoff;
 // Uses a draft model to generate proposals, then validates with target model.
 // Eagle3WorkerImpl inherits from this class.
 template <typename TargetInput>
-class MTPWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
+class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
  public:
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
@@ -70,60 +68,46 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   ::xllm::Status create_task_pipeline(
       std::unique_ptr<TaskExecutionPipeline>& output) override;
-  bool task_models_loaded() const override;
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
-  bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
-
-#if defined(USE_NPU) || defined(USE_MLU)
-  bool allocate_kv_cache_with_transfer(
-      const KVCacheShape& kv_cache_shape) override;
-#endif
-
-  TargetInput update_input_by_last_step_output(TargetInput& inputs) override;
   TargetInput update_input_by_last_step_output_for_schedule_overlap(
       TargetInput& inputs) override;
-  void prepare_work_before_execute(const TargetInput& inputs,
-                                   TargetInput& processed_inputs) override;
 
  protected:
-  using SpeculativeWorkerImpl<TargetInput>::adaptive_spec_controller_;
-  using SpeculativeWorkerImpl<TargetInput>::compute_stream_;
-  using SpeculativeWorkerImpl<TargetInput>::context_;
-  using SpeculativeWorkerImpl<TargetInput>::device_;
-  using SpeculativeWorkerImpl<TargetInput>::dp_driver_;
-  using SpeculativeWorkerImpl<TargetInput>::draft_impl_;
-  using SpeculativeWorkerImpl<TargetInput>::draft_sampling_mode_;
-  using SpeculativeWorkerImpl<TargetInput>::driver_;
-  using SpeculativeWorkerImpl<TargetInput>::dtype_;
-  using SpeculativeWorkerImpl<TargetInput>::embedding_cache_;
-  using SpeculativeWorkerImpl<TargetInput>::embedding_size_;
-  using SpeculativeWorkerImpl<TargetInput>::enable_fused_kernel_;
-  using SpeculativeWorkerImpl<TargetInput>::impl_;
-  using SpeculativeWorkerImpl<TargetInput>::kv_cache_transfer_;
-  using SpeculativeWorkerImpl<TargetInput>::options_;
-  using SpeculativeWorkerImpl<TargetInput>::parallel_args_;
-  using SpeculativeWorkerImpl<TargetInput>::prepare_stream_;
-  using SpeculativeWorkerImpl<TargetInput>::threadpool_;
-  using SpeculativeWorkerImpl<TargetInput>::build_draft_kv_cache_shape;
-  using SpeculativeWorkerImpl<TargetInput>::enable_schedule_overlap;
-  using SpeculativeWorkerImpl<
+  using DraftModelSpecWorkerImpl<TargetInput>::adaptive_spec_controller_;
+  using DraftModelSpecWorkerImpl<TargetInput>::compute_stream_;
+  using DraftModelSpecWorkerImpl<TargetInput>::context_;
+  using DraftModelSpecWorkerImpl<TargetInput>::device_;
+  using DraftModelSpecWorkerImpl<TargetInput>::dp_driver_;
+  using DraftModelSpecWorkerImpl<TargetInput>::draft_impl_;
+  using DraftModelSpecWorkerImpl<TargetInput>::draft_sampling_mode_;
+  using DraftModelSpecWorkerImpl<TargetInput>::driver_;
+  using DraftModelSpecWorkerImpl<TargetInput>::dtype_;
+  using DraftModelSpecWorkerImpl<TargetInput>::embedding_cache_;
+  using DraftModelSpecWorkerImpl<TargetInput>::enable_fused_kernel_;
+  using DraftModelSpecWorkerImpl<TargetInput>::impl_;
+  using DraftModelSpecWorkerImpl<TargetInput>::options_;
+  using DraftModelSpecWorkerImpl<TargetInput>::parallel_args_;
+  using DraftModelSpecWorkerImpl<TargetInput>::prepare_stream_;
+  using DraftModelSpecWorkerImpl<TargetInput>::threadpool_;
+  using DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape;
+  using DraftModelSpecWorkerImpl<TargetInput>::enable_schedule_overlap;
+  using DraftModelSpecWorkerImpl<
       TargetInput>::estimate_kv_cache_capacity_with_draft;
-  using SpeculativeWorkerImpl<
-      TargetInput>::finalize_hierarchy_kv_cache_transfers;
-  using SpeculativeWorkerImpl<TargetInput>::force_greedy_draft_sampling;
-  using SpeculativeWorkerImpl<TargetInput>::get_optimization_config;
-  using SpeculativeWorkerImpl<
-      TargetInput>::prepare_hierarchy_kv_cache_transfers;
-  using SpeculativeWorkerImpl<
+  using DraftModelSpecWorkerImpl<TargetInput>::force_greedy_draft_sampling;
+  using DraftModelSpecWorkerImpl<TargetInput>::get_optimization_config;
+  using DraftModelSpecWorkerImpl<
       TargetInput>::sync_dp_global_token_nums_after_prune;
-  using SpeculativeWorkerImpl<
+  using DraftModelSpecWorkerImpl<
       TargetInput>::sync_dp_global_token_nums_for_idle_rank;
-  using SpeculativeWorkerImpl<TargetInput>::update_sampling_params;
-  using SpeculativeWorkerImpl<
+  using DraftModelSpecWorkerImpl<TargetInput>::update_input_by_last_step_output;
+  using DraftModelSpecWorkerImpl<TargetInput>::update_sampling_params;
+  using DraftModelSpecWorkerImpl<
       TargetInput>::update_json_object_states_by_last_step_output;
-  using SpeculativeWorkerImpl<TargetInput>::sanitize_json_object_error_inputs;
+  using DraftModelSpecWorkerImpl<
+      TargetInput>::sanitize_json_object_error_inputs;
+  using DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input;
 
   // MTP composite: leaves own model-specific NPU input preparation.
   bool owns_npu_parallel_input_prepare() const override;
@@ -196,8 +180,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
-  virtual int64_t get_embedding_placeholder_size();
-  bool should_use_separate_draft_kv_cache_shape() const;
+  int64_t get_embedding_placeholder_size() const override;
   KVCacheShape draft_kv_cache_shape(
       const KVCacheShape& target_kv_cache_shape) const override;
 
@@ -305,8 +288,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;
   bool can_prelaunch_next_first_draft(const TargetInput& input) const;
-  void prepare_next_first_draft_template(const TargetInput& input,
-                                         LlmForwardInput& combined_input);
+  void prepare_first_draft_template(TargetInput& metadata_template,
+                                    LlmForwardInput& combined_input,
+                                    bool wait_for_compute_stream);
   void enqueue_next_first_draft(const TargetInput& input,
                                 const SampleOutput& validate_output,
                                 const torch::Tensor& base_positions,
@@ -342,7 +326,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.
   PendingDraftContext pending_draft_context_;
-  // adaptive_spec_controller_ now lives on SpeculativeWorkerImpl (base class).
 
   // Classified once when the corresponding models are loaded. Decode-path
   // decisions only read these closed policies.

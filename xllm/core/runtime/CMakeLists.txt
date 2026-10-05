@@ -41,6 +41,7 @@ cc_library(
     mm_embed_vlm_worker_impl.h
     worker_client.h
     xservice_client.h
+    draft_model_spec_worker_impl.h
     speculative_worker_impl.h
     mtp_worker_impl.h
     suffix_worker_impl.h
@@ -82,6 +83,7 @@ cc_library(
     worker_client.cpp
     xservice_client.cpp
     params_utils.cpp
+    draft_model_spec_worker_impl.cpp
     speculative_worker_impl.cpp
     mtp_worker_impl.cpp
     suffix_worker_impl.cpp

@@ -36,7 +36,7 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
                   MasterStatus master_status) override;
 
   // EAGLE-3 draft input_embedding is 3 * target_hidden_size
-  int64_t get_embedding_placeholder_size() override;
+  int64_t get_embedding_placeholder_size() const override;
 
   // Get hot_token_id for draft-to-target token mapping
   torch::Tensor get_hot_token_id() const { return hot_token_id_; }

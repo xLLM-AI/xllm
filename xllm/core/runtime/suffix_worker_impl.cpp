@@ -54,9 +54,6 @@ std::string summarize_int32_span(std::span<const int32_t> values,
   return out;
 }
 
-}  // namespace
-
-namespace {
 runtime::Options SuffixTargetOptions(const runtime::Options& options) {
   auto opts = options;
   opts.enable_schedule_overlap(false);
@@ -360,9 +357,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
-  val_output.embeddings = torch::Tensor();
-  target_output.sample_output = val_output;
-  return target_output;
+  return finalize_verify_output(std::move(target_output),
+                                std::move(val_output));
 }
 
 SampleOutput SuffixWorkerImpl::validate(

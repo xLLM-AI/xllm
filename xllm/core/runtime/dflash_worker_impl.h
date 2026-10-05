@@ -26,8 +26,8 @@ limitations under the License.
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
 #include "framework/sampling/draft_proposal.h"
+#include "runtime/draft_model_spec_worker_impl.h"
 #include "runtime/llm_worker_impl.h"
-#include "runtime/speculative_worker_impl.h"
 #include "util/utils.h"
 
 namespace xllm {
@@ -65,7 +65,7 @@ inline DSparkSasMode classify_dspark_sas_mode(const ModelArgs& draft_args,
 
 }  // namespace dflash_detail
 
-class DFlashWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
+class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
  public:
   DFlashWorkerImpl(const ParallelArgs& parallel_args,
                    const torch::Device& device,
@@ -79,17 +79,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
-  bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
-
-#if defined(USE_NPU) || defined(USE_MLU)
-  bool allocate_kv_cache_with_transfer(
-      const KVCacheShape& kv_cache_shape) override;
-#endif
-
-  LlmForwardInput update_input_by_last_step_output(
-      LlmForwardInput& inputs) override;
-
-  bool task_models_loaded() const override;
   ::xllm::Status create_task_pipeline(
       std::unique_ptr<TaskExecutionPipeline>& output) override;
 
