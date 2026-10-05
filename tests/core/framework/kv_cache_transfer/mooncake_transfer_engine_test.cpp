@@ -516,13 +516,14 @@ struct NpuMixedTransferCaches {
   std::vector<KVCache> caches;
 };
 
-NpuMixedTransferCaches make_npu_mixed_transfer_caches(
+NpuMixedTransferCaches register_npu_mixed_transfer_caches(
+    MooncakeKVCacheTransferDefault& transfer,
     const torch::Device& device) {
   NpuMixedTransferCaches tensors;
-  tensors.backing = torch::zeros({6, 2, 1024, 512},
+  tensors.backing = torch::zeros({6, 2, 1024, 1, 512},
                                  torch::dtype(torch::kBFloat16).device(device));
-  tensors.conv = tensors.backing.index({0});
-  tensors.ssm = tensors.backing.index({1});
+  tensors.conv = tensors.backing.index({0}).view({2, 1024, 512});
+  tensors.ssm = tensors.backing.index({1}).view({2, 1024, 512});
   tensors.key = tensors.backing.index({2});
   tensors.value = tensors.backing.index({3});
   tensors.index = tensors.backing.index({4});
@@ -533,6 +534,10 @@ NpuMixedTransferCaches make_npu_mixed_transfer_caches(
       IndexedKVCacheTensors{KVCacheTensors{tensors.key, tensors.value},
                             tensors.index,
                             tensors.index_scale});
+  ModelArgs model_args;
+  model_args.model_type("test").n_layers(2).n_heads(1).head_dim(512);
+  transfer.configure_cache_layout(make_args(0, 1, 1), model_args, 1024, false);
+  transfer.register_kv_cache(tensors.caches, KVCacheShape(), torch::kBFloat16);
   return tensors;
 }
 
@@ -593,9 +598,7 @@ int run_npu_round_trip_peer(int command_fd,
                                                  /*model_type=*/"test");
   remote_transfer.initialize(device_index);
   NpuMixedTransferCaches remote_caches =
-      make_npu_mixed_transfer_caches(remote_torch_device);
-  remote_transfer.register_kv_cache(
-      remote_caches.caches, KVCacheShape(), torch::kBFloat16);
+      register_npu_mixed_transfer_caches(remote_transfer, remote_torch_device);
 
   const auto& layers = remote_transfer.main_layout_.layers;
   const bool layout_matches =
@@ -624,6 +627,19 @@ int run_npu_round_trip_peer(int command_fd,
     return 11;
   }
 
+  uint64_t local_cluster_id = 0;
+  uint16_t local_port = 0;
+  std::string local_addr;
+  if (!read_endpoint(command_fd, &local_cluster_id, &local_port, &local_addr) ||
+      !remote_transfer.link_clusters(
+          {local_cluster_id}, {local_addr}, {local_port})) {
+    return 15;
+  }
+  const uint8_t ready = 1;
+  if (!write_all(status_fd, &ready, sizeof(ready))) {
+    return 14;
+  }
+
   while (true) {
     int32_t command = 0;
     if (!read_all(command_fd, &command, sizeof(command))) {
@@ -645,13 +661,13 @@ int run_npu_round_trip_peer(int command_fd,
           &remote_caches, /*block_id=*/1, /*pull_pattern=*/true);
       success = remote_device.synchronize_default_stream() == 0 ? 1 : 0;
     } else if (command == kStopChildCommand) {
+      const bool unlinked = remote_transfer.unlink_cluster(
+          local_cluster_id, local_addr, local_port, /*force_flag=*/true);
       close(command_fd);
       close(status_fd);
-      // The peer is an exec-isolated test process. The transfer and remote
-      // session have already been verified and closed by the parent before
-      // this command. Bypass third-party process-global teardown, which can
-      // terminate on a still-joinable TransferEngine thread.
-      _exit(0);
+      // Bypass third-party process-global teardown, which can terminate on a
+      // still-joinable TransferEngine thread.
+      _exit(unlinked ? 0 : 16);
     } else {
       return 13;
     }
@@ -1422,9 +1438,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       /*model_type=*/"test");
   local_transfer.initialize(/*device_id=*/0);
   NpuMixedTransferCaches local_caches =
-      make_npu_mixed_transfer_caches(local_torch_device);
-  local_transfer.register_kv_cache(
-      local_caches.caches, KVCacheShape(), torch::kBFloat16);
+      register_npu_mixed_transfer_caches(local_transfer, local_torch_device);
 
   ASSERT_EQ(local_transfer.main_layout_.layers.size(), 2U);
   ASSERT_EQ(local_transfer.main_layout_.layers[0].size(), 2U);
@@ -1462,6 +1476,14 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                             &remote_addr));
   ASSERT_EQ(received_remote_port, static_cast<uint16_t>(remote_listen_port));
   ASSERT_FALSE(remote_addr.empty());
+  ASSERT_TRUE(write_endpoint(parent_to_child[1],
+                             local_cluster_id,
+                             static_cast<uint16_t>(local_listen_port),
+                             local_addr));
+  uint8_t child_success = 0;
+  ASSERT_TRUE(
+      read_all(child_to_parent[0], &child_success, sizeof(child_success)));
+  ASSERT_EQ(child_success, 1);
   ASSERT_TRUE(local_transfer.link_clusters(
       {remote_cluster_id}, {remote_addr}, {received_remote_port}));
 
@@ -1499,7 +1521,6 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 
   int32_t command = kValidatePushCommand;
   ASSERT_TRUE(write_all(parent_to_child[1], &command, sizeof(command)));
-  uint8_t child_success = 0;
   ASSERT_TRUE(
       read_all(child_to_parent[0], &child_success, sizeof(child_success)));
   ASSERT_EQ(child_success, 1);
