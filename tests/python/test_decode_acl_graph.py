@@ -875,3 +875,20 @@ def test_dp_real_and_dummy_decode_share_graph_admission() -> None:
 
     assert real_runner.can_execute(input_ids, make_metadata(is_dummy=False))
     assert dummy_runner.can_execute(input_ids, make_metadata(is_dummy=True))
+
+
+def test_decode_rejects_mismatched_linear_state_validity_mask() -> None:
+    runner = _runner()
+    metadata = _metadata(torch.arange(4, dtype=torch.int32))
+    metadata.has_initial_state = torch.ones(3, dtype=torch.int32)
+
+    assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+
+
+def test_decode_rejects_mismatched_linear_state_indices_without_cache_probe() -> None:
+    runner = _runner()
+    metadata = _metadata(torch.arange(4, dtype=torch.int32))
+    metadata.linear_state_indices = torch.arange(3, dtype=torch.int32)
+
+    with patch.object(runner, "_has_compatible_index_history", side_effect=AssertionError):
+        assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)

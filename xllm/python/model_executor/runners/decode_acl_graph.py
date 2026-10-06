@@ -439,7 +439,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 batch_size + 1,
             ):
                 return False
-        return True
+        has_initial_state = getattr(metadata, "has_initial_state", None)
+        if has_initial_state is not None:
+            state_count = has_initial_state.numel()
+            if state_count != batch_size and not (is_expanded and state_count > 0 and batch_size % state_count == 0):
+                return False
+        linear_idx = getattr(metadata, "linear_state_indices", None)
+        return not (
+            linear_idx is not None
+            and linear_idx.numel() != batch_size
+            and not (is_expanded and linear_idx.numel() > 0 and batch_size % linear_idx.numel() == 0)
+        )
 
     @staticmethod
     def _cumulative_lengths(
