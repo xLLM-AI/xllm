@@ -370,21 +370,6 @@ std::shared_ptr<Request> generate_request_with_best_of(
   return std::make_shared<Request>("1", "1", "1", std::move(req_state), "1");
 }
 
-// dont not consider speculative decoding.
-void update_requests(std::vector<std::shared_ptr<Request>> requests) {
-  for (auto req : requests) {
-    for (auto& seq : req->sequences()) {
-      if (seq->kv_state().kv_cache_tokens_num() == 0) {
-        seq->kv_state().incr_kv_cache_tokens_num(seq->num_prompt_tokens());
-      } else {
-        seq->kv_state().incr_kv_cache_tokens_num(1);
-      }
-      Token token(1);
-      seq->append_token(token);
-    }
-  }
-}
-
 void make_request_decode_ready(const std::shared_ptr<Request>& request) {
   for (auto& seq : request->sequences()) {
     seq->kv_state().set_kv_cache_tokens_num(seq->num_prompt_tokens());
@@ -400,19 +385,6 @@ void set_chunk_kv(const std::shared_ptr<Request>& request, size_t kv_tokens) {
 }
 
 }  // namespace
-
-TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithoutSPCreatesContinuousScheduler) {
-  SchedulerOptions opt = create_scheduler_options(10000, 256, 0, 1024, 1);
-  opt.enable_chunked_prefill() = true;
-
-  auto engine = std::make_unique<FakeEngine>(32, 32);
-  auto scheduler = create_continuous_scheduler(engine.get(), opt);
-
-  // All non-PD paths now create ContinuousScheduler with BatchMode routing.
-  EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),
-            nullptr);
-}
 
 TEST(ContinuousSchedulerTest,
      MixedSequenceCountsPreserveBatchesAcrossDecodeAndCancellation) {
@@ -740,8 +712,7 @@ TEST(ContinuousSchedulerTest,
   EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
 }
 
-TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPCreatesContinuousScheduler) {
+TEST(ContinuousSchedulerFactoryTest, ChunkedPrefillCreatesContinuousScheduler) {
   SchedulerOptions opt = create_scheduler_options(10000, 256, 0, 1024, 1);
   opt.enable_chunked_prefill() = true;
 

@@ -49,13 +49,6 @@ std::vector<int32_t> to_layout_seq_lens(const std::vector<int32_t>& lens) {
 #endif
 }
 
-std::vector<int32_t> tensor_to_vec_int32(const torch::Tensor& tensor) {
-  torch::Tensor cpu_tensor =
-      tensor.to(torch::kCPU).to(torch::kInt).contiguous();
-  const int32_t* data = cpu_tensor.data_ptr<int32_t>();
-  return {data, data + cpu_tensor.numel()};
-}
-
 void expect_position_ids(const DecodeBuildBuffers& buf,
                          const std::vector<int32_t>& expected) {
   EXPECT_EQ(buf.out_positions, expected);
