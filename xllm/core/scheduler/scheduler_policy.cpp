@@ -526,11 +526,9 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
     state.kv_cache_manager->allocate_shared(seq);
     return;
   }
-  // DSV4 (SWA_COMPRESSED) never has a KV leaf. A failed HBM growth can retain
-  // its device prefix while releasing the Host match, so the hierarchy manager
-  // must get a chance to re-probe Host before the scheduler computes the next
-  // chunk boundary. Non-hierarchical DSV4 managers make this call idempotent.
-  if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
+  // Refresh the shared match before sizing the next chunk when required by
+  // the cache manager.
+  if (state.kv_cache_manager->needs_shared_reprobe(seq)) {
     state.kv_cache_manager->allocate_shared(seq);
     return;
   }

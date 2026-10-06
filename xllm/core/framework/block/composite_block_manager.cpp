@@ -36,6 +36,43 @@ namespace {
 constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
 constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
 
+// KV completion bounds the block contents; confirmed tokens independently
+// provide the hasher's lookahead. The lookahead token needs no completed KV.
+size_t publishable_tokens(const Sequence& seq, const BlockManager& leaf) {
+  const BlockHasherType type = leaf.options().hasher_type();
+  const size_t token_count = seq.hash_tokens(type).size();
+  const size_t lookahead = block_hash_lookahead(type);
+  const size_t ready_tokens =
+      token_count > lookahead ? token_count - lookahead : 0;
+  return std::min(seq.kv_cache_tokens_num(), ready_tokens);
+}
+
+// Publish a dependency-complete range and advance its cursor together. Callers
+// select the range; the leaf's identity policy owns the extra hash tokens.
+void publish_blocks(Sequence* seq,
+                    BlockManager& leaf,
+                    BlockType type,
+                    size_t begin,
+                    size_t end) {
+  if (end <= begin) {
+    return;
+  }
+  const BlockHasherType hasher_type = leaf.options().hasher_type();
+  const size_t block_size = leaf.block_size();
+  const size_t token_end = end * block_size + block_hash_lookahead(hasher_type);
+  KVCacheState& kv = seq->kv_state();
+  std::vector<Block>* blocks = kv.mutable_blocks(type);
+  CHECK(blocks != nullptr);
+  CHECK_LE(end, blocks->size());
+  seq->update_block_hashes(static_cast<uint32_t>(block_size), hasher_type);
+  leaf.cache(seq->hash_tokens(hasher_type).slice(0, token_end),
+             *blocks,
+             begin,
+             seq->mm_data(),
+             seq->block_hashes());
+  kv.set_num_cached_blocks(type, end);
+}
+
 // Whether a leaf of the given BlockType participates in prefix cache under
 // the current role. On the PREFILL side (instance_is_decode == false) every
 // cache-bearing leaf participates. On the DECODE side we skip SWA and
@@ -470,12 +507,12 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
   }
   KVCacheState& kv = seq->kv_state();
 
-  size_t cacheable_tokens =
-      std::min(seq->kv_cache_tokens_num(), seq->tokens().size());
+  size_t cacheable_tokens = 0;
   size_t cache_unit_size = 0;
   if (combination_ == LeafCombination::SWA_COMPRESSED) {
     BlockManager* c128_leaf = leaf_of(BlockType::C128);
     CHECK(c128_leaf != nullptr);
+    cacheable_tokens = publishable_tokens(*seq, *c128_leaf);
     cache_unit_size = c128_leaf->block_size();
     CHECK_GT(cache_unit_size, 0u);
 
@@ -518,7 +555,7 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
     }
     const size_t num_full = combination_ == LeafCombination::SWA_COMPRESSED
                                 ? cacheable_tokens / block_size
-                                : seq->kv_cache_tokens_num() / block_size;
+                                : publishable_tokens(*seq, leaf) / block_size;
     size_t cached = kv.num_cached_blocks(type);
     const size_t end = std::min(num_full, blocks->size());
     if (end <= cached) {
@@ -543,40 +580,13 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
         const size_t window_begin =
             unit_end > blocks_per_window ? unit_end - blocks_per_window : 0;
         const size_t publish_begin = std::max(cached, window_begin);
-        if (unit_end > publish_begin) {
-          seq->update_block_hashes(static_cast<uint32_t>(block_size),
-                                   leaf.options().hasher_type());
-          leaf.cache(seq->tokens().slice(0, unit_end * block_size),
-                     *blocks,
-                     publish_begin,
-                     seq->mm_data(),
-                     seq->block_hashes());
-        }
+        publish_blocks(seq, leaf, type, publish_begin, unit_end);
         cached = unit_end;
       }
-      kv.set_num_cached_blocks(type, cached);
       continue;
     }
 
-    // Clamp tokens to `end * block_size`. The leaf's cache() re-derives its own
-    // n_blocks bound from `tokens.size() / block_size_`; without this clamp,
-    // chunked prefill (where seq->tokens() spans the whole prompt but only
-    // `num_full` blocks are actually forwarded) would let the leaf stamp a
-    // partial tail block with a full-block hash key and admit garbage KV into
-    // the prefix cache. Also cap at seq->tokens().size(): unit tests build
-    // sequences whose token vector is shorter than kv_cache_tokens_num.
-    const size_t token_end = std::min(end * block_size, seq->tokens().size());
-    if (token_end / block_size <= cached) {
-      continue;
-    }
-    seq->update_block_hashes(static_cast<uint32_t>(block_size),
-                             leaf.options().hasher_type());
-    leaf.cache(seq->tokens().slice(0, token_end),
-               *blocks,
-               cached,
-               seq->mm_data(),
-               seq->block_hashes());
-    kv.set_num_cached_blocks(type, token_end / block_size);
+    publish_blocks(seq, leaf, type, cached, end);
   }
 }
 
@@ -712,7 +722,10 @@ CompositeBlockManager::probe_prefix_cache(Sequence* seq,
         /*type=*/type,
         /*leaf=*/&leaf,
         /*blocks=*/
-        leaf.allocate_shared(seq->tokens(), existed, seq->mm_data(), hashes),
+        leaf.allocate_shared(seq->hash_tokens(leaf.options().hasher_type()),
+                             existed,
+                             seq->mm_data(),
+                             hashes),
         /*block_size=*/leaf.block_size()});
   }
   return probes;
@@ -793,42 +806,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
 }
 
 void CompositeBlockManager::cache_for_sequence(Sequence* seq) {
-  // Final flush at deallocate. KV shapes flush the tail via leaf->cache();
-  // SWA_COMPRESSED re-runs the pre-grow hook (cursor-guarded, idempotent) so
-  // the window-tail block that never triggered another allocate_sequence
-  // still makes it into the cache.
-  if (seq == nullptr || combination_ == LeafCombination::UNSUPPORTED) {
-    return;
-  }
-  switch (combination_) {
-    case LeafCombination::FLAT_KV:
-    case LeafCombination::FLAT_KV_LINEAR: {
-      BlockManager& kv_leaf = *leaf_of(BlockType::KV);
-      seq->update_block_hashes(static_cast<uint32_t>(kv_leaf.block_size()),
-                               kv_leaf.options().hasher_type());
-      KVCacheState& kv_state = seq->kv_state();
-      std::vector<Block>* blocks = kv_state.mutable_blocks(BlockType::KV);
-      const size_t block_size = kv_leaf.block_size();
-      const Slice<int32_t> cached_tokens = seq->cached_tokens();
-      const size_t publish_end =
-          std::min(cached_tokens.size() / block_size, blocks->size());
-      const size_t publish_begin = kv_state.num_cached_blocks(BlockType::KV);
-      kv_leaf.cache(cached_tokens,
-                    *blocks,
-                    publish_begin,
-                    seq->mm_data(),
-                    seq->block_hashes());
-      kv_state.set_num_cached_blocks(BlockType::KV,
-                                     std::max(publish_begin, publish_end));
-      break;
-    }
-    case LeafCombination::SWA_COMPRESSED: {
-      cache_full_blocks_for_sequence(seq);
-      break;
-    }
-    case LeafCombination::UNSUPPORTED:
-      break;
-  }
+  cache_full_blocks_for_sequence(seq);
 }
 
 void CompositeBlockManager::cache_for_sequence(Sequence* seq,
@@ -845,24 +823,20 @@ void CompositeBlockManager::cache_for_sequence(Sequence* seq,
       BlockManager& kv_leaf = *leaf_of(BlockType::KV);
       KVCacheState& kv_state = seq->kv_state();
       const size_t block_size = kv_leaf.block_size();
+      const BlockHasherType hasher_type = kv_leaf.options().hasher_type();
+      const Slice<int32_t> tokens = seq->hash_tokens(hasher_type);
+      const size_t completed_tokens = block_hash_lookahead(hasher_type) == 0
+                                          ? num_tokens
+                                          : kv_state.kv_cache_tokens_num();
       const size_t available_tokens_num =
           std::min({num_tokens,
-                    kv_state.num_blocks(BlockType::KV) * block_size,
-                    seq->tokens().size()});
+                    completed_tokens,
+                    kv_state.num_blocks(BlockType::KV) * block_size});
+      const size_t publish_end =
+          std::min(available_tokens_num / block_size,
+                   num_hash_blocks(hasher_type, tokens.size(), block_size));
       const size_t publish_begin = kv_state.num_cached_blocks(BlockType::KV);
-      if (available_tokens_num > publish_begin * block_size) {
-        seq->update_block_hashes(static_cast<uint32_t>(block_size),
-                                 kv_leaf.options().hasher_type());
-        std::vector<Block>* blocks = kv_state.mutable_blocks(BlockType::KV);
-        CHECK_GE(blocks->size(), publish_begin);
-        kv_leaf.cache(seq->tokens().slice(0, available_tokens_num),
-                      *blocks,
-                      publish_begin,
-                      seq->mm_data(),
-                      seq->block_hashes());
-        kv_state.set_num_cached_blocks(BlockType::KV,
-                                       available_tokens_num / block_size);
-      }
+      publish_blocks(seq, kv_leaf, BlockType::KV, publish_begin, publish_end);
       break;
     }
     case LeafCombination::SWA_COMPRESSED:

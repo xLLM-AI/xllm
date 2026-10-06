@@ -305,10 +305,14 @@ class Sequence {
   void add_shared_host_blocks(BlockType type, std::vector<Block>&& blocks);
 
   // Precomputed chained block hashes used by the prefix cache. Covers all full
-  // blocks of the current tokens; reused by match()/insert() so the hash is
-  // computed once per sequence instead of recomputed on every call. Returns the
-  // chain for the stride set by the most recent update_block_hashes() call.
+  // blocks with available token dependencies; reused by match()/insert() so the
+  // hash is computed once per sequence instead of recomputed on every call.
+  // Returns the chain for the stride set by the most recent
+  // update_block_hashes() call.
   Slice<XXH3Key> block_hashes() const;
+
+  // MTP identity must never include overlap placeholders or unverified tokens.
+  Slice<int32_t> hash_tokens(BlockHasherType hasher_type) const;
 
   // Extend the per-stride chain for `block_size` to cover any newly completed
   // full blocks, and select it as the one block_hashes() returns. Cheap (no-op)
@@ -635,7 +639,7 @@ class Sequence {
   // the length of the prompt tokens
   size_t num_prompt_tokens_ = 0;
 
-  // Precomputed chained block hashes covering all full blocks of `tokens_`,
+  // Precomputed chained block hashes covering dependency-complete blocks,
   // keyed by block-size stride. DSV4 admission probes multiple strides (base /
   // 4*base / 128*base) per tick; each keeps its own chain so a stride switch
   // extends incrementally instead of discarding and rebuilding. Extended
@@ -647,6 +651,7 @@ class Sequence {
   // Stride selected by the most recent update_block_hashes() call; keys
   // block_hashes() into `block_hashes_by_stride_` (0 until first computed).
   uint32_t hash_block_size_ = 0;
+  BlockHasherType hash_type_ = BlockHasherType::TEXT;
 
   // Precomputed chained per-chunk hashes for the linear-state checkpoint index
   // (own hash domain, chunk-strided). Extended incrementally, invalidated on

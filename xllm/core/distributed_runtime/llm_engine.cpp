@@ -44,6 +44,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/framework/prefix_cache/block_hasher.h"
 #include "core/platform/platform.h"
 #include "core/util/model_config_utils.h"
 #include "framework/block/block_utils.h"
@@ -494,6 +495,9 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
   BlockManagerPool::Options options;
   options.num_blocks(kv_cache_cap.n_blocks())
+      .hasher_type(mtp_hasher_type(BlockHasherType::TEXT,
+                                   options_.num_speculative_tokens(),
+                                   options_.speculative_algorithm()))
       .block_size(kv_split_size_eff > 1 ? block_size * kv_split_size_eff
                                         : block_size)
       .host_num_blocks(kv_cache_cap.n_blocks() * options_.host_blocks_factor())

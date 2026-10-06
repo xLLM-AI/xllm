@@ -102,11 +102,6 @@ class HierarchyPoolTestPeer final {
       }
     }
   }
-
-  static bool should_probe_prefix_cache(const HierarchyBlockManagerPool& pool,
-                                        Sequence* sequence) {
-    return pool.should_probe_prefix_cache(sequence);
-  }
 };
 
 namespace {
@@ -293,6 +288,82 @@ bool allocate_with_host_cache_budget(HierarchyBlockManagerPool* pool,
   return pool->allocate(sequence, num_tokens);
 }
 
+TEST(HierarchyBlockManagerPoolTest,
+     SharedHostPrefixCopiesEveryPrivateDestination) {
+  constexpr size_t kPromptTokens = 65;
+  constexpr size_t kPrefixBlocks = 4;
+  for (size_t hbm_prefix_tokens : {0u, 32u}) {
+    SCOPED_TRACE(hbm_prefix_tokens);
+    auto options = make_flat_kv_options();
+    options.block_size(16).hasher_type(BlockHasherType::MTP_TEXT);
+    HierarchyBlockManagerPool pool(options, /*engine=*/nullptr, /*dp_size=*/1);
+
+    std::vector<int32_t> tokens(kPromptTokens, 41);
+    auto& host =
+        HierarchyPoolTestPeer::mutable_host_block_managers(pool).front();
+    seed_host_prefix(host.at(BlockType::KV).leaf.get(), tokens);
+    if (hbm_prefix_tokens > 0) {
+      CompositeBlockManager* device =
+          HierarchyPoolTestPeer::device_composite(pool);
+      // MTP needs the next token to prove the second 16-token block.
+      seed_host_prefix(
+          device->leaf_entries().at(BlockType::KV).leaf.get(),
+          std::vector<int32_t>(tokens.begin(), tokens.begin() + 33));
+    }
+
+    Sequence first = make_test_sequence(/*index=*/0, tokens);
+    Sequence second = make_test_sequence(/*index=*/1, tokens);
+    // Admission may pin the same Host prefix for multiple requests before
+    // either request receives its own HBM allocation.
+    pool.allocate_shared(&first);
+    pool.allocate_shared(&second);
+    ASSERT_EQ(first.kv_cache_tokens_num(), 64u);
+    ASSERT_EQ(second.kv_cache_tokens_num(), 64u);
+    ASSERT_EQ(first.kv_state().kv_cache_tokens_num(), hbm_prefix_tokens);
+    ASSERT_EQ(second.kv_state().kv_cache_tokens_num(), hbm_prefix_tokens);
+    ASSERT_TRUE(pool.allocate(&first, kPromptTokens));
+    ASSERT_TRUE(pool.allocate(&second, kPromptTokens));
+
+    const auto transfers = HierarchyPoolTestPeer::pending_load_infos(pool);
+    const size_t expected_transfers = hbm_prefix_tokens == 0 ? 8 : 4;
+    EXPECT_EQ(transfers.size(), expected_transfers);
+    for (Sequence* sequence : {&first, &second}) {
+      const auto host_blocks = sequence->host_kv_state().blocks(BlockType::KV);
+      const auto device_blocks = sequence->kv_state().blocks(BlockType::KV);
+      for (size_t i = 0; i < kPrefixBlocks; ++i) {
+        const size_t expected_copies = i < hbm_prefix_tokens / 16 ? 0 : 1;
+        EXPECT_EQ(
+            std::count_if(transfers.begin(),
+                          transfers.end(),
+                          [&](const BlockTransferInfo& info) {
+                            return info.transfer_type == TransferType::H2D &&
+                                   info.block_type == BlockType::KV &&
+                                   info.src_block_id == host_blocks[i].id() &&
+                                   info.dst_block_id == device_blocks[i].id();
+                          }),
+            expected_copies)
+            << "Unexpected Host restore count for sequence "
+            << sequence->seq_id() << ", logical block " << i;
+      }
+    }
+
+    for (size_t i = hbm_prefix_tokens / 16; i < kPrefixBlocks; ++i) {
+      EXPECT_EQ(first.host_kv_state().blocks(BlockType::KV)[i].id(),
+                second.host_kv_state().blocks(BlockType::KV)[i].id());
+      EXPECT_NE(first.kv_state().blocks(BlockType::KV)[i].id(),
+                second.kv_state().blocks(BlockType::KV)[i].id());
+    }
+
+    ASSERT_TRUE(pool.allocate(&first, kPromptTokens));
+    ASSERT_TRUE(pool.allocate(&second, kPromptTokens));
+    EXPECT_EQ(HierarchyPoolTestPeer::pending_load_infos(pool).size(),
+              expected_transfers);
+
+    pool.deallocate(&first);
+    pool.deallocate(&second);
+  }
+}
+
 }  // namespace
 
 // A flat KV layout still creates a single KV host leaf. num_total_blocks
@@ -401,6 +472,7 @@ TEST(HierarchyBlockManagerPoolTest, DecodeTypedLayoutProbesOnlyDeviceC4C128) {
   Sequence sequence = make_test_sequence(/*index=*/0, tokens);
   sequence.kv_state().set_kv_cache_tokens_num(kPromptTokens);
   ASSERT_EQ(sequence.stage(), SequenceStage::DECODE);
+  EXPECT_TRUE(pool.needs_shared_reprobe(&sequence));
   pool.allocate_shared(&sequence);
 
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::SWA), 0u);
@@ -641,13 +713,13 @@ TEST(HierarchyBlockManagerPoolTest,
   ASSERT_EQ(sequence.kv_state().kv_cache_tokens_num(), kSharedTokens);
   ASSERT_EQ(sequence.kv_state().shared_tokens_num(), kSharedTokens);
 
+  sequence.host_kv_state().set_prefix_cache_matched();
+  EXPECT_FALSE(pool.needs_shared_reprobe(&sequence));
   sequence.host_kv_state().set_prefix_cache_matched(false);
-  EXPECT_TRUE(
-      HierarchyPoolTestPeer::should_probe_prefix_cache(pool, &sequence));
+  EXPECT_TRUE(pool.needs_shared_reprobe(&sequence));
 
   sequence.kv_state().set_kv_cache_tokens_num(kSharedTokens + 1);
-  EXPECT_FALSE(
-      HierarchyPoolTestPeer::should_probe_prefix_cache(pool, &sequence));
+  EXPECT_FALSE(pool.needs_shared_reprobe(&sequence));
 
   pool.deallocate(&sequence);
 }

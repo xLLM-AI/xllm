@@ -29,22 +29,22 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                                       const Slice<Block>& existed_shared_blocks,
                                       const MMData& mm_data,
                                       const Slice<XXH3Key>& block_hashes) {
-  // align tokens to block boundary
-  const size_t n_tokens = round_down(token_ids.size(), block_size_);
-  if (n_tokens == 0) {
+  const size_t n_blocks =
+      num_hash_blocks(hasher_type_, token_ids.size(), block_size_);
+  if (n_blocks == 0) {
     return std::vector<Block>();
   }
 
-  const size_t n_blocks = n_tokens / block_size_;
   total_blocks_.fetch_add(n_blocks);
 
   std::vector<Block> blocks;
   blocks.reserve(n_blocks);
-  blocks.insert(
-      blocks.end(), existed_shared_blocks.begin(), existed_shared_blocks.end());
+  const size_t start_block = std::min(existed_shared_blocks.size(), n_blocks);
+  blocks.insert(blocks.end(),
+                existed_shared_blocks.begin(),
+                existed_shared_blocks.begin() + start_block);
 
   DNodeList node_list;
-  const size_t start_block = existed_shared_blocks.size();
 
   // Look up one block by its chained hash; on hit, record the block and move
   // its LRU node to the front of the working list. Returns false on miss.
@@ -105,12 +105,12 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
   const int64_t now = absl::ToUnixMicros(absl::Now());
   // align tokens to block boundary
   const size_t n_blocks =
-      std::min(token_ids.size() / block_size_, blocks.size());
+      std::min(num_hash_blocks(hasher_type_, token_ids.size(), block_size_),
+               blocks.size());
 
-  if (n_blocks == 0) {
-    return 0;
+  if (n_blocks <= existed_shared_blocks_num) {
+    return n_blocks * block_size_;
   }
-  CHECK_GE(n_blocks, existed_shared_blocks_num);
   // truncate the token ids and blocks to boundary
 
   DNodeList node_list;

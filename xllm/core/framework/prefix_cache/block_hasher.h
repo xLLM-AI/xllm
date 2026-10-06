@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "core/framework/multimodal/mm_data.h"
@@ -35,11 +36,26 @@ void mm_xxh3_128bits_hash(const std::vector<const uint8_t*>& mm_hash_values,
                           const Slice<int32_t>& token_ids,
                           uint8_t* hash_value);
 
-// Type tag bound to the engine: LLM uses TEXT, VLM uses MM.
+// Engine-bound identity policy. MTP variants cover the next confirmed token
+// as well as the block itself.
 enum class BlockHasherType {
   TEXT,
   MM,
+  MTP_TEXT,
+  MTP_MM,
 };
+
+// Select the MTP identity variant only when MTP speculation is enabled.
+BlockHasherType mtp_hasher_type(BlockHasherType base,
+                                int32_t num_speculative_tokens,
+                                std::string_view algorithm);
+
+size_t block_hash_lookahead(BlockHasherType type);
+
+// Number of complete blocks whose token dependencies are available.
+size_t num_hash_blocks(BlockHasherType type,
+                       size_t num_tokens,
+                       size_t block_size);
 
 class BlockHasher {
  public:
@@ -97,7 +113,8 @@ class MMBlockHasher : public BlockHasher {
 // only blocks from hashes.size() up to |boundary_blocks| are appended, resuming
 // the chain from the last present hash. A no-op when nothing new is covered, so
 // it is safe to call before every match()/save. |boundary_blocks| *
-// |block_size| must be within |token_ids|.
+// |block_size| plus the policy's lookahead must be within |token_ids|;
+// boundary_blocks is capped to that available range.
 void extend_prefix_hashes(BlockHasherType type,
                           const MMData& mm_data,
                           const Slice<int32_t>& token_ids,

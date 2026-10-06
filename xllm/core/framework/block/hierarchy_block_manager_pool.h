@@ -53,6 +53,9 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   bool allocate(Sequence* sequence, size_t num_tokens) override;
 
   void allocate_shared(Sequence* sequence) override;
+  bool needs_shared_reprobe(Sequence* sequence) const override {
+    return should_probe_prefix_cache(sequence);
+  }
   bool supports_host_cache_restore() const override { return true; }
   bool has_pending_async_block_release() const override;
   HostCacheRestorePoint select_host_cache_restore(

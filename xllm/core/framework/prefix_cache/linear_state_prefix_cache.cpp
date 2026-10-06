@@ -27,20 +27,21 @@ std::vector<Block> LinearStatePrefixCache::match(
     const Slice<Block>& existed_shared_blocks,
     const MMData& mm_data,
     const Slice<XXH3Key>& block_hashes) {
-  const size_t n_tokens = round_down(token_ids.size(), block_size_);
-  if (n_tokens == 0) {
+  const size_t n_blocks =
+      num_hash_blocks(hasher_type_, token_ids.size(), block_size_);
+  if (n_blocks == 0) {
     return {};
   }
-  const size_t n_blocks = n_tokens / block_size_;
   total_blocks_.fetch_add(n_blocks);
 
   std::vector<Block> blocks;
   blocks.reserve(n_blocks);
-  blocks.insert(
-      blocks.end(), existed_shared_blocks.begin(), existed_shared_blocks.end());
+  const size_t start_block = std::min(existed_shared_blocks.size(), n_blocks);
+  blocks.insert(blocks.end(),
+                existed_shared_blocks.begin(),
+                existed_shared_blocks.begin() + start_block);
 
   DNodeList node_list;
-  const size_t start_block = existed_shared_blocks.size();
 
   // Hit: emplace + LRU-touch. Miss: emplace invalid placeholder.
   auto probe = [&](const XXH3Key& key) -> bool {
@@ -85,8 +86,7 @@ std::vector<Block> LinearStatePrefixCache::match(
   }
 
   // Trim trailing placeholders; end at deepest hit.
-  const size_t keep =
-      has_any_hit ? (last_hit_idx + 1) : existed_shared_blocks.size();
+  const size_t keep = has_any_hit ? (last_hit_idx + 1) : start_block;
   blocks.resize(keep);
 
   while (!node_list.is_empty()) {
@@ -113,12 +113,12 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
   const int64_t now = absl::ToUnixMicros(absl::Now());
   // align tokens to block boundary
   const size_t n_blocks =
-      std::min(token_ids.size() / block_size_, blocks.size());
+      std::min(num_hash_blocks(hasher_type_, token_ids.size(), block_size_),
+               blocks.size());
 
-  if (n_blocks == 0) {
-    return 0;
+  if (n_blocks <= existed_shared_blocks_num) {
+    return n_blocks * block_size_;
   }
-  CHECK_GE(n_blocks, existed_shared_blocks_num);
 
   DNodeList node_list;
 

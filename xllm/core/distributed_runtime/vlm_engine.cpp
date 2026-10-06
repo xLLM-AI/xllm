@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/framework/prefix_cache/block_hasher.h"
 #include "framework/block/kv_cache_manager_factory.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache/kv_cache_utils.h"
@@ -247,7 +248,9 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_linear_state(enable_linear_attention)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
-      .hasher_type(BlockHasherType::MM)
+      .hasher_type(mtp_hasher_type(BlockHasherType::MM,
+                                   options_.num_speculative_tokens(),
+                                   options_.speculative_algorithm()))
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .num_speculative_tokens(options_.num_speculative_tokens())
       // DECODE-side prefix cache participation is per-leaf and gated by the

@@ -13,7 +13,121 @@
 #include "util/hash_util.h"
 namespace xllm {
 
+TEST(PrefixCacheMtpTest, DifferentNextTokenCannotReuseFirstBlock) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl allocator(options);
+  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_TEXT);
+  std::vector<int32_t> tokens(33, 7);
+  auto blocks = allocator.allocate(/*num_blocks=*/2);
+  ASSERT_EQ(cache.insert(tokens, blocks), 32u);
+  ASSERT_EQ(cache.match(tokens).size(), 2u);
+
+  tokens[16] = 8;
+  EXPECT_TRUE(cache.match(tokens).empty());
+}
+
+TEST(PrefixCacheMtpTest, RequiresNextTokenEvenWithPrecomputedHashes) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl allocator(options);
+  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_TEXT);
+  const std::vector<int32_t> tokens(33, 7);
+  std::vector<XXH3Key> hashes;
+  extend_prefix_hashes(BlockHasherType::MTP_TEXT,
+                       MMData(),
+                       tokens,
+                       /*block_size=*/16,
+                       /*boundary_blocks=*/2,
+                       hashes);
+  auto blocks = allocator.allocate(/*num_blocks=*/2);
+  const std::vector<size_t> lengths = {0, 1, 15, 16, 17, 31, 32, 33};
+  const std::vector<size_t> ready_blocks = {0, 0, 0, 0, 1, 1, 1, 2};
+  for (size_t i = 0; i < lengths.size(); ++i) {
+    SCOPED_TRACE(lengths[i]);
+    const Slice<int32_t> available(tokens, lengths[i]);
+    EXPECT_EQ(cache.insert(available, blocks, /*existed=*/0, MMData(), hashes),
+              ready_blocks[i] * 16);
+    EXPECT_EQ(cache.match(available, {}, MMData(), hashes).size(),
+              ready_blocks[i]);
+  }
+}
+
+TEST(PrefixCacheMtpTest, ForkedRequestsNeverMixIncompatibleBlocks) {
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(16);
+  BlockManagerImpl allocator(options);
+  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_TEXT);
+  std::vector<int32_t> tokens_a(33, 7);
+  tokens_a[16] = 11;
+  auto blocks_a = allocator.allocate(/*num_blocks=*/2);
+  ASSERT_EQ(cache.insert(tokens_a, blocks_a), 32u);
+
+  std::vector<int32_t> tokens_b = tokens_a;
+  tokens_b[16] = 12;
+  auto blocks_b = allocator.allocate(/*num_blocks=*/2);
+  ASSERT_EQ(cache.insert(tokens_b, blocks_b), 32u);
+  const auto matched = cache.match(tokens_b);
+  ASSERT_EQ(matched.size(), 2u);
+  EXPECT_EQ(matched[0].id(), blocks_b[0].id());
+  EXPECT_EQ(matched[1].id(), blocks_b[1].id());
+
+  tokens_b[32] = 13;
+  const auto forked = cache.match(tokens_b);
+  ASSERT_EQ(forked.size(), 1u);
+  EXPECT_EQ(forked[0].id(), blocks_b[0].id());
+}
+
+TEST(PrefixCacheMtpTest, IncludesLookaheadAndMatchesPrecomputedChain) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl allocator(options);
+  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_TEXT);
+  const std::vector<int32_t> tokens(33, 7);
+  std::vector<XXH3Key> hashes;
+  extend_prefix_hashes(BlockHasherType::MTP_TEXT,
+                       MMData(),
+                       tokens,
+                       /*block_size=*/16,
+                       /*boundary_blocks=*/2,
+                       hashes);
+  ASSERT_EQ(hashes.size(), 2u);
+  XXH3Key expected;
+  xxh3_128bits_hash(/*pre_hash_value=*/nullptr,
+                    Slice<int32_t>(tokens, /*size=*/17),
+                    expected.data);
+  EXPECT_EQ(hashes[0], expected);
+  auto blocks = allocator.allocate(/*num_blocks=*/2);
+  ASSERT_EQ(cache.insert(tokens, blocks), 32u);
+  const auto matched = cache.match(tokens, {}, MMData(), hashes);
+  ASSERT_EQ(matched.size(), 2u);
+  EXPECT_EQ(matched[0].id(), blocks[0].id());
+  EXPECT_EQ(matched[1].id(), blocks[1].id());
+}
+
 namespace {
+
+TEST(PrefixCacheMtpTest, ResumedMultimodalMatchKeepsOverlappingContent) {
+  MMData mm_data;
+  auto& item = mm_data.add(MMType::IMAGE);
+  item.mutable_state().mutable_token_pos() = {16, 1};
+  std::memset(item.mutable_state().mutable_schedule_data().key.data,
+              1,
+              XXH3_128BITS_HASH_VALUE_LEN);
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl allocator(options);
+  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_MM);
+  const std::vector<int32_t> tokens(33, 7);
+  auto blocks = allocator.allocate(/*num_blocks=*/2);
+  ASSERT_EQ(cache.insert(tokens, blocks, /*existed=*/0, mm_data), 32u);
+  const auto first =
+      cache.match(Slice<int32_t>(tokens, /*size=*/17), {}, mm_data);
+  ASSERT_EQ(first.size(), 1u);
+  EXPECT_EQ(cache.match(tokens, first, mm_data).size(), 2u);
+  item.mutable_state().mutable_schedule_data().key.data[0] = 2;
+  EXPECT_TRUE(cache.match(tokens, {}, mm_data).empty());
+}
 
 // Build the chained block hashes for `tokens`, matching the chain produced by
 // xxh3_128bits_hash() inside PrefixCache and Sequence::update_block_hashes().

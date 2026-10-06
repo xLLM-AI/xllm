@@ -636,7 +636,22 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
     std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
     const size_t block_size = entry.leaf->block_size();
     CHECK_GT(block_size, 0u);
-    const size_t completed_blocks = completed_tokens / block_size;
+    size_t completed_blocks = completed_tokens / block_size;
+    const BlockHasherType hasher_type = entry.leaf->options().hasher_type();
+    const bool needs_sequence_hash = !entry.supports_prefix_cache;
+    Slice<XXH3Key> hashes;
+    if (needs_sequence_hash) {
+      sequence->update_block_hashes(static_cast<uint32_t>(block_size),
+                                    hasher_type);
+      hashes = sequence->block_hashes();
+      completed_blocks = std::min(completed_blocks, hashes.size());
+    } else if (block_hash_lookahead(hasher_type) > 0) {
+      completed_blocks =
+          std::min(completed_blocks,
+                   num_hash_blocks(hasher_type,
+                                   sequence->hash_tokens(hasher_type).size(),
+                                   block_size));
+    }
     const size_t comparable_blocks =
         std::min({hbm_blocks->size(), host_blocks->size(), completed_blocks});
     for (size_t i = 0; i < comparable_blocks; ++i) {
@@ -651,7 +666,12 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
           host_block.ref_count() != 1) {
         continue;
       }
-      host_block.set_hash_value(hbm_block.get_immutable_hash_value());
+      // Prefix-capable leaves already carry the hasher's identity stamp.
+      // Decode SWA has no device stamp, so derive its Host/Store key from
+      // the sequence for both ordinary and MTP hashers.
+      host_block.set_hash_value(needs_sequence_hash
+                                    ? hashes[i].data
+                                    : hbm_block.get_immutable_hash_value());
       auto pair = std::make_shared<OffloadBlockPair>(
           OffloadBlockPair{/*src=*/hbm_block,
                            /*dst=*/std::move(host_block),
@@ -795,13 +815,15 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
       Block& host_block = (*host_blocks)[i];
       Block& hbm_block = (*hbm_blocks)[i];
       if (i < hbm_matched_blocks || i >= host_matched_blocks ||
-          hbm_block.ref_count() != 2 || host_block.ref_count() != 2) {
+          !hbm_block.is_valid() || !host_block.is_valid()) {
         continue;
       }
-      host_block.set_hash_value(hbm_block.get_immutable_hash_value());
+      // Shared Host sources can restore multiple private HBM destinations.
+      // Reference counts do not indicate whether a destination is initialized.
+      hbm_block.set_hash_value(host_block.get_immutable_hash_value());
       load_infos.emplace_back(host_block.id(),
                               hbm_block.id(),
-                              hbm_block.get_immutable_hash_value(),
+                              host_block.get_immutable_hash_value(),
                               TransferType::H2D,
                               type);
     }
@@ -1035,7 +1057,18 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
     const size_t unit_size = prefetch_unit_size(combination, host_leaves);
     const size_t max_prefix_tokens =
         sequence->tokens().empty() ? 0 : sequence->tokens().size() - 1;
-    const size_t target_tokens = (max_prefix_tokens / unit_size) * unit_size;
+    size_t cacheable_tokens = max_prefix_tokens;
+    for (const auto& [type, entry] : host_leaves) {
+      const BlockHasherType hasher_type = entry.leaf->options().hasher_type();
+      const size_t block_size = entry.leaf->block_size();
+      const size_t hashable_tokens =
+          num_hash_blocks(hasher_type,
+                          sequence->hash_tokens(hasher_type).size(),
+                          block_size) *
+          block_size;
+      cacheable_tokens = std::min(cacheable_tokens, hashable_tokens);
+    }
+    const size_t target_tokens = (cacheable_tokens / unit_size) * unit_size;
 
     std::vector<ProbeResult> probes =
         CompositeBlockManager::probe_prefix_cache(sequence, host_leaves);

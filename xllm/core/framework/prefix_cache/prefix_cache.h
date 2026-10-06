@@ -37,10 +37,6 @@ limitations under the License.
 
 namespace xllm {
 
-inline size_t round_down(size_t n, size_t multiple) {
-  return (n / multiple) * multiple;
-}
-
 // LRU-evicted prefix cache keyed by chained per-block hash. Solid-prefix
 // match by default; LinearStatePrefixCache overrides match with a
 // gap-tolerant walk for SWA / LINEAR leaves.

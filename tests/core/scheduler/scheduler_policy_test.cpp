@@ -29,6 +29,7 @@ limitations under the License.
 #include <vector>
 
 #include "continuous_scheduler.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -127,6 +128,7 @@ class RetryRestoreBlockManagerPool final : public BlockManagerPool {
   bool allocate(Sequence* sequence, size_t num_tokens) override {
     allocate_targets_.emplace_back(num_tokens);
     if (allocate_targets_.size() == 1) {
+      sequence->host_kv_state().reset();
       sequence->clear_host_cache_match();
       return false;
     }
@@ -143,6 +145,12 @@ class RetryRestoreBlockManagerPool final : public BlockManagerPool {
   const std::vector<size_t>& allocate_targets() const {
     return allocate_targets_;
   }
+
+  bool needs_shared_reprobe(Sequence* sequence) const override {
+    return !sequence->host_kv_state().prefix_cache_matched();
+  }
+
+  bool supports_host_cache_restore() const override { return true; }
 
   int32_t allocate_shared_calls() const { return allocate_shared_calls_; }
 
@@ -705,6 +713,100 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   EXPECT_EQ(running_sequence_budgets,
             (std::vector<size_t>{kPromptTokens - kRestoreTokens}));
   EXPECT_EQ(budget.num_preempted_requests, 1u);
+  EXPECT_TRUE(finished.empty());
+}
+
+TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
+  ScopedConfigValue<int32_t> match_frequency(
+      SchedulerConfig::get_instance().chunked_match_frequency(), 2);
+  ScopedConfigValue<bool> in_batch_cache(
+      KVCacheConfig::get_instance().enable_in_batch_prefix_cache(), false);
+  constexpr size_t kHbmTokens = 8192;
+  constexpr size_t kRestoreTokens = 32768;
+  constexpr size_t kChunkTokens = 4096;
+  SchedulerOptions options = create_scheduler_options(
+      /*max_tokens_per_batch=*/kChunkTokens,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/kChunkTokens,
+      /*dp_size=*/1);
+  BatchMode mode{
+      .enable_mix_batch = true,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  DecodeFirstPolicy policy(mode, options);
+  RetryRestoreBlockManagerPool block_manager_pool;
+  std::vector<std::shared_ptr<Request>> requests = generate_request(
+      {40001}, {1}, std::nullopt, std::nullopt, /*max_context_len=*/50000);
+  Sequence* sequence = requests.front()->sequences().front().get();
+  ASSERT_TRUE(
+      block_manager_pool.BlockManagerPool::allocate(sequence, kHbmTokens));
+  sequence->kv_state().set_kv_cache_tokens_num(kHbmTokens);
+  sequence->kv_state().set_prefix_cache_matched();
+  ASSERT_GT(sequence->kv_state().num_blocks(BlockType::KV), 0u);
+  block_manager_pool.allocate_shared(sequence);
+
+  // The retained HBM prefix is at chunk 2, outside the regular match interval
+  // of 5 chunks. A released Host match must still be refreshed on retry.
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting{
+      DecodeRestoreEntry{requests.front(), absl::Now()}};
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  ModelArgs model_args;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .response_processor = nullptr,
+      .model_args = model_args,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget budget{
+      .remaining_token_budget = kChunkTokens,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, budget, finished);
+
+  ASSERT_EQ(decode_restore_waiting.size(), 1u);
+  EXPECT_TRUE(running_sequences.empty());
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), kHbmTokens);
+  EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
+  EXPECT_EQ(budget.remaining_token_budget, kChunkTokens);
+
+  policy.schedule(state, budget, finished);
+
+  EXPECT_EQ(block_manager_pool.allocate_targets(),
+            (std::vector<size_t>{kRestoreTokens + kChunkTokens,
+                                 kRestoreTokens + kChunkTokens}));
+  EXPECT_TRUE(decode_restore_waiting.empty());
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequences.front(), sequence);
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), kRestoreTokens);
+  EXPECT_EQ(running_sequence_budgets, (std::vector<size_t>{kChunkTokens}));
+  EXPECT_EQ(budget.remaining_token_budget, 0u);
   EXPECT_TRUE(finished.empty());
 }
 

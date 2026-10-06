@@ -64,6 +64,10 @@ class KVCacheManager {
   virtual void deallocate(Sequence* sequence) = 0;
 
   virtual void allocate_shared(Sequence* sequence) = 0;
+  // Whether shared matching is needed before sizing the next prefill chunk.
+  virtual bool needs_shared_reprobe(Sequence* sequence) const {
+    return sequence->kv_state().num_blocks(BlockType::KV) == 0;
+  }
   virtual bool supports_host_cache_restore() const { return false; }
   virtual bool has_pending_async_block_release() const { return false; }
   virtual HostCacheRestorePoint select_host_cache_restore(
