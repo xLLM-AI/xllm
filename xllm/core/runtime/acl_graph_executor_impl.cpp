@@ -1366,7 +1366,8 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
             max_local_batch_size,
             max_graph_batch_size,
             dp_size,
-            params_single.meta.is_graph_warmup)) {
+            params_single.meta.is_graph_warmup,
+            static_cast<uint32_t>(options_.num_decoding_tokens()))) {
       LOG_FIRST_N(WARNING, 1)
           << "Falling back to eager mode because no ACL graph was prewarmed "
              "for no-padding decode batch_size="

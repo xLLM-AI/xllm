@@ -19,6 +19,17 @@ limitations under the License.
 
 namespace xllm::npu {
 
+inline bool is_acl_graph_compatibility_batch_size(uint64_t batch_size,
+                                                  uint64_t max_batch_size) {
+  if (batch_size == max_batch_size) {
+    return true;
+  }
+  if (batch_size <= 16) {
+    return batch_size != 0 && (batch_size & (batch_size - 1)) == 0;
+  }
+  return batch_size >= 32 && batch_size % 16 == 0;
+}
+
 inline uint32_t acl_graph_max_global_batch_size(
     uint32_t configured_max_batch_size,
     uint32_t local_batch_size_limit,
@@ -34,9 +45,15 @@ inline uint32_t acl_graph_max_global_batch_size(
              : configured_max_batch_size;
 }
 
+inline uint32_t acl_graph_max_full_local_batch_size(uint32_t max_batch_size,
+                                                    uint32_t dp_size) {
+  return dp_size == 0 ? 0 : max_batch_size / dp_size;
+}
+
 inline bool is_acl_graph_warmup_batch_size(uint32_t batch_size,
                                            uint32_t max_batch_size,
-                                           uint32_t dp_size) {
+                                           uint32_t dp_size,
+                                           uint32_t num_decoding_tokens = 1) {
   if (batch_size == 0 || max_batch_size == 0 || dp_size == 0) {
     return false;
   }
@@ -46,31 +63,40 @@ inline bool is_acl_graph_warmup_batch_size(uint32_t batch_size,
     return false;
   }
 
-  auto is_global_warmup_bucket = [max_batch_size](uint32_t global_batch_size) {
-    if (global_batch_size == max_batch_size) {
-      return true;
-    }
-    if (global_batch_size <= 16) {
-      return (global_batch_size & (global_batch_size - 1)) == 0;
-    }
-    return global_batch_size >= 32 && global_batch_size % 16 == 0;
-  };
   for (uint32_t global_batch_size = dp_size;
        global_batch_size <= max_batch_size;
        ++global_batch_size) {
-    if (is_global_warmup_bucket(global_batch_size) &&
+    if (is_acl_graph_compatibility_batch_size(global_batch_size,
+                                              max_batch_size) &&
         (global_batch_size + dp_size - 1) / dp_size == batch_size) {
       return true;
     }
   }
-  return false;
+
+  // No-padding MTP warmup also schedules sequence counts whose token-row
+  // counts are compatibility buckets. Admit the same counts at runtime so
+  // every graph slot can capture them during warmup.
+  const uint32_t max_full_local_batch_size =
+      acl_graph_max_full_local_batch_size(max_batch_size, dp_size);
+  if (batch_size > max_full_local_batch_size) {
+    return false;
+  }
+  const uint64_t token_batch_size =
+      static_cast<uint64_t>(batch_size) * num_decoding_tokens;
+  const uint64_t max_token_batch_size =
+      static_cast<uint64_t>(max_full_local_batch_size) * num_decoding_tokens;
+  return num_decoding_tokens > 1 && is_acl_graph_compatibility_batch_size(
+                                        token_batch_size, max_token_batch_size);
 }
 
-inline bool is_acl_graph_decode_capture_allowed(uint32_t batch_size,
-                                                uint32_t max_batch_size,
-                                                uint32_t dp_size,
-                                                bool is_graph_warmup) {
-  if (is_acl_graph_warmup_batch_size(batch_size, max_batch_size, dp_size)) {
+inline bool is_acl_graph_decode_capture_allowed(
+    uint32_t batch_size,
+    uint32_t max_batch_size,
+    uint32_t dp_size,
+    bool is_graph_warmup,
+    uint32_t num_decoding_tokens = 1) {
+  if (is_acl_graph_warmup_batch_size(
+          batch_size, max_batch_size, dp_size, num_decoding_tokens)) {
     return true;
   }
   const uint32_t max_local_batch_size =

@@ -42,6 +42,40 @@ TEST(AclGraphBucketPolicyUnitTest, RejectsNonCanonicalSingleDpBatches) {
   EXPECT_FALSE(npu::is_acl_graph_warmup_batch_size(12, 20, 1));
 }
 
+TEST(AclGraphBucketPolicyUnitTest, AdmitsNoPaddingMtpTokenBuckets) {
+  EXPECT_TRUE(npu::is_acl_graph_warmup_batch_size(
+      /*batch_size=*/12,
+      /*max_batch_size=*/16,
+      /*dp_size=*/1,
+      /*num_decoding_tokens=*/4));
+  EXPECT_FALSE(npu::is_acl_graph_warmup_batch_size(
+      /*batch_size=*/11,
+      /*max_batch_size=*/16,
+      /*dp_size=*/1,
+      /*num_decoding_tokens=*/4));
+  EXPECT_TRUE(npu::is_acl_graph_decode_capture_allowed(
+      /*batch_size=*/12,
+      /*max_batch_size=*/16,
+      /*dp_size=*/1,
+      /*is_graph_warmup=*/false,
+      /*num_decoding_tokens=*/4));
+}
+
+TEST(AclGraphBucketPolicyUnitTest, AdmitsNonDivisibleDpMtpTailBucket) {
+  EXPECT_TRUE(npu::is_acl_graph_decode_capture_allowed(
+      /*batch_size=*/3,
+      /*max_batch_size=*/7,
+      /*dp_size=*/2,
+      /*is_graph_warmup=*/false,
+      /*num_decoding_tokens=*/4));
+  EXPECT_TRUE(npu::is_acl_graph_decode_capture_allowed(
+      /*batch_size=*/4,
+      /*max_batch_size=*/7,
+      /*dp_size=*/2,
+      /*is_graph_warmup=*/false,
+      /*num_decoding_tokens=*/4));
+}
+
 TEST(AclGraphBucketPolicyUnitTest, AppliesWarmupCapacityInLocalDpUnits) {
   EXPECT_TRUE(npu::is_acl_graph_decode_capture_allowed(4, 16, 4, true));
   EXPECT_FALSE(npu::is_acl_graph_decode_capture_allowed(5, 16, 4, true));

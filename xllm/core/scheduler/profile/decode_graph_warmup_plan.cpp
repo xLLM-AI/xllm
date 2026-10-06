@@ -21,6 +21,7 @@ limitations under the License.
 #include <utility>
 
 #include "platform/platform.h"
+#include "runtime/acl_graph_bucket_policy.h"
 
 namespace xllm {
 namespace {
@@ -91,14 +92,18 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   }
 
   const bool use_mtp_batches =
-      !execution_shape.enable_graph_mode_decode_no_padding &&
       execution_shape.num_decoding_tokens > 1 &&
-      max_global_batch_size >= dp_size && dp_size > 0;
+      max_global_batch_size >= dp_size && dp_size > 0 &&
+      (!execution_shape.enable_graph_mode_decode_no_padding ||
+       execution_shape.max_graph_batch_size > 0);
   if (!use_mtp_batches) {
     return plan;
   }
 
-  const int32_t max_local_batch_size = max_global_batch_size / dp_size;
+  const int32_t max_local_batch_size =
+      static_cast<int32_t>(npu::acl_graph_max_full_local_batch_size(
+          static_cast<uint32_t>(max_global_batch_size),
+          static_cast<uint32_t>(dp_size)));
 
   if (execution_shape.max_graph_batch_size > 0) {
     // The graph batch limit caps the DP-local decode batch: the executor
@@ -110,6 +115,9 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
         max_graph_local_batch_size * dp_size;
     std::vector<int32_t> graph_batch_sizes;
     int64_t current_token_bucket = 0;
+    const int64_t max_graph_token_count =
+        static_cast<int64_t>(max_graph_local_batch_size) *
+        execution_shape.num_decoding_tokens;
     for (int32_t local_batch_size = 1;
          local_batch_size <= max_graph_local_batch_size;
          ++local_batch_size) {
@@ -117,6 +125,12 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
                                  execution_shape.num_decoding_tokens;
       const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
           num_tokens, execution_shape.enable_graph_mode_decode_no_padding);
+      if (execution_shape.enable_graph_mode_decode_no_padding &&
+          !npu::is_acl_graph_compatibility_batch_size(
+              static_cast<uint64_t>(token_bucket),
+              static_cast<uint64_t>(max_graph_token_count))) {
+        continue;
+      }
       const int32_t global_batch_size = local_batch_size * dp_size;
       if (graph_batch_sizes.empty() || token_bucket != current_token_bucket) {
         graph_batch_sizes.emplace_back(global_batch_size);
@@ -129,7 +143,8 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
     std::vector<int32_t> batch_sizes;
     batch_sizes.reserve(plan.batch_sizes.size() + graph_batch_sizes.size());
     for (int32_t batch_size : plan.batch_sizes) {
-      if (batch_size > max_graph_global_batch_size) {
+      if (execution_shape.enable_graph_mode_decode_no_padding ||
+          batch_size > max_graph_global_batch_size) {
         batch_sizes.emplace_back(batch_size);
       }
     }
