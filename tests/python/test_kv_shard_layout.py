@@ -64,6 +64,51 @@ def test_indexer_reads_expanded_logical_block_table() -> None:
     )
 
 
+def test_pack_owned_slots_drops_foreign_and_invalid_slots() -> None:
+    layout = KVShardLayout(
+        physical_block_size=4,
+        dcp_size=2,
+        dcp_rank=1,
+    )
+    logical_slots = torch.tensor([-1, 0, 3, 4, 7, 8, 12], dtype=torch.int32)
+
+    packed = layout.pack_owned_slots(logical_slots)
+
+    # Owned slots keep their relative order; foreign and invalid ones end up behind them.
+    assert torch.equal(
+        packed,
+        torch.tensor([0, 3, 4, -1, -1, -1, -1], dtype=torch.int32),
+    )
+
+
+def test_pack_owned_slots_keeps_kpool_tail_inside_the_valid_run() -> None:
+    """page=128/DCP=4, top-k prefix 0..2047, kPool tail 2048..2050 (GLM-5.3).
+
+    Rank 0 owns 128 of every 512 logical slots, so 512 prefix slots are local.
+    The packed row has to carry all 515 owned slots ahead of the first ``-1``:
+    SFA stops scanning at the first ``-1``, so a tail parked behind the padding
+    would be dropped.
+    """
+    layout = KVShardLayout(
+        physical_block_size=128,
+        dcp_size=4,
+        dcp_rank=0,
+    )
+    logical_slots = torch.cat(
+        [
+            torch.arange(2048, dtype=torch.int32),
+            torch.arange(2048, 2051, dtype=torch.int32),
+        ]
+    )
+
+    packed = layout.pack_owned_slots(logical_slots)
+
+    assert torch.equal(packed[:512], torch.arange(512, dtype=torch.int32))
+    assert torch.equal(packed[512:515], torch.tensor([512, 513, 514], dtype=torch.int32))
+    assert bool((packed[515:] < 0).all())
+    assert int((packed >= 0).sum()) == 515
+
+
 def test_graph_padded_zero_block_expands_to_valid_indexer_pages() -> None:
     layout = KVShardLayout(
         physical_block_size=128,

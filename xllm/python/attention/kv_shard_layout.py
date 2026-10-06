@@ -78,6 +78,25 @@ class KVShardLayout:
             torch.full_like(local_slots, self.INVALID_SLOT),
         )
 
+    def pack_owned_slots(self, logical_slots: torch.Tensor) -> torch.Tensor:
+        """Map logical slots onto this rank and pack every owned slot to the front.
+
+        SFA walks ``sparse_indices`` until the first ``INVALID_SLOT``, so all slots
+        this rank owns must form one leading run. A kPool indexer appends tail
+        columns next to the top-k ones; packing the whole row keeps that tail in
+        the same run instead of leaving it behind the ``-1`` padding.
+        """
+        localized = self.localize_slots(logical_slots)
+        width = int(localized.shape[-1])
+        original_order = torch.arange(
+            width,
+            dtype=torch.float32,
+            device=localized.device,
+        ).expand_as(localized)
+        pack_keys = original_order + (localized < 0).to(torch.float32) * width
+        pack_order = torch.sort(pack_keys, dim=-1).indices
+        return torch.gather(localized, dim=-1, index=pack_order.to(torch.int32))
+
     def expand_indexer_block_table(
         self,
         logical_block_table: torch.Tensor,

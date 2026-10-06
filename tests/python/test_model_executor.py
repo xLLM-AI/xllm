@@ -371,6 +371,35 @@ class TestModelExecutorConstruction:
         "xllm.python.model_executor.executor._create_attention_backend",
         return_value=StubAttentionBackend(),
     )
+    def test_glm_next_mixed_layers_build_backend_from_dsa(self, mock_backend: MagicMock) -> None:
+        class _DsaAttention(Attention):
+            is_glm_next_mla = True
+
+        class _FakeGlmNext(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = nn.Linear(1, 1)
+                self.kda = _make_attention_layer(num_heads=16, num_kv_heads=16, head_dim=64, scale=0.125, layer_id=0)
+                self.dsa = _DsaAttention(
+                    num_heads=8,
+                    num_kv_heads=1,
+                    head_dim=512,
+                    scale=0.044,
+                    sliding_window=0,
+                    layer_id=3,
+                )
+                self._param = nn.Parameter(torch.zeros(1))
+
+        ModelExecutor(_FakeGlmNext(), {"python_graph_backend": "off"}, max_seqs_per_batch=4)
+        first_attention = mock_backend.call_args.args[0]
+        assert first_attention.num_heads == 8
+        assert first_attention.num_kv_heads == 1
+        assert first_attention.head_dim == 512
+
+    @patch(
+        "xllm.python.model_executor.executor._create_attention_backend",
+        return_value=StubAttentionBackend(),
+    )
     def test_graph_backend_off_variants(self, _mock_backend):
         for off_value in ("off", "", "none", "0"):
             model = _FakeModel(num_layers=1)

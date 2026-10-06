@@ -35,6 +35,7 @@ from xllm.python.attention.backend import (
     LayerCache,
     MlaIndexContext,
     MlaPreprocessContext,
+    has_rope_dim,
 )
 from xllm.python.attention.expanded_decode_metadata import (
     resolve_expanded_decode_metadata,
@@ -218,6 +219,35 @@ class PagedAttentionGraphState:
     kv: list[int]
 
 
+def write_mla_paged_cache(
+    slot_mapping: torch.Tensor,
+    k_latent_3d: torch.Tensor,
+    k_pe_3d: torch.Tensor | None,
+    nope_cache: torch.Tensor,
+    rope_cache: torch.Tensor | None,
+) -> None:
+    """Scatter MLA KV into paged caches.
+
+    ATB ``ReshapeAndCache`` rejects a 0-width rope/value tensor. NoPE therefore
+    writes the latent into both key and value operands against ``nope_cache``.
+    """
+    if has_rope_dim(k_pe_3d):
+        if not has_rope_dim(rope_cache):
+            raise RuntimeError("MLA rope cache is missing for a non-empty k_pe")
+    elif has_rope_dim(rope_cache):
+        raise RuntimeError("MLA key rope tensor is missing for a non-empty rope cache")
+    else:
+        k_pe_3d = k_latent_3d
+        rope_cache = nope_cache
+    torch.ops.xllm_ops.reshape_paged_cache(
+        slot_mapping,
+        k_latent_3d,
+        k_pe_3d,
+        nope_cache,
+        rope_cache,
+    )
+
+
 class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     """NPU attention backend dispatching to npu_fused_infer_attention_score."""
 
@@ -297,6 +327,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if self._page_size is None:
             raise RuntimeError("full-attention KV caches are not bound")
         return self._page_size
+
+    def indexer_block_table(self) -> torch.Tensor:
+        """Return the required paged index-cache table, expanded by DCP backends."""
+        block_table = self._block_table_i32
+        if block_table is None and self._metadata is not None:
+            block_table = self._metadata.block_table
+        if block_table is None:
+            raise RuntimeError("indexer_block_table needs a paged block_table")
+        return block_table
 
     @property
     def graph_index_history_max_kv(self) -> int:
@@ -886,8 +925,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                             nope_cache,
                         )
                     else:
-                        torch.ops.xllm_ops.reshape_paged_cache(
-                            metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
+                        write_mla_paged_cache(
+                            metadata.slot_mapping,
+                            k_latent_3d,
+                            k_pe_3d,
+                            nope_cache,
+                            rope_cache,
                         )
                 # Dense absorbed MLA (indexer disabled, topk is None): fall back to
                 # FIA v2 full attention over the paged latent cache. This is the
@@ -927,8 +970,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if not cache_is_preprocessed:
                 if k_latent_3d is None:
                     raise RuntimeError("MLA cache inputs are required")
-                torch.ops.xllm_ops.reshape_paged_cache(
-                    metadata.slot_mapping, k_latent_3d, k_latent_3d, nope_cache, nope_cache
+                write_mla_paged_cache(
+                    metadata.slot_mapping,
+                    k_latent_3d,
+                    k_pe_3d,
+                    nope_cache,
+                    rope_cache,
                 )
             return self._mla_sparse(
                 q_latent,
@@ -1292,7 +1339,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     def gather_index_history(
         self,
         layer: Attention,
-        batch_size: int,
     ) -> torch.Tensor:
         """Gather the kPool packed history into a dense ``[B, kv_len, W]`` tensor.
 
@@ -1303,22 +1349,18 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         ``kv_len`` is padded to the max across the batch; out-of-range rows
         are zeroed so ``valid`` channels read as false downstream.
         """
-        metadata = self._metadata
-        assert metadata is not None, "gather_index_history called before prepare()"
+        assert self._metadata is not None, "gather_index_history called before prepare()"
         index_cache = self._kv_caches[layer.layer_id].index
         assert index_cache is not None, "gather_index_history requires a paged index cache"
-        block_table = metadata.block_table
-        if block_table is None:
-            # No paged view (standalone): caller should not reach here.
-            raise RuntimeError("gather_index_history needs a paged block_table")
+        block_table = self.indexer_block_table()
         block_size = index_cache.shape[1]
         width = index_cache.shape[3]
         device = index_cache.device
 
-        # batch_size is hidden_states.shape[0] which the engine flattens to 1
-        # for multi-sequence batches; the real sequence count is the block
-        # table's first dim. Use it to gather every sequence's history.
-        num_seqs = block_table.shape[0] if block_table is not None else batch_size
+        kv_seq_lens = self._mla_actual_seq_kv
+        if kv_seq_lens is None:
+            raise RuntimeError("gather_index_history needs prepared device KV lengths")
+        num_seqs = block_table.shape[0]
 
         if in_acl_graph():
             # Graph branch: fixed shapes only (no .item()/host sync). Gather
@@ -1329,9 +1371,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             # mask: the valid channel alone cannot be trusted because a
             # recycled block still carries a previous owner's valid=1 rows,
             # and a padded block-table column points at block 0.
-            kv_lens_dev = metadata.kv_seq_lens
-            if kv_lens_dev is None:
-                raise RuntimeError("gather_index_history graph mode needs device kv_seq_lens")
             max_kv = min(
                 block_table.shape[1] * block_size,
                 self.graph_index_history_max_kv,
@@ -1352,23 +1391,11 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             block_offsets = torch.arange(block_size, device=device)
             slot_ids = (bt[:, :, None] * block_size + block_offsets[None, None, :]).reshape(num_seqs, max_kv)
             gathered = flat.index_select(0, slot_ids.reshape(-1)).view(num_seqs, max_kv, width)
-            row_valid = torch.arange(max_kv, device=device)[None, :] < kv_lens_dev[:num_seqs].to(torch.int64)[:, None]
+            row_valid = torch.arange(max_kv, device=device)[None, :] < kv_seq_lens[:num_seqs].to(torch.int64)[:, None]
             torch.mul(gathered, row_valid[:, :, None].to(out.dtype), out=out)
             return out
 
-        kv_seq_lens = metadata.kv_seq_lens
-        if kv_seq_lens is not None:
-            kv_lens = kv_seq_lens[:num_seqs].to(torch.int64)
-        else:
-            kv_host = metadata.kv_seq_lens_host
-            if kv_host is not None:
-                kl = kv_host.cpu()
-                if kl.numel() == num_seqs + 1:
-                    kv_lens = (kl[1:] - kl[:-1]).to(torch.int64)
-                else:
-                    kv_lens = kl[:num_seqs].to(torch.int64)
-            else:
-                raise RuntimeError("gather_index_history needs kv_seq_lens")
+        kv_lens = kv_seq_lens[:num_seqs].to(torch.int64)
 
         max_kv = int(kv_lens.max().item()) if num_seqs > 0 else 0
         flat = index_cache.view(-1, width)

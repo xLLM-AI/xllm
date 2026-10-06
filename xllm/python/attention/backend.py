@@ -17,7 +17,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import torch
 
@@ -28,6 +28,15 @@ from xllm.python.attention.expanded_decode_metadata import (
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
     from xllm.python.model_executor.cp_utils import CpContext
+
+
+def has_rope_dim(tensor: torch.Tensor | None) -> TypeGuard[torch.Tensor]:
+    """Whether an MLA rope operand carries a rope dimension.
+
+    NoPE models (``qk_rope_head_dim == 0``) surface the rope operand as ``None``
+    or as a zero-width tensor; both mean "skip the rope path".
+    """
+    return tensor is not None and tensor.shape[-1] > 0
 
 
 @dataclass(frozen=True, slots=True)

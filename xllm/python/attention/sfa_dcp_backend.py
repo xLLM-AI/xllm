@@ -22,17 +22,32 @@ from typing import TYPE_CHECKING
 import torch
 from torch.distributed import ProcessGroup
 
-from xllm.python.attention.backend import AttentionMetadata, LayerCache, MlaIndexContext, MlaPreprocessContext
-from xllm.python.attention.expanded_decode_metadata import resolve_expanded_decode_metadata
+from xllm.python.attention.backend import (
+    AttentionMetadata,
+    LayerCache,
+    MlaIndexContext,
+    MlaPreprocessContext,
+    has_rope_dim,
+)
+from xllm.python.attention.expanded_decode_metadata import (
+    resolve_expanded_decode_metadata,
+)
 from xllm.python.attention.kv_shard_layout import KVShardLayout
-from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend, _PreparedMlaAttention
+from xllm.python.attention.npu_paged_attention import (
+    NpuPagedAttentionBackend,
+    _PreparedMlaAttention,
+    write_mla_paged_cache,
+)
 from xllm.python.layers.sfa_dcp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadata,
     AscendSFADCPMetadataBuilder,
     DCPContext,
 )
-from xllm.python.model_executor.forward_context import copy_into_execution_buffer, get_forward_context
+from xllm.python.model_executor.forward_context import (
+    copy_into_execution_buffer,
+    get_forward_context,
+)
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
@@ -43,14 +58,6 @@ class _ProcessGroupCoordinator:
     world_size: int
     rank_in_group: int
     device_group: ProcessGroup
-
-
-def _coordinator(group: ProcessGroup) -> _ProcessGroupCoordinator:
-    return _ProcessGroupCoordinator(
-        world_size=group.size(),
-        rank_in_group=group.rank(),
-        device_group=group,
-    )
 
 
 def dcp_layer_options(layer: Attention) -> int:
@@ -104,9 +111,12 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             self._dcp_group.size(),
             self._dcp_group.rank(),
         )
-        coordinator = _coordinator(self._dcp_group)
         self._impl = AscendSFADCPImpl(
-            coordinator,
+            _ProcessGroupCoordinator(
+                world_size=self._dcp_group.size(),
+                rank_in_group=self._dcp_group.rank(),
+                device_group=self._dcp_group,
+            ),
             scale=self.scale,
             index_topk=self._index_topk,
             layout=self._kv_layout,
@@ -115,17 +125,6 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             layout=self._kv_layout,
             device=self.device,
             max_num_reqs=max(self._max_num_reqs, 1),
-        )
-
-    def _ensure_builder_capacity(self, num_reqs: int) -> None:
-        if self._builder is None or self._kv_layout is None:
-            raise RuntimeError("SFA DCP backend requires bind_kv_caches before execute")
-        if num_reqs <= self._builder.dcp_local_seq_lens_buf.shape[0]:
-            return
-        raise RuntimeError(
-            "SFA DCP builder buffer is too small; "
-            f"max_num_reqs={self._builder.dcp_local_seq_lens_buf.shape[0]}, "
-            f"num_reqs={num_reqs}"
         )
 
     def prepare(
@@ -165,20 +164,17 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             )
         self._local_slot_mapping = local_slots
 
-        if self._block_table_i32 is not None:
-            # ACL graph padded lanes keep logical block 0 and kv_seq_len=1 so
-            # sparse MLA tiling stays valid. Expanding that row yields pages
-            # 0..dcp_size-1. Do not rewrite those pages to -1: LightningIndexer
-            # treats -1 as a huge page id and MTE-OOB.
-            expanded = self._kv_layout.expand_indexer_block_table(self._block_table_i32)
-            if graph_mode:
-                expanded = copy_into_execution_buffer(
-                    ("DCP_INDEXER_BT", tuple(expanded.shape)),
-                    expanded,
-                )
-            self._expanded_indexer_block_table = expanded
-        else:
-            self._expanded_indexer_block_table = None
+        # ACL graph padded lanes keep logical block 0 and kv_seq_len=1 so
+        # sparse MLA tiling stays valid. Expanding that row yields pages
+        # 0..dcp_size-1. Do not rewrite those pages to -1: LightningIndexer
+        # treats -1 as a huge page id and MTE-OOB.
+        expanded = self._kv_layout.expand_indexer_block_table(block_table)
+        if graph_mode:
+            expanded = copy_into_execution_buffer(
+                ("DCP_INDEXER_BT", tuple(expanded.shape)),
+                expanded,
+            )
+        self._expanded_indexer_block_table = expanded
 
         # Speculative verification expands each request into one row per
         # proposed token.  Use the same expanded row layout as the parent
@@ -211,7 +207,12 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             )
             return
 
-        self._ensure_builder_capacity(num_reqs)
+        if num_reqs > self._builder.dcp_local_seq_lens_buf.shape[0]:
+            raise RuntimeError(
+                "SFA DCP builder buffer is too small; "
+                f"max_num_reqs={self._builder.dcp_local_seq_lens_buf.shape[0]}, "
+                f"num_reqs={num_reqs}"
+            )
         attn_metadata = self._builder.build(
             slot_mapping=local_slots,
             block_table=block_table,
@@ -221,9 +222,6 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             dcp_local_seq_lens=local_seq_lens,
             num_prefills=num_prefills,
         )
-        attn_metadata.dcp_context.slot_mapping = local_slots[:num_input_tokens]
-        attn_metadata.dcp_context.seq_lens = local_seq_lens[:num_reqs]
-        attn_metadata.dcp_context.block_table = block_table[:num_reqs]
         self._sfa_metadata = attn_metadata
 
     def prepare_graph_replay(self, metadata: AttentionMetadata) -> None:
@@ -266,31 +264,35 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         # Latent KV is sharded; the index cache still uses global logical slots.
         return replace(context, slot_mapping=self._local_slot_mapping)
 
+    def indexer_block_table(self) -> torch.Tensor:
+        if self._expanded_indexer_block_table is not None:
+            return self._expanded_indexer_block_table
+        return super().indexer_block_table()
+
     def mla_index_context(self, layer: Attention) -> MlaIndexContext:
         context = super().mla_index_context(layer)
-        expanded_block_table = self._expanded_indexer_block_table
-        if expanded_block_table is None:
+        indexer_table = self._expanded_indexer_block_table
+        if indexer_table is None:
             return context
 
         def materialize_index_cache() -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
             index_cache, index_cache_scale, _ = context.materialize_index_cache()
-            return index_cache, index_cache_scale, expanded_block_table
+            return index_cache, index_cache_scale, indexer_table
 
         return replace(
             context,
-            block_table=expanded_block_table,
+            block_table=indexer_table,
             materialize_index_cache=materialize_index_cache,
         )
 
     def execute_mla(
         self,
         q_latent: torch.Tensor,
-        q_pe: torch.Tensor,
+        q_pe: torch.Tensor | None,
         k_latent_3d: torch.Tensor | None,
         k_pe_3d: torch.Tensor | None,
         layer: Attention,
         topk: torch.Tensor | None = None,
-        *,
         cache_is_preprocessed: bool = False,
     ) -> torch.Tensor:
         if topk is None:
@@ -305,22 +307,32 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         ctx = get_forward_context()
         layer_cache = ctx.layer_caches[layer.layer_id]
         nope_cache, rope_cache = layer_cache.key, layer_cache.value
-        if nope_cache is None or rope_cache is None:
+        if nope_cache is None:
             raise RuntimeError(f"MLA latent cache is missing for layer {layer.layer_id}")
+        # Validate the rope story before touching any cache: query and KV decide
+        # "NoPE?" independently, so a mixed state must not reach the SFA kernel.
+        if has_rope_dim(q_pe) != has_rope_dim(rope_cache):
+            raise RuntimeError(
+                f"MLA rope cache and query disagree on layer {layer.layer_id}: "
+                f"query rope dim={0 if q_pe is None else q_pe.shape[-1]}, "
+                f"cache rope dim={0 if rope_cache is None else rope_cache.shape[-1]}"
+            )
 
         attn_metadata.dcp_context.gather_context = None
+
         if not cache_is_preprocessed:
-            if k_latent_3d is None or k_pe_3d is None:
+            if k_latent_3d is None:
                 raise RuntimeError("SFA DCP requires K tensors unless MLA preprocessing wrote the cache")
-            torch.ops.xllm_ops.reshape_paged_cache(
+            write_mla_paged_cache(
                 attn_metadata.dcp_context.slot_mapping,
                 k_latent_3d,
                 k_pe_3d,
                 nope_cache,
                 rope_cache,
             )
+
         kv_cache = (nope_cache, rope_cache)
-        self._impl._store_parallel_kv(k_pe_3d, k_latent_3d, None, kv_cache, attn_metadata)
+        self._impl._record_dcp_kv_gather_context(kv_cache, attn_metadata)
         self._impl._record_query_gather_context(q_latent, q_pe, attn_metadata)
         return self._impl._execute_sparse_flash_attention_process(
             q_latent,

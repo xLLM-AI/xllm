@@ -25,17 +25,16 @@ def remap_sparse_indices(
     layout: KVShardLayout,
     index_topk: int,
 ) -> torch.Tensor:
-    topk_count = topk_indices.shape[-1]
-    if topk_count > index_topk:
-        raise RuntimeError(f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({index_topk}).")
+    """Pack this rank's owned sparse slots to the front of the SFA width.
 
-    local_table = layout.localize_slots(topk_indices)
-    owned_entries = local_table >= 0
-    original_order = torch.arange(
-        topk_count,
-        dtype=torch.float32,
-        device=topk_indices.device,
-    ).expand_as(topk_indices)
-    pack_keys = original_order + (~owned_entries).to(torch.float32) * topk_count
-    _, pack_order = torch.sort(pack_keys, dim=-1)
-    return torch.gather(local_table, dim=-1, index=pack_order.to(torch.int32))
+    ``index_topk`` is the configured SFA width and is only a lower bound here: a
+    kPool indexer may emit a wider last dim (``topk + index_kpool - 1`` when
+    always-select-tail is on). SFA stops at the first ``-1``, so the tail columns
+    have to be packed into the same leading run as the top-k ones.
+    """
+    last_dim = int(topk_indices.shape[-1])
+    if last_dim < index_topk:
+        raise RuntimeError(
+            f"sparse indices last dim ({last_dim}) is narrower than the configured index_topk ({index_topk})."
+        )
+    return layout.pack_owned_slots(topk_indices)

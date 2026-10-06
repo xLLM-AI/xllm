@@ -29,6 +29,7 @@ from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
 from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
 from xllm.python.layers.sfa_dcp import (
+    AscendSFADCPImpl,
     AscendSFADCPMetadataBuilder,
     _lse_as_token_head,
 )
@@ -274,3 +275,196 @@ def test_lse_as_token_head_squeezes_graph_leading_one() -> None:
     out = _lse_as_token_head(lse, num_tokens, num_heads)
     assert tuple(out.shape) == (num_tokens, num_heads)
     torch.testing.assert_close(out, lse[0])
+
+
+class _IdentityDcpGroup:
+    world_size = 1
+    rank_in_group = 0
+    device_group = None
+
+
+def _dcp_impl() -> AscendSFADCPImpl:
+    return AscendSFADCPImpl(
+        _IdentityDcpGroup(),
+        scale=0.1,
+        index_topk=8,
+        layout=KVShardLayout(physical_block_size=4, dcp_size=2, dcp_rank=0),
+    )
+
+
+def test_query_gather_nope_returns_none_q_pe() -> None:
+    impl = _dcp_impl()
+    ql_nope = torch.randn(2, 4, 8)
+    gather_context = impl._start_dcp_query_gather(ql_nope, None)
+    assert gather_context.split_sizes == (8,)
+    gathered_ql, gathered_q_pe = impl._finish_dcp_gather(gather_context)
+    torch.testing.assert_close(gathered_ql, ql_nope)
+    assert gathered_q_pe is None
+
+
+def test_query_gather_with_rope_keeps_fused_split() -> None:
+    impl = _dcp_impl()
+    ql_nope = torch.randn(2, 4, 8)
+    q_pe = torch.randn(2, 4, 4)
+    gather_context = impl._start_dcp_query_gather(ql_nope, q_pe)
+    assert gather_context.split_sizes == (8, 4)
+    gathered_ql, gathered_q_pe = impl._finish_dcp_gather(gather_context)
+    torch.testing.assert_close(gathered_ql, ql_nope)
+    assert gathered_q_pe is not None
+    torch.testing.assert_close(gathered_q_pe, q_pe)
+
+
+def test_decode_nope_query_gather_unpacks_none_before_sfa() -> None:
+    impl = _dcp_impl()
+    builder = _builder()
+    metadata = builder.build(
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([[1, 2]], dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
+        num_reqs=1,
+        num_input_tokens=2,
+        num_prefills=0,
+    )
+    ql_nope = torch.randn(2, 4, 8)
+    impl._record_query_gather_context(ql_nope, None, metadata)
+    sfa_out = torch.randn(2, 4, 8)
+    softmax_max = torch.zeros(2, 4)
+    softmax_sum = torch.ones(2, 4)
+    merged = torch.randn(2, 2, 8)
+    topk = torch.zeros(2, 1, 8, dtype=torch.int32)
+    kv = torch.randn(4, 4, 1, 8)
+    with (
+        patch.object(impl, "_remap_sparse_indices", side_effect=lambda indices: indices),
+        patch.object(
+            impl,
+            "_npu_sparse_flash_attention",
+            return_value=(sfa_out, softmax_max, softmax_sum),
+        ) as sparse_attn,
+        patch.object(impl, "_merge_dcp_outputs", return_value=merged) as merge,
+    ):
+        out = impl._execute_sparse_flash_attention_process(
+            ql_nope,
+            None,
+            (kv,),
+            topk,
+            metadata,
+            torch.tensor([1, 2], dtype=torch.int32),
+            torch.tensor([8], dtype=torch.int32),
+        )
+    assert out is merged
+    assert sparse_attn.call_args.args[1] is None
+    merge.assert_called_once()
+
+
+def test_prefill_kv_gather_with_rope_still_fuses() -> None:
+    impl = _dcp_impl()
+    builder = _builder()
+    metadata = builder.build(
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([[1]], dtype=torch.int32),
+        torch.tensor([4], dtype=torch.int32),
+        num_reqs=1,
+        num_input_tokens=1,
+        num_prefills=1,
+    )
+    nope = torch.randn(4, 4, 1, 16)
+    rope = torch.randn(4, 4, 1, 4)
+    impl._record_dcp_kv_gather_context((nope, rope), metadata)
+    gather_context = metadata.dcp_context.gather_context
+    assert gather_context is not None
+    assert gather_context.split_sizes == (16, 4)
+    gathered_kv, gathered_rope = impl._finish_dcp_gather(gather_context)
+    assert gathered_rope is not None
+    assert gathered_kv.shape[-1] == 16
+    assert gathered_rope.shape[-1] == 4
+
+
+def test_prefill_kv_gather_without_rope_cache() -> None:
+    impl = _dcp_impl()
+    builder = _builder()
+    metadata = builder.build(
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([[1, 2], [3, 0]], dtype=torch.int32),
+        torch.tensor([8, 4], dtype=torch.int32),
+        num_reqs=2,
+        num_input_tokens=2,
+        num_prefills=2,
+    )
+    nope = torch.randn(8, 4, 1, 16)
+    impl._record_dcp_kv_gather_context((nope,), metadata)
+    gather_context = metadata.dcp_context.gather_context
+    assert gather_context is not None
+    assert gather_context.split_sizes == (16,)
+    gathered_kv, gathered_rope = impl._finish_dcp_gather(gather_context)
+    assert gathered_rope is None
+    assert gathered_kv.shape[-1] == 16
+
+    sfa_out = torch.randn(2, 4, 16)
+    ql_nope = torch.randn(2, 4, 16)
+    topk = torch.zeros(2, 1, 8, dtype=torch.int32)
+    metadata.dcp_context.gather_context = gather_context
+    with patch.object(impl, "_npu_sparse_flash_attention", return_value=sfa_out) as sparse_attn:
+        out = impl._execute_sparse_flash_attention_process(
+            ql_nope,
+            None,
+            (nope, None),
+            topk,
+            metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([8, 4], dtype=torch.int32),
+        )
+    assert out is sfa_out
+    kv_arg = sparse_attn.call_args.args[2]
+    assert kv_arg[1] is None
+
+
+def test_prefill_kv_gather_skips_zero_width_rope_cache() -> None:
+    impl = _dcp_impl()
+    builder = _builder()
+    metadata = builder.build(
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([[1]], dtype=torch.int32),
+        torch.tensor([4], dtype=torch.int32),
+        num_reqs=1,
+        num_input_tokens=1,
+        num_prefills=1,
+    )
+    nope = torch.randn(4, 4, 1, 16)
+    rope = torch.empty(4, 4, 1, 0)
+    impl._record_dcp_kv_gather_context((nope, rope), metadata)
+    gather_context = metadata.dcp_context.gather_context
+    assert gather_context is not None
+    assert gather_context.split_sizes == (16,)
+    _, gathered_rope = impl._finish_dcp_gather(gather_context)
+    assert gathered_rope is None
+
+
+def test_npu_sparse_flash_attention_passes_none_rope() -> None:
+    impl = _dcp_impl()
+    query = torch.randn(2, 4, 8)
+    key = torch.randn(4, 4, 1, 8)
+    topk = torch.zeros(2, 1, 8, dtype=torch.int32)
+    block_table = torch.zeros(1, 2, dtype=torch.int32)
+    actual_q = torch.tensor([2], dtype=torch.int32)
+    actual_kv = torch.tensor([8], dtype=torch.int32)
+    attn_out = torch.randn(2, 4, 8)
+    softmax_max = torch.zeros(1)
+    softmax_sum = torch.ones(1)
+    fake_ops = MagicMock()
+    fake_ops.sparse_flash_attention_lse.return_value = (attn_out, softmax_max, softmax_sum)
+    with patch.object(torch.ops, "xllm_ops", fake_ops, create=True):
+        out = impl._npu_sparse_flash_attention(
+            query,
+            None,
+            (key, None),
+            topk,
+            actual_q,
+            actual_kv,
+            block_table,
+            sparse_mode=0,
+            return_lse=False,
+        )
+    assert out is attn_out
+    kwargs = fake_ops.sparse_flash_attention_lse.call_args.kwargs
+    assert kwargs["query_rope"] is None
+    assert kwargs["key_rope"] is None
