@@ -454,6 +454,20 @@ class Glm5NextForgetGate(nn.Module):
         return -decay_rate * F.softplus(g)
 
 
+def _stable_pack(dst: torch.Tensor | None, packed: torch.Tensor) -> torch.Tensor:
+    """Keep a packed weight buffer at a stable storage address across reloads.
+
+    A captured decode ACL graph records the buffer's address, so a plain
+    reallocation on every ``process_weights_after_loading`` (e.g. weight
+    hot-reload) leaves the graph replaying stale weights. Mirror the W_UK/W_UV
+    discipline: allocate once, then copy in place when the layout is unchanged.
+    """
+    if dst is None or dst.shape != packed.shape or dst.dtype != packed.dtype:
+        return packed
+    dst.copy_(packed)
+    return dst
+
+
 class Glm5NextKdaAttention(Attention):
     """KDA linear-attention layer (conv1d + delta-rule + gated norm + o_proj).
 
@@ -503,7 +517,7 @@ class Glm5NextKdaAttention(Attention):
 
         projection_sizes = tuple(getattr(self, size_attr) for _, size_attr, _ in _KDA_IN_PROJ)
         # Follow checkpoint row order; equal-sized f_a/g_a blocks must not be exchanged.
-        self.input_projection_sizes = (sum(projection_sizes[:3]), *projection_sizes[3:])
+        self.input_projection_sizes = (sum(projection_sizes[:3]), projection_sizes[3], sum(projection_sizes[4:]))
         self.in_proj_qkvbfg_a = nn.Linear(self.hidden_size, sum(self.input_projection_sizes), bias=False)
         # conv1d: depthwise over the LOCAL conv_dim (groups=conv_dim_local); the
         # loader shards each of q/k/v_conv1d by head then cats so the channel
@@ -519,6 +533,7 @@ class Glm5NextKdaAttention(Attention):
         self.conv1d.weight = nn.Parameter(self.conv1d.weight.detach().to(torch.float32))
         self.forget_gate = Glm5NextForgetGate(cfg, dtype, device)
         self.g_b_proj = nn.Linear(self.head_dim, self.qkv_dim, bias=False)
+        self.register_buffer("_fg_b_weight", None, persistent=False)
         self.o_norm = _RMSNormGated(self.head_dim, self.eps, dtype, device)
         # o_proj: row-parallel + all_reduce. With KDA now head-sharded, each
         # rank's attention output is its head-subset's partial sum over
@@ -533,6 +548,21 @@ class Glm5NextKdaAttention(Attention):
             row_parallel=True,
         )
 
+    def process_weights_after_loading(self) -> None:
+        packed = torch.stack((self.forget_gate.f_b_proj.weight.detach(), self.g_b_proj.weight.detach()))
+        self._fg_b_weight = _stable_pack(self._fg_b_weight, packed)
+        self.forget_gate.f_b_proj.weight.data = self._fg_b_weight[0]
+        self.g_b_proj.weight.data = self._fg_b_weight[1]
+
+    def _project_fg(self, latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Batch the two distinct F/G inputs as in SGLang's batched linear."""
+        hidden_shape = (*latents.shape[:2], self.num_heads_local, self.head_dim)
+        if self._fg_b_weight is None:
+            forget_latent, output_latent = latents.split(self.head_dim, dim=-1)
+            return self.forget_gate.raw_projection(forget_latent), self.g_b_proj(output_latent).view(hidden_shape)
+        projected = torch.bmm(latents.view(-1, 2, self.head_dim).transpose(0, 1), self._fg_b_weight.transpose(-1, -2))
+        return projected[0].view(hidden_shape), projected[1].view(hidden_shape)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -541,13 +571,11 @@ class Glm5NextKdaAttention(Attention):
         prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         batch_size, seq_len = hidden_states.shape[:2]
-        hidden_shape = (batch_size, seq_len, -1, self.head_dim)
-
         projected = self.in_proj_qkvbfg_a(hidden_states)
-        mixed_qkv, beta_raw, forget_latent, output_latent = projected.split(self.input_projection_sizes, dim=-1)
+        mixed_qkv, beta_raw, fg_latents = projected.split(self.input_projection_sizes, dim=-1)
         mixed_qkv = mixed_qkv.transpose(1, 2)
 
-        g_raw = self.forget_gate.raw_projection(forget_latent)
+        g_raw, gate = self._project_fg(fg_latents)
         beta = torch.sigmoid(beta_raw.float())
 
         # KDA conv1d + delta-rule + conv/ssm state is owned by the backend
@@ -561,7 +589,6 @@ class Glm5NextKdaAttention(Attention):
             )
         core_attn_out = backend.execute_linear(mixed_qkv, beta, self, raw_gate_proj=g_raw)
 
-        gate = self.g_b_proj(output_latent).view(hidden_shape)
         output = self.o_norm(core_attn_out, gate).reshape(batch_size, seq_len, -1)
         # KDA is head-sharded: each rank's o_proj (row-parallel, input
         # qkv_dim_local) yields a partial hidden summed over its head-subset;
@@ -728,7 +755,11 @@ class Glm5NextIndexer(nn.Module):
         ``hidden_states`` are the CURRENT query tokens ``[B, S_q, ...]``.
         Alternatively, pass ``pool_data``/``key_valid`` from the paged pool
         cache (read_pools) to skip both the dense gather and the per-step
-        re-pooling. Returns absolute kv-position top-k indices
+        re-pooling. Paged decode can pass ``kv_seq_lens`` instead of a dense
+        ``key_valid`` mask; only the non-fused fallback materializes that mask,
+        so ``kv_seq_lens`` is a decode-only (seq_len=1) input — passing it on a
+        long-kv prefill would rebuild a dense ``[B, kv_len]`` mask every step.
+        Returns absolute kv-position top-k indices
         ``[B, S_q, topk]`` (int64, -1 = invalid), matching the reference
         indexer output.
         """
@@ -1162,6 +1193,8 @@ class Glm5NextMlaAttention(Attention):
             bias=cfg.attention_bias,
         )
         self.kv_a_layernorm = Glm5NextRMSNorm(self.kv_lora_rank, self.eps, dtype, device)
+        self.register_buffer("_qkv_a_weight", None, persistent=False)
+        self.register_buffer("_qkv_a_bias", None, persistent=False)
         # kv_b: column-parallel fp (absorbed split reads .weight; stays fp, see
         # design §3)
         self.kv_b_proj = ColumnParallelLinear(
@@ -1210,6 +1243,19 @@ class Glm5NextMlaAttention(Attention):
         )
 
     def process_weights_after_loading(self) -> None:
+        prev_weight, prev_bias = self._qkv_a_weight, self._qkv_a_bias
+        self._qkv_a_weight = None
+        self._qkv_a_bias = None
+        if self.q_a_proj.use_w8a8 is False and self.kv_a_proj_with_mqa.use_w8a8 is False:
+            packed = torch.cat((self.q_a_proj.weight.detach(), self.kv_a_proj_with_mqa.weight.detach()), dim=0)
+            self._qkv_a_weight = _stable_pack(prev_weight, packed)
+            self.q_a_proj.weight.data = self._qkv_a_weight[: self.q_lora_rank]
+            self.kv_a_proj_with_mqa.weight.data = self._qkv_a_weight[self.q_lora_rank :]
+            if self.cfg.attention_bias:
+                packed_bias = torch.cat((self.q_a_proj.bias.detach(), self.kv_a_proj_with_mqa.bias.detach()), dim=0)
+                self._qkv_a_bias = _stable_pack(prev_bias, packed_bias)
+                self.q_a_proj.bias.data = self._qkv_a_bias[: self.q_lora_rank]
+                self.kv_a_proj_with_mqa.bias.data = self._qkv_a_bias[self.q_lora_rank :]
         # Split kv_b_proj.weight into absorbed W_UK / W_UV (mirrors
         # deepseek_v32.process_weights_after_loading split). glm5_next is NoPE
         # (qk_rope_head_dim=0), so qk_head_dim == qk_nope_head_dim.
@@ -1222,6 +1268,15 @@ class Glm5NextMlaAttention(Attention):
         w_uk, w_uv = w.split([self.qk_nope_head_dim, self.v_head_dim], dim=1)
         self.W_UK.copy_(w_uk.contiguous())
         self.W_UV.copy_(w_uv.transpose(1, 2).contiguous())
+
+    def _project_qkv_a(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reuse the shared-input Q/KV-A linear layout used by vLLM-Ascend."""
+        # W8A8 can't fuse: each QLinear owns a per-tensor act scale and a repacked
+        # int8 weight, so only the float path cats into the single GEMM below.
+        if self._qkv_a_weight is None:
+            return self.q_a_proj(hidden), self.kv_a_proj_with_mqa(hidden)
+        projected = F.linear(hidden, self._qkv_a_weight, self._qkv_a_bias)
+        return projected.split((self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim), dim=-1)
 
     def forward(
         self,
@@ -1240,7 +1295,7 @@ class Glm5NextMlaAttention(Attention):
         """
         num_tokens = hidden_states.shape[0] * hidden_states.shape[1]
         hidden = hidden_states.view(num_tokens, -1)
-        q_a = self.q_a_proj(hidden)
+        q_a, kv = self._project_qkv_a(hidden)
         q_c = self.q_a_layernorm(q_a)
         backend = get_forward_context().attention_backend
         topk = None
@@ -1256,7 +1311,6 @@ class Glm5NextMlaAttention(Attention):
         q_nope = q.narrow(-1, 0, self.qk_nope_head_dim)
         q_latent = torch.bmm(q_nope.transpose(0, 1), self.W_UK).transpose(0, 1)
 
-        kv = self.kv_a_proj_with_mqa(hidden)
         k_latent_raw = kv.narrow(-1, 0, self.kv_lora_rank)
         k_latent = self.kv_a_layernorm(k_latent_raw)
         k_latent_3d = k_latent.view(num_tokens, 1, self.kv_lora_rank)

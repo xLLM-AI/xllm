@@ -114,6 +114,75 @@ def _reference_projections(
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 8])
+@torch.inference_mode()
+def test_fg_batched_weights_preserve_head_shards_and_share_storage(tp_size: int) -> None:
+    for tp_rank in range(tp_size):
+        model, tensors = _make_model(tp_size, tp_rank)
+        attention = model.model.layers[0].self_attn
+        expected = torch.stack(
+            [
+                _shard_rows(tensors[_ATTENTION_PREFIX + name], tp_size, tp_rank)
+                for name in ("forget_gate.f_b_proj.weight", "g_b_proj.weight")
+            ]
+        )
+        torch.testing.assert_close(attention._fg_b_weight, expected, rtol=0, atol=0)
+        for weight in (attention.forget_gate.f_b_proj.weight, attention.g_b_proj.weight):
+            assert weight.untyped_storage().data_ptr() == attention._fg_b_weight.untyped_storage().data_ptr()
+        attention.process_weights_after_loading()
+        torch.testing.assert_close(attention._fg_b_weight, expected, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_fg_batched_weights_reuse_storage_across_reloads() -> None:
+    # A captured decode ACL graph records _fg_b_weight's storage address, so a
+    # weight hot-reload must keep the packed buffer at a stable address instead
+    # of reallocating; otherwise replay reads stale weights. Reproduces the
+    # reload path: copy_in writes fresh weights into the existing .data storage,
+    # then process_weights_after_loading re-packs.
+    model, _ = _make_model(1, 0)
+    attention = model.model.layers[0].self_attn
+    captured = attention._fg_b_weight
+    captured_ptr = captured.data_ptr()
+    generator = torch.Generator().manual_seed(7)
+    for _ in range(2):
+        new_f = torch.randn(attention.forget_gate.f_b_proj.weight.shape, generator=generator)
+        new_g = torch.randn(attention.g_b_proj.weight.shape, generator=generator)
+        attention.forget_gate.f_b_proj.weight.data.copy_(new_f)
+        attention.g_b_proj.weight.data.copy_(new_g)
+        attention.process_weights_after_loading()
+        assert attention._fg_b_weight.data_ptr() == captured_ptr
+        torch.testing.assert_close(captured[0], new_f, rtol=0, atol=0)
+        torch.testing.assert_close(captured[1], new_g, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("batch_size,seq_len", [(1, 1), (1, 17), (3, 4)])
+@torch.inference_mode()
+def test_fg_batched_projection_matches_separate_inputs(
+    batch_size: int, seq_len: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model, _ = _make_model(2, 1)
+    attention = model.model.layers[0].self_attn
+    projected = attention.in_proj_qkvbfg_a(torch.randn(batch_size, seq_len, model.cfg.hidden_size))
+    latents = projected[..., -2 * attention.head_dim :]
+    forget_latent, output_latent = latents.chunk(2, dim=-1)
+    hidden_shape = (batch_size, seq_len, attention.num_heads_local, attention.head_dim)
+    expected = (
+        attention.forget_gate.raw_projection(forget_latent),
+        attention.g_b_proj(output_latent).view(hidden_shape),
+    )
+    bmm_calls = []
+    original_bmm = torch.bmm
+
+    def _bmm(inputs: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        bmm_calls.append(inputs.shape)
+        return original_bmm(inputs, weights)
+
+    monkeypatch.setattr(torch, "bmm", _bmm)
+    torch.testing.assert_close(attention._project_fg(latents), expected)
+    assert bmm_calls == [torch.Size((2, batch_size * seq_len, attention.head_dim))]
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 8])
 def test_merged_input_weights_shard_heads_and_replicate_latents(tp_size: int) -> None:
     for tp_rank in range(tp_size):
         _, tensors, attention = _make_model(tp_size, tp_rank)
@@ -315,27 +384,28 @@ def test_real_kda_merged_projection_graph_replay(
     attention.in_proj_qkvbfg_a.weight.copy_(torch.cat(weights))
     for projection in ("forget_gate.f_b_proj.weight", "g_b_proj.weight", "forget_gate.A_log", "forget_gate.dt_bias"):
         attention.get_parameter(projection).copy_(_shard_rows(tensors[_ATTENTION_PREFIX + projection], 8, tp_rank))
+    attention.process_weights_after_loading()
     hidden_states = torch.randn(1, num_tokens, config.hidden_size, device=device, dtype=torch.bfloat16)
     hidden_shape = (1, num_tokens, attention.num_heads_local, attention.head_dim)
 
     def _project(merged: bool) -> tuple[torch.Tensor, ...]:
         if merged:
             projected = attention.in_proj_qkvbfg_a(hidden_states)
-            mixed_qkv, beta_raw, forget_latent, output_latent = projected.split(
-                attention.input_projection_sizes, dim=-1
-            )
+            mixed_qkv, beta_raw, fg_latents = projected.split(attention.input_projection_sizes, dim=-1)
+            raw_gate, output_gate = attention._project_fg(fg_latents)
         else:
             query, key, value, beta_raw, forget_latent, output_latent = _reference_projections(
                 hidden_states, tensors, 8, tp_rank
             )
             mixed_qkv = torch.cat((query, key, value), dim=-1)
-        raw_gate = attention.forget_gate.raw_projection(forget_latent)
+            raw_gate = attention.forget_gate.raw_projection(forget_latent)
+            output_gate = attention.g_b_proj(output_latent).view(hidden_shape)
         return (
             mixed_qkv.transpose(1, 2),
             beta_raw.float().sigmoid(),
             raw_gate,
             attention.forget_gate.gate_from_raw(raw_gate),
-            attention.g_b_proj(output_latent).view(hidden_shape),
+            output_gate,
         )
 
     for _ in range(3):
