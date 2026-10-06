@@ -150,13 +150,33 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
         static_cast<int64_t>(cache_ops.size()) == batch_size)
       << "linear_state_cache_ops must be empty or sequence-scoped.";
   const auto read_slot_at = [&](int64_t row) {
+    CHECK(validity_mask[row] == 0 || validity_mask[row] == 1)
+        << "linear state validity must be 0 or 1.";
     int32_t slot = validity_mask[row] == 0 ? -1 : live_slots[row];
     if (!cache_ops.empty()) {
       const LinearStateCacheOp& op = cache_ops[row];
       CHECK_EQ(op.linear_state_id, live_slots[row]);
-      if (!op.restore_requested && op.restore_src_slot_id >= 0) {
+      CHECK(!(op.reset_requested && op.restore_requested))
+          << "linear-state reset and restore are mutually exclusive.";
+      if (op.reset_requested) {
+        CHECK_LT(op.restore_src_slot_id, 0)
+            << "linear-state reset must not carry a restore source.";
+        CHECK_EQ(validity_mask[row], 0)
+            << "linear-state reset row must remain cold after restore.";
+      } else if (op.restore_requested) {
+        CHECK_GE(op.restore_src_slot_id, 0)
+            << "linear-state restore requires a valid source slot.";
+        CHECK_EQ(validity_mask[row], 1)
+            << "linear-state restored row must be warm after restore.";
+      } else if (op.restore_src_slot_id >= 0) {
+        CHECK_EQ(validity_mask[row], 1)
+            << "linear-state direct-read row must be warm after restore.";
+      }
+      if (op.restore_src_slot_id >= 0) {
         CHECK_GT(op.restore_src_slot_id, kPaddingLinearStateId);
         CHECK_LT(op.restore_src_slot_id, num_slots);
+      }
+      if (op.is_direct_read()) {
         slot = op.restore_src_slot_id;
       }
     }
@@ -203,8 +223,6 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
   ssm_write.reserve(batch_size);
   const int32_t stride = static_cast<int32_t>(checkpoint_stride);
   for (int64_t i = 0; i < batch_size; ++i) {
-    CHECK(validity_mask[i] == 0 || validity_mask[i] == 1)
-        << "linear state validity must be 0 or 1.";
     const int32_t live_slot = live_slots[i];
     const int32_t read_slot = read_slot_at(i);
     conv_read.emplace_back(read_slot);

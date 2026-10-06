@@ -485,6 +485,10 @@ struct LinearStateCacheOp {
   // restore rows.
   bool restore_requested = false;
   int32_t restore_src_slot_id = -1;
+
+  bool is_direct_read() const {
+    return restore_src_slot_id >= 0 && !restore_requested && !reset_requested;
+  }
 };
 
 class ExpertInput final {

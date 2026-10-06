@@ -235,12 +235,10 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   multi_block_tables_ = params.multi_block_tables;
   linear_state_indices_ = params.embedding.linear_state_indices;
   const auto& cache_ops = params.linear_state_cache_ops;
-  const auto is_direct_read = [](const LinearStateCacheOp& op) {
-    return op.restore_src_slot_id >= 0 && !op.restore_requested &&
-           !op.reset_requested;
-  };
-  const bool has_direct_read =
-      std::any_of(cache_ops.begin(), cache_ops.end(), is_direct_read);
+  const bool has_direct_read = std::any_of(
+      cache_ops.begin(), cache_ops.end(), [](const LinearStateCacheOp& op) {
+        return op.is_direct_read();
+      });
   if (has_direct_read) {
     CHECK((metadata_->is_prefill || metadata_->is_chunked_prefill) &&
           !params.is_spec_verify)
@@ -256,7 +254,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     std::vector<int32_t> read_ids = params.embedding.linear_state_ids;
     for (size_t i = 0; i < cache_ops.size(); ++i) {
       const LinearStateCacheOp& cache_op = cache_ops[i];
-      if (is_direct_read(cache_op)) {
+      if (cache_op.is_direct_read()) {
         read_ids[i] = cache_op.restore_src_slot_id;
       }
     }
