@@ -31,47 +31,14 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
-#include "framework/tokenizer/tokenizer.h"
+#include "tests/core/framework/request/request_factory_test_utils.h"
 
 namespace xllm {
 namespace {
 
-// Deterministic tokenizer used for factory tests. It encodes each character to
-// a token id inside the vocabulary range, and can be told to fail encoding of
-// any text containing the marker "FAIL" so stop-sequence encode errors can be
-// exercised independently of prompt encoding.
-class FakeTokenizer final : public Tokenizer {
- public:
-  explicit FakeTokenizer(int32_t vocab_size) : vocab_size_(vocab_size) {}
-
-  bool encode(const std::string_view& text,
-              std::vector<int32_t>* ids,
-              bool /*add_special_tokens*/ = true) const override {
-    if (text.find("FAIL") != std::string_view::npos) {
-      return false;
-    }
-    ids->clear();
-    for (const char c : text) {
-      ids->push_back(static_cast<int32_t>(static_cast<unsigned char>(c)) %
-                     vocab_size_);
-    }
-    if (ids->empty()) {
-      ids->push_back(1);
-    }
-    return true;
-  }
-
-  size_t vocab_size() const override {
-    return static_cast<size_t>(vocab_size_);
-  }
-
-  std::unique_ptr<Tokenizer> clone() const override {
-    return std::make_unique<FakeTokenizer>(*this);
-  }
-
- private:
-  int32_t vocab_size_ = 1000;
-};
+using test::CallbackCapture;
+using test::FakeTokenizer;
+using test::make_capture_callback;
 
 // Chat template that renders to a fixed prompt, or reports failure when
 // configured to, so the message overload's error path can be tested without a
@@ -99,20 +66,6 @@ class FakeChatTemplate final : public ChatTemplate {
   bool succeed_ = true;
   std::string rendered_prompt_ = "rendered prompt";
 };
-
-// Records the last error surfaced through the OutputCallback.
-struct CallbackCapture {
-  bool called = false;
-  std::optional<Status> status;
-};
-
-OutputCallback make_capture_callback(CallbackCapture* capture) {
-  return [capture](RequestOutput output) {
-    capture->called = true;
-    capture->status = output.status;
-    return false;
-  };
-}
 
 class LLMRequestFactoryTest : public ::testing::Test {
  protected:
