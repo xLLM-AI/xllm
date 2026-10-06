@@ -338,7 +338,7 @@ def test_prepared_decode_uses_warmed_graph_state(is_mla: bool) -> None:
         assert backend._mla_actual_seq_kv is metadata.kv_seq_lens
         assert backend._mla_max_seqlen_k == metadata.block_table.shape[1] * backend.page_size
     else:
-        assert backend._metadata is None
+        assert backend._metadata is metadata
         assert backend._paged_graph_state is state
         assert state.kv == metadata.kv_seq_lens_host_values
         assert backend._actual_seq_lens is None
