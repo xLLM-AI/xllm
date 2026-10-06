@@ -26,7 +26,7 @@ import torch.nn as nn
 from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
 from xllm.python.layers.qwen3_5.decoder_layer import Qwen3_5DecoderLayer, get_qwen3_5_decoder_layer_class
-from xllm.python.model_executor.forward_context import record_layer_event
+from xllm.python.model_executor.forward_context import ExecutionMetadataBuilder, record_layer_event
 from xllm.python.model_loader import (
     ParallelLoadContext,
     ScopedWeightLoader,
@@ -74,6 +74,10 @@ class Qwen3_5Config:
     moe_tp_rank: int
     ep_size: int
     ep_rank: int
+    enable_mega_moe: bool
+    mega_moe_context: torch.Tensor | None
+    mega_moe_ccl_buffer_size: int
+    mega_moe_num_max_tokens_per_rank: int
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3_5Config:
@@ -134,6 +138,10 @@ class Qwen3_5Config:
             moe_tp_rank=int(pick("moe_tp_rank", default=0)),
             ep_size=ep_size,
             ep_rank=int(pick("ep_rank", default=0)),
+            enable_mega_moe=bool(pick("enable_mega_moe", default=False)),
+            mega_moe_context=pick("mega_moe_context", default=None),
+            mega_moe_ccl_buffer_size=int(pick("mega_moe_ccl_buffer_size", default=0)),
+            mega_moe_num_max_tokens_per_rank=int(pick("mega_moe_num_max_tokens_per_rank", default=0)),
         )
 
     def validate(self) -> None:
@@ -183,6 +191,15 @@ class Qwen3_5Config:
                 raise ValueError("shared_expert_intermediate_size must be positive for Qwen3.5 MoE")
             if self.shared_expert_intermediate_size % self.tp_size:
                 raise ValueError("shared_expert_intermediate_size must be divisible by tp_size")
+        if self.enable_mega_moe:
+            if self.num_experts <= 0 or self.tp_size <= 1 or self.dp_size <= 1:
+                raise ValueError("MegaMoe token ownership requires MoE, TP > 1 and DP > 1")
+            if self.moe_tp_size != 1 or self.ep_size != self.world_size:
+                raise ValueError("MegaMoe token ownership requires MoE-TP = 1 and EP = world_size")
+            if self.mega_moe_context is None:
+                raise ValueError("MegaMoe token ownership requires a communication context")
+            if self.mega_moe_ccl_buffer_size <= 0 or self.mega_moe_num_max_tokens_per_rank <= 0:
+                raise ValueError("MegaMoe token ownership requires positive communication capacities")
 
     def is_moe_layer(self, layer_id: int) -> bool:
         return (
@@ -198,12 +215,20 @@ class Qwen3_5Config:
 class Qwen3_5Model(nn.Module):
     def __init__(self, cfg: Qwen3_5Config, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
-        if device.type in ("npu", "privateuseone") and "linear_attention" in cfg.layer_types:
-            from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import Qwen3_5GdnMetadataBuilder
+        if device.type in ("npu", "privateuseone"):
+            builders: list[ExecutionMetadataBuilder] = []
+            if "linear_attention" in cfg.layer_types:
+                from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import Qwen3_5GdnMetadataBuilder
 
-            if dtype != torch.bfloat16:
-                raise NotImplementedError("Qwen3.5 MegaGdn supports BF16 model weights only")
-            self.execution_metadata_builders = (Qwen3_5GdnMetadataBuilder(cfg),)
+                if dtype != torch.bfloat16:
+                    raise NotImplementedError("Qwen3.5 MegaGdn supports BF16 model weights only")
+                builders.append(Qwen3_5GdnMetadataBuilder(cfg))
+            if cfg.enable_mega_moe:
+                from xllm.python.layers.npu.mega_moe_metadata_builder import TokenOwnerMegaMoeMetadataBuilder
+
+                builders.append(TokenOwnerMegaMoeMetadataBuilder(cfg))
+            if builders:
+                self.execution_metadata_builders = tuple(builders)
         if cfg.hidden_size % cfg.tp_size:
             raise ValueError("hidden_size must be divisible by tp_size")
         self.embed_tokens = HiddenParallelEmbedding(
@@ -251,8 +276,6 @@ class Qwen3_5ForCausalLM(PyModelBase):
         device = torch.device(config.get("device", "cuda"))
         self.dtype = dtype
         self.device = device
-        if self.cfg.vocab_size % self.cfg.tp_size:
-            raise ValueError("vocab_size must be divisible by tp_size")
         self.model = Qwen3_5Model(self.cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
         self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
             self.cfg.hidden_size,

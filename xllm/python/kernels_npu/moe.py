@@ -845,24 +845,29 @@ def mega_moe(
     topk_weights: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
+    w13_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
     num_experts: int,
     ep_size: int,
     ccl_buffer_size: int,
     num_max_tokens_per_rank: int,
     x_active_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Fuse EP dispatch + W8A8 SwiGLU experts + combine for decode MegaMoe."""
+    """Fuse EP dispatch, SwiGLU experts, and combine for BF16 or W8A8."""
+    if (w13_scale is None) != (w2_scale is None):
+        raise ValueError("MegaMoe weight scales must be provided for both projections or neither")
+    use_w8a8 = w13_scale is not None
+    weight1 = [w13] if use_w8a8 else list(w13.unbind(dim=0))
+    weight2 = [w2] if use_w8a8 else list(w2.unbind(dim=0))
     output, _ = torch.ops.xllm_ops.mega_moe(
         context,
         hidden_states,
         topk_ids,
         topk_weights,
-        [w13],
-        [w2],
-        [w13_scale],
-        [w2_scale],
+        weight1,
+        weight2,
+        [w13_scale] if w13_scale is not None else [],
+        [w2_scale] if w2_scale is not None else [],
         num_experts,
         ep_size,
         ccl_buffer_size,

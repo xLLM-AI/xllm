@@ -18,15 +18,29 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from xllm.python import kernels
+from xllm.python import distributed, kernels
 from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
+from xllm.python.layers.npu.mega_moe_metadata import MegaMoeMetadata
 from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
 from xllm.python.layers.qwen3_5.moe import Qwen3_5SparseMoEBlockBase
+from xllm.python.model_executor.forward_context import get_execution_context
+
+
+def _pad_token_rows(tensor: torch.Tensor, token_capacity: int) -> torch.Tensor:
+    token_count = tensor.shape[0]
+    if token_count > token_capacity:
+        raise RuntimeError(f"MegaMoe input has {token_count} rows, exceeding token capacity {token_capacity}")
+    if token_count == token_capacity:
+        return tensor.contiguous()
+    return F.pad(tensor, (0, 0, 0, token_capacity - token_count))
 
 
 class _NpuQwen3_5Experts(nn.Module):
     """BF16 routed experts in NPU grouped-matmul layout."""
+
+    _mega_moe_context: torch.Tensor | None
 
     def __init__(
         self,
@@ -49,7 +63,18 @@ class _NpuQwen3_5Experts(nn.Module):
         self.ep_size = cfg.ep_size
         self.dp_size = cfg.dp_size
         self.dp_rank = cfg.dp_rank
+        self.tp_rank = cfg.tp_rank
         self.reduce_results = reduce_results
+        self._mega_moe_ccl_buffer_size = cfg.mega_moe_ccl_buffer_size
+        self._mega_moe_num_max_tokens_per_rank = cfg.mega_moe_num_max_tokens_per_rank
+        self._enable_mega_moe = cfg.enable_mega_moe
+        self.register_buffer(
+            "_mega_moe_context",
+            cfg.mega_moe_context,
+            persistent=False,
+        )
+        if self._enable_mega_moe and cfg.mega_moe_context is None:
+            raise ValueError("MegaMoe token ownership requires a communication context")
 
         self.gate = nn.Linear(
             cfg.hidden_size,
@@ -88,7 +113,7 @@ class _NpuQwen3_5Experts(nn.Module):
             "softmax",
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _forward_ep_level1(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gathered_states, scatter_state = dp_gather_tokens(hidden_states, self.dp_size, self.dp_rank)
         topk_weights, topk_ids = self._route(self.gate(gathered_states))
         output = kernels.grouped_moe_bf16(
@@ -108,6 +133,54 @@ class _NpuQwen3_5Experts(nn.Module):
             moe_tp_size=self.moe_tp_size,
             ep_size=self.ep_size,
         )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self._enable_mega_moe:
+            return self._forward_ep_level1(hidden_states)
+        metadata = get_execution_context(MegaMoeMetadata)
+        if metadata is None:
+            raise RuntimeError("MegaMoe execution metadata is unavailable")
+        active_token_mask = metadata.active_token_mask
+        if active_token_mask is None:
+            return self._forward_ep_level1(hidden_states)
+        token_capacity = active_token_mask.shape[0]
+        if self.tp_rank == 0:
+            topk_weights, topk_ids = self._route(self.gate(hidden_states))
+            owner_input = _pad_token_rows(hidden_states, token_capacity)
+            topk_weights = _pad_token_rows(topk_weights.to(torch.float32), token_capacity)
+            topk_ids = _pad_token_rows(topk_ids.to(torch.int32), token_capacity)
+        else:
+            owner_input = metadata.dummy_input
+            topk_weights = metadata.dummy_topk_weights
+            topk_ids = metadata.dummy_topk_ids
+            if owner_input is None or topk_weights is None or topk_ids is None:
+                raise RuntimeError("MegaMoe non-owner dummy inputs are unavailable")
+
+        context = self._mega_moe_context
+        if context is None:
+            raise RuntimeError("MegaMoe communication context is unavailable")
+        owner_output = kernels.mega_moe(
+            context,
+            owner_input,
+            topk_ids,
+            topk_weights,
+            self.w13,
+            self.w2,
+            None,
+            None,
+            self.num_experts,
+            self.ep_size,
+            self._mega_moe_ccl_buffer_size,
+            self._mega_moe_num_max_tokens_per_rank,
+            active_token_mask,
+        )
+
+        if self.tp_rank == 0:
+            output = owner_output[: hidden_states.shape[0]].contiguous()
+        else:
+            output = torch.empty_like(hidden_states)
+        distributed.broadcast_(output, 0, "tp")
+        return output
 
 
 class NpuQwen3_5SparseMoEBlock(Qwen3_5SparseMoEBlockBase):

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn as nn
@@ -104,6 +104,7 @@ class AclGraphEntry:
         "kv_seq_lens_delta",
         "graph_tasks",
         "execution_state",
+        "layer_shared_cache",
         "replay_logged",
     )
 
@@ -202,13 +203,17 @@ class AclGraphRunner(BaseRunner):
         # stream. A new bucket's eager warmup must observe those writes before
         # reading token IDs or page tables, just like an existing graph replay.
         stream.wait_stream(torch.npu.current_stream())
+        # Retain builder inputs for the graph's lifetime, including non-owner
+        # MegaMoe dummy tensors allocated before capture.
+        with torch.npu.stream(stream):
+            entry.layer_shared_cache = self._build_execution_contexts(entry.static_metadata, entry.static_input_ids)
         context = ForwardContext(
             self.attention_backend,
             self.device,
             entry.static_metadata,
             self.layer_caches,
             execution_state=entry.execution_state,
-            layer_shared_cache=self._build_execution_contexts(entry.static_metadata, entry.static_input_ids),
+            layer_shared_cache=entry.layer_shared_cache,
         )
         with forward_context(context), torch.npu.stream(stream):
             for _ in range(_CAPTURE_WARMUP_STEPS):
@@ -216,15 +221,7 @@ class AclGraphRunner(BaseRunner):
         torch.npu.synchronize()
         entry.graph = torch.npu.NPUGraph()
         capture_context = AclGraphCaptureContext(stream, [])
-        context = ForwardContext(
-            self.attention_backend,
-            self.device,
-            entry.static_metadata,
-            self.layer_caches,
-            acl_graph=capture_context,
-            execution_state=entry.execution_state,
-            layer_shared_cache=self._build_execution_contexts(entry.static_metadata, entry.static_input_ids),
-        )
+        context = replace(context, acl_graph=capture_context)
         with forward_context(context), torch.npu.graph(entry.graph, pool=_get_graph_pool(), stream=stream):
             entry.static_output = self._forward_static(entry)
         entry.graph_tasks = capture_context.tasks

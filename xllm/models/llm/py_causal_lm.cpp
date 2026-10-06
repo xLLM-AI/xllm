@@ -76,6 +76,21 @@ int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
       max_seqs_per_batch * speculative_width + dp_size - 1);
 }
 
+int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
+    int64_t max_tokens_per_batch,
+    int64_t max_seqs_per_batch,
+    int64_t num_speculative_tokens) {
+  CHECK_GT(max_tokens_per_batch, 0);
+  CHECK_GT(max_seqs_per_batch, 0);
+  CHECK_GE(num_speculative_tokens, 0);
+
+  const int64_t speculative_width = num_speculative_tokens + 1;
+  const int64_t max_decode_tokens = max_seqs_per_batch * speculative_width;
+  // Qwen3.5 uses MegaMoe for both prefill and token-owner decode. It does not
+  // gather DP tokens before dispatch, so no empty-rank dummy rows are added.
+  return std::max(max_tokens_per_batch, max_decode_tokens);
+}
+
 }  // namespace detail
 
 namespace {
@@ -135,10 +150,27 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 #if defined(USE_NPU)
   const auto& kernel_config = KernelConfig::get_instance();
   const auto& eplb_config = EPLBConfig::get_instance();
-  const bool enable_mega_moe =
-      kernel_config.enable_mega_moe() &&
-      model_args_.model_type() == "glm_moe_dsa" && ep_size_ > 1 &&
-      eplb_config.expert_parallel_degree() == 2 && !eplb_config.enable_eplb();
+  const std::string& model_type = model_args_.model_type();
+  const bool is_qwen3_5_mega_moe_model =
+      model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text";
+  const bool enable_glm_mega_moe =
+      kernel_config.enable_mega_moe() && model_type == "glm_moe_dsa" &&
+      ep_size_ > 1 && eplb_config.expert_parallel_degree() == 2 &&
+      !eplb_config.enable_eplb();
+  const bool enable_qwen3_5_mega_moe =
+      kernel_config.enable_mega_moe() && is_qwen3_5_mega_moe_model;
+  if (enable_qwen3_5_mega_moe) {
+    CHECK_GT(tp_size_, 1)
+        << "Qwen3.5 MegaMoe token ownership requires attention TP > 1.";
+    CHECK_GT(dp_size_, 1) << "Qwen3.5 MegaMoe token ownership requires DP > 1.";
+    CHECK_EQ(cp_size_, 1)
+        << "Qwen3.5 MegaMoe token ownership requires CP == 1.";
+    CHECK_EQ(moe_tp_size_, 1)
+        << "Qwen3.5 MegaMoe token ownership requires MoE TP == 1.";
+    CHECK_EQ(ep_size_, parallel_args.world_size())
+        << "Qwen3.5 MegaMoe token ownership requires EP == world size.";
+  }
+  const bool enable_mega_moe = enable_glm_mega_moe || enable_qwen3_5_mega_moe;
   if (enable_mega_moe) {
     CHECK(kernel::npu::has_mega_moe())
         << "Python MegaMoE requires aclnnMegaMoe.";
@@ -147,12 +179,20 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
     comm_spec.hccl_comm = moe_ep_group_->hccl_comm();
     comm_spec.ep_world_size = moe_ep_group_->world_size();
     comm_spec.device_index = device_.index();
-    comm_spec.max_num_tokens_per_rank =
-        detail::python_mega_moe_max_num_tokens_per_rank(
-            static_cast<int64_t>(
-                SchedulerConfig::get_instance().max_seqs_per_batch()),
-            static_cast<int64_t>(model_args_.num_speculative_tokens()),
-            dp_size_);
+    const auto& scheduler_config = SchedulerConfig::get_instance();
+    if (enable_qwen3_5_mega_moe) {
+      comm_spec.max_num_tokens_per_rank =
+          detail::python_qwen3_5_mega_moe_max_num_tokens_per_rank(
+              static_cast<int64_t>(scheduler_config.max_tokens_per_batch()),
+              static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
+              static_cast<int64_t>(model_args_.num_speculative_tokens()));
+    } else {
+      comm_spec.max_num_tokens_per_rank =
+          detail::python_mega_moe_max_num_tokens_per_rank(
+              static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
+              static_cast<int64_t>(model_args_.num_speculative_tokens()),
+              dp_size_);
+    }
     mega_moe_comm_resource_ =
         moe_ep_group_->acquire_mega_moe_comm_resource(comm_spec);
     CHECK(mega_moe_comm_resource_ != nullptr)

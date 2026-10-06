@@ -51,5 +51,19 @@ TEST(PyCausalLMMegaMoeCapacityTest, SpeculativeDecodeScalesRowsBySpecWidth) {
             128);
 }
 
+TEST(PyCausalLMMegaMoeCapacityTest,
+     Qwen35CoversPrefillAndSpeculativeDecodeWithoutDpGather) {
+  EXPECT_EQ(python_qwen3_5_mega_moe_max_num_tokens_per_rank(
+                /*max_tokens_per_batch=*/4096,
+                /*max_seqs_per_batch=*/256,
+                /*num_speculative_tokens=*/3),
+            4096);
+  EXPECT_EQ(python_qwen3_5_mega_moe_max_num_tokens_per_rank(
+                /*max_tokens_per_batch=*/1024,
+                /*max_seqs_per_batch=*/512,
+                /*num_speculative_tokens=*/4),
+            2560);
+}
+
 }  // namespace
 }  // namespace xllm::detail

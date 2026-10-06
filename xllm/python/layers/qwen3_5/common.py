@@ -53,12 +53,17 @@ class Qwen3_5MoEConfig(Protocol):
     moe_intermediate_size: int
     shared_expert_intermediate_size: int
     tp_size: int
+    tp_rank: int
     dp_size: int
     dp_rank: int
     moe_tp_size: int
     moe_tp_rank: int
     ep_size: int
     ep_rank: int
+    enable_mega_moe: bool
+    mega_moe_context: torch.Tensor | None
+    mega_moe_ccl_buffer_size: int
+    mega_moe_num_max_tokens_per_rank: int
 
 
 class Qwen3_5DecoderConfig(

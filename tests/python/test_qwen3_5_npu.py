@@ -48,6 +48,8 @@ from xllm.python.distributed import collectives
 from xllm.python.kernels_npu.causal_conv1d import (
     causal_conv1d_decode as npu_causal_conv1d_decode,
 )
+from xllm.python.layers.npu.mega_moe_metadata import MegaMoeMetadata
+from xllm.python.layers.npu.mega_moe_metadata_builder import TokenOwnerMegaMoeMetadataBuilder
 from xllm.python.layers.npu.qwen3_5.decoder_layer import (
     NpuQwen3_5DecoderLayer,
 )
@@ -74,6 +76,7 @@ from xllm.python.model_executor.forward_context import (
 )
 from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
+from xllm.python.models.qwen3_5 import Qwen3_5Config
 
 kernels.gemma_rms_norm = _gemma_rms_norm
 kernels.moe_fused_topk = MagicMock()
@@ -86,6 +89,55 @@ distributed.all_reduce_ = MagicMock()
 distributed.tp_all_reduce = MagicMock()
 distributed.moe_tp_all_reduce = MagicMock()
 distributed.moe_ep_all_reduce = MagicMock()
+
+
+def _mega_moe_config(*, tp_rank: int = 0, dp_rank: int = 0, max_tokens_per_rank: int = 4096) -> Qwen3_5Config:
+    return _config(
+        tp_size=2,
+        tp_rank=tp_rank,
+        dp_size=2,
+        dp_rank=dp_rank,
+        world_size=4,
+        moe_tp_size=1,
+        moe_tp_rank=0,
+        ep_size=4,
+        ep_rank=dp_rank * 2 + tp_rank,
+        enable_mega_moe=True,
+        mega_moe_context=torch.zeros(1, dtype=torch.int32),
+        mega_moe_ccl_buffer_size=1024,
+        mega_moe_num_max_tokens_per_rank=max_tokens_per_rank,
+    )
+
+
+def _mega_moe_eager_metadata(
+    cfg: Qwen3_5Config,
+    local_token_count: int,
+    execution_token_counts: tuple[int, ...],
+) -> MegaMoeMetadata:
+    return TokenOwnerMegaMoeMetadataBuilder(cfg).build(
+        SimpleNamespace(
+            slot_mapping=torch.zeros(local_token_count, dtype=torch.int32),
+            dp_execution_token_counts=execution_token_counts,
+            mega_moe_token_mask=None,
+        )
+    )
+
+
+def _mega_moe_graph_metadata(
+    cfg: Qwen3_5Config,
+    token_capacity: int,
+    local_token_count: int,
+) -> MegaMoeMetadata:
+    mask = torch.zeros(token_capacity * cfg.dp_size, dtype=torch.int8)
+    start = cfg.dp_rank * token_capacity
+    mask[start : start + local_token_count].fill_(1)
+    return TokenOwnerMegaMoeMetadataBuilder(cfg).build(
+        SimpleNamespace(
+            slot_mapping=torch.zeros(token_capacity, dtype=torch.int32),
+            dp_execution_token_counts=(token_capacity,) * cfg.dp_size,
+            mega_moe_token_mask=mask,
+        )
+    )
 
 
 def test_npu_decoder_factory_selects_privateuseone_backend() -> None:
@@ -657,3 +709,338 @@ def test_npu_moe_gathers_and_slices_execution_counts(
     else:
         variable.assert_called_once_with(local_input, list(counts), dp_rank, "dp")
         fixed.assert_not_called()
+
+
+def test_npu_moe_token_owner_uses_shared_eager_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _mega_moe_config()
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    hidden = (
+        torch.arange(
+            2 * cfg.hidden_size,
+            dtype=torch.float32,
+        )
+        .view(2, cfg.hidden_size)
+        .to(torch.bfloat16)
+    )
+    gate_forward = MagicMock(return_value=torch.zeros(2, cfg.num_experts, dtype=torch.bfloat16))
+    block.experts.gate.forward = gate_forward
+    topk_weights = torch.full(
+        (2, cfg.num_experts_per_tok),
+        0.5,
+        dtype=torch.float32,
+    )
+    topk_ids = torch.zeros(
+        2,
+        cfg.num_experts_per_tok,
+        dtype=torch.int32,
+    )
+    monkeypatch.setattr(
+        kernels,
+        "moe_fused_topk",
+        MagicMock(return_value=(topk_weights, topk_ids)),
+        raising=False,
+    )
+    owner_output = (
+        torch.arange(
+            3 * cfg.hidden_size,
+            dtype=torch.float32,
+        )
+        .view(3, cfg.hidden_size)
+        .to(torch.bfloat16)
+    )
+    mega_moe = MagicMock(return_value=owner_output)
+    monkeypatch.setattr(kernels, "mega_moe", mega_moe, raising=False)
+    broadcast = MagicMock()
+    monkeypatch.setattr(distributed, "broadcast_", broadcast, raising=False)
+    distributed.gather_dp_execution_tokens.reset_mock()
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=SimpleNamespace(dp_execution_token_counts=(2, 3)),
+        layer_caches=[],
+        layer_shared_cache={
+            MegaMoeMetadata: _mega_moe_eager_metadata(
+                cfg,
+                local_token_count=2,
+                execution_token_counts=(2, 3),
+            ),
+        },
+    )
+
+    with forward_context(context):
+        output = block.experts(hidden)
+
+    torch.testing.assert_close(output, owner_output[:2])
+    mega_moe_args = mega_moe.call_args.args
+    assert mega_moe_args[0] is cfg.mega_moe_context
+    assert mega_moe_args[10] == cfg.mega_moe_ccl_buffer_size
+    assert mega_moe_args[11] == cfg.mega_moe_num_max_tokens_per_rank
+    owner_input = mega_moe_args[1]
+    assert owner_input.shape == (3, cfg.hidden_size)
+    torch.testing.assert_close(owner_input[:2], hidden)
+    torch.testing.assert_close(owner_input[2], torch.zeros_like(hidden[0]))
+    assert mega_moe_args[2].shape == (3, cfg.num_experts_per_tok)
+    assert mega_moe_args[3].shape == (3, cfg.num_experts_per_tok)
+    torch.testing.assert_close(
+        mega_moe_args[2][2],
+        torch.zeros(cfg.num_experts_per_tok, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        mega_moe_args[3][2],
+        torch.zeros(cfg.num_experts_per_tok, dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        mega_moe_args[12],
+        torch.tensor([1, 1, 0], dtype=torch.int8),
+    )
+    torch.testing.assert_close(gate_forward.call_args.args[0], hidden)
+    broadcast.assert_called_once_with(output, 0, "tp")
+    distributed.gather_dp_execution_tokens.assert_not_called()
+
+
+def test_npu_moe_token_non_owner_uses_shared_eager_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _mega_moe_config(tp_rank=1)
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    hidden = torch.ones(2, cfg.hidden_size, dtype=torch.bfloat16)
+    gate_forward = MagicMock(side_effect=AssertionError("non-owner ran the router"))
+    block.experts.gate.forward = gate_forward
+    mega_moe = MagicMock(return_value=torch.zeros(3, cfg.hidden_size, dtype=torch.bfloat16))
+    monkeypatch.setattr(kernels, "mega_moe", mega_moe, raising=False)
+    expected = torch.full_like(hidden, 7)
+
+    def _broadcast(output: torch.Tensor, src: int, group_name: str) -> None:
+        assert src == 0
+        assert group_name == "tp"
+        output.copy_(expected)
+
+    monkeypatch.setattr(distributed, "broadcast_", _broadcast, raising=False)
+    mega_moe_metadata = _mega_moe_eager_metadata(
+        cfg,
+        local_token_count=2,
+        execution_token_counts=(2, 3),
+    )
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=SimpleNamespace(dp_execution_token_counts=(2, 3)),
+        layer_caches=[],
+        layer_shared_cache={
+            MegaMoeMetadata: mega_moe_metadata,
+        },
+    )
+
+    with forward_context(context):
+        output = block.experts(hidden)
+
+    mega_moe_args = mega_moe.call_args.args
+    torch.testing.assert_close(output, expected)
+    assert mega_moe_args[1] is mega_moe_metadata.dummy_input
+    assert mega_moe_args[2] is mega_moe_metadata.dummy_topk_ids
+    assert mega_moe_args[3] is mega_moe_metadata.dummy_topk_weights
+    torch.testing.assert_close(
+        mega_moe_args[1],
+        torch.zeros(3, cfg.hidden_size, dtype=torch.bfloat16),
+    )
+    torch.testing.assert_close(
+        mega_moe_args[2],
+        torch.tensor([[0, 1], [0, 1], [0, 1]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        mega_moe_args[3],
+        torch.full((3, cfg.num_experts_per_tok), 0.5, dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        mega_moe_args[12],
+        torch.tensor([1, 0, 0], dtype=torch.int8),
+    )
+    gate_forward.assert_not_called()
+
+
+def test_npu_moe_requires_execution_metadata() -> None:
+    cfg = _mega_moe_config()
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=SimpleNamespace(dp_execution_token_counts=(2, 3)),
+        layer_caches=[],
+    )
+
+    with (
+        forward_context(context),
+        pytest.raises(
+            RuntimeError,
+            match="execution metadata is unavailable",
+        ),
+    ):
+        block.experts(torch.zeros(2, cfg.hidden_size, dtype=torch.bfloat16))
+
+
+def test_npu_moe_token_owner_reuses_graph_mask_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _mega_moe_config(dp_rank=1)
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    hidden = (
+        torch.arange(
+            4 * cfg.hidden_size,
+            dtype=torch.float32,
+        )
+        .view(4, cfg.hidden_size)
+        .to(torch.bfloat16)
+    )
+    distributed.gather_dp_execution_tokens.reset_mock()
+    block.experts.gate.forward = MagicMock(return_value=torch.zeros(4, cfg.num_experts, dtype=torch.bfloat16))
+    monkeypatch.setattr(
+        kernels,
+        "moe_fused_topk",
+        MagicMock(
+            return_value=(
+                torch.ones(
+                    4,
+                    cfg.num_experts_per_tok,
+                    dtype=torch.bfloat16,
+                ),
+                torch.zeros(4, cfg.num_experts_per_tok, dtype=torch.int32),
+            )
+        ),
+        raising=False,
+    )
+    owner_output = torch.full_like(hidden, 3)
+    mega_moe = MagicMock(return_value=owner_output)
+    monkeypatch.setattr(kernels, "mega_moe", mega_moe, raising=False)
+    broadcast = MagicMock()
+    monkeypatch.setattr(distributed, "broadcast_", broadcast, raising=False)
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=SimpleNamespace(dp_execution_token_counts=(4, 2)),
+        layer_caches=[],
+        execution_state=AclGraphExecutionState({}),
+        layer_shared_cache={
+            MegaMoeMetadata: _mega_moe_graph_metadata(
+                cfg,
+                token_capacity=4,
+                local_token_count=2,
+            ),
+        },
+    )
+
+    with forward_context(context):
+        output = block.experts(hidden)
+
+    torch.testing.assert_close(output, owner_output)
+    torch.testing.assert_close(mega_moe.call_args.args[1], hidden)
+    assert mega_moe.call_args.args[3].dtype == torch.float32
+    torch.testing.assert_close(
+        mega_moe.call_args.args[12],
+        torch.tensor([1, 1, 0, 0], dtype=torch.int8),
+    )
+    distributed.gather_dp_execution_tokens.assert_not_called()
+    broadcast.assert_called_once_with(output, 0, "tp")
+
+
+def test_npu_moe_token_non_owner_reuses_graph_dummy_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _mega_moe_config(tp_rank=1)
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    hidden = torch.ones(4, cfg.hidden_size, dtype=torch.bfloat16)
+    block.experts.gate.forward = MagicMock(side_effect=AssertionError("non-owner ran the router"))
+    mega_moe = MagicMock(return_value=torch.zeros_like(hidden))
+    monkeypatch.setattr(kernels, "mega_moe", mega_moe, raising=False)
+    monkeypatch.setattr(distributed, "broadcast_", MagicMock(), raising=False)
+    mega_moe_metadata = _mega_moe_graph_metadata(
+        cfg,
+        token_capacity=4,
+        local_token_count=4,
+    )
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=SimpleNamespace(dp_execution_token_counts=(4, 4)),
+        layer_caches=[],
+        execution_state=AclGraphExecutionState({}),
+        layer_shared_cache={
+            MegaMoeMetadata: mega_moe_metadata,
+        },
+    )
+
+    with forward_context(context):
+        output = block.experts(hidden)
+
+    first_args = mega_moe.call_args.args
+    assert output.shape == hidden.shape
+    assert first_args[1] is mega_moe_metadata.dummy_input
+    assert first_args[2] is mega_moe_metadata.dummy_topk_ids
+    assert first_args[3] is mega_moe_metadata.dummy_topk_weights
+    torch.testing.assert_close(
+        first_args[1],
+        torch.zeros(4, cfg.hidden_size, dtype=torch.bfloat16),
+    )
+    torch.testing.assert_close(
+        first_args[12],
+        torch.tensor([1, 0, 0, 0], dtype=torch.int8),
+    )
+    block.experts.gate.forward.assert_not_called()
+
+
+def test_npu_moe_falls_back_when_capacity_exceeds_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _mega_moe_config(max_tokens_per_rank=2)
+    block = NpuQwen3_5SparseMoEBlock(
+        cfg,
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+    hidden = torch.ones(3, cfg.hidden_size, dtype=torch.bfloat16)
+    expected = torch.full_like(hidden, 7)
+    fallback = MagicMock(return_value=expected)
+    monkeypatch.setattr(block.experts, "_forward_ep_level1", fallback)
+    mega_moe = MagicMock()
+    monkeypatch.setattr(kernels, "mega_moe", mega_moe, raising=False)
+    context = ForwardContext(
+        attention_backend=None,
+        device=torch.device("cpu"),
+        metadata=SimpleNamespace(dp_execution_token_counts=(3, 3)),
+        layer_caches=[],
+        layer_shared_cache={
+            MegaMoeMetadata: _mega_moe_eager_metadata(
+                cfg,
+                local_token_count=3,
+                execution_token_counts=(3, 3),
+            ),
+        },
+    )
+
+    with forward_context(context):
+        output = block.experts(hidden)
+
+    assert output is expected
+    fallback.assert_called_once_with(hidden)
+    mega_moe.assert_not_called()
