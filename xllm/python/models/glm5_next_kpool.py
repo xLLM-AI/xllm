@@ -112,6 +112,8 @@ def compress_completed_pools(
     ape: torch.Tensor,
     head_dim: int,
     rate: int,
+    *,
+    batched: bool = False,
 ) -> None:
     """Write the compressed k of pools completed this step into the pool cache.
 
@@ -122,6 +124,9 @@ def compress_completed_pools(
     written value == the per-step recomputed value of the old path
     (bit-exact). Graph-safe: no data-dependent shapes; unfinished pools
     retain their original value via the write mask.
+
+    ``batched`` accepts one token position per block-table row. Compression
+    is batched, while cache writes preserve sequence order for aliased slots.
     """
     bs = index_cache.shape[1]
     pool_bs = pool_cache.shape[1]
@@ -136,9 +141,13 @@ def compress_completed_pools(
     done = ((pos + 1) % rate == 0) & (pos >= rate - 1)  # [N, 1]
     member_valid = done & (member_pos >= 0)
     # member token row: bt[t // bs] * bs + t % bs
-    bt = block_table.reshape(-1)  # [nblk]
-    blk_idx = (member_pos.clamp(min=0) // bs).clamp(max=bt.shape[0] - 1)
-    slots = bt[blk_idx] * bs + member_pos.clamp(min=0) % bs  # [N, rate]
+    batched = batched and n_tok > 1
+    if batched and block_table.shape[0] != n_tok:
+        raise ValueError("batched pool compression requires one position per block-table row")
+    bt = block_table if batched else block_table.reshape(-1)
+    member_pos = member_pos.clamp(min=0)
+    blk_idx = (member_pos // bs).clamp(max=bt.shape[-1] - 1)
+    slots = (bt.gather(1, blk_idx) if batched else bt[blk_idx]) * bs + member_pos % bs
     rows = flat[slots.reshape(-1)].reshape(n_tok, rate, width)
     gate = rows[..., head_dim : 2 * head_dim].float()
     logits = gate + ape.float()[None]  # ape [rate, head_dim]
@@ -150,18 +159,26 @@ def compress_completed_pools(
     compressed = prod.sum(1).to(torch.bfloat16)  # [N, head_dim]
     # write slot: bt[p // pool_bs] * pool_bs + p % pool_bs
     pool_id = (pos // rate).reshape(-1)  # [N]
-    pool_blk = (pool_id // pool_bs).clamp(max=bt.shape[0] - 1)
-    pool_slots = bt[pool_blk] * pool_bs + pool_id % pool_bs
+    if batched:
+        pool_blk = (pool_id // pool_bs).clamp(min=0, max=block_table.shape[1] - 1)
+        pool_slots = block_table.gather(1, pool_blk[:, None]).reshape(-1) * pool_bs + pool_id % pool_bs
+    else:
+        pool_blk = (pool_id // pool_bs).clamp(max=bt.shape[0] - 1)
+        pool_slots = bt[pool_blk] * pool_bs + pool_id % pool_bs
     pool_slots = pool_slots.clamp(0, pool_flat.shape[0] - 1)
     write = done.reshape(-1)
-    if n_tok > 1:
+    if n_tok > 1 and not batched:
         # Prefill chunk (eager): multiple tokens of the same pool all issue writes,
         # so repeated in-place assignment is non-deterministic (the old value of a
         # non-done slot written back would overwrite a done slot's compressed value);
         # first filter down to only completed pools. decode graph takes the n_tok==1
         # branch (no repeats, static shapes).
         sel = write.nonzero().flatten()
-        pool_flat.index_copy_(0, pool_slots[sel], compressed[sel])
+        pool_flat.index_copy_(0, pool_slots[sel].to(torch.int64), compressed[sel])
+    elif batched:
+        for row in range(n_tok):
+            slot = pool_slots[row : row + 1]
+            pool_flat[slot] = torch.where(write[row : row + 1, None], compressed[row : row + 1], pool_flat[slot])
     else:
         # masked in-place write (graph static shapes): unfinished pools retain their original value
         pool_flat[pool_slots] = torch.where(write[:, None], compressed, pool_flat[pool_slots])

@@ -22,6 +22,35 @@ import torch
 import xllm.python.models.glm5_next as glm5_next
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(4, 8), (2, 3, 8)])
+@pytest.mark.parametrize("eps", [1e-5, 0.25])
+@torch.inference_mode()
+def test_rms_norm_cpu_stub_matches_reference(
+    dtype: torch.dtype,
+    shape: tuple[int, ...],
+    eps: float,
+) -> None:
+    layer = glm5_next.Glm5NextRMSNorm(
+        hidden_size=shape[-1],
+        eps=eps,
+        dtype=dtype,
+        device=torch.device("cpu"),
+    )
+    generator = torch.Generator().manual_seed(42)
+    value = torch.randn(shape, generator=generator, dtype=dtype)
+    value[..., 0, :] = 0
+    layer.weight.copy_(torch.linspace(-1.0, 1.0, shape[-1], dtype=dtype))
+
+    output = layer(value)
+    value_fp32 = value.float()
+    expected = (
+        value_fp32 / torch.sqrt(value_fp32.square().mean(dim=-1, keepdim=True) + eps) * layer.weight.float()
+    ).to(dtype)
+
+    torch.testing.assert_close(output, expected)
+
+
 def test_rms_norm_uses_vendor_rms_norm_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

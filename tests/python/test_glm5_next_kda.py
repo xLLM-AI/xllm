@@ -117,8 +117,7 @@ def _reference_projections(
 @torch.inference_mode()
 def test_fg_batched_weights_preserve_head_shards_and_share_storage(tp_size: int) -> None:
     for tp_rank in range(tp_size):
-        model, tensors = _make_model(tp_size, tp_rank)
-        attention = model.model.layers[0].self_attn
+        model, tensors, attention = _make_model(tp_size, tp_rank)
         expected = torch.stack(
             [
                 _shard_rows(tensors[_ATTENTION_PREFIX + name], tp_size, tp_rank)
@@ -139,8 +138,7 @@ def test_fg_batched_weights_reuse_storage_across_reloads() -> None:
     # of reallocating; otherwise replay reads stale weights. Reproduces the
     # reload path: copy_in writes fresh weights into the existing .data storage,
     # then process_weights_after_loading re-packs.
-    model, _ = _make_model(1, 0)
-    attention = model.model.layers[0].self_attn
+    model, _, attention = _make_model(1, 0)
     captured = attention._fg_b_weight
     captured_ptr = captured.data_ptr()
     generator = torch.Generator().manual_seed(7)
@@ -160,8 +158,7 @@ def test_fg_batched_weights_reuse_storage_across_reloads() -> None:
 def test_fg_batched_projection_matches_separate_inputs(
     batch_size: int, seq_len: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model, _ = _make_model(2, 1)
-    attention = model.model.layers[0].self_attn
+    model, _, attention = _make_model(2, 1)
     projected = attention.in_proj_qkvbfg_a(torch.randn(batch_size, seq_len, model.cfg.hidden_size))
     latents = projected[..., -2 * attention.head_dim :]
     forget_latent, output_latent = latents.chunk(2, dim=-1)
