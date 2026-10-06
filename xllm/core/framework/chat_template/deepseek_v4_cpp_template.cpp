@@ -290,7 +290,8 @@ std::string get_thinking_mode(const nlohmann::ordered_json& kwargs) {
   // reasoning_effort, or by DeepSeek-V4's own default. Matches vLLM's
   // DeepSeek-V4 tokenizer wrapper, which sets thinking_enabled = true when
   // neither "thinking" nor "enable_thinking" is present, and xLLM's own
-  // get_enable_thinking_from_request() default in chat_service_impl.cpp.
+  // get_enable_thinking_from_request() default in
+  // openai_chat_completion_service_impl.cpp.
   if (!has_explicit_thinking_flag(kwargs)) {
     return kThinkingModeThinking;
   }

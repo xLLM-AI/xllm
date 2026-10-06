@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "function_call_parser.h"
+#include "function_call/function_call_parser.h"
 
 #include <algorithm>
 #include <iostream>
@@ -22,13 +22,13 @@ limitations under the License.
 
 #include "absl/strings/str_join.h"
 #include "core/util/uuid.h"
-#include "deepseekv32_detector.h"
-#include "deepseekv3_detector.h"
-#include "glm45_detector.h"
-#include "glm47_detector.h"
-#include "kimik2_detector.h"
-#include "qwen25_detector.h"
-#include "qwen3_coder_detector.h"
+#include "function_call/deepseekv32_detector.h"
+#include "function_call/deepseekv3_detector.h"
+#include "function_call/glm45_detector.h"
+#include "function_call/glm47_detector.h"
+#include "function_call/kimik2_detector.h"
+#include "function_call/qwen25_detector.h"
+#include "function_call/qwen3_coder_detector.h"
 
 namespace xllm {
 namespace function_call {
@@ -148,7 +148,12 @@ FunctionCallParser::parse_non_stream(const std::string& full_text) {
 
 StreamingParseResult FunctionCallParser::parse_streaming_increment(
     const std::string& new_text) {
+  CHECK(!detector_->stream_finished()) << "Tool parsing continued after finish";
   return detector_->parse_streaming_increment(new_text, tools_);
+}
+
+StreamingFinishResult FunctionCallParser::finish_stream() {
+  return detector_->finish_stream(tools_);
 }
 
 std::unique_ptr<BaseFormatDetector> FunctionCallParser::create_detector(

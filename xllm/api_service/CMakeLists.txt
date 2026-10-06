@@ -9,24 +9,28 @@ cc_library(
     openai_json.h
     openai_http.h
     openai_batch.h
+    openai_responses_request.h
+    openai_responses_output.h
+    openai_responses_call.h
+    openai_responses_service_impl.h
     api_service.h
     api_service_impl.h
     call.h
     request_id.h
     chat_json_parser.h
-    chat_request_decoder.h
-    chat_struct_spans.h
-    completion_json_parser.h
+    openai_chat_completion_request_decoder.h
+    openai_chat_completion_struct_spans.h
+    openai_text_completion_json_parser.h
     json_fast_path.h
     json_scan.h
-    completion_service_impl.h
+    openai_text_completion_service_impl.h
     rec_completion_service_impl.h
-    chat_service_impl.h
+    openai_chat_completion_service_impl.h
     anthropic_request_utils.h
     anthropic_service_impl.h
     anthropic_stream_utils.h
     sample_service_impl.h
-    embedding_service_impl.h
+    openai_embeddings_service_impl.h
     audio_generation_service_impl.h
     image_generation_service_impl.h
     text_generation_service_impl.h
@@ -45,24 +49,28 @@ cc_library(
   SRCS
     openai_request.cpp
     openai_json.cpp
+    openai_responses_request.cpp
+    openai_responses_output.cpp
+    openai_responses_call.cpp
+    openai_responses_service_impl.cpp
     api_service.cpp
     chat_json_parser.cpp
-    chat_request_decoder.cpp
-    chat_struct_spans.cpp
-    completion_json_parser.cpp
+    openai_chat_completion_request_decoder.cpp
+    openai_chat_completion_struct_spans.cpp
+    openai_text_completion_json_parser.cpp
     json_fast_path.cpp
     json_scan.cpp
     service_impl_factory.cpp
     call.cpp
     request_id.cpp
-    completion_service_impl.cpp
+    openai_text_completion_service_impl.cpp
     rec_completion_service_impl.cpp
-    chat_service_impl.cpp
+    openai_chat_completion_service_impl.cpp
     anthropic_request_utils.cpp
     anthropic_service_impl.cpp
     anthropic_stream_utils.cpp
     sample_service_impl.cpp
-    embedding_service_impl.cpp
+    openai_embeddings_service_impl.cpp
     audio_generation_service_impl.cpp
     image_generation_service_impl.cpp
     text_generation_service_impl.cpp

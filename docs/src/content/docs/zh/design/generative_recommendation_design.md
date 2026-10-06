@@ -285,7 +285,7 @@ xLLM 在 `backend=rec` 场景下提供了生成式推荐推理能力。其目标
 
 服务入口：
 - `xllm/api_service/rec_completion_service_impl.cpp`
-- `xllm/api_service/chat_service_impl.cpp`
+- `xllm/api_service/openai_chat_completion_service_impl.cpp`
 - `xllm/api_service/api_service.cpp`
 - `xllm/api_service/api_service.h`
 
@@ -323,7 +323,7 @@ kernel / 算子热路径：
 
 1. **外部接入**
    - 如果走动态库方式，请求会从 `xllm/c_api/internal/rec.cpp` 中的 `xllm_rec_text_completions`、`xllm_rec_token_completions` 或 `xllm_rec_chat_completions` 进入。
-   - 如果走服务方式，请求会从 `xllm/api_service/rec_completion_service_impl.cpp` 或 `chat_service_impl.cpp` 进入，再转到 `RecMaster`。
+   - 如果走服务方式，请求会从 `xllm/api_service/rec_completion_service_impl.cpp` 或 `openai_chat_completion_service_impl.cpp` 进入，再转到 `RecMaster`。
 
 2. **请求进入 `RecMaster`**
    - `RecMaster` 负责把 prompt、token ids、raw embedding 等不同入口统一收敛到 request 构造逻辑。
@@ -423,7 +423,7 @@ kernel / 算子热路径：
 - `xllm/api_service/rec_completion_service_impl.cpp`
   - 负责把 rec completion 请求转给 `RecMaster`
   - `routing`、`input_tensors`、`RequestParams` 都是在这里被整理进来
-- `xllm/api_service/chat_service_impl.cpp`
+- `xllm/api_service/openai_chat_completion_service_impl.cpp`
   - 对 `RecMaster` 也有 chat 入口
   - 适合说明“REC 不是只有 token completion，一样可以走 chat 形态”
 

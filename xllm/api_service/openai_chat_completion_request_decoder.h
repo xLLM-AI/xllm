@@ -24,7 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "api_service/chat_struct_spans.h"
+#include "api_service/openai_chat_completion_struct_spans.h"
 #include "core/common/types.h"
 
 namespace xllm {

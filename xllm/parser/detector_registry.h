@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "common/macros.h"
 #include "parser/reasoning_detector.h"
@@ -41,8 +42,10 @@ class DetectorRegistry {
 
   std::string get_supported_parsers() const;
 
-  // Get the reasoning parser name for auto mode based on model_type
-  // Returns empty string if not found
+  std::optional<std::string> resolve_parser_name(
+      const std::string& model_type) const;
+
+  // Startup configuration errors retain the legacy fail-fast behavior.
   std::string get_parser_name_by_model_type(
       const std::string& model_type) const;
 

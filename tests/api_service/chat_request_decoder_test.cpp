@@ -13,8 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "api_service/chat_request_decoder.h"
-
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <gtest/gtest.h>
@@ -23,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "api_service/openai_chat_completion_request_decoder.h"
 #include "chat.pb.h"
 #include "multimodal.pb.h"
 

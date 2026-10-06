@@ -13,13 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "utils.h"
+#include "function_call/utils.h"
 
 #include <glog/logging.h>
 
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <utility>
 
 #include "partial_json_parser/options.h"
 #include "partial_json_parser/parser.h"
@@ -72,15 +73,18 @@ std::tuple<nlohmann::json, int32_t> partial_json_loads(
     // Convert Allow flags to TypeOptions
     auto type_options = convert_allow_to_type_options(flags);
 
-    // Use our C++ partial_json_parser
-    std::string completed_json = partial_json_parser::parse_malformed_string(
-        input_str, type_options, false);
-
-    // Parse the completed JSON
+    const int32_t start = partial_json_parser::skip_blank(input_str, 0);
+    const std::string value = input_str.substr(start);
+    const auto completion =
+        partial_json_parser::complete_any(value, type_options, true);
+    if (completion.index == 0 && completion.string.empty()) {
+      throw partial_json_parser::MalformedJSONException(
+          "no valid JSON content found");
+    }
+    const std::string completed_json =
+        value.substr(0, completion.index) + completion.string;
     nlohmann::json parsed_obj = nlohmann::json::parse(completed_json);
-
-    return std::make_tuple(parsed_obj,
-                           static_cast<int32_t>(input_str.length()));
+    return std::make_tuple(std::move(parsed_obj), start + completion.index);
 
   } catch (const partial_json_parser::MalformedJSONException& e) {
     // Handle malformed JSON - try standard JSON parsing for "Extra data" case

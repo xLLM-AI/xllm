@@ -21,11 +21,12 @@ limitations under the License.
 #include <vector>
 
 #include "anthropic_service_impl.h"
+#include "api_service/openai_chat_completion_service_impl.h"
+#include "api_service/openai_embeddings_service_impl.h"
+#include "api_service/openai_responses_service_impl.h"
+#include "api_service/openai_text_completion_service_impl.h"
 #include "audio_generation_service_impl.h"
-#include "chat_service_impl.h"
-#include "completion_service_impl.h"
 #include "core/distributed_runtime/master_manager.h"
-#include "embedding_service_impl.h"
 #include "image_generation_service_impl.h"
 #include "models_service_impl.h"
 #include "qwen3_rerank_service_impl.h"
@@ -80,6 +81,11 @@ class APIService : public proto::XllmAPIService {
                            const proto::HttpRequest* request,
                            proto::HttpResponse* response,
                            ::google::protobuf::Closure* done) override;
+
+  void ResponsesHttp(::google::protobuf::RpcController* controller,
+                     const proto::HttpRequest* request,
+                     proto::HttpResponse* response,
+                     ::google::protobuf::Closure* done) override;
 
   void Embeddings(::google::protobuf::RpcController* controller,
                   const proto::EmbeddingRequest* request,
@@ -251,6 +257,7 @@ class APIService : public proto::XllmAPIService {
   std::string system_fingerprint_;
   ChatHttpHandler chat_completions_handler_;
   std::unique_ptr<AnthropicServiceImpl> anthropic_service_impl_;
+  std::unique_ptr<ResponsesServiceImpl> responses_service_impl_;
   std::unique_ptr<CompletionServiceImpl> completion_service_impl_;
   std::unique_ptr<SampleServiceImpl> sample_service_impl_;
   std::unique_ptr<ChatServiceImpl> chat_service_impl_;

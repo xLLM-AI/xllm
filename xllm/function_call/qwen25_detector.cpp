@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen25_detector.h"
+#include "function_call/qwen25_detector.h"
 
 #include <algorithm>
 #include <iostream>
@@ -135,41 +135,32 @@ StreamingParseResult Qwen25Detector::parse_streaming_increment(
   StreamingParseResult result =
       BaseFormatDetector::parse_streaming_increment(new_text, tools);
 
-  // Handle partial end tokens that are streamed character by character
-  if (!result.normal_text.empty()) {
-    normal_text_buffer_ += result.normal_text;
-
-    // Check if buffer contains complete end token (without leading newline)
-    std::string end_token_without_newline =
-        eot_token_.substr(1);  // "</tool_call>"
-    size_t end_token_pos = normal_text_buffer_.find(end_token_without_newline);
-
-    if (end_token_pos != std::string::npos) {
-      std::string cleaned_text = normal_text_buffer_;
-      // Remove the end token
-      cleaned_text.erase(end_token_pos, end_token_without_newline.length());
-      normal_text_buffer_.clear();
-      result.normal_text = cleaned_text;
-    } else {
-      // Check if buffer might contain partial end token at the end
-      int32_t partial_match_len = ends_with_partial_token(
-          normal_text_buffer_, end_token_without_newline);
-
-      if (partial_match_len > 0) {
-        // Keep potential partial match in buffer, return the rest
-        result.normal_text = normal_text_buffer_.substr(
-            0, normal_text_buffer_.length() - partial_match_len);
-        normal_text_buffer_ = normal_text_buffer_.substr(
-            normal_text_buffer_.length() - partial_match_len);
-      } else {
-        // No partial match, return all buffered text
-        result.normal_text = normal_text_buffer_;
-        normal_text_buffer_.clear();
-      }
-    }
-  }
-
+  filter_end_token(result, /*final=*/false);
   return result;
+}
+
+StreamingFinishResult Qwen25Detector::finish_stream(
+    const std::vector<JsonTool>& tools) {
+  StreamingFinishResult result = finish_json_buffer(tools);
+  filter_end_token(result.output, /*final=*/true);
+  return result;
+}
+
+void Qwen25Detector::filter_end_token(StreamingParseResult& result,
+                                      bool final) {
+  normal_text_buffer_ += result.normal_text;
+  const std::string end_token = eot_token_.substr(1);
+  size_t position = 0;
+  while ((position = normal_text_buffer_.find(end_token)) !=
+         std::string::npos) {
+    normal_text_buffer_.erase(position, end_token.size());
+  }
+  const size_t held = final ? 0
+                            : static_cast<size_t>(ends_with_partial_token(
+                                  normal_text_buffer_, end_token));
+  result.normal_text =
+      normal_text_buffer_.substr(0, normal_text_buffer_.size() - held);
+  normal_text_buffer_.erase(0, normal_text_buffer_.size() - held);
 }
 
 }  // namespace function_call

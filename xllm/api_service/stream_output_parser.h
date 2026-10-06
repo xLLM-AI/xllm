@@ -32,7 +32,9 @@ class StreamOutputParser {
   StreamOutputParser(const std::vector<function_call::JsonTool>& tools,
                      const std::string& tool_call_parser_format,
                      const std::string& reasoning_parser_format,
-                     bool force_reasoning = false);
+                     bool force_reasoning = false,
+                     std::optional<bool> initial_reasoning = std::nullopt,
+                     bool lossless_reasoning = false);
 
   ~StreamOutputParser() = default;
 
@@ -64,6 +66,8 @@ class StreamOutputParser {
   std::string tool_call_parser_format_;
   std::string reasoning_parser_format_;
   bool force_reasoning_;
+  std::optional<bool> initial_reasoning_;
+  bool lossless_reasoning_;
 };
 
 }  // namespace xllm

@@ -275,7 +275,7 @@ External integration:
 
 Service entry:
 - `xllm/api_service/rec_completion_service_impl.cpp`
-- `xllm/api_service/chat_service_impl.cpp`
+- `xllm/api_service/openai_chat_completion_service_impl.cpp`
 - `xllm/api_service/api_service.cpp`
 - `xllm/api_service/api_service.h`
 
@@ -313,7 +313,7 @@ To align the design with the actual implementation, the current branch can be un
 
 1. **External entry**
    - In shared-library mode, requests enter from `xllm/c_api/internal/rec.cpp` through `xllm_rec_text_completions`, `xllm_rec_token_completions`, or `xllm_rec_chat_completions`.
-   - In service mode, requests enter from `xllm/api_service/rec_completion_service_impl.cpp` or `chat_service_impl.cpp`, and are then forwarded to `RecMaster`.
+   - In service mode, requests enter from `xllm/api_service/rec_completion_service_impl.cpp` or `openai_chat_completion_service_impl.cpp`, and are then forwarded to `RecMaster`.
 
 2. **Request convergence in `RecMaster`**
    - `RecMaster` unifies different request forms such as prompt input, token input, and raw embedding input.
@@ -413,7 +413,7 @@ If the focus is on RPC mode or the unified service path, continue with:
 - `xllm/api_service/rec_completion_service_impl.cpp`
   - forwards REC completion requests into `RecMaster`
   - this is where `routing`, `input_tensors`, and `RequestParams` are assembled together
-- `xllm/api_service/chat_service_impl.cpp`
+- `xllm/api_service/openai_chat_completion_service_impl.cpp`
   - also provides a chat entry for `RecMaster`
   - useful to show that REC is not limited to token completion only
 

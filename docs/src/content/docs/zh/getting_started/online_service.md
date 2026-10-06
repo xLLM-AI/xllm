@@ -6,6 +6,9 @@ sidebar:
 先按照[xllm启动文档](/zh/getting_started/launch_xllm/)启动xllm服务。下面给出LLM和VLM的客户端调用示例，需要根据实际情况修改其中的参数。
 
 ## LLM 客户端调用
+
+原生 `POST /v1/responses` 接口、Responses JSON/SSE、客户端历史回放、函数工具及明确的能力限制，见 [OpenAI Responses API 文档](/zh/features/openai_responses/)。
+
 ### HTTP 调用
 
 chat模式：

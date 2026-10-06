@@ -15,6 +15,7 @@ repos:
   rev: v2.4.1
   hooks:
   - id: codespell
+    exclude: ^tests/core/framework/request/responses_reasoning_test\.cpp$
     args: [
       --toml, pyproject.toml,
       '--skip', 'build/**,third_party/**,*.svg,*.ptx.h,docs/package-lock.json',

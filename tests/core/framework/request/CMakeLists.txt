@@ -161,6 +161,41 @@ cc_test(
 
 cc_test(
   NAME
+    responses_reasoning_test
+  NO_NPU_RUNTIME
+  SRCS
+    responses_reasoning_test.cpp
+  DEPS
+    :reasoning
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    responses_usage_test
+  SRCS
+    responses_usage_test.cpp
+  DEPS
+    :block
+    :common
+    :config
+    :request
+    :reasoning
+    GTest::gtest_main
+)
+target_link_libraries(responses_usage_test
+                      PUBLIC
+                      Python::Python
+                      $<$<BOOL:${USE_NPU}>:ascendcl>
+                      $<$<BOOL:${USE_NPU}>:hccl>
+                      $<$<BOOL:${USE_NPU}>:c_sec>
+                      $<$<BOOL:${USE_NPU}>:nnopbase>)
+target_link_options(responses_usage_test
+                    PRIVATE
+                    $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)
+
+cc_test(
+  NAME
     request_prefix_cache_tokens_test
   SRCS
     request_prefix_cache_tokens_test.cpp

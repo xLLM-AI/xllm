@@ -29,7 +29,7 @@ limitations under the License.
 
 #include "api_service/anthropic_request_utils.h"
 #include "api_service/chat_json_parser.h"
-#include "api_service/chat_request_decoder.h"
+#include "api_service/openai_chat_completion_request_decoder.h"
 #include "api_service/openai_http.h"
 #include "api_service/openai_request.h"
 #include "api_service/request_id.h"
@@ -247,6 +247,56 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
   } else if (rec_completion_service_impl_) {
     rec_completion_service_impl_->process_async(call);
   }
+}
+
+void APIService::ResponsesHttp(::google::protobuf::RpcController* controller,
+                               const proto::HttpRequest* request,
+                               proto::HttpResponse* response,
+                               ::google::protobuf::Closure* done) {
+  ClosureGuard done_guard(
+      done,
+      [](void* /*unused*/) { request_in_metric(nullptr); },
+      [controller](void* /*unused*/) {
+        request_out_metric(static_cast<void*>(controller));
+      });
+  if (request == nullptr || response == nullptr || controller == nullptr) {
+    LOG(ERROR) << "Responses controller, request or response is null";
+    return;
+  }
+  auto* ctrl = static_cast<brpc::Controller*>(controller);
+  api_service::ensure_http_x_request_id(ctrl);
+  if (ctrl->http_request().method() != brpc::HTTP_METHOD_POST) {
+    api_service::write_openai_error(
+        ctrl, StatusCode::INVALID_ARGUMENT, "Responses requires POST");
+    ctrl->http_response().set_status_code(405);
+    ctrl->http_response().SetHeader("Allow", "POST");
+    return;
+  }
+  if (responses_service_impl_ == nullptr) {
+    api_service::write_openai_error(
+        ctrl,
+        StatusCode::INVALID_ARGUMENT,
+        "The selected backend does not support textual Responses");
+    return;
+  }
+  auto [body_status, body] =
+      api_service::openai_request_body(*ctrl, /*binary_input=*/false);
+  if (!body_status.ok()) {
+    api_service::write_openai_error(
+        ctrl, body_status.code(), body_status.message());
+    return;
+  }
+  std::string error_param;
+  auto [status, parsed] =
+      api_service::parse_responses_request(body, default_model_, &error_param);
+  if (!status.ok()) {
+    api_service::write_openai_error(
+        ctrl, status.code(), status.message(), error_param);
+    return;
+  }
+  auto call = std::make_shared<ResponsesCall>(
+      ctrl, done_guard.release(), parsed.params.streaming);
+  responses_service_impl_->process_async(std::move(call), std::move(parsed));
 }
 
 void APIService::Sample(::google::protobuf::RpcController* controller,

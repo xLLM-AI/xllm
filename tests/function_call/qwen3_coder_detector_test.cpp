@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_coder_detector.h"
+#include "function_call/qwen3_coder_detector.h"
 
 #include <gtest/gtest.h>
 
@@ -21,8 +21,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core_types.h"
-#include "function_call_parser.h"
+#include "function_call/core_types.h"
+#include "function_call/function_call_parser.h"
 
 namespace xllm {
 namespace function_call {
@@ -693,6 +693,202 @@ TEST_F(Qwen3CoderDetectorTest, StreamingCharacterByCharacter) {
   nlohmann::json params = nlohmann::json::parse(acc[0].parameters);
   EXPECT_EQ(params["location"], "Tokyo");
   EXPECT_EQ(params["days"], 2);
+}
+
+TEST_F(Qwen3CoderDetectorTest, FullFrameFinishesInFirstFeed) {
+  const std::string frame =
+      "<tool_call><function=get_current_weather>"
+      "<parameter=location>Paris</parameter></function></tool_call>";
+  std::vector<StreamCallAccumulator> calls;
+  merge_stream_result(
+      detector_->parse_streaming_increment(frame, tools_), nullptr, &calls);
+  ASSERT_EQ(calls.size(), 1);
+  EXPECT_EQ(calls[0].name, "get_current_weather");
+  EXPECT_EQ(calls[0].parameters, "{\"location\": \"Paris\"}");
+  ASSERT_EQ(detector_->prev_tool_call_arr_.size(), 1);
+  ASSERT_EQ(detector_->streamed_args_for_tool_.size(), 1);
+  EXPECT_EQ(detector_->prev_tool_call_arr_[0].at("arguments"),
+            calls[0].parameters);
+  EXPECT_EQ(detector_->streamed_args_for_tool_[0], calls[0].parameters);
+
+  const auto finished = detector_->finish_stream(tools_);
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_TRUE(finished.output.normal_text.empty());
+  EXPECT_TRUE(finished.output.calls.empty());
+}
+
+TEST_F(Qwen3CoderDetectorTest, CoalescedFramesAtEverySplit) {
+  const std::string text =
+      "before <tool_call><function=get_current_weather>"
+      "<parameter=location>北京😀</parameter></function></tool_call>"
+      " middle <tool_call><function=sql_interpreter>"
+      "<parameter=query>SELECT 1</parameter>"
+      "<parameter=dry_run>false</parameter></function></tool_call> after";
+  const std::vector<std::string> expected_arguments = {
+      "{\"location\": \"北京😀\"}",
+      "{\"query\": \"SELECT 1\", \"dry_run\": false}"};
+  for (size_t split = 0; split <= text.size(); ++split) {
+    SCOPED_TRACE(split);
+    Qwen3CoderDetector detector;
+    std::string normal_text;
+    std::vector<StreamCallAccumulator> calls;
+    merge_stream_result(
+        detector.parse_streaming_increment(text.substr(0, split), tools_),
+        &normal_text,
+        &calls);
+    merge_stream_result(
+        detector.parse_streaming_increment(text.substr(split), tools_),
+        &normal_text,
+        &calls);
+    const auto finished = detector.finish_stream(tools_);
+    EXPECT_FALSE(finished.has_pending_tool);
+    merge_stream_result(finished.output, &normal_text, &calls);
+    EXPECT_EQ(normal_text, "before  middle  after");
+    ASSERT_EQ(calls.size(), 2);
+    EXPECT_EQ(calls[0].name, "get_current_weather");
+    EXPECT_EQ(calls[1].name, "sql_interpreter");
+    ASSERT_EQ(detector.prev_tool_call_arr_.size(), calls.size());
+    ASSERT_EQ(detector.streamed_args_for_tool_.size(), calls.size());
+    for (size_t index = 0; index < calls.size(); ++index) {
+      EXPECT_EQ(calls[index].parameters, expected_arguments[index]);
+      EXPECT_EQ(detector.prev_tool_call_arr_[index].at("arguments"),
+                calls[index].parameters);
+      EXPECT_EQ(detector.streamed_args_for_tool_[index],
+                calls[index].parameters);
+    }
+    const auto repeated = detector.finish_stream(tools_);
+    EXPECT_FALSE(repeated.has_pending_tool);
+    EXPECT_TRUE(repeated.output.normal_text.empty());
+    EXPECT_TRUE(repeated.output.calls.empty());
+  }
+}
+
+TEST_F(Qwen3CoderDetectorTest, Utf8ParametersStreamOneByteAtATime) {
+  FunctionCallParser parser(tools_, "qwen3_coder");
+  const std::string text =
+      "<tool_call><function=get_current_weather>"
+      "<parameter=location>北京😀</parameter></function></tool_call>";
+  std::vector<StreamCallAccumulator> calls;
+  for (const char byte : text) {
+    merge_stream_result(parser.parse_streaming_increment(std::string(1, byte)),
+                        nullptr,
+                        &calls);
+  }
+  ASSERT_EQ(calls.size(), 1);
+  EXPECT_EQ(calls[0].parameters, "{\"location\": \"北京😀\"}");
+  const auto finished = parser.finish_stream();
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_TRUE(finished.output.calls.empty());
+}
+
+TEST_F(Qwen3CoderDetectorTest, EmptyArgumentsFinishExactlyOnce) {
+  const std::string frame =
+      "<tool_call><function=sql_interpreter></function></tool_call>";
+  std::vector<StreamCallAccumulator> calls;
+  merge_stream_result(
+      detector_->parse_streaming_increment(frame, tools_), nullptr, &calls);
+  ASSERT_EQ(calls.size(), 1);
+  EXPECT_EQ(calls[0].name, "sql_interpreter");
+  EXPECT_EQ(calls[0].parameters, "{}");
+  ASSERT_EQ(detector_->prev_tool_call_arr_.size(), 1);
+  ASSERT_EQ(detector_->streamed_args_for_tool_.size(), 1);
+  EXPECT_EQ(detector_->prev_tool_call_arr_[0].at("arguments"), "{}");
+  EXPECT_EQ(detector_->streamed_args_for_tool_[0], "{}");
+  const auto finished = detector_->finish_stream(tools_);
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_TRUE(finished.output.calls.empty());
+  const auto repeated = detector_->finish_stream(tools_);
+  EXPECT_FALSE(repeated.has_pending_tool);
+  EXPECT_TRUE(repeated.output.calls.empty());
+}
+
+TEST_F(Qwen3CoderDetectorTest, FinishReleasesLiteralMarkerPrefix) {
+  FunctionCallParser parser(tools_, "qwen3_coder");
+  const auto parsed = parser.parse_streaming_increment("literal<tool_ca");
+  EXPECT_EQ(parsed.normal_text, "literal");
+  EXPECT_TRUE(parsed.calls.empty());
+  const auto finished = parser.finish_stream();
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_EQ(finished.output.normal_text, "<tool_ca");
+  EXPECT_TRUE(finished.output.calls.empty());
+  const auto repeated = parser.finish_stream();
+  EXPECT_FALSE(repeated.has_pending_tool);
+  EXPECT_TRUE(repeated.output.normal_text.empty());
+  EXPECT_TRUE(repeated.output.calls.empty());
+}
+
+TEST_F(Qwen3CoderDetectorTest, FinishClosesCompleteArgumentsOnly) {
+  const std::string prefix =
+      "<tool_call><function=get_current_weather>"
+      "<parameter=location>Paris</parameter>";
+  for (const std::string suffix :
+       {"", "</fun", "</tool_c", "</function>", "</tool_call>"}) {
+    SCOPED_TRACE(suffix);
+    FunctionCallParser parser(tools_, "qwen3_coder");
+    std::vector<StreamCallAccumulator> calls;
+    merge_stream_result(
+        parser.parse_streaming_increment(prefix + suffix), nullptr, &calls);
+    const auto finished = parser.finish_stream();
+    EXPECT_FALSE(finished.has_pending_tool);
+    merge_stream_result(finished.output, nullptr, &calls);
+    ASSERT_EQ(calls.size(), 1);
+    EXPECT_EQ(calls[0].name, "get_current_weather");
+    EXPECT_EQ(calls[0].parameters, "{\"location\": \"Paris\"}");
+    const auto repeated = parser.finish_stream();
+    EXPECT_FALSE(repeated.has_pending_tool);
+    EXPECT_TRUE(repeated.output.normal_text.empty());
+    EXPECT_TRUE(repeated.output.calls.empty());
+  }
+}
+
+TEST_F(Qwen3CoderDetectorTest, FinishKeepsTruncatedCallsPending) {
+  const std::vector<std::string> truncated = {
+      "<tool_call>",
+      "<tool_call><function=get_current_wea",
+      "<tool_call><function=get_current_weather>",
+      "<tool_call><function=get_current_weather></tool_call>",
+      "<tool_call><function=get_current_weather><parameter=location",
+      "<tool_call><function=get_current_weather><parameter=location>Par",
+      "<tool_call><function=get_current_weather>"
+      "<parameter=location>Paris</parameter><parameter=unit>cel"};
+  for (const auto& text : truncated) {
+    SCOPED_TRACE(text);
+    FunctionCallParser parser(tools_, "qwen3_coder");
+    std::vector<StreamCallAccumulator> calls;
+    merge_stream_result(
+        parser.parse_streaming_increment(text), nullptr, &calls);
+    const auto finished = parser.finish_stream();
+    EXPECT_TRUE(finished.has_pending_tool);
+    EXPECT_TRUE(finished.output.normal_text.empty());
+    EXPECT_TRUE(finished.output.calls.empty());
+    for (const auto& call : calls) {
+      EXPECT_NE(call.parameters, "{}");
+      EXPECT_TRUE(call.parameters.empty() || call.parameters.back() != '}');
+    }
+    const auto repeated = parser.finish_stream();
+    EXPECT_TRUE(repeated.has_pending_tool);
+    EXPECT_TRUE(repeated.output.normal_text.empty());
+    EXPECT_TRUE(repeated.output.calls.empty());
+  }
+}
+
+TEST_F(Qwen3CoderDetectorTest, CompleteFunctionNeedsNoOuterEndTag) {
+  FunctionCallParser parser(tools_, "qwen3_coder");
+  const std::string text = "<tool_call><function=sql_interpreter></function>";
+  std::vector<StreamCallAccumulator> calls;
+  merge_stream_result(parser.parse_streaming_increment(text), nullptr, &calls);
+  const auto finished = parser.finish_stream();
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_TRUE(finished.output.calls.empty());
+  ASSERT_EQ(calls.size(), 1);
+  EXPECT_EQ(calls[0].parameters, "{}");
+}
+
+TEST_F(Qwen3CoderDetectorTest, FinishedStreamRejectsFurtherInput) {
+  const auto finished = detector_->finish_stream(tools_);
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_DEATH_IF_SUPPORTED(
+      detector_->parse_streaming_increment("late", tools_), "stream_finished");
 }
 
 // -----------------------------------------------------------------------------

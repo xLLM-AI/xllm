@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xllm/parser/reasoning_parser.h"
+#include "parser/reasoning_parser.h"
 
 #include <glog/logging.h>
 
@@ -22,9 +22,15 @@ namespace xllm {
 
 ReasoningParser::ReasoningParser(const std::string& model_type,
                                  bool stream_reasoning,
-                                 bool force_reasoning) {
+                                 bool force_reasoning,
+                                 std::optional<bool> initial_reasoning,
+                                 bool lossless) {
   detector_ = DetectorRegistry::get_instance().get_detector(
       model_type, stream_reasoning, force_reasoning);
+  detector_->set_lossless(lossless);
+  if (initial_reasoning.has_value()) {
+    detector_->set_initial_reasoning(initial_reasoning.value());
+  }
 }
 
 ReasoningResult ReasoningParser::parse_non_stream(const std::string& text) {
@@ -35,6 +41,10 @@ ReasoningResult ReasoningParser::parse_stream_chunk(
     const std::string& chunk_text) {
   return detector_->parse_streaming_increment(
       const_cast<std::string&>(chunk_text));
+}
+
+ReasoningResult ReasoningParser::finish_stream() {
+  return detector_->finish_stream();
 }
 
 std::string ReasoningParser::get_parser_auto(const std::string& parser,

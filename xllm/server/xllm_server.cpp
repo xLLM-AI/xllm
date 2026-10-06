@@ -40,6 +40,7 @@ constexpr const char* kApiServiceRoutes =
     "v1/completions => CompletionsHttp,"
     "v1/sample => SampleHttp,"
     "v1/chat/completions => ChatCompletionsHttp,"
+    "v1/responses => ResponsesHttp,"
     "v1/embeddings => EmbeddingsHttp,"
     "v1/models => ModelsHttp,"
     "v1/image/generation => ImageGenerationHttp,"

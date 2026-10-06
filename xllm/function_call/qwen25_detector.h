@@ -19,7 +19,7 @@ limitations under the License.
 #include <string>
 #include <string_view>
 
-#include "base_format_detector.h"
+#include "function_call/base_format_detector.h"
 
 namespace xllm {
 namespace function_call {
@@ -52,6 +52,12 @@ class Qwen25Detector : public BaseFormatDetector {
   StreamingParseResult parse_streaming_increment(
       const std::string& new_text,
       const std::vector<JsonTool>& tools) override;
+
+  StreamingFinishResult finish_stream(
+      const std::vector<JsonTool>& tools) override;
+
+ private:
+  void filter_end_token(StreamingParseResult& result, bool final);
 };
 
 }  // namespace function_call

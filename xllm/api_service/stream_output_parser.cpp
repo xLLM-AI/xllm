@@ -21,11 +21,15 @@ StreamOutputParser::StreamOutputParser(
     const std::vector<function_call::JsonTool>& tools,
     const std::string& tool_call_parser_format,
     const std::string& reasoning_parser_format,
-    bool force_reasoning)
+    bool force_reasoning,
+    std::optional<bool> initial_reasoning,
+    bool lossless_reasoning)
     : tools_(tools),
       tool_call_parser_format_(tool_call_parser_format),
       reasoning_parser_format_(reasoning_parser_format),
-      force_reasoning_(force_reasoning) {
+      force_reasoning_(force_reasoning),
+      initial_reasoning_(initial_reasoning),
+      lossless_reasoning_(lossless_reasoning) {
   sequence_parsers_.resize(1);
   if (is_tool_call()) {
     sequence_parsers_[0].tool_call_parser =
@@ -33,8 +37,12 @@ StreamOutputParser::StreamOutputParser(
             tools_, tool_call_parser_format_);
   }
   if (is_reasoning()) {
-    sequence_parsers_[0].reasoning_parser_ = std::make_unique<ReasoningParser>(
-        reasoning_parser_format_, true, force_reasoning_);
+    sequence_parsers_[0].reasoning_parser_ =
+        std::make_unique<ReasoningParser>(reasoning_parser_format_,
+                                          true,
+                                          force_reasoning_,
+                                          initial_reasoning_,
+                                          lossless_reasoning_);
   }
 }
 
@@ -78,8 +86,11 @@ ReasoningParser* StreamOutputParser::get_reasoning_parser(size_t index) {
 
   if (!sequence_parsers_[index].reasoning_parser_) {
     sequence_parsers_[index].reasoning_parser_ =
-        std::make_unique<ReasoningParser>(
-            reasoning_parser_format_, true, force_reasoning_);
+        std::make_unique<ReasoningParser>(reasoning_parser_format_,
+                                          true,
+                                          force_reasoning_,
+                                          initial_reasoning_,
+                                          lossless_reasoning_);
   }
 
   return sequence_parsers_[index].reasoning_parser_.get();

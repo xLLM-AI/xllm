@@ -71,8 +71,8 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/chat_json_parser.h"
-#include "api_service/chat_request_decoder.h"
-#include "api_service/completion_json_parser.h"
+#include "api_service/openai_chat_completion_request_decoder.h"
+#include "api_service/openai_text_completion_json_parser.h"
 #include "api_service/serving_mode.h"
 #include "chat.pb.h"
 #include "completion.pb.h"

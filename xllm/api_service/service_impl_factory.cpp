@@ -56,6 +56,8 @@ void ServiceImplFactory::create(
              llm_master, models, self->master_manager_);
          self->chat_service_impl_ = std::make_unique<ChatServiceImpl>(
              llm_master, models, self->master_manager_);
+         self->responses_service_impl_ =
+             std::make_unique<ResponsesServiceImpl>(self->master_manager_);
          self->embedding_service_impl_ = std::make_unique<EmbeddingServiceImpl>(
              llm_master, models, self->master_manager_);
          if (::xllm::ModelConfig::get_instance().enable_qwen3_reranker()) {

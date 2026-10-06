@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "completion_service_impl.h"
+#include "api_service/openai_text_completion_service_impl.h"
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>

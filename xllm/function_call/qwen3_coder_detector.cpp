@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_coder_detector.h"
+#include "function_call/qwen3_coder_detector.h"
 
 #include <algorithm>
 #include <cctype>
@@ -432,7 +432,13 @@ StreamingParseResult Qwen3CoderDetector::detect_and_parse(
 StreamingParseResult Qwen3CoderDetector::parse_streaming_increment(
     const std::string& new_text,
     const std::vector<JsonTool>& tools) {
+  CHECK(!stream_finished_);
   buffer_ += new_text;
+  return consume_buffer(tools);
+}
+
+StreamingParseResult Qwen3CoderDetector::consume_buffer(
+    const std::vector<JsonTool>& tools) {
   if (buffer_.empty()) {
     return StreamingParseResult();
   }
@@ -454,6 +460,7 @@ StreamingParseResult Qwen3CoderDetector::parse_streaming_increment(
     if (starts_with(current_slice, tool_call_start_token_)) {
       parsed_pos_ += tool_call_start_token_.length();
       is_inside_tool_call_ = true;
+      current_tool_name_sent_ = false;
       continue;
     }
 
@@ -550,6 +557,8 @@ StreamingParseResult Qwen3CoderDetector::parse_streaming_increment(
       calls.emplace_back(current_tool_id_, std::nullopt, "}");
       parsed_pos_ += function_end_token_.length();
       current_func_name_.reset();
+      json_started_ = false;
+      current_tool_param_count_ = 0;
       continue;
     }
 
@@ -606,7 +615,67 @@ StreamingParseResult Qwen3CoderDetector::parse_streaming_increment(
     parsed_pos_ = 0;
   }
 
+  for (const auto& call : calls) {
+    record_call(call);
+  }
   return StreamingParseResult(std::move(normal_text), std::move(calls));
+}
+
+void Qwen3CoderDetector::record_call(const ToolCallItem& call) {
+  if (call.tool_index < 0) {
+    return;
+  }
+  const size_t index = static_cast<size_t>(call.tool_index);
+  if (prev_tool_call_arr_.size() <= index) {
+    prev_tool_call_arr_.resize(index + 1);
+    streamed_args_for_tool_.resize(index + 1);
+  }
+  auto& snapshot = prev_tool_call_arr_[index];
+  if (call.name.has_value()) {
+    snapshot["name"] = call.name.value();
+  }
+  streamed_args_for_tool_[index] += call.parameters;
+  snapshot["arguments"] = streamed_args_for_tool_[index];
+}
+
+StreamingFinishResult Qwen3CoderDetector::finish_stream(
+    const std::vector<JsonTool>& tools) {
+  if (stream_finished_) {
+    return {{}, has_pending_tool_};
+  }
+  stream_finished_ = true;
+  StreamingParseResult output = consume_buffer(tools);
+  const std::string tail = trim_ascii_whitespace(buffer_);
+  const bool closing_tail =
+      !tail.empty() && (starts_with(function_end_token_, tail) ||
+                        starts_with(tool_call_end_token_, tail));
+  const bool pending_function = starts_with(tail, tool_call_prefix_) ||
+                                (is_inside_tool_call_ && !tail.empty() &&
+                                 starts_with(tool_call_prefix_, tail));
+  const bool pending_parameter = starts_with(tail, parameter_prefix_) ||
+                                 (is_inside_tool_call_ && !tail.empty() &&
+                                  starts_with(parameter_prefix_, tail));
+  has_pending_tool_ =
+      pending_function || pending_parameter ||
+      (is_inside_tool_call_ && !current_tool_name_sent_) ||
+      (current_func_name_.has_value() &&
+       (current_tool_param_count_ == 0 || (!tail.empty() && !closing_tail)));
+
+  if (current_func_name_.has_value() && !has_pending_tool_) {
+    output.calls.emplace_back(current_tool_id_, std::nullopt, "}");
+    record_call(output.calls.back());
+  } else if (!is_inside_tool_call_ && !current_func_name_.has_value() &&
+             !has_pending_tool_) {
+    output.normal_text += buffer_;
+  }
+
+  buffer_.clear();
+  parsed_pos_ = 0;
+  current_func_name_.reset();
+  current_tool_param_count_ = 0;
+  json_started_ = false;
+  is_inside_tool_call_ = false;
+  return {std::move(output), has_pending_tool_};
 }
 
 }  // namespace function_call

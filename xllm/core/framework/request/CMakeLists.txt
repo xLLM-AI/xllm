@@ -71,6 +71,7 @@ cc_library(
     :chat_template
     :multimodal
     :json_object_grammar
+    :reasoning
     glog::glog
     absl::strings
     absl::time

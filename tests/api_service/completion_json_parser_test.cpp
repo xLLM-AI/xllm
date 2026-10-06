@@ -13,11 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "api_service/completion_json_parser.h"
-
 #include <gtest/gtest.h>
 
 #include <nlohmann/json.hpp>
+
+#include "api_service/openai_text_completion_json_parser.h"
 
 namespace xllm {
 

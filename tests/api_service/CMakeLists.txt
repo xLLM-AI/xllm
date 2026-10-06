@@ -190,25 +190,25 @@ foreach(_sdk_client openai_chat_completion_sdk_client.py anthropic_messages_sdk_
 endforeach()
 
 cc_test(
-  NAME chat_completion_protocol_test
+  NAME openai_chat_completion_protocol_test
   NO_NPU_RUNTIME
-  SRCS chat_completion_protocol_test.cpp http_protocol_test_fixture.cpp
+  SRCS openai_chat_completion_protocol_test.cpp http_protocol_test_fixture.cpp
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
-target_compile_definitions(chat_completion_protocol_test PRIVATE
+target_compile_definitions(openai_chat_completion_protocol_test PRIVATE
   XLLM_CHAT_COMPLETION_SDK_CLIENT="${CMAKE_CURRENT_BINARY_DIR}/openai_chat_completion_sdk_client.py")
 
 cc_test(
-  NAME text_completion_protocol_test
+  NAME openai_text_completion_protocol_test
   NO_NPU_RUNTIME
-  SRCS text_completion_protocol_test.cpp
+  SRCS openai_text_completion_protocol_test.cpp
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
 
 cc_test(
-  NAME embeddings_protocol_test
+  NAME openai_embeddings_protocol_test
   NO_NPU_RUNTIME
-  SRCS embeddings_protocol_test.cpp
+  SRCS openai_embeddings_protocol_test.cpp
   DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
 )
 
@@ -223,14 +223,42 @@ cc_test(
 target_compile_definitions(anthropic_messages_protocol_test PRIVATE
   XLLM_MESSAGES_SDK_CLIENT="${CMAKE_CURRENT_BINARY_DIR}/anthropic_messages_sdk_client.py")
 
+cc_test(
+  NAME openai_responses_request_test
+  NO_NPU_RUNTIME
+  SRCS openai_responses_request_test.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+  ENVIRONMENT "${_api_json_test_env}"
+)
+
+cc_test(
+  NAME openai_responses_output_test
+  NO_NPU_RUNTIME
+  SRCS openai_responses_output_test.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+  ENVIRONMENT "${_api_json_test_env}"
+)
+
+cc_test(
+  NAME openai_responses_protocol_test
+  NO_NPU_RUNTIME
+  SRCS openai_responses_protocol_test.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+  ENVIRONMENT "${_api_json_test_env}"
+)
+target_compile_definitions(openai_responses_protocol_test PRIVATE
+  PYTHON3_EXECUTABLE="${Python3_EXECUTABLE}"
+  XLLM_RESPONSES_SDK_CLIENT_PATH="${PROJECT_SOURCE_DIR}/tests/python/test_openai_responses_protocol.py")
+
 set(_sdk_tests
-  ChatCompletionProtocolTest.OfficialSdkCompatibility
-  AnthropicMessagesProtocolTest.OfficialSdkCompatibility)
+  OpenAIChatCompletionProtocolTest.OfficialSdkCompatibility
+  AnthropicMessagesProtocolTest.OfficialSdkCompatibility
+  OpenAIResponsesProtocolTest.OfficialSdkCompatibility)
 set_tests_properties(${_sdk_tests} PROPERTIES LABELS "sdk")
 if(XLLM_ENABLE_SDK_TESTS)
   execute_process(
     COMMAND "${Python3_EXECUTABLE}" -c
-      "from openai import OpenAI; from anthropic import Anthropic, DefaultHttpxClient"
+      "import httpx; from openai import OpenAI; from anthropic import Anthropic, DefaultHttpxClient"
     RESULT_VARIABLE _sdk_import_result
     ERROR_VARIABLE _sdk_import_error)
   if(NOT _sdk_import_result STREQUAL "0")

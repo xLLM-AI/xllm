@@ -37,7 +37,8 @@ class ReasoningDetector {
   ReasoningDetector(const std::string& think_start_token,
                     const std::string& think_end_token,
                     bool force_reasoning = false,
-                    bool stream_reasoning = true);
+                    bool stream_reasoning = true,
+                    bool lossless = false);
 
   ~ReasoningDetector() = default;
 
@@ -54,12 +55,29 @@ class ReasoningDetector {
   //     Streams reasoning content as it arrives
   ReasoningResult parse_streaming_increment(std::string& new_text);
 
+  // Release an unfinished delimiter prefix as literal text at end of stream.
+  ReasoningResult finish_stream();
+
+  const std::string& start_marker() const { return think_start_token_; }
+  const std::string& end_marker() const { return think_end_token_; }
+  bool initially_in_reasoning() const { return initial_reasoning_; }
+  void set_initial_reasoning(bool in_reasoning);
+  void set_lossless(bool lossless);
+
+ private:
+  ReasoningResult parse_lossless_increment(std::string& new_text);
+
  protected:
   std::string think_start_token_;
   std::string think_end_token_;
   bool in_reasoning_;
+  bool initial_reasoning_;
   bool stream_reasoning_;
+  // Responses preserves raw bytes; existing protocols retain normalization.
+  bool lossless_;
   std::string buffer_ = "";
+  std::string reasoning_buffer_;
   bool stripped_think_start_ = false;
+  bool parsing_started_ = false;
 };
 }  // namespace xllm

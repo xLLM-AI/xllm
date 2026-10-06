@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "chat_service_impl.h"
+#include "api_service/openai_chat_completion_service_impl.h"
 
 #include <absl/strings/escaping.h>
 #include <absl/time/clock.h>

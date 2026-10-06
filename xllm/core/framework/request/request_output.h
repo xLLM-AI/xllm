@@ -122,6 +122,9 @@ struct RequestOutput {
   // the statistics for the request.
   std::optional<Usage> usage;
 
+  // The rendered prompt's initial reasoning state, for Responses parsers.
+  std::optional<bool> force_reasoning;
+
   // whether the request is finished.
   bool finished = false;
 

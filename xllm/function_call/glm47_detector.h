@@ -19,7 +19,7 @@ limitations under the License.
 #include <string_view>
 #include <utility>
 
-#include "base_format_detector.h"
+#include "function_call/base_format_detector.h"
 
 namespace xllm {
 namespace function_call {
@@ -61,7 +61,13 @@ class Glm47Detector : public BaseFormatDetector {
       const std::string& new_text,
       const std::vector<JsonTool>& tools) override;
 
+  StreamingFinishResult finish_stream(
+      const std::vector<JsonTool>& tools) override;
+
  private:
+  StreamingParseResult consume_buffer(const std::vector<JsonTool>& tools,
+                                      bool final);
+
   // String-based parsing helpers (replaces regex to avoid stack overflow)
   std::vector<std::pair<size_t, size_t>> find_tool_call_ranges(
       const std::string& text) const;

@@ -24,7 +24,7 @@ limitations under the License.
 namespace xllm::api_service {
 namespace {
 
-TEST(EmbeddingsRequestTest, BatchedInputsKeepTheirTypesAndOrder) {
+TEST(OpenAIEmbeddingsRequestTest, BatchedInputsKeepTheirTypesAndOrder) {
   for (const auto& input : {nlohmann::json::array({"a", "b"}),
                             nlohmann::json::array({{1, 2}, {3}})}) {
     auto [status, body] =
@@ -41,7 +41,7 @@ TEST(EmbeddingsRequestTest, BatchedInputsKeepTheirTypesAndOrder) {
   }
 }
 
-TEST(EmbeddingsRequestTest, MalformedInputBatchesAreRejected) {
+TEST(OpenAIEmbeddingsRequestTest, MalformedInputBatchesAreRejected) {
   for (const auto& input : {R"([])",
                             R"([1,"x"])",
                             R"([[-1]])",
@@ -55,7 +55,7 @@ TEST(EmbeddingsRequestTest, MalformedInputBatchesAreRejected) {
   }
 }
 
-TEST(EmbeddingsRequestTest, InternalTokenInputIsRejected) {
+TEST(OpenAIEmbeddingsRequestTest, InternalTokenInputIsRejected) {
   EXPECT_EQ(
       normalize_openai_request(
           R"({"input":"","token_ids":[1]})", OpenAIEndpoint::EMBEDDING, "model")
@@ -63,7 +63,7 @@ TEST(EmbeddingsRequestTest, InternalTokenInputIsRejected) {
       StatusCode::INVALID_ARGUMENT);
 }
 
-TEST(EmbeddingsResponseTest, EmbeddingsUseFloat32LittleEndianBase64) {
+TEST(OpenAIEmbeddingsResponseTest, EmbeddingsUseFloat32LittleEndianBase64) {
   proto::EmbeddingResponse response;
   response.add_data()->add_embedding(1.0f);
   response.mutable_data(0)->add_embedding(-2.0f);

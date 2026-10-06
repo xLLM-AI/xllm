@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "api_service/chat_request_decoder.h"
+#include "api_service/openai_chat_completion_request_decoder.h"
 
 #include <butil/third_party/rapidjson/document.h>
 #include <google/protobuf/util/json_util.h>

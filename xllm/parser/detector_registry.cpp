@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "detector_registry.h"
+#include "parser/detector_registry.h"
 
 #include <glog/logging.h>
 
@@ -110,11 +110,20 @@ std::string DetectorRegistry::get_supported_parsers() const {
   return absl::StrJoin(keys, ", ");
 }
 
-std::string DetectorRegistry::get_parser_name_by_model_type(
+std::optional<std::string> DetectorRegistry::resolve_parser_name(
     const std::string& model_type) const {
   auto it = auto_paser_map.find(model_type);
-  if (it != auto_paser_map.end()) {
-    return it->second;
+  if (it == auto_paser_map.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::string DetectorRegistry::get_parser_name_by_model_type(
+    const std::string& model_type) const {
+  const std::optional<std::string> parser = resolve_parser_name(model_type);
+  if (parser.has_value()) {
+    return parser.value();
   }
   LOG(FATAL) << "Unsupported model type for reasoning parser: " << model_type
              << ". Supported model types are: "

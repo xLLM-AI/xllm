@@ -13,12 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "base_format_detector.h"
+#include "function_call/base_format_detector.h"
 
 #include <algorithm>
-#include <iostream>
-#include <regex>
-#include <sstream>
+#include <utility>
+
+#include "function_call/partial_json_parser/include/partial_json_parser/parser.h"
 
 namespace xllm {
 namespace function_call {
@@ -114,16 +114,11 @@ std::vector<ToolCallItem> BaseFormatDetector::parse_base_json(
 int32_t BaseFormatDetector::ends_with_partial_token(
     const std::string& buffer,
     const std::string& bot_token) const {
-  // Check if buffer ends with a partial bot_token.
-  // Return the length of the partial bot_token.
-  // For some format, the bot_token is not a token in model's vocabulary, such
-  // as
-  // `[TOOL_CALLS] [` in Mistral.
-  for (int32_t i = 1; i <= std::min(static_cast<int32_t>(buffer.length()),
-                                    static_cast<int32_t>(bot_token.length()));
-       ++i) {
-    if (bot_token.substr(0, i) == buffer.substr(buffer.length() - i)) {
-      return i;
+  const size_t limit = std::min(buffer.size(), bot_token.size());
+  for (size_t length = limit; length > 0; --length) {
+    if (buffer.compare(buffer.size() - length, length, bot_token, 0, length) ==
+        0) {
+      return static_cast<int32_t>(length);
     }
   }
   return 0;
@@ -132,219 +127,232 @@ int32_t BaseFormatDetector::ends_with_partial_token(
 StreamingParseResult BaseFormatDetector::parse_streaming_increment(
     const std::string& new_text,
     const std::vector<JsonTool>& tools) {
-  // Streaming incremental parsing with tool validation.
-  // This base implementation works best with formats where:
-  // 1. bot_token is followed immediately by JSON (e.g., bot_token + JSON_array)
-  // 2. JSON can be parsed incrementally using partial_json_loads
-  // 3. Multiple tool calls are separated by "; " or ", "
-  //
-  // Examples of incompatible formats (need custom implementation, may reuse
-  // some logic from this class):
-  // - Each tool call is wrapped in a separate block: See Qwen25Detector
-  // - Multiple separate blocks: [TOOL_CALLS] [...] \n [TOOL_CALLS] [...]
-  // - Tool call is Pythonic style
-  //
-  // For incompatible formats, detectors should override this method with custom
-  // logic.
-
-  // Append new text to buffer
+  CHECK(!stream_finished_) << "Tool parsing continued after finish";
   buffer_ += new_text;
-  std::string current_text = buffer_;
+  return consume_json_buffer(tools);
+}
 
-  // The current_text has tool_call if it is the start of a new tool call
-  // sequence or it is the start of a new tool call after a tool call separator,
-  // when there is a previous tool call
-  if (!(has_tool_call(current_text) ||
-        (current_tool_id_ > 0 &&
-         current_text.find(tool_call_separator_) == 0))) {
-    if (ends_with_partial_token(buffer_, bot_token_) == 0) {
-      std::string normal_text = buffer_;
-      buffer_.clear();
-
-      size_t eot_pos = normal_text.find(eot_token_);
-      if (eot_pos != std::string::npos) {
-        normal_text = normal_text.substr(0, eot_pos) +
-                      normal_text.substr(eot_pos + eot_token_.length());
-      }
-
-      return StreamingParseResult(normal_text, {});
-    } else {
-      return StreamingParseResult();
-    }
-  }
-
+StreamingParseResult BaseFormatDetector::consume_json_buffer(
+    const std::vector<JsonTool>& tools,
+    bool final) {
+  StreamingParseResult result;
   if (tool_indices_.empty()) {
     tool_indices_ = get_tool_indices(tools);
   }
 
-  Allow flags =
-      current_tool_name_sent_ ? Allow::ALL : (Allow::ALL & ~Allow::STR);
-
-  try {
-    int32_t start_idx = 0;
-
-    if (current_text.find(bot_token_) == 0) {
-      start_idx = bot_token_.length();
-    } else if (current_tool_id_ > 0 &&
-               current_text.find(tool_call_separator_ + bot_token_) == 0) {
-      start_idx = tool_call_separator_.length() + bot_token_.length();
-    } else if (current_tool_id_ > 0 &&
-               current_text.find(tool_call_separator_) == 0) {
-      start_idx = tool_call_separator_.length();
+  while (!buffer_.empty()) {
+    if (awaiting_tool_end_) {
+      if (!eot_token_.empty() && buffer_.find(eot_token_) == 0) {
+        buffer_.erase(0, eot_token_.size());
+        awaiting_tool_end_ = false;
+        continue;
+      }
+      if (!eot_token_.empty() && eot_token_.find(buffer_) == 0) {
+        if (final) {
+          buffer_.clear();
+        }
+        break;
+      }
+      awaiting_tool_end_ = false;
     }
 
-    if (start_idx >= static_cast<int32_t>(current_text.length())) {
-      return StreamingParseResult();
+    if (!current_tool_name_sent_ && current_tool_id_ > 0 &&
+        !tool_call_separator_.empty() &&
+        buffer_.find(tool_call_separator_) == 0) {
+      const std::string following = buffer_.substr(tool_call_separator_.size());
+      if (following.find(bot_token_) == 0) {
+        buffer_.erase(0, tool_call_separator_.size());
+      } else if (!final && bot_token_.find(following) == 0) {
+        break;
+      }
     }
 
-    std::string json_part = current_text.substr(start_idx);
-    auto [obj, end_idx] = partial_json_loads(json_part, flags);
+    const size_t start = buffer_.find(bot_token_);
+    if (start == std::string::npos) {
+      const size_t held = final ? 0
+                                : static_cast<size_t>(ends_with_partial_token(
+                                      buffer_, bot_token_));
+      result.normal_text += buffer_.substr(0, buffer_.size() - held);
+      buffer_.erase(0, buffer_.size() - held);
+      break;
+    }
+    if (start > 0) {
+      result.normal_text += buffer_.substr(0, start);
+      buffer_.erase(0, start);
+    }
 
-    bool is_current_complete = is_complete_json(json_part.substr(0, end_idx));
+    const std::string json_part = buffer_.substr(bot_token_.size());
+    const int32_t leading = partial_json_parser::skip_blank(json_part, 0);
+    const std::string value = json_part.substr(leading);
+    if (value.empty()) {
+      break;
+    }
 
-    if (obj.contains("name") && obj["name"].is_string()) {
-      std::string tool_name = obj["name"].get<std::string>();
-      if (tool_indices_.find(tool_name) == tool_indices_.end()) {
+    try {
+      if (value.front() != '{') {
+        break;
+      }
+      std::string name;
+      size_t arguments_start = std::string::npos;
+      size_t arguments_end = std::string::npos;
+      bool arguments_complete = false;
+      int32_t position = partial_json_parser::skip_blank(value, 1);
+      while (static_cast<size_t>(position) < value.size() &&
+             value[position] != '}') {
+        const auto key = partial_json_parser::complete_string(
+            value.substr(position), partial_json_parser::ALL);
+        if (!key.string.empty()) {
+          break;
+        }
+        const std::string field =
+            nlohmann::json::parse(value.substr(position, key.index))
+                .get<std::string>();
+        position = partial_json_parser::skip_blank(value, position + key.index);
+        if (static_cast<size_t>(position) >= value.size() ||
+            value[position] != ':') {
+          break;
+        }
+        position = partial_json_parser::skip_blank(value, position + 1);
+        if (static_cast<size_t>(position) >= value.size()) {
+          break;
+        }
+        const bool arguments_field =
+            field == "arguments" || field == "parameters";
+        if (arguments_field) {
+          if (arguments_start != std::string::npos) {
+            LOG(ERROR) << "Model generated duplicate argument fields";
+            has_pending_tool_ = true;
+            break;
+          }
+          if (value[position] != '{') {
+            has_pending_tool_ = true;
+            break;
+          }
+          arguments_start = static_cast<size_t>(position);
+          arguments_end = arguments_start + 1;
+        }
+        partial_json_parser::JsonCompletion item;
+        try {
+          item = partial_json_parser::complete_any(
+              value.substr(position), partial_json_parser::ALL, false);
+        } catch (const partial_json_parser::MalformedJSONException&) {
+          break;
+        }
+        if (arguments_field) {
+          arguments_end = arguments_start + item.index;
+          arguments_complete = item.string.empty();
+        } else if (field == "name" && item.string.empty()) {
+          const auto parsed =
+              nlohmann::json::parse(value.substr(position, item.index));
+          if (parsed.is_string()) {
+            name = parsed.get<std::string>();
+          }
+        }
+        if (!item.string.empty()) {
+          break;
+        }
+        position =
+            partial_json_parser::skip_blank(value, position + item.index);
+        if (static_cast<size_t>(position) >= value.size() ||
+            value[position] != ',') {
+          break;
+        }
+        position = partial_json_parser::skip_blank(value, position + 1);
+      }
+
+      if (has_pending_tool_ || name.empty()) {
+        break;
+      }
+      if (tool_indices_.find(name) == tool_indices_.end()) {
+        LOG(ERROR) << "Model attempted to call undefined function: " << name;
         buffer_.clear();
-        current_tool_id_ = -1;
         current_tool_name_sent_ = false;
-        if (!streamed_args_for_tool_.empty()) {
-          streamed_args_for_tool_.pop_back();
+        break;
+      }
+      if (!current_tool_name_sent_) {
+        if (current_tool_id_ < 0) {
+          current_tool_id_ = 0;
         }
-        return StreamingParseResult();
+        const size_t count = static_cast<size_t>(current_tool_id_) + 1;
+        prev_tool_call_arr_.resize(count);
+        streamed_args_for_tool_.resize(count);
+        result.calls.emplace_back(current_tool_id_, name, "");
+        current_tool_name_sent_ = true;
+        prev_tool_call_arr_[current_tool_id_]["name"] = name;
       }
-    }
-
-    nlohmann::json current_tool_call = obj;
-    if (current_tool_call.contains("parameters")) {
-      if (current_tool_call.contains("arguments")) {
-        LOG(ERROR) << "Model generated both parameters and arguments";
-        return StreamingParseResult();
+      if (prev_tool_call_arr_[current_tool_id_]["name"] != name) {
+        LOG(ERROR) << "Tool parser changed an emitted function name";
+        has_pending_tool_ = true;
+        break;
       }
-      current_tool_call["arguments"] = current_tool_call["parameters"];
-    }
 
-    if (current_tool_call.empty()) {
-      return StreamingParseResult();
-    }
-
-    StreamingParseResult res;
-
-    // Case 1: Handle tool name streaming
-    if (!current_tool_name_sent_) {
-      if (current_tool_call.contains("name") &&
-          current_tool_call["name"].is_string()) {
-        std::string function_name =
-            current_tool_call["name"].get<std::string>();
-
-        if (tool_indices_.find(function_name) != tool_indices_.end()) {
-          // If this is a new tool (current_tool_id was -1), initialize it
-          if (current_tool_id_ == -1) {
-            current_tool_id_ = 0;
-            streamed_args_for_tool_.push_back("");
-          }
-          // If this is a subsequent tool, ensure streamed_args_for_tool is
-          // large enough
-          else if (current_tool_id_ >=
-                   static_cast<int32_t>(streamed_args_for_tool_.size())) {
-            while (static_cast<int32_t>(streamed_args_for_tool_.size()) <=
-                   current_tool_id_) {
-              streamed_args_for_tool_.push_back("");
-            }
-          }
-
-          // Send the tool name with empty parameters
-          res = StreamingParseResult(
-              "", {ToolCallItem(current_tool_id_, function_name, "")});
-          current_tool_name_sent_ = true;
-        } else {
-          res = StreamingParseResult();
+      if (arguments_start != std::string::npos) {
+        if (final && !arguments_complete) {
+          arguments_end = value.size();
         }
-      } else {
-        res = StreamingParseResult();
-      }
-    }
-    // Case 2: Handle streaming arguments
-    else {
-      if (current_tool_call.contains("arguments")) {
-        nlohmann::json cur_arguments = current_tool_call["arguments"];
-
-        // Calculate how much of the arguments we've already streamed
-        int sent = streamed_args_for_tool_[current_tool_id_].length();
-        std::string cur_args_json = cur_arguments.dump();
-
-        std::string argument_diff;
-        int completing_tool_id = current_tool_id_;
-
-        // If the current tool's JSON is complete, send all remaining arguments
-        if (is_current_complete) {
-          argument_diff = cur_args_json.substr(sent);
-
-          // Only remove the processed portion, keep unprocessed content
-          buffer_ = current_text.substr(start_idx + end_idx);
-
-          if (current_tool_id_ < static_cast<int>(prev_tool_call_arr_.size())) {
-            prev_tool_call_arr_[current_tool_id_].clear();
-          }
-          current_tool_name_sent_ = false;
-          streamed_args_for_tool_[current_tool_id_] = "";
-          current_tool_id_++;
+        std::string& sent = streamed_args_for_tool_[current_tool_id_];
+        if (value.compare(arguments_start, sent.size(), sent) != 0) {
+          LOG(ERROR) << "Tool arguments do not extend the emitted prefix";
+          has_pending_tool_ = true;
+          break;
         }
-        // If the tool is still being parsed, send incremental changes
-        else if (current_tool_id_ <
-                 static_cast<int>(prev_tool_call_arr_.size())) {
-          auto prev_args_it =
-              prev_tool_call_arr_[current_tool_id_].find("arguments");
-          if (prev_args_it != prev_tool_call_arr_[current_tool_id_].end()) {
-            std::string prev_args_json = prev_args_it->second;
-            if (cur_args_json != prev_args_json) {
-              std::string prefix =
-                  find_common_prefix(prev_args_json, cur_args_json);
-              argument_diff = prefix.substr(sent);
-            }
-          }
+        // Completion cursors may retreat while a later escape is incomplete.
+        arguments_end = std::max(arguments_end, arguments_start + sent.size());
+        const std::string arguments =
+            value.substr(arguments_start, arguments_end - arguments_start);
+        if (arguments.size() > sent.size()) {
+          result.calls.emplace_back(
+              current_tool_id_, std::nullopt, arguments.substr(sent.size()));
+          sent = arguments;
         }
-
-        if (!argument_diff.empty()) {
-          int tool_index_to_use =
-              is_current_complete ? completing_tool_id : current_tool_id_;
-          res = StreamingParseResult(
-              "",
-              {ToolCallItem(tool_index_to_use, std::nullopt, argument_diff)});
-
-          if (!is_current_complete) {
-            streamed_args_for_tool_[current_tool_id_] += argument_diff;
-          }
-        } else {
-          res = StreamingParseResult();
-        }
-      } else {
-        res = StreamingParseResult();
+        prev_tool_call_arr_[current_tool_id_]["arguments"] = sent;
       }
+
+      const auto completion = partial_json_parser::complete_any(
+          value, partial_json_parser::ALL, true);
+      const size_t end = static_cast<size_t>(leading + completion.index);
+      const bool complete = completion.string.empty();
+      const bool complete_arguments =
+          final && arguments_complete && completion.string == "}" &&
+          static_cast<size_t>(partial_json_parser::skip_blank(
+              json_part, static_cast<int32_t>(end))) == json_part.size();
+
+      if ((!complete && !complete_arguments) ||
+          arguments_start == std::string::npos) {
+        break;
+      }
+      buffer_.erase(0, bot_token_.size() + end);
+      current_tool_name_sent_ = false;
+      ++current_tool_id_;
+      awaiting_tool_end_ = true;
+    } catch (const partial_json_parser::MalformedJSONException&) {
+      break;
+    } catch (const nlohmann::json::exception&) {
+      break;
     }
-
-    if (current_tool_id_ >= 0) {
-      while (static_cast<int>(prev_tool_call_arr_.size()) <= current_tool_id_) {
-        prev_tool_call_arr_.push_back({});
-      }
-
-      std::unordered_map<std::string, std::string> tool_call_map;
-      if (current_tool_call.contains("name") &&
-          current_tool_call["name"].is_string()) {
-        tool_call_map["name"] = current_tool_call["name"].get<std::string>();
-      }
-      if (current_tool_call.contains("arguments")) {
-        tool_call_map["arguments"] = current_tool_call["arguments"].dump();
-      }
-
-      prev_tool_call_arr_[current_tool_id_] = tool_call_map;
-    }
-
-    return res;
-
-  } catch (const std::exception& e) {
-    return StreamingParseResult();
   }
+  return result;
+}
+
+StreamingFinishResult BaseFormatDetector::finish_stream(
+    const std::vector<JsonTool>& /*tools*/) {
+  stream_finished_ = true;
+  return {{}, has_pending_tool_};
+}
+
+StreamingFinishResult BaseFormatDetector::finish_json_buffer(
+    const std::vector<JsonTool>& tools) {
+  if (stream_finished_) {
+    return {{}, has_pending_tool_};
+  }
+  StreamingParseResult result = consume_json_buffer(tools, /*final=*/true);
+  has_pending_tool_ = has_pending_tool_ || current_tool_name_sent_ ||
+                      buffer_.find(bot_token_) != std::string::npos;
+  buffer_.clear();
+  current_tool_name_sent_ = false;
+  awaiting_tool_end_ = false;
+  stream_finished_ = true;
+  return {std::move(result), has_pending_tool_};
 }
 
 }  // namespace function_call

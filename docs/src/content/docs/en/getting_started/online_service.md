@@ -6,6 +6,9 @@ sidebar:
 First, start the xllm service according to the [xllm launch documentation](/en/getting_started/launch_xllm/). Below are examples of client calls for LLM and VLM. Please modify the parameters according to your actual situation.
 
 ## LLM Client Calls
+
+For the native `POST /v1/responses` endpoint, Responses JSON/SSE, client-carried history, function tools, and explicit capability limits, see the [OpenAI Responses API guide](/en/features/openai_responses/).
+
 ### HTTP Call
 
 Chat mode:

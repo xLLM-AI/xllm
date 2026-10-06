@@ -65,6 +65,11 @@ struct StreamingParseResult {
   }
 };
 
+struct StreamingFinishResult {
+  StreamingParseResult output;
+  bool has_pending_tool = false;
+};
+
 struct StructureInfo {
   std::string begin;
   std::string end;

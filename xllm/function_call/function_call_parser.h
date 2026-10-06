@@ -20,8 +20,8 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "base_format_detector.h"
-#include "core_types.h"
+#include "function_call/base_format_detector.h"
+#include "function_call/core_types.h"
 
 namespace xllm {
 namespace function_call {
@@ -43,6 +43,8 @@ class FunctionCallParser {
 
   // Streaming incremental parsing method
   StreamingParseResult parse_streaming_increment(const std::string& new_text);
+
+  StreamingFinishResult finish_stream();
 
   // StructuralTagResponseFormat get_structure_tag();
 

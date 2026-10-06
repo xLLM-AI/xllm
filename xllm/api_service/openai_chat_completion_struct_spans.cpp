@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "api_service/chat_struct_spans.h"
+#include "api_service/openai_chat_completion_struct_spans.h"
 
 #include <algorithm>
 

@@ -18,8 +18,9 @@ limitations under the License.
 #include <regex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
-#include "base_format_detector.h"
+#include "function_call/base_format_detector.h"
 
 namespace xllm {
 namespace function_call {
@@ -63,7 +64,16 @@ class Glm45Detector : public BaseFormatDetector {
       const std::string& new_text,
       const std::vector<JsonTool>& tools) override;
 
+  StreamingFinishResult finish_stream(
+      const std::vector<JsonTool>& tools) override;
+
  private:
+  StreamingParseResult consume_buffer(const std::vector<JsonTool>& tools,
+                                      bool final);
+
+  std::unordered_map<std::string, nlohmann::json> parse_arguments(
+      const std::string& args) const;
+
   std::regex func_call_regex_;
   std::regex func_detail_regex_;
   std::regex func_arg_regex_;

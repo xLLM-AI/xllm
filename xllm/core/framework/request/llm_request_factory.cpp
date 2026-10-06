@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -30,6 +31,7 @@ limitations under the License.
 #include "framework/request/request_state.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/tokenizer/tokenizer.h"
+#include "parser/detector_registry.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -300,6 +302,53 @@ bool LLMRequestFactory::apply_json_object_grammar(
   return true;
 }
 
+bool LLMRequestFactory::configure_responses_reasoning(
+    RequestState& req_state,
+    const RequestParams& sp,
+    const OutputCallback& callback) {
+  auto reject = [&](const std::string& message) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        message,
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
+    return false;
+  };
+  if (sp.n != 1 || sp.best_of.value_or(1) != 1 || sp.beam_width != 0) {
+    return reject("Responses requires one generation sequence");
+  }
+  if (options_->enable_disagg_pd() || options_->enable_service_routing() ||
+      options_->enable_kvcache_store() ||
+      options_->host_blocks_factor() > 1.0) {
+    return reject(
+        "Responses is not supported with distributed request routing "
+        "or host KV-cache storage");
+  }
+  req_state.responses_request = true;
+  if (sp.responses_reasoning_parser.empty()) {
+    return true;
+  }
+  auto& registry = DetectorRegistry::get_instance();
+  if (!registry.has_detector(sp.responses_reasoning_parser)) {
+    return reject("Unsupported Responses reasoning parser: " +
+                  sp.responses_reasoning_parser);
+  }
+  auto detector = registry.get_detector(sp.responses_reasoning_parser,
+                                        /*stream_reasoning=*/true,
+                                        /*force_reasoning=*/false);
+  std::string_view prompt = req_state.prompt;
+  while (!prompt.empty() && std::string_view(" \t\n\r").find(prompt.back()) !=
+                                std::string_view::npos) {
+    prompt.remove_suffix(1);
+  }
+  req_state.force_reasoning = detector->initially_in_reasoning();
+  if (prompt.ends_with(detector->start_marker())) {
+    req_state.force_reasoning = true;
+  } else if (prompt.ends_with(detector->end_marker())) {
+    req_state.force_reasoning = false;
+  }
+  return true;
+}
+
 std::shared_ptr<Request> LLMRequestFactory::create(
     std::string prompt,
     std::optional<std::vector<int>> prompt_tokens,
@@ -333,10 +382,15 @@ std::shared_ptr<Request> LLMRequestFactory::create(
     }
   }
 
-  // allocate enough capacity for prompt tokens, max tokens, and speculative
-  // tokens
+  // Reserve only output that fits the model context, plus scheduler and
+  // speculative slack. Keep the requested budget in the stopping checker.
+  const size_t remaining_context =
+      static_cast<size_t>(model_args_->max_position_embeddings()) -
+      local_prompt_tokens.size();
+  const size_t reserved_output_tokens =
+      std::min(static_cast<size_t>(effective_max_tokens), remaining_context);
   const size_t capacity =
-      local_prompt_tokens.size() + effective_max_tokens + seq_capacity_extra_;
+      local_prompt_tokens.size() + reserved_output_tokens + seq_capacity_extra_;
 
   const size_t best_of = sp.best_of.value_or(sp.n);
   RequestSamplingParam sampling_param = build_sampling_param(sp, best_of);
@@ -389,6 +443,10 @@ std::shared_ptr<Request> LLMRequestFactory::create(
                          sp.decode_address,
                          call);
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
+  if (sp.responses_request &&
+      !configure_responses_reasoning(req_state, sp, callback)) {
+    return nullptr;
+  }
   if (json_object &&
       !apply_json_object_grammar(req_state, sp, generation_mode, callback)) {
     return nullptr;

@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "parser/detector_registry.h"
@@ -25,14 +26,23 @@ namespace xllm {
 
 class ReasoningParser {
  public:
-  ReasoningParser(const std::string& model_type,
-                  bool stream_reasoning = true,
-                  bool force_reasoning = false);
+  explicit ReasoningParser(const std::string& model_type,
+                           bool stream_reasoning = true,
+                           bool force_reasoning = false,
+                           std::optional<bool> initial_reasoning = std::nullopt,
+                           bool lossless = false);
 
   // Non-streaming call: one-time parsing
   ReasoningResult parse_non_stream(const std::string& text);
   // Streaming call: incremental parsing
   ReasoningResult parse_stream_chunk(const std::string& chunk_text);
+  ReasoningResult finish_stream();
+
+  const std::string& start_marker() const { return detector_->start_marker(); }
+  const std::string& end_marker() const { return detector_->end_marker(); }
+  bool initially_in_reasoning() const {
+    return detector_->initially_in_reasoning();
+  }
 
   static std::string get_parser_auto(const std::string& parser,
                                      const std::string& model_type);

@@ -239,6 +239,9 @@ void AsyncResponseProcessor::process_stream_request(
 
       RequestOutput req_output;
       req_output.request_id = request->request_id();
+      if (request->state().responses_request) {
+        req_output.force_reasoning = request->state().force_reasoning;
+      }
       for (size_t i = 0; i < indexes.size(); ++i) {
         const size_t index = indexes[i];
         const size_t size = num_tokens[i];

@@ -23,9 +23,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "chat.pb.h"
-#include "core_types.h"
-#include "utils.h"
+#include "function_call/core_types.h"
+#include "function_call/utils.h"
 
 namespace xllm {
 namespace function_call {
@@ -54,11 +53,23 @@ class BaseFormatDetector {
       const std::string& new_text,
       const std::vector<JsonTool>& tools);
 
+  virtual StreamingFinishResult finish_stream(
+      const std::vector<JsonTool>& tools);
+
+  bool stream_finished() const { return stream_finished_; }
+
   std::vector<std::unordered_map<std::string, std::string>> prev_tool_call_arr_;
 
   std::vector<std::string> streamed_args_for_tool_;
 
  protected:
+  StreamingParseResult consume_json_buffer(const std::vector<JsonTool>& tools,
+                                           bool final = false);
+  StreamingFinishResult finish_json_buffer(const std::vector<JsonTool>& tools);
+
+  bool stream_finished_ = false;
+  bool has_pending_tool_ = false;
+  bool awaiting_tool_end_ = false;
   std::string buffer_;
 
   int32_t current_tool_id_;

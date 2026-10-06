@@ -148,6 +148,9 @@ class RequestState final {
 
   bool stream = false;
 
+  bool responses_request = false;
+  bool force_reasoning = false;
+
   // max tokens for a seq
   size_t seq_capacity;
 

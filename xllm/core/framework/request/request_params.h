@@ -106,6 +106,10 @@ struct RequestParams {
 
   bool streaming = false;
 
+  // Responses propagates the rendered prompt's initial reasoning state.
+  bool responses_request = false;
+  std::string responses_reasoning_parser;
+
   // number of tokens to generate. truncated to model's max context length.
   uint32_t max_tokens = 5120;
 

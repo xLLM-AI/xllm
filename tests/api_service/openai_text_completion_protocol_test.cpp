@@ -31,7 +31,7 @@ limitations under the License.
 namespace xllm::api_service {
 namespace {
 
-TEST(TextCompletionRequestTest, BatchedPromptsKeepTheirTypesAndOrder) {
+TEST(OpenAITextCompletionRequestTest, BatchedPromptsKeepTheirTypesAndOrder) {
   for (const auto& input : {nlohmann::json::array({"a", "b"}),
                             nlohmann::json::array({{1, 2}, {3}})}) {
     auto [status, body] =
@@ -48,7 +48,7 @@ TEST(TextCompletionRequestTest, BatchedPromptsKeepTheirTypesAndOrder) {
   }
 }
 
-TEST(TextCompletionRequestTest, GreedySamplingRequiresOneChoice) {
+TEST(OpenAITextCompletionRequestTest, GreedySamplingRequiresOneChoice) {
   for (const bool stream : {false, true}) {
     for (const uint32_t n : {1U, 2U}) {
       for (const auto& temperature : {nlohmann::json(0),
@@ -75,7 +75,7 @@ TEST(TextCompletionRequestTest, GreedySamplingRequiresOneChoice) {
   }
 }
 
-TEST(TextCompletionRequestTest, Vllm023AcceptsTemperaturesAboveTwo) {
+TEST(OpenAITextCompletionRequestTest, Vllm023AcceptsTemperaturesAboveTwo) {
   const auto [status, body] = normalize_openai_request(
       R"({"prompt":"hi","messages":[{"role":"user","content":"hi"}],"temperature":3})",
       OpenAIEndpoint::COMPLETION,
@@ -84,7 +84,8 @@ TEST(TextCompletionRequestTest, Vllm023AcceptsTemperaturesAboveTwo) {
   EXPECT_EQ(nlohmann::json::parse(body)["temperature"], 3);
 }
 
-TEST(TextCompletionRequestTest, SchemaAndSamplingErrorsHaveDistinctTypes) {
+TEST(OpenAITextCompletionRequestTest,
+     SchemaAndSamplingErrorsHaveDistinctTypes) {
   for (const auto& [body, expected_type] :
        {std::pair{"{", "Bad Request"},
         {R"({"prompt":[1,"hi"]})", "Bad Request"},
@@ -104,7 +105,7 @@ TEST(TextCompletionRequestTest, SchemaAndSamplingErrorsHaveDistinctTypes) {
   }
 }
 
-TEST(TextCompletionRequestTest, CompletionDefaultsAndExtendedStops) {
+TEST(OpenAITextCompletionRequestTest, CompletionDefaultsAndExtendedStops) {
   auto [status, body] = normalize_openai_request(
       R"({"prompt":"hi","max_tokens":null,"stop":["1","2","3","4","5"],"frequency_penalty":-1})",
       OpenAIEndpoint::COMPLETION,
@@ -113,7 +114,8 @@ TEST(TextCompletionRequestTest, CompletionDefaultsAndExtendedStops) {
   EXPECT_EQ(nlohmann::json::parse(body)["max_tokens"], 16);
 }
 
-TEST(TextCompletionRequestTest, UnsupportedSamplingControlsFailExplicitly) {
+TEST(OpenAITextCompletionRequestTest,
+     UnsupportedSamplingControlsFailExplicitly) {
   for (const char* field :
        {"seed", "min_p", "min_tokens", "logit_bias", "structured_outputs"}) {
     auto request = nlohmann::json({{"prompt", "hi"}, {field, 1}});
@@ -124,7 +126,8 @@ TEST(TextCompletionRequestTest, UnsupportedSamplingControlsFailExplicitly) {
   }
 }
 
-TEST(TextCompletionRequestTest, InternalPromptsAndOversizedBatchesAreRejected) {
+TEST(OpenAITextCompletionRequestTest,
+     InternalPromptsAndOversizedBatchesAreRejected) {
   for (const auto& request :
        {nlohmann::json{{"prompt", "hi"}, {"prompts", {{{"text", "hidden"}}}}},
         nlohmann::json{{"prompt", std::vector<std::string>(1025, "hi")}}}) {
@@ -135,7 +138,7 @@ TEST(TextCompletionRequestTest, InternalPromptsAndOversizedBatchesAreRejected) {
   }
 }
 
-TEST(TextCompletionRequestTest,
+TEST(OpenAITextCompletionRequestTest,
      CompletionTokenInputPreservesExistingExtension) {
   auto [status, body] = normalize_openai_request(
       R"({"prompt":[1,2,3]})", OpenAIEndpoint::COMPLETION, "model");
@@ -150,7 +153,7 @@ TEST(TextCompletionRequestTest,
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST(TextCompletionResponseTest, StopReasonsKeepTheirJsonTypes) {
+TEST(OpenAITextCompletionResponseTest, StopReasonsKeepTheirJsonTypes) {
   for (const StopReason& reason : {StopReason{},
                                    StopReason{int32_t{123}},
                                    StopReason{std::string("END")}}) {
@@ -170,7 +173,8 @@ TEST(TextCompletionResponseTest, StopReasonsKeepTheirJsonTypes) {
   }
 }
 
-TEST(TextCompletionResponseTest, CompletionSeparatesFullAndStreamMetadata) {
+TEST(OpenAITextCompletionResponseTest,
+     CompletionSeparatesFullAndStreamMetadata) {
   proto::CompletionResponse response;
   response.set_object("text_completion");
   response.add_choices()->mutable_logprobs()->add_token_ids(42);

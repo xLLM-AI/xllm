@@ -13,16 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen25_detector.h"
+#include "function_call/qwen25_detector.h"
 
 #include <gtest/gtest.h>
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "core_types.h"
-#include "function_call_parser.h"
+#include "function_call/core_types.h"
+#include "function_call/function_call_parser.h"
 
 namespace xllm {
 namespace function_call {
@@ -539,6 +540,205 @@ TEST_F(Qwen25StreamingTest, PartialTokenHandling) {
   // Verify results
   EXPECT_EQ(accumulated_normal_text, "Testing partial tokens ");
   EXPECT_GT(accumulated_calls.size(), 0);
+}
+
+TEST_F(Qwen25StreamingTest, CompleteFrameEmitsNameAndArguments) {
+  FunctionCallParser parser(tools_, "qwen25");
+  const std::string arguments =
+      "{\"location\": \"Paris\", \"unit\": \"celsius\"}";
+  const auto parsed = parser.parse_streaming_increment(
+      "<tool_call>\n{\"name\":\"get_current_weather\",\"arguments\":" +
+      arguments + "}\n</tool_call>");
+  ASSERT_EQ(parsed.calls.size(), 2);
+  EXPECT_EQ(parsed.calls[0].name, "get_current_weather");
+  EXPECT_EQ(parsed.calls[1].parameters, arguments);
+  EXPECT_EQ(parsed.calls[0].tool_index, 0);
+  EXPECT_EQ(parsed.calls[1].tool_index, 0);
+  const auto finished = parser.finish_stream();
+  EXPECT_FALSE(finished.has_pending_tool);
+  EXPECT_TRUE(finished.output.calls.empty());
+  EXPECT_TRUE(finished.output.normal_text.empty());
+  const auto repeated = parser.finish_stream();
+  EXPECT_FALSE(repeated.has_pending_tool);
+  EXPECT_TRUE(repeated.output.calls.empty());
+  EXPECT_EQ(parser.get_detector()->prev_tool_call_arr_[0].at("arguments"),
+            parser.get_detector()->streamed_args_for_tool_[0]);
+  EXPECT_DEATH(parser.parse_streaming_increment("late"), "after finish");
+}
+
+TEST_F(Qwen25StreamingTest, CoalescedCallsAgreeAtEverySplit) {
+  const std::string first_args =
+      "{\"location\":\"北京😀\",\"unit\":\"celsius\"}";
+  const std::string second_args = "{\"expression\":\"2+3\"}";
+  const std::string text =
+      "before<tool_call>\n{\"name\":\"get_current_weather\",\"arguments\":" +
+      first_args +
+      "}\n</tool_call>middle<tool_call>\n{\"name\":\"calculate\","
+      "\"arguments\":" +
+      second_args + "}\n</tool_call>after";
+  for (size_t split = 0; split <= text.size(); ++split) {
+    FunctionCallParser parser(tools_, "qwen25");
+    std::string normal_text;
+    std::vector<std::string> arguments(2);
+    std::vector<std::string> names;
+    names.reserve(2);
+    auto append = [&](const StreamingParseResult& parsed) {
+      normal_text += parsed.normal_text;
+      for (const auto& call : parsed.calls) {
+        ASSERT_GE(call.tool_index, 0);
+        ASSERT_LT(call.tool_index, 2);
+        if (call.name.has_value()) {
+          names.emplace_back(call.name.value());
+        }
+        arguments[call.tool_index] += call.parameters;
+      }
+    };
+    if (split > 0) {
+      append(parser.parse_streaming_increment(text.substr(0, split)));
+    }
+    if (split < text.size()) {
+      append(parser.parse_streaming_increment(text.substr(split)));
+    }
+    const auto finished = parser.finish_stream();
+    append(finished.output);
+    EXPECT_FALSE(finished.has_pending_tool) << split;
+    EXPECT_EQ(normal_text, "beforemiddleafter") << split;
+    EXPECT_EQ(names,
+              (std::vector<std::string>{"get_current_weather", "calculate"}))
+        << split;
+    EXPECT_EQ(arguments, (std::vector<std::string>{first_args, second_args}))
+        << split;
+    for (size_t index = 0; index < arguments.size(); ++index) {
+      EXPECT_EQ(parser.get_detector()->streamed_args_for_tool_[index],
+                arguments[index]);
+      EXPECT_EQ(
+          parser.get_detector()->prev_tool_call_arr_[index].at("arguments"),
+          arguments[index]);
+    }
+  }
+}
+
+TEST_F(Qwen25StreamingTest, JsonSourceArgumentsAgreeAtEverySplit) {
+  const std::string arguments =
+      "{ \"n\": -2.50e+10, \"ok\": false, \"items\": [null, true, "
+      "{\"nested\": \"escaped\\\"}\\u5317北京😀\"}] }";
+  const std::string text = "<tool_call>\n{\"arguments\":" + arguments +
+                           ",\"name\":\"get_current_weather\"}\n</tool_call>";
+  for (size_t split = 0; split <= text.size(); ++split) {
+    FunctionCallParser parser(tools_, "qwen25");
+    std::string emitted;
+    int32_t names = 0;
+    auto append = [&](const StreamingParseResult& parsed) {
+      for (const auto& call : parsed.calls) {
+        EXPECT_EQ(call.tool_index, 0);
+        if (call.name.has_value()) {
+          EXPECT_EQ(call.name.value(), "get_current_weather");
+          ++names;
+        }
+        emitted += call.parameters;
+      }
+    };
+    if (split > 0) {
+      append(parser.parse_streaming_increment(text.substr(0, split)));
+    }
+    if (split < text.size()) {
+      append(parser.parse_streaming_increment(text.substr(split)));
+    }
+    EXPECT_EQ(emitted, arguments) << split;
+    EXPECT_EQ(names, 1) << split;
+    const auto finished = parser.finish_stream();
+    EXPECT_FALSE(finished.has_pending_tool) << split;
+    EXPECT_TRUE(finished.output.calls.empty()) << split;
+    EXPECT_EQ(parser.get_detector()->streamed_args_for_tool_[0], arguments);
+  }
+}
+
+TEST_F(Qwen25StreamingTest, LiteralEscapeFrontierNeverRetreats) {
+  const std::string header =
+      "<tool_call>\n{\"name\":\"get_current_weather\",\"arguments\":";
+  const std::string arguments = "{\"location\":\"\\u5317A\"}";
+  const std::string text = header + arguments + "}\n</tool_call>";
+  std::vector<std::string> bytes;
+  bytes.reserve(text.size());
+  for (const char byte : text) {
+    bytes.emplace_back(1, byte);
+  }
+  const std::vector<std::vector<std::string>> inputs = {
+      {header + "{\"location\":\"\\u5317", "A", "\"}}\n</tool_call>"},
+      std::move(bytes)};
+  for (const auto& chunks : inputs) {
+    FunctionCallParser parser(tools_, "qwen25");
+    std::string emitted;
+    for (const auto& chunk : chunks) {
+      const auto parsed = parser.parse_streaming_increment(chunk);
+      for (const auto& call : parsed.calls) {
+        emitted += call.parameters;
+      }
+      EXPECT_EQ(arguments.compare(0, emitted.size(), emitted), 0);
+    }
+    EXPECT_EQ(emitted, arguments);
+    const auto finished = parser.finish_stream();
+    EXPECT_FALSE(finished.has_pending_tool);
+    EXPECT_TRUE(finished.output.calls.empty());
+    EXPECT_EQ(parser.get_detector()->prev_tool_call_arr_[0].at("arguments"),
+              arguments);
+  }
+}
+
+TEST_F(Qwen25StreamingTest, FinishDistinguishesPartialArguments) {
+  const std::string header =
+      "<tool_call>\n{\"name\":\"get_current_weather\",\"arguments\":";
+  for (const std::string arguments : {"{}",
+                                      "{\"location\":\"Paris\"}",
+                                      "{\"location\":\"Par",
+                                      "{\"n\":1e",
+                                      "{\"n\":-",
+                                      "{\"ok\":tru"}) {  // codespell:ignore tru
+    FunctionCallParser parser(tools_, "qwen25");
+    std::string emitted;
+    const auto parsed = parser.parse_streaming_increment(header + arguments);
+    for (const auto& call : parsed.calls) {
+      emitted += call.parameters;
+    }
+    const auto finished = parser.finish_stream();
+    for (const auto& call : finished.output.calls) {
+      emitted += call.parameters;
+    }
+    EXPECT_EQ(emitted, arguments);
+    EXPECT_EQ(finished.has_pending_tool, !is_complete_json(arguments));
+    const auto repeated = parser.finish_stream();
+    EXPECT_TRUE(repeated.output.calls.empty());
+    EXPECT_EQ(repeated.has_pending_tool, finished.has_pending_tool);
+  }
+  FunctionCallParser literal(tools_, "qwen25");
+  const auto parsed = literal.parse_streaming_increment("literal<tool_");
+  const auto finished = literal.finish_stream();
+  EXPECT_EQ(parsed.normal_text + finished.output.normal_text, "literal<tool_");
+  EXPECT_FALSE(finished.has_pending_tool);
+}
+
+TEST_F(Qwen25StreamingTest, EmptyFeedDoesNotFinish) {
+  FunctionCallParser parser(tools_, "qwen25");
+  parser.parse_streaming_increment(
+      "<tool_call>\n{\"name\":\"get_current_weather\",");
+  EXPECT_TRUE(parser.parse_streaming_increment("").calls.empty());
+  const auto parsed = parser.parse_streaming_increment(
+      "\"arguments\":{\"location\":\"Paris\"}}\n</tool_call>");
+  ASSERT_FALSE(parsed.calls.empty());
+  std::string arguments;
+  for (const auto& call : parsed.calls) {
+    arguments += call.parameters;
+  }
+  EXPECT_EQ(arguments, "{\"location\":\"Paris\"}");
+  EXPECT_FALSE(parser.finish_stream().has_pending_tool);
+}
+
+TEST_F(Qwen25StreamingTest, JsonBoundaryDoesNotConsumeFollowingValue) {
+  const std::string text =
+      "  {\"first\":[{\"nested\":\"}\\\"\"}]}{\"second\":2}";
+  const auto [value, consumed] = partial_json_loads(text, Allow::ALL);
+  EXPECT_EQ(value["first"][0]["nested"], "}\"");
+  EXPECT_EQ(text.substr(consumed), "{\"second\":2}");
 }
 
 }  // namespace function_call

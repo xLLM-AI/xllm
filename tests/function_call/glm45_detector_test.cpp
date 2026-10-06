@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "glm45_detector.h"
+#include "function_call/glm45_detector.h"
 
 #include <gtest/gtest.h>
 
@@ -493,6 +493,122 @@ TEST_F(Glm45DetectorTest, InvalidJsonInArgValues) {
   nlohmann::json params = nlohmann::json::parse(call.parameters);
   EXPECT_EQ(params["location"], "Beijing");
   EXPECT_EQ(params["config"], "{invalid json}");  // Should be treated as string
+}
+
+TEST_F(Glm45DetectorTest, CompleteFramesDrainWithinOneIncrement) {
+  const auto result = detector_->parse_streaming_increment(
+      "Before <tool_call>get_current_weather\n"
+      "<arg_key>location</arg_key><arg_value>Paris</arg_value>"
+      "</tool_call> between <tool_call>calculate\n"
+      "<arg_key>expression</arg_key><arg_value>1+1</arg_value>"
+      "</tool_call> after",
+      tools_);
+  EXPECT_EQ(result.normal_text, "Before  between  after");
+  ASSERT_EQ(result.calls.size(), 2);
+  EXPECT_EQ(result.calls[0].tool_index, 0);
+  EXPECT_EQ(result.calls[0].name, "get_current_weather");
+  EXPECT_EQ(nlohmann::json::parse(result.calls[0].parameters),
+            (nlohmann::json{{"location", "Paris"}}));
+  EXPECT_EQ(result.calls[1].tool_index, 1);
+  EXPECT_EQ(result.calls[1].name, "calculate");
+  EXPECT_EQ(nlohmann::json::parse(result.calls[1].parameters),
+            (nlohmann::json{{"expression", "1+1"}}));
+  for (const auto& call : result.calls) {
+    const size_t index = static_cast<size_t>(call.tool_index);
+    EXPECT_EQ(detector_->prev_tool_call_arr_[index]["arguments"],
+              call.parameters);
+    EXPECT_EQ(detector_->streamed_args_for_tool_[index], call.parameters);
+  }
+  const auto finish = detector_->finish_stream(tools_);
+  EXPECT_FALSE(finish.has_pending_tool);
+  EXPECT_TRUE(finish.output.calls.empty());
+}
+
+TEST_F(Glm45DetectorTest, EverySplitPreservesFrameArguments) {
+  const std::string frame =
+      "<tool_call>get_current_weather\n"
+      "<arg_key>location</arg_key><arg_value>  北京😊  </arg_value>"
+      "</tool_call>";
+  Glm45Detector complete;
+  const auto expected = complete.parse_streaming_increment(frame, tools_);
+  ASSERT_EQ(expected.calls.size(), 1);
+  EXPECT_EQ(nlohmann::json::parse(expected.calls[0].parameters)["location"],
+            "北京😊");
+  for (size_t split = 1; split < frame.size(); ++split) {
+    SCOPED_TRACE(split);
+    Glm45Detector detector;
+    const auto first =
+        detector.parse_streaming_increment(frame.substr(0, split), tools_);
+    const auto second =
+        detector.parse_streaming_increment(frame.substr(split), tools_);
+    ASSERT_EQ(first.calls.size() + second.calls.size(), 1);
+    const auto& call = first.calls.empty() ? second.calls[0] : first.calls[0];
+    EXPECT_EQ(call.parameters, expected.calls[0].parameters);
+    EXPECT_EQ(call.tool_index, 0);
+    EXPECT_FALSE(detector.finish_stream(tools_).has_pending_tool);
+  }
+}
+
+TEST_F(Glm45DetectorTest, FinishParsesCompleteSemanticPairs) {
+  for (const std::string tail : {"", " \n", "</tool_"}) {
+    Glm45Detector detector;
+    const auto before = detector.parse_streaming_increment(
+        "<tool_call>get_current_weather\n"
+        "<arg_key>location</arg_key><arg_value>Paris</arg_value>" +
+            tail,
+        tools_);
+    EXPECT_TRUE(before.calls.empty());
+    const auto finish = detector.finish_stream(tools_);
+    EXPECT_FALSE(finish.has_pending_tool);
+    ASSERT_EQ(finish.output.calls.size(), 1);
+    EXPECT_EQ(finish.output.calls[0].name, "get_current_weather");
+    EXPECT_EQ(nlohmann::json::parse(finish.output.calls[0].parameters),
+              (nlohmann::json{{"location", "Paris"}}));
+    EXPECT_EQ(detector.prev_tool_call_arr_[0]["arguments"],
+              finish.output.calls[0].parameters);
+    EXPECT_EQ(detector.streamed_args_for_tool_[0],
+              finish.output.calls[0].parameters);
+    const auto repeated = detector.finish_stream(tools_);
+    EXPECT_FALSE(repeated.has_pending_tool);
+    EXPECT_TRUE(repeated.output.calls.empty());
+  }
+}
+
+TEST_F(Glm45DetectorTest, FinishDoesNotDefaultIncompleteFrames) {
+  for (const std::string text :
+       {"<tool_call>get_current_weather",
+        "<tool_call>get_current_weather\n",
+        "<tool_call>get_current_weather\n<arg_key>location</arg_key>",
+        "<tool_call>get_current_weather\n<arg_key>location</arg_key>"
+        "<arg_value>Par",
+        "<tool_call>get_current_weather\n<arg_key>location</arg_key>"
+        "<arg_value>Paris</arg_value><arg_key>unit"}) {
+    Glm45Detector detector;
+    EXPECT_TRUE(detector.parse_streaming_increment(text, tools_).calls.empty());
+    const auto finish = detector.finish_stream(tools_);
+    EXPECT_TRUE(finish.has_pending_tool) << text;
+    EXPECT_TRUE(finish.output.calls.empty());
+    const auto repeated = detector.finish_stream(tools_);
+    EXPECT_TRUE(repeated.has_pending_tool);
+    EXPECT_TRUE(repeated.output.calls.empty());
+  }
+}
+
+TEST_F(Glm45DetectorTest, EmptyCallAndLiteralMarkerEof) {
+  const auto call = detector_->parse_streaming_increment(
+      "<tool_call>calculate\n</tool_call>", tools_);
+  ASSERT_EQ(call.calls.size(), 1);
+  EXPECT_EQ(call.calls[0].parameters, "{}");
+  EXPECT_FALSE(detector_->finish_stream(tools_).has_pending_tool);
+
+  Glm45Detector text;
+  const auto before = text.parse_streaming_increment("literal<tool_", tools_);
+  const auto finish = text.finish_stream(tools_);
+  EXPECT_EQ(before.normal_text + finish.output.normal_text, "literal<tool_");
+  EXPECT_FALSE(finish.has_pending_tool);
+  EXPECT_TRUE(text.finish_stream(tools_).output.normal_text.empty());
+  EXPECT_DEATH(text.parse_streaming_increment("late", tools_),
+               "finished tool stream");
 }
 
 }  // namespace function_call

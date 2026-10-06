@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "embedding_service_impl.h"
+#include "api_service/openai_embeddings_service_impl.h"
 
 #include <glog/logging.h>
 

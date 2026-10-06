@@ -77,6 +77,8 @@ service XllmAPIService {
   rpc ChatCompletions (ChatRequest) returns (ChatResponse);
   rpc ChatCompletionsHttp (HttpRequest) returns (HttpResponse);
 
+  rpc ResponsesHttp (HttpRequest) returns (HttpResponse);
+
   rpc Embeddings (EmbeddingRequest) returns (EmbeddingResponse);
   rpc EmbeddingsHttp (HttpRequest) returns (HttpResponse);
 

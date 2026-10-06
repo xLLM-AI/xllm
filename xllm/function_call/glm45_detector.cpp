@@ -13,11 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "glm45_detector.h"
+#include "function_call/glm45_detector.h"
 
 #include <algorithm>
-#include <iostream>
-#include <sstream>
+#include <iterator>
+#include <utility>
 
 namespace xllm {
 namespace function_call {
@@ -54,6 +54,25 @@ bool Glm45Detector::has_tool_call(const std::string& text) {
   return text.find(bot_token_) != std::string::npos;
 }
 
+std::unordered_map<std::string, nlohmann::json> Glm45Detector::parse_arguments(
+    const std::string& args) const {
+  std::unordered_map<std::string, nlohmann::json> arguments;
+  const std::sregex_iterator end;
+  for (std::sregex_iterator iter(args.begin(), args.end(), func_arg_regex_);
+       iter != end;
+       ++iter) {
+    const std::smatch match = *iter;
+    const std::string key = trim_whitespace(match[1].str());
+    const std::string value = trim_whitespace(match[2].str());
+    try {
+      arguments[key] = nlohmann::json::parse(value);
+    } catch (const nlohmann::json::parse_error&) {
+      arguments[key] = value;
+    }
+  }
+  return arguments;
+}
+
 StreamingParseResult Glm45Detector::detect_and_parse(
     const std::string& text,
     const std::vector<JsonTool>& tools) {
@@ -86,30 +105,7 @@ StreamingParseResult Glm45Detector::detect_and_parse(
         std::string func_name = func_detail[1].str();
         std::string func_args = func_detail[2].str();
 
-        // Parse arguments using regex
-        std::unordered_map<std::string, nlohmann::json> arguments;
-        std::sregex_iterator arg_iter(
-            func_args.begin(), func_args.end(), func_arg_regex_);
-        std::sregex_iterator arg_end;
-
-        for (; arg_iter != arg_end; ++arg_iter) {
-          std::smatch arg_match = *arg_iter;
-          if (arg_match.size() >= 3) {
-            std::string arg_key = arg_match[1].str();
-            std::string arg_value = arg_match[2].str();
-
-            arg_key = trim_whitespace(arg_key);
-
-            arg_value = trim_whitespace(arg_value);
-
-            try {
-              nlohmann::json parsed_value = nlohmann::json::parse(arg_value);
-              arguments[arg_key] = parsed_value;
-            } catch (const nlohmann::json::parse_error&) {
-              arguments[arg_key] = nlohmann::json(arg_value);
-            }
-          }
-        }
+        auto arguments = parse_arguments(func_args);
 
         // Create JSON object for parse_base_json
         nlohmann::json match_json;
@@ -134,64 +130,114 @@ StreamingParseResult Glm45Detector::detect_and_parse(
 StreamingParseResult Glm45Detector::parse_streaming_increment(
     const std::string& new_text,
     const std::vector<JsonTool>& tools) {
+  CHECK(!stream_finished_) << "Cannot append to a finished tool stream";
   buffer_ += new_text;
-  std::string current_text = buffer_;
+  return consume_buffer(tools, /*final=*/false);
+}
 
-  size_t start = current_text.find(bot_token_);
-  if (start == std::string::npos) {
-    buffer_.clear();
-    if (current_tool_id_ > 0) {
-      current_text = "";
+StreamingParseResult Glm45Detector::consume_buffer(
+    const std::vector<JsonTool>& tools,
+    bool final) {
+  StreamingParseResult result;
+  while (!buffer_.empty()) {
+    const size_t start = buffer_.find(bot_token_);
+    if (start == std::string::npos) {
+      size_t held = 0;
+      if (!final) {
+        const size_t limit = std::min(buffer_.size(), bot_token_.size() - 1);
+        for (size_t length = limit; length > 0; --length) {
+          if (buffer_.compare(
+                  buffer_.size() - length, length, bot_token_, 0, length) ==
+              0) {
+            held = length;
+            break;
+          }
+        }
+      }
+      const size_t available = buffer_.size() - held;
+      result.normal_text.append(buffer_, 0, available);
+      buffer_.erase(0, available);
+      break;
     }
-    return StreamingParseResult(current_text, {});
+    if (start > 0) {
+      result.normal_text.append(buffer_, 0, start);
+      buffer_.erase(0, start);
+    }
+
+    const size_t end = buffer_.find(eot_token_, bot_token_.length());
+    StreamingParseResult parsed;
+    if (end != std::string::npos) {
+      const size_t consumed = end + eot_token_.length();
+      parsed = detect_and_parse(buffer_.substr(0, consumed), tools);
+      buffer_.erase(0, consumed);
+    } else {
+      if (!final) {
+        break;
+      }
+      const size_t name_end = buffer_.find('\n', bot_token_.length());
+      if (name_end == std::string::npos) {
+        break;
+      }
+      const std::string name = trim_whitespace(
+          buffer_.substr(bot_token_.length(), name_end - bot_token_.length()));
+      const std::string args = buffer_.substr(name_end + 1);
+      const std::sregex_iterator args_end;
+      size_t consumed_args = 0;
+      bool complete_pairs = false;
+      for (std::sregex_iterator iter(args.begin(), args.end(), func_arg_regex_);
+           iter != args_end;
+           ++iter) {
+        const std::smatch match = *iter;
+        const size_t position = static_cast<size_t>(match.position());
+        if (!trim_whitespace(
+                 args.substr(consumed_args, position - consumed_args))
+                 .empty()) {
+          break;
+        }
+        complete_pairs = true;
+        consumed_args = position + static_cast<size_t>(match.length());
+      }
+      const std::string tail = trim_whitespace(args.substr(consumed_args));
+      const bool outer_tag_prefix =
+          !tail.empty() && tail.size() < eot_token_.size() &&
+          eot_token_.compare(0, tail.size(), tail) == 0;
+      if (name.empty() || !complete_pairs ||
+          (!tail.empty() && !outer_tag_prefix)) {
+        break;
+      }
+      nlohmann::json call = {{"name", name},
+                             {"parameters", parse_arguments(args)}};
+      parsed.calls = parse_base_json(call, tools);
+      buffer_.clear();
+    }
+
+    for (auto& call : parsed.calls) {
+      if (current_tool_id_ == -1) {
+        current_tool_id_ = 0;
+      }
+      const size_t tool_index = static_cast<size_t>(current_tool_id_);
+      prev_tool_call_arr_.resize(tool_index + 1);
+      streamed_args_for_tool_.resize(tool_index + 1);
+      prev_tool_call_arr_[tool_index] = {{"name", call.name.value_or("")},
+                                         {"arguments", call.parameters}};
+      streamed_args_for_tool_[tool_index] = call.parameters;
+      call.tool_index = current_tool_id_++;
+      result.calls.emplace_back(std::move(call));
+    }
   }
+  return result;
+}
 
-  // Look for complete tool call
-  size_t end = current_text.find(eot_token_);
-  if (end != std::string::npos) {
-    // Initialize state if this is the first tool call
-    if (current_tool_id_ == -1) {
-      current_tool_id_ = 0;
-      prev_tool_call_arr_.clear();
-      streamed_args_for_tool_.clear();
-      streamed_args_for_tool_.push_back("");
-    }
-
-    // Ensure we have enough entries in tracking arrays
-    while (prev_tool_call_arr_.size() <= current_tool_id_) {
-      prev_tool_call_arr_.push_back({});
-    }
-    while (streamed_args_for_tool_.size() <= current_tool_id_) {
-      streamed_args_for_tool_.push_back("");
-    }
-
-    // Parse the complete tool call
-    std::string complete_call =
-        current_text.substr(0, end + eot_token_.length());
-    StreamingParseResult result = detect_and_parse(complete_call, tools);
-
-    if (!result.calls.empty()) {
-      // Store tool call info for serving layer
-      prev_tool_call_arr_[current_tool_id_]["name"] =
-          result.calls[0].name.value_or("");
-      prev_tool_call_arr_[current_tool_id_]["arguments"] =
-          result.calls[0].parameters;
-      streamed_args_for_tool_[current_tool_id_] = result.calls[0].parameters;
-
-      // Update tool index
-      result.calls[0].tool_index = current_tool_id_;
-      current_tool_id_++;
-    }
-
-    // Update buffer with remaining text
-    buffer_ = current_text.substr(end + eot_token_.length());
-    return result;
+StreamingFinishResult Glm45Detector::finish_stream(
+    const std::vector<JsonTool>& tools) {
+  if (stream_finished_) {
+    return {StreamingParseResult(), has_pending_tool_};
   }
-
-  // Return normal text before tool call start
-  std::string normal_text = current_text.substr(0, start);
-  buffer_ = current_text.substr(start);
-  return StreamingParseResult(normal_text, {});
+  StreamingParseResult output = consume_buffer(tools, /*final=*/true);
+  has_pending_tool_ = buffer_.find(bot_token_) != std::string::npos;
+  buffer_.clear();
+  stream_finished_ = true;
+  return {std::move(output), has_pending_tool_};
 }
 
 }  // namespace function_call
