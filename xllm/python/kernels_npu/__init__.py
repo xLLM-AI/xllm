@@ -81,11 +81,13 @@ _EXPORTS = {
     "normalization": (
         "fused_add_rms_norm",
         "fused_add_rms_norm_dynamic_quant",
+        "fused_eh_norm",
         "gemma_rms_norm",
         "l2_norm",
         "rms_norm",
         "rms_norm_dynamic_quant",
         "rms_norm_gated",
+        "rms_norm_sigmoid_gated",
     ),
     "quantization": (
         "dynamic_quant",
@@ -132,6 +134,8 @@ __all__ = [
     "rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
+    "rms_norm_sigmoid_gated",
+    "fused_eh_norm",
     "silu_and_mul",
     "dequant_swiglu_quant",
     "reshape_paged_cache",

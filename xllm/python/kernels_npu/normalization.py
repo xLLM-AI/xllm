@@ -87,6 +87,60 @@ def rms_norm_gated(
     return torch.ops.xllm_ops.rms_norm_gated(value, gate, weight, eps)
 
 
+def rms_norm_sigmoid_gated(
+    value: torch.Tensor,
+    gate: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Apply RMSNorm to ``value`` and gate the result with ``sigmoid(gate)``.
+
+    Args:
+        value: Tensor to normalize.
+        gate: Gate applied after normalization (sigmoid is applied internally).
+        weight: RMSNorm weight over the last dimension.
+        eps: RMSNorm epsilon.
+
+    Returns:
+        A tensor with the shape and dtype of ``value``.
+    """
+    from .triton.rms_norm import (
+        rms_norm_sigmoid_gated as triton_rms_norm_sigmoid_gated,
+    )
+
+    return triton_rms_norm_sigmoid_gated(value, gate, weight, eps)
+
+
+def fused_eh_norm(
+    embed: torch.Tensor,
+    carried: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Normalize embedding and carried states, then concatenate the results.
+
+    Args:
+        embed: Token embedding to normalize.
+        carried: Carried hidden state to normalize.
+        enorm_weight: RMSNorm weight for ``embed``.
+        hnorm_weight: RMSNorm weight for ``carried``.
+        eps: RMSNorm epsilon shared by both inputs.
+
+    Returns:
+        The normalized inputs concatenated along the final dimension.
+    """
+    from .triton.eh_norm import fused_eh_norm as triton_fused_eh_norm
+
+    return triton_fused_eh_norm(
+        embed,
+        carried,
+        enorm_weight,
+        hnorm_weight,
+        eps,
+    )
+
+
 __all__ = [
     "rms_norm",
     "gemma_rms_norm",
@@ -95,4 +149,6 @@ __all__ = [
     "rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
+    "rms_norm_sigmoid_gated",
+    "fused_eh_norm",
 ]

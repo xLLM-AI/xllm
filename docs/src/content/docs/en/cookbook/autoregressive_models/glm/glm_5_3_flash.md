@@ -111,9 +111,6 @@ export HCCL_CONNECT_TIMEOUT=7200
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_BASE_PORT=47440
 
-export GLM5_RMSNORM_ROWWISE=1
-# Required when MTP is enabled
-
 ```
 
 ### Start command: 8-card single-node, GLM-5.3-Flash

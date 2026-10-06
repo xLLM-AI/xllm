@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from xllm.python import kernels
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.linear import ColumnParallelLinear
 from xllm.python.model_loader import QLinearWeightLoader
@@ -107,10 +108,16 @@ class Glm5NextMtpDecoderLayer(nn.Module):
         # match residual — parity with Glm5NextDecoderLayer._forward_ref.
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.view(residual.shape[0], residual.shape[1], -1)
-        hidden_states = residual + hidden_states
 
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        # Fuse the post-attention residual-add + RMSNorm into one npu_add_rms_norm
+        # (normed = RMSNorm(attn_out + residual); residual is updated to the sum
+        # for the post-MLP add below).
+        hidden_states, residual = kernels.fused_add_rms_norm(
+            hidden_states,
+            residual,
+            self.post_attention_layernorm.weight,
+            self.post_attention_layernorm.variance_epsilon,
+        )
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -183,9 +190,15 @@ class Glm5NextMtpModel(nn.Module):
 
         carried = token_hidden if input_embedding is None else input_embedding.reshape(token_hidden.shape)
 
-        e = self.enorm(token_hidden)
-        h = self.hnorm(carried)
-        hidden_states = self.eh_proj(torch.cat((e, h), dim=-1))
+        # Fuse the two eh-input RMSNorms + concat into one kernel.
+        eh = kernels.fused_eh_norm(
+            token_hidden,
+            carried,
+            self.enorm.weight,
+            self.hnorm.weight,
+            self.enorm.variance_epsilon,
+        )
+        hidden_states = self.eh_proj(eh)
 
         batch_size, seq_len = hidden_states.shape[:2]
         attention_mask = torch.ones(
