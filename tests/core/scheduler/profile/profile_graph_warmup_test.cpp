@@ -38,6 +38,44 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(StepTimeProfilePlanTest, NeverExceedsConfiguredSequenceCapacity) {
+  const std::vector<int32_t> batch_sizes =
+      build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/16);
+  ASSERT_FALSE(batch_sizes.empty());
+  EXPECT_EQ(batch_sizes.back(), 16);
+  EXPECT_TRUE(std::all_of(batch_sizes.begin(),
+                          batch_sizes.end(),
+                          [](int32_t x) { return x >= 1 && x <= 16; }));
+}
+
+TEST(StepTimeProfilePlanTest, BatchSizesCoverBoundaries) {
+  // Minimal input yields the single smallest bucket.
+  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/1),
+            (std::vector<int32_t>{1}));
+  // Even tail buckets are padded up to the configured max.
+  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/2),
+            (std::vector<int32_t>{1, 2}));
+  // The legacy upper bound keeps odd buckets only.
+  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/23),
+            (std::vector<int32_t>{1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23}));
+  // Inputs beyond the legacy bound are capped by it.
+  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/100),
+            build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/23));
+}
+
+TEST(StepTimeProfilePlanTest, WarmupDecodeSeqLenFollowsFiaAndContextBounds) {
+  // Without FIA the legacy 16-sequence bound applies, capped by the context.
+  const bool without_fia = false;
+  const bool with_fia = true;
+  EXPECT_EQ(warmup_decode_seq_len(without_fia, /*max_context_len=*/8), 8);
+  EXPECT_EQ(warmup_decode_seq_len(without_fia, /*max_context_len=*/16), 16);
+  EXPECT_EQ(warmup_decode_seq_len(without_fia, /*max_context_len=*/4096), 16);
+  // With FIA the bound rises to 2048, still capped by the context length.
+  EXPECT_EQ(warmup_decode_seq_len(with_fia, /*max_context_len=*/16), 16);
+  EXPECT_EQ(warmup_decode_seq_len(with_fia, /*max_context_len=*/2048), 2048);
+  EXPECT_EQ(warmup_decode_seq_len(with_fia, /*max_context_len=*/4096), 2048);
+}
+
 Sequence make_sequence(size_t index, const std::vector<int32_t>& tokens) {
   RequestSamplingParam sampling_param;
   sampling_param.beam_width = 0;

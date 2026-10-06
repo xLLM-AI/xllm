@@ -49,8 +49,8 @@ limitations under the License.
 
 namespace xllm {
 
-#if defined(USE_NPU)
 namespace {
+#if defined(USE_NPU)
 
 bool rank_table_rank_id_matches(const nlohmann::json& rank_id,
                                 const std::string& target_rank_id) {
@@ -207,10 +207,7 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
   return result;
 }
 
-}  // namespace
 #endif
-
-namespace {
 
 std::string get_context_parallel_group_host(int32_t group_root_rank,
                                             const std::string& fallback_host) {

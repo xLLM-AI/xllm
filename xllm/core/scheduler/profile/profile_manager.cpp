@@ -45,6 +45,37 @@ limitations under the License.
 #include "platform/platform.h"
 
 namespace xllm {
+
+std::vector<int32_t> build_step_time_profile_batch_sizes(
+    int32_t max_seqs_per_batch) {
+  CHECK_GT(max_seqs_per_batch, 0);
+  constexpr int32_t kLegacyMaxProfileBatchSize = 23;
+  const int32_t max_profile_batch_size =
+      std::min(max_seqs_per_batch, kLegacyMaxProfileBatchSize);
+  std::vector<int32_t> batch_sizes;
+  batch_sizes.reserve(max_profile_batch_size / 2 + 2);
+  for (int32_t batch_size = 1; batch_size <= max_profile_batch_size;
+       batch_size += 2) {
+    batch_sizes.push_back(batch_size);
+  }
+  if (batch_sizes.back() != max_profile_batch_size) {
+    batch_sizes.push_back(max_profile_batch_size);
+  }
+  return batch_sizes;
+}
+
+int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len) {
+  // FIA decode graphs refresh dynamic host parameters before every replay and
+  // run captures beyond the default 16 decode sequence lengths, so warmup
+  // measures capacity with the FIA warmup bound to keep measured memory and
+  // the final warmup batch capacity consistent with real captures.
+  constexpr int32_t kDefaultWarmupDecodeSeqLen = 16;
+  constexpr int32_t kFiaWarmupDecodeSeqLen = 2048;
+  return std::min(
+      fia_enabled ? kFiaWarmupDecodeSeqLen : kDefaultWarmupDecodeSeqLen,
+      max_context_len);
+}
+
 namespace {
 
 int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
@@ -411,12 +442,13 @@ void ProfileManager::profile_step_time(bool if_dump_to_file) {
   // decode time profile
 
   std::vector<std::tuple<int32_t, int32_t, double>> time_profiling_data;
-  int32_t max_batch_size = 25;
   // for (int32_t token_length = profile_max_prompt_length; token_length >
   // 1;token_length >>= 1)
+  const std::vector<int32_t> profile_batch_sizes =
+      build_step_time_profile_batch_sizes(options_.max_seqs_per_batch());
   for (int32_t token_length = 2; token_length < profile_max_prompt_length;
        token_length += profile_length_step_) {
-    for (int32_t batch_size = 1; batch_size < max_batch_size; batch_size += 2) {
+    for (int32_t batch_size : profile_batch_sizes) {
       double latency_mean = 0;
       for (int32_t k = 0; k < profile_count_per_step_; k++) {
         latency_mean += run_request(token_length, token_length - 1, batch_size);
@@ -1294,7 +1326,10 @@ void ProfileManager::warmup_decode_for_graph() {
                                       .acl_graph_decode_batch_size_limit())),
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
-  int32_t decode_seq_len = std::min(16, max_context_len);
+  const int32_t decode_seq_len = warmup_decode_seq_len(
+      Platform::is_npu() &&
+          ::xllm::ExecutionConfig::get_instance().enable_fia_decode(),
+      max_context_len);
 
   const int32_t allocatable_sequences =
       measure_graph_decode_capacity(max_decode_batch_size, decode_seq_len);

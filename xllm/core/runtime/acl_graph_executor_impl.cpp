@@ -106,6 +106,7 @@ bool uses_static_mtp_graph_task_variant(const ModelInputParams& params,
   const int64_t batch_size = params.meta.num_sequences;
   const int64_t spec_width = params.meta.q_max_seq_len;
   return params.is_spec_verify &&
+         !ExecutionConfig::get_instance().enable_fia_decode() &&
          params.meta.batch_forward_type.is_chunked_prefill() &&
          params.graph.use_expanded_decode_for_spec_verify_attention &&
          params.graph.spec_verify_source_addresses_stable &&
@@ -1527,6 +1528,13 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
 bool AclGraphExecutorImpl::prepare_static_mtp_graph_tasks(
     const SpecVerifyGraphTaskSignal& signal,
     const Stream& signal_stream) {
+  // FIA disables the static MTP graph-task variant entirely (see
+  // uses_static_mtp_graph_task_variant), so stored graphs never carry a
+  // signature-wrapped key and the lookup below is a guaranteed miss. Mirror
+  // the same contract explicitly and skip the pointless computation.
+  if (::xllm::ExecutionConfig::get_instance().enable_fia_decode()) {
+    return false;
+  }
   if (!model_->is_hybrid_linear_attention() || graph_slot_count_ != 1 ||
       !kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
           signal.spec_width, options_.block_size()) ||
@@ -1633,7 +1641,12 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
       CHECK_NE(attention_plan_class, 0)
           << "stable speculative-verify graph requires an attention plan "
              "class";
-      const uint64_t base_key = mix_graph_key(packed_key, attention_plan_class);
+      // FIA refreshes host params on replay; PA-only plan classes do not apply.
+      const uint64_t base_key =
+          ::xllm::ExecutionConfig::get_instance().enable_fia_decode() &&
+                  is_qwen3_5_target_model_type(args_.model_type())
+              ? packed_key
+              : mix_graph_key(packed_key, attention_plan_class);
       if (uses_static_mtp_graph_task_variant(
               params, bucket_num_tokens, options_.block_size())) {
         const auto signature = make_static_graph_task_signature(params);
