@@ -15,90 +15,145 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
 
 from xllm.python.attention.backend import resolve_linear_state_io_indices
-from xllm.python.attention.kda_constants import (
-    _KDA_NO_COORD,
-    _KDA_SEQWISE,
-    _KDA_VERIFY_V2,
-    _KDA_VERIFY_V3,
-    _MTP_FULL_COMMIT,
-)
+from xllm.python.attention.expanded_decode_metadata import resolve_expanded_decode_metadata
 from xllm.python.model_executor.forward_context import (
     get_execution_buffer,
     in_acl_graph,
 )
 
 if TYPE_CHECKING:
-    from xllm.python.layers.attention import Attention
+    from xllm.python.attention.backend import AttentionMetadata, LayerCache
+    from xllm.python.layers.kda import KdaForgetGate
+
+
+def _causal_conv1d_fn(mixed_qkv: torch.Tensor, weight: torch.Tensor, activation: str = "silu") -> torch.Tensor:
+    """Depthwise causal conv1d (left-pad K-1) + activation, fp32 weight."""
+    # mixed_qkv: [B, conv_dim, S]; weight: [conv_dim, K] (squeezed)
+    padding = weight.shape[-1] - 1
+    out = F.conv1d(
+        mixed_qkv.to(weight.dtype),
+        weight=weight.unsqueeze(1),
+        bias=None,
+        padding=padding,
+        groups=mixed_qkv.shape[1],
+    )[:, :, : mixed_qkv.shape[-1]]
+    if activation == "silu":
+        out = F.silu(out)
+    return out.to(mixed_qkv.dtype)
+
+
+def _causal_conv1d_update(
+    mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
+) -> torch.Tensor:
+    """Incremental depthwise causal conv1d + activation (single-token decode).
+
+    Faithful port of transformers ``causal_conv1d_update``: prepend the
+    ``conv_state`` (last K-1 conv inputs), run a width-0-pad conv over the
+    concatenation, slice the tail, and update ``conv_state`` in place.
+
+    Args:
+        mixed_qkv: [B, conv_dim, S] (S == 1 for decode).
+        conv_state: [B, conv_dim, K-1], updated in place to the last K-1 inputs.
+        weight: [conv_dim, K] (squeezed).
+    """
+    _, hidden_size, seq_len = mixed_qkv.shape
+    state_len = conv_state.shape[-1]
+    hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
+    conv_state.copy_(hidden_states_new[:, :, -state_len:])
+    out = F.conv1d(
+        hidden_states_new,
+        weight=weight.unsqueeze(1),
+        bias=None,
+        padding=0,
+        groups=hidden_size,
+    )[:, :, -seq_len:]
+    if activation == "silu":
+        out = F.silu(out)
+    return out.to(mixed_qkv.dtype)
+
+
+def _causal_conv1d_update_graph(
+    mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
+) -> torch.Tensor:
+    """Graph-capturable twin of ``_causal_conv1d_update`` (ACL-graph decode).
+
+    F.conv1d lowers to the aclop Conv2D, which NPUGraph cannot capture (and
+    ``allow_internal_format=False`` would break the MoE W8A8 NZ weights), so
+    the depthwise width-K conv is unrolled into elementwise multiply-adds
+    reproducing the aclop kernel's numeric contract bit for bit via
+    ``_causal_conv1d_graph_multi``. Only called on the graph decode path; eager
+    keeps the F.conv1d original byte-for-byte. NOTE the engine's conv weight
+    is bf16 (checkpoint overrides the fp32 init), so the eager conv runs in
+    bf16 — emulating the fp32 conv contract here returns a wrong-SHAPE
+    tensor (bf16 view(int32) halves the last dim) and crashes capture.
+    """
+    seq_len = mixed_qkv.shape[-1]
+    state_len = conv_state.shape[-1]
+    hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
+    conv_state.copy_(hidden_states_new[:, :, -state_len:])
+    return _causal_conv1d_graph_multi(hidden_states_new, weight, seq_len, activation).to(mixed_qkv.dtype)
+
+
+def _causal_conv1d_graph_multi(
+    cin: torch.Tensor,
+    weight: torch.Tensor,
+    out_rows: int,
+    activation: str = "silu",
+) -> torch.Tensor:
+    """Graph-capturable multi-row twin of the eager depthwise conv.
+
+    ``cin`` is ``[B, conv_dim, state_len + R]`` (boundary tail + the R
+    current rows); the causal outputs for the R rows are the K-wide windows
+    STARTING at ``[0, R)``. F.conv1d lowers to an aclop NPUGraph cannot
+    capture, so the conv is unrolled into the per-tap multiply-add contract
+    of ``_causal_conv1d_update_graph`` — bit-compatible with that plain-decode
+    path and the eager F.conv1d path.
+
+    Implements the shared graph numeric contract: operands
+    cast to fp32, per-tap products exact in fp32, ascending accumulation,
+    one final round to the weight dtype. The RNE rounding to 11 mantissa bits
+    is a no-op for bf16 sources (7 mantissa bits), so it is skipped to avoid
+    RightShift/BitwiseAnd on AI_CPU.
+    """
+    h_r = cin.to(weight.dtype).float()
+    w_r = weight.float()
+    k_size = weight.shape[-1]
+    out = w_r[:, 0:1].unsqueeze(0) * h_r[:, :, 0:out_rows]
+    for k in range(1, k_size):
+        out = out + w_r[:, k : k + 1].unsqueeze(0) * h_r[:, :, k : k + out_rows]
+    out = out.to(weight.dtype)
+    if activation == "silu":
+        out = F.silu(out)
+    return out.to(cin.dtype)
 
 
 class KdaLinearAttentionMixin:
-    """KDA linear-attention + MTP spec-verify state I/O, mixed into NpuPagedAttentionBackend."""
+    """KDA linear-attention + speculative verify state I/O, mixed into NpuPagedAttentionBackend."""
 
-    def snapshot_kda_v2_state(self, idx: torch.Tensor):
-        """Snapshot the V2 stash rows the graph warmup/capture will consume.
+    _metadata: AttentionMetadata | None
+    _kv_caches: list[LayerCache]
+    _kda_verify_width: int
+    _kda_state: dict[int, dict[str, Any]]
 
-        Mirrors ``_snapshot_linear_state`` for the backend-owned spec-verify
-        stash: the capture runs advance the stash just like the conv/ssm
-        caches, so the entry contents must be restored afterwards.
-        """
+    def _disarm_slots(self, idx: torch.Tensor) -> None:
+        """Mark slots' combined-pool state invalid (prefill restart)."""
         idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
-        snap = []
-        for st in self.__dict__.get("_kda_v2", {}).values():
-            if "armed_buf" not in st:
-                continue
-            snap.append(
-                (
-                    st,
-                    idx64,
-                    st["conv_out"].index_select(0, idx64).clone(),
-                    st["g_raw"].index_select(0, idx64).clone(),
-                    st["b_raw"].index_select(0, idx64).clone(),
-                    st["tails"].index_select(1, idx64).clone(),
-                    st["kv_prev"].index_select(0, idx64).clone(),
-                    st["armed_buf"].index_select(0, idx64).clone(),
-                    st["ever_armed"],
-                )
-            )
-        return snap or None
-
-    @staticmethod
-    def restore_kda_v2_state(snap) -> None:
-        if not snap:
-            return
-        for st, idx64, co, g, b, t, kv, ar, ever_armed in snap:
-            st["conv_out"].index_copy_(0, idx64, co)
-            st["g_raw"].index_copy_(0, idx64, g)
-            st["b_raw"].index_copy_(0, idx64, b)
-            st["tails"].index_copy_(1, idx64, t)
-            st["kv_prev"].index_copy_(0, idx64, kv)
-            st["armed_buf"].index_copy_(0, idx64, ar)
-            st["ever_armed"] = ever_armed
-
-    def disarm_kda_v2_slots(self, idx: torch.Tensor) -> None:
-        """Mark slots' V2 stash invalid (prefill restarts the chain)."""
-        idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
-        for st in self.__dict__.get("_kda_v2", {}).values():
+        for st in self.__dict__.get("_kda_state", {}).values():
             if "armed_buf" in st:
                 st["armed_buf"].index_fill_(0, idx64, False)
 
-    def disarm_kda_v3_slots(self, idx: torch.Tensor) -> None:
-        """Mark slots' V3 combined-pool state invalid (prefill restart)."""
-        idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
-        for st in self.__dict__.get("_kda_v3", {}).values():
-            if "armed_buf" in st:
-                st["armed_buf"].index_fill_(0, idx64, False)
-
-    def snapshot_kda_v3_state(self, idx: torch.Tensor):
-        """Snapshot V3 combined-pool rows the graph warmup/capture mutates."""
-        idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
+    def snapshot_linear_state(self, indices: torch.Tensor) -> tuple[torch.Tensor, list[tuple]]:
+        """Snapshot combined-pool rows the graph warmup/capture mutates."""
+        idx64 = indices if indices.dtype == torch.int64 else indices.to(torch.int64)
         snap = []
-        for st in self.__dict__.get("_kda_v3", {}).values():
+        for st in self.__dict__.get("_kda_state", {}).values():
             if "armed_buf" not in st:
                 continue
             # nslots is the C++ pool capacity (armed_buf/kv_prev are sized to
@@ -111,54 +166,56 @@ class KdaLinearAttentionMixin:
             snap.append(
                 (
                     st,
-                    idx64,
                     nslots,
                     rslots,
-                    [st["combined_conv"].index_select(0, s).clone() for s in slot_idx],
-                    [st["combined_ssm"].index_select(0, s).clone() for s in slot_idx],
-                    st["kv_prev"].index_select(0, idx64).clone(),
-                    st["armed_buf"].index_select(0, idx64).clone(),
-                    st["ever_armed"],
+                    [st["combined_conv"].index_select(0, s) for s in slot_idx],
+                    [st["combined_ssm"].index_select(0, s) for s in slot_idx],
+                    st["kv_prev"].index_select(0, idx64),
+                    st["armed_buf"].index_select(0, idx64),
                 )
             )
-        return snap or None
+        return idx64, snap
 
-    @staticmethod
-    def restore_kda_v3_state(snap) -> None:
-        if not snap:
-            return
-        for st, idx64, nslots, rslots, conv_snaps, ssm_snaps, kv, ar, ever_armed in snap:
+    def restore_linear_state(self, snapshot: Any) -> None:
+        idx64, snap = snapshot
+        # Capture may create state that did not exist when the snapshot was taken.
+        self._disarm_slots(idx64)
+        for st, nslots, rslots, conv_snaps, ssm_snaps, kv, ar in snap:
             for j in range(rslots):
                 st["combined_conv"].index_copy_(0, idx64 + j * nslots, conv_snaps[j])
                 st["combined_ssm"].index_copy_(0, idx64 + j * nslots, ssm_snaps[j])
             st["kv_prev"].index_copy_(0, idx64, kv)
             st["armed_buf"].index_copy_(0, idx64, ar)
-            st["ever_armed"] = ever_armed
 
     def execute_linear(
         self,
         mixed_qkv: torch.Tensor,
         beta: torch.Tensor,
-        layer: Attention,
+        layer_id: int,
+        conv1d: torch.nn.Conv1d,
+        forget_gate: KdaForgetGate,
+        activation: str,
         raw_gate_proj: torch.Tensor,
     ) -> torch.Tensor:
         """Run KDA and update the framework's convolution/recurrent state slots.
 
-        ``raw_gate_proj`` is ``[B, S, num_heads_local, head_dim]``. Plain
-        steps fuse its safe-gate in the kernel; speculative verification
-        materializes the gate lazily. Returns output with the same shape.
+        Returns ``[B, S, num_heads_local, head_dim]``. The conv1d + delta-rule
+        math is identical to the model-layer self-contained path (validated
+        against the transformers reference); only the state I/O moved here so
+        both attention layer types dispatch through the backend.
+
+        ``raw_gate_proj`` is the pre-gate projection ``f_b(f_a(x))``. Plain
+        decode/prefill kernels fuse the safe-gate calculation in-kernel. Speculative
+        verify uses the multi-slot path with a materialized safe-gate from
+        ``KdaForgetGate.gate_from_raw``.
         """
         from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
 
         from xllm.python import kernels
-        from xllm.python.models.glm5_next import (
-            _causal_conv1d_fn,
-            _causal_conv1d_update,
-        )
 
         metadata = self._metadata
         assert metadata is not None, "execute_linear called before prepare()"
-        layer_cache = self._kv_caches[layer.layer_id]
+        layer_cache = self._kv_caches[layer_id]
         conv_cache = layer_cache.conv
         ssm_cache = layer_cache.ssm
         assert conv_cache is not None and ssm_cache is not None, (
@@ -166,31 +223,16 @@ class KdaLinearAttentionMixin:
         )
 
         batch_size, _, seq_len = mixed_qkv.shape
-        conv_kernel_size = layer.conv_kernel_size
-        conv_state_len = conv_kernel_size - 1
-        head_dim = layer.head_dim
-        num_heads_local = layer.num_heads_local
-        qkv_dim = layer.qkv_dim
+        conv_state_len = conv1d.kernel_size[0] - 1
+        head_dim = forget_gate.head_dim
+        num_heads_local = forget_gate.num_heads
+        qkv_dim = forget_gate.qkv_dim
         hidden_shape = (batch_size, seq_len, -1, head_dim)
 
-        fg = layer.forget_gate
-        gate_lb = fg.safe_gate_lower_bound
-        gate_cache: Optional[torch.Tensor] = None
-
-        def _materialized_gate() -> torch.Tensor:
-            nonlocal gate_cache
-            if gate_cache is None:
-                gate_cache = fg.gate_from_raw(raw_gate_proj)
-            return gate_cache
-
-        # Retain pre-convolution projections for MTP state commits.
-        raw_mixed, raw_beta = mixed_qkv, beta
-        chain_seqs: dict = {}
-
+        gate_lb = forget_gate.safe_gate_lower_bound
         read_idx, idx = resolve_linear_state_io_indices(metadata)
         is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
         num_seqs = idx.shape[0] if idx is not None else batch_size
-        merged_q_cu: Optional[torch.Tensor] = None
         # ACL-graph decode with a flattened batch: the model forward unsqueezes
         # the 1-D ``[num_seqs]`` decode input into ``[1, num_seqs]``, so
         # mixed_qkv arrives as ``[1, conv_dim, num_seqs]`` with idx
@@ -204,6 +246,7 @@ class KdaLinearAttentionMixin:
         flatten_graph_decode = (
             in_graph
             and is_decode
+            and self._kda_verify_width == 1
             and idx is not None
             and batch_size == 1
             and num_seqs > 1
@@ -223,9 +266,9 @@ class KdaLinearAttentionMixin:
             device = mixed_qkv.device
             conv_state = torch.zeros(
                 batch_size,
-                layer.conv_dim,
+                conv1d.out_channels,
                 conv_state_len,
-                dtype=layer.conv1d.weight.dtype,
+                dtype=conv1d.weight.dtype,
                 device=device,
             )
             ssm_state = torch.zeros(
@@ -239,7 +282,7 @@ class KdaLinearAttentionMixin:
         else:
             if idx.dtype != torch.int64:
                 idx = idx.to(torch.int64)
-            # MTP spec-verify expands one logical sequence into consecutive
+            # Speculative verify expands one logical sequence into consecutive
             # batch rows (bonus + drafted tokens, e.g. q_cu=[0,1,2,3,4] for
             # two k=1 sequences, kv=[n,n+1,m,m+1] per row) while
             # linear_state_indices stays per SEQUENCE (one slot id per
@@ -251,14 +294,8 @@ class KdaLinearAttentionMixin:
             # position instead (rows==seqs) silently drops the tail rows of
             # every sequence past the first and corrupts the view/layout
             # downstream.
-            merged_row0: list = []
             q_cu_raw = metadata.q_cu_seq_lens
-            if (
-                (_KDA_VERIFY_V2 or _KDA_VERIFY_V3)
-                and in_graph
-                and getattr(metadata, "expanded_decode_metadata", None) is not None
-                and q_cu_raw is not None
-            ):
+            if in_graph and getattr(metadata, "expanded_decode_metadata", None) is not None and q_cu_raw is not None:
                 # Graph capture/replay of an expanded spec-verify batch. The
                 # static metadata keeps the PER-ROW layout the attention
                 # backends consume (q_cu/kv/block_table all per token row);
@@ -274,27 +311,19 @@ class KdaLinearAttentionMixin:
                         group_idx = idx.view(n_groups, num_rows // n_groups)[:, 0].contiguous()
                     else:
                         group_idx = idx
-                    from fla_npu.ops.ascendc import (
-                        recurrent_kda as _rk,
-                    )
-
-                    _fn = self._spec_verify_v3 if _KDA_VERIFY_V3 else self._spec_verify_v2
-                    return _fn(
+                    return self._spec_verify(
                         mixed_qkv,
-                        _materialized_gate(),
-                        raw_beta,
-                        layer,
+                        forget_gate.gate_from_raw(raw_gate_proj),
+                        beta,
+                        layer_id,
+                        conv1d,
+                        activation,
                         group_idx,
                         metadata,
                         conv_cache,
                         ssm_cache,
-                        _rk,
+                        recurrent_kda,
                     )
-            # The row-merge + lazy-commit bookkeeping below is MTP-spec-verify
-            # tracking that relies on device->host syncs (.item()/.tolist()),
-            # which are forbidden on a captured ACL-graph stream. The graph
-            # decode path is not spec-verify (merged_q_cu stays None and the
-            # simple path below uses the capture-safe conv), so skip it whole.
             q_rows = 0 if in_graph else (int(q_cu_raw.numel()) - 1 if q_cu_raw is not None else 0)
             per_row_idx = None
             per_row_cu = None
@@ -322,244 +351,44 @@ class KdaLinearAttentionMixin:
                     f"unaligned linear-state batch: {q_rows} rows vs {idx.numel()} sequences with non-uniform expansion"
                 )
             if per_row_idx is not None:
+                if per_row_cu is None:
+                    raise RuntimeError("KDA verify rows require cumulative query lengths")
                 row_lengths = (per_row_cu[1:] - per_row_cu[:-1]).tolist()
                 merged_lengths: list = []
                 merged_slots: list = []
-                for row, (slot, length) in enumerate(zip(per_row_idx.tolist(), row_lengths)):
+                for slot, length in zip(per_row_idx.tolist(), row_lengths, strict=True):
                     if merged_slots and slot == merged_slots[-1]:
                         merged_lengths[-1] += length
                     else:
                         merged_slots.append(slot)
                         merged_lengths.append(length)
-                        merged_row0.append(row)
-                merged_cu = [0]
-                for length in merged_lengths:
-                    merged_cu.append(merged_cu[-1] + length)
-                merged_q_cu = torch.tensor(merged_cu, dtype=torch.int64, device=idx.device)
+                if len(set(merged_lengths)) != 1:
+                    raise RuntimeError("KDA verify requires uniform rows per sequence")
                 idx = torch.tensor(merged_slots, dtype=torch.int64, device=idx.device)
-                num_seqs = idx.shape[0]
-                if _KDA_VERIFY_V2 or _KDA_VERIFY_V3:
-                    # Graph-shaped verify path: fixed-shape ops and device
-                    # tensors only (see _spec_verify_v2 / _spec_verify_v3).
-                    from fla_npu.ops.ascendc import recurrent_kda as _rk
-
-                    _fn = self._spec_verify_v3 if _KDA_VERIFY_V3 else self._spec_verify_v2
-                    return _fn(
-                        mixed_qkv, _materialized_gate(), raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
-                    )
-            else:
-                if _KDA_VERIFY_V3:
-                    _v3_states = self.__dict__.get("_kda_v3", {})
-                    if is_prefill:
-                        if idx is not None:
-                            self.disarm_kda_v3_slots(idx)
-                    elif (
-                        _v3_states.get(layer.layer_id, {}).get("ever_armed")
-                        and idx is not None
-                        and idx.numel() > 0
-                        and mixed_qkv.dim() == 3
-                        and mixed_qkv.shape[2] >= idx.numel()
-                        and mixed_qkv.shape[2] % idx.numel() == 0
-                    ):
-                        # Plain (rejection-bootstrap) step inside an open V3
-                        # chain: uniform path (rows_per_seq=1) advances the
-                        # single confirmed token in one fused call.
-                        from fla_npu.ops.ascendc import recurrent_kda as _rk
-
-                        return self._spec_verify_v3(
-                            mixed_qkv, _materialized_gate(), raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
-                        )
-                if _KDA_VERIFY_V2:
-                    _v2_states = self.__dict__.get("_kda_v2", {})
-                    if is_prefill:
-                        # Prefill restarts the chain from a fresh state —
-                        # per-slot, so concurrent decode sequences keep
-                        # their stashes.
-                        if idx is not None:
-                            self.disarm_kda_v2_slots(idx)
-                    elif (
-                        _v2_states.get(layer.layer_id, {}).get("ever_armed")
-                        and idx is not None
-                        and idx.numel() > 0
-                        and mixed_qkv.dim() == 3
-                        and mixed_qkv.shape[2] >= idx.numel()
-                        and mixed_qkv.shape[2] % idx.numel() == 0
-                    ):
-                        # Plain (rejection-bootstrap) step inside an open V2
-                        # chain: same protocol — advance the stashed rows,
-                        # chain this row read-only, re-stash it.
-                        from fla_npu.ops.ascendc import recurrent_kda as _rk
-
-                        return self._spec_verify_v2(
-                            mixed_qkv, _materialized_gate(), raw_beta, layer, idx, metadata, conv_cache, ssm_cache, _rk
-                        )
-                # Non-verify path (plain decode / prefill): states are
-                # committed wholesale the regular way, plus lazy-commit
-                # handshakes - but ONLY once this backend has seen a
-                # spec-verify batch, so a pure-decode engine (no MTP) keeps
-                # its exact pre-MTP behavior. (1) A reject interrupts the
-                # verify chain with a bootstrap plain step while the chain's
-                # last confirmed token is still stashed un-advanced - consume
-                # that stash FIRST (advance the live caches), or the token is
-                # silently lost from the linear state at every rejection.
-                # (2) A plain step with an open chain is processed
-                # READ-ONLY: its row is stashed and committed by the next
-                # verify's advance, so both its own output and the re-
-                # processed row0 in the next verify match a plain decode
-                # exactly (committing here would make the next verify's row0
-                # run from a state already containing it). (3) Other plain
-                # steps record a coverage marker (kv length, empty stash) so
-                # the next verify does not re-advance them. Prefill resets
-                # the chain (the slot restarts from a fresh state).
-                if not _MTP_FULL_COMMIT and not in_graph:
-                    _pending = getattr(self, "_mtp_pending", None)
-                    if _pending is None:
-                        _pending = {}
-                        self._mtp_pending = _pending
-                    _lp = _pending.setdefault(layer.layer_id, {})
-                    # NOTE: kv_seq_lens.tolist() / idx.tolist() are device->host
-                    # syncs forbidden on a captured stream; the graph path uses
-                    # static metadata and the capture-safe conv in the simple
-                    # path below, so this lazy-commit bookkeeping is eager-only.
-                    _kv_list = metadata.kv_seq_lens.tolist() if metadata.kv_seq_lens is not None else None
-                    _active = getattr(self, "_mtp_seen_verify", False)
-                    _cw = layer.conv1d.weight.squeeze(1)
-                    for s, slot in enumerate(idx.tolist()):
-                        slot = int(slot)
-                        if is_prefill or _kv_list is None or s >= len(_kv_list):
-                            _lp.pop(slot, None)
-                            continue
-                        prev = _lp.get(slot)
-                        if not _active or prev is None:
-                            _lp[slot] = (
-                                int(_kv_list[s]),
-                                mixed_qkv[:, :, 0:0],
-                                raw_gate_proj[:, 0:0],
-                                beta[:, 0:0],
-                                _cw,
-                                layer.activation,
-                            )
-                            continue
-                        (prev_base, prev_seg, prev_g, prev_b, _pw, _pact) = prev
-                        _m = int(_kv_list[s]) - 1 - prev_base
-                        if 0 < _m <= prev_seg.shape[2]:
-                            _cs = conv_cache[slot].transpose(0, 1).unsqueeze(0).contiguous()
-                            _cin = torch.cat([_cs, prev_seg[:, :, :_m]], dim=-1)
-                            _adv_qkv = _causal_conv1d_fn(
-                                _cin,
-                                _cw,
-                                layer.activation,
-                            )[:, :, -_m:]
-                            conv_cache[slot] = _cin[0, :, -conv_state_len:].transpose(0, 1)
-                            _sp = torch.split(_adv_qkv.transpose(1, 2), [qkv_dim] * 3, dim=-1)
-                            _, _st = recurrent_kda(
-                                _sp[0].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous(),
-                                _sp[1].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous(),
-                                _sp[2].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous(),
-                                prev_g[:, :_m].reshape(-1, num_heads_local, head_dim).to(torch.float32).contiguous(),
-                                prev_b[:, :_m].reshape(-1, num_heads_local).to(torch.float32).contiguous(),
-                                initial_state=ssm_cache[slot].unsqueeze(0),
-                                cu_seqlens=torch.tensor([0, _m], dtype=torch.int32, device=mixed_qkv.device),
-                                layout="TND",
-                                scale=1.0 / (head_dim**0.5),
-                                output_final_state=True,
-                                inplace_final_state=False,
-                                use_qk_l2norm_in_kernel=True,
-                                use_gate_in_kernel=False,
-                                use_beta_sigmoid_in_kernel=False,
-                                state_v_first=True,
-                            )
-                            ssm_cache[slot] = _st[0].to(ssm_cache.dtype)
-                        if 0 <= _m <= prev_seg.shape[2]:
-                            # Open chain: read-only plain; stash at the
-                            # tail write-back.
-                            _lp.pop(slot, None)
-                            chain_seqs[s] = slot
-                            continue
-                        _lp[slot] = (
-                            int(_kv_list[s]),
-                            mixed_qkv[:, :, 0:0],
-                            raw_gate_proj[:, 0:0],
-                            beta[:, 0:0],
-                            _cw,
-                            layer.activation,
-                        )
-            if (
-                not _MTP_FULL_COMMIT
-                and merged_q_cu is not None
-                and not in_graph
-                and not _KDA_NO_COORD
-                and getattr(self, "_mtp_pending", None)
-                and layer.layer_id == min(self._mtp_pending.keys())
+            if per_row_idx is not None or (
+                not is_prefill
+                and self._kda_verify_width > 1
+                and idx.numel() > 0
+                and mixed_qkv.dim() == 3
+                and mixed_qkv.shape[2] >= idx.numel()
+                and mixed_qkv.shape[2] % idx.numel() == 0
             ):
-                # Batched cross-layer lazy advance. Every KDA layer's
-                # verify-step advance is independent (own weights/states,
-                # same confirmed-token count), so the FIRST KDA layer of the
-                # step advances them ALL here - one conv per layer plus ONE
-                # recurrent_kda for the whole batch - instead of one extra
-                # recurrent call inside each layer (~33 extra kernel
-                # launches per step otherwise). The coordinator runs before
-                # any layer reads the caches, so every layer (including this
-                # one) reads its already-advanced state below. Non-consumable
-                # entries (coverage markers, m == 0 open chains) are left in
-                # place for the per-layer logic.
-                _slot_base = {}
-                _kv_all = metadata.kv_seq_lens.tolist() if metadata.kv_seq_lens is not None else None
-                if _kv_all is not None:
-                    for _si, _sl in enumerate(idx.tolist()):
-                        _slot_base.setdefault(int(_sl), _kv_all[merged_row0[_si]] - 1)
-                _bq, _bk, _bv, _bg, _bb = [], [], [], [], []
-                _b_init, _b_scatter = [], []
-                _b_cu = [0]
-                for _lid, _lp2 in self._mtp_pending.items():
-                    _lc = self._kv_caches[_lid]
-                    for _sl, (_pb, _seg, _pg, _pbeta, _pw, _pact) in list(_lp2.items()):
-                        _base = _slot_base.get(_sl)
-                        if _base is None:
-                            continue
-                        _bm = _base - _pb
-                        if not (0 < _bm <= _seg.shape[2]):
-                            continue
-                        del _lp2[_sl]
-                        _cs = _lc.conv[_sl].transpose(0, 1).unsqueeze(0).contiguous()
-                        _cin = torch.cat([_cs, _seg[:, :, :_bm]], dim=-1)
-                        _cout = _causal_conv1d_fn(_cin, _pw, _pact)[:, :, -_bm:]
-                        _lc.conv[_sl] = _cin[0, :, -conv_state_len:].transpose(0, 1)
-                        _sp = torch.split(_cout.transpose(1, 2), [qkv_dim] * 3, dim=-1)
-                        _bq.append(_sp[0].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16))
-                        _bk.append(_sp[1].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16))
-                        _bv.append(_sp[2].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16))
-                        _bg.append(_pg[:, :_bm].reshape(-1, num_heads_local, head_dim).to(torch.float32))
-                        _bb.append(_pbeta[:, :_bm].reshape(-1, num_heads_local).to(torch.float32))
-                        _b_init.append(_lc.ssm[_sl].unsqueeze(0))
-                        _b_scatter.append((_lid, _sl))
-                        _b_cu.append(_b_cu[-1] + _bm)
-                if _bq:
-                    _, _bst = recurrent_kda(
-                        torch.cat(_bq).contiguous(),
-                        torch.cat(_bk).contiguous(),
-                        torch.cat(_bv).contiguous(),
-                        torch.cat(_bg).contiguous(),
-                        torch.cat(_bb).contiguous(),
-                        initial_state=torch.cat(_b_init, dim=0).contiguous(),
-                        cu_seqlens=torch.tensor(_b_cu, dtype=torch.int32, device=mixed_qkv.device),
-                        layout="TND",
-                        scale=1.0 / (head_dim**0.5),
-                        output_final_state=True,
-                        inplace_final_state=False,
-                        use_qk_l2norm_in_kernel=True,
-                        use_gate_in_kernel=False,
-                        use_beta_sigmoid_in_kernel=False,
-                        state_v_first=True,
-                    )
-                    for _bi, (_lid, _sl) in enumerate(_b_scatter):
-                        self._kv_caches[_lid].ssm[_sl] = _bst[_bi].to(self._kv_caches[_lid].ssm.dtype)
-            # Direct read is only valid before any spec-verify row merge. Once
-            # merged_q_cu is set, idx has one slot per sequence while read_idx
-            # still describes the original per-row metadata.
-            state_read_idx = idx
-            if read_idx is not None and is_prefill and merged_q_cu is None:
-                state_read_idx = read_idx
+                return self._spec_verify(
+                    mixed_qkv,
+                    forget_gate.gate_from_raw(raw_gate_proj),
+                    beta,
+                    layer_id,
+                    conv1d,
+                    activation,
+                    idx,
+                    metadata,
+                    conv_cache,
+                    ssm_cache,
+                    recurrent_kda,
+                )
+            if is_prefill:
+                self._disarm_slots(idx)
+            state_read_idx = read_idx if is_prefill else idx
             conv_i = conv_cache.index_select(0, state_read_idx)
             conv_i = conv_i.transpose(1, 2).contiguous()
             ssm_i = ssm_cache.index_select(0, state_read_idx)
@@ -571,41 +400,19 @@ class KdaLinearAttentionMixin:
                 conv_i.masked_fill_(cold.view(num_seqs, 1, 1), 0)
                 ssm_i.masked_fill_(cold.view(num_seqs, 1, 1, 1), 0)
             conv_state, ssm_state = conv_i, ssm_i.contiguous()
-            if chain_seqs:
-                # Entry snapshots (post consume-advance) for the read-only
-                # plain chain rows: restored at the tail write-back so this
-                # step's own token is not committed here.
-                _entry_conv = {i: conv_state[i].clone() for i in chain_seqs}
-                _entry_ssm = {i: ssm_state[i].clone() for i in chain_seqs}
-
-        conv_weight = layer.conv1d.weight.squeeze(1)
-        activation = layer.activation
+        conv_weight = conv1d.weight.squeeze(1)
         scale = 1.0 / (head_dim**0.5)
-        # Route on metadata, not seq_len: MTP/spec decode can carry multiple
+        # Route on metadata, not seq_len: speculative decode can carry multiple
         # tokens per sequence (seq_len > 1) but is still a decode step; the
         # seq_len heuristic would wrongly send it to the chunked prefill path.
         device = mixed_qkv.device
-        # Spec-verify (merged same-slot rows) commits lazily via the
-        # kv-delta scheme in the flattened branch; see the comments there.
-        commit_first_only = False
-        # A merged spec-verify batch must take the flattened branch even when
-        # it collapses to ONE sequence (single-stream verify: 2 rows -> 1
-        # merged seq == batch_size): the simple path full-commits both rows,
-        # which inserts a phantom draft token into the state on every
-        # rejection (the corrected token overwrites the draft's position, so
-        # only the bonus row of the previous step is confirmable here - see
-        # the lazy-commit scheme below).
-        if num_seqs == batch_size and merged_q_cu is None:
+        if num_seqs == batch_size:
             # Simple path: mixed_qkv is already [B, conv_dim, S] (one sequence
             # per batch row, or a single flattened sequence).
             if seq_len == 1:
                 if in_graph:
                     # F.conv1d is an aclop NPUGraph cannot capture; the manual
                     # depthwise mul-add is capture-safe. Eager keeps F.conv1d.
-                    from xllm.python.models.glm5_next import (
-                        _causal_conv1d_update_graph,
-                    )
-
                     mixed_qkv = _causal_conv1d_update_graph(mixed_qkv, conv_state, conv_weight, activation)
                 else:
                     mixed_qkv = _causal_conv1d_update(mixed_qkv, conv_state, conv_weight, activation)
@@ -621,197 +428,34 @@ class KdaLinearAttentionMixin:
                     )
         else:
             # Flattened multi-sequence: mixed_qkv is [1, conv_dim, T] (T = sum
-            # of per-seq token counts). Variable-length (MTP/spec decode: each
+            # of per-seq token counts). Variable-length (speculative decode: each
             # sequence may carry a different token count) is supported by a
             # per-sequence conv1d loop (pure-torch F.conv1d is batched and
             # requires equal lengths) followed by a single varlen recurrent_kda
             # call (cu_seqlens does the per-seq split inside the kernel).
-            q_cu = merged_q_cu if merged_q_cu is not None else (metadata.q_cu_seq_lens)
+            q_cu = metadata.q_cu_seq_lens
             assert q_cu is not None, "multi-sequence linear attention needs q_cu_seq_lens"
             q_cu = q_cu.to(torch.int64)
             q_cu_list = q_cu.tolist()
-            commit_first_only = merged_q_cu is not None
-            if commit_first_only:
-                # First spec-verify batch arms the plain-step handshakes (a
-                # pure-decode backend never sets this and keeps the exact
-                # pre-MTP plain-path behavior).
-                self._mtp_seen_verify = True
-                # ---- MTP spec-verify steps (observed layout, k=1) ----
-                # Rows are [last-confirmed token (re-processed each step to
-                # judge the next draft), drafted token]; the C++ commits
-                # exactly one token per step (the draft on accept, the
-                # corrected argmax on reject) and the next step's row0 is
-                # that token at the previous row1's position, so kv grows
-                # +1 per step. Alternative scheme (full,
-                # GLM5_MTP_COMMIT=full): commit BOTH rows every step - the
-                # row0 re-write is near-idempotent under the delta rule but
-                # a rejected draft leaves a persistent phantom write.
-                #
-                # Default scheme (lazy, see _MTP_FULL_COMMIT): commit
-                # NOTHING here; (1) ADVANCE the live state by the PREVIOUS
-                # step's confirmed tokens - their count m (kv_seq_lens
-                # growth over the previous verify) with the stashed raw
-                # qkv/gate rows; (2) process the current rows read-only
-                # (outputs only); (3) stash the current rows for the next
-                # step's advance. The state then tracks the true token
-                # stream exactly, independent of accept/reject.
-                kv_rows = metadata.kv_seq_lens.tolist()
-                pending = getattr(self, "_mtp_pending", None)
-                if pending is None:
-                    pending = {}
-                    self._mtp_pending = pending
-                # The stash is PER LAYER: all KDA layers of a model share this
-                # backend instance, and each layer's stashed qkv/gate rows are
-                # only valid for that layer's own conv/recurrent advance.
-                # Keying by slot alone made every layer overwrite the others'
-                # stashes (layer N's advance consumed the last layer's rows -
-                # total state corruption under multi-layer models).
-                pending = pending.setdefault(layer.layer_id, {})
-                live_slots = {int(x) for x in idx.tolist()}
-                for slot in list(pending.keys()):
-                    if slot not in live_slots:
-                        del pending[slot]
-                mat_gate = _materialized_gate()
-                adv_seg: list = []  # raw qkv [1, conv_dim, m]
-                adv_g: list = []
-                adv_b: list = []
-                adv_seq: list = []  # merged-seq index per segment
-                for s in range(num_seqs):
-                    slot = int(idx[s])
-                    t0, t1 = q_cu_list[s], q_cu_list[s + 1]
-                    base_now = int(kv_rows[merged_row0[s]]) - 1
-                    prev = pending.get(slot)
-                    lead = 0
-                    if prev is not None and not _MTP_FULL_COMMIT:
-                        (prev_base, prev_seg, prev_g, prev_b, _pw, _pact) = prev
-                        m = base_now - prev_base
-                        if 0 < m <= prev_seg.shape[2]:
-                            adv_seg.append(prev_seg[:, :, :m])
-                            adv_g.append(prev_g[:, :m])
-                            adv_b.append(prev_b[:, :m])
-                            adv_seq.append(s)
-                        # Rows already covered by the recorded coverage
-                        # (e.g. the plain step before the first verify) must
-                        # not be stashed again - trim them off the front.
-                        lead = max(0, min(prev_base - base_now, t1 - t0))
-                    if not _MTP_FULL_COMMIT:
-                        pending[slot] = (
-                            base_now + lead,
-                            mixed_qkv[:, :, t0 + lead : t1].clone(),
-                            mat_gate[:, t0 + lead : t1].clone(),
-                            beta[:, t0 + lead : t1].clone(),
-                            conv_weight,
-                            activation,
-                        )
-                if adv_seg:
-                    # conv-advance each segment sequentially (per slot) and
-                    # collect post-conv qkv for the recurrent advance.
-                    adv_conv_out = []
-                    for s, seg_raw in zip(adv_seq, adv_seg):
-                        cs = conv_state[s : s + 1].contiguous()
-                        seg_raw = seg_raw.contiguous()
-                        cin = torch.cat([cs, seg_raw], dim=-1)
-                        adv_conv_out.append(_causal_conv1d_fn(cin, conv_weight, activation)[:, :, -seg_raw.shape[2] :])
-                        conv_state[s] = cin[0, :, -conv_state_len:]
-                    adv_qkv = torch.cat(adv_conv_out, dim=-1)
-                    a_lengths = [seg.shape[2] for seg in adv_seg]
-                    a_cu = [0]
-                    for length in a_lengths:
-                        a_cu.append(a_cu[-1] + length)
-                    a_split = torch.split(adv_qkv.transpose(1, 2), [qkv_dim] * 3, dim=-1)
-                    aq = a_split[0].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
-                    ak = a_split[1].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
-                    av = a_split[2].reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
-                    ag = torch.cat(adv_g, dim=1).reshape(-1, num_heads_local, head_dim).to(torch.float32).contiguous()
-                    ab = torch.cat(adv_b, dim=1).reshape(-1, num_heads_local).to(torch.float32).contiguous()
-                    adv_idx = torch.tensor(adv_seq, dtype=torch.long, device=ssm_state.device)
-                    if _KDA_SEQWISE and len(adv_seq) > 1:
-                        # Same seq-wise rationale as the read-only branch: keep
-                        # every advance call at the single-sequence shape so
-                        # concurrent batches advance state bit-identically to a
-                        # single-request run.
-                        for _si, _slot in enumerate(adv_seq):
-                            _a0, _a1 = a_cu[_si], a_cu[_si + 1]
-                            _asel = slice(int(_a0), int(_a1))
-                            _, _st = recurrent_kda(
-                                aq[_asel].contiguous(),
-                                ak[_asel].contiguous(),
-                                av[_asel].contiguous(),
-                                ag[_asel].contiguous(),
-                                ab[_asel].contiguous(),
-                                initial_state=ssm_state.index_select(0, adv_idx[[_si]]),
-                                cu_seqlens=torch.tensor([0, int(_a1 - _a0)], dtype=torch.int32, device=device),
-                                layout="TND",
-                                scale=scale,
-                                output_final_state=True,
-                                inplace_final_state=False,
-                                use_qk_l2norm_in_kernel=True,
-                                use_gate_in_kernel=False,
-                                use_beta_sigmoid_in_kernel=False,
-                                state_v_first=True,
-                            )
-                            ssm_state[adv_idx[_si]] = _st.to(ssm_state.dtype)
-                    else:
-                        _, adv_state = recurrent_kda(
-                            aq,
-                            ak,
-                            av,
-                            ag,
-                            ab,
-                            initial_state=ssm_state.index_select(0, adv_idx),
-                            cu_seqlens=torch.tensor(a_cu, dtype=torch.int32, device=device),
-                            layout="TND",
-                            scale=scale,
-                            output_final_state=True,
-                            inplace_final_state=False,
-                            use_qk_l2norm_in_kernel=True,
-                            use_gate_in_kernel=False,
-                            use_beta_sigmoid_in_kernel=False,
-                            state_v_first=True,
-                        )
-                        ssm_state[adv_idx] = adv_state.to(ssm_state.dtype)
-                outs = []
-                for s in range(num_seqs):
-                    t0, t1 = q_cu_list[s], q_cu_list[s + 1]
-                    seg = mixed_qkv[:, :, t0:t1].contiguous()
-                    # contiguous: a row-view of the batched cache has a
-                    # different layout than a single-request's whole cache
-                    # and the conv kernel picks its tiling off that layout.
-                    cs = conv_state[s : s + 1].contiguous()
+            outs = []
+            for s in range(num_seqs):
+                t0, t1 = q_cu_list[s], q_cu_list[s + 1]
+                seg = mixed_qkv[:, :, t0:t1]  # [1, conv_dim, seg_len]
+                cs = conv_state[s : s + 1]  # [1, conv_dim, state_len]
+                seg_len = t1 - t0
+                if seg_len == 1:
+                    outs.append(_causal_conv1d_update(seg, cs, conv_weight, activation))
+                else:
                     cin = torch.cat([cs, seg], dim=-1)
-                    outs.append(
-                        _causal_conv1d_fn(
-                            cin,
-                            conv_weight,
-                            activation,
-                        )[:, :, -(t1 - t0) :]
-                    )
-                    if _MTP_FULL_COMMIT:
-                        # Full-commit scheme keeps the live conv state at the
-                        # tail of BOTH rows (mirrors the pre-merge simple
-                        # path); lazy mode leaves it at the advance boundary.
-                        conv_state[s] = cin[0, :, -conv_state_len:]
-                mixed_qkv = torch.cat(outs, dim=-1)
-            else:
-                outs = []
-                for s in range(num_seqs):
-                    t0, t1 = q_cu_list[s], q_cu_list[s + 1]
-                    seg = mixed_qkv[:, :, t0:t1]  # [1, conv_dim, seg_len]
-                    cs = conv_state[s : s + 1]  # [1, conv_dim, state_len]
-                    seg_len = t1 - t0
-                    if seg_len == 1:
-                        outs.append(_causal_conv1d_update(seg, cs, conv_weight, activation))
-                    else:
-                        cin = torch.cat([cs, seg], dim=-1)
-                        outs.append(_causal_conv1d_fn(cin, conv_weight, activation)[:, :, -seg_len:])
-                        conv_state[s] = cin[0, :, -conv_state_len:]
-                        if conv_state.shape[-1] < conv_state_len:
-                            conv_state[s] = F.pad(
-                                conv_state[s],
-                                (conv_state_len - conv_state.shape[-1], 0),
-                                value=0,
-                            )
-                mixed_qkv = torch.cat(outs, dim=-1)  # [1, conv_dim, T]
+                    outs.append(_causal_conv1d_fn(cin, conv_weight, activation)[:, :, -seg_len:])
+                    conv_state[s] = cin[0, :, -conv_state_len:]
+                    if conv_state.shape[-1] < conv_state_len:
+                        conv_state[s] = F.pad(
+                            conv_state[s],
+                            (conv_state_len - conv_state.shape[-1], 0),
+                            value=0,
+                        )
+            mixed_qkv = torch.cat(outs, dim=-1)  # [1, conv_dim, T]
             # TND packed layout for recurrent_kda: [T, nh, hd] per channel group.
             seq_len = int(q_cu_list[-1])
             hidden_shape = (1, seq_len, -1, head_dim)
@@ -831,14 +475,12 @@ class KdaLinearAttentionMixin:
         # fla_npu KDA ops require fp32 gate/beta (the pure-torch reference also
         # upcasts them); the model hands them in bf16.
         b = beta.to(torch.float32)
-        # Verify masks need materialized gates: gate == 0 leaves state unchanged.
-        # AscendC safe-gate fusion supports lower bounds in [-5, 0).
-        fuse_gate = merged_q_cu is None and gate_lb is not None and -5.0 <= gate_lb < 0.0
-        g = (raw_gate_proj if fuse_gate else _materialized_gate()).view(hidden_shape).to(torch.float32)
+        fuse_gate = gate_lb is not None and -5.0 <= gate_lb < 0.0
+        g = (raw_gate_proj if fuse_gate else forget_gate.gate_from_raw(raw_gate_proj)).view(hidden_shape).float()
         _gate_kwargs = (
             {
-                "A_log": fg.A_log.contiguous(),
-                "dt_bias": fg.dt_bias.contiguous(),
+                "A_log": forget_gate.A_log.contiguous(),
+                "dt_bias": forget_gate.dt_bias.contiguous(),
                 "use_gate_in_kernel": True,
                 "safe_gate": True,
                 "lower_bound": gate_lb,
@@ -847,7 +489,7 @@ class KdaLinearAttentionMixin:
             else {"use_gate_in_kernel": False}
         )
         if not is_prefill:
-            # decode (incl. MTP multi-token-per-seq varlen): recurrent_kda on
+            # decode (incl. multi-token speculative varlen): recurrent_kda on
             # packed TND [T, nh, hd] with cu_seqlens.
             q_tnd = query.reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
             k_tnd = key.reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
@@ -870,92 +512,26 @@ class KdaLinearAttentionMixin:
                     cu_seqlens = torch.arange(num_seqs + 1, dtype=torch.int32, device=device)
             else:
                 cu_seqlens = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
-            if commit_first_only and not _MTP_FULL_COMMIT:
-                # Spec-verify: the state was already ADVANCED by the
-                # previous step's confirmed tokens (see the flattened
-                # branch). Chain the current rows read-only from that state
-                # for their outputs; the tail write-back persists exactly
-                # the advanced state (never the drafted rows).
-                # state_v_first=True matches the V-first accumulation order of
-                # the KDA reference and the prefill/advance paths so every
-                # read here is layout-consistent with the advanced state.
-                # inplace_final_state stays False on purpose: the lazy-advance
-                # scheme owns ssm_state mutations (advance step writes, verify
-                # reads); an in-place write here would clobber the advanced
-                # state before the tail write-back persists it.
-                if _KDA_SEQWISE and num_seqs > 1 and num_seqs != batch_size:
-                    # Seq-wise dispatch: one single-segment recurrent call per
-                    # sequence, exactly matching the single-request verify call
-                    # shape. The flattened multi-segment call picks a different
-                    # device tiling inside the engine process (verified
-                    # bit-exact offline but not in-process), leaking a 1-ULP
-                    # drift into the KDA output that the next layer's mHC
-                    # sinkhorn amplifies ~16x per layer until argmax flips —
-                    # concurrent outputs then diverge from single-request ones.
-                    _ros = []
-                    for s in range(num_seqs):
-                        _t0, _t1 = q_cu_list[s], q_cu_list[s + 1]
-                        _sel = slice(int(_t0), int(_t1))
-                        _ro = recurrent_kda(
-                            q_tnd[_sel].contiguous(),
-                            k_tnd[_sel].contiguous(),
-                            v_tnd[_sel].contiguous(),
-                            g_tnd[_sel].contiguous(),
-                            b_tnd[_sel].contiguous(),
-                            initial_state=ssm_state[s : s + 1].contiguous(),
-                            cu_seqlens=torch.tensor([0, int(_t1 - _t0)], dtype=torch.int32, device=device),
-                            layout="TND",
-                            scale=scale,
-                            output_final_state=False,
-                            inplace_final_state=False,
-                            use_qk_l2norm_in_kernel=True,
-                            use_gate_in_kernel=False,
-                            use_beta_sigmoid_in_kernel=False,
-                            state_v_first=True,
-                        )
-                        _ros.append(_ro[0] if isinstance(_ro, tuple) else _ro)
-                    core_attn_out = torch.cat(_ros, dim=0)
-                    final_state = ssm_state
-                else:
-                    ro = recurrent_kda(
-                        q_tnd,
-                        k_tnd,
-                        v_tnd,
-                        g_tnd,
-                        b_tnd,
-                        initial_state=ssm_state,
-                        cu_seqlens=cu_seqlens,
-                        layout="TND",
-                        scale=scale,
-                        output_final_state=False,
-                        inplace_final_state=False,
-                        use_qk_l2norm_in_kernel=True,
-                        use_gate_in_kernel=False,
-                        use_beta_sigmoid_in_kernel=False,
-                        state_v_first=True,
-                    )
-                    # fla_npu returns a tuple even with
-                    # output_final_state=False.
-                    core_attn_out = ro[0] if isinstance(ro, tuple) else ro
-                    final_state = ssm_state
-            else:
-                core_attn_out, final_state = recurrent_kda(
-                    q_tnd,
-                    k_tnd,
-                    v_tnd,
-                    g_tnd,
-                    b_tnd,
-                    initial_state=ssm_state,
-                    cu_seqlens=cu_seqlens,
-                    layout="TND",
-                    scale=scale,
-                    output_final_state=True,
-                    inplace_final_state=False,
-                    use_qk_l2norm_in_kernel=True,
-                    use_beta_sigmoid_in_kernel=False,
-                    state_v_first=True,
-                    **_gate_kwargs,
-                )
+            # Plain decode hot path: fuse the safe-gate into the
+            # kernel when the model handed a raw projection (``_gate_kwargs``
+            # / ``g_raw_tnd``); else keep the python-materialized gate.
+            core_attn_out, final_state = recurrent_kda(
+                q_tnd,
+                k_tnd,
+                v_tnd,
+                g_tnd,
+                b_tnd,
+                initial_state=ssm_state,
+                cu_seqlens=cu_seqlens,
+                layout="TND",
+                scale=scale,
+                output_final_state=True,
+                inplace_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+                use_beta_sigmoid_in_kernel=False,
+                state_v_first=True,
+                **_gate_kwargs,
+            )
             # recurrent_kda returns the packed TND [T, nh, hd] layout of its
             # inputs; restore the [B, S, nh, hd] grouping the model layer
             # expects (o_norm gates per head). For T == 1 the flat layout
@@ -972,7 +548,7 @@ class KdaLinearAttentionMixin:
                 if num_seqs != batch_size
                 else torch.tensor([0, seq_len], dtype=torch.int32, device=device)
             )
-            if _KDA_SEQWISE and cu_seqlens.numel() > 2:
+            if cu_seqlens.numel() > 2:
                 # Seq-wise prefill: one single-sequence chunk_kda_fwd per
                 # sequence. A merged multi-sequence prefill (engine batches the
                 # concurrent requests' prefills) leaves per-seq conv/ssm state
@@ -1036,37 +612,6 @@ class KdaLinearAttentionMixin:
                 final_state = result[1]
 
         if idx is not None:
-            if chain_seqs:
-                # Read-only plain chain rows: restore the entry (post
-                # consume-advance) state and stash this step's own raw rows;
-                # the next verify's advance commits them exactly once.
-                _pend = self._mtp_pending[layer.layer_id]
-                _kv_tail = metadata.kv_seq_lens.tolist() if metadata.kv_seq_lens is not None else None
-                # chain_seqs is only populated on the eager MTP coordination
-                # path (host-sync bookkeeping, never in-graph), so raw_gate_proj
-                # is un-transposed here and the materialized gate shares its
-                # layout.
-                mat_gate = _materialized_gate()
-                for i, slot in chain_seqs.items():
-                    conv_state[i] = _entry_conv[i]
-                    final_state[i] = _entry_ssm[i]
-                    if num_seqs != batch_size:
-                        t0, t1 = q_cu_list[i], q_cu_list[i + 1]
-                        seg = raw_mixed[:, :, t0:t1]
-                        gseg = mat_gate[:, t0:t1]
-                        bseg = raw_beta[:, t0:t1]
-                    else:
-                        seg = raw_mixed[i : i + 1]
-                        gseg = mat_gate[i : i + 1]
-                        bseg = raw_beta[i : i + 1]
-                    _pend[slot] = (
-                        int(_kv_tail[i]) - seg.shape[2],
-                        seg.clone(),
-                        gseg.clone(),
-                        bseg.clone(),
-                        layer.conv1d.weight.squeeze(1),
-                        layer.activation,
-                    )
             conv_cache.index_copy_(0, idx, conv_state.transpose(1, 2).contiguous())
             ssm_cache.index_copy_(0, idx, final_state.float().contiguous())
         # multi-seq path reshaped mixed_qkv to [num_seqs, ...]; flatten the
@@ -1081,3 +626,197 @@ class KdaLinearAttentionMixin:
             # broadcasting.
             core_attn_out = core_attn_out.transpose(0, 1)
         return core_attn_out
+
+    def _spec_verify(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        layer_id: int,
+        conv1d: torch.nn.Conv1d,
+        activation: str,
+        idx: torch.Tensor,
+        metadata: AttentionMetadata,
+        conv_cache: torch.Tensor,
+        ssm_cache: torch.Tensor,
+        recurrent_kda: Callable[..., Any],
+    ) -> torch.Tensor:
+        """Fused multi-slot speculative verify / plain-step path for KDA layers.
+
+        The default KDA verify path uses the fused in-kernel-spec contract:
+        a persistent per-layer combined ``[base | draft]`` state pool
+        and a single ``recurrent_kda`` call per layer that advances BOTH the
+        confirmed (base) and draft (draft) tokens in one multi-token pass,
+        writing each token's resulting state to its own slot so both outcomes
+        survive to the next step (no stash, no host selection, no per-tap conv
+        decomposition of the recurrent state).
+
+        Correctness invariants (see docs/mtp_graph_verify_design.md / B8):
+        - The fla_npu ``aclnnRecurrentKda`` kernel writes each token ``seq_i``'s
+          state to ``ssm_state_indices[seq_i]`` (per-token-slot writeback,
+          recurrent_kda.h CopyOutState). With
+          ``ssm_state_indices = [base, base+N]`` (1D packed per seq), processing
+          ``[b, d]`` writes after-b -> base slot, after-d -> draft slot; after-b
+          is preserved so rejection (next-step num_accepted=1) resumes from it.
+        - ``num_accepted_tokens=1`` always resumes from the base slot, which
+          holds the *selected* running state (after-b from a rejection, or
+          after-d copied base<-draft when the previous draft was accepted).
+          The selection uses device-side slot gathers independently of the
+          current step's width, not a host branch.
+        - Pools use the configured maximum decoding width so changing widths
+          never reallocates storage referenced by captured graphs. Cumulative
+          lengths are cached by both sequence count and current width.
+        - The C++ conv/ssm pools remain the source of truth for plain/prefill
+          steps: at verify entry the committed running state is copied into
+          the combined base region; at exit after-b (always accepted) is
+          committed back, so a plain step sees the correct state.
+        - Conv state is handled the same dual-slot way with the combined conv
+          pool; the conv itself reuses the proven bit-exact per-tap mul-add
+          (``_causal_conv1d_graph_multi``) — graph-capturable, no aclop conv.
+        """
+        device = mixed_qkv.device
+        num_seqs = idx.shape[0]
+        rows_per_seq = mixed_qkv.shape[2] // num_seqs  # 2 verify, 1 plain
+        if not 1 <= rows_per_seq <= self._kda_verify_width:
+            raise ValueError(
+                f"KDA verify width {rows_per_seq} exceeds configured decoding width {self._kda_verify_width}"
+            )
+        head_dim = gate.shape[-1]
+        nh = gate.shape[-2]
+        qkv_dim = nh * head_dim
+        conv_dim = conv1d.out_channels
+        conv_state_len = conv1d.kernel_size[0] - 1
+        scale = 1.0 / (head_dim**0.5)
+        conv_weight = conv1d.weight.squeeze(1)
+        in_graph = in_acl_graph()
+        nslots = conv_cache.shape[0]  # C++ pool capacity
+
+        if (states := self.__dict__.get("_kda_state")) is None:
+            states = self._kda_state = {}
+        if (st := states.get(layer_id)) is None:
+            st = states[layer_id] = {}
+        if "armed_buf" not in st:
+            pool_slots = self._kda_verify_width * nslots
+            st["combined_conv"] = torch.zeros(
+                pool_slots, conv_state_len, conv_dim, dtype=conv_cache.dtype, device=device
+            )
+            st["combined_ssm"] = torch.zeros(pool_slots, nh, head_dim, head_dim, dtype=ssm_cache.dtype, device=device)
+            st["kv_prev"] = torch.zeros(nslots, dtype=torch.int64, device=device)
+            st["armed_buf"] = torch.zeros(nslots, dtype=torch.bool, device=device)
+        combined_conv = st["combined_conv"]
+        combined_ssm = st["combined_ssm"]
+        kv_prev = st["kv_prev"]
+        armed_buf = st["armed_buf"]
+
+        # ---- per-step m (previous accepted count = kv growth) ----
+        # (base_now, m) is recomputed from the live kv_seq_lens on every call
+        # and must NOT be cached across steps: the scheduler reuses the same
+        # kv_seq_lens host buffer, so a (data_ptr, num_seqs) key repeats every
+        # step while the per-seq lengths GROW — a cached (base_now, m) would
+        # mis-select the conv/ssm boundary slot and diverge output under
+        # temp=0 + HCCL_DETERMINISTIC. The cost is a handful of cheap host->dev
+        # + index_select ops per step.
+        expanded = resolve_expanded_decode_metadata(metadata)
+        kv_src = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
+        if kv_src is None:
+            raise RuntimeError("KDA verify requires per-row KV sequence lengths")
+        kv_rows = kv_src.to(device=device, dtype=torch.int64)
+        base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
+        armed_h = armed_buf.index_select(0, idx)
+        kv_prev_h = kv_prev.index_select(0, idx)
+        accepted_counts = torch.where(
+            armed_h,
+            (base_now - kv_prev_h).clamp(min=1, max=self._kda_verify_width),
+            torch.ones_like(base_now),
+        )
+
+        idx64 = idx if idx.dtype == torch.int64 else idx.to(torch.int64)
+        idx32 = idx64.to(torch.int32)
+
+        # ---- 1) committed running state (C++ pool) -> combined base ----
+        combined_conv[:nslots].index_copy_(0, idx64, conv_cache.index_select(0, idx64))
+        combined_ssm[:nslots].index_copy_(0, idx64, ssm_cache.index_select(0, idx64))
+
+        slot_offsets = torch.arange(rows_per_seq, dtype=torch.int32, device=device) * nslots
+        ssm_state_indices = (idx32.view(-1, 1) + slot_offsets.view(1, -1)).reshape(-1)
+        qsl_key = (num_seqs, rows_per_seq)
+        if "qsl_buf" not in st:
+            st["qsl_buf"] = {}
+        qsl_buf = st["qsl_buf"].get(qsl_key)
+        if qsl_buf is None:
+            qsl_buf = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * rows_per_seq
+            st["qsl_buf"][qsl_key] = qsl_buf
+
+        # ---- 2) conv-boundary select (slot m-1: prev last-accepted state) ----
+        # Boundary = running conv state after the previous step's last accepted
+        # token = slot (m-1) per seq (0=base/reject, 1=draft0 accept, ...,
+        # R-1=all-accepted). Generalizes the legacy 2-way where(m2, draft, base).
+        boundary_slot = idx64 + (accepted_counts - 1) * nslots
+        sel_conv = combined_conv.index_select(0, boundary_slot)  # [S, Ks, C]
+        combined_ssm.index_copy_(0, idx64, combined_ssm.index_select(0, boundary_slot))
+
+        # ---- 3) conv (per-tap, bit-exact, graph-capturable) ----
+        cache_boundary = sel_conv.transpose(1, 2).contiguous()  # [S, C, Ks]
+        x = mixed_qkv.reshape(conv_dim, num_seqs, rows_per_seq).permute(1, 0, 2).contiguous()
+        cin = torch.cat([cache_boundary.to(x.dtype), x], dim=-1)
+        if in_graph:
+            conv_out = _causal_conv1d_graph_multi(cin, conv_weight, rows_per_seq, activation)
+        else:
+            _cin_c = cin.to(conv_weight.dtype).contiguous()
+            _cw = conv_weight.unsqueeze(1).contiguous()
+            conv_out = torch.nn.functional.conv1d(
+                _cin_c,
+                _cw,
+                bias=None,
+                padding=conv_state_len,
+                groups=conv_dim,
+            )[..., conv_state_len : conv_state_len + rows_per_seq]
+            if activation == "silu":
+                conv_out = torch.nn.functional.silu(conv_out)
+            conv_out = conv_out.to(x.dtype)
+        # multi-tail conv_state: slot j (0=base ... R-1=last draft) <- window
+        # ending after token j. For R==2 this is base<-tail_b / draft1<-tail_full
+        # (== legacy dual-tail); for R==1 only base is written (a plain step's
+        # next verify has m=1 -> base, so draft slots are never read).
+        for j in range(rows_per_seq):
+            tail_j = cin[..., (j + 1) : (j + 1) + conv_state_len].transpose(1, 2).contiguous()
+            combined_conv.index_copy_(0, idx64 + j * nslots, tail_j)
+
+        # ---- 4) split conv_out -> q/k/v; gate/beta -> g/b (TND, [T,nh,hd]) ----
+        c_split = conv_out.transpose(1, 2).split(qkv_dim, dim=-1)
+        q = c_split[0].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        k = c_split[1].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        v = c_split[2].reshape(-1, nh, head_dim).to(torch.bfloat16)
+        g_flat = gate.reshape(num_seqs * rows_per_seq, nh, head_dim).to(torch.float32)
+        b_flat = beta.reshape(num_seqs * rows_per_seq, nh).to(torch.float32)
+
+        # ---- 5) fused multi-slot recurrent: advance [b, d0, ..., d{R-1}] ----
+        ret = recurrent_kda(
+            q,
+            k,
+            v,
+            g_flat,
+            b_flat,
+            initial_state=combined_ssm,
+            cu_seqlens=qsl_buf,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=torch.ones_like(idx32),
+            layout="TND",
+            scale=scale,
+            output_final_state=True,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+            state_v_first=True,
+        )
+        core_out = ret[0] if isinstance(ret, tuple) else ret
+
+        # ---- 6) commit after-b (always accepted) -> C++ source of truth ----
+        conv_cache.index_copy_(0, idx64, combined_conv[:nslots].index_select(0, idx64))
+        ssm_cache.index_copy_(0, idx64, combined_ssm[:nslots].index_select(0, idx64))
+
+        # ---- 7) bookkeeping for next step's m ----
+        kv_prev.index_copy_(0, idx64, base_now)
+        armed_buf.index_fill_(0, idx64, True)
+        return core_out.view(1, num_seqs * rows_per_seq, nh, head_dim)

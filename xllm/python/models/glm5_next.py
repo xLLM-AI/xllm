@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -60,6 +60,7 @@ _has_mhc_fused = hasattr(kernels, "hc_pre") and kernels.hc_pre is not None
 # activation headroom and a hard device OOM mid prefill.
 _SCORES_SLAB_CAP_BYTES = int(1.5 * 1024**3)
 from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.kda import KdaForgetGate
 from xllm.python.layers.linear import ColumnParallelLinear
 from xllm.python.layers.qlinear import QLinear
 from xllm.python.models.base import PyModelBase
@@ -136,89 +137,6 @@ class _RMSNormGated(nn.Module):
         # Fused sigmoid-gated kernel (one launch over all rows). Must be the
         # sigmoid-gated kernel — never kernels.rms_norm_gated, which is SiLU.
         return kernels.rms_norm_sigmoid_gated(x, gate, self.weight, self.variance_epsilon)
-
-
-def _causal_conv1d_fn(mixed_qkv: torch.Tensor, weight: torch.Tensor, activation: str = "silu") -> torch.Tensor:
-    """Depthwise causal conv1d (left-pad K-1) + activation, fp32 weight."""
-    # mixed_qkv: [B, conv_dim, S]; weight: [conv_dim, K] (squeezed)
-    padding = weight.shape[-1] - 1
-    out = F.conv1d(
-        mixed_qkv.to(weight.dtype),
-        weight=weight.unsqueeze(1),
-        bias=None,
-        padding=padding,
-        groups=mixed_qkv.shape[1],
-    )[:, :, : mixed_qkv.shape[-1]]
-    if activation == "silu":
-        out = F.silu(out)
-    return out.to(mixed_qkv.dtype)
-
-
-def _causal_conv1d_update(
-    mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
-) -> torch.Tensor:
-    """Incremental depthwise causal conv1d + activation (single-token decode).
-
-    Faithful port of transformers ``causal_conv1d_update``: prepend the
-    ``conv_state`` (last K-1 conv inputs), run a width-0-pad conv over the
-    concatenation, slice the tail, and update ``conv_state`` in place.
-
-    Args:
-        mixed_qkv: [B, conv_dim, S] (S == 1 for decode).
-        conv_state: [B, conv_dim, K-1], updated in place to the last K-1 inputs.
-        weight: [conv_dim, K] (squeezed).
-    """
-    _, hidden_size, seq_len = mixed_qkv.shape
-    state_len = conv_state.shape[-1]
-    hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
-    conv_state.copy_(hidden_states_new[:, :, -state_len:])
-    out = F.conv1d(
-        hidden_states_new,
-        weight=weight.unsqueeze(1),
-        bias=None,
-        padding=0,
-        groups=hidden_size,
-    )[:, :, -seq_len:]
-    if activation == "silu":
-        out = F.silu(out)
-    return out.to(mixed_qkv.dtype)
-
-
-def _causal_conv1d_update_graph(
-    mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
-) -> torch.Tensor:
-    """Graph-capturable twin of ``_causal_conv1d_update`` (ACL-graph decode).
-
-    F.conv1d lowers to the aclop Conv2D, which NPUGraph cannot capture (and
-    ``allow_internal_format=False`` would break the MoE W8A8 NZ weights), so
-    the depthwise width-K conv is unrolled into elementwise multiply-adds
-    reproducing the aclop kernel's numeric contract bit for bit (see the
-    accumulate block below). Only called on the graph decode path; eager
-    keeps the F.conv1d original byte-for-byte. NOTE the engine's conv weight
-    is bf16 (checkpoint overrides the fp32 init), so the eager conv runs in
-    bf16 — emulating the fp32 conv contract here returns a wrong-SHAPE
-    tensor (bf16 view(int32) halves the last dim) and crashes capture.
-    """
-    seq_len = mixed_qkv.shape[-1]
-    state_len = conv_state.shape[-1]
-    hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
-    conv_state.copy_(hidden_states_new[:, :, -state_len:])
-    k_size = weight.shape[-1]
-    # Unified aclop conv contract (reverse-engineered bitwise on NPU): operands
-    # are rounded RNE to 11 explicit mantissa bits (a no-op for bf16/fp16
-    # sources). Since the engine's conv weight is always bf16 and hidden_states
-    # are cast to bf16 above, the RNE rounding is a no-op — float() alone
-    # preserves the exact bf16 value in fp32. We skip the RNE mantissa rounding
-    # to avoid RightShift/BitwiseAnd on AI_CPU (~7.4% of total decode time).
-    h_r = hidden_states_new.float()
-    w_r = weight.float()
-    out = w_r[:, 0:1].unsqueeze(0) * h_r[:, :, 0:seq_len]
-    for k in range(1, k_size):
-        out = out + w_r[:, k : k + 1].unsqueeze(0) * h_r[:, :, k : k + seq_len]
-    out = out.to(weight.dtype)
-    if activation == "silu":
-        out = F.silu(out)
-    return out.to(mixed_qkv.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -420,42 +338,6 @@ _KDA_IN_PROJ = (
 )
 
 
-class Glm5NextForgetGate(nn.Module):
-    """KDA forget gate consuming the merged projection latent."""
-
-    def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
-        super().__init__()
-        self.head_dim = cfg.kda_head_dim
-        self.num_heads = cfg.kda_num_heads // cfg.tp_size  # local per-rank
-        self.qkv_dim = self.head_dim * self.num_heads
-        self.f_b_proj = nn.Linear(self.head_dim, self.qkv_dim, bias=False)
-        self.dt_bias = nn.Parameter(torch.zeros(self.qkv_dim, dtype=torch.float32))
-        self.A_log = nn.Parameter(torch.zeros(self.num_heads, dtype=torch.float32))
-        self.safe_gate_lower_bound = cfg.linear_lower_bound
-
-    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True) -> Glm5NextForgetGate:
-        a_log = self.A_log.detach()
-        dt_bias = self.dt_bias.detach()
-        super()._apply(fn, recurse)
-        # Preserve FP32 constants across the model's global dtype conversion.
-        self.A_log.data = a_log.to(device=self.A_log.device, dtype=torch.float32)
-        self.dt_bias.data = dt_bias.to(device=self.dt_bias.device, dtype=torch.float32)
-        return self
-
-    def raw_projection(self, forget_latent: torch.Tensor) -> torch.Tensor:
-        """Project the replicated latent into per-head forget logits."""
-        hidden_shape = (*forget_latent.shape[:2], -1, self.head_dim)
-        return self.f_b_proj(forget_latent).view(hidden_shape)
-
-    def gate_from_raw(self, raw: torch.Tensor) -> torch.Tensor:
-        """Apply bounded sigmoid decay, or unbounded softplus when no bound is set."""
-        g = raw.float() + self.dt_bias.view(1, 1, self.num_heads, self.head_dim)
-        decay_rate = torch.exp(self.A_log.view(1, 1, self.num_heads, 1))
-        if self.safe_gate_lower_bound is not None:
-            return self.safe_gate_lower_bound * torch.sigmoid(decay_rate * g)
-        return -decay_rate * F.softplus(g)
-
-
 def _stable_pack(dst: torch.Tensor | None, packed: torch.Tensor) -> torch.Tensor:
     """Keep a packed weight buffer at a stable storage address across reloads.
 
@@ -533,7 +415,7 @@ class Glm5NextKdaAttention(Attention):
             padding=self.conv_kernel_size - 1,
         )
         self.conv1d.weight = nn.Parameter(self.conv1d.weight.detach().to(torch.float32))
-        self.forget_gate = Glm5NextForgetGate(cfg, dtype, device)
+        self.forget_gate = KdaForgetGate(cfg.kda_head_dim, self.num_heads_local, cfg.linear_lower_bound)
         self.g_b_proj = nn.Linear(self.head_dim, self.qkv_dim, bias=False)
         self.register_buffer("_fg_b_weight", None, persistent=False)
         self.o_norm = _RMSNormGated(self.head_dim, self.eps, dtype, device)
@@ -591,7 +473,9 @@ class Glm5NextKdaAttention(Attention):
             raise RuntimeError(
                 "Glm5NextKdaAttention requires an attention backend with execute_linear; run inside the engine."
             )
-        core_attn_out = backend.execute_linear(mixed_qkv, beta, self, raw_gate_proj=g_raw)
+        core_attn_out = backend.execute_linear(
+            mixed_qkv, beta, self.layer_id, self.conv1d, self.forget_gate, self.activation, raw_gate_proj=g_raw
+        )
 
         output = self.o_norm(core_attn_out, gate).reshape(batch_size, seq_len, -1)
         # KDA is head-sharded: each rank's o_proj (row-parallel, input

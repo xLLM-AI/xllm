@@ -78,6 +78,7 @@ def _create_attention_backend(
     dtype: torch.dtype,
     config: dict | None = None,
     max_num_reqs: int = 1,
+    num_decoding_tokens: int = 1,
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
@@ -131,6 +132,7 @@ def _create_attention_backend(
             is_mla=bool(config.get("enable_mla", False)),
             device=device,
             dtype=dtype,
+            num_decoding_tokens=num_decoding_tokens,
         )
     if current_platform.is_cuda():
         from xllm.python.attention.flashinfer import FlashInferBackend
@@ -221,7 +223,7 @@ class ModelExecutor:
 
         first_parameter = next(model.parameters())
         device = first_parameter.device
-        num_decoding_tokens = max(1, int(num_decoding_tokens))
+        num_decoding_tokens = max(1, int(num_decoding_tokens), int(config.get("num_speculative_tokens", 0)) + 1)
         # GLM MTP can prepend a repair row after all draft tokens are accepted.
         # Two requests then need up to four attention rows, even though later
         # draft steps still decode one token per request.
@@ -235,6 +237,7 @@ class ModelExecutor:
             first_parameter.dtype,
             config,
             max(max_seqs_per_batch, 1) * max_decode_rows_per_request,
+            num_decoding_tokens=num_decoding_tokens,
         )
 
         execution_model = model.model
@@ -377,7 +380,7 @@ class ModelExecutor:
                         dp_size,
                         dp_rank,
                         decode_batch_size_limit,
-                        num_decoding_tokens,
+                        num_decoding_tokens=num_decoding_tokens,
                         enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                     )
         else:

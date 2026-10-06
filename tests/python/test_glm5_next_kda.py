@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.nn.functional as functional
 
+from xllm.python.attention import kda_linear_attention
 from xllm.python.model_loader import QLinearWeightLoader
 from xllm.python.models import glm5_next
 from xllm.python.models.glm5_next import _KDA_IN_PROJ
@@ -227,9 +228,19 @@ def test_merged_input_forward_preserves_backend_arguments_and_output(
     reductions = []
 
     def _execute_linear(
-        mixed_qkv: torch.Tensor, beta: torch.Tensor, layer: torch.nn.Module, *, raw_gate_proj: torch.Tensor
+        mixed_qkv: torch.Tensor,
+        beta: torch.Tensor,
+        layer_id: int,
+        conv1d: torch.nn.Conv1d,
+        forget_gate: torch.nn.Module,
+        activation: str,
+        *,
+        raw_gate_proj: torch.Tensor,
     ) -> torch.Tensor:
-        assert layer is attention
+        assert layer_id == attention.layer_id
+        assert conv1d is attention.conv1d
+        assert forget_gate is attention.forget_gate
+        assert activation == attention.activation
         torch.testing.assert_close(mixed_qkv, expected_qkv)
         torch.testing.assert_close(beta, beta_raw.float().sigmoid())
         torch.testing.assert_close(raw_gate_proj, expected_raw)
@@ -252,9 +263,9 @@ def test_merged_input_forward_preserves_backend_arguments_and_output(
 @pytest.mark.parametrize(
     "conv_fn",
     [
-        pytest.param(glm5_next._causal_conv1d_fn, id="prefill"),
-        pytest.param(glm5_next._causal_conv1d_update, id="decode"),
-        pytest.param(glm5_next._causal_conv1d_update_graph, id="graph_decode"),
+        pytest.param(kda_linear_attention._causal_conv1d_fn, id="prefill"),
+        pytest.param(kda_linear_attention._causal_conv1d_update, id="decode"),
+        pytest.param(kda_linear_attention._causal_conv1d_update_graph, id="graph_decode"),
     ],
 )
 @torch.inference_mode()
@@ -280,7 +291,7 @@ def test_merged_qkv_strides_preserve_causal_conv_and_state(
         assert mixed_qkv.stride(-1) == sum(attention.input_projection_sizes)
         assert reference_qkv.stride(-1) == attention.conv_dim
         torch.testing.assert_close(mixed_qkv, reference_qkv, rtol=0, atol=0)
-        if conv_fn is glm5_next._causal_conv1d_fn:
+        if conv_fn is kda_linear_attention._causal_conv1d_fn:
             actual = conv_fn(mixed_qkv, conv_weight, activation=activation)
             expected = conv_fn(reference_qkv, conv_weight, activation=activation)
         else:

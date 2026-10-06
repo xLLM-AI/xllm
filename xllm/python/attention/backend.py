@@ -27,6 +27,7 @@ from xllm.python.attention.expanded_decode_metadata import (
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
+    from xllm.python.layers.kda import KdaForgetGate
     from xllm.python.model_executor.cp_utils import CpContext
 
 
@@ -259,6 +260,14 @@ class AttentionBackend(ABC):
         """Install live metadata for an already captured graph entry."""
         self.prepare(metadata, graph_mode=True)
 
+    def snapshot_linear_state(self, indices: torch.Tensor) -> object | None:
+        """Save backend-owned state that graph warmup/capture may mutate."""
+        return None
+
+    def restore_linear_state(self, snapshot: object) -> None:
+        """Restore an opaque snapshot, including state first created by capture."""
+        del snapshot
+
     def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
         """Reset request-owned state before a model attaches current inputs."""
         del metadata
@@ -337,7 +346,10 @@ class AttentionBackend(ABC):
         self,
         mixed_qkv: torch.Tensor,
         beta: torch.Tensor,
-        layer: Attention,
+        layer_id: int,
+        conv1d: torch.nn.Conv1d,
+        forget_gate: KdaForgetGate,
+        activation: str,
         raw_gate_proj: torch.Tensor,
     ) -> torch.Tensor:
         """KDA linear attention (conv1d + delta-rule) over framework state.
