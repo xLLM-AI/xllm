@@ -13,32 +13,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xtensor_allocator.h"
+#include "core/framework/xtensor/xtensor_allocator.h"
 
 #include <folly/futures/Future.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <unordered_map>
 
-#include "common/global_flags.h"
-#include "common/macros.h"
+#include "core/distributed_runtime/collective_service.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "distributed_runtime/collective_service.h"
-#include "global_xtensor.h"
-#include "phy_page.h"
-#include "phy_page_pool.h"
-#include "platform/device.h"
-#include "platform/vmm_api.h"
+#include "core/framework/xtensor/global_xtensor.h"
+#include "core/framework/xtensor/phy_page.h"
+#include "core/framework/xtensor/phy_page_pool.h"
+#include "core/framework/xtensor/weight_transfer_segments.h"
+#include "core/framework/xtensor/xtensor.h"
+#include "core/platform/device.h"
+#include "core/platform/vmm_api.h"
 #include "server/xllm_server_registry.h"
-#include "xtensor.h"
 
 namespace xllm {
 
@@ -105,81 +103,65 @@ void XTensorAllocator::setup_multi_node_xtensor_dist(
     const std::string& master_node_addr,
     int32_t dp_size) {
   const auto& devices = options.devices();
-  const int32_t each_node_ranks = static_cast<int32_t>(devices.size());
-  world_size_ =
-      each_node_ranks * ::xllm::DistributedConfig::get_instance().nnodes();
-  dp_size_ = dp_size;
-  tp_size_ = world_size_ / dp_size_;
+  // The allocator, physical page pool and global mapping currently share one
+  // process-wide device context. Reject multiple devices before starting RPCs.
+  CHECK_EQ(devices.size(), 1)
+      << "Distributed XTensor requires exactly one local device per process";
+  CHECK_GT(dp_size, 0) << "dp_size must be positive";
+  CHECK(xtensor_dist_servers_.empty()) << "Distributed XTensor already set up";
 
-  CHECK_EQ(world_size_ % dp_size_, 0)
+  const auto& distributed_config = DistributedConfig::get_instance();
+  CHECK_GT(distributed_config.nnodes(), 0) << "nnodes must be positive";
+  CHECK_GE(distributed_config.node_rank(), 0);
+  CHECK_LT(distributed_config.node_rank(), distributed_config.nnodes());
+  const int32_t world_size = distributed_config.nnodes();
+  CHECK_EQ(world_size % dp_size, 0)
       << "world_size must be divisible by dp_size";
 
-  std::vector<std::atomic<bool>> dones(devices.size());
-  for (size_t i = 0; i < devices.size(); ++i) {
-    dones[i].store(false, std::memory_order_relaxed);
-  }
-
-  // Update collective server name with server index
+  world_size_ = world_size;
+  dp_size_ = dp_size;
+  tp_size_ = world_size_ / dp_size_;
   collective_server_name_ = "XTensorDistCollectiveServer";
 
-  for (size_t i = 0; i < devices.size(); ++i) {
-    // Create XTensor dist server for each device
-    xtensor_dist_servers_.emplace_back(std::make_unique<XTensorDistServer>(
-        i, master_node_addr, dones[i], devices[i], options));
-
-    // Only rank0 connects to other workers
-    if (::xllm::DistributedConfig::get_instance().node_rank() == 0) {
-      std::shared_ptr<CollectiveService> collective_service =
-          std::make_shared<CollectiveService>(world_size_);
-      XllmServer* collective_server =
-          ServerRegistry::get_instance().register_server(
-              collective_server_name_);
-      if (!collective_server->start(
-              collective_service, master_node_addr, collective_server_name_)) {
-        LOG(ERROR) << "failed to start collective server on address: "
-                   << master_node_addr;
-        return;
-      }
-
-      auto xtensor_dist_addrs_map = collective_service->wait();
-
-      // Initialize DP group clients mapping
-      dp_group_clients_.resize(dp_size_);
-      for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
-        dp_group_clients_[dp_rank].reserve(tp_size_);
-      }
-
-      for (int32_t r = 0; r < world_size_; ++r) {
-        if (xtensor_dist_addrs_map.find(r) == xtensor_dist_addrs_map.end()) {
-          LOG(FATAL) << "Not all xtensor dist servers connect to master node. "
-                        "Miss rank is "
-                     << r;
-          return;
-        }
-        auto client = std::make_shared<XTensorDistClient>(
-            r, xtensor_dist_addrs_map[r], devices[r % each_node_ranks]);
-
-        // Add to flat list
-        xtensor_dist_clients_.emplace_back(client);
-
-        // Add to DP group mapping
-        // Workers are organized as: [dp0_tp0, dp0_tp1, ..., dp1_tp0, dp1_tp1,
-        // ...]
-        int32_t dp_rank = r / tp_size_;
-        dp_group_clients_[dp_rank].emplace_back(client);
-      }
-
-      LOG(INFO) << "XTensor dist setup: world_size=" << world_size_
-                << ", dp_size=" << dp_size_ << ", tp_size=" << tp_size_;
-    }
-
-    // Wait for all servers to be ready
-    for (size_t idx = 0; idx < dones.size(); ++idx) {
-      while (!dones[idx].load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      }
-    }
+  std::shared_ptr<CollectiveService> collective_service;
+  if (distributed_config.node_rank() == 0) {
+    collective_service = std::make_shared<CollectiveService>(world_size_);
+    XllmServer* collective_server =
+        ServerRegistry::get_instance().register_server(collective_server_name_);
+    CHECK(collective_server->start(
+        collective_service, master_node_addr, collective_server_name_))
+        << "Failed to start XTensor collective server on address: "
+        << master_node_addr;
   }
+
+  xtensor_dist_servers_.emplace_back(std::make_unique<XTensorDistServer>(
+      /*local_rank=*/0, master_node_addr, devices.front(), options));
+  CHECK(xtensor_dist_servers_.front()->wait_until_ready())
+      << "Failed to start or register local XTensor dist server";
+
+  if (collective_service == nullptr) {
+    return;
+  }
+  auto xtensor_dist_addrs_map = collective_service->wait();
+
+  dp_group_clients_.resize(dp_size_);
+  for (auto& clients : dp_group_clients_) {
+    clients.reserve(tp_size_);
+  }
+  xtensor_dist_clients_.reserve(world_size_);
+  for (int32_t rank = 0; rank < world_size_; ++rank) {
+    auto address = xtensor_dist_addrs_map.find(rank);
+    CHECK(address != xtensor_dist_addrs_map.end())
+        << "XTensor dist server did not connect to master node: rank " << rank;
+    auto client = std::make_shared<XTensorDistClient>(
+        rank, address->second, devices.front());
+    xtensor_dist_clients_.emplace_back(client);
+    const int32_t dp_rank = rank / tp_size_;
+    dp_group_clients_[dp_rank].emplace_back(std::move(client));
+  }
+
+  LOG(INFO) << "XTensor dist setup: world_size=" << world_size_
+            << ", dp_size=" << dp_size_ << ", tp_size=" << tp_size_;
 }
 
 int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
@@ -414,8 +396,7 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
     // Try contiguous allocation first (from GlobalXTensor)
     page_id_t start_page = pool.allocate_contiguous_from_right(num_pages);
     if (start_page >= 0) {
-      record_weight_allocation(model_id, start_page, num_pages);
-      return true;
+      return record_weight_allocation(model_id, start_page, num_pages);
     }
 
     // Fallback: try non-contiguous allocation using XTensor
@@ -429,8 +410,7 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
       return false;
     }
 
-    record_weight_fallback_allocation(model_id, page_ids);
-    return true;
+    return record_weight_fallback_allocation(model_id, page_ids);
   }
 
   // Broadcast to all workers for this model
@@ -538,15 +518,21 @@ std::vector<torch::Tensor> XTensorAllocator::create_kv_tensors_impl_(
   CHECK(target_tensors->empty())
       << name << " tensors already created for model " << model_id;
   CHECK(!dims.empty()) << name << " tensor dims cannot be empty";
+  CHECK_GT(num_layers, 0);
 
   // Calculate size from dims and dtype
   size_t size = torch::scalarTypeToTypeMeta(dtype).itemsize();
-  for (auto dim : dims) {
-    size *= dim;
+  for (int64_t dim : dims) {
+    CHECK_GT(dim, 0);
+    CHECK_LE(size,
+             std::numeric_limits<size_t>::max() / static_cast<size_t>(dim));
+    size *= static_cast<size_t>(dim);
   }
 
   size_t page_size =
       ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
+  CHECK_GT(page_size, 0);
+  CHECK_LE(size, std::numeric_limits<size_t>::max() - (page_size - 1));
   // Align size to page size (round up)
   if (size % page_size != 0) {
     size_t aligned_size = ((size + page_size - 1) / page_size) * page_size;
@@ -578,17 +564,20 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
     return false;
   }
 
-  // Per-layer mapping for K and V tensors separately
-  for (int64_t i = 0; i < tensors->num_layers; i++) {
-    auto k_xtensor = tensors->k_tensors[i].get();
-    auto v_xtensor = tensors->v_tensors[i].get();
-    for (auto offset : offsets) {
-      k_xtensor->map(offset);
-      v_xtensor->map(offset);
+  CHECK_GT(tensors->num_layers, 0);
+  CHECK_EQ(tensors->k_tensors.size(), tensors->num_layers);
+  CHECK_EQ(tensors->v_tensors.size(), tensors->num_layers);
+  CHECK_LE(offsets.size(),
+           std::numeric_limits<size_t>::max() / tensors->k_tensors.size() / 2);
+  std::vector<std::pair<XTensor*, offset_t>> targets;
+  targets.reserve(offsets.size() * tensors->k_tensors.size() * 2);
+  for (size_t i = 0; i < tensors->k_tensors.size(); ++i) {
+    for (offset_t offset : offsets) {
+      targets.emplace_back(tensors->k_tensors[i].get(), offset);
+      targets.emplace_back(tensors->v_tensors[i].get(), offset);
     }
   }
-
-  return true;
+  return XTensor::map_pages(targets);
 }
 
 bool XTensorAllocator::unmap_from_kv_tensors(
@@ -608,26 +597,54 @@ bool XTensorAllocator::unmap_from_kv_tensors(
     return false;
   }
 
-  // Per-layer unmapping for K and V tensors separately
-  for (int64_t i = 0; i < tensors->num_layers; i++) {
-    auto k_xtensor = tensors->k_tensors[i].get();
-    auto v_xtensor = tensors->v_tensors[i].get();
-    for (auto offset : offsets) {
-      k_xtensor->unmap(offset);
-      v_xtensor->unmap(offset);
+  CHECK_GT(tensors->num_layers, 0);
+  CHECK_EQ(tensors->k_tensors.size(), tensors->num_layers);
+  CHECK_EQ(tensors->v_tensors.size(), tensors->num_layers);
+  for (size_t i = 0; i < tensors->k_tensors.size(); ++i) {
+    const auto& k_tensor = tensors->k_tensors[i];
+    const auto& v_tensor = tensors->v_tensors[i];
+    for (offset_t offset : offsets) {
+      if (offset < 0 || static_cast<size_t>(offset) >= k_tensor->size() ||
+          static_cast<size_t>(offset) >= v_tensor->size() ||
+          static_cast<size_t>(offset) % k_tensor->page_size() != 0 ||
+          static_cast<size_t>(offset) % v_tensor->page_size() != 0) {
+        LOG(ERROR) << "Invalid KV unmapping offset " << offset;
+        return false;
+      }
     }
   }
 
+  for (size_t i = 0; i < tensors->k_tensors.size(); ++i) {
+    for (offset_t offset : offsets) {
+      CHECK(tensors->k_tensors[i]->unmap(offset));
+      CHECK(tensors->v_tensors[i]->unmap(offset));
+    }
+  }
   return true;
 }
 
-void XTensorAllocator::record_weight_allocation(const std::string& model_id,
+bool XTensorAllocator::record_weight_allocation(const std::string& model_id,
                                                 page_id_t start_page_id,
                                                 size_t num_pages) {
   std::lock_guard<std::mutex> lock(mtx_);
 
   auto& global_xtensor = GlobalXTensor::get_instance();
   void* base_ptr = global_xtensor.get_vaddr_by_page_id(start_page_id);
+  auto& pool = PhyPagePool::get_instance();
+  CHECK_GE(start_page_id, 0);
+  CHECK_LT(static_cast<size_t>(start_page_id), pool.num_total());
+  CHECK_LE(num_pages, pool.num_total() - static_cast<size_t>(start_page_id));
+  if (base_ptr == nullptr || num_pages == 0) {
+    LOG(ERROR) << "XTensorAllocator: invalid GlobalXTensor region for model "
+               << model_id;
+    std::vector<page_id_t> page_ids;
+    page_ids.reserve(num_pages);
+    for (size_t i = 0; i < num_pages; ++i) {
+      page_ids.emplace_back(start_page_id + static_cast<page_id_t>(i));
+    }
+    pool.free_weight_pages(page_ids);
+    return false;
+  }
 
   auto& tensors = get_or_create_model_tensors(model_id);
   tensors.weight_start_page_id = start_page_id;
@@ -647,27 +664,28 @@ void XTensorAllocator::record_weight_allocation(const std::string& model_id,
   LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
             << model_id << ", start_page=" << start_page_id
             << ", num_pages=" << num_pages << ", base_ptr=" << base_ptr;
+  return true;
 }
 
-void XTensorAllocator::record_weight_fallback_allocation(
+bool XTensorAllocator::record_weight_fallback_allocation(
     const std::string& model_id,
     const std::vector<page_id_t>& page_ids) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  auto& tensors = get_or_create_model_tensors(model_id);
-
   // Create XTensor with the non-contiguous preallocated pages
-  tensors.weight_xtensor =
+  auto weight_xtensor =
       std::make_unique<XTensor>(page_ids, torch::kBFloat16, dev_);
-  if (is_null_vir_ptr(tensors.weight_xtensor->vaddr())) {
+  auto& global_xtensor = GlobalXTensor::get_instance();
+  if (is_null_vir_ptr(weight_xtensor->vaddr()) ||
+      !global_xtensor.is_initialized()) {
     LOG(ERROR) << "XTensorAllocator: failed to create XTensor for model "
                << model_id;
-    // Free pages on failure
-    PhyPagePool::get_instance().free_weight_pages(page_ids);
-    tensors.weight_xtensor.reset();
-    return;
+    // The XTensor destructor returns its reserved pages to the pool.
+    return false;
   }
 
+  auto& tensors = get_or_create_model_tensors(model_id);
+  tensors.weight_xtensor = std::move(weight_xtensor);
   tensors.using_weight_xtensor = true;
   tensors.weight_num_pages = page_ids.size();
   tensors.weight_base_ptr =
@@ -676,25 +694,13 @@ void XTensorAllocator::record_weight_fallback_allocation(
   tensors.weight_start_page_id = -1;  // Not applicable for non-contiguous
 
   // Populate weight_segments for P2P transfer support
-  // Merge adjacent page_ids into contiguous segments
-  size_t page_size = GlobalXTensor::get_instance().page_size();
+  // Preserve logical mapping order; merge only forward-adjacent pages.
+  size_t page_size = global_xtensor.page_size();
   tensors.weight_segments.clear();
-  if (!page_ids.empty()) {
-    std::vector<page_id_t> sorted_pages(page_ids.begin(), page_ids.end());
-    std::sort(sorted_pages.begin(), sorted_pages.end());
-
-    uint64_t seg_offset = static_cast<uint64_t>(sorted_pages[0]) * page_size;
-    uint64_t seg_size = page_size;
-    for (size_t i = 1; i < sorted_pages.size(); ++i) {
-      if (sorted_pages[i] == sorted_pages[i - 1] + 1) {
-        seg_size += page_size;
-      } else {
-        tensors.weight_segments.emplace_back(seg_offset, seg_size);
-        seg_offset = static_cast<uint64_t>(sorted_pages[i]) * page_size;
-        seg_size = page_size;
-      }
-    }
-    tensors.weight_segments.emplace_back(seg_offset, seg_size);
+  auto segments = make_weight_transfer_segments(page_ids, page_size);
+  tensors.weight_segments.reserve(segments.size());
+  for (const auto& [offset, size] : segments) {
+    tensors.weight_segments.emplace_back(offset, size);
   }
 
   LOG(INFO) << "XTensorAllocator: recorded XTensor allocation for model "
@@ -702,6 +708,7 @@ void XTensorAllocator::record_weight_fallback_allocation(
             << ", base_ptr=" << tensors.weight_base_ptr
             << ", weight_segments=" << tensors.weight_segments.size()
             << " (fallback mode)";
+  return true;
 }
 
 bool XTensorAllocator::allocate_weight(const std::string& model_id,
@@ -732,7 +739,8 @@ bool XTensorAllocator::allocate_weight(const std::string& model_id,
   size_t region_size = tensors->weight_num_pages * global_xtensor.page_size();
 
   // Check if there's enough space in pre-allocated region
-  if (tensors->weight_current_offset + size > region_size) {
+  CHECK_LE(tensors->weight_current_offset, region_size);
+  if (size > region_size - tensors->weight_current_offset) {
     LOG(ERROR) << "Not enough space in weight region for model " << model_id
                << ": requested " << size << ", available "
                << (region_size - tensors->weight_current_offset);

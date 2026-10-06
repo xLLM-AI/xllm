@@ -15,47 +15,47 @@ limitations under the License.
 
 #pragma once
 
-#include <brpc/server.h>
 #include <torch/types.h>
 
-#include <atomic>
+#include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
 
-#include "common/macros.h"
-#include "options.h"
+#include "core/common/macros.h"
+#include "core/framework/xtensor/options.h"
 #include "xtensor_dist.pb.h"
 
 namespace xllm {
 
-class XTensorDistServer {
+class XTensorDistServer final {
  public:
-  XTensorDistServer(int local_rank,
+  XTensorDistServer(int32_t local_rank,
                     const std::string& master_node_addr,
-                    std::atomic<bool>& done,
                     const torch::Device& device,
                     const xtensor::Options& options);
   ~XTensorDistServer();
 
+  bool wait_until_ready();
+
  private:
   DISALLOW_COPY_AND_ASSIGN(XTensorDistServer);
 
-  void create_server(const xtensor::Options& options,
-                     std::atomic<bool>& done,
-                     const std::string& master_node_addr,
+  void create_server(const std::string& master_node_addr,
                      const torch::Device& device,
-                     int world_size,
-                     int global_rank,
-                     int local_rank);
+                     int32_t world_size,
+                     int32_t global_rank);
 
   bool sync_master_node(const std::string& master_node_addr,
                         proto::AddressInfo& addr_info,
                         proto::CommUniqueIdList& uids);
 
  private:
-  std::unique_ptr<std::thread> server_thread_;
+  std::promise<bool> readiness_;
+  std::shared_future<bool> readiness_result_;
   std::string server_name_;
+  std::unique_ptr<std::thread> server_thread_;
 };
 
 }  // namespace xllm

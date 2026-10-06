@@ -17,6 +17,7 @@ cc_library(
     xtensor_dist_client.h
     xtensor_dist_service.h
     xtensor_dist_server.h
+    weight_transfer_segments.h
   SRCS
     phy_page.cpp
     phy_page_pool.cpp

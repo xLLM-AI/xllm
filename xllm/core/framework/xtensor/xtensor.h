@@ -19,13 +19,11 @@ limitations under the License.
 
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
-#include "common/global_flags.h"
-#include "common/macros.h"
-#include "core/framework/config/kv_cache_config.h"
-#include "phy_page.h"  // Includes page_id_t definition
-#include "platform/vmm_api.h"
+#include "core/framework/xtensor/phy_page.h"
+#include "core/platform/vmm_api.h"
 
 namespace xllm {
 
@@ -48,6 +46,11 @@ class XTensor {
 
   bool map(offset_t offset);
   bool unmap(offset_t offset);
+
+  // Validate every target and reserve all missing pages before changing any
+  // mapping. Duplicate targets and existing mappings are idempotent.
+  static bool map_pages(
+      const std::vector<std::pair<XTensor*, offset_t>>& targets);
 
   // Map/unmap all pages (for weight tensors)
   bool map_all();
@@ -102,8 +105,7 @@ class XTensor {
   page_id_t get_phy_page_id(offset_t offset) const;
 
  private:
-  // Map a single physical page at the given offset
-  bool map_phy_page_(PhyPage* page, offset_t offset);
+  bool valid_offset_(offset_t offset) const;
 
   VirPtr vaddr_;
   size_t size_;
@@ -122,6 +124,7 @@ class XTensor {
   // For weight fallback mode: use pre-allocated pages from PhyPagePool
   bool use_preallocated_pages_ = false;
   std::vector<page_id_t> preallocated_page_ids_;  // Stored for cleanup
+  size_t mapped_preallocated_pages_ = 0;
 };
 
 }  // namespace xllm

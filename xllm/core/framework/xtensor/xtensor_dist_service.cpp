@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xtensor_dist_service.h"
+#include "core/framework/xtensor/xtensor_dist_service.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
@@ -21,11 +21,11 @@ limitations under the License.
 
 #include <vector>
 
-#include "common/device_monitor.h"
-#include "global_xtensor.h"
-#include "phy_page_pool.h"
-#include "platform/device.h"
-#include "xtensor_allocator.h"
+#include "core/common/device_monitor.h"
+#include "core/framework/xtensor/global_xtensor.h"
+#include "core/framework/xtensor/phy_page_pool.h"
+#include "core/framework/xtensor/xtensor_allocator.h"
+#include "core/platform/device.h"
 
 namespace xllm {
 
@@ -176,7 +176,11 @@ void XTensorDistService::AllocWeightPages(
     // Try contiguous allocation first (from GlobalXTensor)
     page_id_t start_page = pool.allocate_contiguous_from_right(num_pages);
     if (start_page >= 0) {
-      allocator.record_weight_allocation(model_id, start_page, num_pages);
+      if (!allocator.record_weight_allocation(
+              model_id, start_page, num_pages)) {
+        response->set_ok(false);
+        return;
+      }
       response->set_ok(true);
       LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
                 << ", start_page=" << start_page << ", num_pages=" << num_pages;
@@ -195,7 +199,10 @@ void XTensorDistService::AllocWeightPages(
       return;
     }
 
-    allocator.record_weight_fallback_allocation(model_id, page_ids);
+    if (!allocator.record_weight_fallback_allocation(model_id, page_ids)) {
+      response->set_ok(false);
+      return;
+    }
     response->set_ok(true);
     LOG(INFO) << "AllocWeightPages success (fallback): model_id=" << model_id
               << ", num_pages=" << num_pages;

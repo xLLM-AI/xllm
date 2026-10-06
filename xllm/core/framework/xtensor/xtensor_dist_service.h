@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include "common/macros.h"
-#include "util/threadpool.h"
+#include <atomic>
+
+#include "core/common/macros.h"
+#include "core/util/threadpool.h"
 #include "xtensor_dist.pb.h"
 
 namespace xllm {
@@ -83,7 +85,7 @@ class XTensorDistService : public proto::XTensorDist {
   DISALLOW_COPY_AND_ASSIGN(XTensorDistService);
 
  private:
-  bool initialized_;
+  std::atomic<bool> initialized_{false};
   int32_t global_rank_;
   int32_t world_size_;
   torch::Device device_;

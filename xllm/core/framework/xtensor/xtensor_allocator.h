@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -25,12 +24,12 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "common/types.h"
-#include "options.h"
-#include "phy_page.h"
-#include "xtensor.h"
-#include "xtensor_dist_client.h"
-#include "xtensor_dist_server.h"
+#include "core/common/types.h"
+#include "core/framework/xtensor/options.h"
+#include "core/framework/xtensor/phy_page.h"
+#include "core/framework/xtensor/xtensor.h"
+#include "core/framework/xtensor/xtensor_dist_client.h"
+#include "core/framework/xtensor/xtensor_dist_server.h"
 
 namespace xllm {
 
@@ -64,7 +63,7 @@ struct ModelTensors {
   int32_t tp_size = 0;
 
   // ============== Weight Segments (for P2P transfer) ==============
-  // Ordered list of weight segments in GlobalXTensor.
+  // Segments in logical weight order, independent of physical page ID order.
   // For contiguous allocation: single segment.
   // For fallback (XTensor): multiple segments from non-contiguous pages.
   std::vector<WeightSegment> weight_segments;
@@ -114,15 +113,14 @@ class XTensorAllocator {
 
   // ============== Weight Allocation Interfaces ==============
 
-  // Record weight pre-allocation (called by RPC handler after PhyPagePool
-  // allocation)
-  void record_weight_allocation(const std::string& model_id,
+  // Takes ownership of a reserved region, including releasing it on failure.
+  bool record_weight_allocation(const std::string& model_id,
                                 page_id_t start_page_id,
                                 size_t num_pages);
 
-  // Record weight allocation using fallback mode (non-contiguous pages)
-  // Used when contiguous allocation fails due to fragmentation
-  void record_weight_fallback_allocation(
+  // Takes ownership of the reserved pages, including releasing them on failure.
+  // Used when contiguous allocation fails due to fragmentation.
+  bool record_weight_fallback_allocation(
       const std::string& model_id,
       const std::vector<page_id_t>& page_ids);
 
@@ -234,6 +232,8 @@ class XTensorAllocator {
   get_all_model_weight_segments() const;
 
  private:
+  friend class XTensorAllocatorTestPeer;
+
   XTensorAllocator() = default;
   ~XTensorAllocator();
   XTensorAllocator(const XTensorAllocator&) = delete;

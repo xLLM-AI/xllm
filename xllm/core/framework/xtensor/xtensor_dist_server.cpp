@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xtensor_dist_server.h"
+#include "core/framework/xtensor/xtensor_dist_server.h"
 
 #include <brpc/channel.h>
 #include <glog/logging.h>
@@ -21,37 +21,35 @@ limitations under the License.
 #include <chrono>
 #include <thread>
 
-#include "common/global_flags.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/service_config.h"
-#include "platform/device.h"
+#include "core/framework/xtensor/xtensor_dist_service.h"
+#include "core/platform/device.h"
+#include "core/util/net.h"
 #include "server/xllm_server_registry.h"
-#include "util/net.h"
-#include "xtensor_dist_service.h"
 
 namespace xllm {
 
-void XTensorDistServer::create_server(const xtensor::Options& options,
-                                      std::atomic<bool>& done,
-                                      const std::string& master_node_addr,
+void XTensorDistServer::create_server(const std::string& master_node_addr,
                                       const torch::Device& d,
-                                      int world_size,
-                                      int global_rank,
-                                      int local_rank) {
+                                      int32_t world_size,
+                                      int32_t global_rank) {
   Device device(d);
   device.set_device();
 
   auto service =
       std::make_shared<XTensorDistService>(global_rank, world_size, d);
 
-  auto addr = net::get_local_ip_addr();
-  auto server = ServerRegistry::get_instance().register_server(server_name_);
+  std::string addr = net::get_local_ip_addr();
+  XllmServer* server =
+      ServerRegistry::get_instance().register_server(server_name_);
   if (!server->start(service, addr + ":0")) {
     LOG(ERROR) << "Failed to start XTensorDistServer on address: " << addr;
+    readiness_.set_value(false);
     return;
   }
 
-  auto server_addr = addr + ":" + std::to_string(server->listen_port());
+  std::string server_addr = addr + ":" + std::to_string(server->listen_port());
   LOG(INFO) << "XTensorDistServer " << global_rank
             << ": server address: " << server_addr;
 
@@ -60,23 +58,26 @@ void XTensorDistServer::create_server(const xtensor::Options& options,
   addr_info.set_address(server_addr);
   addr_info.set_global_rank(global_rank);
   proto::CommUniqueIdList uids;
-  sync_master_node(master_node_addr, addr_info, uids);
+  if (!sync_master_node(master_node_addr, addr_info, uids)) {
+    server->stop();
+    readiness_.set_value(false);
+    return;
+  }
 
   // Mark service as initialized
   service->set_initialized(true);
 
-  done.store(true);
+  readiness_.set_value(true);
 
   // Wait until server is stopped
   server->run();
 }
 
-XTensorDistServer::XTensorDistServer(int local_rank,
+XTensorDistServer::XTensorDistServer(int32_t local_rank,
                                      const std::string& master_node_addr,
-                                     std::atomic<bool>& done,
                                      const torch::Device& device,
                                      const xtensor::Options& options)
-    : server_name_("XTensorDistServer") {
+    : readiness_result_(readiness_.get_future().share()) {
   const auto& devices = options.devices();
   int32_t each_node_ranks = static_cast<int32_t>(devices.size());
   int32_t world_size =
@@ -84,24 +85,15 @@ XTensorDistServer::XTensorDistServer(int local_rank,
   int32_t global_rank =
       ::xllm::DistributedConfig::get_instance().node_rank() * each_node_ranks +
       local_rank;
+  server_name_ = "XTensorDistServer_" + std::to_string(global_rank);
 
-  server_thread_ = std::make_unique<std::thread>([this,
-                                                  &options,
-                                                  &done,
-                                                  &master_node_addr,
-                                                  &device,
-                                                  world_size,
-                                                  global_rank,
-                                                  local_rank] {
-    create_server(options,
-                  done,
-                  master_node_addr,
-                  device,
-                  world_size,
-                  global_rank,
-                  local_rank);
-  });
+  server_thread_ = std::make_unique<std::thread>(
+      [this, master_node_addr, device, world_size, global_rank] {
+        create_server(master_node_addr, device, world_size, global_rank);
+      });
 }
+
+bool XTensorDistServer::wait_until_ready() { return readiness_result_.get(); }
 
 bool XTensorDistServer::sync_master_node(const std::string& master_node_addr,
                                          proto::AddressInfo& addr_info,
@@ -119,9 +111,9 @@ bool XTensorDistServer::sync_master_node(const std::string& master_node_addr,
   proto::Collective_Stub stub(&channel);
 
   // Retry until master node ready
-  int try_count = 0;
+  int32_t try_count = 0;
   brpc::Controller cntl;
-  const int sleep_time_second = 3;
+  constexpr int32_t kReconnectDelaySeconds = 3;
   while (try_count <
          ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     cntl.Reset();
@@ -130,7 +122,7 @@ bool XTensorDistServer::sync_master_node(const std::string& master_node_addr,
       LOG(WARNING) << "XTensorDistServer#" << addr_info.global_rank()
                    << " try connect to engine server error, try again."
                    << " Error message: " << cntl.ErrorText();
-      std::this_thread::sleep_for(std::chrono::seconds(sleep_time_second));
+      std::this_thread::sleep_for(std::chrono::seconds(kReconnectDelaySeconds));
     } else {
       LOG(INFO) << "XTensorDistServer#" << addr_info.global_rank()
                 << " connect to " << master_node_addr << " success.";
@@ -151,8 +143,17 @@ bool XTensorDistServer::sync_master_node(const std::string& master_node_addr,
 }
 
 XTensorDistServer::~XTensorDistServer() {
+  readiness_result_.wait();
+  XllmServer* server =
+      ServerRegistry::get_instance().try_get_server(server_name_);
+  if (server != nullptr) {
+    server->stop();
+  }
   if (server_thread_ && server_thread_->joinable()) {
     server_thread_->join();
+  }
+  if (server != nullptr) {
+    ServerRegistry::get_instance().unregister_server(server_name_);
   }
 }
 

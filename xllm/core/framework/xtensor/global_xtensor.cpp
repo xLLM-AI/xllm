@@ -13,15 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "global_xtensor.h"
+#include "core/framework/xtensor/global_xtensor.h"
 
 #include <glog/logging.h>
 
 #include <algorithm>
 
-#include "common/global_flags.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "phy_page_pool.h"
+#include "core/framework/xtensor/phy_page_pool.h"
 
 namespace xllm {
 
@@ -33,6 +32,7 @@ void GlobalXTensor::init(const torch::Device& device) {
 
   auto& pool = PhyPagePool::get_instance();
   CHECK(pool.is_initialized()) << "PhyPagePool must be initialized first";
+  CHECK_EQ(device, pool.device()) << "GlobalXTensor device mismatch";
 
   num_total_pages_ = pool.num_total();
   if (num_total_pages_ == 0) {
@@ -68,7 +68,7 @@ bool GlobalXTensor::map_page(PhyPage* page, size_t offset) {
 
   VirPtr vaddr = add_vir_ptr_offset(vaddr_, offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
-  vmm::map(vaddr, phy_handle);
+  vmm::map(vaddr, phy_handle, page->device().index());
   return true;
 }
 

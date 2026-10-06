@@ -22,7 +22,7 @@ limitations under the License.
 #include <mutex>
 #include <vector>
 
-#include "phy_page.h"
+#include "core/framework/xtensor/phy_page.h"
 
 namespace xllm {
 
@@ -97,6 +97,8 @@ class PhyPagePool {
   const std::vector<PhyPage*>& get_all_pages() const;
 
  private:
+  friend class XTensorTestPeer;
+
   PhyPagePool() = default;
   ~PhyPagePool() = default;
   PhyPagePool(const PhyPagePool&) = delete;

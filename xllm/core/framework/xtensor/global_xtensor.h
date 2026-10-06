@@ -23,8 +23,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "phy_page.h"
-#include "platform/vmm_api.h"
+#include "core/framework/xtensor/phy_page.h"
+#include "core/platform/vmm_api.h"
 
 namespace xllm {
 
@@ -65,6 +65,8 @@ class GlobalXTensor {
   }
 
  private:
+  friend class XTensorTestPeer;
+
   GlobalXTensor() = default;
   ~GlobalXTensor() = default;
   GlobalXTensor(const GlobalXTensor&) = delete;

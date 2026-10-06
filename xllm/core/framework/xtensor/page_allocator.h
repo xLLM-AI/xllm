@@ -24,15 +24,16 @@ limitations under the License.
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <set>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-#include "common/types.h"
+#include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "virt_page.h"
-#include "xtensor.h"  // For offset_t type definition
+#include "core/framework/xtensor/virt_page.h"
+#include "core/framework/xtensor/xtensor.h"  // For offset_t type definition
 
 namespace xllm {
 
@@ -196,6 +197,8 @@ class PageAllocator {
   size_t phy_pages_per_virt_page(const std::string& model_id) const;
 
  private:
+  friend class PageAllocatorTestPeer;
+
   PageAllocator() = default;
   ~PageAllocator();
   PageAllocator(const PageAllocator&) = delete;
@@ -212,14 +215,19 @@ class PageAllocator {
   };
 
   // Per-model state
+  enum class ModelTransition : uint8_t { IDLE, SLEEPING, WAKING };
+
   struct ModelState {
     int64_t num_layers = 0;
     size_t num_total_virt_pages = 0;
     size_t phy_pages_per_virt_page = 0;
     size_t weight_pages_allocated = 0;  // Not cleared on free, used for wakeup
     bool is_sleeping = false;
+    // Sleeping pages keep their virtual IDs, but no longer own physical pages.
+    bool kv_cache_mapped = true;
+    ModelTransition transition = ModelTransition::IDLE;
     // Count of pending map operations (for safe sleep)
-    std::atomic<int> pending_map_ops{0};
+    std::atomic<int32_t> pending_map_ops{0};
     std::vector<DpGroupPages> dp_group_pages;
     // Model-specific parallel strategy (for fork master with different dp/tp)
     int32_t model_dp_size = 0;     // 0 means use global dp_size_
@@ -278,6 +286,10 @@ class PageAllocator {
   // Get model state (throws if not found)
   ModelState& get_model_state(const std::string& model_id);
   const ModelState& get_model_state(const std::string& model_id) const;
+
+  // Wait with mtx_ released so lifecycle operations can finish on this model.
+  void wait_for_model_transition(ModelState& state,
+                                 std::unique_lock<std::mutex>& lock);
 
   // Initialization state
   bool initialized_ = false;

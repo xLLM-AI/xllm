@@ -13,14 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "virt_page.h"
+#include "core/framework/xtensor/virt_page.h"
 
 #include <glog/logging.h>
 
 #include <algorithm>
 #include <stdexcept>
-
-#include "common/macros.h"
 
 namespace xllm {
 

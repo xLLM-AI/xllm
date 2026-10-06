@@ -150,8 +150,13 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
 
 std::vector<Block> XTensorBlockManagerImpl::allocate(size_t num_blocks) {
   auto indices = alloc_internal(num_blocks);
+  if (indices.size() != num_blocks) {
+    free_blocks(indices);
+    return {};
+  }
+
   std::vector<Block> blocks;
-  blocks.reserve(indices.size());
+  blocks.reserve(num_blocks);
   for (int32_t idx : indices) {
     blocks.emplace_back(idx, this);
   }
