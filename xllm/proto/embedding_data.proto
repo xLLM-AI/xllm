@@ -24,4 +24,5 @@ import "tensor.proto";
 message Embedding {
   Tensor embedding = 1;
   map<string, Tensor> metadata = 2;
+  string hash_key = 3;
 }

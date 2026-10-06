@@ -594,6 +594,7 @@ class Sequence {
 
   // whether the prefill stage has been cached.
   bool is_cache_block_for_prefill_ = false;
+  bool is_mm_embed_ = false;
 
   SequenceParams sequence_params_;
 

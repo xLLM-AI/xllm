@@ -32,7 +32,9 @@ limitations under the License.
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/config/scheduler_config.h"
 #if defined(USE_NPU)
 #include "framework/parallel_state/npu_rank_table_env.h"
 #endif
@@ -166,6 +168,15 @@ Master::Master(const Options& options) : options_(options) {
         << "Multi-stream parallel is refactoring now, will be supported later.";
   }
   LOG(INFO) << "Using devices: " << DeviceNameUtils::to_string(devices_);
+
+  if (options_.task_type() == "mm_embed") {
+    options_.enable_chunked_prefill(false);
+    options_.enable_prefix_cache(false);
+    SchedulerConfig::get_instance().enable_chunked_prefill(false);
+    KVCacheConfig::get_instance().enable_prefix_cache(false);
+    LOG(WARNING) << "Disabling chunked prefill and prefix cache for "
+                    "task=mm_embed to process all multimodal inputs.";
+  }
 
   if (!is_leader()) {
     const std::string master_node_addr =

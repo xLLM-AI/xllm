@@ -31,6 +31,7 @@ cc_library(
     encoder_cache
     :processor_cache
     glog::glog
+    OpenSSL::Crypto
     absl::strings
     absl::time
     proto::xllm_proto

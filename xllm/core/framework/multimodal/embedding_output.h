@@ -25,6 +25,7 @@ namespace xllm {
 struct EmbeddingOutput {
   torch::Tensor embedding;
   std::unordered_map<std::string, torch::Tensor> metadata;
+  std::string hash_key;
 };
 
 }  // namespace xllm

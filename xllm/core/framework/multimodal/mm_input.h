@@ -38,11 +38,7 @@ struct MMInputItem {
     virtual bool visit(const MMInputItem& item) = 0;
   };
 
-  void clear() {
-    type = MMType::NONE;
-    raw_data.clear();
-    hash_key.reset();
-  }
+  void clear() { *this = MMInputItem(); }
 
   std::optional<torch::Tensor> get_decode_data(MMType type_) const {
     if (type_ == MMType::IMAGE) {

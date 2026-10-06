@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "sequence.h"
 
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
@@ -33,6 +34,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
 #include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/prefix_cache/block_hasher.h"
@@ -456,6 +458,7 @@ void Sequence::update_mm_embeddings(
   }
   output_mm_embeddings_ = mm_embeddings;
   CHECK(sequence_params_.sampling_param->is_embeddings);
+  is_mm_embed_ = ModelConfig::get_instance().task() == "mm_embed";
   // invalidate the finish status once a new token is appended
   finish_status_invalidated_ = false;
   finished_ = true;
@@ -637,6 +640,12 @@ void Sequence::generate_embeddings_output(SequenceOutput& output) {
 
 void Sequence::generate_mm_embeddings_output(SequenceOutput& output) {
   output.index = index_;
+  // task=embed can use this container for a full-sequence embedding. Only
+  // task=mm_embed maps output tensors one-to-one to multimodal input items.
+  if (is_mm_embed_) {
+    CHECK(mm_data_.hold<MMItemVec>());
+    CHECK_EQ(mm_data_.size(), output_mm_embeddings_.size());
+  }
   std::vector<EmbeddingOutput> embedding_outputs;
   embedding_outputs.reserve(output_mm_embeddings_.size());
   std::unordered_map<MMKey, std::vector<torch::Tensor>> metadata;
@@ -649,9 +658,15 @@ void Sequence::generate_mm_embeddings_output(SequenceOutput& output) {
     for (const auto& [key, value] : metadata) {
       embedding_output.metadata[key] = value[i];
     }
-    embedding_outputs.push_back(embedding_output);
-  };
-  output.mm_embeddings = embedding_outputs;
+    if (is_mm_embed_) {
+      const XXH3Key& hash_key =
+          mm_data_.items<MMItemVec>()[i].state().schedule_data().key;
+      embedding_output.hash_key = absl::BytesToHexString(absl::string_view(
+          reinterpret_cast<const char*>(hash_key.data), sizeof(hash_key.data)));
+    }
+    embedding_outputs.emplace_back(std::move(embedding_output));
+  }
+  output.mm_embeddings = std::move(embedding_outputs);
 }
 
 SequenceOutput Sequence::generate_output(const Tokenizer& tokenizer) {

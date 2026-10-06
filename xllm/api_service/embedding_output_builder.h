@@ -54,9 +54,6 @@ class EmbeddingOutputBuilder {
   bool build_embedding_output(const EmbeddingOutput& in_embedding,
                               xllm::proto::Embedding& out_embedding,
                               std::string& binary_payload);
-  bool build_embedding_output(const xllm::proto::Embedding& in_embedding,
-                              std::string& binary_payload,
-                              EmbeddingOutput& out_embedding);
 
  private:
   bool embedding_use_binary_encoding_;

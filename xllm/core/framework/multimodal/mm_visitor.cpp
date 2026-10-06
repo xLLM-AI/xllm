@@ -411,7 +411,7 @@ ProcessorCacheLookupVisitor::ProcessorCacheLookupVisitor(ProcessorCache& cache,
 
 bool ProcessorCacheLookupVisitor::visit(const MMInputItem& input) {
   std::optional<MMDataItem> cache_hit;
-  if (input.hash_key.has_value()) {
+  if (!input.is_embedding() && input.hash_key.has_value()) {
     cache_hit = cache_.lookup(input.hash_key.value());
   }
   if (!cache_hit.has_value()) {

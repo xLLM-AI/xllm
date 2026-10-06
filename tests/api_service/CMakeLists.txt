@@ -117,6 +117,16 @@ cc_test(
 
 cc_test(
   NAME
+    mm_embedding_roundtrip_test
+  SRCS
+    mm_embedding_roundtrip_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     anthropic_json_test
   SRCS
     anthropic_json_test.cpp
