@@ -412,6 +412,9 @@ class ParallelInput final {
   std::vector<int32_t> dp_global_json_object_active;
   std::vector<int32_t> dp_is_decode;
 
+  // Persistent int8 mask for real MegaMoE rows in a captured graph bucket.
+  torch::Tensor mega_active_mask;
+
   DpEpPaddingData dp_ep_padding_data;
   NpuCpPlan cp_plan;
 
@@ -438,6 +441,7 @@ class ParallelInput final {
     out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
     out.dp_global_json_object_active = dp_global_json_object_active;
     out.dp_is_decode = dp_is_decode;
+    out.mega_active_mask = mega_active_mask;
     out.dp_ep_padding_data = dp_ep_padding_data;
     out.cp_plan = cp_plan.to(device);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)

@@ -341,6 +341,11 @@ class GraphPersistentParam final {
   DpEpPaddingData persistent_dp_ep_padding_;
   CpEpMeta persistent_cp_ep_meta_;
 
+  // Persistent int8 mega_moe active-token mask. Pre-allocated with max
+  // decode graph token capacity; capture records its address so replays can
+  // mark real rows via the mask without recapturing the graph.
+  torch::Tensor persistent_mega_active_mask_;
+
   // Copy src padding data into pre-allocated persistent buffers.
   void update_persistent_dp_ep_padding(const DpEpPaddingData& src,
                                        uint32_t padded_tokens,

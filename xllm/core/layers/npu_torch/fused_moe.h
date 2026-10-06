@@ -121,10 +121,17 @@ class FusedMoEImpl : public torch::nn::Module {
 
   void initialize_mega_moe();
   void ensure_mega_moe_weights();
-  torch::Tensor forward_mega_moe(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& router_logits,
-      const std::optional<torch::Tensor>& shared_output);
+  // Runs the fused aclnnMegaMoe path end to end: expert selection on the
+  // real rows, all-to-all layout padding with an int8 active mask for
+  // non-uniform or empty DP shards, and output shape restoration.
+  torch::Tensor forward_mega_moe(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& router_logits,
+                                 const ModelInputParams& input_params);
+
+  // Returns true when the mega_moe fused kernel should be used instead of
+  // the allgather + dispatch/combine path.
+  bool should_use_mega_moe(const ModelInputParams& input_params,
+                           int64_t input_size) const;
 
  private:
   int64_t num_total_experts_;

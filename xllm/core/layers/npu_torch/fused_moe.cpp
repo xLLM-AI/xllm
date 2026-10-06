@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1842,7 +1843,8 @@ torch::Tensor FusedMoEImpl::select_experts(
 }
 
 void FusedMoEImpl::initialize_mega_moe() {
-  if (!::xllm::KernelConfig::get_instance().enable_mega_moe()) {
+  // MegaMoE does not support EPLB's physical expert remapping.
+  if (!::xllm::KernelConfig::get_instance().enable_mega_moe() || enable_eplb_) {
     return;
   }
   CHECK_GT(parallel_args_.ep_size(), 1) << "mega_moe requires ep_size > 1";
@@ -1888,7 +1890,7 @@ void FusedMoEImpl::ensure_mega_moe_weights() {
 torch::Tensor FusedMoEImpl::forward_mega_moe(
     const torch::Tensor& hidden_states,
     const torch::Tensor& router_logits,
-    const std::optional<torch::Tensor>& shared_output) {
+    const ModelInputParams& input_params) {
   CHECK(mega_moe_enabled_);
   auto comm = mega_moe_comm_resource_.lock();
   CHECK(comm != nullptr)
@@ -1900,12 +1902,83 @@ torch::Tensor FusedMoEImpl::forward_mega_moe(
       hidden_states.reshape({-1, hidden_states.size(-1)}).contiguous();
   auto router_logits_2d = router_logits.reshape({-1, router_logits.size(-1)});
 
+  // Expert selection always runs on the real rows; padded rows never take
+  // part in routing.
   auto [topk_weights, topk_ids] =
       select_global_experts(input_2d, router_logits_2d);
   topk_weights = topk_weights.to(torch::kFloat32).contiguous();
   topk_ids = topk_ids.to(torch::kInt32).contiguous();
 
+  // Unmasked EP ranks derive the per-rank token budget from global DP
+  // metadata, never from the local batch size.
+  const auto& dp_nums = input_params.parallel.dp_global_token_nums;
+  int64_t num_max_tokens_per_rank = input_2d.size(0);
+  if (!dp_nums.empty() && !input_params.parallel.mega_active_mask.defined()) {
+    num_max_tokens_per_rank =
+        static_cast<int64_t>(*std::max_element(dp_nums.begin(), dp_nums.end()));
+  }
+  // max_recv_token_num must be identical on every EP rank; the kernel's
+  // dispatch clamps use it as the receive capacity on both sides. Leaving
+  // it at 0 auto-resolves it from the LOCAL bs, which breaks mixed DP
+  // steps where per-rank token counts differ.
   const int64_t ep_world_size = parallel_args_.ep_size();
+  const int64_t recv_topk = std::min<int64_t>(topk_, num_experts_per_rank_);
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  bool mega_padded = false;
+  int64_t mega_real_tokens = 0;
+  if (input_params.parallel.mega_active_mask.defined()) {
+    // ACL graph capture: the executor hands the persistent mask slice
+    // (length = padded bucket tokens) and the input is already padded to
+    // the same bucket, so pass the mask straight through. This covers any
+    // dp size: bucket padding separates real from padded rows regardless
+    // of the DP topology.
+    x_active_mask = input_params.parallel.mega_active_mask;
+    // The operator's max_recv_token_num freezes at capture time; it must
+    // cover the full padded bucket width (input_2d.size(0)), not the
+    // capture step's actual token count. dp_global_token_nums for DP=1
+    // is the real token count (not padded), so keep the initialized
+    // bucket-aligned size.
+  } else if (dp_nums.size() > 1) {
+    // Eager non-uniform or empty DP shards zero-pad x and the routing
+    // results to the global max token count and hand aclnnMegaMoe an
+    // int8 x_active_mask marking the real rows; the kernel excludes
+    // masked rows from dispatch/combine (validated at the operator
+    // level). This replaces the legacy allgather fallback. Uniform
+    // steps pass no mask so ACL graph capture keeps the stable no-mask
+    // op sequence.
+    const bool dp_uniform = std::all_of(
+        dp_nums.begin(),
+        dp_nums.end(),
+        [first_num = dp_nums.front()](int32_t n) { return n == first_num; });
+    const int64_t n_local = input_2d.size(0);
+    if (!dp_uniform || n_local != num_max_tokens_per_rank ||
+        input_params.meta.num_sequences == 0) {
+      const int64_t pad_rows = num_max_tokens_per_rank - n_local;
+      if (pad_rows > 0) {
+        input_2d = torch::constant_pad_nd(
+                       input_2d, /*pad=*/{0, 0, 0, pad_rows}, /*value=*/0)
+                       .contiguous();
+        topk_ids = torch::constant_pad_nd(
+                       topk_ids, /*pad=*/{0, 0, 0, pad_rows}, /*value=*/0)
+                       .contiguous();
+        topk_weights = torch::constant_pad_nd(topk_weights,
+                                              /*pad=*/{0, 0, 0, pad_rows},
+                                              /*value=*/0)
+                           .contiguous();
+      }
+      auto mask = torch::zeros(
+          {num_max_tokens_per_rank},
+          torch::TensorOptions().dtype(torch::kInt8).device(input_2d.device()));
+      // An empty DP shard carries a single fake token; keep it masked off
+      // so the mega kernel skips it entirely.
+      if (input_params.meta.num_sequences != 0) {
+        mask.slice(/*dim=*/0, /*start=*/0, /*end=*/n_local).fill_(1);
+      }
+      x_active_mask = mask;
+      mega_padded = true;
+      mega_real_tokens = n_local;
+    }
+  }
 
   xllm::kernel::MegaMoeParams params;
   params.context = comm->context_tensor();
@@ -1917,20 +1990,44 @@ torch::Tensor FusedMoEImpl::forward_mega_moe(
   params.moe_expert_num = num_total_experts_;
   params.ep_world_size = ep_world_size;
   params.ccl_buffer_size = comm->ccl_buffer_size();
-  params.num_max_tokens_per_rank = comm->max_num_tokens_per_rank();
+  params.num_max_tokens_per_rank = num_max_tokens_per_rank;
+  params.max_recv_token_num =
+      num_max_tokens_per_rank * ep_world_size * recv_topk;
+  params.x_active_mask = x_active_mask;
 
   auto [y, expert_token_nums] = xllm::kernel::mega_moe(params);
 
   (void)expert_token_nums;
-  auto output = y.reshape(hidden_states_shape);
-  if (shared_output.has_value()) {
-    auto shared = shared_output.value();
-    if (tp_pg_->world_size() > 1) {
-      shared = parallel_state::reduce(shared, tp_pg_);
-    }
-    output = output + shared;
+  if (mega_padded) {
+    y = y.slice(/*dim=*/0, /*start=*/0, /*end=*/mega_real_tokens);
   }
-  return output;
+  return y.reshape(hidden_states_shape);
+}
+
+bool FusedMoEImpl::should_use_mega_moe(const ModelInputParams& input_params,
+                                       int64_t input_size) const {
+  if (!mega_moe_enabled_) {
+    return false;
+  }
+  // MegaMoE fused kernel is not validated under MoE tensor parallelism; fall
+  // back to the per-expert path so TP>1 keeps the correct weight layout.
+  if (tp_pg_->world_size() > 1) {
+    return false;
+  }
+  const auto& dp_nums = input_params.parallel.dp_global_token_nums;
+  if (dp_nums.empty()) {
+    return input_size <= kMegaMoeMaxTokens;
+  }
+  const int64_t max_dp_tokens =
+      static_cast<int64_t>(*std::max_element(dp_nums.begin(), dp_nums.end()));
+  // aclnnMegaMoe requires uniform token counts per EP rank; non-uniform and
+  // empty DP shards are handled by padding to max(dp) plus an int8
+  // x_active_mask in forward_mega_moe() (operator-level validated), so only
+  // the token budget gates the mega path here.
+  if (max_dp_tokens <= 0) {
+    return false;
+  }
+  return max_dp_tokens <= kMegaMoeMaxTokens;
 }
 
 torch::Tensor FusedMoEImpl::forward_expert(
@@ -1940,7 +2037,15 @@ torch::Tensor FusedMoEImpl::forward_expert(
     const ModelInputParams& input_params,
     bool use_mega_moe) {
   if (use_mega_moe) {
-    return forward_mega_moe(hidden_states, router_logits, shared_output);
+    auto output = forward_mega_moe(hidden_states, router_logits, input_params);
+    if (shared_output.has_value()) {
+      auto shared = shared_output.value();
+      if (tp_pg_->world_size() > 1) {
+        shared = parallel_state::reduce(shared, tp_pg_);
+      }
+      output = output + shared;
+    }
+    return output;
   }
   // prepare the parameters for MoE computation
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
@@ -2213,7 +2318,8 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
   auto input = hidden_states;
   bool need_slice = false;
   std::vector<int32_t> moe_dp_token_nums;
-  if (should_gather_dp_inputs_for_moe()) {
+  const bool use_mega_moe = should_use_mega_moe(input_params, input.size(0));
+  if (should_gather_dp_inputs_for_moe() && !use_mega_moe) {
     moe_dp_token_nums =
         make_moe_dp_token_nums(input_params.parallel.dp_global_token_nums);
     input = parallel_state::gather(
@@ -2235,8 +2341,6 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
     }
   }
   auto router_logits = gate_(input);
-  const bool use_mega_moe =
-      mega_moe_enabled_ && input.size(0) <= kMegaMoeMaxTokens;
   auto output = forward_expert(
       input, router_logits, shared_output, input_params, use_mega_moe);
 
@@ -2767,7 +2871,8 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   }
 
   bool need_slice = false;
-  if (should_gather_dp_inputs_for_moe()) {
+  const bool use_mega_moe = should_use_mega_moe(input_params, input.size(0));
+  if (should_gather_dp_inputs_for_moe() && !use_mega_moe) {
     input = parallel_state::gather(input,
                                    parallel_args_.dp_local_process_group_,
                                    input_params.parallel.dp_global_token_nums);
@@ -2812,8 +2917,6 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   std::vector<int64_t> router_shape = input.sizes().vec();
   router_shape.back() = num_total_experts_;
   torch::Tensor router_logits = torch::empty(router_shape, input.options());
-  const bool use_mega_moe =
-      mega_moe_enabled_ && input.size(0) <= kMegaMoeMaxTokens;
   torch::Tensor output = forward_expert(
       input, router_logits, shared_output, input_params, use_mega_moe);
   preselected_experts_ = std::nullopt;
