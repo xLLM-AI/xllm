@@ -8,7 +8,8 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
-option(ENABLE_HA "Enable Mooncake etcd-based high availability support" OFF)
+option(USE_ETCD "Build Mooncake etcd support" ON)
+option(STORE_USE_ETCD "Build Mooncake Store etcd support" ${USE_ETCD})
 # xlite is an NPU-only backend; it requires USE_NPU=ON.
 option(USE_XLITE "Enable xlite NPU backend" ${USE_NPU})
 add_compile_definitions(YLT_ENABLE_IBV)
@@ -20,11 +21,6 @@ set(YLT_ENABLE_IBV ON)
 # relocatable instead of depending on the build tree.
 list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
 list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
-
-if(ENABLE_HA)
-  set(USE_ETCD ON)
-  message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
-endif()
 
 if(DEVICE_ARCH STREQUAL "ARM")
     set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -905,28 +901,31 @@ endif()
 # Configure third_party first so xllm can link against real CMake targets.
 
 add_subdirectory(third_party)
-if(ENABLE_HA)
-  if(NOT TARGET build_etcd_wrapper OR NOT TARGET mooncake_store)
-    message(FATAL_ERROR
-      "ENABLE_HA requires Mooncake Store and its etcd wrapper targets")
-  endif()
-
-  if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
-    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
-  else()
-    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_BINARY_DIR}")
-  endif()
-  set(MOONCAKE_ETCD_WRAPPER
-      "${CMAKE_BINARY_DIR}/third_party/Mooncake/mooncake-common/etcd/libetcd_wrapper.so")
-  add_custom_target(stage_mooncake_ha_runtime ALL
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${MOONCAKE_HA_RUNTIME_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${MOONCAKE_ETCD_WRAPPER}"
-            "${MOONCAKE_HA_RUNTIME_DIR}/libetcd_wrapper.so"
-    DEPENDS build_etcd_wrapper
-    COMMENT "Staging Mooncake etcd HA runtime")
-  add_dependencies(mooncake_store stage_mooncake_ha_runtime)
+# Record the configured HA backends for packaging; Python must not reinterpret
+# CMake command-line options or stale build outputs.
+if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+  set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+else()
+  set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_BINARY_DIR}")
 endif()
+set(MOONCAKE_HA_RUNTIME_LIBRARIES "")
+add_custom_target(stage_mooncake_ha_runtime)
+foreach(backend etcd k8s_lease)
+  if(TARGET build_${backend}_wrapper)
+    string(REPLACE "_" "-" backend_dir "${backend}")
+    set(wrapper "lib${backend}_wrapper.so")
+    list(APPEND MOONCAKE_HA_RUNTIME_LIBRARIES "${wrapper}")
+    add_custom_command(TARGET stage_mooncake_ha_runtime POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${MOONCAKE_HA_RUNTIME_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${CMAKE_BINARY_DIR}/third_party/Mooncake/mooncake-common/${backend_dir}/${wrapper}"
+              "${MOONCAKE_HA_RUNTIME_DIR}/${wrapper}")
+    add_dependencies(stage_mooncake_ha_runtime build_${backend}_wrapper)
+    add_dependencies(mooncake_store stage_mooncake_ha_runtime)
+  endif()
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/mooncake_ha_runtime_libraries.txt"
+     CONTENT "$<JOIN:${MOONCAKE_HA_RUNTIME_LIBRARIES},\n>")
 if(TARGET brpc-static AND NOT TARGET brpc)
   add_library(brpc ALIAS brpc-static)
 endif()

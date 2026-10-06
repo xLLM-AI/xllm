@@ -45,6 +45,7 @@ from scripts.build_support.env import (
 from scripts.build_support.utils import (
     check_and_install_pre_commit,
     configure_ccache,
+    ensure_mooncake_go_toolchain,
     get_ascend_platform,
     get_base_dir,
     get_cmake_dir,
@@ -330,7 +331,6 @@ class ExtBuild(build_ext):
         ("device=", None, "target device type (npu or mlu or cuda or ilu or musa or maca)"),
         ("arch=", None, "target arch type (x86 or arm)"),
         ("generate-so=", None, "generate so or binary"),
-        ("enable-ha=", None, "enable Mooncake etcd high availability"),
         ("dev=", None, "build for fast iteration: -O1 and no unit tests"),
         ("tilelang-jobs=", None, "maximum parallel TileLang compile workers"),
     ]
@@ -341,8 +341,8 @@ class ExtBuild(build_ext):
         self.device: str | None = None
         self.arch: str | None = None
         self.generate_so: bool = False
-        self.enable_ha: bool = False
         self.dev: bool = False
+        self.force_dependencies: bool = False
         self.tilelang_jobs: int | str | None = None
 
     def finalize_options(self) -> None:
@@ -416,9 +416,6 @@ class ExtBuild(build_ext):
             "-DBUILD_SHARED_LIBS=OFF",
             f"-DDEVICE_TYPE=USE_{self.device.upper()}",
             f"-DDEVICE_ARCH={self.arch.upper()}",
-            f"-DENABLE_HA={'ON' if self.enable_ha else 'OFF'}",
-            f"-DUSE_ETCD={'ON' if self.enable_ha else 'OFF'}",
-            f"-DSTORE_USE_ETCD={'ON' if self.enable_ha else 'OFF'}",
             f"-DXLLM_ATB_LAYERS_SOURCE_DIR={os.path.join(self.base_dir, 'third_party', 'xllm_atb_layers')}",
             f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
@@ -543,6 +540,16 @@ class ExtBuild(build_ext):
 
         self.build_cmake_targets(ext, cmake_args, build_args, env, extdir, product)
 
+    def _configure_cmake(self, cmake_cmd: str, cmake_args: list[str], env: dict[str, str]) -> list[str]:
+        cmake_dir = get_cmake_dir()
+        subprocess.check_call([cmake_cmd, self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
+        with open(os.path.join(cmake_dir, "mooncake_ha_runtime_libraries.txt"), encoding="utf-8") as runtime_file:
+            ha_libraries = runtime_file.read().splitlines()
+        if ha_libraries:
+            ensure_mooncake_go_toolchain(self.base_dir, install=self.force_dependencies)
+            env.update({key: os.environ[key] for key in ("PATH", "GOPROXY") if key in os.environ})
+        return ha_libraries
+
     def build_cmake_targets(
         self,
         ext: CMakeExtension,
@@ -555,15 +562,13 @@ class ExtBuild(build_ext):
         """Build CMake targets"""
         cmake_dir = get_cmake_dir()
         cmake_cmd = "cmake_maca" if self.device == "maca" else "cmake"
-        subprocess.check_call([cmake_cmd, self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
+        ha_libraries = self._configure_cmake(cmake_cmd, cmake_args, env)
 
         # Build every native executable shipped in the wheel so stale Mooncake
         # binaries cannot be reused from a previous build directory.
-        build_targets = [ext.name, "mooncake_master", "mooncake_client"]
-        if self.enable_ha:
-            build_targets.append("stage_mooncake_ha_runtime")
+        build_targets = [ext.name, "mooncake_master", "mooncake_client", "stage_mooncake_ha_runtime"]
         build_cmd = [cmake_cmd, "--build", ".", "--verbose"] + build_args + ["--target"]
-        subprocess.check_call(build_cmd + build_targets, cwd=cmake_dir)
+        subprocess.check_call(build_cmd + build_targets, cwd=cmake_dir, env=env)
 
         server_output_dir = os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/")
         os.makedirs(server_output_dir, exist_ok=True)
@@ -571,11 +576,14 @@ class ExtBuild(build_ext):
             os.path.join(extdir, product),
             server_output_dir,
         )
-        if self.enable_ha:
-            etcd_wrapper = os.path.join(extdir, "libetcd_wrapper.so")
-            if not os.path.isfile(etcd_wrapper):
-                raise RuntimeError(f"Mooncake HA runtime library was not staged: {etcd_wrapper}")
-            shutil.copy(etcd_wrapper, server_output_dir)
+        for name in ("libetcd_wrapper.so", "libk8s_lease_wrapper.so"):
+            if name in ha_libraries:
+                shutil.copy2(os.path.join(extdir, name), server_output_dir)
+                continue
+            for directory in (extdir, server_output_dir):
+                runtime_library = os.path.join(directory, name)
+                if os.path.lexists(runtime_library):
+                    os.remove(runtime_library)
 
         # Stage the Python model-executor package into the wheel as the
         # ``xllm.python`` subpackage (xllm/python/...). The installed ``xllm``
@@ -643,11 +651,11 @@ class ExtBuildSingleTest(ExtBuild):
     ) -> None:
         """Override method: only build the specified test target and run"""
         cmake_dir = get_cmake_dir()
-        subprocess.check_call(["cmake", self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
+        self._configure_cmake("cmake", cmake_args, env)
 
         # Only build the specified test target
         subprocess.check_call(
-            ["cmake", "--build", ".", "--verbose"] + build_args + ["--target", self.test_name], cwd=cmake_dir
+            ["cmake", "--build", ".", "--verbose"] + build_args + ["--target", self.test_name], cwd=cmake_dir, env=env
         )
 
         # Find test executable
@@ -697,7 +705,6 @@ class BuildDistWheel(bdist_wheel):
     user_options = bdist_wheel.user_options + [
         ("device=", None, "target device type (npu or mlu or cuda or ilu or musa)"),
         ("arch=", None, "target arch type (x86 or arm)"),
-        ("enable-ha=", None, "enable Mooncake etcd high availability"),
         ("tilelang-jobs=", None, "maximum parallel TileLang compile workers"),
     ]
 
@@ -705,7 +712,6 @@ class BuildDistWheel(bdist_wheel):
         super().initialize_options()
         self.device: str | None = None
         self.arch: str | None = None
-        self.enable_ha: bool = False
         self.tilelang_jobs: int | str | None = None
         # Cache the original dist name early so finalize_options is idempotent
         # and so name changes are visible to egg_info/metadata generation.
@@ -735,7 +741,6 @@ class BuildDistWheel(bdist_wheel):
         build_ext_cmd = self.get_finalized_command("build_ext")
         build_ext_cmd.device = self.device
         build_ext_cmd.arch = self.arch
-        build_ext_cmd.enable_ha = self.enable_ha
         build_ext_cmd.tilelang_jobs = self.tilelang_jobs
 
         logger.info("🔨 build project...")
@@ -954,7 +959,6 @@ class SingleTest(Command):
         ("device=", None, "target device type (npu or mlu or cuda or ilu)"),
         ("arch=", None, "target arch type (x86 or arm)"),
         ("generate-so=", None, "generate so or binary"),
-        ("enable-ha=", None, "enable Mooncake etcd high availability"),
         ("tilelang-jobs=", None, "maximum parallel TileLang compile workers"),
     ]
 
@@ -963,7 +967,7 @@ class SingleTest(Command):
         self.device: str | None = None
         self.arch: str | None = None
         self.generate_so: bool = False
-        self.enable_ha: bool = False
+        self.force_dependencies: bool = False
         self.tilelang_jobs: int | str | None = None
 
     def finalize_options(self) -> None:
@@ -978,7 +982,7 @@ class SingleTest(Command):
         build_ext.device = self.device
         build_ext.arch = self.arch
         build_ext.generate_so = self.generate_so
-        build_ext.enable_ha = self.enable_ha
+        build_ext.force_dependencies = self.force_dependencies
         build_ext.tilelang_jobs = self.tilelang_jobs
         build_ext.finalize_options()
 
@@ -1016,11 +1020,9 @@ def parse_arguments() -> dict[str, Any]:
         help="Whether to generate so or binary",
     )
     parser.add_argument(
-        "--enable-ha",
-        type=str.lower,
-        choices=["true", "false", "1", "0", "yes", "no", "y", "n", "on", "off"],
-        default="false",
-        help="Whether to enable Mooncake etcd high availability support",
+        "--deps",
+        action="store_true",
+        help="Force installation of Mooncake build dependencies",
     )
 
     parser.add_argument(
@@ -1046,12 +1048,10 @@ def parse_arguments() -> dict[str, Any]:
     sys.argv = [sys.argv[0]] + args.setup_args
 
     generate_so = args.generate_so.lower() in ("true", "1", "yes", "y", "on")
-    enable_ha = args.enable_ha.lower() in ("true", "1", "yes", "y", "on")
-
     return {
         "device": args.device,
+        "force_dependencies": args.deps,
         "generate_so": generate_so,
-        "enable_ha": enable_ha,
         "test_name": args.test_name,
         "tilelang_jobs": args.tilelang_jobs,
         "dev": args.dev,
@@ -1065,9 +1065,8 @@ if __name__ == "__main__":
     device = config["device"]
     if device == "auto":
         device = get_device_type()
-    enable_ha = config["enable_ha"]
-    logger.info(f"🚀 Build xllm with CPU arch: {arch}, target device: {device}, enable_ha: {enable_ha}")
-    pre_build(device, enable_ha)
+    logger.info(f"🚀 Build xllm with CPU arch: {arch}, target device: {device}")
+    pre_build(device, force_dependencies=config["force_dependencies"])
 
     generate_so = config["generate_so"]
     test_name = config.get("test_name")
@@ -1095,14 +1094,13 @@ if __name__ == "__main__":
             "device": device,
             "arch": arch,
             "generate_so": generate_so,
-            "enable_ha": enable_ha,
             "dev": dev,
+            "force_dependencies": config["force_dependencies"],
             "tilelang_jobs": tilelang_jobs,
         },
         "bdist_wheel": {
             "device": device,
             "arch": arch,
-            "enable_ha": enable_ha,
             "tilelang_jobs": tilelang_jobs,
         },
     }
@@ -1111,8 +1109,8 @@ if __name__ == "__main__":
             "device": device,
             "arch": arch,
             "generate_so": generate_so,
-            "enable_ha": enable_ha,
             "test_name": test_name,
+            "force_dependencies": config["force_dependencies"],
             "tilelang_jobs": tilelang_jobs,
         }
 

@@ -14,16 +14,17 @@ Mooncake etcd wrapper 需要 Go 1.25.10 或兼容工具链：
 
 ```bash
 MAX_JOBS=32 SKIP_EXPORT=1 \
-  python setup.py build --device npu --enable-ha true
+  python setup.py build --device npu
 
 cmake --build build/cmake.linux-aarch64-cpython-311 \
   --target mooncake_master mooncake_client -j32
 ```
 
-启用 HA 时，如果没有 Go 1.25.10，`third_party/dependencies.sh` 会参考
-Mooncake 的依赖安装方式，依次尝试官方源和国内镜像，并自动安装到
-`/usr/local/go`。`pre_build` 会在 `enable-ha` 开启时自动调用该脚本；
-Mooncake 升级 Go 版本时，需要同步更新脚本中的 `GOVER`。
+构建时，`pre_build` 会检查 Mooncake 构建依赖和 Go 版本。仅在依赖缺失或所需的 Go 工具链不可用时
+执行 `cd third_party/Mooncake && bash dependencies.sh -y`，因此后续编译不会重复
+更新系统软件包。构建前还会自动将 Mooncake 的精确路径加入 Git
+`safe.directory`。依赖安装脚本需要 root 权限，并将 Go 安装到 `/usr/local/go`。
+如需忽略检测并强制重新安装依赖，可在构建命令中添加 `--deps`。
 
 脚本会优先使用 `PATH` 中的 Mooncake 二进制，否则自动查找 `build/lib.*/xllm/`。也可以显式设置：
 

@@ -1,4 +1,17 @@
 #!/bin/bash
+# Copyright 2026 The xLLM Authors.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 # Color definitions
 GREEN="\033[0;32m"
@@ -8,10 +21,10 @@ RED="\033[0;31m"
 NC="\033[0m" # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-INSTALL_PREFIX="${YALANTINGLIBS_PREFIX:-/usr/local/yalantinglibs}"
-GOVER=1.25.10
-GO_INSTALL_DIR="/usr/local/go"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+INSTALL_PREFIX="$(python3 -c 'import os; print(os.path.abspath(os.path.expanduser(os.getenv("YALANTINGLIBS_PREFIX", "/usr/local"))))')"
+GOVER="$(sed -n 's/^GOVER=["\x27]*\([0-9.]*\).*/\1/p' "${REPO_ROOT}/third_party/Mooncake/dependencies.sh")"
+GO_INSTALL_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/xllm/go${GOVER}"
 
 print_section() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
@@ -47,27 +60,9 @@ ensure_dir() {
     fi
 }
 
-remove_dir_if_exists() {
-    local dir_path="$1"
-    local dir_name="$2"
-    if [ -d "${dir_path}" ]; then
-        print_warning "${dir_name} directory already exists. Removing for fresh install..."
-        run_or_die "Failed to remove existing ${dir_name} directory" rm -rf "${dir_path}"
-    fi
-}
-
 installed_go_version() {
     local go_binary="$1"
     "${go_binary}" version 2>/dev/null | sed -n 's/.* go\([0-9][0-9.]*\).*/\1/p'
-}
-
-configure_go() {
-    local go_binary="$1"
-    if [ -z "${GOPROXY:-}" ]; then
-        run_or_die "Failed to configure GOPROXY" \
-            "${go_binary}" env -w \
-            GOPROXY=https://goproxy.cn,https://goproxy.io,direct
-    fi
 }
 
 install_go() {
@@ -92,7 +87,8 @@ install_go() {
     esac
 
     go_tarball="go${GOVER}.linux-${arch}.tar.gz"
-    work_dir="$(mktemp -d -t xllm-go-XXXXXX)"
+    ensure_dir "$(dirname "${GO_INSTALL_DIR}")" "Failed to create toolchain cache"
+    work_dir="$(mktemp -d "$(dirname "${GO_INSTALL_DIR}")/.go-install-XXXXXX")" || print_error "Failed to create download directory"
     download_urls=(
         "https://go.dev/dl/${go_tarball}"
         "https://golang.google.cn/dl/${go_tarball}"
@@ -114,9 +110,14 @@ install_go() {
         print_error "Failed to download Go ${GOVER} from all mirrors"
     fi
 
-    run_or_die "Failed to remove old Go installation" rm -rf "${GO_INSTALL_DIR}"
-    run_or_die "Failed to install Go ${GOVER}" \
-        tar -C /usr/local -xzf "${work_dir}/${go_tarball}"
+    run_or_die "Failed to extract Go ${GOVER}" tar -C "${work_dir}" -xzf "${work_dir}/${go_tarball}"
+    if [ "$(installed_go_version "${work_dir}/go/bin/go")" != "${GOVER}" ]; then
+        print_error "Downloaded Go toolchain version does not match ${GOVER}"
+    fi
+    if [ -e "${GO_INSTALL_DIR}" ]; then
+        print_error "Incomplete toolchain at ${GO_INSTALL_DIR}; remove it before retrying"
+    fi
+    run_or_die "Failed to install Go ${GOVER}" mv -T "${work_dir}/go" "${GO_INSTALL_DIR}"
     rm -rf "${work_dir}"
     print_success "Go ${GOVER} installed successfully to ${GO_INSTALL_DIR}"
 }
@@ -129,7 +130,6 @@ ensure_go() {
     if [ -n "${go_binary}" ]; then
         go_version="$(installed_go_version "${go_binary}")"
         if [ "${go_version}" = "${GOVER}" ]; then
-            configure_go "${go_binary}"
             print_success "Go ${GOVER} is already installed"
             return
         fi
@@ -137,18 +137,12 @@ ensure_go() {
 
     if [ -x "${GO_INSTALL_DIR}/bin/go" ] && \
         [ "$(installed_go_version "${GO_INSTALL_DIR}/bin/go")" = "${GOVER}" ]; then
-        run_or_die "Failed to expose Go in /usr/local/bin" \
-            ln -sf "${GO_INSTALL_DIR}/bin/go" /usr/local/bin/go
-        configure_go "${GO_INSTALL_DIR}/bin/go"
         print_success "Go ${GOVER} is already installed"
         return
     fi
 
     print_section "Installing Go ${GOVER} for Mooncake HA"
     install_go
-    run_or_die "Failed to expose Go in /usr/local/bin" \
-        ln -sf "${GO_INSTALL_DIR}/bin/go" /usr/local/bin/go
-    configure_go "${GO_INSTALL_DIR}/bin/go"
 }
 
 patch_yalantinglibs_config() {
@@ -162,39 +156,16 @@ patch_yalantinglibs_config() {
     fi
 }
 
-patch_yalantinglibs_easylog() {
-    local easylog_header="$1"
-    if [ -f "${easylog_header}" ]; then
-        run_or_die \
-            "Failed to patch yalantinglibs easylog severity default" \
-            sed -i \
-            '/std::atomic<Severity> min_severity_ =/,/#endif/c\  std::atomic<Severity> min_severity_ = Severity::WARN;' \
-            "${easylog_header}"
-    fi
-}
-
 install_yalantinglibs() {
     print_section "Installing yalantinglibs"
 
-    local thirdparties_dir="${REPO_ROOT}/third_party/Mooncake/thirdparties"
-    local yalanting_repo_url="https://gitcode.com/gh_mirrors/ya/yalantinglibs.git"
-    local yalanting_source_dir="${thirdparties_dir}/yalantinglibs"
-    local yalanting_build_dir="${yalanting_source_dir}/build"
+    local yalanting_source_dir="${REPO_ROOT}/third_party/Mooncake/extern/yalantinglibs"
+    local yalanting_build_dir="${REPO_ROOT}/build/dependencies/yalantinglibs"
     local yalanting_config_file="${INSTALL_PREFIX}/lib/cmake/yalantinglibs/config.cmake"
-    local yalanting_easylog_header="${yalanting_source_dir}/include/ylt/easylog.hpp"
 
-    ensure_dir "${thirdparties_dir}" "Failed to create Mooncake/thirdparties directory"
-    remove_dir_if_exists "${yalanting_source_dir}" "yalantinglibs"
-
-    echo "Cloning yalantinglibs from ${yalanting_repo_url}"
-    run_or_die "Failed to clone yalantinglibs" git clone "${yalanting_repo_url}" "${yalanting_source_dir}"
-
-    echo "Checking out yalantinglibs version 0.5.5..."
-    run_or_die "Failed to checkout yalantinglibs version 0.5.5" git -C "${yalanting_source_dir}" checkout 0.5.5
-
-    patch_yalantinglibs_easylog "${yalanting_easylog_header}"
-
-    ensure_dir "${yalanting_build_dir}" "Failed to create build directory"
+    if [ ! -f "${yalanting_source_dir}/CMakeLists.txt" ]; then
+        print_error "Initialize the pinned Mooncake/extern/yalantinglibs submodule first"
+    fi
 
     echo "Configuring yalantinglibs..."
     run_or_die \
@@ -296,10 +267,12 @@ install_msgpack_cxx_headers() {
         git clone --depth 1 --branch "${version}" "${repo_url}" "${work_dir}/msgpack-c"
 
     echo "Installing msgpack.hpp and msgpack/ into /usr/local/include"
-    run_or_die "Failed to install msgpack.hpp" \
-        cp "${work_dir}/msgpack-c/include/msgpack.hpp" /usr/local/include/
     run_or_die "Failed to install msgpack/ headers" \
         cp -r "${work_dir}/msgpack-c/include/msgpack" /usr/local/include/
+    local marker
+    marker="$(mktemp /usr/local/include/.msgpack.hpp-XXXXXX)" || print_error "Failed to create header marker"
+    run_or_die "Failed to stage msgpack.hpp" cp "${work_dir}/msgpack-c/include/msgpack.hpp" "${marker}"
+    run_or_die "Failed to publish msgpack.hpp" mv -f "${marker}" /usr/local/include/msgpack.hpp
 
     rm -rf "${work_dir}"
     print_success "msgpack-cxx headers installed to /usr/local/include"
@@ -332,6 +305,9 @@ install_build_dependencies() {
 main() {
     case "${1:-}" in
         --ensure-go)
+            if [ -z "${GOVER}" ]; then
+                print_error "Cannot read Go version from Mooncake/dependencies.sh"
+            fi
             ensure_go
             ;;
         "")
