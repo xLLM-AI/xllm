@@ -28,8 +28,6 @@ struct TaskPipelineTestPeer {
       TaskExecutionPipeline::context_prepare_prefill;
   static constexpr auto context_prepare_decode =
       TaskExecutionPipeline::context_prepare_decode;
-  static constexpr auto context_prepare_impl =
-      TaskExecutionPipeline::context_prepare_impl;
   static constexpr auto context_gather = TaskExecutionPipeline::context_gather;
   static constexpr auto context_publish =
       TaskExecutionPipeline::context_publish;
@@ -48,13 +46,8 @@ struct TaskPipelineTestPeer {
   static constexpr auto prepare_planned_mtp_decode =
       SlotBuffer::prepare_planned_mtp_decode;
   static constexpr auto patch_mtp_decode = SlotBuffer::patch_mtp_decode;
-  static constexpr auto plan_mtp_prefill = SlotBuffer::plan_mtp_prefill;
   static constexpr auto prepare_mtp_prefill = SlotBuffer::prepare_mtp_prefill;
-  static constexpr auto prepare_planned_mtp_prefill =
-      SlotBuffer::prepare_planned_mtp_prefill;
   static constexpr auto patch_mtp_prefill = SlotBuffer::patch_mtp_prefill;
-  static constexpr auto initialize_mtp_context =
-      SlotBuffer::initialize_mtp_context;
   static constexpr auto create_mtp_context =
       TaskExecutionPipeline::create_mtp_context;
   static constexpr auto mtp_context_bytes =

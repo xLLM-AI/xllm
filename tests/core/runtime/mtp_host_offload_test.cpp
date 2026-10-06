@@ -112,19 +112,15 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
         transfer_result_(transfer_result) {}
 
   uint32_t transfer_kv_blocks(
-      uint64_t batch_id,
-      const std::vector<BlockTransferInfo>& block_transfer_info) override {
-    last_batch_id_ = batch_id;
-    last_transfer_size_ = block_transfer_info.size();
+      uint64_t /*batch_id*/,
+      const std::vector<BlockTransferInfo>& /*block_transfer_info*/) override {
     ++vector_transfer_count_;
     return transfer_result_;
   }
 
   uint32_t transfer_kv_blocks(
-      uint64_t batch_id,
-      Slice<BlockTransferInfo>& block_transfer_info) override {
-    last_batch_id_ = batch_id;
-    last_transfer_size_ = block_transfer_info.size();
+      uint64_t /*batch_id*/,
+      Slice<BlockTransferInfo>& /*block_transfer_info*/) override {
     ++slice_transfer_count_;
     return transfer_result_;
   }
@@ -138,16 +134,12 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
   uint32_t vector_transfer_count() const { return vector_transfer_count_; }
   uint32_t slice_transfer_count() const { return slice_transfer_count_; }
   uint32_t prefetch_count() const { return prefetch_count_; }
-  uint64_t last_batch_id() const { return last_batch_id_; }
-  size_t last_transfer_size() const { return last_transfer_size_; }
 
  private:
   uint32_t transfer_result_ = 0;
   uint32_t vector_transfer_count_ = 0;
   uint32_t slice_transfer_count_ = 0;
   uint32_t prefetch_count_ = 0;
-  uint64_t last_batch_id_ = 0;
-  size_t last_transfer_size_ = 0;
 };
 
 class HierarchyTransferTestWorker : public LLMWorkerImpl {

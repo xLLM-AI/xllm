@@ -122,13 +122,12 @@ class MirroredDcpProcessGroup final : public ProcessGroup {
 
 class HybridConv1dMockLM final : public CausalLM {
  public:
-  HybridConv1dMockLM(const ModelArgs& args,
+  HybridConv1dMockLM(const ModelArgs& /*args*/,
                      const torch::Device& device,
                      bool enable_fia_decode = true,
                      int32_t attention_repetitions = 1,
                      ProcessGroup* dcp_group = nullptr)
-      : args_(args),
-        device_(device),
+      : device_(device),
         attention_repetitions_(attention_repetitions),
         dcp_group_(dcp_group) {
     CHECK_GT(attention_repetitions_, 0);
@@ -368,7 +367,6 @@ class HybridConv1dMockLM final : public CausalLM {
   void set_npu_word_embedding(layer::NpuWordEmbedding&) override {}
 
  private:
-  ModelArgs args_;
   torch::Device device_;
   torch::nn::Linear linear_{nullptr};
   layer::Attention attention_{nullptr};

@@ -214,17 +214,6 @@ const KVCache& first_full_attention_cache(
 }
 }  // namespace
 
-// Initialize glog for testing - use a function to ensure proper initialization
-// order
-void InitializeGlog() {
-  static bool initialized = false;
-  if (!initialized) {
-    google::InitGoogleLogging("acl_graph_executor_test");
-    google::SetStderrLogging(google::INFO);
-    initialized = true;
-  }
-}
-
 // Simple CausalLM implementation for testing ACL graph executor
 // Uses basic operations to verify graph capture and replay functionality
 class SimpleCausalLM : public CausalLM {
@@ -508,15 +497,6 @@ class AclGraphExecutorTest : public ::testing::Test {
   }
 
   void TearDown() override { return; }
-
-  void reset() {
-    for (auto& sequence : sequences_) {
-      auto blocks = sequence.kv_state().blocks(BlockType::KV);
-      if (!blocks.empty()) {
-        block_manager_->deallocate(blocks);
-      }
-    }
-  }
 
   // Helper function to create a simple batch
   std::unique_ptr<Batch> CreateTestBatch() {
