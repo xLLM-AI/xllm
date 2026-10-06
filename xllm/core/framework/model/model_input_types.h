@@ -407,6 +407,9 @@ class ParallelInput final {
   // max kv seq len of all dp shards. Graph key generation uses this so empty
   // DP decode ranks pick the same graph as ranks with real decode tokens.
   std::vector<int32_t> dp_global_kv_max_seq_lens;
+  // Replicated per-DP-shard JSON grammar presence for collective-safe MTP
+  // prelaunch admission. Missing metadata disables the prelaunch.
+  std::vector<int32_t> dp_global_json_object_active;
   std::vector<int32_t> dp_is_decode;
 
   DpEpPaddingData dp_ep_padding_data;
@@ -433,6 +436,7 @@ class ParallelInput final {
     out.raw_dp_global_token_nums = raw_dp_global_token_nums;
     out.dp_global_batch_generations = dp_global_batch_generations;
     out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
+    out.dp_global_json_object_active = dp_global_json_object_active;
     out.dp_is_decode = dp_is_decode;
     out.dp_ep_padding_data = dp_ep_padding_data;
     out.cp_plan = cp_plan.to(device);

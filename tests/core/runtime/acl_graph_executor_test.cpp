@@ -42,7 +42,6 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
@@ -1462,7 +1461,7 @@ TEST(AclGraphPersistentParamTest,
                                          true);
   ASSERT_TRUE(generic.has_value());
   const int64_t capacity =
-      mtp_async::speculative_verify_block_table_capacity(32, 4);
+      spec_verify::speculative_verify_block_table_capacity(32, 4);
   EXPECT_EQ(generic->graph.expanded_block_tables.size(0), kSpecWidth);
   EXPECT_EQ(generic->graph.expanded_block_tables.size(1), capacity);
   EXPECT_TRUE(generic->graph.expanded_block_tables.is_contiguous());

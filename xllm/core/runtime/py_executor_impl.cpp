@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/kv_shard_batch_metadata.h"
@@ -370,6 +371,9 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   py::object input_embedding =
       optional_tensor(params.embedding.input_embedding);
   py::object topk_indices = mtp_topk_indices(params);
+  torch::Tensor execution_tokens =
+      spec_verify::materialize_graph_speculative_verify_tokens(tokens,
+                                                               params.graph);
 
   // --- VLM: vision encode + embedding merge on image/video prefill steps ---
   // On steps carrying multimodal input, ``params.multimodal().mm_data`` holds
@@ -431,7 +435,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
       }
       // Sets top_model.model._inputs_embeds + deepstack_input_embeds.
       top_model.attr("get_input_embeddings")(
-          tokens, image_embeds, video_embeds);
+          execution_tokens, image_embeds, video_embeds);
     }
   }
 
@@ -463,7 +467,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   // get_input_embeddings above), so the runner takes the 2-arg model() branch
   // and Qwen3VLModel.forward reads _inputs_embeds. positions_arg carries the
   // mRoPE [3,N]->1-D decode collapse.
-  py::object hidden_obj = py_executor_.attr("execute")(tokens,
+  py::object hidden_obj = py_executor_.attr("execute")(execution_tokens,
                                                        positions_arg,
                                                        py_metadata,
                                                        input_embedding,

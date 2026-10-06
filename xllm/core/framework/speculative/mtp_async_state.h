@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string_view>
-#include <vector>
 
 namespace xllm::mtp_async {
 
@@ -35,11 +34,6 @@ enum class TargetSpecVerifyMode {
 TargetSpecVerifyMode classify_target_spec_verify_mode(
     std::string_view model_type);
 
-// Shared allocation/launch width for target verification block tables. The
-// extra entry covers the speculative token that can cross a block boundary.
-int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
-                                                int64_t block_size);
-
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
   QWEN3_5_PAGED_ATTENTION,
@@ -53,13 +47,6 @@ bool supports_combined_draft_configuration(
     CombinedDraftExecutionPath execution_path,
     std::string_view npu_backend,
     int32_t dp_size);
-
-// Materialize proposer-owned token columns into the row-major target verify
-// input. Graph replay normally performs this copy internally; eager fallback
-// must use the same logical tokens before invoking the model.
-torch::Tensor materialize_speculative_verify_tokens(
-    const torch::Tensor& verify_tokens,
-    const std::vector<torch::Tensor>& draft_token_sources);
 
 // Recover the KV length at the first target-verify token. Chunked-prefill
 // stores one post-verify length per sequence, while decode stores one length

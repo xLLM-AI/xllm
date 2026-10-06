@@ -46,8 +46,11 @@ cc_test(
   SRCS
     mtp_async_state_test.cpp
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/mtp_async_state.cpp"
+    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/spec_verify.cpp"
   DEPS
+    :sampler
     torch
+    proto::xllm_proto
     glog::glog
     GTest::gtest_main
 )

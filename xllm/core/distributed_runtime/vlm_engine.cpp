@@ -427,6 +427,11 @@ std::vector<VlmForwardInput> VLMEngine::prepare_inputs(BatchGroup& batch) {
   std::vector<int32_t> dp_global_token_nums(dp_size_);
   std::vector<int32_t> dp_global_sequence_nums(dp_size_);
   std::vector<int32_t> dp_global_kv_max_seq_lens(dp_size_);
+  std::vector<int32_t> dp_global_json_object_active(
+      dp_size_ > 1 && !options_.is_draft_engine() &&
+              options_.num_speculative_tokens() > 0
+          ? dp_size_
+          : 0);
   std::vector<int32_t> dp_is_decode(dp_size_, 0);
   // when enable dp, we need to check the forward type of each batch
   // and set the empty forward type of each batch to the same value as the first
@@ -450,6 +455,12 @@ std::vector<VlmForwardInput> VLMEngine::prepare_inputs(BatchGroup& batch) {
         batched_inputs[dp_rank].input_params.meta.num_sequences;
     dp_global_kv_max_seq_lens[dp_rank] =
         batched_inputs[dp_rank].input_params.meta.kv_max_seq_len;
+    if (!dp_global_json_object_active.empty()) {
+      const auto& shard = batched_inputs[dp_rank];
+      dp_global_json_object_active[dp_rank] =
+          !shard.json_object_states.empty() ||
+          !shard.json_object_state_snapshots.empty();
+    }
     if (batch_forward_type.is_empty() &&
         !batched_inputs[dp_rank]
              .input_params.meta.batch_forward_type.is_empty()) {
@@ -484,6 +495,8 @@ std::vector<VlmForwardInput> VLMEngine::prepare_inputs(BatchGroup& batch) {
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.dp_global_kv_max_seq_lens =
         dp_global_kv_max_seq_lens;
+    batched_inputs[dp_rank].input_params.parallel.dp_global_json_object_active =
+        dp_global_json_object_active;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (batched_inputs[dp_rank]
             .input_params.meta.batch_forward_type.is_empty()) {

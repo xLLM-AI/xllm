@@ -75,14 +75,13 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       TargetInput& inputs) override;
 
  protected:
+  using typename DraftModelSpecWorkerImpl<TargetInput>::TargetModelParams;
   using DraftModelSpecWorkerImpl<TargetInput>::adaptive_spec_controller_;
   using DraftModelSpecWorkerImpl<TargetInput>::compute_stream_;
   using DraftModelSpecWorkerImpl<TargetInput>::context_;
   using DraftModelSpecWorkerImpl<TargetInput>::device_;
-  using DraftModelSpecWorkerImpl<TargetInput>::dp_driver_;
   using DraftModelSpecWorkerImpl<TargetInput>::draft_impl_;
   using DraftModelSpecWorkerImpl<TargetInput>::draft_sampling_mode_;
-  using DraftModelSpecWorkerImpl<TargetInput>::driver_;
   using DraftModelSpecWorkerImpl<TargetInput>::dtype_;
   using DraftModelSpecWorkerImpl<TargetInput>::embedding_cache_;
   using DraftModelSpecWorkerImpl<TargetInput>::enable_fused_kernel_;
@@ -204,6 +203,8 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   int32_t logical_block_size() const;
   int64_t spec_verify_block_table_width(
       const torch::Tensor& block_tables) const;
+  void ensure_spec_verify_control_block_table(TargetModelParams& input_params,
+                                              int64_t num_sequences);
   // Returns true when validation must use chunked-prefill to avoid the
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
@@ -322,6 +323,10 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // into this storage until the copy event is synchronized and CPU consumers
   // have finished reading it.
   torch::Tensor accepted_tokens_host_buffer_;
+  // Model-managed KV layouts do not publish a primary block table. Expanded
+  // verification still needs a zero-filled host control table, so retain one
+  // pinned allocation and expose a row view for each batch.
+  torch::Tensor spec_verify_control_block_table_buffer_;
   // Draft step 0 is submitted at the tail of the preceding target validation,
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.

@@ -47,24 +47,15 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
   if (is_qwen3_5_target_model_type(model_type)) {
     return TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
   }
-  // GLM-5.2/5.3 uses the same DSA expanded target-verify layout as
-  // DeepSeek-V3.2.  Keep the shared mode so the Python target executor can
-  // receive expanded block-table/KV metadata without enabling it for other
-  // generic models.
-  if (model_type == "deepseek_v32" || model_type == "glm_moe_dsa") {
+  // GLM and DeepSeek use the same DSA expanded target-verify layout.
+  if (model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
+      model_type == "deepseek_v4" || model_type == "deepseek_v4_dspark") {
     return TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY;
   }
   if (model_type == "mimo") {
     return TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL;
   }
   return TargetSpecVerifyMode::GENERIC;
-}
-
-int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
-                                                int64_t block_size) {
-  CHECK_GT(max_position_embeddings, 0);
-  CHECK_GT(block_size, 0);
-  return (max_position_embeddings + block_size - 1) / block_size + 1;
 }
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
@@ -91,29 +82,6 @@ bool supports_combined_draft_configuration(
       return false;
   }
   return false;
-}
-
-torch::Tensor materialize_speculative_verify_tokens(
-    const torch::Tensor& verify_tokens,
-    const std::vector<torch::Tensor>& draft_token_sources) {
-  if (draft_token_sources.empty()) {
-    return verify_tokens;
-  }
-  CHECK(verify_tokens.defined());
-  CHECK_EQ(verify_tokens.dim(), 1);
-  const int64_t verify_width =
-      static_cast<int64_t>(draft_token_sources.size()) + 1;
-  CHECK_EQ(verify_tokens.numel() % verify_width, 0);
-  const int64_t batch_size = verify_tokens.numel() / verify_width;
-  torch::Tensor verify_rows = verify_tokens.view({batch_size, verify_width});
-  for (size_t step = 0; step < draft_token_sources.size(); ++step) {
-    const torch::Tensor& source = draft_token_sources[step];
-    CHECK(source.defined());
-    CHECK_EQ(source.numel(), batch_size);
-    verify_rows.select(/*dim=*/1, static_cast<int64_t>(step) + 1)
-        .copy_(source.flatten(), /*non_blocking=*/true);
-  }
-  return verify_tokens;
 }
 
 torch::Tensor extract_target_base_kv_seq_lens(

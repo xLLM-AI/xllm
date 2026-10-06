@@ -34,6 +34,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/block/block_utils.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
@@ -1052,18 +1053,22 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
 #if defined(USE_NPU)
   const torch::Tensor& block_tables =
       input.input_params.attention.host.block_tables;
+  const int64_t num_sequences = input.input_params.meta.num_sequences;
   if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
       !::xllm::ExecutionConfig::get_instance()
            .enable_graph_mode_decode_no_padding() ||
-      !supports_explicit_spec_verify_replay_update() ||
-      options_.num_speculative_tokens() <= 0 ||
-      input.input_params.meta.num_sequences <= 0 ||
-      options_.block_size() <= 0 || !block_tables.defined() ||
-      block_tables.dim() != 2 ||
-      block_tables.size(0) != input.input_params.meta.num_sequences) {
+      !supports_explicit_spec_verify_replay_update() || impl_ == nullptr ||
+      options_.num_speculative_tokens() <= 0 || options_.block_size() <= 0 ||
+      !spec_verify::has_speculative_verify_block_table_layout(
+          block_tables, input.input_params.multi_block_tables, num_sequences)) {
     return false;
   }
-  const int64_t block_table_width = spec_verify_block_table_width(block_tables);
+  const int64_t block_table_width =
+      block_tables.defined()
+          ? spec_verify_block_table_width(block_tables)
+          : spec_verify::speculative_verify_block_table_capacity(
+                impl_->context_.get_model_args().max_position_embeddings(),
+                logical_block_size());
   if (block_table_width <= 0 ||
       block_table_width > kMaxSpecVerifyGraphUpdateBlockTableWidth) {
     return false;
@@ -1086,7 +1091,7 @@ int64_t MTPWorkerImpl<TargetInput>::spec_verify_block_table_width(
   int64_t required_width = block_tables.size(1);
   if (impl_ != nullptr) {
     const int64_t declared_capacity =
-        mtp_async::speculative_verify_block_table_capacity(
+        spec_verify::speculative_verify_block_table_capacity(
             impl_->context_.get_model_args().max_position_embeddings(),
             logical_block_size());
     CHECK_LE(required_width, declared_capacity)
@@ -1094,6 +1099,39 @@ int64_t MTPWorkerImpl<TargetInput>::spec_verify_block_table_width(
     required_width = declared_capacity;
   }
   return required_width;
+}
+
+template <typename TargetInput>
+void MTPWorkerImpl<TargetInput>::ensure_spec_verify_control_block_table(
+    TargetModelParams& input_params,
+    int64_t num_sequences) {
+  auto& block_tables = input_params.attention.host.block_tables;
+  if (block_tables.defined()) {
+    return;
+  }
+  CHECK(!input_params.multi_block_tables.empty())
+      << "missing model-managed block tables for spec verify";
+  CHECK(impl_ != nullptr) << "target model must be initialized";
+  const int64_t block_table_capacity =
+      spec_verify::speculative_verify_block_table_capacity(
+          impl_->context_.get_model_args().max_position_embeddings(),
+          logical_block_size());
+  CHECK_GT(num_sequences, 0);
+  CHECK_GT(block_table_capacity, 0);
+
+  const int64_t row_capacity = std::max(
+      num_sequences, static_cast<int64_t>(options_.max_seqs_per_batch()));
+  if (!spec_verify_control_block_table_buffer_.defined() ||
+      spec_verify_control_block_table_buffer_.size(0) < row_capacity ||
+      spec_verify_control_block_table_buffer_.size(1) < block_table_capacity) {
+    spec_verify_control_block_table_buffer_ =
+        spec_verify::make_speculative_verify_control_block_table(
+            row_capacity, block_table_capacity);
+  }
+
+  block_tables = spec_verify_control_block_table_buffer_
+                     .narrow(/*dim=*/0, /*start=*/0, num_sequences)
+                     .narrow(/*dim=*/1, /*start=*/0, block_table_capacity);
 }
 
 template <typename TargetInput>
@@ -1285,7 +1323,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
   finalize_output_on_stream(
       output, *compute_stream_, enable_schedule_overlap());
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+  if (!enable_schedule_overlap() && !this->is_driver() &&
+      !::xllm::EPLBConfig::get_instance().enable_eplb()) {
     return std::nullopt;
   }
   return output;
@@ -2178,7 +2217,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
         val_output, num_speculative_tokens, pruned_prefix_lengths);
     write_target_context_to_cache(input, val_output, num_speculative_tokens);
 
-    if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+    if (!enable_schedule_overlap() && !this->is_driver() &&
+        !::xllm::EPLBConfig::get_instance().enable_eplb()) {
       return std::nullopt;
     }
     return finalize_verify_output(std::move(target_output),
@@ -2330,7 +2370,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     val_output.next_tokens = std::move(accepted_tokens_cpu_result);
   }
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+  if (!enable_schedule_overlap() && !this->is_driver() &&
+      !::xllm::EPLBConfig::get_instance().enable_eplb()) {
     return std::nullopt;
   }
   return finalize_verify_output(std::move(target_output),
@@ -2584,6 +2625,25 @@ bool MTPWorkerImpl<TargetInput>::can_prelaunch_next_first_draft(
     const TargetInput& input) const {
   if (!can_use_combined_first_draft()) {
     return false;
+  }
+  // Prelaunch runs inside collectives, so every DP rank must agree. Missing
+  // or malformed global JSON presence fails closed for DP > 1.
+  const int32_t dp_size = parallel_args_.dp_size();
+  if (dp_size == 1) {
+    if (!input.json_object_states.empty() ||
+        !input.json_object_state_snapshots.empty()) {
+      return false;
+    }
+  } else {
+    const auto& global_presence =
+        input.input_params.parallel.dp_global_json_object_active;
+    if (dp_size <= 0 ||
+        global_presence.size() != static_cast<size_t>(dp_size) ||
+        !std::all_of(global_presence.begin(),
+                     global_presence.end(),
+                     [](int32_t active) { return active == 0; })) {
+      return false;
+    }
   }
   const bool requires_dp_symmetric_prelaunch =
       parallel_args_.dp_size() > 1 &&
@@ -3081,9 +3141,8 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   if (use_stable_greedy_validate_sampling) {
     if (!mtp_validate_greedy_indices_.defined() ||
         mtp_validate_greedy_indices_.numel() != total_num_val_tokens) {
-      mtp_validate_greedy_indices_ = torch::arange(
-          total_num_val_tokens,
-          torch::TensorOptions().dtype(torch::kInt).device(device_));
+      mtp_validate_greedy_indices_ =
+          arange_indices(total_num_val_tokens, device_);
       mtp_validate_greedy_do_sample_ = torch::zeros(
           {total_num_val_tokens},
           torch::TensorOptions().dtype(torch::kBool).device(device_));
@@ -3142,6 +3201,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   if (use_explicit_spec_verify_replay_update) {
     build_expanded_spec_verify_graph_host_input(input_params);
 
+    ensure_spec_verify_control_block_table(input_params, num_sequences);
     AttentionInputView attention(input_params.attention);
     CHECK(attention.host.block_tables.defined());
     CHECK_EQ(attention.host.block_tables.dim(), 2);
@@ -3250,9 +3310,11 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     input_params.graph.input_tokens_override = validate_input.token_ids;
     input_params.graph.spec_verify_source_addresses_stable = true;
   } else {
+    if (supports_explicit_spec_verify_replay_update()) {
+      ensure_spec_verify_control_block_table(input_params, num_sequences);
+    }
     std::vector<PackedAttentionIntInput> extra_int_inputs;
     if (!expanded_linear_state_ids.empty()) {
-      extra_int_inputs.reserve(1);
       extra_int_inputs.push_back(
           {&expanded_linear_state_ids,
            nullptr,
@@ -3509,9 +3571,11 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   }
 
 #if defined(USE_NPU)
+  if (supports_explicit_spec_verify_replay_update()) {
+    ensure_spec_verify_control_block_table(input_params, num_sequences);
+  }
   std::vector<PackedAttentionIntInput> extra_int_inputs;
   if (!expanded_linear_state_ids.empty()) {
-    extra_int_inputs.reserve(1);
     extra_int_inputs.push_back({&expanded_linear_state_ids,
                                 nullptr,
                                 &input_params.embedding.linear_state_indices});

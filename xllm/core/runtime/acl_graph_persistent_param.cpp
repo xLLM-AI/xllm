@@ -31,7 +31,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/speculative/mtp_async_state.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -296,8 +296,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Block table tensors with maximum possible size
   const int64_t block_size = options.block_size();
   const int64_t max_block_table_len =
-      mtp_async::speculative_verify_block_table_capacity(max_seq_len,
-                                                         block_size);
+      spec_verify::speculative_verify_block_table_capacity(max_seq_len,
+                                                           block_size);
   persistent_block_tables_ =
       torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));

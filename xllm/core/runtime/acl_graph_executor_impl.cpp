@@ -35,7 +35,7 @@ limitations under the License.
 #endif
 #include "core/common/metrics.h"
 #include "core/framework/kv_cache/kv_shard_layout.h"
-#include "core/framework/speculative/mtp_async_state.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/kernels/ops_api.h"
@@ -311,13 +311,9 @@ ModelOutput forward_eager(CausalLM* model,
                           const torch::Tensor& positions,
                           std::vector<KVCache>& kv_cache,
                           const ModelInputParams& params) {
-  const torch::Tensor& verify_tokens =
-      params.graph.input_tokens_override.defined()
-          ? params.graph.input_tokens_override
-          : tokens;
   torch::Tensor materialized_tokens =
-      mtp_async::materialize_speculative_verify_tokens(
-          verify_tokens, params.graph.spec_verify_draft_token_sources);
+      spec_verify::materialize_graph_speculative_verify_tokens(tokens,
+                                                               params.graph);
   return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 

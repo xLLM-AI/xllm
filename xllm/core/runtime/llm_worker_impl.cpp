@@ -126,7 +126,10 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   model_executor_ = std::make_unique<Executor>(
       model_.get(), context.get_model_args(), device_, options_);
 
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  // MTP draft workers execute a separate one-layer model and must not consume
+  // the target model's EPLB prepare/update commands. Only the target reports
+  // expert load and participates in expert-weight transfer.
+  if (::xllm::EPLBConfig::get_instance().enable_eplb() && !is_spec_draft_) {
     eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
   }
 
@@ -267,7 +270,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   auto wait_kv_push = [&kv_transfers]() {
     CHECK(kv_transfers.wait()) << "KV cache push failed";
   };
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  if (eplb_executor_ != nullptr) {
     eplb_executor_->start_eplb_step(input.input_params.expert.eplb_info);
   }
 
@@ -275,7 +278,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   ModelInputParams execution_params(input.input_params);
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, execution_params);
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  if (eplb_executor_ != nullptr) {
     eplb_executor_->finish_eplb_step();
   }
   if (!model_output.hidden_states.defined()) {
@@ -331,7 +334,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 
   ForwardOutput output;
   output.mtp_topk_state = std::move(model_output.mtp_topk_state);
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  if (eplb_executor_ != nullptr) {
     output.expert_load_data = expert_load_data_;
     output.prepared_token = eplb_executor_->consume_ready_prepare_token();
   }
@@ -346,7 +349,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     int ret = device_.synchronize_default_stream();
     CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
     wait_kv_push();
-    if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+    if (eplb_executor_ != nullptr) {
       return output;
     }
     return std::nullopt;

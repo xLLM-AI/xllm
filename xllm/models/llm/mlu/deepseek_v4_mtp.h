@@ -363,4 +363,10 @@ REGISTER_MODEL_ARGS(deepseek_v4_mtp, [&] {
   validate_deepseek_v4_args(*args, args_policy);
 });
 
+// The draft checkpoint owns its embedding and LM head weights.
+const bool deepseek_v4_mtp_shared_weight_owner_registered = []() {
+  ModelRegistry::register_mtp_shared_weight_owner("deepseek_v4_mtp");
+  return true;
+}();
+
 }  // namespace xllm::mlu::model

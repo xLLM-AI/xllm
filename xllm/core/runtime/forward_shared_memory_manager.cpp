@@ -108,7 +108,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 3;
+constexpr uint16_t kPackedInputSchemaVersion = 4;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2685,6 +2685,7 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.parallel.raw_dp_global_token_nums);
   read_vector(context, input_params.parallel.dp_global_batch_generations);
   read_vector(context, input_params.parallel.dp_global_kv_max_seq_lens);
+  read_vector(context, input_params.parallel.dp_global_json_object_active);
   read_vector(context, input_params.parallel.dp_is_decode);
   read_vector(context, input_params.embedding.embedding_ids);
   read_vector(context, input_params.embedding.linear_state_ids);
@@ -3141,6 +3142,8 @@ inline void serialize_forward_input_sections(
                input_params.parallel.dp_global_batch_generations);
   write_vector(context.descriptor,
                input_params.parallel.dp_global_kv_max_seq_lens);
+  write_vector(context.descriptor,
+               input_params.parallel.dp_global_json_object_active);
   write_vector(context.descriptor, input_params.parallel.dp_is_decode);
   write_vector(context.descriptor, input_params.embedding.embedding_ids);
   write_vector(context.descriptor, input_params.embedding.linear_state_ids);

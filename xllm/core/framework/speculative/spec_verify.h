@@ -25,6 +25,7 @@ limitations under the License.
 namespace xllm {
 
 class DraftProposal;
+class GraphInputView;
 struct SampleOutput;
 struct ForwardOutput;
 
@@ -50,6 +51,35 @@ ForwardOutput finalize_verify_output(ForwardOutput target_output,
                                      SampleOutput val_output);
 
 namespace spec_verify {
+
+// Expanded verify needs a primary block-table tensor for its generic graph
+// metadata. Model-managed cache layouts instead carry every real cache table
+// in multi_block_tables, so the primary table may be intentionally absent.
+bool has_speculative_verify_block_table_layout(
+    const torch::Tensor& block_tables,
+    const std::vector<torch::Tensor>& multi_block_tables,
+    int64_t num_sequences);
+
+// Build the zero-filled primary control table used only by generic expanded
+// metadata when the model owns its real cache layout through
+// multi_block_tables.
+torch::Tensor make_speculative_verify_control_block_table(
+    int64_t num_sequences,
+    int64_t block_table_capacity);
+
+// Shared allocation/launch width for target verification block tables. The
+// extra entry covers the speculative token that can cross a block boundary.
+int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
+                                                int64_t block_size);
+
+// Fill deferred draft token columns for eager target verification. The graph
+// override, when present, owns the returned tensor storage.
+torch::Tensor materialize_speculative_verify_tokens(
+    const torch::Tensor& verify_tokens,
+    const std::vector<torch::Tensor>& draft_token_sources);
+torch::Tensor materialize_graph_speculative_verify_tokens(
+    const torch::Tensor& tokens,
+    const GraphInputView& graph_input);
 
 struct SamplerPolicy {
   torch::Tensor do_sample;
