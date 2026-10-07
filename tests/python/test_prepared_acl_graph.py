@@ -192,7 +192,7 @@ def test_real_paged_backend_refreshes_captured_lengths_and_isolates_entries(
     backend = NpuPagedAttentionBackend(8, 2, 64, 0.125, 0, False, torch.device("cpu"), torch.float16)
     cache = torch.empty(4, 128, 2, 64)
     backend.bind_kv_caches([LayerCache(key=cache, value=cache)])
-    allocate_workspace = Mock(side_effect=lambda *args: torch.empty(1))
+    allocate_workspace = Mock(side_effect=lambda *args, **kwargs: torch.empty(1))
     monkeypatch.setattr(backend, "_allocate_graph_workspace", allocate_workspace)
     calls = []
 
