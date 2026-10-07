@@ -1,0 +1,421 @@
+---
+// Copyright 2026 The xLLM Authors. Licensed under the Apache License, Version 2.0.
+interface Props {
+	locale: 'en' | 'zh';
+}
+
+const { locale } = Astro.props;
+const text = locale === 'zh' ? {
+	search: '搜索模型', placeholder: '例如 Qwen、GLM、DeepSeek…', task: '任务类型',
+	allTasks: '全部任务', hardware: '硬件平台', allHardware: '全部平台',
+	npu: '昇腾 NPU', mlu: '寒武纪 MLU', dcu: '海光 DCU', reset: '重置筛选',
+	count: '显示 {visible} / {total} 个模型条目', empty: '没有匹配的模型',
+	emptyHint: '试试其他关键词，或重置任务和硬件筛选。',
+	supported: '支持', unsupported: '未支持', unknown: '未确认',
+	tasks: ['文本生成', '视觉语言', '重排序', '图像与视频生成', '生成式推荐'],
+} : {
+	search: 'Search models', placeholder: 'Try Qwen, GLM, DeepSeek…', task: 'Task',
+	allTasks: 'All tasks', hardware: 'Hardware', allHardware: 'All platforms',
+	npu: 'Ascend NPU', mlu: 'Cambricon MLU', dcu: 'Hygon DCU', reset: 'Reset filters',
+	count: 'Showing {visible} of {total} model entries', empty: 'No matching models',
+	emptyHint: 'Try another name, or reset the task and hardware filters.',
+	supported: 'Supported', unsupported: 'Not supported', unknown: 'Not documented',
+	tasks: ['Text generation', 'Vision-language', 'Reranking', 'Image & video generation', 'Recommendation'],
+};
+const categories = ['llm', 'vlm', 'rerank', 'dit', 'rec'];
+---
+
+<xllm-model-catalog
+	data-count={text.count}
+	data-supported={text.supported}
+	data-unsupported={text.unsupported}
+	data-unknown={text.unknown}
+>
+	<slot />
+	<template>
+		<form class="catalog-filters" role="search" aria-label={text.search}>
+			<div class="catalog-fields">
+				<label class="catalog-search" for="model-search">
+					<span>{text.search}</span>
+					<input id="model-search" type="search" name="query" placeholder={text.placeholder} autocomplete="off" />
+				</label>
+				<label for="model-task">
+					<span>{text.task}</span>
+					<span class="catalog-select">
+						<select id="model-task" name="task">
+							<option value="">{text.allTasks}</option>
+							{categories.map((category, index) => <option value={category}>{text.tasks[index]}</option>)}
+						</select>
+					</span>
+				</label>
+				<label for="model-hardware">
+					<span>{text.hardware}</span>
+					<span class="catalog-select">
+						<select id="model-hardware" name="hardware">
+							<option value="">{text.allHardware}</option>
+							<option value="1">{text.npu}</option>
+							<option value="2">{text.mlu}</option>
+							<option value="3">{text.dcu}</option>
+						</select>
+					</span>
+				</label>
+			</div>
+			<div class="catalog-results">
+				<span data-results role="status" aria-live="polite" aria-atomic="true"></span>
+				<button type="reset">{text.reset}</button>
+			</div>
+		</form>
+		<div class="catalog-empty" hidden>
+			<strong>{text.empty}</strong>
+			<p>{text.emptyHint}</p>
+		</div>
+	</template>
+</xllm-model-catalog>
+
+<script>
+	class ModelCatalog extends HTMLElement {
+		connectedCallback() {
+			if (this.dataset.initialized) {
+				return;
+			}
+			const target = this.querySelector('[data-catalog-filters]');
+			const template = this.querySelector('template');
+			if (!target || !template) {
+				return;
+			}
+			this.dataset.initialized = 'true';
+			target.append(template.content.cloneNode(true));
+
+			const form = target.querySelector('form')!;
+			const search = form.querySelector('input')!;
+			const task = form.querySelector<HTMLSelectElement>('[name="task"]')!;
+			const hardware = form.querySelector<HTMLSelectElement>('[name="hardware"]')!;
+			const results = form.querySelector('[data-results]')!;
+			const empty = target.querySelector<HTMLElement>('.catalog-empty')!;
+			const normalize = (value: string) => value.toLowerCase().replace(/[\s._/\-]+/g, '');
+			const sections = Array.from(this.querySelectorAll<HTMLElement>('[data-model-category]')).map((section) => {
+				const table = section.querySelector('table')!;
+				const heading = section.querySelector('h2')!;
+				table.setAttribute('aria-labelledby', heading.id);
+				const rows = Array.from(table.tBodies[0].rows).map((row) => {
+					const supportCells = Array.from(row.cells).slice(1, -1);
+					const platforms = supportCells.map((cell) => cell.textContent?.trim() === '✅');
+					for (const cell of supportCells) {
+						const symbol = cell.textContent?.trim();
+						const status = symbol === '✅' ? 'supported' : symbol === '❌' ? 'unsupported' : 'unknown';
+						cell.dataset.support = status;
+						cell.setAttribute('aria-label', this.dataset[status]!);
+						cell.title = this.dataset[status]!;
+						cell.textContent = status === 'supported' ? '✓' : status === 'unsupported' ? '×' : '—';
+					}
+					return { row, platforms, name: normalize(row.cells[0].textContent || '') };
+				});
+				const badge = document.createElement('span');
+				badge.className = 'catalog-section-count';
+				heading.append(badge);
+				return { section, rows, badge };
+			});
+			const total = sections.reduce((sum, section) => sum + section.rows.length, 0);
+
+			const filter = () => {
+				const query = normalize(search.value);
+				let visible = 0;
+				for (const { section, rows, badge } of sections) {
+					let sectionCount = 0;
+					for (const { row, platforms, name } of rows) {
+						const matches = (!task.value || task.value === section.dataset.modelCategory)
+							&& (!hardware.value || platforms[Number(hardware.value) - 1])
+							&& name.includes(query);
+						row.hidden = !matches;
+						sectionCount += Number(matches);
+					}
+					section.hidden = sectionCount === 0;
+					badge.textContent = String(sectionCount);
+					visible += sectionCount;
+				}
+				results.textContent = this.dataset.count!.replace('{visible}', String(visible)).replace('{total}', String(total));
+				empty.hidden = visible !== 0;
+			};
+
+			form.addEventListener('submit', (event) => event.preventDefault());
+			form.addEventListener('input', filter);
+			form.addEventListener('change', filter);
+			form.addEventListener('reset', () => {
+				search.value = task.value = hardware.value = '';
+				filter();
+			});
+			// Section links should remain usable even when their rows are filtered out.
+			for (const link of document.querySelectorAll<HTMLAnchorElement>('a[href^="#"]')) {
+				if (!sections.some(({ section }) => section.querySelector('h2')?.id === link.hash.slice(1))) {
+					continue;
+				}
+				link.addEventListener('click', () => form.reset());
+			}
+			filter();
+		}
+	}
+	if (!customElements.get('xllm-model-catalog')) {
+		customElements.define('xllm-model-catalog', ModelCatalog);
+	}
+</script>
+
+<style is:global>
+	xllm-model-catalog {
+		display: block;
+	}
+	xllm-model-catalog [hidden] {
+		display: none !important;
+	}
+	xllm-model-catalog .catalog-intro {
+		font-size: 1.1rem;
+		max-width: 52rem;
+	}
+	xllm-model-catalog .catalog-links {
+		display: flex;
+		flex-wrap: wrap;
+		gap: .75rem 1.5rem;
+		margin-block: 1.25rem 1.75rem;
+		font-size: .9rem;
+	}
+	xllm-model-catalog .catalog-links a {
+		text-decoration: none;
+		font-weight: 600;
+	}
+	xllm-model-catalog .catalog-jumps {
+		display: grid;
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+		gap: .65rem;
+		margin-block: 1.5rem;
+	}
+	xllm-model-catalog .catalog-jumps a {
+		margin: 0;
+		padding: .9rem;
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: .6rem;
+		text-decoration: none;
+		color: var(--sl-color-white);
+		background: var(--sl-color-bg);
+	}
+	xllm-model-catalog .catalog-jumps a:hover {
+		border-color: var(--sl-color-text-accent);
+	}
+	xllm-model-catalog .catalog-jumps strong {
+		display: block;
+		color: var(--sl-color-text-accent);
+		font-size: 1rem;
+	}
+	xllm-model-catalog .catalog-jumps span {
+		display: block;
+		margin-top: .25rem;
+		font-size: .75rem;
+		line-height: 1.45;
+		color: var(--sl-color-gray-2);
+	}
+	xllm-model-catalog .catalog-filters {
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: .75rem;
+		padding: 1.15rem;
+		background: var(--sl-color-gray-7, var(--sl-color-gray-6));
+	}
+	xllm-model-catalog .catalog-fields {
+		display: grid;
+		grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+		gap: .8rem;
+	}
+	xllm-model-catalog .catalog-fields label {
+		display: grid;
+		align-content: start;
+		gap: .4rem;
+		margin: 0;
+		font-size: .8rem;
+		font-weight: 600;
+	}
+	xllm-model-catalog :is(input, select) {
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		margin: 0;
+		border: 1px solid var(--sl-color-gray-4);
+		border-radius: .4rem;
+		padding: .65rem .7rem;
+		color: var(--sl-color-white);
+		background: var(--sl-color-bg);
+		font: inherit;
+		font-weight: 400;
+		height: 2.75rem;
+	}
+	xllm-model-catalog .catalog-select {
+		position: relative;
+		display: block;
+		margin: 0;
+	}
+	xllm-model-catalog .catalog-select::after {
+		content: '';
+		position: absolute;
+		inset-inline-end: 1rem;
+		top: 50%;
+		width: .4rem;
+		height: .4rem;
+		border-right: 1.5px solid currentColor;
+		border-bottom: 1.5px solid currentColor;
+		transform: translateY(-70%) rotate(45deg);
+		pointer-events: none;
+	}
+	xllm-model-catalog select {
+		appearance: none;
+		padding-inline-end: 2.5rem;
+	}
+	xllm-model-catalog input::placeholder {
+		color: var(--sl-color-gray-3);
+	}
+	xllm-model-catalog :is(input, select, button, a):focus-visible {
+		outline: 2px solid var(--sl-color-text-accent);
+		outline-offset: 3px;
+	}
+	xllm-model-catalog .catalog-results {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: .5rem;
+		margin-top: .7rem;
+		font-size: .8rem;
+		color: var(--sl-color-gray-2);
+	}
+	xllm-model-catalog button {
+		background: transparent;
+		border: 0;
+		padding: .5rem;
+		margin: 0;
+		color: var(--sl-color-text-accent);
+		cursor: pointer;
+		font: inherit;
+	}
+	xllm-model-catalog .catalog-empty {
+		padding: 2.5rem 1rem;
+		text-align: center;
+		border: 1px dashed var(--sl-color-gray-4);
+		border-radius: .6rem;
+		margin-top: 1.25rem;
+	}
+	xllm-model-catalog .catalog-empty p {
+		font-size: .9rem;
+	}
+	xllm-model-catalog .catalog-legend {
+		display: flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: .5rem 1.25rem;
+		font-size: .8rem;
+		color: var(--sl-color-gray-2);
+		margin-block: 1rem;
+	}
+	xllm-model-catalog .catalog-legend span {
+		margin: 0;
+	}
+	xllm-model-catalog [data-model-category] {
+		margin-top: 2.5rem;
+	}
+	xllm-model-catalog [data-model-category] h2 {
+		display: inline-flex;
+		align-items: center;
+		gap: .65rem;
+		font-size: 1.4rem;
+	}
+	xllm-model-catalog .catalog-section-count {
+		border: 1px solid var(--sl-color-gray-5);
+		padding: .1rem .5rem;
+		border-radius: 1rem;
+		color: var(--sl-color-gray-2);
+		font-size: .75rem;
+		font-weight: 500;
+	}
+	xllm-model-catalog [data-model-category] > p {
+		margin-top: .4rem;
+		font-size: .9rem;
+		color: var(--sl-color-gray-2);
+	}
+	xllm-model-catalog .catalog-table {
+		overflow-x: auto;
+		margin-top: 1rem;
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: .65rem;
+	}
+	xllm-model-catalog table {
+		display: table;
+		width: 100%;
+		margin: 0;
+		font-size: .85rem;
+		border-collapse: collapse;
+	}
+	xllm-model-catalog :is(th, td) {
+		padding: .8rem .9rem;
+		border-bottom: 1px solid var(--sl-color-gray-5);
+		vertical-align: middle;
+	}
+	xllm-model-catalog th {
+		background: var(--sl-color-gray-7, var(--sl-color-gray-6));
+		color: var(--sl-color-gray-2);
+		font-size: .75rem;
+		white-space: nowrap;
+	}
+	xllm-model-catalog :is(th, td):first-child {
+		min-width: 12rem;
+		text-align: left;
+	}
+	xllm-model-catalog td:first-child {
+		color: var(--sl-color-white);
+		font-weight: 600;
+	}
+	xllm-model-catalog td:last-child {
+		min-width: 8rem;
+		font-size: .8rem;
+	}
+	xllm-model-catalog td a {
+		text-decoration: none;
+	}
+	xllm-model-catalog td a:hover {
+		text-decoration: underline;
+	}
+	xllm-model-catalog tbody tr:last-child td {
+		border-bottom: 0;
+	}
+	xllm-model-catalog tbody tr:hover {
+		background: color-mix(in srgb, var(--sl-color-text-accent) 4%, transparent);
+	}
+	xllm-model-catalog [data-support] {
+		font-size: 1.1rem;
+		font-weight: 600;
+	}
+	xllm-model-catalog [data-support='supported'] {
+		color: #36c99b;
+	}
+	xllm-model-catalog [data-support='unsupported'], xllm-model-catalog [data-support='unknown'] {
+		color: var(--sl-color-gray-3);
+		font-weight: 400;
+	}
+	:root[data-theme='light'] xllm-model-catalog [data-support='supported'] {
+		color: #08785a;
+	}
+	@media (max-width: 50rem) {
+		xllm-model-catalog .catalog-jumps {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+		xllm-model-catalog .catalog-fields {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		xllm-model-catalog .catalog-search {
+			grid-column: 1 / -1;
+		}
+	}
+	@media (max-width: 28rem) {
+		xllm-model-catalog .catalog-jumps {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		xllm-model-catalog .catalog-filters {
+			padding: .8rem;
+		}
+		xllm-model-catalog :is(input, select) {
+			font-size: 1rem;
+		}
+	}
+</style>

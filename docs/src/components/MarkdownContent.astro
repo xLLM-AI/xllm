@@ -1,0 +1,16 @@
+---
+// Copyright 2026 The xLLM Authors. Licensed under the Apache License, Version 2.0.
+import DefaultMarkdownContent from '@astrojs/starlight/components/MarkdownContent.astro';
+import ModelCatalog from './ModelCatalog.astro';
+
+const { entry } = Astro.locals.starlightRoute;
+const isModelCatalog = /^(en|zh)\/supported_models$/.test(entry.id);
+---
+
+{isModelCatalog ? (
+	<ModelCatalog locale={entry.id.startsWith('zh/') ? 'zh' : 'en'}>
+		<DefaultMarkdownContent><slot /></DefaultMarkdownContent>
+	</ModelCatalog>
+) : (
+	<DefaultMarkdownContent><slot /></DefaultMarkdownContent>
+)}
