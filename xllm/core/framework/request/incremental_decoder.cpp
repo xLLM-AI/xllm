@@ -54,7 +54,7 @@ std::string IncrementalDecoder::decode(const Slice<int32_t>& token_ids,
   // In PD mode, if a prefill token can directly generate characters, the decode
   // phase needs to skip that token. If it cannot, the decode token and that
   // token need to generate characters together.
-  if (checking_prefill_token_) {
+  if (checking_prefill_token_ && output_offset_ < token_ids.size()) {
     const auto prefill_token_text =
         tokenizer.decode(token_ids.slice(output_offset_, output_offset_ + 1),
                          skip_special_tokens_);
