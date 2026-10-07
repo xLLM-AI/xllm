@@ -514,7 +514,8 @@ class TestModelExecutorConstruction:
             1,
             0,
             16,
-            4,
+            num_decoding_tokens=4,
+            is_spec_draft=False,
             enable_mega_moe_token_mask=False,
         )
 
@@ -573,7 +574,8 @@ class TestModelExecutorConstruction:
             16,
             0,
             None,
-            4,
+            num_decoding_tokens=4,
+            is_spec_draft=False,
             enable_mega_moe_token_mask=True,
         )
 

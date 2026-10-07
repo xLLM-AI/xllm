@@ -31,13 +31,15 @@ logic:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
 from scripts.logger import logger
 from xllm.python import kernels
-from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
+from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, LayerCache
 from xllm.python.attention.expanded_decode_metadata import (
     ExpandedDecodeMetadata,
     resolve_expanded_decode_metadata,
@@ -83,6 +85,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         decode_batch_size_limit: int | None = None,
         num_decoding_tokens: int = 1,
         enable_mega_moe_token_mask: bool = False,
+        *,
+        is_spec_draft: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -91,6 +95,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_model_len = max_model_len
         self.decode_batch_size_limit = None if decode_batch_size_limit is None else max(1, int(decode_batch_size_limit))
         self.num_decoding_tokens = max(1, int(num_decoding_tokens))
+        self._is_spec_draft = is_spec_draft
+        self._has_index_cache = False
         self._batch_limit_warning_logged = False
         self._graphs: dict[_GraphKey, AclGraphEntry] = {}
         self._dp_graph_variants: dict[_GraphKey, int] = {}
@@ -100,6 +106,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._stream: torch.npu.Stream | None = None
         self._update_done_event: torch.npu.Event | None = None
         self._update_done_recorded = False
+
+    def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
+        super().bind_layer_caches(layer_caches)
+        self._has_index_cache = any(cache.index is not None for cache in layer_caches)
 
     def can_execute(
         self,
@@ -183,6 +193,39 @@ class DecodeAclGraphRunner(AclGraphRunner):
             global_batch = max(execution_counts)
             return global_batch <= self.max_batch
         return batch_size <= self.max_batch
+
+    def _has_compatible_index_history(self, metadata: AttentionMetadata, block_table: torch.Tensor) -> bool:
+        if not self._has_index_cache:
+            return True
+        max_kv_cap = getattr(self.attention_backend, "graph_index_history_max_kv", None)
+        if max_kv_cap is None:
+            return True
+        page_size = self.attention_backend.page_size
+        if max_kv_cap <= 0 or page_size <= 0 or max_kv_cap % page_size:
+            return False
+        if self.dp_size > 1:
+            # Draft iterations advance KV without refreshing the shared host plan.
+            if self._is_spec_draft:
+                return False
+            global_kv_lengths = getattr(metadata, "dp_global_kv_max_seq_lens", None)
+            if global_kv_lengths is None:
+                return False
+            if not isinstance(global_kv_lengths, Sequence):
+                raise RuntimeError("DP index-history lengths must be a host sequence")
+            if not global_kv_lengths:
+                return False
+            if len(global_kv_lengths) != self.dp_size:
+                raise RuntimeError(f"DP index-history lengths must contain {self.dp_size} entries")
+            if any(
+                not isinstance(length, int) or isinstance(length, bool) or length < 0 for length in global_kv_lengths
+            ):
+                raise RuntimeError("DP index-history lengths must be nonnegative host integers")
+            # All ranks, including dummy ranks, decide from the same logical history.
+            # Target verify appends rows after the scheduler publishes its plan.
+            max_verify_kv = max(global_kv_lengths) + self.num_decoding_tokens - 1
+            return max_verify_kv <= max_kv_cap
+
+        return block_table.shape[1] * self._logical_page_size <= max_kv_cap
 
     def _padded_batch_size(self, batch_size: int, metadata: AttentionMetadata) -> int:
         # All DP ranks must use the same shape for captured MoE collectives.
@@ -448,7 +491,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             linear_idx is not None
             and linear_idx.numel() != batch_size
             and not (is_expanded and linear_idx.numel() > 0 and batch_size % linear_idx.numel() == 0)
-        )
+        ) and self._has_compatible_index_history(metadata, block_table)
 
     @staticmethod
     def _cumulative_lengths(

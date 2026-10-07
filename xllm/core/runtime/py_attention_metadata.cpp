@@ -132,6 +132,9 @@ void register_attention_metadata_views(py::module_& module) {
           &PyAttentionMetadataView::raw_dp_execution_token_counts)
       .def_property_readonly("dp_global_sequence_nums",
                              &PyAttentionMetadataView::dp_global_sequence_nums)
+      .def_property_readonly(
+          "dp_global_kv_max_seq_lens",
+          &PyAttentionMetadataView::dp_global_kv_max_seq_lens)
       .def_property_readonly("dp_is_decode",
                              &PyAttentionMetadataView::dp_is_decode)
       .def_property_readonly("q_seq_lens", &PyAttentionMetadataView::q_seq_lens)
@@ -265,6 +268,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   // therefore contribute the worker-created dummy row instead of zero rows.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;
   dp_global_sequence_nums_ = params.parallel.dp_global_sequence_nums;
+  dp_global_kv_max_seq_lens_ = params.parallel.dp_global_kv_max_seq_lens;
   for (int32_t& count : dp_execution_token_counts_) {
     if (count == 0) {
       count = 1;
@@ -395,6 +399,11 @@ PyAttentionMetadataView::raw_dp_execution_token_counts() const {
 const std::vector<int32_t>& PyAttentionMetadataView::dp_global_sequence_nums()
     const {
   return dp_global_sequence_nums_;
+}
+
+const std::vector<int32_t>& PyAttentionMetadataView::dp_global_kv_max_seq_lens()
+    const {
+  return dp_global_kv_max_seq_lens_;
 }
 
 const std::vector<int32_t>& PyAttentionMetadataView::dp_is_decode() const {
