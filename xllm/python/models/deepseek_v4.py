@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 import torch.nn as nn
@@ -84,6 +84,37 @@ def _pick(d: dict, *keys: str, default: Any = None) -> Any:
         if k in d and d[k] is not None:
             return d[k]
     return default
+
+
+def _find_checkpoint_key(loader: W8A8WeightLoader, candidates: Sequence[str]) -> str | None:
+    """Return the first checkpoint key present in compatibility order."""
+    return next((name for name in candidates if loader.has(name)), None)
+
+
+def _require_checkpoint_key(
+    loader: W8A8WeightLoader,
+    candidates: Sequence[str],
+    description: str,
+) -> str:
+    key = _find_checkpoint_key(loader, candidates)
+    if key is None:
+        expected = ", ".join(candidates)
+        raise KeyError(f"{description} not found; expected one of: {expected}")
+    return key
+
+
+def _resolve_mlp_projection_names(loader: W8A8WeightLoader, checkpoint_prefix: str) -> tuple[str, str, str]:
+    """Resolve native ``gate/up/down`` and legacy ``w1/w3/w2`` names."""
+    for names in (
+        ("gate_proj", "up_proj", "down_proj"),
+        ("w1", "w3", "w2"),
+    ):
+        if all(loader.has(checkpoint_prefix + name + ".weight") for name in names):
+            return names
+    raise KeyError(
+        f"DeepSeek-V4 MLP projections not found under {checkpoint_prefix}; "
+        "expected gate_proj/up_proj/down_proj or w1/w3/w2"
+    )
 
 
 def _compress_kv(
@@ -1710,6 +1741,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             state_dicts,
             cfg.tp_size,
             cfg.tp_rank,
+            src_prefixes=("", "model."),
             name_aliases={
                 "lm_head.weight": (
                     "lm_head.weight",
@@ -1858,17 +1890,27 @@ class DeepseekV4ForCausalLM(PyModelBase):
         parameter_prefix: str,
         mlp: DeepseekV3MLP,
     ) -> None:
-        """Load DSV4 ``w1/w3/w2`` tensors into a fused dense W8A8 MLP."""
+        """Load DSV4 dense projection tensors into a fused W8A8 MLP."""
         gate_up_prefix = parameter_prefix + "mlp.gate_up_proj."
         down_prefix = parameter_prefix + "mlp.down_proj."
+        gate_name, up_name, down_name = _resolve_mlp_projection_names(
+            loader,
+            checkpoint_prefix + "ffn.",
+        )
         for suffix in ("weight", "weight_scale", "weight_offset"):
-            w1 = loader.shard(loader.get_tensor(checkpoint_prefix + "ffn.w1." + suffix), dim=0)
-            w3 = loader.shard(loader.get_tensor(checkpoint_prefix + "ffn.w3." + suffix), dim=0)
-            loader.copy_in(gate_up_prefix + suffix, torch.cat([w1, w3], dim=0))
-            w2 = loader.get_tensor(checkpoint_prefix + "ffn.w2." + suffix)
+            gate = loader.shard(
+                loader.get_tensor(checkpoint_prefix + "ffn." + gate_name + "." + suffix),
+                dim=0,
+            )
+            up = loader.shard(
+                loader.get_tensor(checkpoint_prefix + "ffn." + up_name + "." + suffix),
+                dim=0,
+            )
+            loader.copy_in(gate_up_prefix + suffix, torch.cat([gate, up], dim=0))
+            down = loader.get_tensor(checkpoint_prefix + "ffn." + down_name + "." + suffix)
             if suffix == "weight":
-                w2 = loader.shard(w2, dim=1)
-            loader.copy_in(down_prefix + suffix, w2)
+                down = loader.shard(down, dim=1)
+            loader.copy_in(down_prefix + suffix, down)
         mlp.process_weights_after_loading()
 
     def _load_dsv4_moe(self, loader, ck: str, pm: str, layer_id: int) -> None:
@@ -1885,19 +1927,17 @@ class DeepseekV4ForCausalLM(PyModelBase):
         loader.copy_in(pm + "mlp.gate.weight", loader.get_tensor(ck + "ffn.gate.weight"))
         if mlp.hash_layer:
             # C++ DeepseekV4GateImpl requires tid2eid for every hash layer.
-            tid2eid_key = ck + "ffn.gate.tid2eid"
-            if not loader.has(tid2eid_key):
-                tid2eid_key += ".weight"
-            assert loader.has(tid2eid_key), f"hash gate checkpoint tensor not found: {tid2eid_key}"
+            tid2eid_key = _require_checkpoint_key(
+                loader, (ck + "ffn.gate.tid2eid", ck + "ffn.gate.tid2eid.weight"), "hash gate checkpoint tensor"
+            )
             loader.copy_in(pm + "mlp.tid2eid", loader.get_tensor(tid2eid_key))
         else:
             # Match DeepseekV4GateImpl::load_state_dict: the correction bias is
             # mandatory for non-hash routing, with the legacy key as fallback.
-            bias_key = ck + "ffn.gate.bias"
-            if not loader.has(bias_key):
-                bias_key = ck + "ffn.gate.e_score_correction_bias"
-            assert loader.has(bias_key), (
-                f"non-hash gate checkpoint tensor not found: {ck}ffn.gate.bias (or e_score_correction_bias)"
+            bias_key = _require_checkpoint_key(
+                loader,
+                (ck + "ffn.gate.bias", ck + "ffn.gate.e_score_correction_bias"),
+                "non-hash gate checkpoint tensor",
             )
             loader.copy_in(
                 pm + "mlp.e_score_correction_bias",
