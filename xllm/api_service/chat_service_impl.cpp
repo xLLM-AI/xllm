@@ -907,6 +907,7 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
   std::vector<Message> messages;
   if (!mm_service_utils::build_messages<MMChatCall>(
           req_messages, messages, call, master_->get_image_limit())) {
+    master_->get_rate_limiter()->decrease_one_request();
     return;
   }
 

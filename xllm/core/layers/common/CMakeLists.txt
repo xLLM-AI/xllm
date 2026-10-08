@@ -86,7 +86,8 @@ cc_library(
     $<$<BOOL:${USE_DCU}>:dcu_layers>
 )
 
-if(USE_NPU)
-  # Repeat the static-library cycle so NPU RoPE symbols are resolved.
+if(USE_NPU OR USE_MLU)
+  # Scan the static-library cycle three times to resolve layer symbols introduced
+  # by model registration on later passes (including RoPE and DenseMLP).
   set_property(TARGET common_layers PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
 endif()

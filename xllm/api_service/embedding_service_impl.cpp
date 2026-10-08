@@ -28,6 +28,7 @@ limitations under the License.
 #include "framework/config/model_config.h"
 #include "framework/request/request_params.h"
 #include "mm_service_utils.h"
+#include "util/scope_guard.h"
 #include "util/utils.h"
 #include "util/uuid.h"
 
@@ -118,6 +119,25 @@ void EmbeddingServiceImpl::process_async_impl(
     return;
   }
 
+  auto* rate_limiter = master->get_rate_limiter();
+  int32_t reserved_slots = 0;
+  ScopeGuard rate_limit_guard([rate_limiter, &reserved_slots] {
+    while (reserved_slots > 0) {
+      rate_limiter->decrease_one_request();
+      --reserved_slots;
+    }
+  });
+  const int32_t request_count =
+      rpc_request.inputs().empty() ? 1 : rpc_request.inputs_size();
+  for (int32_t index = 0; index < request_count; ++index) {
+    const Status admission = rate_limiter->acquire();
+    if (!admission.ok()) {
+      call->finish_with_error(admission.code(), admission.message());
+      return;
+    }
+    ++reserved_slots;
+  }
+
   // create RequestParams for embeddings request
   // set is_embeddings and max_tokens = 1 to control engine step once.
   RequestParams request_params(
@@ -140,6 +160,7 @@ void EmbeddingServiceImpl::process_async_impl(
                            std::move(request_params),
                            call.get(),
                            std::move(send));
+    --reserved_slots;
     return;
   }
   auto batch = std::make_shared<api_service::OpenAIBatch>(
@@ -161,6 +182,7 @@ void EmbeddingServiceImpl::process_async_impl(
                              return batch->accept(
                                  index, std::move(output), send);
                            });
+    --reserved_slots;
   }
 }
 
@@ -189,6 +211,14 @@ void MMEmbeddingServiceImpl::process_async_impl(
         "dimensions is not supported by this embedding backend.");
     return;
   }
+
+  const Status admission = master_->get_rate_limiter()->acquire();
+  if (!admission.ok()) {
+    call->finish_with_error(admission.code(), admission.message());
+    return;
+  }
+  ScopeGuard rate_limit_guard(
+      [this] { master_->get_rate_limiter()->decrease_one_request(); });
 
   // create RequestParams for embeddings request
   // set is_embeddings and max_tokens = 1 to control engine step once.
@@ -241,5 +271,6 @@ void MMEmbeddingServiceImpl::process_async_impl(
         return send_result_to_client_brpc<MMEmbeddingCall>(
             call, request_id, created_time, model, req_output);
       });
+  rate_limit_guard.dismiss();
 }
 }  // namespace xllm
