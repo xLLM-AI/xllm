@@ -5,6 +5,8 @@ sidebar:
 ---
 先按照[xllm启动文档](/zh/getting_started/launch_xllm/)启动xllm服务。下面给出LLM和VLM的客户端调用示例，需要根据实际情况修改其中的参数。
 
+SDK 配置、流式输出、工具调用和兼容性说明请参阅 [OpenAI 兼容接口](/zh/getting_started/openai_api/)和 [Anthropic 兼容接口](/zh/getting_started/anthropic_api/)。另有[视觉输入](/zh/getting_started/openai_api_vision/)和 [Embedding](/zh/getting_started/openai_api_embeddings/)专项指南。
+
 ## LLM 客户端调用
 ### HTTP 调用
 

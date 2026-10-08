@@ -52,6 +52,22 @@ export default defineConfig({
 						'getting_started/launch_xllm',
 						'getting_started/multi_machine',
 						'getting_started/online_service',
+						{
+							slug: 'getting_started/openai_api',
+							attrs: { class: 'online-service-child' },
+						},
+						{
+							slug: 'getting_started/openai_api_vision',
+							attrs: { class: 'online-service-child' },
+						},
+						{
+							slug: 'getting_started/openai_api_embeddings',
+							attrs: { class: 'online-service-child' },
+						},
+						{
+							slug: 'getting_started/anthropic_api',
+							attrs: { class: 'online-service-child' },
+						},
 						'getting_started/offline_service',
 						{
 							label: 'Supported Models',

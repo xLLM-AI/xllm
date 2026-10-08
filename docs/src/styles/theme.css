@@ -39,6 +39,10 @@
 	--sl-rapide-ui-border-color: color-mix(in srgb, var(--docs-red) 20%, var(--sl-color-gray-6));
 }
 
+.sidebar-pane a.online-service-child {
+	padding-inline-start: 1.5rem;
+}
+
 .sidebar-pane a > span:first-child,
 .sidebar-pane summary .group-label {
 	display: inline-block;
