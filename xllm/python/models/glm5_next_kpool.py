@@ -131,9 +131,37 @@ def compress_completed_pools(
     bs = index_cache.shape[1]
     pool_bs = pool_cache.shape[1]
     width = 2 * head_dim + 1
+    n_tok = positions.shape[0]
+    if (
+        batched
+        and n_tok > 0
+        and rate > 0
+        and bs % rate == 0
+        and pool_bs == bs // rate
+        and block_table.shape[0] == n_tok
+        and block_table.shape[1] > 0
+        and positions.ndim == 1
+        and positions.device.type in ("npu", "privateuseone")
+        and index_cache.shape[2:] == (1, width)
+        and pool_cache.shape[2:] == (1, head_dim)
+        and index_cache.dtype == pool_cache.dtype == torch.bfloat16
+        and index_cache.is_contiguous()
+        and pool_cache.is_contiguous()
+        and block_table.dtype in (torch.int32, torch.int64)
+        and positions.dtype in (torch.int32, torch.int64)
+        and ape.shape == (rate, head_dim)
+        and all(tensor.device == positions.device for tensor in (index_cache, pool_cache, block_table, ape))
+    ):
+        try:
+            from xllm.python.kernels_npu.triton.kpool_compress import compress_completed_pools_decode
+        except ImportError:
+            pass
+        else:
+            compress_completed_pools_decode(index_cache, pool_cache, block_table, positions, ape, head_dim, rate)
+            return
+
     flat = index_cache.reshape(-1, width)
     pool_flat = pool_cache.reshape(-1, head_dim)
-    n_tok = positions.shape[0]
     rate_off = torch.arange(rate, device=positions.device)
     # Each token is the last token of its pool: pool p = pos // rate
     pos = positions.reshape(-1, 1)  # [N, 1]
