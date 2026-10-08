@@ -58,7 +58,7 @@ from xllm.python.model_executor.forward_context import (
     get_forward_context,
     record_layer_event,
 )
-from xllm.python.model_executor.v4_cp_context import build_deepseek_v4_cp_context
+from xllm.python.model_executor.v4_cp_context import DeepseekV4CpContext, build_deepseek_v4_cp_context
 from xllm.python.model_loader import W8A8WeightLoader
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
@@ -1466,6 +1466,24 @@ class DeepseekV4MoE(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _hc_head_merge(
+    hidden: torch.Tensor,
+    hc_head_fn: torch.Tensor,
+    hc_head_base: torch.Tensor,
+    hc_head_scale: torch.Tensor,
+    rms_norm_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    """Merge HyperConnection streams with the shared target/draft algorithm."""
+    hidden_float = hidden.to(torch.float32)
+    flattened = hidden_float.flatten(-2, -1)
+    reciprocal_rms = torch.rsqrt(flattened.pow(2).mean(-1, keepdim=True) + rms_norm_eps)
+    mixes = torch.matmul(flattened, hc_head_fn.transpose(0, 1))
+    weights = torch.sigmoid(mixes * reciprocal_rms * hc_head_scale + hc_head_base)
+    weights = weights + hc_eps
+    return (weights.unsqueeze(-1) * hidden_float).sum(-2).to(hidden.dtype)
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     """DeepSeek-V4 decoder layer: HyperConnection(attn) + HyperConnection(ffn)."""
 
@@ -1540,7 +1558,88 @@ class DeepseekV4DecoderLayer(nn.Module):
         return hidden, None
 
 
-class DeepseekV4Model(nn.Module):
+def _build_rotary_tables(
+    cfg: DeepseekV4Config,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[DeepseekV4RotaryEmbedding, DeepseekV4RotaryEmbedding, DeepseekV4RotaryEmbedding]:
+    # Match the native loader's fallback to max_position_embeddings for the
+    # original context length, rather than the nested rope_scaling value.
+    # Compressed caches use compress_rope_theta and no mscale amplitude,
+    # matching the native C4/C128 cache groups.
+    rotary, compress_rotary_c4, compress_rotary_c128 = (
+        DeepseekV4RotaryEmbedding(
+            cfg.qk_rope_head_dim,
+            cfg.max_position_embeddings,
+            cfg.rope_scaling_factor,
+            theta,
+            cfg.rope_beta_fast,
+            cfg.rope_beta_slow,
+            cfg.max_position_embeddings,
+            dtype=dtype,
+            device=device,
+        )
+        for theta in (cfg.rope_theta, cfg.compress_rope_theta, cfg.compress_rope_theta)
+    )
+    return rotary, compress_rotary_c4, compress_rotary_c128
+
+
+class _DeepseekV4ForwardSetup:
+    def _prepare_dsa_forward(self, backend: Any, metadata: Any, positions: torch.Tensor, model_name: str) -> None:
+        graph_mode = bool(getattr(metadata, "dsa_graph_mode", False))
+        if graph_mode and getattr(metadata, "dsa_metadata", None) is not None:
+            return
+        if backend is None or not hasattr(backend, "attach_rope_tables"):
+            raise RuntimeError(f"{model_name} requires a CSA backend with attach_rope_tables")
+        backend.reset_forward(metadata)
+        metadata.dsa_graph_mode = graph_mode
+        backend.attach_rope_tables(
+            positions,
+            self.rotary.cos_sin_cache,
+            csa_cos_sin=self.compress_rotary_c4.cos_sin_cache,
+            hca_cos_sin=self.compress_rotary_c128.cos_sin_cache,
+            metadata=metadata,
+        )
+        prepare_dsa = getattr(backend, "prepare_dsa_metadata_for_forward", None)
+        if prepare_dsa is None:
+            raise RuntimeError(f"{model_name} requires prepare_dsa_metadata_for_forward")
+        prepare_dsa(metadata)
+
+    def _build_cp_context(
+        self, backend: Any, metadata: Any, positions: torch.Tensor, *, allow_spec_verify: bool = False
+    ) -> DeepseekV4CpContext | None:
+        if (
+            getattr(metadata, "is_dummy", False)
+            or (not allow_spec_verify and getattr(metadata, "is_spec_verify", False))
+            or not (metadata.is_prefill or metadata.is_chunked_prefill)
+        ):
+            return None
+        q_seq_lens = getattr(metadata, "q_seq_lens_host", None)
+        kv_seq_lens = metadata.kv_seq_lens_host
+        if self.cfg.cp_size <= 1 or q_seq_lens is None or q_seq_lens.numel() == 0:
+            return None
+        cp_ctx = build_deepseek_v4_cp_context(
+            self.cfg.cp_size,
+            self.cfg.cp_rank,
+            q_seq_lens.cpu().tolist(),
+            kv_seq_lens.cpu().tolist(),
+            positions,
+        )
+        if cp_ctx.enabled():
+            cp_ctx.set_global_rope_cache(1, self.rotary.cos_sin_cache)
+            cp_ctx.set_global_rope_cache(4, self.compress_rotary_c4.cos_sin_cache)
+            cp_ctx.set_global_rope_cache(128, self.compress_rotary_c128.cos_sin_cache)
+            dsa = getattr(metadata, "dsa_metadata", None)
+            global_rope_by_ratio = getattr(dsa, "input_rope_by_ratio", {})
+            for ratio in (1, 4, 128):
+                pair = global_rope_by_ratio.get(ratio)
+                if pair is not None:
+                    cp_ctx.set_global_rope_pair(ratio, pair)
+            backend.localize_dsa_metadata_for_cp(cp_ctx, metadata)
+        return cp_ctx
+
+
+class DeepseekV4Model(_DeepseekV4ForwardSetup, nn.Module):
     """DeepSeek-V4 transformer body."""
 
     def __init__(self, cfg: DeepseekV4Config, dtype: torch.dtype, device: torch.device) -> None:
@@ -1560,49 +1659,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = nn.Parameter(torch.empty(cfg.hc_mult, hc_dim, dtype=torch.float32, device=device))
         self.hc_head_base = nn.Parameter(torch.empty(cfg.hc_mult, dtype=torch.float32, device=device))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32, device=device))
-        # Native C++ falls back to max_position_embeddings when the flat
-        # rope_scaling_original_max_position_embeddings ModelArgs field is 0.
-        # The DSV4 loader currently leaves that field at 0, so old_context_len
-        # is 1048576 for this checkpoint, not nested rope_scaling's 65536.
-        native_old_context_len = cfg.max_position_embeddings
-        self.rotary = DeepseekV4RotaryEmbedding(
-            cfg.qk_rope_head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_scaling_factor,
-            cfg.rope_theta,
-            cfg.rope_beta_fast,
-            cfg.rope_beta_slow,
-            native_old_context_len,
-            dtype=dtype,
-            device=device,
-        )
-        # Per-ratio compressed RoPE caches (C++ DeepseekV4RotaryEmbedding c4/c128
-        # groups). Same YaRN inv_freq as the default cache but with
-        # compress_rope_theta (config=160000) and NO mscale amplitude (C++
-        # create_cos_sin_cache does (void)mscale). mscale=1/mscale_all_dim=1 makes
-        # rope_mscale = get_mscale(s,1)/get_mscale(s,1) = 1.0 (no amplitude).
-        self.compress_rotary_c4 = DeepseekV4RotaryEmbedding(
-            cfg.qk_rope_head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_scaling_factor,
-            cfg.compress_rope_theta,
-            cfg.rope_beta_fast,
-            cfg.rope_beta_slow,
-            native_old_context_len,
-            dtype=dtype,
-            device=device,
-        )
-        self.compress_rotary_c128 = DeepseekV4RotaryEmbedding(
-            cfg.qk_rope_head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_scaling_factor,
-            cfg.compress_rope_theta,
-            cfg.rope_beta_fast,
-            cfg.rope_beta_slow,
-            native_old_context_len,
-            dtype=dtype,
-            device=device,
-        )
+        self.rotary, self.compress_rotary_c4, self.compress_rotary_c128 = _build_rotary_tables(cfg, dtype, device)
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
         """Final HyperConnection head.
@@ -1612,14 +1669,14 @@ class DeepseekV4Model(nn.Module):
         hc_head_fn=[hc_mult, hc_mult*hidden], hc_head_base=[hc_mult], and
         hc_head_scale=[1].
         """
-        x_float = x.to(torch.float32)
-        x_flatten = x_float.flatten(-2, -1)
-        rsqrt = torch.rsqrt(x_flatten.pow(2).mean(-1, keepdim=True) + self.cfg.rms_norm_eps)
-        mixes = torch.matmul(x_flatten, self.hc_head_fn.transpose(0, 1))
-        mixes = mixes * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.cfg.hc_eps
-        y = (pre.unsqueeze(-1) * x_float).sum(-2)
-        return y.to(x.dtype)
+        return _hc_head_merge(
+            x,
+            self.hc_head_fn,
+            self.hc_head_base,
+            self.hc_head_scale,
+            self.cfg.rms_norm_eps,
+            self.cfg.hc_eps,
+        )
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
@@ -1628,54 +1685,8 @@ class DeepseekV4Model(nn.Module):
         context = get_forward_context()
         backend = context.attention_backend
         metadata = context.metadata
-        graph_mode = bool(getattr(metadata, "dsa_graph_mode", False))
-        # Replay retains the captured DSA and RoPE storage.
-        if not graph_mode or getattr(metadata, "dsa_metadata", None) is None:
-            backend.reset_forward(metadata)
-            metadata.dsa_graph_mode = graph_mode
-            if backend is None or not hasattr(backend, "attach_rope_tables"):
-                raise RuntimeError("DeepSeek-V4 requires a CSA backend with attach_rope_tables")
-            backend.attach_rope_tables(
-                positions,
-                self.rotary.cos_sin_cache,
-                csa_cos_sin=self.compress_rotary_c4.cos_sin_cache,
-                hca_cos_sin=self.compress_rotary_c128.cos_sin_cache,
-                metadata=metadata,
-            )
-            prepare_dsa = getattr(backend, "prepare_dsa_metadata_for_forward", None)
-            if prepare_dsa is None:
-                raise RuntimeError("DeepSeek-V4 requires prepare_dsa_metadata_for_forward")
-            prepare_dsa(metadata)
-        cp_ctx = None
-        if (
-            not getattr(metadata, "is_dummy", False)
-            and not getattr(metadata, "is_spec_verify", False)
-            and (metadata.is_prefill or metadata.is_chunked_prefill)
-        ):
-            # DeepSeek-V4 needs contiguous per-sequence splits, rather than the FIA zigzag layout.
-            q_seq_lens = getattr(metadata, "q_seq_lens_host", None)
-            kv_seq_lens = metadata.kv_seq_lens_host
-            if self.cfg.cp_size > 1 and q_seq_lens is not None and q_seq_lens.numel() > 0:
-                cp_ctx = build_deepseek_v4_cp_context(
-                    self.cfg.cp_size,
-                    self.cfg.cp_rank,
-                    q_seq_lens.cpu().tolist(),
-                    kv_seq_lens.cpu().tolist(),
-                    positions,
-                )
-                if cp_ctx.enabled():
-                    # Keep global RoPE caches before localizing query metadata.
-                    cp_ctx.set_global_rope_cache(1, self.rotary.cos_sin_cache)
-                    cp_ctx.set_global_rope_cache(4, self.compress_rotary_c4.cos_sin_cache)
-                    cp_ctx.set_global_rope_cache(128, self.compress_rotary_c128.cos_sin_cache)
-                    # Preserve global request-shaped RoPE pairs before rebuilding the query-local map.
-                    dsa = getattr(metadata, "dsa_metadata", None)
-                    global_rope_by_ratio = getattr(dsa, "input_rope_by_ratio", {})
-                    for ratio in (1, 4, 128):
-                        pair = global_rope_by_ratio.get(ratio)
-                        if pair is not None:
-                            cp_ctx.set_global_rope_pair(ratio, pair)
-                    backend.localize_dsa_metadata_for_cp(cp_ctx, metadata)
+        self._prepare_dsa_forward(backend, metadata, positions, "DeepSeek-V4")
+        cp_ctx = self._build_cp_context(backend, metadata, positions)
         # Expand hidden into hc_mult parallel residual streams for the
         # HyperConnection decoder layers (C++ flat_hc does this reshape).
         if cp_ctx is not None and cp_ctx.enabled():
