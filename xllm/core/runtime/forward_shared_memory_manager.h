@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <stddef.h>
 
+#include <atomic>
 #include <memory>
 
 #include "forward_params.h"
@@ -110,22 +111,22 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
   };
 
   bool input_write(const DiTForwardInput& input);
-  void input_read(DiTForwardInput& input);
+  bool input_read(DiTForwardInput& input);
 
   bool input_write(const RecForwardInput& input);
-  void input_read(RecForwardInput& input,
+  bool input_read(RecForwardInput& input,
                   const torch::Device& device,
                   InputDeviceMaterializationPolicy policy =
                       InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
 
   bool input_write(const VlmForwardInput& input);
-  void input_read(VlmForwardInput& input,
+  bool input_read(VlmForwardInput& input,
                   const torch::Device& device,
                   InputDeviceMaterializationPolicy policy =
                       InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
 
   bool input_write(const LlmForwardInput& input);
-  void input_read(LlmForwardInput& input,
+  bool input_read(LlmForwardInput& input,
                   const torch::Device& device,
                   InputDeviceMaterializationPolicy policy =
                       InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
@@ -147,17 +148,24 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
       const std::vector<JsonObjectOutputError>& json_object_errors);
   void raw_output_read(RawForwardOutput& outputs);
 
+  // Permanently cancel input reads on this local manager without publishing
+  // a synthetic request or changing the shared segment for other readers.
+  void stop_input_read();
+
   void clear();
 
  private:
   template <typename Input>
   bool write_token_input(const Input& input);
 
+  bool wait_for_input();
+
   template <typename Input>
-  void read_token_input(Input& input,
+  bool read_token_input(Input& input,
                         const torch::Device& device,
                         InputDeviceMaterializationPolicy policy);
 
+  std::atomic<bool> input_read_stopped_{false};
   ForwardType forward_type_;
   uint64_t last_version_ = 0;
   void* metadata_addr_ = nullptr;

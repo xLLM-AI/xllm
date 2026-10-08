@@ -325,7 +325,16 @@ WorkerService::WorkerService(runtime::Options options,
       /*pool_name=*/"WorkerService.request");
 }
 
-WorkerService::~WorkerService() = default;
+WorkerService::~WorkerService() {
+  // The polling thread may be idle in input_read. Cancel that wait before
+  // joining, while the worker and its execution resources are still alive.
+  if (input_shm_manager_) {
+    input_shm_manager_->stop_input_read();
+  }
+  if (polling_thread_ && polling_thread_->joinable()) {
+    polling_thread_->join();
+  }
+}
 
 std::vector<SpeculativeTokenStats>
 WorkerService::record_speculative_metrics_from_output(
@@ -603,10 +612,10 @@ void WorkerService::step(
 void WorkerService::create_polling_shm_thread(
     std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
     std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
+  CHECK(!polling_thread_) << "SHM polling thread has already been created.";
+  input_shm_manager_ = std::move(input_shm_manager);
   polling_thread_ = std::make_unique<std::thread>(
-      [this,
-       input_shm_manager = std::move(input_shm_manager),
-       output_shm_manager = std::move(output_shm_manager)]() mutable {
+      [this, output_shm_manager = std::move(output_shm_manager)]() mutable {
         device_.set_device();
         Timer timer;
         while (true) {
@@ -631,17 +640,20 @@ void WorkerService::create_polling_shm_thread(
                        options_.enable_graph())
                   ? InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE
                   : InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
-          std::visit(
+          const bool input_ready = std::visit(
               [&](auto& typed_input) {
                 using Input = std::decay_t<decltype(typed_input)>;
                 if constexpr (std::is_same_v<Input, DiTForwardInput>) {
-                  input_shm_manager->input_read(typed_input);
+                  return input_shm_manager_->input_read(typed_input);
                 } else {
-                  input_shm_manager->input_read(
+                  return input_shm_manager_->input_read(
                       typed_input, device_, materialization_policy);
                 }
               },
               input);
+          if (!input_ready) {
+            break;
+          }
           timer.reset();
           // model output variables
           torch::Tensor next_tokens;

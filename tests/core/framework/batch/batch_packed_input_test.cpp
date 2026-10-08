@@ -15,9 +15,12 @@ limitations under the License.
 ==============================================================================*/
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <string>
 #include <type_traits>
@@ -98,6 +101,66 @@ class ScopedContiguousInputBuffer final {
  private:
   bool previous_enabled_;
 };
+
+template <typename Input>
+void expect_input_read_cancellation(const std::string& suffix) {
+  ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
+  const std::string name =
+      "shm_input_cancel_" + std::to_string(getpid()) + "_" + suffix;
+  bool is_creator = false;
+  ForwardSharedMemoryManager reader(
+      name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
+  auto read_input = [&reader]() {
+    Input input;
+    if constexpr (std::is_same_v<Input, DiTForwardInput>) {
+      return reader.input_read(input);
+    } else {
+      return reader.input_read(input, torch::Device(torch::kCPU));
+    }
+  };
+  auto result = std::async(std::launch::async, read_input);
+  EXPECT_EQ(result.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  reader.stop_input_read();
+  reader.stop_input_read();
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  EXPECT_FALSE(result.get());
+  EXPECT_FALSE(read_input());
+}
+
+TEST(ForwardSharedMemoryShutdownTest, CancelsIdleReadsForEveryInputDomain) {
+  expect_input_read_cancellation<LlmForwardInput>("llm");
+  expect_input_read_cancellation<VlmForwardInput>("vlm");
+  expect_input_read_cancellation<RecForwardInput>("rec");
+  expect_input_read_cancellation<DiTForwardInput>("dit");
+}
+
+TEST(ForwardSharedMemoryShutdownTest,
+     CancellationDoesNotPublishOrConsumeInput) {
+  ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
+  const std::string name = "shm_input_local_stop_" + std::to_string(getpid());
+  bool is_creator = false;
+  ForwardSharedMemoryManager writer(
+      name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
+  ForwardSharedMemoryManager stopped_reader(
+      name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
+  ForwardSharedMemoryManager active_reader(
+      name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
+  stopped_reader.stop_input_read();
+  DiTForwardInput source;
+  source.batch_size = 1;
+  source.prompts = {"Keep the pending request for active readers."};
+  ASSERT_TRUE(writer.input_write(source));
+  DiTForwardInput cancelled;
+  cancelled.batch_size = 7;
+  EXPECT_FALSE(stopped_reader.input_read(cancelled));
+  EXPECT_EQ(cancelled.batch_size, 7);
+  DiTForwardInput received;
+  ASSERT_TRUE(active_reader.input_read(received));
+  EXPECT_EQ(received.batch_size, source.batch_size);
+  EXPECT_EQ(received.prompts, source.prompts);
+}
 
 void expect_linear_state_cache_op_eq(const LinearStateCacheOp& actual,
                                      const LinearStateCacheOp& expected) {

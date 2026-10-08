@@ -17,9 +17,11 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
+#include <unistd.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -45,6 +47,38 @@ class WorkerServiceTestPeer final {
 };
 
 namespace {
+
+TEST(WorkerServiceShutdownTest, JoinsIdleShmPollingThreadForEveryBackend) {
+  for (const std::string& backend : {"llm", "vlm", "rec", "dit"}) {
+    SCOPED_TRACE(backend);
+    runtime::Options options;
+    options.backend(backend);
+    auto service =
+        std::make_unique<WorkerService>(options, torch::Device("npu:0"));
+    const std::string prefix =
+        "worker_shutdown_" + std::to_string(getpid()) + "_" + backend;
+    bool is_creator = false;
+    auto input =
+        std::make_unique<ForwardSharedMemoryManager>(prefix + "_input",
+                                                     /*size=*/1 << 20,
+                                                     is_creator,
+                                                     ForwardType::RAW_INPUT);
+    auto output =
+        std::make_unique<ForwardSharedMemoryManager>(prefix + "_output",
+                                                     /*size=*/1 << 20,
+                                                     is_creator,
+                                                     ForwardType::RAW_OUTPUT);
+    service->create_polling_shm_thread(std::move(input), std::move(output));
+    // No input is ever published: destruction must cancel the read and join,
+    // including when shutdown races with the polling thread's first read.
+    service.reset();
+  }
+}
+
+TEST(WorkerServiceShutdownTest, StopsWithoutShmPollingThread) {
+  runtime::Options options;
+  WorkerService service(options, torch::Device("npu:0"));
+}
 
 TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
   // Row 0 accepts two draft tokens; row 1 accepts all five.

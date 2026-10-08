@@ -195,6 +195,7 @@ class WorkerService : public proto::DistributeWorker {
 
   std::unique_ptr<Worker> worker_;
 
+  std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager_;
   std::unique_ptr<std::thread> polling_thread_;
 
   std::unique_ptr<ThreadPool> threadpool_;

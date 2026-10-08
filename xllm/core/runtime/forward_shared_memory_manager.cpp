@@ -3707,12 +3707,26 @@ bool ForwardSharedMemoryManager::input_write(const DiTForwardInput& input) {
   return true;
 }
 
-void ForwardSharedMemoryManager::input_read(DiTForwardInput& input) {
-  while (control_ptr_->version == last_version_) {
+void ForwardSharedMemoryManager::stop_input_read() {
+  input_read_stopped_.store(true, std::memory_order_relaxed);
+}
+
+bool ForwardSharedMemoryManager::wait_for_input() {
+  while (!input_read_stopped_.load(std::memory_order_relaxed)) {
+    if (control_ptr_->version != last_version_) {
+      last_version_ = control_ptr_->version;
+      std::atomic_thread_fence(std::memory_order_acquire);
+      return true;
+    }
     std::this_thread::sleep_for(std::chrono::nanoseconds(kNumWaitNanoseconds));
   }
-  last_version_ = control_ptr_->version;
-  std::atomic_thread_fence(std::memory_order_acquire);
+  return false;
+}
+
+bool ForwardSharedMemoryManager::input_read(DiTForwardInput& input) {
+  if (!wait_for_input()) {
+    return false;
+  }
   const char* cursor =
       static_cast<const char*>(base_address()) + sizeof(ControlMetadata);
   uint64_t payload_size = 0;
@@ -3722,6 +3736,7 @@ void ForwardSharedMemoryManager::input_read(DiTForwardInput& input) {
   CHECK_LE(payload_size, size() - overhead);
   CHECK(deserialize_dit_input_payload(cursor, payload_size, input))
       << "Invalid native DiT input domain, schema, or layout";
+  return true;
 }
 
 template <typename Input>
@@ -3757,17 +3772,12 @@ bool ForwardSharedMemoryManager::write_token_input(const Input& input) {
 }
 
 template <typename Input>
-void ForwardSharedMemoryManager::read_token_input(
+bool ForwardSharedMemoryManager::read_token_input(
     Input& input,
     const torch::Device& device,
     InputDeviceMaterializationPolicy policy) {
-  while (true) {
-    if (control_ptr_->version != last_version_) {
-      last_version_ = control_ptr_->version;
-      std::atomic_thread_fence(std::memory_order_acquire);
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::nanoseconds(kNumWaitNanoseconds));
+  if (!wait_for_input()) {
+    return false;
   }
 
   const char* data_ptr =
@@ -3812,7 +3822,7 @@ void ForwardSharedMemoryManager::read_token_input(
                                     stream_.get(),
                                     materialize_device_buffer);
 
-  return;
+  return true;
 }
 
 bool ForwardSharedMemoryManager::input_write(const LlmForwardInput& input) {
@@ -3831,25 +3841,25 @@ bool ForwardSharedMemoryManager::input_write(const VlmForwardInput& input) {
   return write_token_input(input);
 }
 
-void ForwardSharedMemoryManager::input_read(
+bool ForwardSharedMemoryManager::input_read(
     LlmForwardInput& input,
     const torch::Device& device,
     InputDeviceMaterializationPolicy policy) {
-  read_token_input(input, device, policy);
+  return read_token_input(input, device, policy);
 }
 
-void ForwardSharedMemoryManager::input_read(
+bool ForwardSharedMemoryManager::input_read(
     RecForwardInput& input,
     const torch::Device& device,
     InputDeviceMaterializationPolicy policy) {
-  read_token_input(input, device, policy);
+  return read_token_input(input, device, policy);
 }
 
-void ForwardSharedMemoryManager::input_read(
+bool ForwardSharedMemoryManager::input_read(
     VlmForwardInput& input,
     const torch::Device& device,
     InputDeviceMaterializationPolicy policy) {
-  read_token_input(input, device, policy);
+  return read_token_input(input, device, policy);
 }
 
 bool ForwardSharedMemoryManager::raw_output_write(
