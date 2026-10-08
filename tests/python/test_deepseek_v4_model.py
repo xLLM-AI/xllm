@@ -431,26 +431,28 @@ def test_causal_lm_accepts_data_parallelism_config() -> None:
 
 
 @pytest.mark.parametrize(
-    "checkpoint_names",
+    ("checkpoint_prefix", "checkpoint_names"),
     [
-        ("gate_proj", "up_proj", "down_proj"),
-        ("w1", "w3", "w2"),
+        ("layers.0.ffn.", ("gate_proj", "up_proj", "down_proj")),
+        ("layers.0.ffn.", ("w1", "w3", "w2")),
+        ("layers.0.mlp.", ("gate_proj", "up_proj", "down_proj")),
     ],
 )
 def test_dense_mlp_loader_maps_dsv4_weight_names(
+    checkpoint_prefix: str,
     checkpoint_names: tuple[str, str, str],
 ) -> None:
     checkpoint_gate, checkpoint_up, checkpoint_down = checkpoint_names
     tensors = {
-        f"layers.0.ffn.{checkpoint_gate}.weight": torch.arange(12, dtype=torch.int8).reshape(4, 3),
-        f"layers.0.ffn.{checkpoint_up}.weight": torch.arange(12, 24, dtype=torch.int8).reshape(4, 3),
-        f"layers.0.ffn.{checkpoint_down}.weight": torch.arange(12, dtype=torch.int8).reshape(3, 4),
-        f"layers.0.ffn.{checkpoint_gate}.weight_scale": torch.arange(4, dtype=torch.float32).reshape(4, 1),
-        f"layers.0.ffn.{checkpoint_up}.weight_scale": torch.arange(4, 8, dtype=torch.float32).reshape(4, 1),
-        f"layers.0.ffn.{checkpoint_down}.weight_scale": torch.arange(3, dtype=torch.float32).reshape(3, 1),
-        f"layers.0.ffn.{checkpoint_gate}.weight_offset": torch.zeros(4, 1),
-        f"layers.0.ffn.{checkpoint_up}.weight_offset": torch.zeros(4, 1),
-        f"layers.0.ffn.{checkpoint_down}.weight_offset": torch.zeros(3, 1),
+        f"{checkpoint_prefix}{checkpoint_gate}.weight": torch.arange(12, dtype=torch.int8).reshape(4, 3),
+        f"{checkpoint_prefix}{checkpoint_up}.weight": torch.arange(12, 24, dtype=torch.int8).reshape(4, 3),
+        f"{checkpoint_prefix}{checkpoint_down}.weight": torch.arange(12, dtype=torch.int8).reshape(3, 4),
+        f"{checkpoint_prefix}{checkpoint_gate}.weight_scale": torch.arange(4, dtype=torch.float32).reshape(4, 1),
+        f"{checkpoint_prefix}{checkpoint_up}.weight_scale": torch.arange(4, 8, dtype=torch.float32).reshape(4, 1),
+        f"{checkpoint_prefix}{checkpoint_down}.weight_scale": torch.arange(3, dtype=torch.float32).reshape(3, 1),
+        f"{checkpoint_prefix}{checkpoint_gate}.weight_offset": torch.zeros(4, 1),
+        f"{checkpoint_prefix}{checkpoint_up}.weight_offset": torch.zeros(4, 1),
+        f"{checkpoint_prefix}{checkpoint_down}.weight_offset": torch.zeros(3, 1),
     }
 
     class FakeLoader:
@@ -483,18 +485,18 @@ def test_dense_mlp_loader_maps_dsv4_weight_names(
         loader.loaded["model.layers.0.mlp.gate_up_proj.weight"],
         torch.cat(
             [
-                tensors[f"layers.0.ffn.{checkpoint_gate}.weight"][2:],
-                tensors[f"layers.0.ffn.{checkpoint_up}.weight"][2:],
+                tensors[f"{checkpoint_prefix}{checkpoint_gate}.weight"][2:],
+                tensors[f"{checkpoint_prefix}{checkpoint_up}.weight"][2:],
             ]
         ),
     )
     torch.testing.assert_close(
         loader.loaded["model.layers.0.mlp.down_proj.weight"],
-        tensors[f"layers.0.ffn.{checkpoint_down}.weight"][:, 2:],
+        tensors[f"{checkpoint_prefix}{checkpoint_down}.weight"][:, 2:],
     )
     torch.testing.assert_close(
         loader.loaded["model.layers.0.mlp.down_proj.weight_scale"],
-        tensors[f"layers.0.ffn.{checkpoint_down}.weight_scale"],
+        tensors[f"{checkpoint_prefix}{checkpoint_down}.weight_scale"],
     )
     assert mlp.processed
 

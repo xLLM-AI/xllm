@@ -105,18 +105,31 @@ def _require_checkpoint_key(
     return key
 
 
+def _find_checkpoint_prefix(
+    loader: W8A8WeightLoader,
+    candidates: Sequence[str],
+    probes: Sequence[str],
+) -> str | None:
+    """Return the first module prefix containing a supported probe tensor."""
+    return next(
+        (prefix for prefix in candidates if any(loader.has(prefix + probe) for probe in probes)),
+        None,
+    )
+
+
+_DSV4_MLP_NAME_SCHEMES = (
+    ("gate_proj", "up_proj", "down_proj"),
+    ("w1", "w3", "w2"),
+)
+
+
 def _resolve_mlp_projection_names(loader: W8A8WeightLoader, checkpoint_prefix: str) -> tuple[str, str, str]:
     """Resolve native ``gate/up/down`` and legacy ``w1/w3/w2`` names."""
-    for names in (
-        ("gate_proj", "up_proj", "down_proj"),
-        ("w1", "w3", "w2"),
-    ):
+    for names in _DSV4_MLP_NAME_SCHEMES:
         if all(loader.has(checkpoint_prefix + name + ".weight") for name in names):
             return names
-    raise KeyError(
-        f"DeepSeek-V4 MLP projections not found under {checkpoint_prefix}; "
-        "expected gate_proj/up_proj/down_proj or w1/w3/w2"
-    )
+    expected = " or ".join("/".join(names) for names in _DSV4_MLP_NAME_SCHEMES)
+    raise KeyError(f"DeepSeek-V4 MLP projections not found under {checkpoint_prefix}; expected {expected}")
 
 
 def _compress_kv(
@@ -1910,24 +1923,31 @@ class DeepseekV4ForCausalLM(PyModelBase):
         parameter_prefix: str,
         mlp: DeepseekV3MLP,
     ) -> None:
-        """Load DSV4 dense projection tensors into a fused W8A8 MLP."""
+        """Load a dense W8A8 MLP using the key aliases accepted by C++."""
+        source_prefix = next(
+            (
+                prefix
+                for prefix in (checkpoint_prefix + "ffn.", checkpoint_prefix + "mlp.")
+                if any(all(loader.has(prefix + name + ".weight") for name in names) for names in _DSV4_MLP_NAME_SCHEMES)
+            ),
+            None,
+        )
+        if source_prefix is None:
+            raise KeyError(f"DeepSeek-V4 dense MLP weights not found under {checkpoint_prefix}")
+        gate_name, up_name, down_name = _resolve_mlp_projection_names(loader, source_prefix)
         gate_up_prefix = parameter_prefix + "mlp.gate_up_proj."
         down_prefix = parameter_prefix + "mlp.down_proj."
-        gate_name, up_name, down_name = _resolve_mlp_projection_names(
-            loader,
-            checkpoint_prefix + "ffn.",
-        )
         for suffix in ("weight", "weight_scale", "weight_offset"):
             gate = loader.shard(
-                loader.get_tensor(checkpoint_prefix + "ffn." + gate_name + "." + suffix),
+                loader.get_tensor(source_prefix + gate_name + "." + suffix),
                 dim=0,
             )
             up = loader.shard(
-                loader.get_tensor(checkpoint_prefix + "ffn." + up_name + "." + suffix),
+                loader.get_tensor(source_prefix + up_name + "." + suffix),
                 dim=0,
             )
             loader.copy_in(gate_up_prefix + suffix, torch.cat([gate, up], dim=0))
-            down = loader.get_tensor(checkpoint_prefix + "ffn." + down_name + "." + suffix)
+            down = loader.get_tensor(source_prefix + down_name + "." + suffix)
             if suffix == "weight":
                 down = loader.shard(down, dim=1)
             loader.copy_in(down_prefix + suffix, down)
