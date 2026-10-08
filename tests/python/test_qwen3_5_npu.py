@@ -48,8 +48,10 @@ from xllm.python.distributed import collectives
 from xllm.python.kernels_npu.causal_conv1d import (
     causal_conv1d_decode as npu_causal_conv1d_decode,
 )
+from xllm.python.layers.npu.layernorm import NpuGemmaRMSNorm
 from xllm.python.layers.npu.mega_moe_metadata import MegaMoeMetadata
 from xllm.python.layers.npu.mega_moe_metadata_builder import TokenOwnerMegaMoeMetadataBuilder
+from xllm.python.layers.npu.qwen3_5.attention import NpuQwen3_5Attention
 from xllm.python.layers.npu.qwen3_5.decoder_layer import (
     NpuQwen3_5DecoderLayer,
 )
@@ -142,6 +144,185 @@ def _mega_moe_graph_metadata(
 
 def test_npu_decoder_factory_selects_privateuseone_backend() -> None:
     assert get_qwen3_5_decoder_layer_class("privateuseone") is NpuQwen3_5DecoderLayer
+    assert NpuQwen3_5DecoderLayer.normalization_cls is NpuGemmaRMSNorm
+
+
+def test_npu_gemma_rms_norm_uses_fused_residual_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_output = torch.zeros(2, 4, dtype=torch.bfloat16)
+    expected_residual = torch.ones(2, 4, dtype=torch.bfloat16)
+    fused_norm = MagicMock(return_value=(expected_output, expected_residual))
+    monkeypatch.setattr(
+        kernels,
+        "fused_add_gemma_rms_norm",
+        fused_norm,
+        raising=False,
+    )
+    layer = NpuGemmaRMSNorm(
+        4,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+    hidden = torch.randn(2, 4, dtype=torch.bfloat16)
+    residual = torch.randn(2, 4, dtype=torch.bfloat16)
+
+    actual_output, actual_residual = layer(hidden, residual)
+
+    fused_norm.assert_called_once_with(
+        hidden,
+        residual,
+        layer.weight,
+        layer.eps,
+    )
+    assert layer.weight.dtype == torch.bfloat16
+    assert actual_output is expected_output
+    assert actual_residual is expected_residual
+
+
+def test_npu_fused_attention_preparation_matches_unfused_after_reload() -> None:
+    cfg = _config(
+        hidden_size=8,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+        tp_size=1,
+        world_size=1,
+        moe_tp_size=1,
+        attention_bias=True,
+    )
+
+    def new_layer() -> NpuQwen3_5Attention:
+        layer = NpuQwen3_5Attention(
+            cfg,
+            0,
+            torch.float32,
+            torch.device("cpu"),
+            MagicMock(),
+        )
+        layer.use_fused_qkv = True
+        return layer
+
+    def checkpoint(offset: float) -> dict[str, torch.Tensor]:
+        query = torch.arange(
+            2 * cfg.n_heads * cfg.head_dim * cfg.hidden_size,
+            dtype=torch.float32,
+        ).view(2 * cfg.n_heads * cfg.head_dim, cfg.hidden_size)
+        key = torch.arange(
+            cfg.n_kv_heads * cfg.head_dim * cfg.hidden_size,
+            dtype=torch.float32,
+        ).view(cfg.n_kv_heads * cfg.head_dim, cfg.hidden_size)
+        query_bias = torch.arange(
+            2 * cfg.n_heads * cfg.head_dim,
+            dtype=torch.float32,
+        )
+        key_bias = torch.arange(
+            cfg.n_kv_heads * cfg.head_dim,
+            dtype=torch.float32,
+        )
+        q_norm = torch.arange(cfg.head_dim, dtype=torch.float32)
+        return {
+            "q_proj.weight": query + offset,
+            "k_proj.weight": key + offset,
+            "v_proj.weight": key + offset + 100000,
+            "q_proj.bias": query_bias + offset,
+            "k_proj.bias": key_bias + offset,
+            "v_proj.bias": key_bias + offset + 1000,
+            "o_proj.weight": torch.full(
+                (cfg.hidden_size, cfg.n_heads * cfg.head_dim),
+                offset,
+            ),
+            "o_proj.bias": torch.full((cfg.hidden_size,), offset),
+            "q_norm.weight": q_norm + offset,
+            "k_norm.weight": q_norm + offset + 100,
+        }
+
+    def load(
+        layer: NpuQwen3_5Attention,
+        tensors: dict[str, torch.Tensor],
+    ) -> None:
+        layer.load_weights(
+            ScopedWeightLoader([_StateDict(tensors)]),
+            context,
+        )
+
+    context = ParallelLoadContext(tp_rank=0, tp_size=1)
+    layer = new_layer()
+    initial_checkpoint = checkpoint(0.0)
+
+    load(layer, initial_checkpoint)
+    prepared_qkv = layer.qkv_proj.weight.detach().clone()
+    assert layer.qkv_proj.bias is not None
+    prepared_qkv_bias = layer.qkv_proj.bias.detach().clone()
+    prepared_q_norm = layer.q_norm.weight.detach().clone()
+    prepared_k_norm = layer.k_norm.weight.detach().clone()
+
+    load(layer, initial_checkpoint)
+
+    torch.testing.assert_close(layer.qkv_proj.weight, prepared_qkv)
+    assert layer.qkv_proj.bias is not None
+    torch.testing.assert_close(layer.qkv_proj.bias, prepared_qkv_bias)
+    torch.testing.assert_close(layer.q_norm.weight, prepared_q_norm)
+    torch.testing.assert_close(layer.k_norm.weight, prepared_k_norm)
+
+    updated_checkpoint = checkpoint(10.0)
+    incomplete_checkpoint = dict(updated_checkpoint)
+    del incomplete_checkpoint["k_norm.weight"]
+    with pytest.raises(KeyError, match="k_norm.weight"):
+        load(layer, incomplete_checkpoint)
+
+    load(layer, updated_checkpoint)
+    fresh_layer = new_layer()
+    load(fresh_layer, updated_checkpoint)
+
+    torch.testing.assert_close(layer.qkv_proj.weight, fresh_layer.qkv_proj.weight)
+    assert layer.qkv_proj.bias is not None
+    assert fresh_layer.qkv_proj.bias is not None
+    torch.testing.assert_close(layer.qkv_proj.bias, fresh_layer.qkv_proj.bias)
+    torch.testing.assert_close(layer.q_norm.weight, fresh_layer.q_norm.weight)
+    torch.testing.assert_close(layer.k_norm.weight, fresh_layer.k_norm.weight)
+    torch.testing.assert_close(
+        layer.q_norm.weight,
+        updated_checkpoint["q_norm.weight"] + 1.0,
+    )
+    torch.testing.assert_close(
+        layer.k_norm.weight,
+        updated_checkpoint["k_norm.weight"] + 1.0,
+    )
+
+    hidden = torch.arange(
+        2 * cfg.hidden_size,
+        dtype=torch.float32,
+    ).view(2, cfg.hidden_size)
+    torch.testing.assert_close(
+        layer.qkv_proj(hidden),
+        fresh_layer.qkv_proj(hidden),
+    )
+    unfused_qg = torch.nn.functional.linear(
+        hidden,
+        updated_checkpoint["q_proj.weight"],
+        updated_checkpoint["q_proj.bias"],
+    )
+    unfused_query, unfused_gate = unfused_qg.view(
+        2,
+        cfg.n_heads,
+        2 * cfg.head_dim,
+    ).chunk(2, dim=-1)
+    fused_qg = torch.nn.functional.linear(
+        hidden,
+        layer.qkv_proj.weight[: 2 * layer.q_size],
+        layer.qkv_proj.bias[: 2 * layer.q_size],
+    )
+    fused_query, fused_gate = fused_qg.split(layer.q_size, dim=-1)
+
+    torch.testing.assert_close(
+        fused_query,
+        unfused_query.reshape(2, layer.q_size),
+    )
+    torch.testing.assert_close(
+        fused_gate,
+        unfused_gate.reshape(2, layer.q_size),
+    )
 
 
 def test_npu_gdn_rejects_unsupported_rms_norm_epsilon() -> None:

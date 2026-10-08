@@ -76,6 +76,50 @@ def _rms_norm_gated_fake(
     return torch.empty_like(input)
 
 
+def _fused_add_gemma_rms_norm_fake(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del weight, eps
+    return torch.empty_like(input), torch.empty_like(residual)
+
+
+def _moe_gating_top_k_softmax_fake(
+    input: torch.Tensor,
+    topk: int,
+    normalize: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del normalize
+    output_shape = (*input.shape[:-1], topk)
+    return (
+        input.new_empty(output_shape),
+        input.new_empty(output_shape, dtype=torch.int32),
+    )
+
+
+def _split_qkv_rmsnorm_mrope_fake(
+    qkvg: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin: torch.Tensor,
+    gather_pattern: torch.Tensor,
+    eps: float,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    del q_weight, k_weight, cos_sin, gather_pattern, eps
+    num_tokens = qkvg.shape[0]
+    return (
+        qkvg.new_empty((num_tokens, num_q_heads, head_size)),
+        qkvg.new_empty((num_tokens, num_kv_heads, head_size)),
+        qkvg.new_empty((num_tokens, num_kv_heads, head_size)),
+        qkvg.new_empty((num_tokens, num_q_heads, head_size)),
+    )
+
+
 def _l2_norm_fake(
     input: torch.Tensor,
     eps: float,
@@ -1181,9 +1225,12 @@ register_fake("xllm_ops::npu_all_gather", _npu_all_gather_fake)
 register_fake("xllm_ops::npu_reduce_scatter", _npu_reduce_scatter_fake)
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
+register_fake("xllm_ops::fused_add_gemma_rms_norm", _fused_add_gemma_rms_norm_fake)
 register_fake("xllm_ops::l2_norm", _l2_norm_fake)
 register_fake("xllm_ops::atb_matmul_ein_sum", _atb_matmul_ein_sum_fake)
 register_fake("xllm_ops::atb_matmul_ein_sum_out", _atb_matmul_ein_sum_out_fake)
+register_fake("xllm_ops::moe_gating_top_k_softmax", _moe_gating_top_k_softmax_fake)
+register_fake("xllm_ops::split_qkv_rmsnorm_mrope", _split_qkv_rmsnorm_mrope_fake)
 register_fake("xllm_ops::chunk_gated_delta_rule", _chunk_gated_delta_rule_fake)
 register_fake("xllm_ops::mega_gdn_prefill", _mega_gdn_prefill_fake)
 register_fake("xllm_ops::mega_gdn_decode", _mega_gdn_decode_fake)

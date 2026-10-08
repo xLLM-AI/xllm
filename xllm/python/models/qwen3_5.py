@@ -23,7 +23,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-from xllm.python.layers import ColumnParallelLinear, GemmaRMSNorm, HiddenParallelEmbedding
+from xllm.python.layers import ColumnParallelLinear, HiddenParallelEmbedding
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
 from xllm.python.layers.qwen3_5.decoder_layer import Qwen3_5DecoderLayer, get_qwen3_5_decoder_layer_class
 from xllm.python.model_executor.forward_context import ExecutionMetadataBuilder, record_layer_event
@@ -47,6 +47,8 @@ class Qwen3_5Config:
     rms_norm_eps: float
     rope_theta: float
     partial_rotary_factor: float
+    rope_scaling_mrope_section: list[int]
+    rope_scaling_mrope_interleaved: bool
     max_position_embeddings: int
     vocab_size: int
     layer_types: list[str]
@@ -101,6 +103,27 @@ class Qwen3_5Config:
         dp_size = int(pick("dp_size", default=1))
         world_size = int(pick("world_size", default=tp_size * dp_size))
         ep_size = int(pick("ep_size", default=1))
+        rope_parameters = pick("rope_parameters", default={})
+        if not isinstance(rope_parameters, dict):
+            rope_parameters = {}
+        rope_scaling = pick("rope_scaling", default={})
+        if not isinstance(rope_scaling, dict):
+            rope_scaling = {}
+        mrope_section = pick(
+            "rope_scaling_mrope_section",
+            default=rope_parameters.get(
+                "mrope_section",
+                rope_scaling.get("mrope_section", []),
+            ),
+        )
+        mrope_interleaved = pick(
+            "rope_scaling_mrope_interleaved",
+            default=rope_parameters.get(
+                "mrope_interleaved",
+                rope_scaling.get("mrope_interleaved", False),
+            ),
+        )
+
         return cls(
             hidden_size=hidden_size,
             n_layers=n_layers,
@@ -111,6 +134,8 @@ class Qwen3_5Config:
             rms_norm_eps=float(pick("rms_norm_eps", default=1e-6)),
             rope_theta=float(pick("rope_theta", default=1e7)),
             partial_rotary_factor=float(pick("partial_rotary_factor", default=0.25)),
+            rope_scaling_mrope_section=[int(section) for section in mrope_section],
+            rope_scaling_mrope_interleaved=bool(mrope_interleaved),
             max_position_embeddings=int(pick("max_position_embeddings", default=262144)),
             vocab_size=int(pick("vocab_size", default=248320)),
             layer_types=layer_types,
@@ -252,7 +277,12 @@ class Qwen3_5Model(nn.Module):
             Sequence[Qwen3_5DecoderLayer],
             nn.ModuleList(decoder_layer_cls(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers)),
         )
-        self.norm = GemmaRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.norm = decoder_layer_cls.normalization_cls(
+            cfg.hidden_size,
+            cfg.rms_norm_eps,
+            dtype=dtype,
+            device=device,
+        )
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)

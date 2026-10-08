@@ -830,14 +830,11 @@ def moe_fused_topk(
     """
     if scoring_func != "softmax":
         raise NotImplementedError("NPU moe_fused_topk currently supports softmax routing only")
-    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax_v2(
+    return torch.ops.xllm_ops.moe_gating_top_k_softmax(
         gating_output,
-        k=topk,
-        finished=None,
-        renorm=1 if renormalize else 0,
-        output_softmax=False,
+        topk,
+        renormalize,
     )
-    return topk_weights.contiguous(), topk_ids.to(torch.int32).contiguous()
 
 
 def cutlass_fused_moe(

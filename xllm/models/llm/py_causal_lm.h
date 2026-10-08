@@ -119,6 +119,9 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
 
   void tp_all_reduce(torch::Tensor& tensor);
   torch::Tensor tp_all_gather(const torch::Tensor& tensor, int64_t dim);
+  torch::Tensor dp_all_gather(
+      const torch::Tensor& tensor,
+      const std::vector<int32_t>& execution_token_counts);
   void moe_tp_all_reduce(torch::Tensor& tensor);
   void moe_ep_all_reduce(torch::Tensor& tensor);
 
@@ -153,6 +156,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   int64_t kv_split_size_ = 1;
   int64_t kv_split_rank_ = 0;
   ProcessGroup* tp_group_ = nullptr;
+  ProcessGroup* dp_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
 #if defined(USE_NPU)

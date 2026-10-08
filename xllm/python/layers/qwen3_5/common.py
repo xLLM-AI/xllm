@@ -27,6 +27,9 @@ class Qwen3_5AttentionConfig(Protocol):
     n_kv_heads: int
     head_dim: int
     rms_norm_eps: float
+    partial_rotary_factor: float
+    rope_scaling_mrope_section: list[int]
+    rope_scaling_mrope_interleaved: bool
     attention_bias: bool
     attn_output_gate: bool
     tp_size: int
@@ -108,8 +111,19 @@ class PartialRotaryEmbedding(nn.Module):
         )
         positions = torch.arange(max_position, dtype=torch.float32, device=device)
         freqs = torch.outer(positions, inv_freq)
-        self.register_buffer("cos", freqs.cos().to(dtype), persistent=False)
-        self.register_buffer("sin", freqs.sin().to(dtype), persistent=False)
+        self.register_buffer(
+            "cos_sin_cache",
+            torch.cat((freqs.cos(), freqs.sin()), dim=-1).to(dtype),
+            persistent=False,
+        )
+
+    def build_mrope_cos_sin(self, positions: torch.Tensor) -> torch.Tensor:
+        """Gather the three-axis cosine/sine rows consumed by fused mRoPE."""
+        if positions.dim() == 1:
+            return self.cos_sin_cache.index_select(0, positions).repeat(1, 3)
+        positions_t = positions.permute(1, 0).contiguous()
+        gathered = self.cos_sin_cache.index_select(0, positions_t.view(-1))
+        return gathered.view(positions.size(1), -1)
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -122,7 +136,11 @@ class PartialRotaryEmbedding(nn.Module):
             dim=-1,
         )
         pos = positions.to(torch.long)
-        cos = torch.cat((self.cos[pos], self.cos[pos]), dim=-1).unsqueeze(1)
-        sin = torch.cat((self.sin[pos], self.sin[pos]), dim=-1).unsqueeze(1)
+        cached = self.cos_sin_cache[pos]
+        half_rotary_dim = self.rotary_dim // 2
+        cos_half = cached[..., :half_rotary_dim]
+        sin_half = cached[..., half_rotary_dim:]
+        cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(1)
+        sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(1)
         rotary = rotary * cos + self._rotate_half(rotary) * sin
         return torch.cat((rotary, passthrough), dim=-1)

@@ -636,13 +636,8 @@ std::tuple<torch::Tensor, torch::Tensor> moe_active_topk(
 #elif defined(USE_NPU)
   CHECK_EQ(params.scoring_func, "softmax")
       << "Only softmax is supported for NPU";
-  auto [topk_weights, topk_ids, row_ids] = npu::apply_moe_gating_topk_softmax(
-      params.input, params.finished, params.topk);
-  (void)row_ids;
-  if (params.normalize) {
-    topk_weights = topk_weights / topk_weights.sum(-1, true);
-  }
-  return std::make_tuple(topk_weights, topk_ids);
+  return npu::apply_moe_gating_topk_softmax(
+      params.input, params.finished, params.topk, params.normalize);
 #elif defined(USE_ILU)
   return ilu::moe_active_topk(params.input,
                               params.topk,

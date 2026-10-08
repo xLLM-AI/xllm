@@ -20,6 +20,59 @@ import torch
 import torch_npu
 
 
+def has_split_qkv_rmsnorm_mrope_specialization(
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> bool:
+    """Return whether the AOT fused QKV specialization is available."""
+    return torch.ops.xllm_ops.has_split_qkv_rmsnorm_mrope_specialization(
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+    )
+
+
+def build_split_qkv_rmsnorm_mrope_gather_pattern(
+    rope_dim: int,
+    mrope_section: list[int],
+    is_interleaved: bool,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build the fused kernel's persistent mRoPE byte-offset table."""
+    return torch.ops.xllm_ops.build_split_qkv_rmsnorm_mrope_gather_pattern(
+        rope_dim,
+        mrope_section,
+        is_interleaved,
+        device,
+    )
+
+
+def split_qkv_rmsnorm_mrope(
+    qkvg: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin: torch.Tensor,
+    gather_pattern: torch.Tensor,
+    eps: float,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split Q/G/K/V and apply fused Q/K RMSNorm plus mRoPE."""
+    return torch.ops.xllm_ops.split_qkv_rmsnorm_mrope(
+        qkvg,
+        q_weight,
+        k_weight,
+        cos_sin,
+        gather_pattern,
+        eps,
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+    )
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     *,
@@ -224,10 +277,13 @@ def npu_inplace_partial_rotary_mul(
 
 
 __all__ = [
+    "build_split_qkv_rmsnorm_mrope_gather_pattern",
     "fused_qk_norm_rope",
+    "has_split_qkv_rmsnorm_mrope_specialization",
     "inplace_partial_rotary_mul",
     "interleaved_rotary_embedding",
     "mrope",
     "npu_inplace_partial_rotary_mul",
+    "split_qkv_rmsnorm_mrope",
     "vision_rotary_mul",
 ]

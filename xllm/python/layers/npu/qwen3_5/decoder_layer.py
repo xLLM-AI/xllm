@@ -16,19 +16,18 @@
 
 from __future__ import annotations
 
+from xllm.python.layers.npu.layernorm import NpuGemmaRMSNorm
+from xllm.python.layers.npu.qwen3_5.attention import NpuQwen3_5Attention
 from xllm.python.layers.npu.qwen3_5.gated_delta_net import NpuQwen3_5GatedDeltaNet
 from xllm.python.layers.npu.qwen3_5.moe import NpuQwen3_5SparseMoEBlock
-from xllm.python.layers.qwen3_5.attention import Qwen3_5Attention
 from xllm.python.layers.qwen3_5.decoder_layer import Qwen3_5DecoderLayer
 
 
 class NpuQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
-    # NPU inherits the base ``Qwen3_5Attention``: row-parallel weights stay
-    # unfinalized for TileLang/CANN coexistence via the base's no-op
-    # ``_finish_loading``, unlike the CUDA backend which finalizes ``o_proj``.
-    attention_cls = Qwen3_5Attention
+    attention_cls = NpuQwen3_5Attention
     gated_delta_net_cls = NpuQwen3_5GatedDeltaNet
     sparse_moe_cls = NpuQwen3_5SparseMoEBlock
+    normalization_cls = NpuGemmaRMSNorm
 
     def _prepare_forward(self) -> None:
         if self.layer_id == 0:

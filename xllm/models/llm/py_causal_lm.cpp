@@ -28,6 +28,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/framework/parallel_state/parallel_state.h"
+#include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/util/pybind_helper.h"
 #include "core/util/utils.h"
@@ -37,7 +39,6 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/parallel_state/mega_moe_comm_resource.h"
-#include "core/framework/parallel_state/process_group.h"
 #include "core/kernels/npu/npu_ops_api.h"
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -132,9 +133,9 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   // (CP) at once, so both dimensions may be > 1 simultaneously.
   tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
-  ProcessGroup* dp_group = parallel_args.dp_local_process_group_;
-  dp_size_ = (dp_group != nullptr) ? dp_group->world_size() : 1;
-  dp_rank_ = (dp_group != nullptr) ? dp_group->rank() : 0;
+  dp_group_ = parallel_args.dp_local_process_group_;
+  dp_size_ = (dp_group_ != nullptr) ? dp_group_->world_size() : 1;
+  dp_rank_ = (dp_group_ != nullptr) ? dp_group_->rank() : 0;
   ep_size_ = parallel_args.ep_size();
 
   CHECK(parallel_args.moe_tp_group_ != nullptr);
@@ -544,6 +545,12 @@ torch::Tensor PyCausalLM::tp_all_gather(const torch::Tensor& tensor,
   auto output_shape = tensor.sizes().vec();
   output_shape[dim] *= world_size;
   return gathered.reshape(output_shape).contiguous();
+}
+
+torch::Tensor PyCausalLM::dp_all_gather(
+    const torch::Tensor& tensor,
+    const std::vector<int32_t>& execution_token_counts) {
+  return parallel_state::gather(tensor, dp_group_, execution_token_counts);
 }
 
 void PyCausalLM::moe_tp_all_reduce(torch::Tensor& tensor) {

@@ -27,6 +27,7 @@ from tests.python.qwen3_5_test_utils import (
 )
 from xllm.python import kernels
 from xllm.python.layers.layernorm import GemmaRMSNorm
+from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
 from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
 )
@@ -35,9 +36,58 @@ from xllm.python.model_loader import ScopedWeightLoader
 from xllm.python.models.qwen3_5 import Qwen3_5Model
 
 
+def _known_partial_rotary() -> tuple[PartialRotaryEmbedding, torch.Tensor]:
+    rotary = PartialRotaryEmbedding(
+        head_dim=256,
+        rotary_dim=64,
+        max_position=8,
+        rope_theta=10000.0,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    cache = torch.arange(8 * 64, dtype=torch.float32).view(8, 64)
+    rotary.cos_sin_cache.copy_(cache)
+    return rotary, cache
+
+
 def test_backend_decoder_factory_rejects_unknown_device() -> None:
     with pytest.raises(ValueError, match="no decoder implementation"):
         get_qwen3_5_decoder_layer_class("cpu")
+
+
+def test_build_mrope_cos_sin_repeats_text_positions_for_each_axis() -> None:
+    rotary, cache = _known_partial_rotary()
+    positions = torch.tensor([4, 1], dtype=torch.long)
+
+    actual = rotary.build_mrope_cos_sin(positions)
+
+    selected = cache.index_select(0, positions)
+    expected = torch.cat((selected, selected, selected), dim=-1)
+    assert actual.shape == (2, 192)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_build_mrope_cos_sin_groups_three_axis_positions_per_token() -> None:
+    rotary, cache = _known_partial_rotary()
+    positions = torch.tensor(
+        [
+            [0, 3],
+            [1, 4],
+            [2, 5],
+        ],
+        dtype=torch.long,
+    )
+
+    actual = rotary.build_mrope_cos_sin(positions)
+
+    expected = torch.stack(
+        (
+            torch.cat((cache[0], cache[1], cache[2])),
+            torch.cat((cache[3], cache[4], cache[5])),
+        )
+    )
+    assert actual.shape == (2, 192)
+    torch.testing.assert_close(actual, expected)
 
 
 def test_model_records_pd_layer_events_in_order() -> None:

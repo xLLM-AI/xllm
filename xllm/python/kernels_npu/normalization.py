@@ -21,6 +21,7 @@ import torch_npu
 
 rms_norm = torch.ops.xllm_ops.rms_norm
 fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
+fused_add_gemma_rms_norm = torch.ops.xllm_ops.fused_add_gemma_rms_norm
 _FUSED_ADD_RMS_NORM_DYNAMIC_QUANT = torch_npu.npu_add_rms_norm_dynamic_quant
 
 
@@ -145,6 +146,7 @@ __all__ = [
     "rms_norm",
     "gemma_rms_norm",
     "fused_add_rms_norm",
+    "fused_add_gemma_rms_norm",
     "fused_add_rms_norm_dynamic_quant",
     "rms_norm_dynamic_quant",
     "l2_norm",

@@ -212,6 +212,10 @@ def test_native_runtime_bridge_bypasses_python_process_groups(monkeypatch):
             calls.append(f"tp_gather:{dim}"),
             torch.cat((tensor, tensor), dim=dim),
         )[1],
+        dp_all_gather=lambda tensor, counts: (
+            calls.append(f"dp_gather:{counts}"),
+            torch.cat((tensor, tensor), dim=0),
+        )[1],
         moe_tp_all_reduce=lambda tensor: (
             calls.append("moe_tp_reduce"),
             tensor.add_(2),
@@ -230,11 +234,24 @@ def test_native_runtime_bridge_bypasses_python_process_groups(monkeypatch):
     value = torch.tensor([[1.0]])
     collectives.tp_all_reduce(value)
     gathered = collectives.tp_all_gather(value, 1, 2)
+    dp_gathered, dp_offset = collectives.gather_dp_execution_tokens(
+        value,
+        (1, 1),
+        rank=1,
+    )
     collectives.moe_tp_all_reduce(value)
     collectives.moe_ep_all_reduce(value)
 
-    assert calls == ["tp_reduce", "tp_gather:1", "moe_tp_reduce", "moe_ep_reduce"]
+    assert calls == [
+        "tp_reduce",
+        "tp_gather:1",
+        "dp_gather:[1, 1]",
+        "moe_tp_reduce",
+        "moe_ep_reduce",
+    ]
     assert gathered.tolist() == [[2.0, 2.0]]
+    assert dp_gathered.tolist() == [[2.0], [2.0]]
+    assert dp_offset == 1
     assert value.tolist() == [[8.0]]
     python_reduce.assert_not_called()
     python_gather.assert_not_called()

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/python.h>
 
 #include <memory>
@@ -132,6 +133,15 @@ void register_xllm_runtime_module(py::module_& m) {
     }
     return tensor;
   });
+  m.def("dp_all_gather",
+        [](torch::Tensor tensor,
+           const std::vector<int32_t>& execution_token_counts) {
+          PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+          if (py_causal_lm != nullptr) {
+            return py_causal_lm->dp_all_gather(tensor, execution_token_counts);
+          }
+          return tensor;
+        });
   m.def("moe_tp_all_reduce", [](torch::Tensor tensor) {
     if (active_py_causal_lm != nullptr) {
       active_py_causal_lm->moe_tp_all_reduce(tensor);

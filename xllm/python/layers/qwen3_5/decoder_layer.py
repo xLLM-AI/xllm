@@ -46,6 +46,7 @@ class Qwen3_5DecoderLayer(nn.Module):
     attention_cls: type[Qwen3_5Attention]
     gated_delta_net_cls: type[nn.Module]
     sparse_moe_cls: type[nn.Module]
+    normalization_cls: type[nn.Module] = GemmaRMSNorm
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -67,7 +68,7 @@ class Qwen3_5DecoderLayer(nn.Module):
         self.cfg = cfg
         self.layer_id = layer_id
         self.layer_type = cfg.layer_types[layer_id]
-        self.input_layernorm = GemmaRMSNorm(
+        self.input_layernorm = self.normalization_cls(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             dtype=dtype,
@@ -90,7 +91,7 @@ class Qwen3_5DecoderLayer(nn.Module):
             )
         else:
             raise ValueError(f"unsupported Qwen3.5 layer type: {self.layer_type}")
-        self.post_attention_layernorm = GemmaRMSNorm(
+        self.post_attention_layernorm = self.normalization_cls(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             dtype=dtype,

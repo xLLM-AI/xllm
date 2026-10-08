@@ -275,17 +275,10 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     }
   }
   dp_is_decode_ = params.parallel.dp_is_decode;
-  if (params.enable_graph) {
-    raw_dp_execution_token_counts_ =
-        params.parallel.raw_dp_global_token_nums.empty()
-            ? params.parallel.dp_global_token_nums
-            : params.parallel.raw_dp_global_token_nums;
+  if (params.enable_graph && raw_dp_execution_token_counts_.empty()) {
     // Prepared ordinary decode has one token per actual sequence, before
     // padding.
-    if (raw_dp_execution_token_counts_.empty()) {
-      raw_dp_execution_token_counts_.push_back(
-          params.meta.actual_num_sequences);
-    }
+    raw_dp_execution_token_counts_.push_back(params.meta.actual_num_sequences);
   }
 }
 

@@ -38,6 +38,8 @@ from xllm.python.model_loader import (
 
 
 class Qwen3_5Attention(nn.Module):
+    normalization_cls: type[nn.Module] = GemmaRMSNorm
+
     def __init__(
         self,
         cfg: Qwen3_5AttentionConfig,
@@ -71,13 +73,13 @@ class Qwen3_5Attention(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.q_norm = GemmaRMSNorm(
+        self.q_norm = self.normalization_cls(
             self.head_dim,
             cfg.rms_norm_eps,
             dtype=dtype,
             device=device,
         )
-        self.k_norm = GemmaRMSNorm(
+        self.k_norm = self.normalization_cls(
             self.head_dim,
             cfg.rms_norm_eps,
             dtype=dtype,
@@ -92,6 +94,7 @@ class Qwen3_5Attention(nn.Module):
             0,
             layer_id,
         )
+        self.use_fused_qkv = False
 
     def _finish_loading(self) -> None:
         """Run backend-specific post-load preparation, if any."""
@@ -109,6 +112,8 @@ class Qwen3_5Attention(nn.Module):
         positions: torch.Tensor,
         hidden: torch.Tensor,
     ) -> torch.Tensor:
+        if positions.dim() != 1:
+            raise ValueError("unfused Qwen3.5 attention requires one-dimensional positions")
         qkv = self.qkv_proj(hidden)
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(

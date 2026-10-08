@@ -246,10 +246,11 @@ torch::Tensor apply_npu_moe_token_unpermute(
     bool padded_mode,
     c10::OptionalIntArrayRef restore_shape);
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-apply_moe_gating_topk_softmax(const torch::Tensor& x,
-                              const std::optional<torch::Tensor>& finished,
-                              int k);
+std::tuple<torch::Tensor, torch::Tensor> apply_moe_gating_topk_softmax(
+    const torch::Tensor& x,
+    const std::optional<torch::Tensor>& finished,
+    int k,
+    bool normalize);
 
 std::vector<torch::Tensor> apply_npu_grouped_matmul(
     const torch::TensorList x,

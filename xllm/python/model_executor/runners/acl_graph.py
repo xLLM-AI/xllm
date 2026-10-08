@@ -219,7 +219,8 @@ class AclGraphRunner(BaseRunner):
             entry.static_metadata,
             self.layer_caches,
             execution_state=entry.execution_state,
-            layer_shared_cache=entry.layer_shared_cache,
+            # Rebuild warmup-derived tensors inside capture.
+            layer_shared_cache=entry.layer_shared_cache.copy(),
         )
         with forward_context(context), torch.npu.stream(stream):
             for _ in range(_CAPTURE_WARMUP_STEPS):
@@ -227,7 +228,7 @@ class AclGraphRunner(BaseRunner):
         torch.npu.synchronize()
         entry.graph = torch.npu.NPUGraph()
         capture_context = AclGraphCaptureContext(stream, [])
-        context = replace(context, acl_graph=capture_context)
+        context = replace(context, acl_graph=capture_context, layer_shared_cache=entry.layer_shared_cache)
         with forward_context(context), torch.npu.graph(entry.graph, pool=_get_graph_pool(), stream=stream):
             entry.static_output = self._forward_static(entry)
         entry.graph_tasks = capture_context.tasks
