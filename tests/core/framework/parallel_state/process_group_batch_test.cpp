@@ -50,7 +50,10 @@ class RecordingWork final : public c10d::Work {
 class RecordingBackend final : public c10d::FakeProcessGroup {
  public:
   RecordingBackend(int32_t rank, int32_t world_size)
-      : c10d::FakeProcessGroup(rank, world_size) {}
+      : c10d::FakeProcessGroup(
+            rank,
+            world_size,
+            c10::make_intrusive<c10d::FakeProcessGroup::Options>()) {}
 
   c10::intrusive_ptr<c10d::Work> send(std::vector<torch::Tensor>& tensors,
                                       int destination_rank,
