@@ -1,6 +1,22 @@
 include(cc_library)
 
 cc_library(
+  NAME
+    npu_startup
+  HDRS
+    startup.h
+  SRCS
+    startup.cpp
+  DEPS
+    :config
+    :platform
+    absl::strings
+    ascendcl
+    glog::glog
+    pybind11::embed
+)
+
+cc_library(
   NAME 
     platform_npu
   HDRS

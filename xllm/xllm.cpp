@@ -20,16 +20,15 @@ limitations under the License.
 namespace py = pybind11;
 #include <torch/torch.h>
 
-#if defined(USE_NPU)
-#include <acl/acl.h>
-#endif
-
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <random>
+#include <string>
+#include <vector>
 
 #include "api_service/api_service.h"
 #include "core/common/global_flags.h"
@@ -62,6 +61,9 @@ namespace py = pybind11;
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/platform/device_name_utils.h"
+#if defined(USE_NPU)
+#include "core/platform/npu/startup.h"
+#endif
 #include "core/util/net.h"
 #include "core/util/utils.h"
 #include "core/util/verbose_trace_logger.h"
@@ -256,95 +258,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
 }
 
 }  // namespace
-
-#if defined(USE_NPU)
-namespace {
-// Initialize Python interpreter and torch_npu runtime early, before any NPU
-// tensor allocation. torch_npu (post4+) calls PyGILState_Ensure inside
-// empty_with_format(), so Python must be alive before the first NPU op.
-// All NPU processes go through this path for consistency — the build system
-// links against the pip-installed torch_npu .so directly.
-// The caller owns the interpreter and holds the GIL during initialization.
-void init_npu_python_runtime() {
-  // Select the same logical device this process's worker will run on. Multi-
-  // process single-card serving lets every process see all TP cards and picks
-  // its own via node_rank (see Master ctor). Using .front() here would pin an
-  // extra context on logical device 0 for every node_rank != 0 process, piling
-  // small allocations onto die0. Mirror master.cpp's get_device_idx instead.
-  const auto& distributed_config = DistributedConfig::get_instance();
-  const int32_t visible_device_count =
-      DeviceNameUtils::parse_devices("auto").size();
-  const int32_t device_index =
-      DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
-                                      distributed_config.nnodes(),
-                                      visible_device_count);
-
-  // Register fla_npu's embedded AscendC opapi (libcust_opapi) + OPP vendor
-  // dir before aclInit. The KDA forward op (aclnnChunkKdaFwd) and its kernels
-  // live in fla_npu's embedded OPP; without this registration the opapi cannot
-  // locate the kernel binary and aclnnChunkKdaFwdGetWorkspaceSize returns
-  // ACLNN_ERR_INNER_NULLPTR (561103), breaking GLM-5.3-Flash's KDA layers.
-  // Guarded so non-KDA builds without fla_npu stay unaffected.
-  {
-    py::gil_scoped_acquire gil;
-    py::exec(
-        "try:\n"
-        "    import fla_npu\n"
-        "    fla_npu.load_ascendc_opapi_libraries()\n"
-        "except (ImportError, RuntimeError):\n"
-        "    pass\n");
-  }
-
-  const aclError acl_ret = aclInit(nullptr);
-  CHECK(acl_ret == ACL_SUCCESS || acl_ret == ACL_ERROR_INTERNAL_ERROR)
-      << "aclInit failed with error " << acl_ret;
-
-  // Bind the ACL context before torch_npu creates its default runtime state.
-  // Without this, every rank can briefly allocate on logical device 0 before
-  // the worker selects its own card, leaving stray per-rank processes there.
-  const aclError set_device_ret = aclrtSetDevice(device_index);
-  CHECK_EQ(set_device_ret, ACL_SUCCESS)
-      << "aclrtSetDevice failed for device " << device_index << " with error "
-      << set_device_ret;
-
-  // We own ACL initialization, so torch_npu will skip aclFinalize. Register
-  // before importing torch_npu: Python runs exit hooks in reverse order,
-  // releasing its groups, streams and devices before we finalize CANN.
-  py::module_::import("atexit").attr("register")(py::cpp_function(
-      []() {
-        const aclError status = aclFinalize();
-        if (status != ACL_SUCCESS) {
-          LOG(ERROR) << "aclFinalize failed with error " << status;
-        }
-      },
-      py::call_guard<py::gil_scoped_release>()));
-
-  {
-    py::gil_scoped_acquire gil;
-    py::exec(
-        "import os, sys\n"
-        "os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'\n"
-        "import torch\n"
-        "orig = torch._C._get_accelerator\n"
-        "try:\n"
-        "    torch._C._get_accelerator = lambda: torch.device('cpu')\n"
-        "    import torch_npu\n"
-        "finally:\n"
-        "    torch._C._get_accelerator = orig\n"
-        "import torch_npu.npu as _npu_mod\n"
-        "try:\n"
-        "    torch_npu._C._npu_init()\n"
-        "except RuntimeError as e:\n"
-        "    if 'already initialized' not in str(e).lower():\n"
-        "        raise\n"
-        "_npu_mod._initialized = True\n"
-        "_npu_mod._original_pid = os.getpid()\n"
-        "torch_npu._C._npu_setDevice(" +
-        std::to_string(device_index) + ")\n");
-  }
-}
-}  // namespace
-#endif
 
 void shutdown_handler(int signal) {
   // TODO: gracefully shutdown the server
@@ -649,7 +562,9 @@ int main(int argc, char** argv) {
   // Reacquire the GIL before finalization so Python atexit hooks run before
   // extension-module static destructors (including Triton's pybind objects).
   py::scoped_interpreter interpreter(/*init_signal_handlers=*/false);
-  init_npu_python_runtime();
+  if (!initialize_npu_startup()) {
+    return 1;
+  }
   py::gil_scoped_release release;
 #endif
 

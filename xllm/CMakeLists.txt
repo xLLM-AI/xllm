@@ -89,6 +89,7 @@ else()
     SRCS
       xllm.cpp
     DEPS
+      $<$<BOOL:${USE_NPU}>:npu_startup>
       :config
       :xllm_server
       :master
