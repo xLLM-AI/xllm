@@ -37,6 +37,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #if defined(USE_NPU)
+#include "core/framework/config/eplb_config.h"
 #include "models/model_registry.h"
 #endif
 #include "distributed_runtime/xservice_client.h"
@@ -157,6 +158,9 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   options_.enable_mla(util::should_enable_mla(
       std::filesystem::path(options_.model_path()), options_.backend()));
 #if defined(USE_NPU)
+  CHECK(!EPLBConfig::get_instance().enable_eplb())
+      << "EPLB does not support VLM engines because VLMEngine has no EPLB "
+         "control plane.";
   resolve_npu_kernel_backend(&options_);
 #endif
   configure_disaggregated_pd_options(&options_);

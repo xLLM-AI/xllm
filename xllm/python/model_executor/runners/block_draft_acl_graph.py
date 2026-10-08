@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from scripts.logger import logger
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
-from xllm.python.model_executor.forward_context import AclGraphExecutionState
+from xllm.python.model_executor.forward_context import AclGraphExecutionState, EplbRuntimeState
 from xllm.python.model_executor.runners.acl_graph import (
     AclGraphEntry,
     StaticGraphAttentionMetadata,
@@ -165,6 +165,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        *,
+        eplb: EplbRuntimeState | None = None,
     ) -> _BlockGraphKey:
         self._validate_inputs(input_ids, positions, metadata)
         sequence_count = metadata.q_seq_lens.numel()
@@ -172,7 +174,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         graph_key = self._graph_key(input_ids, metadata, sequence_count, query_width)
         if graph_key in self._graphs:
             return graph_key
-        self._prepare_graph_entry(input_ids, positions, metadata, graph_key=graph_key)
+        self._prepare_graph_entry(input_ids, positions, metadata, graph_key=graph_key, eplb=eplb)
         return graph_key
 
     def _graph_key(
@@ -236,6 +238,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         graph_key: _BlockGraphKey,
+        eplb: EplbRuntimeState | None = None,
     ) -> AclGraphEntry:
         if input_embedding is not None or mtp_topk_indices is not None:
             raise ValueError("DSpark ACL graph does not accept embedding or MTP graph inputs")
@@ -258,6 +261,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         if self._update_done_recorded:
             assert self._update_done_event is not None
             torch.npu.current_stream().wait_event(self._update_done_event)
+        self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
         self._fill_entry(entry, input_ids, positions, metadata)
         self._prepare_attention(entry, entry.static_metadata)
         if first_capture:

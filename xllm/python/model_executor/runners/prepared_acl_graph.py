@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from scripts.logger import logger
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
-from xllm.python.model_executor.forward_context import AclGraphExecutionState, LayerSynchronizer
+from xllm.python.model_executor.forward_context import AclGraphExecutionState, EplbRuntimeState, LayerSynchronizer
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
 from xllm.python.model_executor.runners.base import ModelExecutionOutput
 
@@ -139,6 +139,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        *,
+        eplb: EplbRuntimeState | None = None,
     ) -> None:
         self._validate_prepared_input(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
         binding = self._prepared_binding(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
@@ -183,6 +185,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         )
         if mega_moe_token_mask is not None:
             self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
+        self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=True)
         self._prepare_attention(entry, entry.static_metadata)
         self._capture(entry, torch.npu.current_stream(self.device))
         self._prepared_graphs[binding] = entry
@@ -195,6 +198,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        *,
+        eplb: EplbRuntimeState | None = None,
     ) -> ModelExecutionOutput:
         if layer_synchronizer is not None:
             raise ValueError("prepared ACL replay does not support layer synchronization")
@@ -211,6 +216,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         if entry.static_metadata.mega_moe_token_mask is not None:
             # Counts precede native Slot padding; execution counts are physical.
             self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
+        self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=False)
         self._prepare_attention(entry, metadata, replay=True)
         stream = torch.npu.current_stream(self.device)
         entry.graph.replay()

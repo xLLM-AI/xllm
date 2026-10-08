@@ -81,6 +81,15 @@ class AclGraphCaptureContext:
     tasks: list[AclGraphTask]
 
 
+@dataclass(slots=True)
+class EplbRuntimeState:
+    """Per-forward EPLB tensors owned by the C++ worker runtime."""
+
+    expert_load_data: torch.Tensor
+    decode_token_mask: torch.Tensor | None
+    is_graph_warmup: bool
+
+
 @dataclass(frozen=True, slots=True)
 class ForwardContext:
     attention_backend: AttentionBackend
@@ -93,6 +102,7 @@ class ForwardContext:
     # Context-Parallel sharding plan for this forward, or None when CP is off
     # (cp_size <= 1) or the step is decode (CP is prefill-only).
     cp_context: CpContext | None = None
+    eplb: EplbRuntimeState | None = None
     # Values derived from per-forward metadata that are shared by multiple
     # layers. A new ForwardContext gets a new cache, so entries never leak
     # across requests or graph executions.

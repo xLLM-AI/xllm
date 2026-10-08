@@ -28,6 +28,7 @@ from xllm.python.attention.expanded_decode_metadata import ExpandedDecodeMetadat
 from xllm.python.model_executor.forward_context import (
     AclGraphCaptureContext,
     AclGraphTask,
+    EplbRuntimeState,
     ForwardContext,
     forward_context,
 )
@@ -104,9 +105,13 @@ class AclGraphEntry:
         "kv_seq_lens_delta",
         "graph_tasks",
         "execution_state",
+        "eplb",
         "layer_shared_cache",
         "replay_logged",
     )
+
+    def __init__(self) -> None:
+        self.eplb: EplbRuntimeState | None = None
 
 
 class AclGraphRunner(BaseRunner):
@@ -139,6 +144,86 @@ class AclGraphRunner(BaseRunner):
                 mask[start : start + count].fill_(1)
         entry.mega_moe_token_counts = token_counts
 
+    def _prepare_graph_eplb_state(
+        self,
+        entry: AclGraphEntry,
+        eplb: EplbRuntimeState | None,
+        metadata: AttentionMetadata,
+        *,
+        first_capture: bool,
+    ) -> None:
+        if first_capture:
+            entry.eplb = self._allocate_graph_eplb_state(eplb, entry.batch_size)
+        entry_eplb = entry.eplb
+        if (entry_eplb is None) != (eplb is None):
+            raise RuntimeError("EPLB state changed after ACL graph capture")
+        if eplb is not None and entry_eplb is not None:
+            if entry_eplb.expert_load_data.data_ptr() != eplb.expert_load_data.data_ptr():
+                raise RuntimeError("EPLB expert-load tensor changed after ACL graph capture")
+            if (entry_eplb.decode_token_mask is None) != (eplb.decode_token_mask is None):
+                raise RuntimeError("EPLB decode-mask availability changed after ACL graph capture")
+            entry_eplb.is_graph_warmup = eplb.is_graph_warmup
+        self._fill_graph_eplb_decode_mask(entry, eplb, metadata)
+
+    def _allocate_graph_eplb_state(
+        self,
+        eplb: EplbRuntimeState | None,
+        padded_batch_size: int,
+    ) -> EplbRuntimeState | None:
+        if eplb is None:
+            return None
+        decode_token_mask = None
+        if eplb.decode_token_mask is not None:
+            with torch.inference_mode(False):
+                decode_token_mask = torch.zeros(
+                    padded_batch_size * self.dp_size,
+                    dtype=eplb.decode_token_mask.dtype,
+                    device=eplb.decode_token_mask.device,
+                )
+        return EplbRuntimeState(
+            expert_load_data=eplb.expert_load_data,
+            decode_token_mask=decode_token_mask,
+            is_graph_warmup=eplb.is_graph_warmup,
+        )
+
+    def _fill_graph_eplb_decode_mask(
+        self,
+        entry: AclGraphEntry,
+        eplb: EplbRuntimeState | None,
+        metadata: AttentionMetadata,
+    ) -> None:
+        entry_eplb = entry.eplb
+        if entry_eplb is None or entry_eplb.decode_token_mask is None:
+            return
+        if eplb is None or eplb.decode_token_mask is None:
+            raise RuntimeError("EPLB decode-mask state is missing for a captured graph")
+
+        destination = entry_eplb.decode_token_mask
+        source = eplb.decode_token_mask.reshape(-1)
+        destination.zero_()
+        if self.dp_size == 1:
+            if source.numel() > entry.batch_size:
+                raise RuntimeError("EPLB decode mask exceeds graph bucket capacity")
+            destination[: source.numel()].copy_(source)
+            return
+
+        raw_counts = tuple(metadata.raw_dp_execution_token_counts)
+        if len(raw_counts) != self.dp_size:
+            raise RuntimeError(f"DP decode step requires {self.dp_size} token counts, got {len(raw_counts)}")
+        if any(count < 0 or count > entry.batch_size for count in raw_counts):
+            raise RuntimeError(
+                f"DP token counts must fit the ACL graph batch bucket: counts={raw_counts}, bucket={entry.batch_size}"
+            )
+        if source.numel() != sum(raw_counts):
+            raise RuntimeError("EPLB decode mask does not match DP token counts")
+        source_begin = 0
+        for rank, count in enumerate(raw_counts):
+            destination_begin = rank * entry.batch_size
+            destination[destination_begin : destination_begin + count].copy_(
+                source[source_begin : source_begin + count]
+            )
+            source_begin += count
+
     def _initialize_task_updates(self) -> None:
         self._initialize_replay_state()
         if self._update_stream is None:
@@ -155,6 +240,7 @@ class AclGraphRunner(BaseRunner):
             metadata,
             self.layer_caches,
             execution_state=entry.execution_state,
+            eplb=entry.eplb,
         )
         with forward_context(context):
             if replay:
@@ -219,6 +305,7 @@ class AclGraphRunner(BaseRunner):
             entry.static_metadata,
             self.layer_caches,
             execution_state=entry.execution_state,
+            eplb=entry.eplb,
             # Rebuild warmup-derived tensors inside capture.
             layer_shared_cache=entry.layer_shared_cache.copy(),
         )

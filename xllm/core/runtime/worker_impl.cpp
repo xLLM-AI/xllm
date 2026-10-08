@@ -1448,11 +1448,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     if (owns_npu_parallel_input_prepare()) {
       prepare_dp_ep_padding(processed_input.input_params);
     }
-    if (uses_npu_dp_ep_padding()) {
-      if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-        processed_input.input_params.expert.expert_load_data =
-            expert_load_data_;
-      }
+    if (::xllm::EPLBConfig::get_instance().enable_eplb() &&
+        expert_load_data_.defined()) {
+      // Python/TORCH models do not require the NPU mapping metadata used by
+      // prepare_dp_ep_padding(), but they still need this worker-local EPLB
+      // buffer to record routed expert loads.
+      processed_input.input_params.expert.expert_load_data = expert_load_data_;
     }
 #endif
 

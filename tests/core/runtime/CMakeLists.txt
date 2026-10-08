@@ -184,6 +184,12 @@ if(USE_NPU)
     "-Wl,--whole-archive"
     "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
     "-Wl,--no-whole-archive")
+
+  # This case captures and replays three ACL graphs on NPU 0. Running it
+  # alongside hundreds of torch_npu test processes can stall graph cleanup.
+  set_tests_properties(
+    AclGraphTaskUpdateTest.StaticMtpPrepareReplaysFiaSpecVerifyWidths
+    PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 cc_test(

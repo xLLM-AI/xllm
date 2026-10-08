@@ -23,6 +23,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
@@ -36,7 +37,6 @@ limitations under the License.
 #include "models/py_model_helper.h"
 
 #if defined(USE_NPU)
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/parallel_state/mega_moe_comm_resource.h"
 #include "core/kernels/npu/npu_ops_api.h"
@@ -46,6 +46,7 @@ limitations under the License.
 namespace py = pybind11;
 
 namespace xllm {
+
 namespace detail {
 
 void share_python_model_weights(py::object& draft_model,
@@ -147,10 +148,21 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   moe_tp_size_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->world_size() : 1;
   moe_tp_rank_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->rank() : 0;
   ep_rank_ = (moe_ep_group_ != nullptr) ? moe_ep_group_->rank() : 0;
+  const auto& eplb_config = EPLBConfig::get_instance();
+  if (eplb_config.enable_eplb()) {
+    CHECK(parallel_args.eplb_group_ != nullptr)
+        << "Python EPLB requires a dedicated EPLB process group.";
+    eplb_group_ = parallel_args.eplb_group_;
+    if (moe_ep_group_ != nullptr) {
+      CHECK_EQ(eplb_group_->rank(), moe_ep_group_->rank())
+          << "EPLB and MoE EP groups must use the same rank ordering.";
+      CHECK_EQ(eplb_group_->world_size(), moe_ep_group_->world_size())
+          << "EPLB and MoE EP groups must use the same world size.";
+    }
+  }
 
 #if defined(USE_NPU)
   const auto& kernel_config = KernelConfig::get_instance();
-  const auto& eplb_config = EPLBConfig::get_instance();
   const std::string& model_type = model_args_.model_type();
   const bool is_qwen3_5_mega_moe_model =
       model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text";
@@ -339,6 +351,10 @@ py::dict PyCausalLM::build_config_dict(
   visit_properties(parallel_args, visitor);
   d["dtype"] = dtype_to_string(options_);
   d["device"] = c10::str(device_);
+  const auto& eplb_config = EPLBConfig::get_instance();
+  d["enable_eplb"] = eplb_config.enable_eplb();
+  d["redundant_experts_num"] = eplb_config.redundant_experts_num();
+  d["eplb_use_decode_only_load"] = eplb_config.eplb_use_decode_only_load();
   // Checkpoint directory: python models use it to discover side-car files
   // shipped with the weights (e.g. optional/quarot.safetensors).
   d["model_path"] = ModelConfig::get_instance().model();
@@ -513,6 +529,53 @@ bool PyCausalLM::has_dspark_confidence_head() const {
   return py_model_.attr("has_dspark_confidence_head")().cast<bool>();
 }
 
+void PyCausalLM::prepare_expert_weight(int32_t layer_id,
+                                       const std::vector<int32_t>& expert_ids) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  if (!py::hasattr(py_model_, "prepare_expert_weight")) {
+    last_prepare_expert_weight_ok_[layer_id] = true;
+    return;
+  }
+  const bool prepare_ok =
+      py_model_.attr("prepare_expert_weight")(layer_id, expert_ids)
+          .cast<bool>();
+  last_prepare_expert_weight_ok_[layer_id] = prepare_ok;
+}
+
+void PyCausalLM::start_expert_weight_transfer(int32_t layer_id) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  if (!py::hasattr(py_model_, "start_expert_weight_transfer")) {
+    return;
+  }
+  set_active_instance(this);
+  py_model_.attr("start_expert_weight_transfer")(layer_id);
+}
+
+void PyCausalLM::update_expert_weight(int32_t layer_id) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  if (!py::hasattr(py_model_, "update_expert_weight")) {
+    return;
+  }
+  set_active_instance(this);
+  py_model_.attr("update_expert_weight")(layer_id);
+}
+
+bool PyCausalLM::last_prepare_expert_weight_ok(int32_t layer_id) const {
+  const auto result = last_prepare_expert_weight_ok_.find(layer_id);
+  return result == last_prepare_expert_weight_ok_.end() || result->second;
+}
+
+thread_local PyCausalLM* PyCausalLM::active_instance_ = nullptr;
+
+PyCausalLM* PyCausalLM::active_instance() { return active_instance_; }
+
+void PyCausalLM::set_active_instance(PyCausalLM* py_causal_lm) {
+  active_instance_ = py_causal_lm;
+}
+
 void PyCausalLM::tp_all_reduce(torch::Tensor& tensor) {
   if (tp_group_ != nullptr) {
     tp_group_->allreduce(tensor);
@@ -563,6 +626,47 @@ void PyCausalLM::moe_ep_all_reduce(torch::Tensor& tensor) {
   if (moe_ep_group_ != nullptr) {
     moe_ep_group_->allreduce(tensor);
   }
+}
+
+void PyCausalLM::eplb_batch_isend_irecv(const py::list& operation_types,
+                                        const py::list& tensors,
+                                        const py::list& remote_ranks) {
+  CHECK_EQ(operation_types.size(), tensors.size())
+      << "EPLB P2P operation types and tensors must align.";
+  CHECK_EQ(operation_types.size(), remote_ranks.size())
+      << "EPLB P2P operation types and remote ranks must align.";
+  if (tensors.size() == 0) {
+    return;
+  }
+  CHECK(eplb_group_ != nullptr)
+      << "EPLB P2P transfer requires a dedicated EPLB process group.";
+#if defined(USE_NPU)
+  CHECK(eplb_p2p_work_ == nullptr) << "EPLB P2P transfer is already in flight.";
+  std::vector<std::string> native_operation_types =
+      operation_types.cast<std::vector<std::string>>();
+  std::vector<torch::Tensor> native_tensors =
+      tensors.cast<std::vector<torch::Tensor>>();
+  std::vector<int64_t> native_remote_ranks =
+      remote_ranks.cast<std::vector<int64_t>>();
+  eplb_p2p_work_ = eplb_group_->batch_isend_irecv(
+      native_operation_types, native_tensors, native_remote_ranks);
+  CHECK(eplb_p2p_work_ != nullptr)
+      << "EPLB P2P transfer returned no work handle.";
+#else
+  LOG(FATAL) << "EPLB P2P transfer is supported only on NPU.";
+#endif
+}
+
+void PyCausalLM::eplb_wait_batch_isend_irecv() {
+#if defined(USE_NPU)
+  if (eplb_p2p_work_ == nullptr) {
+    return;
+  }
+  CHECK(eplb_p2p_work_->wait()) << "EPLB P2P transfer failed.";
+  eplb_p2p_work_.reset();
+#else
+  LOG(FATAL) << "EPLB P2P transfer is supported only on NPU.";
+#endif
 }
 
 bool PyCausalLM::share_weights_from(CausalLM& source) {

@@ -172,12 +172,14 @@ def test_dspark_warmup_captures_once_per_page_capacity_bucket() -> None:
     input_ids = torch.arange(2, dtype=torch.int32)
     positions = input_ids.clone()
 
-    def prepare_entry(*args: object, graph_key: tuple[object, ...]) -> None:
+    def prepare_entry(*args: object, graph_key: tuple[object, ...], eplb: object = None) -> None:
         runner._graphs[graph_key] = object()
 
     with patch.object(runner, "_prepare_graph_entry", side_effect=prepare_entry) as prepare:
         keys = [
-            runner.warmup(input_ids, positions, _block_draft_metadata(torch.zeros(1, width, dtype=torch.int32)))
+            runner.warmup(
+                input_ids, positions, _block_draft_metadata(torch.zeros(1, width, dtype=torch.int32)), eplb=None
+            )
             for width in (3, 4, 5, 3)
         ]
     assert prepare.call_count == 2

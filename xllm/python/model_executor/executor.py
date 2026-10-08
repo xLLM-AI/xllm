@@ -30,6 +30,7 @@ from xllm.python.layers.attention import Attention
 from xllm.python.model_executor.forward_context import (
     AclGraphCaptureContext,
     AclGraphExecutionState,
+    EplbRuntimeState,
     ForwardContext,
     LayerSynchronizer,
     forward_context,
@@ -721,10 +722,20 @@ class ModelExecutor:
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        expert_load_data: torch.Tensor | None = None,
+        eplb_decode_token_mask: torch.Tensor | None = None,
+        is_graph_warmup: bool = False,
     ) -> None:
         if self.prepared_graph_runner is None:
             raise RuntimeError("prepared ACL graph runner is not enabled")
-        self.prepared_graph_runner.warmup_prepared(input_ids, positions, metadata, input_embedding, mtp_topk_indices)
+        eplb = (
+            None
+            if expert_load_data is None
+            else EplbRuntimeState(expert_load_data, eplb_decode_token_mask, is_graph_warmup)
+        )
+        self.prepared_graph_runner.warmup_prepared(
+            input_ids, positions, metadata, input_embedding, mtp_topk_indices, eplb=eplb
+        )
 
     def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:
         layer_caches = normalize_layer_caches(kv_caches)
@@ -753,12 +764,18 @@ class ModelExecutor:
         layer_synchronizer: LayerSynchronizer | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
         enable_graph: bool = False,
+        expert_load_data: torch.Tensor | None = None,
+        eplb_decode_token_mask: torch.Tensor | None = None,
+        is_graph_warmup: bool = False,
     ) -> ModelExecutionOutput:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
         if self.layerwise_split_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
             raise NotImplementedError("Python GLM5.2 layerwise split is decode-only")
 
+        eplb = None
+        if expert_load_data is not None:
+            eplb = EplbRuntimeState(expert_load_data, eplb_decode_token_mask, is_graph_warmup)
         # Transfer completion events belong to this step. Graph replay cannot
         # record them through Python, and compilation must not retain a prior
         # step's synchronizer. Decode steps without a transfer can use graphs.
@@ -770,13 +787,15 @@ class ModelExecutor:
                 if self.prepared_graph_runner is None:
                     raise RuntimeError("prepared ACL graph runner is not enabled")
                 return self.prepared_graph_runner.execute(
-                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices
+                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices, eplb=eplb
                 )
             if self._prepared_mtp:
                 return self.eager_runner.execute(
-                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices
+                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices, eplb=eplb
                 )
-            return self.eager_runner.execute(input_ids, positions, metadata, input_embedding, layer_synchronizer)
+            return self.eager_runner.execute(
+                input_ids, positions, metadata, input_embedding, layer_synchronizer, eplb=eplb
+            )
         graph_kwargs = {}
         if mtp_topk_indices is not None:
             from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
@@ -785,14 +804,25 @@ class ModelExecutor:
                 graph_kwargs["mtp_topk_indices"] = mtp_topk_indices
             else:
                 graph_runner = None
-        if graph_runner is not None and graph_runner.can_execute(input_ids, metadata, input_embedding, **graph_kwargs):
+        if (
+            graph_runner is not None
+            and (eplb is None or current_platform.is_npu())
+            and graph_runner.can_execute(input_ids, metadata, input_embedding, **graph_kwargs)
+        ):
             from xllm.python.model_executor.runners.decode_cuda_graph import DecodeCudaGraphRunner
 
             graph_key = None
             # CUDA can_execute only admits previously captured buckets. ACL
             # captures lazily with scheduler metadata and MTP inputs.
             if not isinstance(graph_runner, DecodeCudaGraphRunner):
-                graph_key = graph_runner.warmup(input_ids, positions, metadata, input_embedding, **graph_kwargs)
+                graph_key = graph_runner.warmup(
+                    input_ids,
+                    positions,
+                    metadata,
+                    input_embedding,
+                    **graph_kwargs,
+                    eplb=eplb,
+                )
                 if graph_key is not None:
                     graph_kwargs["graph_key"] = graph_key
             return graph_runner.execute(
@@ -801,6 +831,7 @@ class ModelExecutor:
                 metadata,
                 input_embedding,
                 **graph_kwargs,
+                eplb=eplb,
             )
         if mtp_topk_indices is None and self.inductor_runner is not None and layer_synchronizer is None:
             return self.inductor_runner.execute(
@@ -809,6 +840,7 @@ class ModelExecutor:
                 metadata,
                 input_embedding,
                 layer_synchronizer,
+                eplb=eplb,
             )
         return self.eager_runner.execute(
             input_ids,
@@ -817,4 +849,5 @@ class ModelExecutor:
             input_embedding,
             layer_synchronizer,
             mtp_topk_indices,
+            eplb=eplb,
         )

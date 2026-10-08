@@ -22,7 +22,9 @@ import torch.nn as nn
 from xllm.python import kernels
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 from xllm.python.model_executor.forward_context import (
+    EplbRuntimeState,
     ForwardContext,
+    LayerSynchronizer,
     forward_context,
 )
 from xllm.python.model_executor.runners.base import BaseRunner
@@ -185,6 +187,8 @@ class DecodeCudaGraphRunner(BaseRunner):
         positions: torch.Tensor,
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
+        layer_synchronizer: LayerSynchronizer | None = None,
+        eplb: EplbRuntimeState | None = None,
     ) -> torch.Tensor:
         batch_size = input_ids.shape[0]
         graph_key = self._graph_key(input_ids, metadata)

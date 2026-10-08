@@ -49,8 +49,6 @@ namespace py = pybind11;
 namespace xllm {
 namespace {
 
-thread_local PyCausalLM* active_py_causal_lm = nullptr;
-
 py::object mtp_topk_indices(const ModelInputParams& params) {
   if (params.mtp_topk_state != nullptr) {
     const auto tensor = params.mtp_topk_state->as_tensor();
@@ -122,14 +120,16 @@ void register_xllm_runtime_module(py::module_& m) {
   register_attention_metadata_views(m);
 
   m.def("tp_all_reduce", [](torch::Tensor tensor) {
-    if (active_py_causal_lm != nullptr) {
-      active_py_causal_lm->tp_all_reduce(tensor);
+    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    if (py_causal_lm != nullptr) {
+      py_causal_lm->tp_all_reduce(tensor);
     }
     return tensor;
   });
   m.def("tp_all_gather", [](torch::Tensor tensor, int64_t dim) {
-    if (active_py_causal_lm != nullptr) {
-      return active_py_causal_lm->tp_all_gather(tensor, dim);
+    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    if (py_causal_lm != nullptr) {
+      return py_causal_lm->tp_all_gather(tensor, dim);
     }
     return tensor;
   });
@@ -143,16 +143,32 @@ void register_xllm_runtime_module(py::module_& m) {
           return tensor;
         });
   m.def("moe_tp_all_reduce", [](torch::Tensor tensor) {
-    if (active_py_causal_lm != nullptr) {
-      active_py_causal_lm->moe_tp_all_reduce(tensor);
+    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    if (py_causal_lm != nullptr) {
+      py_causal_lm->moe_tp_all_reduce(tensor);
     }
     return tensor;
   });
   m.def("moe_ep_all_reduce", [](torch::Tensor tensor) {
-    if (active_py_causal_lm != nullptr) {
-      active_py_causal_lm->moe_ep_all_reduce(tensor);
+    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    if (py_causal_lm != nullptr) {
+      py_causal_lm->moe_ep_all_reduce(tensor);
     }
     return tensor;
+  });
+  m.def("eplb_batch_isend_irecv",
+        [](py::list operation_types, py::list tensors, py::list remote_ranks) {
+          PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+          CHECK(py_causal_lm != nullptr)
+              << "EPLB P2P transfer requires an active PyCausalLM.";
+          py_causal_lm->eplb_batch_isend_irecv(
+              operation_types, tensors, remote_ranks);
+        });
+  m.def("eplb_wait_batch_isend_irecv", []() {
+    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    CHECK(py_causal_lm != nullptr)
+        << "EPLB P2P transfer requires an active PyCausalLM.";
+    py_causal_lm->eplb_wait_batch_isend_irecv();
   });
 
 #if defined(USE_NPU)
@@ -227,8 +243,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
 }
 
 PyExecutorImpl::~PyExecutorImpl() {
-  if (active_py_causal_lm == py_causal_lm_) {
-    active_py_causal_lm = nullptr;
+  if (PyCausalLM::active_instance() == py_causal_lm_) {
+    PyCausalLM::set_active_instance(nullptr);
   }
   clear_python_object(py_executor_);
 }
@@ -254,10 +270,10 @@ py::object PyExecutorImpl::create_mtp_graph_variant_registry(
     int32_t max_variants) {
   py::gil_scoped_acquire gil;
   py::cpp_function draft_activate = py::cpp_function([&draft_executor]() {
-    active_py_causal_lm = draft_executor.py_causal_lm_;
+    PyCausalLM::set_active_instance(draft_executor.py_causal_lm_);
   });
-  py::cpp_function target_activate =
-      py::cpp_function([this]() { active_py_causal_lm = py_causal_lm_; });
+  py::cpp_function target_activate = py::cpp_function(
+      [this]() { PyCausalLM::set_active_instance(py_causal_lm_); });
   py::object capture_runner = py::none();
 #if defined(USE_NPU)
   capture_runner =
@@ -379,13 +395,16 @@ void PyExecutorImpl::warmup_prepared_graph(const torch::Tensor& tokens,
   CHECK(params.python_attention_metadata != nullptr);
   py::gil_scoped_acquire gil;
   bind_kv_caches(kv_caches);
-  active_py_causal_lm = py_causal_lm_;
+  PyCausalLM::set_active_instance(py_causal_lm_);
   py_executor_.attr("warmup_prepared_graph")(
       tokens,
       positions,
       params.python_attention_metadata->value(),
       optional_tensor(params.embedding.input_embedding),
-      mtp_topk_indices(params));
+      mtp_topk_indices(params),
+      optional_tensor(params.expert.expert_load_data),
+      optional_tensor(params.expert.eplb_decode_token_mask),
+      params.meta.is_graph_warmup);
 }
 
 ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
@@ -393,7 +412,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                 std::vector<KVCache>& kv_caches,
                                 const ModelInputParams& params) {
   torch::NoGradGuard no_grad;
-  active_py_causal_lm = py_causal_lm_;
+  PyCausalLM::set_active_instance(py_causal_lm_);
 
   // Build or reuse attention metadata.
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
@@ -525,18 +544,26 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   }
 #endif
 
+  py::object expert_load_data = optional_tensor(params.expert.expert_load_data);
+  py::object eplb_decode_token_mask =
+      optional_tensor(params.expert.eplb_decode_token_mask);
+
   // Execute: one C++ -> Python call per step. input_embedding stays None for
   // the Qwen3-VL python path (embeddings are merged via the attribute set by
   // get_input_embeddings above), so the runner takes the 2-arg model() branch
   // and Qwen3VLModel.forward reads _inputs_embeds. positions_arg carries the
   // mRoPE [3,N]->1-D decode collapse.
-  py::object hidden_obj = py_executor_.attr("execute")(execution_tokens,
-                                                       positions_arg,
-                                                       py_metadata,
-                                                       input_embedding,
-                                                       py_sync,
-                                                       topk_indices,
-                                                       prepared_graph);
+  py::object hidden_obj =
+      py_executor_.attr("execute")(execution_tokens,
+                                   positions_arg,
+                                   py_metadata,
+                                   input_embedding,
+                                   py_sync,
+                                   topk_indices,
+                                   prepared_graph,
+                                   expert_load_data,
+                                   eplb_decode_token_mask,
+                                   params.meta.is_graph_warmup);
   if (py::isinstance<py::tuple>(hidden_obj)) {
     py::tuple output = hidden_obj.cast<py::tuple>();
     CHECK(output.size() == 2 || output.size() == 3)

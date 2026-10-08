@@ -46,6 +46,8 @@ from xllm.python.attention.expanded_decode_metadata import (
 )
 from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
+    EplbRuntimeState,
+    LayerSynchronizer,
 )
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
 from xllm.python.model_executor.runners.base import ModelExecutionOutput
@@ -548,6 +550,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        *,
+        eplb: EplbRuntimeState | None = None,
     ) -> _GraphKey:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
@@ -566,10 +570,23 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._graphs.pop(graph_key, None)
 
         if mtp_topk_indices is None:
-            self._prepare_graph_entry(input_ids, positions, metadata, input_embedding, graph_key=graph_key)
+            self._prepare_graph_entry(
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+                graph_key=graph_key,
+                eplb=eplb,
+            )
         else:
             self._prepare_graph_entry(
-                input_ids, positions, metadata, input_embedding, mtp_topk_indices, graph_key=graph_key
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+                mtp_topk_indices,
+                graph_key=graph_key,
+                eplb=eplb,
             )
         return graph_key
 
@@ -648,6 +665,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         graph_key: _GraphKey | None = None,
+        layer_synchronizer: LayerSynchronizer | None = None,
+        eplb: EplbRuntimeState | None = None,
     ) -> ModelExecutionOutput:
         batch_size = input_ids.shape[0]
         if graph_key is not None:
@@ -659,6 +678,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             input_embedding,
             mtp_topk_indices,
             graph_key=graph_key,
+            eplb=eplb,
         )
 
         assert self._stream is not None
@@ -782,6 +802,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         graph_key: _GraphKey | None = None,
+        eplb: EplbRuntimeState | None = None,
     ) -> AclGraphEntry:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
@@ -828,6 +849,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             current_stream, self._taskless_replay_stream
         ):
             current_stream.wait_stream(self._taskless_replay_stream)
+
+        self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
 
         self._fill_entry(
             entry,

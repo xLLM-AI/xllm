@@ -20,6 +20,7 @@ from xllm.python.attention.backend import AttentionMetadata
 from xllm.python.attention.expanded_decode_metadata import resolve_expanded_decode_metadata
 from xllm.python.model_executor.cp_utils import build_cp_context
 from xllm.python.model_executor.forward_context import (
+    EplbRuntimeState,
     ForwardContext,
     LayerSynchronizer,
     forward_context,
@@ -63,6 +64,8 @@ class EagerRunner(BaseRunner):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        *,
+        eplb: EplbRuntimeState | None = None,
     ) -> ModelExecutionOutput:
         cp_context = None
         is_mla = self.attention_backend.is_mla
@@ -122,6 +125,7 @@ class EagerRunner(BaseRunner):
                 layer_synchronizer=layer_synchronizer,
                 layer_shared_cache=execution_contexts,
                 cp_context=cp_context,
+                eplb=eplb,
             )
         ):
             if mtp_topk_indices is not None:

@@ -3,14 +3,27 @@ include(cc_library)
 
 cc_library(
   NAME
-    prefix_cache
+    block_hasher
   HDRS
     block_hasher.h
+  SRCS
+    block_hasher.cpp
+  DEPS
+    :config
+    :multimodal
+    glog::glog
+    torch
+    xxHash
+)
+
+cc_library(
+  NAME
+    prefix_cache
+  HDRS
     prefix_cache.h
     linear_state_prefix_cache.h
     prefix_cache_factory.h
   SRCS
-    block_hasher.cpp
     prefix_cache.cpp
     linear_state_prefix_cache.cpp
     prefix_cache_factory.cpp
@@ -18,6 +31,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>
     :request
+    :block_hasher
     :common
     glog::glog
     Boost::serialization

@@ -264,6 +264,12 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     linear_state_read_indices_ =
         make_cpu_tensor(read_ids).to(linear_state_indices_.device());
   }
+  if (params.enable_graph || params.expert.eplb_decode_token_mask.defined()) {
+    raw_dp_execution_token_counts_ =
+        params.parallel.raw_dp_global_token_nums.empty()
+            ? params.parallel.dp_global_token_nums
+            : params.parallel.raw_dp_global_token_nums;
+  }
   // Python model kernels consume materialized execution rows. Empty DP ranks
   // therefore contribute the worker-created dummy row instead of zero rows.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;

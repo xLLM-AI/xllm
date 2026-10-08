@@ -21,6 +21,8 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <torch/csrc/distributed/c10d/Work.hpp>
+#include <unordered_map>
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
@@ -112,8 +114,11 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Device device() const override { return device_; }
   const torch::TensorOptions& options() const override { return options_; }
 
-  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
-  void update_expert_weight(int32_t) override {}
+  void prepare_expert_weight(int32_t layer_id,
+                             const std::vector<int32_t>& expert_ids) override;
+  void start_expert_weight_transfer(int32_t layer_id) override;
+  void update_expert_weight(int32_t layer_id) override;
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const override;
 
   bool share_weights_from(CausalLM& source) override;
 
@@ -124,6 +129,13 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
       const std::vector<int32_t>& execution_token_counts);
   void moe_tp_all_reduce(torch::Tensor& tensor);
   void moe_ep_all_reduce(torch::Tensor& tensor);
+  void eplb_batch_isend_irecv(const pybind11::list& operation_types,
+                              const pybind11::list& tensors,
+                              const pybind11::list& remote_ranks);
+  void eplb_wait_batch_isend_irecv();
+
+  static PyCausalLM* active_instance();
+  static void set_active_instance(PyCausalLM* py_causal_lm);
 
   pybind11::object& python_model() { return py_model_; }
   const pybind11::object& config_dict() const { return config_dict_; }
@@ -159,6 +171,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   ProcessGroup* dp_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
+  ProcessGroup* eplb_group_ = nullptr;
 #if defined(USE_NPU)
   std::shared_ptr<MegaMoeCommResource> mega_moe_comm_resource_;
 #endif
@@ -166,6 +179,10 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   pybind11::object py_model_;
   pybind11::object config_dict_;
   pybind11::object python_kv_caches_;
+  std::unordered_map<int32_t, bool> last_prepare_expert_weight_ok_;
+  c10::intrusive_ptr<c10d::Work> eplb_p2p_work_;
+
+  static thread_local PyCausalLM* active_instance_;
 };
 
 }  // namespace xllm
