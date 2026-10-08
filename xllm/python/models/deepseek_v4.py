@@ -39,6 +39,7 @@ from typing import Any, Sequence
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 
 from xllm.python.attention.backend import LayerCache
@@ -56,6 +57,7 @@ from xllm.python.layers.moe_dp import dp_gather_tokens
 from xllm.python.layers.rotary_embedding import _expand_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import (
     get_forward_context,
+    in_acl_graph,
     record_layer_event,
 )
 from xllm.python.model_executor.v4_cp_context import DeepseekV4CpContext, build_deepseek_v4_cp_context
@@ -1195,7 +1197,10 @@ class DeepseekV4MoE(nn.Module):
         self.register_buffer("experts_w13_scale", torch.empty(0, dtype=torch.float32, device=device))
         self.register_buffer("experts_w13_scale_second", torch.empty(0, dtype=torch.float32, device=device))
         self.register_buffer("experts_w13_offset", torch.empty(0, dtype=torch.float32, device=device))
-        self.register_buffer("experts_w2_scale", torch.empty(0, dtype=torch.float32, device=device))
+        self.register_buffer(
+            "experts_w2_scale",
+            torch.empty(0, dtype=torch.bfloat16 if dtype == torch.bfloat16 else torch.float32, device=device),
+        )
         self.register_buffer("experts_w2_scale_second", torch.empty(0, dtype=torch.float32, device=device))
         self.register_buffer("experts_w2_offset", torch.empty(0, dtype=torch.float32, device=device))
         self.register_buffer("experts_w13_scale_bias", torch.empty(0, dtype=torch.float32, device=device))
@@ -1229,7 +1234,10 @@ class DeepseekV4MoE(nn.Module):
 
             def _pack(weight: torch.Tensor) -> torch.Tensor:
                 weight = torch_npu.npu_format_cast(weight.transpose(1, 2).contiguous(), 29)
-                return weight.view(torch.int32).contiguous()
+                weight = weight.view(torch.int32).contiguous()
+                if weight.device.type == "npu":
+                    torch.npu.synchronize(weight.device)
+                return weight
 
             def _scale(scale: torch.Tensor, scale_second: torch.Tensor | None) -> torch.Tensor:
                 transposed = scale.transpose(1, 2).contiguous()
@@ -1378,7 +1386,8 @@ class DeepseekV4MoE(nn.Module):
             if 0.0 < limit < 1_000_000.0:
                 gate = gate.clamp_max(limit)
                 up = up.clamp(min=-limit, max=limit)
-            act = (torch_npu.npu_silu(gate) * up).to(activation_dtype)
+            silu = F.silu if in_acl_graph() else torch_npu.npu_silu
+            act = (silu(gate) * up).to(activation_dtype)
             # C++ FusedMoE normalizes the fused SwiGLU result to the dtype
             # accepted by dynamic_quant before producing the W4A8 GEMM2
             # activation scale. Keep this explicit so the Python path does
@@ -2011,9 +2020,9 @@ class DeepseekV4ForCausalLM(PyModelBase):
             w13.data = torch.empty(nepr, 2 * inter_local, cfg.hidden_size, dtype=torch.int8, device=device)
             w2.data = torch.empty(nepr, cfg.hidden_size, inter_local, dtype=torch.int8, device=device)
             w13_scale.data = torch.empty(nepr, 2 * inter_local, 1, dtype=torch.float32, device=device)
-            w2_scale.data = torch.empty(nepr, cfg.hidden_size, 1, dtype=torch.float32, device=device)
+            w2_scale.data = w2_scale.new_empty((nepr, cfg.hidden_size, 1))
             w13_offset.data = torch.zeros_like(w13_scale)
-            w2_offset.data = torch.zeros_like(w2_scale)
+            w2_offset.data = torch.zeros_like(w2_scale, dtype=torch.float32)
         for local_idx in range(nepr):
             global_id = start + local_idx
             e = ck + f"ffn.experts.{global_id}."

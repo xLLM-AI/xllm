@@ -28,14 +28,8 @@ _TORCH_INT8_DTYPE = 1
 
 
 def _unpermute_probs(topk_weights: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-    """Keep FP32 routing probabilities in the native unpermute call.
-
-    ``MoeTokenUnpermute`` accepts FP32 probabilities independently of the
-    routed output dtype.  The router normally already returns the output
-    dtype, so preserve that fast path and only retain the conversion for
-    other probability dtypes.
-    """
-    if topk_weights.dtype == torch.float32:
+    """Native unpermute accepts FP32 probabilities for BF16 outputs."""
+    if topk_weights.dtype == torch.float32 or topk_weights.dtype == output.dtype:
         return topk_weights
     return topk_weights.to(output.dtype)
 
@@ -65,7 +59,7 @@ def _moe_init_routing_v3(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return torch.ops.xllm_ops.moe_init_routing_v3(
         hidden_states,
-        topk_ids.to(torch.int32),
+        topk_ids,
         active_num,
         expert_num,
         active_expert_range,
@@ -79,15 +73,15 @@ def _enable_internal_format() -> None:
 
 
 def encode_mega_moe_scale(scale: torch.Tensor, offset: torch.Tensor) -> torch.Tensor:
-    """Pack W8A8 weight scale/offset into the int64 encoding aclnnMegaMoe expects."""
+    """Pack caller-prepared FP32 scale/offset into aclnnMegaMoe's int64 encoding."""
     if scale.shape != offset.shape:
         raise ValueError(
             f"MegaMoE weight scale and offset shapes must match: {tuple(scale.shape)} != {tuple(offset.shape)}"
         )
     original_shape = scale.shape
     encoded = torch_npu.npu_trans_quant_param(
-        scale.to(torch.float32).contiguous().reshape(-1),
-        offset.to(torch.float32).contiguous().reshape(-1),
+        scale.contiguous().reshape(-1),
+        offset.contiguous().reshape(-1),
         round_mode=0,
     )
     if encoded.dtype != torch.int64:
@@ -335,8 +329,8 @@ def _grouped_moe_impl(
         gating_output: Router logits of shape ``[num_tokens, num_experts]``.
         w13: Quantized gate and up projections of every expert.
         w2: Quantized down projection of every expert.
-        w13_scale: Dequantization scales of ``w13``.
-        w2_scale: Dequantization scales of ``w2``.
+        w13_scale: FP32 dequantization scales of ``w13``, prepared by the caller.
+        w2_scale: BF16 dequantization scales of ``w2``, prepared by the caller.
         correction_bias: Router bias added before group selection.
         topk: Experts selected per token.
         topk_group: Groups selected per token.
@@ -518,7 +512,7 @@ def grouped_moe_bf16(
     ]
     expanded_hidden, expanded_row_idx, group_list, _ = torch_npu.npu_moe_init_routing_v2(
         hidden_states,
-        topk_ids.to(torch.int32),
+        topk_ids,
         scale=None,
         active_num=hidden_states.shape[0] * topk_ids.shape[1],
         expert_num=num_total_experts,
@@ -527,7 +521,7 @@ def grouped_moe_bf16(
         active_expert_range=active_expert_range,
         quant_mode=-1,
     )
-    group_list = group_list[:num_experts_per_rank].to(torch.int64)
+    group_list = group_list[:num_experts_per_rank]
     gate_up = _group_gemm(
         x=expanded_hidden,
         weight=w13,
@@ -554,7 +548,7 @@ def grouped_moe_bf16(
         output_dtype=hidden_states.dtype,
     )
     local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
-    local_topk_weights = topk_weights * local_expert_mask.to(topk_weights.dtype)
+    local_topk_weights = topk_weights * local_expert_mask
     return torch_npu.npu_moe_token_unpermute(
         permuted_tokens=expert_output,
         sorted_indices=expanded_row_idx.abs(),
@@ -615,7 +609,7 @@ def _grouped_moe_with_selected_experts_impl(
         raise ValueError("local expert count must match the first dimension of w13 and w2")
     expanded_hidden, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
         hidden_states,
-        topk_ids.to(torch.int32),
+        topk_ids,
         scale=None,
         active_num=num_tokens * topk_ids.size(-1),
         expert_num=expert_num,
@@ -631,7 +625,7 @@ def _grouped_moe_with_selected_experts_impl(
         raise RuntimeError("dynamic_quant did not return a per-token scale")
     if expert_tokens.numel() < local_expert_count:
         raise RuntimeError("npu_moe_init_routing_v2 returned fewer groups than local experts")
-    group_list = expert_tokens[:local_expert_count].to(torch.int64)
+    group_list = expert_tokens[:local_expert_count]
     gemm1_out = _group_gemm(
         x=sorted_hidden_i8,
         weight=w13,
@@ -662,7 +656,7 @@ def _grouped_moe_with_selected_experts_impl(
     output = _group_gemm(
         x=act_i8,
         weight=w2,
-        scale=w2_scale.to(hidden_states.dtype),
+        scale=w2_scale,
         per_token_scale=act_pt,
         group_list=group_list,
         split_item=2,
@@ -671,7 +665,7 @@ def _grouped_moe_with_selected_experts_impl(
         output_dtype=hidden_states.dtype,
     )
     local_mask = (topk_ids >= active_range[0]) & (topk_ids < active_range[1])
-    local_topk_weights = topk_weights * local_mask.to(topk_weights.dtype)
+    local_topk_weights = topk_weights * local_mask
     return torch_npu.npu_moe_token_unpermute(
         permuted_tokens=output,
         sorted_indices=expanded_row_idx.abs(),
@@ -1022,7 +1016,7 @@ def _moe_expert_compute_impl(
     else:
         sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
             hidden_states,
-            topk_ids.to(torch.int32),
+            topk_ids,
             scale=None,
             active_num=num_tokens * topk,
             expert_num=num_experts,
@@ -1050,7 +1044,6 @@ def _moe_expert_compute_impl(
         gmm2_group_list = group_list
         gmm2_group_list_type = 2
     else:
-        group_list = group_list.to(torch.int64)
         act_i8, act_pt = _grouped_matmul_swiglu_quant_v2(
             sorted_hidden_i8,
             w13,
@@ -1196,7 +1189,7 @@ def moe_token_dispatch(
     num_tokens = hidden_states.shape[0]
     return torch_npu.npu_moe_init_routing_v2(
         hidden_states,
-        topk_ids.to(torch.int32),
+        topk_ids,
         scale=None,
         active_num=num_tokens * topk,
         expert_num=num_experts,

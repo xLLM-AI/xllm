@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Contracts for the NPU pre-selected grouped MoE path."""
+"""Contracts for the NPU grouped MoE paths."""
 
 from __future__ import annotations
 
@@ -154,14 +154,97 @@ def test_grouped_moe_retains_partial_expert_probability_mask(
         assert retained_probs is probs
 
 
+@pytest.mark.parametrize("execution_path", ("grouped", "expert", "split"))
+@pytest.mark.parametrize("routing_dtype", (torch.bfloat16, torch.float32))
+def test_grouped_moe_uses_caller_prepared_dtypes(
+    monkeypatch: pytest.MonkeyPatch,
+    execution_path: str,
+    routing_dtype: torch.dtype,
+) -> None:
+    hidden = torch.ones(2, 8, dtype=torch.bfloat16)
+    topk_weights = torch.tensor([[0.1234, 0.8766], [0.5432, 0.4568]], dtype=routing_dtype)
+    topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+    quantized = torch.zeros(4, 8, dtype=torch.int8)
+    row_ids = torch.arange(4, dtype=torch.int32)
+    expert_tokens = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+    input_scale = torch.ones(4)
+    activated = torch.zeros(4, 16, dtype=torch.int8)
+    activation_scale = torch.ones(4)
+    down_scale = torch.ones(4, 8, dtype=torch.bfloat16)
+    expert_output = torch.zeros(4, 8, dtype=torch.bfloat16)
+    expected = torch.zeros_like(hidden)
+    group_matmul = MagicMock(return_value=[expert_output])
+    for tensor in (down_scale, topk_ids, expert_tokens):
+        monkeypatch.setattr(
+            tensor,
+            "to",
+            MagicMock(side_effect=AssertionError("MoE must consume prepared scales and native routing dtypes")),
+        )
+    monkeypatch.setattr(
+        moe.torch_npu,
+        "npu_moe_gating_top_k",
+        MagicMock(return_value=(topk_weights, topk_ids, None)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        moe.torch_npu,
+        "npu_moe_init_routing_v2",
+        MagicMock(return_value=(quantized, row_ids, expert_tokens, input_scale)),
+        raising=False,
+    )
+    monkeypatch.setattr(moe, "_grouped_matmul_swiglu_quant_v2", MagicMock(return_value=(activated, activation_scale)))
+    monkeypatch.setattr(torch.ops.npu, "npu_grouped_matmul", group_matmul, raising=False)
+    token_unpermute = MagicMock(return_value=expected)
+    monkeypatch.setattr(moe.torch_npu, "npu_moe_token_unpermute", token_unpermute, raising=False)
+
+    w13 = torch.zeros(4, 8, 32, dtype=torch.int8)
+    w2 = torch.zeros(4, 16, 8, dtype=torch.int8)
+    w13_scale = torch.ones(4, 32)
+    context = ForwardContext(None, torch.device("cpu"), SimpleNamespace(), [])
+    with forward_context(context):
+        if execution_path == "grouped":
+            result = moe.grouped_moe(
+                hidden,
+                torch.zeros(2, 4, dtype=routing_dtype),
+                w13,
+                w2,
+                w13_scale,
+                down_scale,
+                None,
+                topk=2,
+                topk_group=1,
+                num_expert_groups=1,
+                renormalize=True,
+                routed_scaling_factor=1.0,
+                expert_tokens_num_type=1,
+                group_list_type=1,
+            )
+        elif execution_path == "expert":
+            result = moe.moe_expert_compute(hidden, topk_weights, topk_ids, w13, w2, w13_scale, down_scale, 2)
+        else:
+            dispatched, indices, groups, input_scales = moe.moe_token_dispatch(hidden, topk_ids, 2, 4)
+            activations, scales = moe.moe_gmm1(dispatched, w13, w13_scale, input_scales, groups)
+            result = moe.moe_gmm2_combine(activations, scales, w2, down_scale, groups, indices, topk_weights)
+
+    group_matmul.assert_called_once()
+    assert group_matmul.call_args.kwargs["scale"][0] is down_scale
+    assert group_matmul.call_args.kwargs["per_token_scale"][0] is activation_scale
+    assert group_matmul.call_args.kwargs["group_list"] is expert_tokens
+    assert token_unpermute.call_args.kwargs["probs"] is topk_weights
+    torch.testing.assert_close(result, expected)
+
+
+@pytest.mark.parametrize("routing_dtype", (torch.bfloat16, torch.float32))
 def test_selected_expert_moe_matches_native_call_contract(
     monkeypatch: pytest.MonkeyPatch,
+    routing_dtype: torch.dtype,
 ) -> None:
     from xllm.python import kernels
 
     hidden = torch.empty(3, 16, dtype=torch.bfloat16)
-    topk_weights = torch.ones(3, 2, dtype=torch.bfloat16)
+    topk_weights = torch.tensor([[0.1234, 0.8766], [0.5432, 0.4568], [0.2345, 0.7655]], dtype=routing_dtype)
     topk_ids = torch.tensor([[4, 0], [5, 9], [7, 6]], dtype=torch.int32)
+    monkeypatch.setattr(topk_ids, "to", MagicMock(side_effect=AssertionError("Routing IDs already use INT32")))
     expanded = torch.empty(6, 16, dtype=torch.bfloat16)
     row_ids = torch.arange(6, dtype=torch.int32)
     expert_tokens = torch.tensor([1, 3, 5, 6, 7, 8], dtype=torch.int64)
@@ -171,6 +254,12 @@ def test_selected_expert_moe_matches_native_call_contract(
     activated = torch.empty(6, 16, dtype=torch.int8)
     activation_scale = torch.empty(6, dtype=torch.float32)
     gemm2 = torch.empty(6, 16, dtype=torch.bfloat16)
+    down_scale = torch.ones(4, 16, dtype=torch.bfloat16)
+    monkeypatch.setattr(
+        down_scale,
+        "to",
+        MagicMock(side_effect=AssertionError("MoE must not convert the caller-prepared down scale")),
+    )
     calls: list[tuple[str, object]] = []
 
     def init_routing(*args, **kwargs):
@@ -209,7 +298,7 @@ def test_selected_expert_moe_matches_native_call_contract(
         torch.empty(4, 16, 32, dtype=torch.int8),
         torch.empty(4, 16, 16, dtype=torch.int8),
         torch.empty(4, 32),
-        torch.empty(4, 16),
+        down_scale,
         num_total_experts=16,
         start_expert_id=4,
         num_experts_per_rank=4,
@@ -227,7 +316,7 @@ def test_selected_expert_moe_matches_native_call_contract(
     assert gemm_calls[0]["scale"] is None
     assert gemm_calls[0]["per_token_scale"] is None
     assert gemm_calls[0]["output_dtype"] == torch.int32
-    assert gemm_calls[1]["scale"].dtype == torch.bfloat16
+    assert gemm_calls[1]["scale"] is down_scale
     assert gemm_calls[1]["per_token_scale"] is activation_scale
     assert gemm_calls[1]["output_dtype"] == torch.bfloat16
     assert all(torch.equal(call["group_list"], expert_tokens[:4]) for call in gemm_calls)
@@ -245,7 +334,7 @@ def test_selected_expert_moe_matches_native_call_contract(
     assert isinstance(unpermute, dict)
     torch.testing.assert_close(
         unpermute["probs"],
-        torch.tensor([[1, 0], [1, 0], [1, 1]], dtype=torch.bfloat16),
+        topk_weights * torch.tensor([[True, False], [True, False], [True, True]]),
     )
 
 
@@ -304,16 +393,22 @@ def test_qwen35_bf16_grouped_moe_uses_native_layout(
     )
     monkeypatch.setattr(kernels, "silu_and_mul", silu_and_mul, raising=False)
 
-    result = moe.grouped_moe_bf16(
-        hidden,
-        topk_weights,
-        topk_ids,
-        w13,
-        w2,
-        16,
-        4,
-        4,
-    )
+    with monkeypatch.context() as cast_guard:
+        cast_guard.setattr(
+            torch.Tensor,
+            "to",
+            MagicMock(side_effect=AssertionError("BF16 MoE must consume native routing dtypes without casts")),
+        )
+        result = moe.grouped_moe_bf16(
+            hidden,
+            topk_weights,
+            topk_ids,
+            w13,
+            w2,
+            16,
+            4,
+            4,
+        )
 
     assert result is expected
     assert init_routing.call_args.kwargs["active_expert_range"] == [4, 8]
@@ -334,6 +429,32 @@ def test_qwen35_bf16_grouped_moe_uses_native_layout(
         token_unpermute.call_args.kwargs["probs"],
         torch.tensor([[1, 0], [1, 0], [1, 1]], dtype=torch.bfloat16),
     )
+
+
+@pytest.mark.parametrize("noncontiguous", (False, True))
+def test_encode_mega_moe_scale_uses_prepared_fp32_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    noncontiguous: bool,
+) -> None:
+    scale = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    offset = torch.zeros_like(scale)
+    if noncontiguous:
+        scale = scale.transpose(0, 1)
+        offset = offset.transpose(0, 1)
+    for tensor in (scale, offset):
+        monkeypatch.setattr(tensor, "to", MagicMock(side_effect=AssertionError("MegaMoE inputs already use FP32")))
+    encoded = torch.arange(6, dtype=torch.int64)
+    trans_quant_param = MagicMock(return_value=encoded)
+    monkeypatch.setattr(moe.torch_npu, "npu_trans_quant_param", trans_quant_param, raising=False)
+
+    result = moe.encode_mega_moe_scale(scale, offset)
+
+    actual_scale, actual_offset = trans_quant_param.call_args.args
+    torch.testing.assert_close(actual_scale, scale.reshape(-1))
+    torch.testing.assert_close(actual_offset, offset.reshape(-1))
+    assert actual_scale.is_contiguous() and actual_offset.is_contiguous()
+    assert trans_quant_param.call_args.kwargs["round_mode"] == 0
+    torch.testing.assert_close(result, encoded.reshape(scale.shape))
 
 
 @pytest.mark.parametrize("renormalize", (False, True))

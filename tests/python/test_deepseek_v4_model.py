@@ -19,6 +19,7 @@ Pure-Python: does not load compiled operators or weights.
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -496,6 +497,82 @@ def test_dense_mlp_loader_maps_dsv4_weight_names(
         tensors[f"layers.0.ffn.{checkpoint_down}.weight_scale"],
     )
     assert mlp.processed
+
+
+@pytest.mark.parametrize("quantization", ("w8a8", "w4a8"))
+@pytest.mark.parametrize("moe_tp_size", (1, 2))
+def test_moe_loader_prepares_down_scales_for_each_quantization(
+    monkeypatch: pytest.MonkeyPatch,
+    quantization: str,
+    moe_tp_size: int,
+) -> None:
+    cfg = DeepseekV4Config.from_dict(
+        {
+            **_DSV4_CONFIG,
+            "hidden_size": 8,
+            "moe_intermediate_size": 8,
+            "n_routed_experts": 4,
+            "n_activated_experts": 2,
+            "n_hash_layers": 0,
+            "ep_size": 2,
+            "ep_rank": 1,
+            "moe_tp_size": moe_tp_size,
+            "moe_tp_rank": moe_tp_size - 1,
+        }
+    )
+    moe = DeepseekV4MoE(cfg, layer_id=0, dtype=torch.bfloat16, device=torch.device("cpu"))
+    assert moe.experts_w2_scale.dtype == torch.bfloat16
+    assert moe.experts_w13_scale.dtype == torch.float32
+    assert not hasattr(moe, "experts_w2_scale_compute")
+    owner = torch.nn.Module()
+    owner.cfg = cfg
+    owner.model = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.mlp = moe
+    owner.model.layers = torch.nn.ModuleList([layer])
+
+    packed_divisor = 2 if quantization == "w4a8" else 1
+    tensors = {
+        "layers.0.ffn.gate.weight": torch.zeros_like(moe.gate.weight),
+        "layers.0.ffn.gate.bias": torch.zeros_like(moe.e_score_correction_bias),
+    }
+    for expert_id in range(2, 4):
+        prefix = f"layers.0.ffn.experts.{expert_id}."
+        for projection in ("w1", "w3", "w2"):
+            tensors[prefix + projection + ".weight"] = torch.zeros(8 // packed_divisor, 8, dtype=torch.int8)
+            tensors[prefix + projection + ".weight_scale"] = (
+                torch.linspace(0.1234, 0.5678, 8, dtype=torch.float32).reshape(8, 1) + expert_id
+            )
+            if quantization == "w4a8":
+                bias_groups = 8 if projection == "w2" else 1
+                tensors[prefix + projection + ".scale_bias"] = torch.zeros(8, bias_groups)
+    loader = SimpleNamespace(
+        has=tensors.__contains__,
+        get_tensor=tensors.__getitem__,
+        copy_in=lambda name, value: owner.get_parameter(name).data.copy_(value),
+        shard=lambda value, dim, world, rank: value.chunk(world, dim=dim)[rank].contiguous(),
+    )
+    monkeypatch.setattr(moe.shared_experts.gate_up_proj, "process_weights_after_loading", MagicMock())
+    monkeypatch.setattr(moe.shared_experts.down_proj, "process_weights_after_loading", MagicMock())
+    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_format_cast=lambda value, _format: value))
+
+    DeepseekV4ForCausalLM._load_dsv4_moe(owner, loader, "layers.0.", "model.layers.0.", 0)
+
+    assert moe.experts_w2_scale.dtype == (torch.float32 if quantization == "w4a8" else torch.bfloat16)
+    moe.process_weights_after_loading()
+
+    expected_scale = torch.stack(
+        [tensors[f"layers.0.ffn.experts.{expert_id}.w2.weight_scale"] for expert_id in range(2, 4)]
+    )
+    assert moe.w4a8_dynamic == (quantization == "w4a8")
+    assert moe.experts_w2_offset.dtype == torch.float32
+    if quantization == "w4a8":
+        assert moe.experts_w13_scale.dtype == torch.int64
+        expected_scale = expected_scale.transpose(1, 2).contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    else:
+        assert moe.experts_w13_scale.dtype == torch.float32
+        expected_scale = expected_scale.squeeze(-1).to(torch.bfloat16)
+    torch.testing.assert_close(moe.experts_w2_scale, expected_scale, rtol=0, atol=0)
 
 
 def test_moe_uses_dedicated_group_sizes() -> None:
