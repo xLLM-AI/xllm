@@ -28,8 +28,16 @@ namespace {
 int32_t discover_num_slots(const std::vector<KVCache>& kv_caches) {
   int32_t num_slots = 0;
   for (const KVCache& kv_cache : kv_caches) {
+    const torch::Tensor kpool_tail = kv_cache.get_kpool_tail();
     const torch::Tensor conv_cache = kv_cache.get_conv_cache();
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
+    if (kpool_tail.defined()) {
+      CHECK_GT(kpool_tail.size(0), kPaddingLinearStateId);
+      if (num_slots == 0) {
+        num_slots = static_cast<int32_t>(kpool_tail.size(0));
+      }
+      CHECK_EQ(num_slots, kpool_tail.size(0));
+    }
     if (!conv_cache.defined() && !ssm_cache.defined()) {
       continue;
     }
@@ -83,8 +91,14 @@ void zero_slots_across_layers(std::vector<KVCache>& kv_caches,
                               std::vector<int32_t>& slot_ids) {
   const std::vector<SlotRange> ranges = coalesce_slot_ranges(slot_ids);
   for (const KVCache& kv_cache : kv_caches) {
+    const torch::Tensor kpool_tail = kv_cache.get_kpool_tail();
     const torch::Tensor conv_cache = kv_cache.get_conv_cache();
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
+    if (kpool_tail.defined()) {
+      for (const SlotRange& range : ranges) {
+        kpool_tail.narrow(0, range.start, range.length).zero_();
+      }
+    }
     if (!conv_cache.defined() && !ssm_cache.defined()) {
       continue;
     }
@@ -108,8 +122,13 @@ void copy_slot_across_layers(std::vector<KVCache>& kv_caches,
                              int32_t dst_slot_id,
                              int32_t src_slot_id) {
   for (const KVCache& kv_cache : kv_caches) {
+    const torch::Tensor kpool_tail = kv_cache.get_kpool_tail();
     const torch::Tensor conv_cache = kv_cache.get_conv_cache();
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
+    if (kpool_tail.defined()) {
+      kpool_tail.select(0, dst_slot_id)
+          .copy_(kpool_tail.select(0, src_slot_id));
+    }
     if (!conv_cache.defined() && !ssm_cache.defined()) {
       continue;
     }
@@ -165,7 +184,7 @@ void restore_linear_state_slots(
 
   const int32_t num_slots = discover_num_slots(kv_caches);
   CHECK_GT(num_slots, kPaddingLinearStateId)
-      << "linear-state operations require an allocated recurrent cache";
+      << "linear-state operations require an allocated request state cache";
   const auto is_real_slot = [num_slots](int32_t slot_id) {
     return slot_id > kPaddingLinearStateId && slot_id < num_slots;
   };

@@ -360,6 +360,38 @@ TEST(KVCacheEstimationTest, ReservesLinearAttentionState) {
   EXPECT_EQ(capacity.n_blocks(), 254);
 }
 
+#if defined(USE_MLU)
+TEST(KVCacheEstimationTest, KPoolReservesSpeculativeTailWithRequestState) {
+  ModelArgs args = make_linear_attention_args();
+  args.index_n_heads(1).index_head_dim(16).index_kpool(4).index_kpool_compress(
+      true);
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.dtype = torch::kBFloat16;
+  options.num_speculative_tokens = 5;
+  const KVCacheCapacity capacity = estimate_kv_cache_capacity(args, options);
+  // Two recurrent layers and two indexer layers. Each tail keeps K + W
+  // BF16 key/gate rows; W includes the verify base token and prelaunch room.
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 10);
+  EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 25600);
+  EXPECT_EQ(
+      capacity.num_linear_attention_layers() * capacity.linear_slot_size(),
+      512);
+  EXPECT_EQ(capacity.num_indexer_layers() * capacity.kpool_tail_slot_size(),
+            2048);
+  EXPECT_EQ(capacity.kpool_tail_len(), 16);
+  EXPECT_LE(capacity.n_blocks() * 16 * (2 * 128 + 2 * 8) +
+                capacity.linear_cache_size_in_bytes(),
+            options.cache_size_in_bytes);
+  args.num_nextn_predict_layers(2);
+  const KVCacheCapacity speculative = estimate_kv_cache_capacity(args, options);
+  EXPECT_EQ(speculative.num_full_attention_layers(), 2);
+  EXPECT_EQ(speculative.num_indexer_layers(), 2);
+  EXPECT_EQ(speculative.linear_cache_size_in_bytes(),
+            capacity.linear_cache_size_in_bytes());
+  EXPECT_EQ(speculative.n_blocks(), capacity.n_blocks());
+}
+#endif
+
 TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
   struct TestCase {
     const char* name;

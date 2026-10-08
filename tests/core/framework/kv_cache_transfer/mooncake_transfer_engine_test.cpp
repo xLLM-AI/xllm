@@ -982,6 +982,93 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   EXPECT_EQ(ssm_it->shard.spans[0].repeat_count, 3U);
 }
 
+TEST(MooncakeKVCacheTransferDefaultTest, RegistersCompressedIndexAndKpoolTail) {
+  for (const int32_t pool_size : {1, 4}) {
+    SCOPED_TRACE(pool_size);
+    auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+        /*listen_port=*/0, torch::Device(torch::kCPU));
+    RecordingMooncakeTransferEngine* engine_observer = engine.get();
+    MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                            /*listen_port=*/0,
+                                            torch::Device(torch::kCPU),
+                                            /*model_type=*/"glm5",
+                                            std::move(engine));
+    transfer.addr_ = "local";
+    ModelArgs args;
+    args.n_layers(1)
+        .n_heads(1)
+        .n_kv_heads(1)
+        .head_dim(8)
+        .index_n_heads(1)
+        .index_head_dim(8)
+        .index_kpool(pool_size)
+        .index_kpool_compress(true);
+    KVCacheCapacity capacity;
+    capacity.n_blocks(4).block_size(16).num_linear_state_blocks(2).kpool_layout(
+        KPoolCacheLayout::COMPRESSED_WITH_TAIL);
+    const KVCacheShape shape(capacity, args, /*world_size=*/1);
+    IndexedKVCacheTensors tensors;
+    tensors.kv_cache_tensors.key_cache =
+        torch::zeros(shape.key_cache_shape(), torch::kBFloat16);
+    tensors.kv_cache_tensors.value_cache =
+        torch::zeros(shape.value_cache_shape(), torch::kBFloat16);
+    tensors.index_cache =
+        torch::zeros(shape.index_cache_shape(), torch::kBFloat16);
+    tensors.kpool_tail =
+        torch::zeros(shape.kpool_tail_shape(), torch::kBFloat16);
+    std::vector<KVCache> caches;
+    caches.emplace_back(std::move(tensors));
+    transfer.configure_cache_layout(make_args(/*rank=*/0,
+                                              /*world_size=*/1,
+                                              /*dp_size=*/1),
+                                    args,
+                                    /*block_token_capacity=*/16,
+                                    /*is_spec_draft=*/false);
+    transfer.register_kv_cache(caches, shape, torch::kBFloat16);
+
+    const auto& manifests = transfer.local_cache_layout_.tensors;
+    ASSERT_EQ(manifests.size(), 4U);
+    const auto index = std::find_if(
+        manifests.begin(), manifests.end(), [](const CacheTensorManifest& m) {
+          return m.role == static_cast<int32_t>(KVCacheTensorRole::INDEX);
+        });
+    const auto tail = std::find_if(
+        manifests.begin(), manifests.end(), [](const CacheTensorManifest& m) {
+          return m.role == static_cast<int32_t>(KVCacheTensorRole::KPOOL_TAIL);
+        });
+    ASSERT_NE(index, manifests.end());
+    ASSERT_NE(tail, manifests.end());
+    EXPECT_EQ(index->group_id, cache_group_id(BlockType::KV));
+    EXPECT_EQ(index->resource_count, 4U);
+    EXPECT_EQ(index->resource_stride_bytes, 16U / pool_size * 8 * 2);
+    EXPECT_EQ(index->block_token_capacity, 16U);
+    ASSERT_EQ(index->shard.spans.size(), 1U);
+    EXPECT_EQ(index->shard.spans[0].repeat_count, 16U / pool_size);
+    EXPECT_EQ(tail->group_id, cache_group_id(BlockType::LINEAR));
+    EXPECT_EQ(tail->resource_count, 2U);
+    EXPECT_EQ(tail->resource_stride_bytes, 2U * pool_size * 8 * 2);
+    EXPECT_EQ(tail->shard.resource_scope, CacheResourceScope::SEQUENCE);
+
+    KVTransferMapping pages;
+    pages.group_id = cache_group_id(BlockType::KV);
+    pages.local_ids = {1};
+    pages.remote_ids = {3};
+    KVTransferMapping slots;
+    slots.group_id = cache_group_id(BlockType::LINEAR);
+    slots.local_ids = {0};
+    slots.remote_ids = {1};
+    ASSERT_TRUE(transfer.pull_kv_blocks(
+        /*src_cluster_id=*/1, "remote", {pages, slots}));
+    ASSERT_EQ(engine_observer->move_calls.size(), 1U);
+    const auto& mappings = engine_observer->move_calls[0].mappings;
+    ASSERT_EQ(mappings.size(), 4U);
+    EXPECT_EQ(mappings[index->mooncake_buffer_id].local_ids, pages.local_ids);
+    EXPECT_EQ(mappings[index->mooncake_buffer_id].remote_ids, pages.remote_ids);
+    EXPECT_EQ(mappings[tail->mooncake_buffer_id].local_ids, slots.local_ids);
+    EXPECT_EQ(mappings[tail->mooncake_buffer_id].remote_ids, slots.remote_ids);
+  }
+}
+
 TEST(MooncakeKVCacheTransferDefaultTest,
      RegistersTp1SpecDraftBesideTp2MainCache) {
   auto engine = std::make_unique<RecordingMooncakeTransferEngine>(

@@ -41,10 +41,10 @@ limitations under the License.
 #endif
 
 #include "framework/block/block.h"
+#include "framework/kv_cache/cache_layout_types.h"
 #include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
-#include "framework/kv_cache/logical_cache_layout.h"
 
 namespace xllm {
 
@@ -114,6 +114,7 @@ struct IndexedKVCacheTensors {
   std::optional<torch::Tensor> index_cache_scale;
   std::optional<torch::Tensor> key_cache_scale;
   std::optional<torch::Tensor> value_cache_scale;
+  torch::Tensor kpool_tail;
 };
 
 struct QuantizedKVCacheTensors {

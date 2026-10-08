@@ -64,6 +64,9 @@ class KVCacheShape final {
   const std::vector<int64_t>& key_cache_shape() const;
   const std::vector<int64_t>& value_cache_shape() const;
   const std::vector<int64_t>& index_cache_shape() const;
+  const std::vector<int64_t>& kpool_tail_shape() const;
+  bool has_kpool_tail_shape() const;
+  KPoolCacheLayout kpool_layout() const { return kpool_layout_; }
   const std::vector<int64_t>& index_cache_scale_shape() const;
   const std::vector<int64_t>& conv_cache_shape() const;
   const std::vector<int64_t>& ssm_cache_shape() const;
@@ -114,6 +117,8 @@ class KVCacheShape final {
   static const std::vector<int64_t>& empty_shape();
 
  private:
+  KPoolCacheLayout kpool_layout_ = KPoolCacheLayout::PACKED;
+  std::optional<std::vector<int64_t>> kpool_tail_shape_;
   ShapeKind shape_kind_ = ShapeKind::NORMAL;
   std::optional<std::vector<int64_t>> key_cache_shape_;
   std::optional<std::vector<int64_t>> value_cache_shape_;
@@ -136,5 +141,12 @@ KVCacheShape build_speculative_draft_kv_cache_shape(
     int64_t block_size,
     int64_t draft_world_size,
     const std::string& kv_cache_dtype);
+
+// Returns the cache layout requested by the model, including draft-specific
+// layouts. Keeping this decision with cache geometry prevents workers from
+// interpreting model attention semantics.
+KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
+                                                 const KVCacheShape& shape,
+                                                 bool is_spec_draft);
 
 }  // namespace xllm

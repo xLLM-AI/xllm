@@ -413,8 +413,12 @@ bool describe_cache_tensor(const CacheTensorLayoutContext& context,
     // key is a single shared logical head. KVCacheShape and the DeepSeek V4
     // grouped cache both allocate INDEX/INDEX_SCALE with a physical head
     // dimension of one on every TP rank.
+    CacheTensorLayoutContext index_context = context;
+    if (context.index_block_capacity > 0) {
+      index_context.block_token_capacity = context.index_block_capacity;
+    }
     return describe_attention_heads(
-        context, /*global_head_count=*/1, cache_tensor, error);
+        index_context, /*global_head_count=*/1, cache_tensor, error);
   }
 
   // Roles whose producer exposes no head axis are explicit whole-resource

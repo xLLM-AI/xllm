@@ -1067,4 +1067,144 @@ TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
   EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
+TEST(KVCacheTest, KPoolShapeRoundTripKeepsRequestTailSeparateFromPages) {
+  ModelArgs args;
+  args.n_layers(1)
+      .head_dim(16)
+      .index_n_heads(1)
+      .index_head_dim(16)
+      .index_kpool(4)
+      .index_kpool_compress(true);
+  KVCacheEstimateOptions options;
+  options.kpool_layout = KPoolCacheLayout::COMPRESSED_WITH_TAIL;
+  options.cache_size_in_bytes = 1024 * 1024;
+  options.block_size = 16;
+  options.n_local_kv_heads = 1;
+  options.max_seqs_per_batch = 3;
+  options.num_speculative_tokens = 5;
+  const KVCacheCapacity capacity = estimate_kv_cache_capacity(args, options);
+  const KVCacheShape shape(capacity, args, 1);
+  proto::KVCacheShape proto_shape;
+  shape.to_proto(&proto_shape);
+  const KVCacheShape restored = KVCacheShape::from_proto(proto_shape);
+  EXPECT_EQ(restored.kpool_layout(), KPoolCacheLayout::COMPRESSED_WITH_TAIL);
+  EXPECT_EQ(restored.kpool_tail_shape(), (std::vector<int64_t>{5, 2, 16, 16}));
+#if !defined(USE_NPU)
+  KVCacheCreateOptions create_options;
+  create_options.enable_lighting_indexer(true).dtype(torch::kBFloat16);
+  KVCache cache(restored, create_options, 0);
+  EXPECT_EQ(cache.get_kpool_tail().sizes().vec(), restored.kpool_tail_shape());
+  EXPECT_EQ(cache.get_index_cache().numel(), capacity.n_blocks() * 4 * 16);
+  ExpectTensorGroup(cache, KVCacheTensorRole::INDEX, BlockType::KV);
+  ExpectTensorGroup(cache, KVCacheTensorRole::KPOOL_TAIL, BlockType::LINEAR);
+  EXPECT_EQ(cache.get_block_type_tensors(BlockType::LINEAR).size(), 1);
+  int64_t allocated_bytes = 0;
+  for (const KVCacheTensor& tensor : cache.get_cache_tensors()) {
+    allocated_bytes += tensor.tensor.numel() * tensor.tensor.element_size();
+  }
+  EXPECT_EQ(allocated_bytes, capacity.n_blocks() * 1152 + 5120);
+  EXPECT_LE(allocated_bytes, options.cache_size_in_bytes);
+
+  EXPECT_EQ(cache.get_shapes().back(), restored.kpool_tail_shape());
+#endif
+
+  options.kpool_layout = KPoolCacheLayout::PACKED;
+  const KVCacheCapacity packed = estimate_kv_cache_capacity(args, options);
+  const KVCacheShape packed_shape(packed, args, 1);
+  EXPECT_FALSE(packed_shape.has_kpool_tail_shape());
+  EXPECT_EQ(packed.index_slot_size(), 66);
+  EXPECT_EQ(packed_shape.index_cache_shape().back(), 33);
+}
+
+#if defined(USE_MLU)
+TEST(KVCacheTest, SharedKPoolBudgetCoversBothModelsWithoutDoubleCounting) {
+  ModelArgs target_args;
+  target_args.n_layers(2)
+      .head_dim(16)
+      .index_n_heads(1)
+      .index_head_dim(32)
+      .index_kpool(4)
+      .index_kpool_compress(true);
+  KVCacheEstimateOptions options;
+  options.kpool_layout = KPoolCacheLayout::COMPRESSED_WITH_TAIL;
+  options.cache_size_in_bytes = 64 * 1024;
+  options.block_size = 32;
+  options.n_local_kv_heads = 1;
+  options.max_seqs_per_batch = 3;
+  options.num_speculative_tokens = 5;
+  KVCacheEstimateOptions draft_options = options;
+  draft_options.is_draft_engine = true;
+  draft_options.max_seqs_per_batch = 1;
+  draft_options.num_speculative_tokens = 0;
+
+  for (const int32_t nextn_layers : {0, 1}) {
+    for (const int32_t draft_kpool : {4, 32}) {
+      SCOPED_TRACE(::testing::Message() << "nextn_layers=" << nextn_layers
+                                        << ", draft_kpool=" << draft_kpool);
+      target_args.num_nextn_predict_layers(nextn_layers);
+      ModelArgs draft_args = target_args;
+      draft_args.n_layers(1).index_kpool(draft_kpool);
+      KVCacheCapacity target_cap =
+          estimate_kv_cache_capacity(target_args, options);
+      KVCacheCapacity draft_cap =
+          estimate_kv_cache_capacity(draft_args, draft_options);
+      ASSERT_NE(target_cap.num_linear_state_blocks(),
+                draft_cap.num_linear_state_blocks());
+      const int64_t n_blocks =
+          estimate_shared_kpool_blocks(target_cap, draft_cap, draft_args);
+      target_cap.n_blocks(n_blocks);
+      draft_cap.n_blocks(n_blocks);
+      // Match the final draft shape's inherited request slots and window.
+      draft_cap.num_linear_state_blocks(target_cap.num_linear_state_blocks())
+          .kpool_tail_len(target_cap.kpool_tail_len());
+      const auto allocated_bytes = [&]() -> int64_t {
+        const KVCacheShape target_shape(
+            target_cap, target_args, /*world_size=*/1);
+        const KVCacheShape draft_shape(draft_cap, draft_args, /*world_size=*/1);
+        KVCacheCreateOptions create_options;
+        create_options.enable_lighting_indexer(true).dtype(torch::kBFloat16);
+        int64_t bytes = 0;
+        for (int32_t layer_id = 0; layer_id < target_args.n_layers();
+             ++layer_id) {
+          KVCache cache(target_shape, create_options, layer_id);
+          for (const KVCacheTensor& tensor : cache.get_cache_tensors()) {
+            bytes += tensor.tensor.numel() * tensor.tensor.element_size();
+          }
+        }
+        KVCache draft_cache(draft_shape, create_options, /*layer_id=*/0);
+        for (const KVCacheTensor& tensor : draft_cache.get_cache_tensors()) {
+          bytes += tensor.tensor.numel() * tensor.tensor.element_size();
+        }
+        return bytes;
+      };
+      EXPECT_LE(allocated_bytes(), options.cache_size_in_bytes);
+      target_cap.n_blocks(n_blocks + 1);
+      draft_cap.n_blocks(n_blocks + 1);
+      EXPECT_GT(allocated_bytes(), options.cache_size_in_bytes);
+    }
+  }
+}
+
+TEST(KVCacheTest, SharedKPoolBudgetRejectsInsufficientMemory) {
+  ModelArgs draft_args;
+  draft_args.index_kpool(4).index_head_dim(16);
+  KVCacheCapacity capacity;
+  capacity.block_size(16)
+      .slot_size(64)
+      .index_slot_size(8)
+      .num_full_attention_layers(1)
+      .num_indexer_layers(1)
+      .num_linear_state_blocks(5)
+      .kpool_tail_len(16)
+      .kpool_tail_slot_size(1024)
+      .linear_cache_size_in_bytes(5120)
+      .cache_size_in_bytes(10240);
+  EXPECT_DEATH(estimate_shared_kpool_blocks(capacity, capacity, draft_args),
+               "target and draft KPool request state");
+  capacity.cache_size_in_bytes(10241);
+  EXPECT_DEATH(estimate_shared_kpool_blocks(capacity, capacity, draft_args),
+               "no memory for a shared KPool block");
+}
+#endif
+
 }  // namespace xllm

@@ -40,12 +40,15 @@ class KVCacheTensorRole {
     SWA = 14,
     COMPRESS_STATE = 15,
     COMPRESS_INDEX_STATE = 16,
+    KPOOL_TAIL = 17,
     INVALID = -1,
   };
 
   constexpr KVCacheTensorRole(Value v) : value_(v) {}
   KVCacheTensorRole(const std::string& str) {
-    if (str == "KEY" || str == "key") {
+    if (str == "KPOOL_TAIL" || str == "kpool_tail") {
+      value_ = KPOOL_TAIL;
+    } else if (str == "KEY" || str == "key") {
       value_ = KEY;
     } else if (str == "VALUE" || str == "value") {
       value_ = VALUE;
@@ -95,7 +98,9 @@ class KVCacheTensorRole {
   bool operator!=(Value rhs) const { return value_ != rhs; }
 
   constexpr const char* to_string() const {
-    if (this->value_ == KEY) {
+    if (this->value_ == KPOOL_TAIL) {
+      return "kpool_tail";
+    } else if (this->value_ == KEY) {
       return "key";
     } else if (this->value_ == VALUE) {
       return "value";

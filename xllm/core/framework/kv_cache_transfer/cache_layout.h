@@ -20,7 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
-#include "framework/kv_cache/logical_cache_layout.h"
+#include "framework/kv_cache/cache_layout_types.h"
 #include "mooncake_transfer_engine.pb.h"
 
 namespace xllm {

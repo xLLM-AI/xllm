@@ -57,6 +57,7 @@ namespace py = pybind11;
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/xtensor/global_xtensor.h"
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
@@ -116,14 +117,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const KernelConfig& kernel_config = KernelConfig::get_instance();
   const DiTConfig& dit_config = DiTConfig::get_instance();
   const RecConfig& rec_config = RecConfig::get_instance();
-
-  if (kv_cache_store_config.enable_kvcache_store()) {
-    CHECK(kv_cache_config.enable_prefix_cache())
-        << "KV cache Store requires --enable_prefix_cache=true.";
-    CHECK_GT(kv_cache_store_config.host_blocks_factor(), 1.0)
-        << "KV cache Store requires --host_blocks_factor > 1 so Host cache "
-           "blocks can serve as transfer destinations.";
-  }
 
 #if !defined(USE_NPU)
   CHECK(!speculative_config.enable_mtp_draft_body_tp1())
@@ -269,11 +262,50 @@ void validate_config(const std::string& model_type) {
   ModelConfig& model_config = ModelConfig::get_instance();
   LoadConfig& load_config = LoadConfig::get_instance();
   KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
+  KVCacheStoreConfig& kv_cache_store_config =
+      KVCacheStoreConfig::get_instance();
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   ParallelConfig& parallel_config = ParallelConfig::get_instance();
   DisaggPDConfig& disagg_pd_config = DisaggPDConfig::get_instance();
   SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
   ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+
+  ModelArgs model_args;
+  if (!model_type.empty()) {
+    JsonReader model_config_json;
+    const std::filesystem::path model_config_path =
+        std::filesystem::path(model_config.model()) / "config.json";
+    CHECK(model_config_json.parse(model_config_path.string()))
+        << "Failed to parse model config: " << model_config_path;
+
+    std::string resolved_model_type;
+    std::string error_message;
+    CHECK(resolve_model_registration_name(
+        model_type, &resolved_model_type, &error_message))
+        << error_message;
+    const auto model_args_loader =
+        ModelRegistry::get_model_args_loader(resolved_model_type);
+    CHECK(model_args_loader != nullptr)
+        << "Failed to find model args loader for model type "
+        << resolved_model_type;
+    CHECK(model_args_loader(model_config_json, &model_args))
+        << "Failed to load model args for model type " << resolved_model_type;
+  }
+
+  if (model_args.index_kpool_compress()) {
+    CHECK_LE(kv_cache_store_config.host_blocks_factor(), 1.0)
+        << "Compressed KPool host offload requires request-state scheduler "
+           "support.";
+    CHECK(!kv_cache_store_config.enable_kvcache_store())
+        << "Compressed KPool external storage is not supported yet.";
+  }
+
+  if (kv_cache_store_config.enable_kvcache_store()) {
+    CHECK(kv_cache_config.enable_prefix_cache())
+        << "KV cache Store requires --enable_prefix_cache=true.";
+    CHECK_GT(kv_cache_store_config.host_blocks_factor(), 1.0)
+        << "KV cache Store requires --host_blocks_factor > 1.";
+  }
 
   if (model_config.backend().empty()) {
     LOG(FATAL) << "Model is not supported currently, model type: "

@@ -38,7 +38,7 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(HostBlockCounts, host_num_blocks_by_type) = {};
     PROPERTY(int32_t, block_size) = 0;
     PROPERTY(bool, enable_linear_state) = false;
-    // Total physical linear-state slots [0, N) for the unified slot pool
+    // Total physical state slots [0, N) for the unified GDN/KPool slot pool
     // (= num_linear_state_blocks). Only used when enable_linear_state is true.
     PROPERTY(int32_t, linear_state_num_slots) = 0;
     PROPERTY(bool, enable_prefix_cache) = true;

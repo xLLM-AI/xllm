@@ -300,8 +300,19 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
   const int64_t ssm_checkpoint_stride =
       kv_cache_shape.linear_ssm_checkpoint_stride();
   if (pending_registration_context_.has_value()) {
-    pending_registration_context_->tensor_layout.linear_ssm_checkpoint_stride =
-        ssm_checkpoint_stride;
+    CacheTensorLayoutContext& tensor_layout =
+        pending_registration_context_->tensor_layout;
+    tensor_layout.linear_ssm_checkpoint_stride = ssm_checkpoint_stride;
+    // The shape carries the actual producer layout, including compressed KPool
+    // and draft caches. K/V blocks still cover the original token capacity.
+    tensor_layout.index_block_capacity = 0;
+    if (kv_cache_shape.kpool_layout() ==
+            KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
+        kv_cache_shape.has_index_cache_shape()) {
+      const int64_t token_axis = tensor_layout.head_major_layout ? 2 : 1;
+      tensor_layout.index_block_capacity =
+          kv_cache_shape.index_cache_shape().at(token_axis);
+    }
   }
 
   BufLayout layout;

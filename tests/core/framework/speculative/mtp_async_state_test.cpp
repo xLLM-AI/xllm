@@ -37,6 +37,7 @@ TEST(MtpAsyncStateTest, ClassifiesClosedTargetSpecVerifyPolicy) {
       {"deepseek_v4_dspark",
        TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
       {"mimo", TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL},
+      {"glm5_next", TargetSpecVerifyMode::GENERIC},
       {"qwen3_next", TargetSpecVerifyMode::GENERIC},
       {"qwen3_5_mtp", TargetSpecVerifyMode::GENERIC},
       {"qwen3_5_moe_mtp", TargetSpecVerifyMode::GENERIC},

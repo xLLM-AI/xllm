@@ -28,6 +28,23 @@ limitations under the License.
 
 namespace xllm {
 
+KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
+                                                 const KVCacheShape& shape,
+                                                 bool is_spec_draft) {
+  KVCacheCreateOptions options;
+  const bool kpool_draft = shape.has_kpool_tail_shape() && is_spec_draft;
+  options.enable_linear_attention(has_linear_attention_layers(model_args) &&
+                                  !kpool_draft);
+  options.full_attention_interval(
+      kpool_draft ? 1 : model_args.full_attention_interval());
+  options.layer_types(
+      kpool_draft
+          ? std::vector<std::string>(static_cast<size_t>(model_args.n_layers()),
+                                     "full_attention")
+          : model_args.layer_types());
+  return options;
+}
+
 namespace {
 constexpr int32_t kNzAlignment = 16;
 
@@ -71,6 +88,9 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
     return;
   }
 
+  kpool_layout_ = model_args.index_kpool_compress()
+                      ? kv_cache_cap.kpool_layout()
+                      : KPoolCacheLayout::PACKED;
   const bool enable_lighting_indexer = model_args.index_n_heads() > 0;
   const bool enable_linear_attention = has_linear_attention_layers(model_args);
   // A model may be BOTH linear-attention (KDA layers need conv/ssm caches)
@@ -90,6 +110,16 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
 
   if (enable_lighting_indexer) {
     init_index_cache_shape(kv_cache_cap, model_args);
+    if (model_args.index_kpool_compress() &&
+        kpool_layout_ == KPoolCacheLayout::COMPRESSED_WITH_TAIL) {
+      CHECK_GT(kv_cache_cap.num_linear_state_blocks(), 0);
+      kpool_tail_shape_ =
+          std::vector<int64_t>{kv_cache_cap.num_linear_state_blocks(),
+                               2,
+                               std::max<int64_t>(model_args.index_kpool(),
+                                                 kv_cache_cap.kpool_tail_len()),
+                               model_args.index_head_dim()};
+    }
   }
 
   if (enable_linear_attention) {
@@ -128,6 +158,14 @@ const std::vector<int64_t>& KVCacheShape::index_cache_scale_shape() const {
     return empty_shape();
   }
   return *index_cache_scale_shape_;
+}
+
+const std::vector<int64_t>& KVCacheShape::kpool_tail_shape() const {
+  return kpool_tail_shape_.has_value() ? *kpool_tail_shape_ : empty_shape();
+}
+
+bool KVCacheShape::has_kpool_tail_shape() const {
+  return kpool_tail_shape_.has_value();
 }
 
 const std::vector<int64_t>& KVCacheShape::conv_cache_shape() const {
@@ -200,6 +238,10 @@ void KVCacheShape::print_shapes() const {
     LOG(INFO) << "Initializing indexer cache with shape: ["
               << index_cache_shape() << "]";
   }
+  if (has_kpool_tail_shape()) {
+    LOG(INFO) << "Initializing KPool tail with shape: [" << kpool_tail_shape()
+              << "]";
+  }
   if (has_index_cache_scale_shape()) {
     LOG(INFO) << "Initializing indexer cache scale with shape: ["
               << index_cache_scale_shape() << "]";
@@ -236,6 +278,11 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
   CHECK(proto_shape != nullptr) << "proto_shape must not be nullptr.";
   proto_shape->Clear();
   proto_shape->set_grouped_cache_layout(has_grouped_cache_layout());
+  proto_shape->set_kpool_layout(static_cast<int32_t>(kpool_layout_));
+  if (has_kpool_tail_shape()) {
+    add_shape_to_proto(kpool_tail_shape(),
+                       proto_shape->mutable_kpool_tail_shape());
+  }
   add_shape_to_proto(key_cache_shape(), proto_shape->mutable_key_cache_shape());
   if (has_value_cache_shape()) {
     add_shape_to_proto(value_cache_shape(),
@@ -259,6 +306,14 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
 
 KVCacheShape KVCacheShape::from_proto(const proto::KVCacheShape& proto_shape) {
   KVCacheShape kv_cache_shape;
+  CHECK(proto_shape.kpool_layout() == 0 || proto_shape.kpool_layout() == 1);
+  kv_cache_shape.kpool_layout_ =
+      static_cast<KPoolCacheLayout>(proto_shape.kpool_layout());
+  if (proto_shape.kpool_tail_shape_size() > 0) {
+    CHECK_EQ(proto_shape.kpool_tail_shape_size(), 4);
+    kv_cache_shape.kpool_tail_shape_ =
+        repeated_field_to_vector(proto_shape.kpool_tail_shape());
+  }
   if (proto_shape.grouped_cache_layout()) {
     kv_cache_shape.shape_kind_ = ShapeKind::GROUPED_POOL;
   }
@@ -322,6 +377,10 @@ void KVCacheShape::init_value_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                           const ModelArgs& model_args,
                                           int64_t world_size) {
   if (model_args.enable_mla()) {
+    if (model_args.qk_rope_head_dim() == 0) {
+      value_cache_shape_.reset();
+      return;
+    }
 #if defined(USE_NPU)
     if (use_npu_nz_kv_cache_layout(model_args.model_type())) {
       value_cache_shape_ = std::vector<int64_t>{
@@ -364,6 +423,17 @@ void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
   if (Platform::supports_dsa_indexer_cache_sharding() &&
       util::kv_split_size_effective() > 1) {
     index_block_count *= util::kv_split_size_effective();
+  }
+  if (kpool_layout_ == KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
+      model_args.index_kpool_compress()) {
+    CHECK_EQ(kv_cache_cap.block_size() % model_args.index_kpool(), 0)
+        << "KPool cache block_size must be divisible by index_kpool.";
+    index_cache_shape_ = std::vector<int64_t>{
+        index_block_count,
+        kv_cache_cap.block_size() / model_args.index_kpool(),
+        1,
+        model_args.index_head_dim()};
+    return;
   }
   // GLM-next kPool packs [k, gate, valid] = index_head_dim*2+1 per token into
   // the index cache (its Python select_topk reads historical gate/valid from
@@ -493,9 +563,20 @@ KVCacheShape build_speculative_draft_kv_cache_shape(
   CHECK(!has_linear_attention_layers(draft_model_args) ||
         draft_capacity.num_linear_state_blocks() > 0)
       << "Linear drafts require an explicit linear-state capacity.";
+  CHECK(!draft_model_args.index_kpool_compress() ||
+        target_kv_cache_shape.kpool_layout() !=
+            KPoolCacheLayout::COMPRESSED_WITH_TAIL ||
+        target_kv_cache_shape.has_kpool_tail_shape())
+      << "Compressed KPool drafts require a target KPool tail shape.";
   draft_capacity.n_blocks(target_kv_cache_shape.key_cache_shape()[0])
       .block_size(block_size)
       .enable_mla_kv_cache_quant(draft_mla_packed_c8);
+  draft_capacity.kpool_layout(target_kv_cache_shape.kpool_layout());
+  if (target_kv_cache_shape.has_kpool_tail_shape()) {
+    draft_capacity
+        .num_linear_state_blocks(target_kv_cache_shape.kpool_tail_shape()[0])
+        .kpool_tail_len(target_kv_cache_shape.kpool_tail_shape()[2]);
+  }
   return KVCacheShape(draft_capacity, draft_model_args, draft_world_size);
 }
 

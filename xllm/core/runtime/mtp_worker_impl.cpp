@@ -1370,7 +1370,10 @@ void MTPWorkerImpl<TargetInput>::prepare_prefill_inputs(
   // The Qwen draft is a pure full-attention model; without this cleanup the
   // target's recurrent slot metadata makes MTP prefill enter a stateful path
   // it has neither a validity mask nor a recurrent cache for.
-  input_params.clear_linear_attention_state();
+  // Full-attention KPool drafts still own per-request compression tails.
+  if (!draft_impl_->has_request_state_cache()) {
+    input_params.clear_linear_attention_state();
+  }
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;
@@ -3044,6 +3047,12 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     }
   }
 
+  if (impl_->has_request_state_cache()) {
+    input_params.attention.host.kpool_query_lens =
+        std::vector<int32_t>(num_sequences, num_val_tokens);
+    input_params.is_spec_verify = true;
+  }
+
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "validate kv slots/tokens mismatch";
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
@@ -3452,6 +3461,12 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     }
   }
 
+  if (impl_->has_request_state_cache()) {
+    input_params.attention.host.kpool_query_lens =
+        std::vector<int32_t>(per_seq_val_tokens);
+    input_params.is_spec_verify = true;
+  }
+
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "validate kv slots/tokens mismatch";
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
@@ -3709,6 +3724,17 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     add_row(state.token_id, /*position_offset=*/0, state.embedding);
   }
 
+  if (draft_impl_->has_request_state_cache()) {
+    auto& spans = input_params.attention.host.kpool_query_lens;
+    spans.clear();
+    spans.reserve(num_sequences);
+    int32_t begin = 0;
+    for (const int32_t selected : selected_row_idx) {
+      spans.emplace_back(selected + 1 - begin);
+      begin = selected + 1;
+    }
+  }
+
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())
       << "draft extend slots/positions mismatch";
   CHECK_EQ(expanded_embeddings.size(), buf.out_positions.size())
@@ -3822,6 +3848,17 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
   auto& input_params = draft_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
   const int32_t num_sequences = input_params.meta.num_sequences;
+  if (draft_impl_->has_request_state_cache()) {
+    input_params.attention.host.kpool_query_lens.assign(num_sequences, 1);
+    input_params.is_spec_verify = false;
+    // The first draft already restored its request slot. Subsequent drafts
+    // append to that live state instead of replaying a prefix restore.
+    for (auto& op : input_params.linear_state_cache_ops) {
+      op.reset_requested = false;
+      op.restore_requested = false;
+      op.restore_src_slot_id = -1;
+    }
+  }
   const int32_t logical_block_size = this->logical_block_size();
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);

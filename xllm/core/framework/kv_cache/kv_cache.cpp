@@ -35,6 +35,7 @@ limitations under the License.
 
 #include "framework/kv_cache/deepseek_v4_kv_cache_impl.h"
 #include "framework/kv_cache/indexed_kv_cache_impl.h"
+#include "framework/kv_cache/kpool_kv_cache_impl.h"
 #include "framework/kv_cache/linear_attention_kv_cache_impl.h"
 #include "framework/kv_cache/quantized_kv_cache_impl.h"
 #include "framework/xtensor/xtensor_allocator.h"
@@ -92,6 +93,9 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
   }
 
   if (enable_indexer_cache) {
+    if (kv_cache_shape.has_kpool_tail_shape()) {
+      return std::make_unique<KPoolKVCacheImpl>(kv_cache_shape, create_options);
+    }
     return std::make_unique<IndexedKVCacheImpl>(kv_cache_shape, create_options);
   }
 
@@ -169,8 +173,13 @@ KVCache::KVCache() : impl_(std::make_unique<KVCacheImpl>()) {}
 KVCache::KVCache(const KVCacheTensors& tensors)
     : impl_(std::make_unique<KVCacheImpl>(tensors)) {}
 
-KVCache::KVCache(const IndexedKVCacheTensors& tensors)
-    : impl_(std::make_unique<IndexedKVCacheImpl>(tensors)) {}
+KVCache::KVCache(const IndexedKVCacheTensors& tensors) {
+  if (tensors.kpool_tail.defined()) {
+    impl_ = std::make_unique<KPoolKVCacheImpl>(tensors);
+  } else {
+    impl_ = std::make_unique<IndexedKVCacheImpl>(tensors);
+  }
+}
 
 KVCache::KVCache(const LinearAttentionKVCacheTensors& tensors)
     : impl_(std::make_unique<LinearAttentionKVCacheImpl>(tensors)) {}
@@ -203,6 +212,10 @@ torch::Tensor KVCache::get_v_cache() const { return impl_->get_v_cache(); }
 
 torch::Tensor KVCache::get_kpool_tail() const {
   return impl_->get_kpool_tail();
+}
+
+bool KVCache::has_request_state() const {
+  return get_ssm_cache().defined() || get_kpool_tail().defined();
 }
 
 torch::Tensor KVCache::get_index_cache() const {
@@ -287,6 +300,9 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
                         const KVCacheCreateOptions& create_options) {
   CHECK(kv_caches.empty()) << "KV caches are already initialized.";
 
+  CHECK(!kv_cache_shape.has_kpool_tail_shape() ||
+        create_options.layer_cache_owned().empty())
+      << "Compressed KPool requires owned layer caches.";
   const int64_t num_layers = create_options.num_layers();
   kv_caches.reserve(num_layers);
   const std::vector<bool>& layer_cache_owned =

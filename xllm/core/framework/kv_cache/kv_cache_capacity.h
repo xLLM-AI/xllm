@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 
 #include "common/macros.h"
+#include "framework/kv_cache/cache_layout_types.h"
 
 namespace xllm {
 
@@ -27,6 +28,10 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, cache_size_in_bytes) = 0;
   PROPERTY(int64_t, block_size) = 0;
   PROPERTY(int64_t, slot_size) = 0;
+
+  PROPERTY(KPoolCacheLayout, kpool_layout) = default_kpool_layout();
+  PROPERTY(int64_t, kpool_tail_len) = 0;
+  PROPERTY(int64_t, kpool_tail_slot_size) = 0;
 
   // for index cache
   PROPERTY(int64_t, index_slot_size) = 0;

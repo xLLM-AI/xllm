@@ -96,6 +96,8 @@ class WorkerImpl {
 
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
+  bool has_request_state_cache() const;
+
   // allocate kv cache. blocking call
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
 
@@ -393,7 +395,6 @@ class WorkerImpl {
   // caches. Overlap callers must use compute_stream_ after the preceding
   // forward.
   void try_restore_linear_state_slots(const ModelInputParams& params);
-  bool owns_recurrent_cache() const;
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
   void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);

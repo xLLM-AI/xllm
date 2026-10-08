@@ -916,7 +916,8 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   // batch row. GDN models always hold a dedicated LINEAR slot, so read it
   // directly; non-linear models emit -1 and return early below.
   const bool has_linear_attention =
-      args_ && has_linear_attention_layers(*args_);
+      args_ && (has_linear_attention_layers(*args_) ||
+                sequence->has_linear_state_slot());
   int32_t linear_state_id = sequence->get_linear_state_slot_id();
   state.linear_state_ids.emplace_back(linear_state_id);
   if (!has_linear_attention) {

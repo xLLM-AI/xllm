@@ -213,7 +213,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const LlmForwardInput& input) {
   // The worker thread orders checkpoint restores after the preceding chunk's
   // writes on compute_stream_, rather than preparing them on prepare_stream_.
-  if (has_linear_attention_layers(context_.get_model_args())) {
+  if (has_request_state_cache()) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
     try_restore_linear_state_slots(ModelInputParams(input.input_params));
   }

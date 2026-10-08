@@ -33,9 +33,10 @@ cc_library(
     kv_cache
   HDRS
     cache_layout_builder.h
-    logical_cache_layout.h
+    cache_layout_types.h
     deepseek_v4_kv_cache_impl.h
     indexed_kv_cache_impl.h
+    kpool_kv_cache_impl.h
     kv_cache.h
     kv_cache_impl.h
     kv_cache_shape.h
@@ -50,6 +51,7 @@ cc_library(
     cache_layout_builder.cpp
     deepseek_v4_kv_cache_impl.cpp
     indexed_kv_cache_impl.cpp
+    kpool_kv_cache_impl.cpp
     kv_cache.cpp
     kv_cache_impl.cpp
     kv_cache_shape.cpp

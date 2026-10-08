@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace xllm {
 
-class IndexedKVCacheImpl final : public KVCacheImpl {
+class IndexedKVCacheImpl : public KVCacheImpl {
  public:
   explicit IndexedKVCacheImpl(const IndexedKVCacheTensors& tensors);
   IndexedKVCacheImpl(const KVCacheShape& kv_cache_shape,
@@ -42,6 +42,10 @@ class IndexedKVCacheImpl final : public KVCacheImpl {
 
   void swap_blocks(torch::Tensor& src_tensor,
                    torch::Tensor& dst_tensor) override;
+
+ protected:
+  IndexedKVCacheImpl(const KVCacheShape& kv_cache_shape,
+                     const IndexedKVCacheTensors& tensors);
 
  private:
   torch::Tensor index_cache_;

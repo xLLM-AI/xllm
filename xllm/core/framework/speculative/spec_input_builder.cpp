@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 #include "framework/model/model_input_params.h"
 #include "framework/sampling/sampling_params.h"

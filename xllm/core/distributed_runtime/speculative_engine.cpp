@@ -237,14 +237,21 @@ int64_t SpeculativeEngineBase<TargetEngine>::calculate_kv_cache(
   const int64_t block_size = target_kv_cache_cap.block_size();
   CHECK_GT(block_size, 0) << "kv cache block size must be greater than 0";
 
+  if (target_kv_cache_cap.kpool_tail_slot_size() > 0 &&
+      draft_kv_cache_cap.kpool_tail_slot_size() > 0) {
+    return estimate_shared_kpool_blocks(
+        target_kv_cache_cap, draft_kv_cache_cap, draft_engine_->model_args());
+  }
+
   const int64_t cache_size_in_bytes =
       std::min(target_kv_cache_cap.cache_size_in_bytes(),
                draft_kv_cache_cap.cache_size_in_bytes());
   const int64_t linear_cache_size_in_bytes =
-      target_kv_cache_cap.linear_cache_size_in_bytes();
+      target_kv_cache_cap.linear_cache_size_in_bytes() +
+      draft_kv_cache_cap.linear_cache_size_in_bytes();
   CHECK_GT(cache_size_in_bytes, linear_cache_size_in_bytes)
       << "no memory left for speculative full-attention kv cache after "
-         "reserving target linear state cache, cache_size: "
+         "reserving target and draft state caches, cache_size: "
       << cache_size_in_bytes
       << ", linear_cache_size: " << linear_cache_size_in_bytes;
 

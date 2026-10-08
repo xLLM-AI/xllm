@@ -53,6 +53,8 @@ message KVCacheShape {
   repeated int64 index_cache_scale_shape = 6;
   // Capability metadata used by workers to validate transfer/backend support.
   bool grouped_cache_layout = 7;
+  int32 kpool_layout = 8;
+  repeated int64 kpool_tail_shape = 9;
 }
 
 message AllocateKVCacheRequest {

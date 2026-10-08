@@ -362,5 +362,30 @@ TEST(LinearStateRestoreTest, EmptySsmCheckpointLayoutFailsClosed) {
       "ssm cache must contain checkpoint rows");
 }
 
+TEST(LinearStateRestoreTest, KPoolTailFollowsCheckpointForkAndSlotReset) {
+  LinearStateTestCache cache = make_cache();
+  IndexedKVCacheTensors tensors;
+  tensors.kpool_tail = torch::arange(4 * 2 * 16 * 8, torch::kFloat32)
+                           .reshape({4, 2, 16, 8})
+                           .to(torch::kBFloat16);
+  const torch::Tensor checkpoint = tensors.kpool_tail[1].clone();
+  cache.kv_caches.emplace_back(tensors);
+  LinearStateCacheOp restore;
+  restore.linear_state_id = 2;
+  restore.restore_requested = true;
+  restore.restore_src_slot_id = 1;
+  std::vector<int64_t> validity_mask = {0};
+  restore_linear_state_slots(cache.kv_caches, {restore}, validity_mask);
+  EXPECT_TRUE(torch::equal(tensors.kpool_tail[2], checkpoint));
+  tensors.kpool_tail[2].fill_(-1);
+  EXPECT_TRUE(torch::equal(tensors.kpool_tail[1], checkpoint));
+  LinearStateCacheOp reset;
+  reset.linear_state_id = 2;
+  reset.reset_requested = true;
+  restore_linear_state_slots(cache.kv_caches, {reset}, validity_mask);
+  EXPECT_EQ(tensors.kpool_tail[2].count_nonzero().item<int64_t>(), 0);
+  EXPECT_TRUE(torch::equal(tensors.kpool_tail[1], checkpoint));
+}
+
 }  // namespace
 }  // namespace xllm

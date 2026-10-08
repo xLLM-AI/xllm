@@ -64,16 +64,12 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
     auto results = folly::collectAll(futures).get();
     context.worker_memory.reserve(results.size());
     for (size_t i = 0; i < results.size(); ++i) {
-      if (!results[i].hasValue()) {
-        LOG(ERROR) << "Failed to estimate kv cache capacity for worker: " << i;
-        continue;
-      }
+      CHECK(results[i].hasValue())
+          << "Failed to estimate KV cache capacity for worker: " << i;
       const auto& [available_memory, total_memory] = results[i].value();
       context.worker_memory.emplace_back(
           KVCacheMemorySnapshot{available_memory, total_memory});
     }
-    CHECK(!context.worker_memory.empty())
-        << "Failed to estimate KV cache capacity for all workers";
   }
 
   KVCacheCapacity capacity =

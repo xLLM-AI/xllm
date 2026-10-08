@@ -150,6 +150,8 @@ std::vector<KVCacheTensor> KVCacheImpl::get_cache_tensors() const {
     add_tensor(
         KVCacheTensorRole::INDEX_SCALE, index_scale.value(), BlockType::KV);
   }
+  add_tensor(
+      KVCacheTensorRole::KPOOL_TAIL, get_kpool_tail(), BlockType::LINEAR);
   add_tensor(KVCacheTensorRole::CONV, get_conv_cache(), BlockType::LINEAR);
   add_tensor(KVCacheTensorRole::SSM, get_ssm_cache(), BlockType::LINEAR);
   const auto key_scale = get_k_cache_scale();
