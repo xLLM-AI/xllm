@@ -85,6 +85,10 @@ enum DecoderLayerTensorId : int {
 
   IN_HIDDEN_NORM_WEIGHT = 50,  // weight
   IN_HIDDEN_NORM_BIAS = 51,    // bias
+
+  // Eagle3.1 QK norm weights (present only in qk-norm draft checkpoints).
+  IN_Q_NORM_WEIGHT = 52,
+  IN_K_NORM_WEIGHT = 53,
 };
 static std::vector<std::pair<int, std::string>> WEIGHT_MAPPING = {
     {IN_NORM_WEIGHT, "input_layernorm.weight"},
@@ -97,6 +101,11 @@ static std::vector<std::pair<int, std::string>> WEIGHT_MAPPING = {
     {IN_MLP_W2_WEIGHT, "mlp.gate_proj.weight"},
     {IN_MLP_W1_WEIGHT, "mlp.up_proj.weight"},
     {IN_MLP_CPROJ_WEIGHT, "mlp.down_proj.weight"}};
+
+// Extra entries for Eagle3.1 drafts whose layers carry QK norm weights.
+static std::vector<std::pair<int, std::string>> QK_NORM_WEIGHT_MAPPING = {
+    {IN_Q_NORM_WEIGHT, "self_attn.q_norm.weight"},
+    {IN_K_NORM_WEIGHT, "self_attn.k_norm.weight"}};
 
 static std::vector<std::pair<int, std::string>> WEIGHT_MAPPING_W8A8 = {
     {IN_NORM_WEIGHT, "input_layernorm.weight"},

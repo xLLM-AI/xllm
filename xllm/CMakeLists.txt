@@ -93,6 +93,7 @@ else()
       :config
       :xllm_server
       :master
+      :kv_cache_store_config_validation
       :util
       absl::strings
       Boost::serialization

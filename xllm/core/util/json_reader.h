@@ -20,6 +20,7 @@ limitations under the License.
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace xllm {
@@ -50,7 +51,7 @@ class JsonReader {
   T value_or(const std::vector<std::string>& keys, T2 default_value) const {
     for (const auto& key : keys) {
       if (auto data = value<T>(key)) {
-        return data.value();
+        return std::move_if_noexcept(data.value());
       }
     }
     // may introduce implicit conversion from T2 to T
@@ -60,7 +61,7 @@ class JsonReader {
   template <typename T, typename T2>
   T value_or(const std::string& key, T2 default_value) const {
     if (auto data = value<T>(key)) {
-      return data.value();
+      return std::move_if_noexcept(data.value());
     }
     // may introduce implicit conversion from T2 to T
     return default_value;
@@ -104,6 +105,11 @@ class JsonReader {
   }
 
   nlohmann::json data() const { return data_; }
+
+  // Mutable access to the parsed document, for in-place rewrites that avoid a
+  // dump()/parse_text() round-trip. The reader keeps no derived state, so
+  // resolve()/value() see mutations immediately.
+  nlohmann::json& mutable_data() { return data_; }
 
  private:
   nlohmann::json data_;

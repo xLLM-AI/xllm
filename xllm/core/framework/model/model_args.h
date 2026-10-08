@@ -490,6 +490,19 @@ struct ModelArgs {
   // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
 
+  // Eagle3.1 draft variants (speculators-format checkpoints). The per-head QK
+  // RMSNorm switch reuses the shared use_qk_norm field above.
+  // Apply a single RMSNorm over the concatenated target aux hidden states
+  // before the fc projection.
+  PROPERTY(bool, norm_before_fc) = false;
+  // Use the hidden_norm output as the attention residual base.
+  PROPERTY(bool, norm_before_residual) = false;
+  // Feed post-final-norm hidden states back across draft steps.
+  PROPERTY(bool, norm_output) = false;
+  // Apply a per-chunk RMSNorm to each aux hidden state before the fc
+  // projection (mutually exclusive with norm_before_fc).
+  PROPERTY(bool, fc_norm) = false;
+
   // VAE related args
   PROPERTY(int64_t, in_channels) = -1;
   PROPERTY(int64_t, out_channels) = -1;

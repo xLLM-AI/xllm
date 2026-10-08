@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "runtime/llm_worker_impl.h"
 
@@ -112,8 +113,7 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 
 template <typename TargetInput>
 int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
-  const int64_t target_hidden = context_.get_model_args().hidden_size();
-  return 3 * target_hidden;
+  return AuxHiddenCapture::aux_hidden_dim(context_.get_model_args());
 }
 
 template <typename TargetInput>
@@ -152,12 +152,11 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
   if (!embedding.defined()) {
     CHECK_NE(phase, "prefill")
         << "Eagle3 prefill requires verifier aux hidden-state embeddings. "
-        << "Check that target model captures three aux hidden-state layers.";
+        << "Check that the target model captures its aux hidden-state layers.";
     return;
   }
 
-  const int64_t expected_hidden_size =
-      3 * context_.get_model_args().hidden_size();
+  const int64_t expected_hidden_size = get_embedding_placeholder_size();
   const int64_t draft_hidden_size =
       draft_impl_ == nullptr ? 0 : draft_impl_->hidden_size();
   CHECK_EQ(embedding.dim(), 2)
@@ -169,7 +168,7 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
     CHECK(embedding.size(-1) == expected_hidden_size ||
           embedding.size(-1) == draft_hidden_size)
         << "Eagle3 " << phase
-        << " embedding hidden size mismatch, expected 3 * target hidden size "
+        << " embedding hidden size mismatch, expected target aux hidden size "
         << expected_hidden_size << " or draft hidden size " << draft_hidden_size
         << ", got " << embedding.size(-1);
     return;
@@ -177,9 +176,9 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
 
   CHECK_EQ(embedding.size(-1), expected_hidden_size)
       << "Eagle3 " << phase
-      << " embedding hidden size mismatch, expected 3 * target hidden size "
+      << " embedding hidden size mismatch, expected target aux hidden size "
       << expected_hidden_size << ", got " << embedding.size(-1)
-      << ". Check that target model captures three aux hidden-state layers "
+      << ". Check that the target model captures its aux hidden-state layers "
          "for Eagle3.";
 }
 

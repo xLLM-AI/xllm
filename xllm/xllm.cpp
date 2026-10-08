@@ -49,6 +49,7 @@ namespace py = pybind11;
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
+#include "core/framework/config/kv_cache_store_config_validation.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -57,7 +58,6 @@ namespace py = pybind11;
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/model/model_args.h"
 #include "core/framework/xtensor/global_xtensor.h"
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
@@ -270,42 +270,8 @@ void validate_config(const std::string& model_type) {
   SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
   ExecutionConfig& execution_config = ExecutionConfig::get_instance();
 
-  ModelArgs model_args;
-  if (!model_type.empty()) {
-    JsonReader model_config_json;
-    const std::filesystem::path model_config_path =
-        std::filesystem::path(model_config.model()) / "config.json";
-    CHECK(model_config_json.parse(model_config_path.string()))
-        << "Failed to parse model config: " << model_config_path;
-
-    std::string resolved_model_type;
-    std::string error_message;
-    CHECK(resolve_model_registration_name(
-        model_type, &resolved_model_type, &error_message))
-        << error_message;
-    const auto model_args_loader =
-        ModelRegistry::get_model_args_loader(resolved_model_type);
-    CHECK(model_args_loader != nullptr)
-        << "Failed to find model args loader for model type "
-        << resolved_model_type;
-    CHECK(model_args_loader(model_config_json, &model_args))
-        << "Failed to load model args for model type " << resolved_model_type;
-  }
-
-  if (model_args.index_kpool_compress()) {
-    CHECK_LE(kv_cache_store_config.host_blocks_factor(), 1.0)
-        << "Compressed KPool host offload requires request-state scheduler "
-           "support.";
-    CHECK(!kv_cache_store_config.enable_kvcache_store())
-        << "Compressed KPool external storage is not supported yet.";
-  }
-
-  if (kv_cache_store_config.enable_kvcache_store()) {
-    CHECK(kv_cache_config.enable_prefix_cache())
-        << "KV cache Store requires --enable_prefix_cache=true.";
-    CHECK_GT(kv_cache_store_config.host_blocks_factor(), 1.0)
-        << "KV cache Store requires --host_blocks_factor > 1.";
-  }
+  validate_kv_cache_store_config(
+      model_type, model_config, kv_cache_config, kv_cache_store_config);
 
   if (model_config.backend().empty()) {
     LOG(FATAL) << "Model is not supported currently, model type: "

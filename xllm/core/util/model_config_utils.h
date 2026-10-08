@@ -28,9 +28,13 @@ class JsonReader;
 
 namespace util {
 
-// Returns zero-based post-layer capture indices from a block draft checkpoint.
+std::vector<int32_t> boundary_to_post_layer_ids(
+    std::vector<int32_t> boundary_ids);
+
+// Returns zero-based post-layer capture indices from a draft checkpoint.
 std::vector<int32_t> read_capture_layer_ids(
-    const std::string& model_weights_path);
+    const std::string& model_weights_path,
+    bool required = true);
 
 std::string get_model_type(const JsonReader& reader,
                            const std::filesystem::path& model_path,

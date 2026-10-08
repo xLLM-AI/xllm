@@ -35,7 +35,7 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
-  // EAGLE-3 draft input_embedding is 3 * target_hidden_size
+  // EAGLE-3 draft input_embedding is num_aux_layers * target_hidden_size
   int64_t get_embedding_placeholder_size() const override;
 
   // Get hot_token_id for draft-to-target token mapping

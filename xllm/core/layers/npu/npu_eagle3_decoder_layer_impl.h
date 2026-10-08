@@ -44,6 +44,10 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+// Base weight count of the Eagle3 decoder layer. Eagle3.1 drafts with QK norm
+// carry two additional per-head norm weights (see eagle3_loader_constants.h).
+inline constexpr uint64_t kBaseWeightCountPerLayer = 52;
+
 class NpuEagle3DecoderLayerImpl : public BaseLayer {
  public:
   explicit NpuEagle3DecoderLayerImpl(const ModelContext& context);
@@ -111,6 +115,8 @@ class NpuEagle3DecoderLayerImpl : public BaseLayer {
 
   int device_id_;
   int32_t layer_id_;
+
+  uint64_t weight_count_ = kBaseWeightCountPerLayer;
 
   std::vector<std::shared_ptr<at::Tensor>> prefill_tensor_storage_;
   std::vector<std::shared_ptr<at::Tensor>> decode_tensor_storage_;

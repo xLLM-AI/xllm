@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <vector>
 
+#include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/util/json_reader.h"

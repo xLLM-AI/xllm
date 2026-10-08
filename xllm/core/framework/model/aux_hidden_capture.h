@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
 #include <torch/types.h>
 
 #include <algorithm>
@@ -35,6 +34,31 @@ namespace xllm {
 // signal.
 class AuxHiddenCapture final {
  public:
+  // EAGLE-3 low/mid/high default capture layers (0-based post-layer indices),
+  // used when the target config omits the capture list.
+  static std::vector<int32_t> legacy_default_capture_layer_ids(
+      int32_t num_layers) {
+    return {1, num_layers / 2 - 1, num_layers - 4};
+  }
+
+  // Number of aux hidden-state chunks the target produces and the draft
+  // consumes. An omitted capture list falls back to the EAGLE-3
+  // low/mid/high default (three layers), matching the speculators None->3
+  // fallback and legacy_default_capture_layer_ids.
+  static int64_t num_aux_layers(const ModelArgs& model_args) {
+    const auto& capture_ids = model_args.layers_to_capture();
+    return capture_ids.empty()
+               ? static_cast<int64_t>(
+                     legacy_default_capture_layer_ids(model_args.num_layers())
+                         .size())
+               : static_cast<int64_t>(capture_ids.size());
+  }
+  // Width of the concatenated aux hidden-state tensor the target produces and
+  // the draft consumes.
+  static int64_t aux_hidden_dim(const ModelArgs& model_args) {
+    return num_aux_layers(model_args) * model_args.hidden_size();
+  }
+
   AuxHiddenCapture(const ModelArgs& model_args,
                    const torch::TensorOptions& options,
                    int64_t max_tokens_per_batch) {
@@ -42,10 +66,8 @@ class AuxHiddenCapture final {
       return;
     }
     layers_to_capture_ = model_args.layers_to_capture();
-    const int64_t num_captured =
-        static_cast<int64_t>(layers_to_capture_.size());
-    const int64_t aux_dim = model_args.hidden_size() * num_captured;
-    buffer_ = torch::empty({max_tokens_per_batch, aux_dim}, options);
+    buffer_ = torch::empty({max_tokens_per_batch, aux_hidden_dim(model_args)},
+                           options);
   }
 
   // Pass residual when the caller keeps `h` and residual as separate tensors

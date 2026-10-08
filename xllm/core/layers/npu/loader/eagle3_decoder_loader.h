@@ -25,9 +25,12 @@ namespace layer {
 
 class Eagle3DecoderLoader : public BaseLoader {
  public:
+  // use_qk_norm: load the extra q/k norm weights required by Eagle3.1
+  // drafts. weight_count must then cover the two additional tensors.
   Eagle3DecoderLoader(uint64_t weight_count,
                       const ModelContext& context,
-                      LoadMode mode = LoadMode::kEager);
+                      LoadMode mode = LoadMode::kEager,
+                      bool use_qk_norm = false);
 
   void load_state_dict(const StateDict& state_dict) override;
   void verify_loaded_weights() const override;
@@ -35,7 +38,10 @@ class Eagle3DecoderLoader : public BaseLoader {
  protected:
   void merge_host_at_weights() override;
   TransposeType check_transpose(at::Tensor& tensor);
+
+ private:
   int device_id_;
+  bool use_qk_norm_ = false;
 };
 
 }  // namespace layer

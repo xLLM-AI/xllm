@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context/model_context.h"
@@ -107,6 +108,10 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
     mrope_section_ = model_args.rope_scaling_mrope_section();
+    norm_before_fc_ = model_args.norm_before_fc();
+    norm_output_ = model_args.norm_output();
+    CHECK(!(model_args.fc_norm() && norm_before_fc_))
+        << "Eagle3 fc_norm and norm_before_fc are mutually exclusive";
 
     dp_size_ = parallel_args.dp_size();
     dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
@@ -133,6 +138,25 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
 
     // Final norm
     norm_ = register_module("norm", layer::NpuRMSNorm(context));
+
+    // Eagle3.1 norm_before_fc: single RMSNorm over the concatenated target aux
+    // hidden states (3 * target_hidden_size) applied before the fc projection.
+    if (norm_before_fc_) {
+      input_norm_ = register_module("input_norm", layer::NpuRMSNorm(context));
+    }
+
+    // Eagle3.1 fc_norm variant: one RMSNorm per aux hidden state chunk before
+    // the fc projection (mutually exclusive with norm_before_fc_). EAGLE-3
+    // drafts consume three target aux hidden states (low/mid/high).
+    if (model_args.fc_norm()) {
+      const int64_t num_aux_layers =
+          AuxHiddenCapture::num_aux_layers(model_args);
+      fc_norm_.reserve(static_cast<size_t>(num_aux_layers));
+      for (int64_t i = 0; i < num_aux_layers; ++i) {
+        fc_norm_.emplace_back(register_module("fc_norm_" + std::to_string(i),
+                                              layer::NpuRMSNorm(context)));
+      }
+    }
 
     // fc layer for fusion: 3 * target_hidden_size -> hidden_size
     fc_ = register_module("fc", layer::NpuColumnParallelLinear(context));
@@ -177,6 +201,30 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     // hidden_states_extra shape: [B*L, 3*target_hidden_size] or [B*L,
     // hidden_size]
     if (hidden_states_extra.size(-1) != hidden_states.size(-1)) {
+      // Eagle3.1 norm_before_fc: normalize the concatenated aux hidden states
+      // before the fc projection.
+      if (norm_before_fc_) {
+        // NpuRMSNorm is in-place and hidden_states_extra aliases the caller's
+        // input_embedding; materialize a private copy before normalizing.
+        torch::Tensor normed =
+            hidden_states_extra.clone(torch::MemoryFormat::Contiguous);
+        hidden_states_extra = input_norm_(normed, 0);
+      } else if (!fc_norm_.empty()) {
+        // Eagle3.1 fc_norm: per-chunk RMSNorm over each aux hidden state.
+        const int64_t num_aux_layers = static_cast<int64_t>(fc_norm_.size());
+        CHECK_EQ(hidden_states_extra.size(-1) % num_aux_layers, 0)
+            << "Eagle3 fc_norm input dim " << hidden_states_extra.size(-1)
+            << " is not divisible by " << num_aux_layers << " aux states";
+        std::vector<torch::Tensor> chunks =
+            hidden_states_extra.chunk(num_aux_layers, /*dim=*/-1);
+        for (size_t i = 0; i < chunks.size(); ++i) {
+          // A single-row chunk can already be contiguous. Clone explicitly
+          // so the in-place norm never writes the caller's embedding storage.
+          chunks[i] = chunks[i].clone(torch::MemoryFormat::Contiguous);
+          chunks[i] = fc_norm_[i](chunks[i], 0);
+        }
+        hidden_states_extra = torch::cat(chunks, /*dim=*/-1);
+      }
       hidden_states_extra = fc_(hidden_states_extra, 0);
     }
 
@@ -265,12 +313,17 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
              input_params_new,
              event,
              event_flag);
-    auto aux_hidden_states = hidden_states.clone();
+    // aux_hidden_states feeds the next step: post-norm when norm_output_ is
+    // set, else the pre-norm value cloned before the in-place norm_ overwrites
+    // it.
+    torch::Tensor aux_hidden_states;
+    if (!norm_output_) {
+      aux_hidden_states = hidden_states.clone();
+    }
     hidden_states = norm_(hidden_states, 0);
-
-    // For draft decode, we capture the hidden state before norm as
-    // aux_hidden_states This is used for speculative decoding to pass hidden
-    // states to next step
+    if (norm_output_) {
+      aux_hidden_states = hidden_states.clone();
+    }
     return ModelOutput(hidden_states,
                        /*residual=*/torch::Tensor(),
                        /*aux_hidden_states=*/aux_hidden_states);
@@ -280,23 +333,53 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     // fc: (hidden_size, 3*target_hidden_size) fusion layer
     fc_->load_state_dict(state_dict.get_dict_with_prefix("fc."));
 
-    decoder_->load_state_dict(state_dict.get_dict_with_prefix("midlayer."));
+    // Legacy checkpoints name the single draft layer "midlayer.", while
+    // speculators-format (Eagle3.1) checkpoints name it "layers.0.".
+    auto layer_dict = state_dict.get_dict_with_prefix("midlayer.");
+    if (layer_dict.size() == 0) {
+      layer_dict = state_dict.get_dict_with_prefix("layers.0.");
+    }
+    decoder_->load_state_dict(layer_dict);
 
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
+
+    if (norm_before_fc_) {
+      input_norm_->load_state_dict(
+          state_dict.get_dict_with_prefix("input_norm."));
+    }
+    for (size_t i = 0; i < fc_norm_.size(); ++i) {
+      fc_norm_[i]->load_state_dict(state_dict.get_dict_with_prefix(
+          "fc_norm." + std::to_string(i) + "."));
+    }
   }
 
   virtual void verify_loaded_weights(const std::string& prefix) const {
     fc_->verify_loaded_weights(prefix + "fc.");
     decoder_->verify_loaded_weights(prefix + "midlayer.");
     norm_->verify_loaded_weights(prefix + "norm.");
+    if (norm_before_fc_) {
+      input_norm_->verify_loaded_weights(prefix + "input_norm.");
+    }
+    for (size_t i = 0; i < fc_norm_.size(); ++i) {
+      fc_norm_[i]->verify_loaded_weights(prefix + "fc_norm." +
+                                         std::to_string(i) + ".");
+    }
   }
 
   virtual void merge_loaded_weights() {
     fc_->merge_loaded_weights();
     decoder_->merge_loaded_weights();
     norm_->merge_loaded_weights();
+    if (norm_before_fc_) {
+      input_norm_->merge_loaded_weights();
+    }
+    for (auto& fc_norm : fc_norm_) {
+      fc_norm->merge_loaded_weights();
+    }
   }
 
+  // Eagle3.1 drafts ship their own target-vocab embedding in the checkpoint;
+  // expose it so the draft does not share the target's embedding table.
   virtual layer::NpuWordEmbedding get_npu_word_embedding() {
     return embed_tokens_;
   }
@@ -329,6 +412,14 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
   // EAGLE-3 specific modules
   layer::NpuColumnParallelLinear fc_{nullptr};  // fusion layer
   layer::NpuRMSNorm norm_{nullptr};             // final norm
+  layer::NpuRMSNorm input_norm_{nullptr};  // Eagle3.1 norm_before_fc (3*hidden)
+  std::vector<layer::NpuRMSNorm> fc_norm_;  // Eagle3.1 fc_norm per-chunk norms
+
+  // Eagle3.1 variant flags (from the draft checkpoint config). The fc_norm
+  // variant is tracked by fc_norm_ being non-empty (see forward/load); the aux
+  // chunk count is fc_norm_.size().
+  bool norm_before_fc_ = false;
+  bool norm_output_ = false;
 
   // Decoder
   QWen3Eagle3DecoderLayer decoder_{nullptr};
@@ -404,6 +495,13 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
       if (sub_dict.size() == 0) {
         sub_dict = state_dict->get_dict_with_prefix(prefix);
       }
+      // Speculators-format (Eagle3.1) drafts ship their own target-vocab
+      // embedding; prefer it over the shared target embedding.
+      auto embed_dict = state_dict->get_dict_with_prefix("embed_tokens.");
+      if (embed_dict.size() > 0) {
+        model_->get_npu_word_embedding()->load_state_dict(embed_dict);
+        owns_word_embedding_ = true;
+      }
       model_->load_state_dict(sub_dict);
 
       if (!load_lm_head_from_target_) {
@@ -419,6 +517,9 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
 
     // verify
     model_->verify_loaded_weights(prefix);
+    if (owns_word_embedding_) {
+      model_->get_npu_word_embedding()->verify_loaded_weights("embed_tokens.");
+    }
     if (!load_lm_head_from_target_) {
       if (tie_word_embeddings_) {
         npu_lm_head_->verify_loaded_weights(prefix + "embed_tokens.");
@@ -428,6 +529,9 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
     }
     load_optional_quarot_rotation(quarot_model_path);
     model_->merge_loaded_weights();
+    if (owns_word_embedding_) {
+      model_->get_npu_word_embedding()->merge_loaded_weights();
+    }
     if (!load_lm_head_from_target_) {
       npu_lm_head_->merge_loaded_weights();
     }
@@ -453,11 +557,17 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
 
   virtual void set_npu_word_embedding(
       layer::NpuWordEmbedding& npu_word_embedding) {
+    if (owns_word_embedding_) {
+      return;  // draft checkpoint provides its own target-vocab embedding
+    }
     model_->set_npu_word_embedding(npu_word_embedding);
   }
 
   virtual void set_restored_npu_word_embedding(
       layer::NpuWordEmbedding& npu_word_embedding) {
+    if (owns_word_embedding_) {
+      return;  // draft checkpoint provides its own target-vocab embedding
+    }
     model_->set_restored_npu_word_embedding(npu_word_embedding);
   }
 
@@ -501,6 +611,7 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
   torch::Dtype dtype_;
   bool tie_word_embeddings_{false};
   bool load_lm_head_from_target_{false};
+  bool owns_word_embedding_{false};
   layer::NpuLmHead npu_lm_head_{nullptr};
 };
 TORCH_MODULE(QWen3Eagle3ForCausalLM);
@@ -545,6 +656,22 @@ REGISTER_MODEL_ARGS(qwen3_eagle3, [&] {
 
   LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
+
+  // Eagle3.1 (speculators-format) draft variants, read straight from the
+  // checkpoint's own config keys. normalize_speculators_config only sets
+  // model_type and infers use_qk_norm.
+  LOAD_ARG_OR(use_qk_norm, "use_qk_norm", false);
+  LOAD_ARG_OR(norm_before_fc, "norm_before_fc", false);
+  LOAD_ARG_OR(norm_before_residual, "norm_before_residual", false);
+  LOAD_ARG_OR(norm_output, "norm_output", false);
+  LOAD_ARG_OR(fc_norm, "fc_norm", false);
+
+  // Only the element count is consumed (fc_norm_.size() in the ctor), so the
+  // speculators boundary indices are stored as-is; the 0-based post-layer shift
+  // is applied on the target capture side.
+  LOAD_ARG_OR(layers_to_capture,
+              "eagle_aux_hidden_state_layer_ids",
+              std::vector<int32_t>{});
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();

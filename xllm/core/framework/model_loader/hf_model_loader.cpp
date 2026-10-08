@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/common/version_singleton.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/state_dict/rec_vocab_dict.h"
 #include "core/framework/state_dict/safetensors/safetensors.h"
 #include "core/framework/tokenizer/fast_tokenizer.h"
@@ -58,46 +59,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-
-// Speculators-format draft configs (e.g. GLM-5.2 DSpark) nest the backbone
-// under transformer_layer_config; lift it (and flatten rope_parameters) so the
-// flat qwen3 loader sees the backbone fields at the top level.
-void lift_speculators_config(nlohmann::json& config) {
-  if (!config.contains("speculators_model_type") ||
-      !config.contains("transformer_layer_config")) {
-    return;
-  }
-  const auto& tlc = config["transformer_layer_config"];
-  if (tlc.is_object()) {
-    for (const auto& [k, v] : tlc.items()) {
-      if (!v.is_null() && !config.contains(k)) {
-        config[k] = v;
-      }
-    }
-  }
-  if (config.contains("rope_parameters") &&
-      config["rope_parameters"].is_object()) {
-    const auto& rope = config["rope_parameters"];
-    if (rope.contains("rope_theta") && !config.contains("rope_theta")) {
-      config["rope_theta"] = rope["rope_theta"];
-    }
-    if (rope.contains("factor") && !config.contains("rope_scaling")) {
-      config["rope_scaling"] = rope;
-    }
-  }
-}
-
-JsonReader normalize_config_torch_dtype(const JsonReader& reader) {
-  auto config = reader.data();
-  if (!config.contains("torch_dtype") && config.contains("dtype")) {
-    config["torch_dtype"] = config["dtype"];
-  }
-  lift_speculators_config(config);
-
-  JsonReader normalized_reader;
-  normalized_reader.parse_text(config.dump());
-  return normalized_reader;
-}
 
 bool is_compressed_tensors_fp8_scheme(const nlohmann::json& config) {
   auto type_it = config.find("type");
@@ -123,7 +84,6 @@ bool is_compressed_tensors_int8_scheme(const nlohmann::json& config,
 }
 
 const nlohmann::json* get_compressed_tensors_config(
-    const nlohmann::json& data,
     const JsonReader& reader,
     const std::string& config_key) {
   const auto quant_method =
@@ -133,13 +93,13 @@ const nlohmann::json* get_compressed_tensors_config(
     return nullptr;
   }
 
-  auto quant_config_it = data.find(config_key);
-  if (quant_config_it == data.end() || !quant_config_it->is_object()) {
+  const nlohmann::json* quant_config = reader.resolve(config_key);
+  if (quant_config == nullptr || !quant_config->is_object()) {
     LOG(ERROR) << config_key << " must be an object for "
                << "compressed-tensors quantization.";
     return nullptr;
   }
-  return &(*quant_config_it);
+  return quant_config;
 }
 
 bool load_ct_w8a8_dynamic_config(const nlohmann::json& config,
@@ -461,20 +421,17 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
     return true;
   }
 
-  const bool only_expert_per_group =
+  quant_args.only_expert_per_group() =
       reader.value_or<bool>("quantization_config.only_expert_per_group", false);
-  quant_args.only_expert_per_group() = only_expert_per_group;
 
   if (auto v = reader.value<std::string>("quantization_config.quant_method")) {
     quant_args.quant_method() = v.value();
   }
   // Checkpoint format parsing is independent of backend execution support.
-  const nlohmann::json data = reader.data();
   const nlohmann::json* ct_config =
-      get_compressed_tensors_config(data, reader, "quantization_config");
+      get_compressed_tensors_config(reader, "quantization_config");
   if (ct_config == nullptr) {
-    ct_config =
-        get_compressed_tensors_config(data, reader, "compression_config");
+    ct_config = get_compressed_tensors_config(reader, "compression_config");
   }
   if (ct_config != nullptr) {
     return load_ct_quant_config(*ct_config, quant_args);
@@ -509,11 +466,9 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
     // TODO(liangzhiwei20): check fp8 quantization format
     quant_args.fmt() = v.value();
   }
-  if (reader.contains("quantization_config.weight_block_size")) {
-    const auto& data = reader.data();
-    quant_args.weight_block_size() =
-        data["quantization_config"]["weight_block_size"]
-            .get<std::vector<int64_t>>();
+  if (const auto* block_size =
+          reader.resolve("quantization_config.weight_block_size")) {
+    quant_args.weight_block_size() = block_size->get<std::vector<int64_t>>();
   }
 
   return validate_smoothquant_mixed_w4a8(reader, quant_args);
@@ -848,40 +803,8 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
 }
 
 bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
-  JsonReader reader;
-  const std::string args_file_path = model_weights_path + "/config.json";
-  if (!reader.parse(args_file_path)) {
-    LOG(ERROR) << "Failed to parse model args file: " << args_file_path;
-    return false;
-  }
-
-  const std::string model_type =
-      util::get_model_type(reader,
-                           std::filesystem::path(model_weights_path),
-                           ModelConfig::get_instance().backend());
-
-  std::string resolved_model_type;
-  std::string error_message;
-  if (!resolve_model_registration_name(
-          model_type, &resolved_model_type, &error_message)) {
-    LOG(ERROR) << error_message;
-    return false;
-  }
-
-  auto model_args_loader =
-      ModelRegistry::get_model_args_loader(resolved_model_type);
-  if (model_args_loader == nullptr) {
-    LOG(ERROR) << "Failed to find model args loader for model type "
-               << resolved_model_type;
-    return false;
-  }
-  const JsonReader config_reader = normalize_config_torch_dtype(reader);
-  model_args_loader(config_reader, &args_);
-  args_.enable_mla(
-      util::should_enable_mla(std::filesystem::path(model_weights_path),
-                              ModelConfig::get_instance().backend()));
-
-  return true;
+  return load_hf_model_args(
+      model_weights_path, ModelConfig::get_instance().backend(), &args_);
 }
 
 bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
@@ -892,21 +815,19 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
     return false;
   }
 
-  const JsonReader config_reader = normalize_config_torch_dtype(reader);
+  normalize_config_torch_dtype(reader);
 
-  if (!load_quant_cfg(config_reader, quant_args_)) {
+  if (!load_quant_cfg(reader, quant_args_)) {
     return false;
   }
 
   // load quantization args for npu if exists
-  const bool has_config_quantize = config_reader.contains("quantize");
+  const bool has_config_quantize = reader.contains("quantize");
   if (has_config_quantize) {
-    quant_args_.quantize_type() =
-        config_reader.value_or<std::string>("quantize", "");
+    quant_args_.quantize_type() = reader.value_or<std::string>("quantize", "");
   }
-  if (config_reader.contains("torch_dtype")) {
-    quant_args_.torch_dtype() =
-        config_reader.value_or<std::string>("torch_dtype", "");
+  if (reader.contains("torch_dtype")) {
+    quant_args_.torch_dtype() = reader.value_or<std::string>("torch_dtype", "");
   }
   if (auto v = reader.value<std::string>("quantization_config.version")) {
     quant_args_.quant_version() = v.value();

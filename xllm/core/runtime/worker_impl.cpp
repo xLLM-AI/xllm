@@ -88,6 +88,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/layerwise_split_layout.h"
 #include "framework/kv_cache/linear_state_restore.h"
+#include "framework/model/aux_hidden_capture.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/sampling/sampler.h"
@@ -2393,9 +2394,21 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (options_.enable_speculative_decode() && !options_.is_draft_engine() &&
       SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
       args.layers_to_capture().empty()) {
-    const int32_t num_layers = static_cast<int32_t>(args.n_layers());
-    // EAGLE-3 low/mid/high default, as 0-based post-layer output indices.
-    args.layers_to_capture({1, num_layers / 2 - 1, num_layers - 4});
+    std::vector<int32_t> capture_layer_ids;
+    if (speculative_algorithm == "Eagle3" &&
+        options_.draft_model_path().has_value()) {
+      // Eagle3.1 drafts pin their aux capture layers in the draft config;
+      // legacy eagle3 configs omit them and fall back to the default below.
+      capture_layer_ids =
+          util::read_capture_layer_ids(*options_.draft_model_path(),
+                                       /*required=*/false);
+    }
+    if (capture_layer_ids.empty()) {
+      const int32_t num_layers = static_cast<int32_t>(args.n_layers());
+      capture_layer_ids =
+          AuxHiddenCapture::legacy_default_capture_layer_ids(num_layers);
+    }
+    args.layers_to_capture(std::move(capture_layer_ids));
   }
 #else
   if (options_.enable_speculative_decode()) {

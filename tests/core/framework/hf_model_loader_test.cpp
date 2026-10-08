@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/kv_cache/kv_cache_shape.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/rec_causal_lm.h"
 #include "core/framework/speculative/mtp_utils.h"
 #include "core/platform/device.h"
@@ -88,6 +89,25 @@ class DummyRecCausalLM final : public RecCausalLM {
  private:
   torch::TensorOptions options_;
 };
+
+nlohmann::json speculators_eagle3_config() {
+  return nlohmann::json{
+      {"model_type", "speculators"},
+      {"speculators_model_type", "eagle3"},
+      {"draft_vocab_size", 32000},
+      {"dtype", "bfloat16"},
+      {"eagle_aux_hidden_state_layer_ids", nlohmann::json{2, 32, 61}},
+      {"transformer_layer_config",
+       nlohmann::json{
+           {"model_type", "qwen3"},
+           {"hidden_size", 5120},
+           {"num_attention_heads", 64},
+           {"num_key_value_heads", 8},
+           {"head_dim", 128},
+           {"vocab_size", 151936},
+       }},
+  };
+}
 
 }  // namespace
 
@@ -912,6 +932,126 @@ TEST(HFModelLoaderTest, RejectUnsupportedCompressedTensorsScheme) {
     QuantArgs args;
     EXPECT_FALSE(load_quant_cfg(reader, args));
   }
+}
+
+// A null discriminator must behave like a missing key (JsonReader contract),
+// not throw nlohmann type_error.302 from json::value().
+TEST(HFModelLoaderTest, NormalizeSpeculatorsNullDiscriminatorIsNoOp) {
+  auto config = nlohmann::json{{"model_type", "qwen3"},
+                               {"speculators_model_type", nullptr}};
+  normalize_speculators_config(&config);
+  EXPECT_EQ(config.at("model_type"), "qwen3");
+  EXPECT_FALSE(config.contains("use_qk_norm"));
+}
+
+TEST(HFModelLoaderTest, NormalizeSpeculatorsMissingDiscriminatorIsNoOp) {
+  auto config = speculators_eagle3_config();
+  config.erase("speculators_model_type");
+  normalize_speculators_config(&config);
+  EXPECT_EQ(config.at("model_type"), "speculators");
+  EXPECT_FALSE(config.contains("use_qk_norm"));
+}
+
+TEST(HFModelLoaderTest, NormalizeSpeculatorsNonEagle3IsNoOp) {
+  auto config = speculators_eagle3_config();
+  config["speculators_model_type"] = "dspark";
+  normalize_speculators_config(&config);
+  EXPECT_EQ(config.at("model_type"), "speculators");
+  EXPECT_FALSE(config.contains("use_qk_norm"));
+}
+
+TEST(HFModelLoaderTest, NormalizeSpeculatorsRewritesConfig) {
+  auto config = speculators_eagle3_config();
+  normalize_speculators_config(&config);
+
+  EXPECT_EQ(config.at("model_type"), "qwen3_eagle3");
+  // QK norm is inferred from the Qwen3 layer template.
+  EXPECT_EQ(config.at("use_qk_norm"), true);
+
+  // An explicit use_qk_norm wins over the layer-template inference.
+  auto explicit_flag = speculators_eagle3_config();
+  explicit_flag["transformer_layer_config"]["use_qk_norm"] = false;
+  normalize_speculators_config(&explicit_flag);
+  EXPECT_EQ(explicit_flag.at("use_qk_norm"), false);
+
+  // A llama-style layer template never carries QK norm.
+  auto llama = speculators_eagle3_config();
+  llama["transformer_layer_config"]["model_type"] = "llama";
+  normalize_speculators_config(&llama);
+  EXPECT_EQ(llama.at("use_qk_norm"), false);
+
+  // An eagle3 config without transformer_layer_config is fatal.
+  auto broken = nlohmann::json{{"model_type", "speculators"},
+                               {"speculators_model_type", "eagle3"}};
+  EXPECT_DEATH(normalize_speculators_config(&broken), "transformer_layer");
+}
+
+#if defined(USE_NPU)
+TEST(HFModelLoaderTest, Qwen3Eagle3LayersToCaptureFromAuxList) {
+  auto loader = ModelRegistry::get_model_args_loader("qwen3_eagle3");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "qwen3_eagle3",
+      "eagle_aux_hidden_state_layer_ids": [2, 32, 61]
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  // The draft sizes num_aux_layers off this list's element count; only the
+  // count is used, so the speculators boundary indices are stored as-is.
+  EXPECT_EQ(args.layers_to_capture(), (std::vector<int32_t>{2, 32, 61}));
+}
+
+TEST(HFModelLoaderTest, Qwen3Eagle3LayersToCaptureDefaultsEmpty) {
+  auto loader = ModelRegistry::get_model_args_loader("qwen3_eagle3");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "qwen3_eagle3"
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  // Absent list leaves layers_to_capture empty; the draft falls back to the
+  // EAGLE-3 low/mid/high default count via num_aux_layers.
+  EXPECT_TRUE(args.layers_to_capture().empty());
+}
+#endif
+
+TEST(HFModelLoaderTest, BoundaryToPostLayerIdsShiftsAndRejectsEmbedding) {
+  // Speculators boundary indices (0=embedding, v=output of layer v-1) shift
+  // to 0-based post-layer capture indices.
+  EXPECT_EQ(util::boundary_to_post_layer_ids({2, 32, 61}),
+            (std::vector<int32_t>{1, 31, 60}));
+  EXPECT_TRUE(util::boundary_to_post_layer_ids({}).empty());
+
+  // Boundary 0 (the embedding output) is legal in speculators but xLLM only
+  // captures decoder-layer outputs; it must be rejected loudly instead of
+  // shifted to -1, where it would never match and silently feed the draft
+  // uninitialized capture slots.
+  EXPECT_DEATH(util::boundary_to_post_layer_ids({0, 32, 61}),
+               "Embedding capture");
+}
+
+TEST(HFModelLoaderTest, NumAuxLayersFallsBackToThreeWhenListOmitted) {
+  ModelArgs args;
+  // Omitted capture list: EAGLE-3 low/mid/high default count, matching the
+  // speculators None->3 fallback (fc_norm drafts without an aux list must
+  // still build three per-chunk norms).
+  EXPECT_EQ(AuxHiddenCapture::num_aux_layers(args), 3);
+
+  args.layers_to_capture({2, 32, 61});
+  EXPECT_EQ(AuxHiddenCapture::num_aux_layers(args), 3);
+
+  args.layers_to_capture({1, 2, 3, 4});
+  EXPECT_EQ(AuxHiddenCapture::num_aux_layers(args), 4);
 }
 
 }  // namespace xllm

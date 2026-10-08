@@ -19,11 +19,24 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <filesystem>
+#include <utility>
 
 #include "core/util/dit_model_discovery.h"
 #include "core/util/json_reader.h"
 
 namespace xllm::util {
+
+std::vector<int32_t> boundary_to_post_layer_ids(
+    std::vector<int32_t> boundary_ids) {
+  for (int32_t& boundary_id : boundary_ids) {
+    CHECK_GE(boundary_id, 1)
+        << "Embedding capture (eagle_aux_hidden_state_layer_ids boundary "
+           "index 0) is not supported; use a decoder-layer boundary index "
+           "in [1, num_layers]";
+    --boundary_id;
+  }
+  return boundary_ids;
+}
 
 std::string get_model_type(const JsonReader& reader,
                            const std::filesystem::path& model_path,
@@ -97,11 +110,14 @@ std::string get_model_type(const std::filesystem::path& model_path,
 }
 
 std::vector<int32_t> read_capture_layer_ids(
-    const std::string& model_weights_path) {
+    const std::string& model_weights_path,
+    bool required) {
   JsonReader reader;
   const std::string config_path = model_weights_path + "/config.json";
-  CHECK(reader.parse(config_path))
-      << "Failed to parse block-diffusion draft config: " << config_path;
+  if (!reader.parse(config_path)) {
+    CHECK(!required) << "Failed to parse draft config: " << config_path;
+    return {};
+  }
 
   // Legacy xLLM/vLLM draft configs already use 0-based post-layer output
   // indices, which match ModelArgs::layers_to_capture directly.
@@ -115,14 +131,14 @@ std::vector<int32_t> read_capture_layer_ids(
     return capture_layer_ids;
   }
 
-  // Speculators uses hidden-state boundary indices (0=embedding, N=after
-  // decoder N-1); shift to xLLM's 0-based post-layer capture contract.
+  // Speculators-format keys are hidden-state boundary indices (0=embedding
+  // output, v=output of layer v-1); shift them to the post-layer contract.
   capture_layer_ids = reader.value_or<std::vector<int32_t>>(
-      "aux_hidden_state_layer_ids", std::vector<int32_t>{});
-  for (int32_t& layer_id : capture_layer_ids) {
-    --layer_id;
-  }
-  CHECK(!capture_layer_ids.empty())
+      std::vector<std::string>{"aux_hidden_state_layer_ids",
+                               "eagle_aux_hidden_state_layer_ids"},
+      std::vector<int32_t>{});
+  capture_layer_ids = boundary_to_post_layer_ids(std::move(capture_layer_ids));
+  CHECK(!required || !capture_layer_ids.empty())
       << "Block-diffusion draft config requires dspark_target_layer_ids, "
          "target_layer_ids, dflash_config.target_layer_ids, or "
          "aux_hidden_state_layer_ids: "

@@ -55,6 +55,19 @@ cc_library(
 # from the base config target, which the models target already depends on.
 cc_library(
   NAME
+    kv_cache_store_config_validation
+  HDRS
+    kv_cache_store_config_validation.h
+  SRCS
+    kv_cache_store_config_validation.cpp
+  DEPS
+    :config
+    :model_loader
+    glog::glog
+)
+
+cc_library(
+  NAME
     parallel_config_validation
   HDRS
     parallel_config_validation.h
