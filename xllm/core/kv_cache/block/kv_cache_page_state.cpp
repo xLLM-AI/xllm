@@ -25,9 +25,9 @@ namespace xllm {
 KVCachePageState::KVCachePageState(VirtualPage page) : page_(page) {}
 
 void KVCachePageState::require_init() const {
-  CHECK(start_block_.has_value()) << "VirtPage not initialised";
-  CHECK(end_block_.has_value()) << "VirtPage not initialised";
-  CHECK(num_kv_blocks_.has_value()) << "VirtPage not initialised";
+  CHECK(start_block_.has_value()) << "VirtualPage not initialized";
+  CHECK(end_block_.has_value()) << "VirtualPage not initialized";
+  CHECK(num_kv_blocks_.has_value()) << "VirtualPage not initialized";
 }
 
 void KVCachePageState::init(size_t block_mem_size) {
@@ -47,7 +47,8 @@ void KVCachePageState::init(size_t block_mem_size) {
 std::vector<int64_t> KVCachePageState::alloc(size_t num_blocks) {
   require_init();
   if (full()) {
-    throw std::runtime_error("VirtPage " + std::to_string(page_.page_index) +
+    throw std::runtime_error("VirtualPage " +
+                             std::to_string(page_.page_index) +
                              " is already full");
   }
 
