@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_client.h"
 
@@ -47,6 +48,10 @@ class DistributedWorkerManager final {
   const std::vector<std::shared_ptr<WorkerClient>>& get_worker_clients() const {
     return worker_clients_;
   }
+
+  // Broadcasts the predictor to every worker in global rank order.
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor);
 
   // Appends the transport endpoints in global worker rank order.
   void get_cache_info(std::vector<uint64_t>& cluster_ids,

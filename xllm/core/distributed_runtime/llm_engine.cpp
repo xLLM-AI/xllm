@@ -509,20 +509,6 @@ bool LLMEngine::allocate_kv_cache(
   return true;
 }
 
-bool LLMEngine::set_speculative_validate_time_predictor(
-    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
-  bool success = true;
-  for (size_t i = 0; i < worker_clients_.size(); ++i) {
-    if (!worker_clients_[i]->set_speculative_validate_time_predictor(
-            predictor)) {
-      LOG(ERROR) << "Failed to set speculative validate predictor for worker "
-                 << i;
-      success = false;
-    }
-  }
-  return success;
-}
-
 ForwardOutput LLMEngine::step(BatchGroup& batch) {
   if (worker_clients_.empty()) {
     // empty worker, return

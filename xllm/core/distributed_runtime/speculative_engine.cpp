@@ -222,13 +222,6 @@ bool SpeculativeEngineBase<TargetEngine>::should_skip_external_draft_kv_cache()
                                     model_args_);
 }
 
-template <typename TargetEngine>
-bool SpeculativeEngineBase<TargetEngine>::
-    set_speculative_validate_time_predictor(
-        const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
-  return engine_->set_speculative_validate_time_predictor(predictor);
-}
-
 // TODO: support dp batches later
 template <typename TargetEngine>
 ForwardOutput SpeculativeEngineBase<TargetEngine>::step(BatchGroup& batches) {

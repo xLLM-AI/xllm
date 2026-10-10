@@ -44,6 +44,15 @@ class RecordingWorkerClient final : public WorkerClient {
     return folly::makeSemiFuture(activation_memory_);
   }
 
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
+      override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++predictor_calls_;
+    predictor_ = predictor;
+    return predictor_result_;
+  }
+
   void get_cache_info(uint64_t& cluster_id,
                       std::string& addr,
                       uint16_t& port) override {
@@ -93,6 +102,9 @@ class RecordingWorkerClient final : public WorkerClient {
   int32_t activation_memory_calls_ = 0;
   int64_t activation_memory_ = 0;
   std::function<folly::SemiFuture<int64_t>()> activation_memory_query_;
+  int32_t predictor_calls_ = 0;
+  SpeculativeProfileRegistry::ValidateTimePredictor predictor_;
+  bool predictor_result_ = true;
   int32_t cache_info_calls_ = 0;
   uint64_t cache_cluster_id_ = 0;
   std::string cache_addr_;
@@ -188,6 +200,36 @@ TEST_F(DistributedWorkerManagerTest, PreservesCacheEndpointsWithoutWorkers) {
   EXPECT_EQ(ids, (std::vector<uint64_t>{99}));
   EXPECT_EQ(addresses, (std::vector<std::string>{"existing"}));
   EXPECT_EQ(source_ports, (std::vector<uint16_t>{999}));
+}
+
+TEST_F(DistributedWorkerManagerTest, BroadcastsPredictorToAllWorkers) {
+  auto first = std::make_shared<RecordingWorkerClient>();
+  auto second = std::make_shared<RecordingWorkerClient>();
+  auto manager = make_manager({first, second});
+  const SpeculativeProfileRegistry::ValidateTimePredictor predictor{
+      .intercept_ms = 1.5, .query_token_ms = 2.5, .query_prefix_ms = 3.5};
+
+  EXPECT_TRUE(manager->set_speculative_validate_time_predictor(predictor));
+
+  for (const auto& client : {first, second}) {
+    EXPECT_EQ(client->predictor_calls_, 1);
+    EXPECT_EQ(client->predictor_.intercept_ms, predictor.intercept_ms);
+    EXPECT_EQ(client->predictor_.query_token_ms, predictor.query_token_ms);
+    EXPECT_EQ(client->predictor_.query_prefix_ms, predictor.query_prefix_ms);
+  }
+}
+
+TEST_F(DistributedWorkerManagerTest, ReportsPredictorBroadcastFailures) {
+  auto first = std::make_shared<RecordingWorkerClient>();
+  auto second = std::make_shared<RecordingWorkerClient>();
+  second->predictor_result_ = false;
+  auto manager = make_manager({first, second});
+  const SpeculativeProfileRegistry::ValidateTimePredictor predictor{
+      .intercept_ms = 4.5, .query_token_ms = 5.5, .query_prefix_ms = 6.5};
+
+  EXPECT_FALSE(manager->set_speculative_validate_time_predictor(predictor));
+  EXPECT_EQ(first->predictor_calls_, 1);
+  EXPECT_EQ(second->predictor_calls_, 1);
 }
 
 TEST_F(DistributedWorkerManagerTest, QueriesAllWorkersBeforeWaiting) {

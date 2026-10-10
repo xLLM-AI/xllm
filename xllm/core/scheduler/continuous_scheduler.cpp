@@ -109,7 +109,8 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       new ProfileManager(resource_engine_,
                          profile_manager_options,
                          step_callback_,
-                         result_callback_));
+                         result_callback_,
+                         distributed_worker_manager_));
 
   // Construct the scheduling policy from the resolved BatchMode.
   policy_ = create_scheduler_policy(batch_mode_, options_);
