@@ -31,6 +31,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
+#include "core/distributed_runtime/memory/worker_page_budget.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/kv_cache_page_state.h"
 #include "core/virtual_memory/mapped_memory_region.h"  // For offset_t.
@@ -182,7 +183,7 @@ class PageAllocator {
 
   // Get free pages for each worker (for etcd registration)
   // Returns a vector where index i = num_total_phy_pages -
-  // worker_pages_used_[i]
+  // worker_page_budget_.free_pages(i)
   std::vector<size_t> get_all_worker_free_pages() const;
 
   // Convert block_id to virt_page_id
@@ -303,15 +304,10 @@ class PageAllocator {
           // ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size())
   bool enable_page_prealloc_ = PAGE_PREALLOC_ENABLED;
 
-  // Physical page tracking (shared across all models)
-  size_t num_total_phy_pages_ = 0;  // Total physical pages per worker
-
-  // Per-worker physical page tracking
-  // Each worker has independent PhysicalPagePool with the same total pages.
-  // worker_pages_used_[i] = total pages used by worker i (weight + KV cache)
-  // This tracks both weight allocation (by model world_size) and
-  // KV cache allocation (by DP group's workers)
-  std::vector<size_t> worker_pages_used_;
+  // Per-worker physical page tracking shared by weight and KV allocations.
+  // PageAllocator owns synchronization; the budget itself is deliberately
+  // lock-free so it can also be reused by other distributed allocators.
+  WorkerPageBudget worker_page_budget_;
   int32_t max_world_size_ =
       0;  // Maximum number of workers (from initial nnodes)
 

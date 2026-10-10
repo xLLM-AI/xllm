@@ -44,18 +44,14 @@ void PageAllocator::init(size_t num_phy_pages,
   enable_page_prealloc_ = enable_page_prealloc;
 
   // Set total physical pages from parameter (same for all workers)
-  num_total_phy_pages_ = num_phy_pages;
-
-  // Initialize per-worker page tracking
-  // All workers start with 0 pages used
-  worker_pages_used_.resize(max_world_size_, 0);
+  worker_page_budget_.reset(num_phy_pages, max_world_size_);
 
   initialized_ = true;
 
   LOG(INFO) << "Init PageAllocator: "
             << "dp_size=" << dp_size_ << ", max_world_size=" << max_world_size_
             << ", page_size=" << page_size_ / (1024 * 1024) << "MB"
-            << ", num_total_phy_pages=" << num_total_phy_pages_
+            << ", num_total_phy_pages=" << worker_page_budget_.total_pages()
             << ", enable_prealloc=" << enable_page_prealloc;
 }
 
@@ -85,7 +81,8 @@ bool PageAllocator::register_model(const std::string& model_id,
   auto& state = model_states_[model_id];
   state.num_layers = num_layers;
   // Calculate virtual pages based on single-layer memory size
-  state.num_total_virt_pages = num_total_phy_pages_ / num_layers / 2;
+  state.num_total_virt_pages =
+      worker_page_budget_.total_pages() / num_layers / 2;
   // Each virt_page needs to map on all K and V XTensors
   state.phy_pages_per_virt_page = 2 * num_layers;
   // Always start with is_sleeping = false to allow KV cache allocation
@@ -197,13 +194,7 @@ bool PageAllocator::sleep_model(const std::string& model_id,
     for (const auto& [dp_rank, virt_page_ids] : pages_to_unmap) {
       size_t pages_released = virt_page_ids.size() * phy_pages_per_virt;
       auto [start_w, end_w] = get_dp_group_worker_range(model_id, dp_rank);
-      for (int32_t w = start_w; w < end_w && w < max_world_size_; ++w) {
-        if (worker_pages_used_[w] >= pages_released) {
-          worker_pages_used_[w] -= pages_released;
-        } else {
-          worker_pages_used_[w] = 0;
-        }
-      }
+      worker_page_budget_.release(start_w, end_w, pages_released);
     }
     ModelState& state = get_model_state(model_id);
     state.kv_cache_mapped = false;
@@ -283,7 +274,7 @@ bool PageAllocator::wakeup_model(const std::string& model_id) {
       if (pages_to_consume_per_worker[w] == 0) {
         continue;
       }
-      size_t worker_free = num_total_phy_pages_ - worker_pages_used_[w];
+      size_t worker_free = worker_page_budget_.free_pages(w);
       if (worker_free < pages_to_consume_per_worker[w]) {
         LOG(ERROR) << "Not enough physical pages for wakeup worker=" << w
                    << ": need " << pages_to_consume_per_worker[w]
@@ -296,7 +287,8 @@ bool PageAllocator::wakeup_model(const std::string& model_id) {
     state.transition = ModelTransition::WAKING;
     for (int32_t w = 0; w < max_world_size_; ++w) {
       if (pages_to_consume_per_worker[w] > 0) {
-        worker_pages_used_[w] += pages_to_consume_per_worker[w];
+        CHECK(worker_page_budget_.try_reserve(
+            w, w + 1, pages_to_consume_per_worker[w]));
       }
     }
     update_memory_usage();
@@ -377,9 +369,9 @@ std::pair<int32_t, int32_t> PageAllocator::get_dp_group_worker_range(
 size_t PageAllocator::get_min_free_pages_in_range(int32_t start_worker,
                                                   int32_t end_worker) const {
   // Note: Caller must hold mtx_
-  size_t min_free = num_total_phy_pages_;
+  size_t min_free = worker_page_budget_.total_pages();
   for (int32_t w = start_worker; w < end_worker && w < max_world_size_; ++w) {
-    size_t worker_free = num_total_phy_pages_ - worker_pages_used_[w];
+    size_t worker_free = worker_page_budget_.free_pages(w);
     min_free = std::min(min_free, worker_free);
   }
   return min_free;
@@ -405,10 +397,7 @@ bool PageAllocator::consume_phy_pages_for_dp(const std::string& model_id,
                  << ": need " << num_phy_pages << ", available " << min_free;
     return false;
   }
-  for (int32_t w = start_w; w < end_w && w < max_world_size_; ++w) {
-    worker_pages_used_[w] += num_phy_pages;
-  }
-  return true;
+  return worker_page_budget_.try_reserve(start_w, end_w, num_phy_pages);
 }
 
 void PageAllocator::release_phy_pages_for_dp(const std::string& model_id,
@@ -416,14 +405,7 @@ void PageAllocator::release_phy_pages_for_dp(const std::string& model_id,
                                              size_t num_phy_pages) {
   // Note: Caller must hold mtx_
   auto [start_w, end_w] = get_dp_group_worker_range(model_id, dp_rank);
-  for (int32_t w = start_w; w < end_w && w < max_world_size_; ++w) {
-    if (worker_pages_used_[w] >= num_phy_pages) {
-      worker_pages_used_[w] -= num_phy_pages;
-    } else {
-      LOG(WARNING) << "Worker " << w << " pages underflow during release";
-      worker_pages_used_[w] = 0;
-    }
-  }
+  worker_page_budget_.release(start_w, end_w, num_phy_pages);
 }
 
 PageAllocator::ModelState& PageAllocator::get_model_state(
@@ -671,9 +653,9 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
 
     // Check if enough pages available for all workers this model uses
     // Find the minimum free pages among target workers
-    size_t min_free_pages = num_total_phy_pages_;
+    size_t min_free_pages = worker_page_budget_.total_pages();
     for (int32_t i = 0; i < model_world_size && i < max_world_size_; ++i) {
-      size_t worker_free = num_total_phy_pages_ - worker_pages_used_[i];
+      size_t worker_free = worker_page_budget_.free_pages(i);
       min_free_pages = std::min(min_free_pages, worker_free);
     }
 
@@ -687,7 +669,7 @@ bool PageAllocator::alloc_weight_pages(const std::string& model_id,
 
     // Update per-worker page usage
     for (int32_t i = 0; i < model_world_size && i < max_world_size_; ++i) {
-      worker_pages_used_[i] += num_pages;
+      CHECK(worker_page_budget_.try_reserve(i, i + 1, num_pages));
     }
 
     state.weight_pages_allocated = num_pages;
@@ -727,14 +709,7 @@ bool PageAllocator::free_weight_pages(const std::string& model_id,
     int32_t model_world_size =
         state.model_world_size > 0 ? state.model_world_size : max_world_size_;
     for (int32_t i = 0; i < model_world_size && i < max_world_size_; ++i) {
-      if (worker_pages_used_[i] >= num_pages) {
-        worker_pages_used_[i] -= num_pages;
-      } else {
-        LOG(WARNING) << "Worker " << i
-                     << " pages underflow: used=" << worker_pages_used_[i]
-                     << ", trying to free=" << num_pages;
-        worker_pages_used_[i] = 0;
-      }
+      worker_page_budget_.release(i, i + 1, num_pages);
     }
 
     update_memory_usage();
@@ -805,18 +780,13 @@ size_t PageAllocator::get_num_free_phy_pages() const {
 }
 
 size_t PageAllocator::get_num_total_phy_pages() const {
-  return num_total_phy_pages_;
+  return worker_page_budget_.total_pages();
 }
 
 std::vector<size_t> PageAllocator::get_all_worker_free_pages() const {
   std::lock_guard<std::mutex> lock(mtx_);
   std::vector<size_t> result;
-  result.reserve(max_world_size_);
-  for (int32_t i = 0; i < max_world_size_; ++i) {
-    size_t free_pages = num_total_phy_pages_ - worker_pages_used_[i];
-    result.push_back(free_pages);
-  }
-  return result;
+  return worker_page_budget_.free_pages_snapshot();
 }
 
 int64_t PageAllocator::get_virt_page_id(int64_t block_id,
@@ -1065,8 +1035,8 @@ void PageAllocator::update_memory_usage() {
 
   // Calculate physical memory usage (based on max used worker)
   size_t max_used = 0;
-  for (int32_t i = 0; i < max_world_size_; ++i) {
-    max_used = std::max(max_used, worker_pages_used_[i]);
+  for (size_t used_pages : worker_page_budget_.used_pages()) {
+    max_used = std::max(max_used, used_pages);
   }
   size_t used_phy_mem = max_used * page_size_;
 

@@ -40,6 +40,7 @@ cc_library(
     :xllm_server
     :xtensor_local
     :kv_cache_page_state
+    :worker_page_budget
 )
 
 cc_library(
