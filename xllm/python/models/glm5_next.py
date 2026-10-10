@@ -387,6 +387,8 @@ class Glm5NextKdaAttention(Attention):
         self.conv_kernel_size = cfg.short_conv_kernel_size
         self.conv_dim = self.qkv_dim * 3  # local conv_dim = 3 * qkv_dim_local
         self.activation = cfg.hidden_act
+        if self.activation not in ("identity", "silu"):
+            raise ValueError(f"Unsupported KDA convolution activation: {self.activation}")
         self.eps = cfg.rms_norm_eps
 
         projection_sizes = tuple(getattr(self, size_attr) for _, size_attr, _ in _KDA_IN_PROJ)
@@ -396,15 +398,8 @@ class Glm5NextKdaAttention(Attention):
         # conv1d: depthwise over the LOCAL conv_dim (groups=conv_dim_local); the
         # loader shards each of q/k/v_conv1d by head then cats so the channel
         # order [q_loc|k_loc|v_loc] matches mixed_qkv. fp32 in transformers.
-        self.conv1d = nn.Conv1d(
-            self.conv_dim,
-            self.conv_dim,
-            kernel_size=self.conv_kernel_size,
-            groups=self.conv_dim,
-            bias=False,
-            padding=self.conv_kernel_size - 1,
-        )
-        self.conv1d.weight = nn.Parameter(self.conv1d.weight.detach().to(torch.float32))
+        self.conv_weight = nn.Parameter(torch.empty(self.conv_dim, 1, self.conv_kernel_size, dtype=torch.float32))
+        self.register_buffer("conv_weight_t", None, persistent=False)
         self.forget_gate = KdaForgetGate(cfg.kda_head_dim, self.num_heads_local, cfg.linear_lower_bound)
         self.g_b_proj = nn.Linear(self.head_dim, self.qkv_dim, bias=False)
         self.register_buffer("_fg_b_weight", None, persistent=False)
@@ -423,6 +418,8 @@ class Glm5NextKdaAttention(Attention):
         )
 
     def process_weights_after_loading(self) -> None:
+        conv_weight = self.conv_weight.squeeze(1).t().to(self.in_proj_qkvbfg_a.weight.dtype).contiguous()
+        self.conv_weight_t = _stable_pack(self.conv_weight_t, conv_weight)
         packed = torch.stack((self.forget_gate.f_b_proj.weight.detach(), self.g_b_proj.weight.detach()))
         self._fg_b_weight = _stable_pack(self._fg_b_weight, packed)
         self.forget_gate.f_b_proj.weight.data = self._fg_b_weight[0]
@@ -464,7 +461,7 @@ class Glm5NextKdaAttention(Attention):
                 "Glm5NextKdaAttention requires an attention backend with execute_linear; run inside the engine."
             )
         core_attn_out = backend.execute_linear(
-            mixed_qkv, beta, self.layer_id, self.conv1d, self.forget_gate, self.activation, raw_gate_proj=g_raw
+            mixed_qkv, beta, self.layer_id, self.conv_weight_t, self.forget_gate, self.activation, raw_gate_proj=g_raw
         )
 
         output = self.o_norm(core_attn_out, gate).reshape(batch_size, seq_len, -1)
@@ -1842,7 +1839,7 @@ class Glm5NextForCausalLM(PyModelBase):
         # The layer projections are created without an explicit dtype (they
         # default to float32 on the target device); move AND cast the whole
         # graph to the target dtype/device so the engine matches the reference
-        # (which runs .to(bf16) over the model). The KDA conv1d is included in
+        # (which runs .to(bf16) over the model). The KDA conv weights are included in
         # this cast — the reference's conv1d is also bf16 after .to(dtype).
         self.to(device=device, dtype=dtype)
 
@@ -1980,7 +1977,7 @@ class Glm5NextForCausalLM(PyModelBase):
         else:
             parts = [L.get_tensor(attn + n + "_conv1d.weight") for n in ("q", "k", "v")]
             conv = torch.cat([L.shard(p, dim=0) for p in parts] if L.tp_size > 1 else parts, dim=0)
-        L.copy_in(attn + "conv1d.weight", conv)
+        L.copy_in(attn + "conv_weight", conv)
         # o_proj: row-parallel QLinear — shard the INPUT dim (dim 1, qkv_dim) so
         # each rank's [hidden, qkv_dim_local] weight consumes its head-subset's
         # partial output; the forward all-reduces the partials.

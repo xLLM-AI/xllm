@@ -204,6 +204,46 @@ def _mega_gdn_decode_fake(
     return torch.empty_like(z)
 
 
+def _causal_conv1d_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    query_start_loc: list[int],
+    activation_mode: int,
+    run_mode: int,
+) -> torch.Tensor:
+    torch._check(input.dim() in (2, 3), lambda: "causal_conv1d input must have rank 2 or 3")
+    torch._check(weight.dim() == 2, lambda: "causal_conv1d weight must have rank 2")
+    torch._check(conv_state.dim() == 3, lambda: "causal_conv1d state must have rank 3")
+    for tensor in (input, weight, conv_state):
+        torch._check(tensor.numel() > 0, lambda: "causal_conv1d tensors must be nonempty")
+        torch._check(tensor.is_contiguous(), lambda: "causal_conv1d tensors must be contiguous")
+    if input.dim() == 3:
+        torch._check(not query_start_loc, lambda: "batched causal_conv1d requires empty query_start_loc")
+        torch._check(input.size(0) == conv_state.size(0), lambda: "causal_conv1d batch sizes must match")
+    else:
+        torch._check(
+            len(query_start_loc) == conv_state.size(0) + 1,
+            lambda: "causal_conv1d query_start_loc must delimit each sequence",
+        )
+        torch._check(query_start_loc[0] == 0, lambda: "causal_conv1d query_start_loc must start at zero")
+        torch._check(
+            query_start_loc[-1] == input.size(0),
+            lambda: "causal_conv1d query_start_loc must end at the token count",
+        )
+    torch._check(input.size(-1) == weight.size(1), lambda: "causal_conv1d input and weight channels must match")
+    torch._check(input.size(-1) == conv_state.size(2), lambda: "causal_conv1d input and state channels must match")
+    torch._check(
+        conv_state.size(1) == weight.size(0) - 1,
+        lambda: "causal_conv1d state width must equal kernel width - 1",
+    )
+    torch._check(activation_mode in (0, 1), lambda: "causal_conv1d activation_mode must be 0 or 1")
+    torch._check(run_mode in (0, 1), lambda: "causal_conv1d run_mode must be 0 or 1")
+    torch._check(input.dtype == weight.dtype, lambda: "causal_conv1d input and weight dtypes must match")
+    torch._check(input.dtype == conv_state.dtype, lambda: "causal_conv1d input and state dtypes must match")
+    return torch.empty_like(input)
+
+
 def _causal_conv1d_qkv_prefill_fake(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1234,6 +1274,7 @@ register_fake("xllm_ops::split_qkv_rmsnorm_mrope", _split_qkv_rmsnorm_mrope_fake
 register_fake("xllm_ops::chunk_gated_delta_rule", _chunk_gated_delta_rule_fake)
 register_fake("xllm_ops::mega_gdn_prefill", _mega_gdn_prefill_fake)
 register_fake("xllm_ops::mega_gdn_decode", _mega_gdn_decode_fake)
+register_fake("xllm_ops::causal_conv1d", _causal_conv1d_fake)
 register_fake("xllm_ops::causal_conv1d_qkv_prefill", _causal_conv1d_qkv_prefill_fake)
 register_fake(
     "xllm_ops::fused_sigmoid_gating_delta_rule_decode",

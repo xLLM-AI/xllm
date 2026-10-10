@@ -28,6 +28,7 @@ from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     PagedAttentionGraphState,
 )
 from xllm.python.kernels_npu import _custom_op, sparse_attention  # noqa: E402
+from xllm.python.model_executor.forward_context import ForwardContext, forward_context  # noqa: E402
 
 
 def test_uses_first_nonempty_key_cache() -> None:
@@ -875,3 +876,300 @@ def test_direct_sparse_attention_matches_output_contract(fake: bool, invalid: st
         else:
             sparse_attention.sparse_flash_attention_lse_out(*args)
     native.assert_not_called()
+
+
+@pytest.mark.usefixtures("causal_conv1d_reference")
+@pytest.mark.parametrize("width", [1, 4])
+@pytest.mark.parametrize("activation", ["identity", "silu"])
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_kda_dense_conv_dispatches_fused_activation(
+    monkeypatch: pytest.MonkeyPatch, width: int, activation: str, is_prefill: bool
+) -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    value = torch.arange(2 * 12 * width, dtype=torch.bfloat16).view(2, 12, width)
+    weight = torch.ones(12, 1, 4, dtype=torch.float32)
+    layer = SimpleNamespace(
+        layer_id=0, activation=activation, conv_weight_t=weight.squeeze(1).t().to(value.dtype).contiguous()
+    )
+    state = torch.zeros(2, 3, 12, dtype=torch.bfloat16)
+    expected_conv = torch.linspace(-4, 4, value.numel()).to(torch.bfloat16).view(2, width, 12)
+
+    def native_conv(
+        inputs: torch.Tensor,
+        weights: torch.Tensor,
+        dense_state: torch.Tensor,
+        query_start_loc: list[int],
+        activation_mode: int,
+        run_mode: int,
+    ) -> torch.Tensor:
+        assert inputs.is_contiguous()
+        assert weights is layer.conv_weight_t
+        torch.testing.assert_close(weights, weight.squeeze(1).t().to(value.dtype))
+        assert dense_state is state
+        assert query_start_loc == []
+        assert activation_mode == (1 if activation == "silu" else 0)
+        assert run_mode == (0 if is_prefill else 1)
+        torch.testing.assert_close(inputs, value.transpose(1, 2))
+        dense_state.fill_(7)
+        return expected_conv.clone()
+
+    monkeypatch.setattr(torch.ops.xllm_ops, "causal_conv1d", native_conv)
+    output = backend._causal_conv1d(value, state, layer.conv_weight_t, activation, is_prefill=is_prefill)
+    torch.testing.assert_close(output, expected_conv.transpose(1, 2), rtol=0, atol=0)
+    assert output.dtype == torch.bfloat16
+    assert torch.all(state == 7)
+
+
+@pytest.mark.parametrize("value_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kernel_width", [2, 4])
+def test_kda_verify_uses_native_conv(
+    causal_conv1d_reference: list[dict],
+    value_dtype: torch.dtype,
+    kernel_width: int,
+) -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    backend._kda_verify_width = 4
+    layer = SimpleNamespace(
+        head_dim=1,
+        num_heads_local=1,
+        qkv_dim=1,
+        conv_dim=3,
+        conv_kernel_size=kernel_width,
+        activation="silu",
+        layer_id=0,
+        conv_weight_t=torch.ones(kernel_width, 3, dtype=value_dtype),
+    )
+    metadata = SimpleNamespace(expanded_decode_metadata=None, kv_seq_lens=torch.tensor([1]))
+
+    def recurrent(query: torch.Tensor, *arguments: object, **options: object) -> torch.Tensor:
+        return query
+
+    output = backend._spec_verify(
+        torch.ones(1, 3, 1, dtype=value_dtype),
+        torch.zeros(1, 1, 1, 1),
+        torch.ones(1, 1, 1),
+        layer.layer_id,
+        layer.conv_weight_t,
+        layer.activation,
+        torch.tensor([0]),
+        metadata,
+        torch.zeros(2, kernel_width - 1, 3, dtype=value_dtype),
+        torch.zeros(2, 1, 1, 1),
+        recurrent,
+    )
+    assert len(causal_conv1d_reference) == 1
+    assert causal_conv1d_reference[0]["activation_mode"] == 1
+    assert causal_conv1d_reference[0]["run_mode"] == 1
+    assert causal_conv1d_reference[0]["weight"].dtype == value_dtype
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.usefixtures("causal_conv1d_reference")
+@pytest.mark.parametrize("width", [1, 2, 4])
+@pytest.mark.parametrize("sequence_count", [1, 4])
+@pytest.mark.parametrize("state_length", [1, 3])
+def test_kda_conv_tails_preserve_each_proposal_state(width: int, sequence_count: int, state_length: int) -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    backend._kda_verify_width = 4
+    capacity = sequence_count * 2 + 1
+    conv_dim = 3
+    token_count = sequence_count * width
+    indices = torch.arange(sequence_count, dtype=torch.int64) * 2 + 1
+    mixed = torch.arange(conv_dim * token_count, dtype=torch.float32).reshape(1, conv_dim, token_count)
+    conv_cache = torch.arange(capacity * state_length * conv_dim, dtype=torch.float32).reshape(
+        capacity, state_length, conv_dim
+    )
+    initial_cache = conv_cache.clone()
+    layer = SimpleNamespace(
+        head_dim=1,
+        num_heads_local=1,
+        qkv_dim=1,
+        conv_dim=conv_dim,
+        conv_kernel_size=state_length + 1,
+        activation="identity",
+        layer_id=0,
+        conv_weight_t=torch.ones(state_length + 1, conv_dim),
+    )
+    metadata = SimpleNamespace(expanded_decode_metadata=None, kv_seq_lens=torch.ones(token_count))
+
+    def recurrent(
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, *args: object, **kwargs: object
+    ) -> torch.Tensor:
+        return value
+
+    backend._spec_verify(
+        mixed,
+        torch.zeros(1, token_count, 1, 1),
+        torch.ones(1, token_count, 1),
+        layer.layer_id,
+        layer.conv_weight_t,
+        layer.activation,
+        indices,
+        metadata,
+        conv_cache,
+        torch.zeros(capacity, 1, 1, 1),
+        recurrent,
+    )
+    expected = torch.zeros_like(backend._kda_state[0]["combined_conv"])
+    values = mixed.reshape(conv_dim, sequence_count, width).permute(1, 2, 0)
+    expected_cache = initial_cache.clone()
+    for sequence, slot in enumerate(indices.tolist()):
+        history = torch.cat([initial_cache[slot], values[sequence]], dim=0)
+        for proposal in range(width):
+            expected[slot + proposal * capacity] = history[proposal + 1 : proposal + 1 + state_length]
+        expected_cache[slot] = expected[slot]
+    torch.testing.assert_close(backend._kda_state[0]["combined_conv"], expected, rtol=0, atol=0)
+    torch.testing.assert_close(conv_cache, expected_cache, rtol=0, atol=0)
+
+
+def _run_kda_verify_step(
+    backend: NpuPagedAttentionBackend,
+    width: int,
+    base_lengths: list[int],
+    conv_cache: torch.Tensor,
+    ssm_cache: torch.Tensor,
+    metadata: SimpleNamespace | None = None,
+    layer_id: int = 0,
+) -> torch.Tensor:
+    sequence_count = len(base_lengths)
+    token_count = sequence_count * width
+    state_indices = torch.arange(sequence_count, dtype=torch.int64) * 2
+    layer = SimpleNamespace(
+        head_dim=1,
+        num_heads_local=1,
+        qkv_dim=1,
+        conv_dim=3,
+        conv_kernel_size=2,
+        activation="identity",
+        layer_id=layer_id,
+        conv_weight_t=torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]),
+    )
+    if metadata is None:
+        metadata = SimpleNamespace(
+            expanded_decode_metadata=None,
+            kv_seq_lens=(torch.tensor(base_lengths)[:, None] + torch.arange(width)).flatten(),
+        )
+
+    def recurrent_contract(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        offsets = kwargs["cu_seqlens"].tolist()
+        assert offsets == list(range(0, token_count + 1, width))
+        slots = kwargs["ssm_state_indices"].tolist()
+        accepted_counts = kwargs["num_accepted_tokens"].tolist()
+        state = kwargs["initial_state"]
+        output = torch.empty_like(value)
+        for sequence, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+            initial_slot = slots[start + accepted_counts[sequence] - 1]
+            running_state = state[initial_slot].clone()
+            for row in range(start, end):
+                running_state = running_state + value[row].unsqueeze(-1)
+                state[slots[row]].copy_(running_state)
+                output[row].copy_(running_state.squeeze(-1))
+        return output
+
+    return backend._spec_verify(
+        torch.ones(1, 3, token_count),
+        torch.zeros(1, token_count, 1, 1),
+        torch.ones(1, token_count, 1),
+        layer.layer_id,
+        layer.conv_weight_t,
+        layer.activation,
+        state_indices,
+        metadata,
+        conv_cache,
+        ssm_cache,
+        recurrent_contract,
+    )
+
+
+@pytest.mark.usefixtures("causal_conv1d_reference")
+def test_kda_verify_reads_live_kv_lengths_on_every_call() -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    backend._kda_verify_width = 4
+    conv_cache = torch.zeros(4, 1, 3)
+    ssm_cache = torch.zeros(4, 1, 1, 1)
+    lengths = torch.tensor([10, 11, 12, 13, 20, 21, 22, 23], dtype=torch.int32)
+    metadata = SimpleNamespace(expanded_decode_metadata=None, kv_seq_lens=lengths)
+    device = torch.device("cpu")
+    original_address = lengths.data_ptr()
+    with forward_context(ForwardContext(backend, device, metadata, [])):
+        _run_kda_verify_step(backend, 4, [10, 20], conv_cache, ssm_cache, metadata=metadata)
+        lengths.view(2, 4).add_(torch.tensor([[3], [1]], dtype=torch.int32))
+        assert lengths.data_ptr() == original_address
+        output = _run_kda_verify_step(backend, 4, [13, 21], conv_cache, ssm_cache, metadata=metadata)
+        torch.testing.assert_close(output.view(2, 4)[:, 0], torch.tensor([4.0, 2.0], dtype=output.dtype))
+        torch.testing.assert_close(backend._kda_state[0]["kv_prev"][[0, 2]], torch.tensor([13, 21]))
+    lengths.add_(1)
+    with forward_context(ForwardContext(backend, device, metadata, [])):
+        output = _run_kda_verify_step(backend, 4, [14, 22], conv_cache, ssm_cache, metadata=metadata)
+        torch.testing.assert_close(output.view(2, 4)[:, 0], torch.tensor([5.0, 3.0], dtype=output.dtype))
+
+
+@pytest.mark.usefixtures("causal_conv1d_reference")
+def test_kda_verify_reads_expanded_lengths_and_sequence_layout() -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    backend._kda_verify_width = 4
+    conv_cache = torch.zeros(8, 1, 3)
+    ssm_cache = torch.zeros(8, 1, 1, 1)
+    expanded = SimpleNamespace(
+        enabled=True,
+        kv_seq_lens=torch.tensor([40, 41, 42, 43, 60, 61, 62, 63], dtype=torch.int32),
+        block_table=torch.zeros(8, 1, dtype=torch.int32),
+        paged_kv_indptr=None,
+        paged_kv_indices=None,
+        paged_kv_last_page_len=None,
+        paged_attention_tiling_data=None,
+        kv_seq_lens_host=None,
+        kv_seq_lens_host_values=None,
+    )
+    metadata = SimpleNamespace(
+        expanded_decode_metadata=expanded,
+        kv_seq_lens=torch.tensor([1, 2]),
+        slot_mapping=torch.arange(8),
+    )
+    device = torch.device("cpu")
+    with forward_context(ForwardContext(backend, device, metadata, [])):
+        _run_kda_verify_step(backend, 4, [40, 60], conv_cache, ssm_cache, metadata=metadata)
+        torch.testing.assert_close(backend._kda_state[0]["kv_prev"][[0, 2]], torch.tensor([40, 60]))
+        _run_kda_verify_step(backend, 2, [40, 42, 60, 62], conv_cache, ssm_cache, metadata=metadata)
+        torch.testing.assert_close(backend._kda_state[0]["kv_prev"][[0, 2, 4, 6]], torch.tensor([40, 42, 60, 62]))
+    expanded.kv_seq_lens.add_(4)
+    with forward_context(ForwardContext(backend, device, metadata, [])):
+        _run_kda_verify_step(backend, 4, [44, 64], conv_cache, ssm_cache, metadata=metadata)
+        torch.testing.assert_close(backend._kda_state[0]["kv_prev"][[0, 2]], torch.tensor([44, 64]))
+
+
+@pytest.mark.usefixtures("causal_conv1d_reference")
+def test_kda_verify_selects_boundaries_across_plain_and_verify_steps() -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    backend._kda_verify_width = 4
+    conv_cache = torch.zeros(4, 1, 3)
+    ssm_cache = torch.zeros(4, 1, 1, 1)
+    _run_kda_verify_step(backend, 1, [10, 20], conv_cache, ssm_cache)
+    _run_kda_verify_step(backend, 4, [11, 21], conv_cache, ssm_cache)
+    output = _run_kda_verify_step(backend, 1, [14, 25], conv_cache, ssm_cache)
+    torch.testing.assert_close(output.flatten(), torch.tensor([5.0, 6.0], dtype=output.dtype))
+    torch.testing.assert_close(ssm_cache[[0, 2]].flatten(), torch.tensor([5.0, 6.0]))
+
+
+@pytest.mark.usefixtures("causal_conv1d_reference")
+def test_kda_shared_metadata_preserves_per_layer_accepted_boundaries() -> None:
+    backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
+    backend._kda_verify_width = 4
+    conv_caches = [torch.zeros(4, 1, 3), torch.zeros(4, 1, 3)]
+    ssm_caches = [torch.zeros(4, 1, 1, 1), torch.zeros(4, 1, 1, 1)]
+    for layer_id, base_length in enumerate((10, 12)):
+        _run_kda_verify_step(backend, 4, [base_length], conv_caches[layer_id], ssm_caches[layer_id], layer_id=layer_id)
+    metadata = SimpleNamespace(expanded_decode_metadata=None, kv_seq_lens=torch.arange(14, 18, dtype=torch.int32))
+    with forward_context(ForwardContext(backend, torch.device("cpu"), metadata, [])):
+        for layer_id, expected in enumerate((5.0, 3.0)):
+            output = _run_kda_verify_step(
+                backend, 4, [14], conv_caches[layer_id], ssm_caches[layer_id], metadata=metadata, layer_id=layer_id
+            )
+            torch.testing.assert_close(output[0, 0], torch.full_like(output[0, 0], expected))

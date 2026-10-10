@@ -353,7 +353,7 @@ class AttentionBackend(ABC):
         mixed_qkv: torch.Tensor,
         beta: torch.Tensor,
         layer_id: int,
-        conv1d: torch.nn.Conv1d,
+        conv_weight: torch.Tensor,
         forget_gate: KdaForgetGate,
         activation: str,
         raw_gate_proj: torch.Tensor,

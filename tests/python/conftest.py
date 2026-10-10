@@ -23,6 +23,53 @@ from xllm.python import initialize_runtime
 initialize_runtime()
 
 
+@pytest.fixture
+def causal_conv1d_reference(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    calls: list[dict] = []
+
+    def native_conv(
+        inputs: torch.Tensor,
+        weight: torch.Tensor,
+        state: torch.Tensor,
+        query_start_loc: list[int],
+        activation_mode: int,
+        run_mode: int,
+    ) -> torch.Tensor:
+        calls.append(
+            dict(
+                weight=weight,
+                query_start_loc=query_start_loc,
+                activation_mode=activation_mode,
+                run_mode=run_mode,
+            )
+        )
+        assert inputs.is_contiguous()
+        assert weight.is_contiguous()
+        assert state.is_contiguous()
+        assert inputs.dtype == weight.dtype == state.dtype
+        channels = inputs.shape[-1]
+        flat_input = inputs.reshape(-1, channels)
+        boundaries = query_start_loc or [sequence * inputs.shape[1] for sequence in range(inputs.shape[0] + 1)]
+        output = torch.empty_like(flat_input)
+        for sequence, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+            if start == end:
+                continue
+            window = torch.cat((state[sequence].float(), flat_input[start:end].float()), dim=0)
+            convolved = (
+                torch.nn.functional.conv1d(window.t().unsqueeze(0), weight.float().t().unsqueeze(1), groups=channels)
+                .squeeze(0)
+                .t()
+            )
+            if activation_mode == 1:
+                convolved = torch.nn.functional.silu(convolved)
+            output[start:end].copy_(convolved)
+            state[sequence].copy_(window[-state.shape[1] :])
+        return output.view_as(inputs)
+
+    monkeypatch.setattr(torch.ops.xllm_ops, "causal_conv1d", native_conv, raising=False)
+    return calls
+
+
 def _rms_norm(
     value: torch.Tensor,
     weight: torch.Tensor,

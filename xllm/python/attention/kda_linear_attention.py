@@ -19,7 +19,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
-import torch.nn.functional as F
 
 from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.attention.expanded_decode_metadata import resolve_expanded_decode_metadata
@@ -33,107 +32,6 @@ if TYPE_CHECKING:
     from xllm.python.layers.kda import KdaForgetGate
 
 
-def _causal_conv1d_fn(mixed_qkv: torch.Tensor, weight: torch.Tensor, activation: str = "silu") -> torch.Tensor:
-    """Depthwise causal conv1d (left-pad K-1) + activation, fp32 weight."""
-    # mixed_qkv: [B, conv_dim, S]; weight: [conv_dim, K] (squeezed)
-    padding = weight.shape[-1] - 1
-    out = F.conv1d(
-        mixed_qkv.to(weight.dtype),
-        weight=weight.unsqueeze(1),
-        bias=None,
-        padding=padding,
-        groups=mixed_qkv.shape[1],
-    )[:, :, : mixed_qkv.shape[-1]]
-    if activation == "silu":
-        out = F.silu(out)
-    return out.to(mixed_qkv.dtype)
-
-
-def _causal_conv1d_update(
-    mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
-) -> torch.Tensor:
-    """Incremental depthwise causal conv1d + activation (single-token decode).
-
-    Faithful port of transformers ``causal_conv1d_update``: prepend the
-    ``conv_state`` (last K-1 conv inputs), run a width-0-pad conv over the
-    concatenation, slice the tail, and update ``conv_state`` in place.
-
-    Args:
-        mixed_qkv: [B, conv_dim, S] (S == 1 for decode).
-        conv_state: [B, conv_dim, K-1], updated in place to the last K-1 inputs.
-        weight: [conv_dim, K] (squeezed).
-    """
-    _, hidden_size, seq_len = mixed_qkv.shape
-    state_len = conv_state.shape[-1]
-    hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
-    conv_state.copy_(hidden_states_new[:, :, -state_len:])
-    out = F.conv1d(
-        hidden_states_new,
-        weight=weight.unsqueeze(1),
-        bias=None,
-        padding=0,
-        groups=hidden_size,
-    )[:, :, -seq_len:]
-    if activation == "silu":
-        out = F.silu(out)
-    return out.to(mixed_qkv.dtype)
-
-
-def _causal_conv1d_update_graph(
-    mixed_qkv: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor, activation: str = "silu"
-) -> torch.Tensor:
-    """Graph-capturable twin of ``_causal_conv1d_update`` (ACL-graph decode).
-
-    F.conv1d lowers to the aclop Conv2D, which NPUGraph cannot capture (and
-    ``allow_internal_format=False`` would break the MoE W8A8 NZ weights), so
-    the depthwise width-K conv is unrolled into elementwise multiply-adds
-    reproducing the aclop kernel's numeric contract bit for bit via
-    ``_causal_conv1d_graph_multi``. Only called on the graph decode path; eager
-    keeps the F.conv1d original byte-for-byte. NOTE the engine's conv weight
-    is bf16 (checkpoint overrides the fp32 init), so the eager conv runs in
-    bf16 — emulating the fp32 conv contract here returns a wrong-SHAPE
-    tensor (bf16 view(int32) halves the last dim) and crashes capture.
-    """
-    seq_len = mixed_qkv.shape[-1]
-    state_len = conv_state.shape[-1]
-    hidden_states_new = torch.cat([conv_state, mixed_qkv], dim=-1).to(weight.dtype)
-    conv_state.copy_(hidden_states_new[:, :, -state_len:])
-    return _causal_conv1d_graph_multi(hidden_states_new, weight, seq_len, activation).to(mixed_qkv.dtype)
-
-
-def _causal_conv1d_graph_multi(
-    cin: torch.Tensor,
-    weight: torch.Tensor,
-    out_rows: int,
-    activation: str = "silu",
-) -> torch.Tensor:
-    """Graph-capturable multi-row twin of the eager depthwise conv.
-
-    ``cin`` is ``[B, conv_dim, state_len + R]`` (boundary tail + the R
-    current rows); the causal outputs for the R rows are the K-wide windows
-    STARTING at ``[0, R)``. F.conv1d lowers to an aclop NPUGraph cannot
-    capture, so the conv is unrolled into the per-tap multiply-add contract
-    of ``_causal_conv1d_update_graph`` — bit-compatible with that plain-decode
-    path and the eager F.conv1d path.
-
-    Implements the shared graph numeric contract: operands
-    cast to fp32, per-tap products exact in fp32, ascending accumulation,
-    one final round to the weight dtype. The RNE rounding to 11 mantissa bits
-    is a no-op for bf16 sources (7 mantissa bits), so it is skipped to avoid
-    RightShift/BitwiseAnd on AI_CPU.
-    """
-    h_r = cin.to(weight.dtype).float()
-    w_r = weight.float()
-    k_size = weight.shape[-1]
-    out = w_r[:, 0:1].unsqueeze(0) * h_r[:, :, 0:out_rows]
-    for k in range(1, k_size):
-        out = out + w_r[:, k : k + 1].unsqueeze(0) * h_r[:, :, k : k + out_rows]
-    out = out.to(weight.dtype)
-    if activation == "silu":
-        out = F.silu(out)
-    return out.to(cin.dtype)
-
-
 class KdaLinearAttentionMixin:
     """KDA linear-attention + speculative verify state I/O, mixed into NpuPagedAttentionBackend."""
 
@@ -141,6 +39,30 @@ class KdaLinearAttentionMixin:
     _kv_caches: list[LayerCache]
     _kda_verify_width: int
     _kda_state: dict[int, dict[str, Any]]
+
+    def _causal_conv1d(
+        self,
+        value: torch.Tensor,
+        state: torch.Tensor,
+        weight: torch.Tensor,
+        activation: str,
+        *,
+        query_start_loc: list[int] | None = None,
+        is_prefill: bool = False,
+    ) -> torch.Tensor:
+        """Convolve staged channel-last states with fused activation."""
+        inputs = value.transpose(1, 2).contiguous()
+        if query_start_loc is not None:
+            inputs = inputs.reshape(-1, inputs.shape[-1])
+        output = torch.ops.xllm_ops.causal_conv1d(
+            inputs,
+            weight,
+            state,
+            query_start_loc if query_start_loc is not None else [],
+            1 if activation == "silu" else 0,
+            0 if is_prefill else 1,
+        )
+        return output.reshape(value.shape[0], value.shape[2], value.shape[1]).transpose(1, 2)
 
     def _disarm_slots(self, idx: torch.Tensor) -> None:
         """Mark slots' combined-pool state invalid (prefill restart)."""
@@ -192,7 +114,7 @@ class KdaLinearAttentionMixin:
         mixed_qkv: torch.Tensor,
         beta: torch.Tensor,
         layer_id: int,
-        conv1d: torch.nn.Conv1d,
+        conv_weight: torch.Tensor,
         forget_gate: KdaForgetGate,
         activation: str,
         raw_gate_proj: torch.Tensor,
@@ -223,7 +145,7 @@ class KdaLinearAttentionMixin:
         )
 
         batch_size, _, seq_len = mixed_qkv.shape
-        conv_state_len = conv1d.kernel_size[0] - 1
+        conv_state_len = conv_weight.shape[0] - 1
         head_dim = forget_gate.head_dim
         num_heads_local = forget_gate.num_heads
         qkv_dim = forget_gate.qkv_dim
@@ -266,9 +188,9 @@ class KdaLinearAttentionMixin:
             device = mixed_qkv.device
             conv_state = torch.zeros(
                 batch_size,
-                conv1d.out_channels,
                 conv_state_len,
-                dtype=conv1d.weight.dtype,
+                conv_weight.shape[1],
+                dtype=mixed_qkv.dtype,
                 device=device,
             )
             ssm_state = torch.zeros(
@@ -316,7 +238,7 @@ class KdaLinearAttentionMixin:
                         forget_gate.gate_from_raw(raw_gate_proj),
                         beta,
                         layer_id,
-                        conv1d,
+                        conv_weight,
                         activation,
                         group_idx,
                         metadata,
@@ -378,7 +300,7 @@ class KdaLinearAttentionMixin:
                     forget_gate.gate_from_raw(raw_gate_proj),
                     beta,
                     layer_id,
-                    conv1d,
+                    conv_weight,
                     activation,
                     idx,
                     metadata,
@@ -390,7 +312,6 @@ class KdaLinearAttentionMixin:
                 self._disarm_slots(idx)
             state_read_idx = read_idx if is_prefill else idx
             conv_i = conv_cache.index_select(0, state_read_idx)
-            conv_i = conv_i.transpose(1, 2).contiguous()
             ssm_i = ssm_cache.index_select(0, state_read_idx)
             his = metadata.has_initial_state
             if his is not None and len(his) == num_seqs:
@@ -400,63 +321,21 @@ class KdaLinearAttentionMixin:
                 conv_i.masked_fill_(cold.view(num_seqs, 1, 1), 0)
                 ssm_i.masked_fill_(cold.view(num_seqs, 1, 1, 1), 0)
             conv_state, ssm_state = conv_i, ssm_i.contiguous()
-        conv_weight = conv1d.weight.squeeze(1)
         scale = 1.0 / (head_dim**0.5)
         # Route on metadata, not seq_len: speculative decode can carry multiple
         # tokens per sequence (seq_len > 1) but is still a decode step; the
         # seq_len heuristic would wrongly send it to the chunked prefill path.
         device = mixed_qkv.device
         if num_seqs == batch_size:
-            # Simple path: mixed_qkv is already [B, conv_dim, S] (one sequence
-            # per batch row, or a single flattened sequence).
-            if seq_len == 1:
-                if in_graph:
-                    # F.conv1d is an aclop NPUGraph cannot capture; the manual
-                    # depthwise mul-add is capture-safe. Eager keeps F.conv1d.
-                    mixed_qkv = _causal_conv1d_update_graph(mixed_qkv, conv_state, conv_weight, activation)
-                else:
-                    mixed_qkv = _causal_conv1d_update(mixed_qkv, conv_state, conv_weight, activation)
-            else:
-                conv_in = torch.cat([conv_state, mixed_qkv], dim=-1)
-                mixed_qkv = _causal_conv1d_fn(conv_in, conv_weight, activation)[:, :, -seq_len:]
-                conv_state = conv_in[..., -conv_state_len:]
-                if conv_state.shape[-1] < conv_state_len:
-                    conv_state = F.pad(
-                        conv_state,
-                        (conv_state_len - conv_state.shape[-1], 0),
-                        value=0,
-                    )
+            mixed_qkv = self._causal_conv1d(mixed_qkv, conv_state, conv_weight, activation, is_prefill=is_prefill)
         else:
-            # Flattened multi-sequence: mixed_qkv is [1, conv_dim, T] (T = sum
-            # of per-seq token counts). Variable-length (speculative decode: each
-            # sequence may carry a different token count) is supported by a
-            # per-sequence conv1d loop (pure-torch F.conv1d is batched and
-            # requires equal lengths) followed by a single varlen recurrent_kda
-            # call (cu_seqlens does the per-seq split inside the kernel).
             q_cu = metadata.q_cu_seq_lens
             assert q_cu is not None, "multi-sequence linear attention needs q_cu_seq_lens"
             q_cu = q_cu.to(torch.int64)
             q_cu_list = q_cu.tolist()
-            outs = []
-            for s in range(num_seqs):
-                t0, t1 = q_cu_list[s], q_cu_list[s + 1]
-                seg = mixed_qkv[:, :, t0:t1]  # [1, conv_dim, seg_len]
-                cs = conv_state[s : s + 1]  # [1, conv_dim, state_len]
-                seg_len = t1 - t0
-                if seg_len == 1:
-                    outs.append(_causal_conv1d_update(seg, cs, conv_weight, activation))
-                else:
-                    cin = torch.cat([cs, seg], dim=-1)
-                    outs.append(_causal_conv1d_fn(cin, conv_weight, activation)[:, :, -seg_len:])
-                    conv_state[s] = cin[0, :, -conv_state_len:]
-                    if conv_state.shape[-1] < conv_state_len:
-                        conv_state[s] = F.pad(
-                            conv_state[s],
-                            (conv_state_len - conv_state.shape[-1], 0),
-                            value=0,
-                        )
-            mixed_qkv = torch.cat(outs, dim=-1)  # [1, conv_dim, T]
-            # TND packed layout for recurrent_kda: [T, nh, hd] per channel group.
+            mixed_qkv = self._causal_conv1d(
+                mixed_qkv, conv_state, conv_weight, activation, query_start_loc=q_cu_list, is_prefill=is_prefill
+            )
             seq_len = int(q_cu_list[-1])
             hidden_shape = (1, seq_len, -1, head_dim)
 
@@ -612,7 +491,7 @@ class KdaLinearAttentionMixin:
                 final_state = result[1]
 
         if idx is not None:
-            conv_cache.index_copy_(0, idx, conv_state.transpose(1, 2).contiguous())
+            conv_cache.index_copy_(0, idx, conv_state)
             ssm_cache.index_copy_(0, idx, final_state.float().contiguous())
         # multi-seq path reshaped mixed_qkv to [num_seqs, ...]; flatten the
         # output back to [1, T, ...] so the KDA forward's hidden_shape [1, T]
@@ -633,7 +512,7 @@ class KdaLinearAttentionMixin:
         gate: torch.Tensor,
         beta: torch.Tensor,
         layer_id: int,
-        conv1d: torch.nn.Conv1d,
+        conv_weight: torch.Tensor,
         activation: str,
         idx: torch.Tensor,
         metadata: AttentionMetadata,
@@ -670,9 +549,8 @@ class KdaLinearAttentionMixin:
           steps: at verify entry the committed running state is copied into
           the combined base region; at exit after-b (always accepted) is
           committed back, so a plain step sees the correct state.
-        - Conv state is handled the same dual-slot way with the combined conv
-          pool; the conv itself reuses the proven bit-exact per-tap mul-add
-          (``_causal_conv1d_graph_multi``) — graph-capturable, no aclop conv.
+        - Conv state retains a checkpoint for every proposal while native
+          convolution and activation consume only the selected boundary.
         """
         device = mixed_qkv.device
         num_seqs = idx.shape[0]
@@ -684,11 +562,9 @@ class KdaLinearAttentionMixin:
         head_dim = gate.shape[-1]
         nh = gate.shape[-2]
         qkv_dim = nh * head_dim
-        conv_dim = conv1d.out_channels
-        conv_state_len = conv1d.kernel_size[0] - 1
+        conv_dim = conv_weight.shape[1]
+        conv_state_len = conv_weight.shape[0] - 1
         scale = 1.0 / (head_dim**0.5)
-        conv_weight = conv1d.weight.squeeze(1)
-        in_graph = in_acl_graph()
         nslots = conv_cache.shape[0]  # C++ pool capacity
 
         if (states := self.__dict__.get("_kda_state")) is None:
@@ -755,32 +631,16 @@ class KdaLinearAttentionMixin:
         sel_conv = combined_conv.index_select(0, boundary_slot)  # [S, Ks, C]
         combined_ssm.index_copy_(0, idx64, combined_ssm.index_select(0, boundary_slot))
 
-        # ---- 3) conv (per-tap, bit-exact, graph-capturable) ----
-        cache_boundary = sel_conv.transpose(1, 2).contiguous()  # [S, C, Ks]
-        x = mixed_qkv.reshape(conv_dim, num_seqs, rows_per_seq).permute(1, 0, 2).contiguous()
-        cin = torch.cat([cache_boundary.to(x.dtype), x], dim=-1)
-        if in_graph:
-            conv_out = _causal_conv1d_graph_multi(cin, conv_weight, rows_per_seq, activation)
-        else:
-            _cin_c = cin.to(conv_weight.dtype).contiguous()
-            _cw = conv_weight.unsqueeze(1).contiguous()
-            conv_out = torch.nn.functional.conv1d(
-                _cin_c,
-                _cw,
-                bias=None,
-                padding=conv_state_len,
-                groups=conv_dim,
-            )[..., conv_state_len : conv_state_len + rows_per_seq]
-            if activation == "silu":
-                conv_out = torch.nn.functional.silu(conv_out)
-            conv_out = conv_out.to(x.dtype)
+        inputs = mixed_qkv.reshape(conv_dim, num_seqs, rows_per_seq).permute(1, 2, 0).contiguous()
+        conv_inputs = torch.cat((sel_conv, inputs), dim=1)
+        conv_out = self._causal_conv1d(inputs.transpose(1, 2), sel_conv, conv_weight, activation)
         # multi-tail conv_state: slot j (0=base ... R-1=last draft) <- window
         # ending after token j. For R==2 this is base<-tail_b / draft1<-tail_full
         # (== legacy dual-tail); for R==1 only base is written (a plain step's
         # next verify has m=1 -> base, so draft slots are never read).
-        for j in range(rows_per_seq):
-            tail_j = cin[..., (j + 1) : (j + 1) + conv_state_len].transpose(1, 2).contiguous()
-            combined_conv.index_copy_(0, idx64 + j * nslots, tail_j)
+        for proposal in range(rows_per_seq):
+            tail = conv_inputs[:, proposal + 1 : proposal + 1 + conv_state_len].contiguous()
+            combined_conv.index_copy_(0, idx64 + proposal * nslots, tail)
 
         # ---- 4) split conv_out -> q/k/v; gate/beta -> g/b (TND, [T,nh,hd]) ----
         c_split = conv_out.transpose(1, 2).split(qkv_dim, dim=-1)

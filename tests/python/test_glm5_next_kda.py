@@ -114,6 +114,57 @@ def _reference_projections(
     )
 
 
+def test_kda_validates_conv_activation_at_initialization() -> None:
+    config = glm5_next.Glm5NextConfig(hidden_size=32, kda_num_heads=8, kda_head_dim=8, hidden_act="relu")
+    with pytest.raises(ValueError, match="Unsupported KDA convolution activation: relu"):
+        glm5_next.Glm5NextKdaAttention(config, 0, torch.float32, torch.device("cpu"))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 1), (8, 7)])
+@torch.inference_mode()
+def test_conv_weights_are_prepared_after_loading_and_keep_storage_on_reload(
+    dtype: torch.dtype, tp_size: int, tp_rank: int
+) -> None:
+    model, tensors, attention = _make_model(tp_size, tp_rank)
+    attention = attention.to(dtype=dtype)
+    assert isinstance(attention.conv_weight, torch.nn.Parameter)
+    assert not any(isinstance(module, torch.nn.Conv1d) for module in attention.modules())
+    expected = (
+        torch.cat(
+            [
+                _shard_rows(tensors[_ATTENTION_PREFIX + channel + "_conv1d.weight"], tp_size, tp_rank)
+                for channel in ("q", "k", "v")
+            ]
+        )
+        .squeeze(1)
+        .t()
+        .to(dtype)
+    )
+    prepared = attention.conv_weight_t
+    assert prepared.is_contiguous()
+    assert prepared.dtype == dtype
+    assert "conv_weight_t" not in attention.state_dict()
+    torch.testing.assert_close(prepared, expected, rtol=0, atol=0)
+
+    attention.conv_weight.data = attention.conv_weight.data.float()
+    attention.conv_weight.add_(1)
+    attention.process_weights_after_loading()
+    assert attention.conv_weight_t.data_ptr() == prepared.data_ptr()
+    torch.testing.assert_close(prepared, attention.conv_weight.squeeze(1).t().to(dtype), rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_merged_conv_checkpoint_loads_direct_parameter() -> None:
+    model, tensors, attention = _make_model(1, 0)
+    expected = torch.cat([tensors.pop(_ATTENTION_PREFIX + channel + "_conv1d.weight") for channel in ("q", "k", "v")])
+    tensors[_ATTENTION_PREFIX + "conv1d.weight"] = expected
+    loader = QLinearWeightLoader(model, [_StateDict(tensors)], 1, 0)
+    model._load_kda_attn(loader, _ATTENTION_PREFIX, 0)
+    torch.testing.assert_close(attention.conv_weight, expected, rtol=0, atol=0)
+    torch.testing.assert_close(attention.conv_weight_t, expected.squeeze(1).t(), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 8])
 @torch.inference_mode()
 def test_fg_batched_weights_preserve_head_shards_and_share_storage(tp_size: int) -> None:
@@ -231,14 +282,14 @@ def test_merged_input_forward_preserves_backend_arguments_and_output(
         mixed_qkv: torch.Tensor,
         beta: torch.Tensor,
         layer_id: int,
-        conv1d: torch.nn.Conv1d,
+        conv_weight: torch.Tensor,
         forget_gate: torch.nn.Module,
         activation: str,
         *,
         raw_gate_proj: torch.Tensor,
     ) -> torch.Tensor:
         assert layer_id == attention.layer_id
-        assert conv1d is attention.conv1d
+        assert conv_weight is attention.conv_weight_t
         assert forget_gate is attention.forget_gate
         assert activation == attention.activation
         torch.testing.assert_close(mixed_qkv, expected_qkv)
@@ -259,18 +310,16 @@ def test_merged_input_forward_preserves_backend_arguments_and_output(
 
 @pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 1), (8, 7)])
 @pytest.mark.parametrize("batch_size", [1, 3])
-@pytest.mark.parametrize("activation", ["none", "silu"])
-@pytest.mark.parametrize(
-    "conv_fn",
-    [
-        pytest.param(kda_linear_attention._causal_conv1d_fn, id="prefill"),
-        pytest.param(kda_linear_attention._causal_conv1d_update, id="decode"),
-        pytest.param(kda_linear_attention._causal_conv1d_update_graph, id="graph_decode"),
-    ],
-)
+@pytest.mark.parametrize("activation", ["identity", "silu"])
+@pytest.mark.parametrize("is_prefill", [False, True])
 @torch.inference_mode()
 def test_merged_qkv_strides_preserve_causal_conv_and_state(
-    tp_size: int, tp_rank: int, batch_size: int, activation: str, conv_fn: Callable[..., torch.Tensor]
+    causal_conv1d_reference: list[dict],
+    tp_size: int,
+    tp_rank: int,
+    batch_size: int,
+    activation: str,
+    is_prefill: bool,
 ) -> None:
     """Require exact conv/state equality; SiLU permits layout-dependent FP32 rounding."""
     torch.manual_seed(42)
@@ -279,8 +328,9 @@ def test_merged_qkv_strides_preserve_causal_conv_and_state(
         weight = tensors[_ATTENTION_PREFIX + projection + ".weight"]
         weight.copy_(torch.randint(-4, 4, weight.shape).float() / 16)
     attention.in_proj_qkvbfg_a.weight.copy_(torch.cat(_input_weights(tensors, tp_size, tp_rank)))
-    conv_weight = attention.conv1d.weight.squeeze(1)
-    conv_state = torch.randn(batch_size, attention.conv_dim, attention.conv_kernel_size - 1)
+    attention.activation = activation
+    backend = kda_linear_attention.KdaLinearAttentionMixin()
+    conv_state = torch.randn(batch_size, attention.conv_kernel_size - 1, attention.conv_dim)
     reference_state = conv_state.clone()
     for seq_len in (17, 1, 4, 1):
         hidden_states = torch.randint(-4, 4, (batch_size, seq_len, model.cfg.hidden_size)).float() / 8
@@ -291,15 +341,17 @@ def test_merged_qkv_strides_preserve_causal_conv_and_state(
         assert mixed_qkv.stride(-1) == sum(attention.input_projection_sizes)
         assert reference_qkv.stride(-1) == attention.conv_dim
         torch.testing.assert_close(mixed_qkv, reference_qkv, rtol=0, atol=0)
-        if conv_fn is kda_linear_attention._causal_conv1d_fn:
-            actual = conv_fn(mixed_qkv, conv_weight, activation=activation)
-            expected = conv_fn(reference_qkv, conv_weight, activation=activation)
-        else:
-            expected_state = torch.cat((reference_state, reference_qkv), dim=-1)[:, :, -conv_state.size(-1) :]
-            actual = conv_fn(mixed_qkv, conv_state, conv_weight, activation=activation)
-            expected = conv_fn(reference_qkv, reference_state, conv_weight, activation=activation)
-            torch.testing.assert_close(conv_state, expected_state, rtol=0, atol=0)
-            torch.testing.assert_close(conv_state, reference_state, rtol=0, atol=0)
+        expected_state = torch.cat((reference_state, reference_qkv.transpose(1, 2)), dim=1)[:, -conv_state.size(1) :]
+        actual = backend._causal_conv1d(
+            mixed_qkv, conv_state, attention.conv_weight_t, activation, is_prefill=is_prefill
+        )
+        expected = backend._causal_conv1d(
+            reference_qkv, reference_state, attention.conv_weight_t, activation, is_prefill=is_prefill
+        )
+        assert causal_conv1d_reference[-2]["weight"] is attention.conv_weight_t
+        assert causal_conv1d_reference[-1]["weight"] is attention.conv_weight_t
+        torch.testing.assert_close(conv_state, expected_state, rtol=0, atol=0)
+        torch.testing.assert_close(conv_state, reference_state, rtol=0, atol=0)
         relative_tolerance = 2 * torch.finfo(actual.dtype).eps if activation == "silu" else 0
         torch.testing.assert_close(actual, expected, rtol=relative_tolerance, atol=0)
 
@@ -307,6 +359,77 @@ def test_merged_qkv_strides_preserve_causal_conv_and_state(
 @pytest.fixture(scope="module")
 def npu_runtime() -> ModuleType:
     return pytest.importorskip("torch_npu")
+
+
+@pytest.fixture(scope="module")
+def native_causal_conv1d(npu_runtime: ModuleType) -> Callable[..., torch.Tensor]:
+    """Load an operator-only library, not an application embedding Python modules."""
+    library_path = os.getenv("XLLM_KDA_TEST_OP_LIBRARY")
+    if library_path:
+        torch.ops.load_library(library_path)
+    if not hasattr(torch.ops.xllm_ops, "causal_conv1d"):
+        pytest.fail("Set XLLM_KDA_TEST_OP_LIBRARY to an operator-only library registering xllm_ops::causal_conv1d")
+    return torch.ops.xllm_ops.causal_conv1d
+
+
+@pytest.mark.skipif(not os.getenv("XLLM_KDA_TEST_NPU_DEVICE"), reason="NPU device not configured")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kernel_width", [2, 4])
+@pytest.mark.parametrize("rows", [1, 4])
+@pytest.mark.parametrize("activation_mode", [0, 1])
+@pytest.mark.parametrize("run_mode", [0, 1])
+@pytest.mark.parametrize("packed", [False, True])
+@torch.inference_mode()
+def test_native_causal_conv1d_output_state_and_graph_replay(
+    npu_runtime: ModuleType,
+    native_causal_conv1d: Callable[..., torch.Tensor],
+    dtype: torch.dtype,
+    kernel_width: int,
+    rows: int,
+    activation_mode: int,
+    run_mode: int,
+    packed: bool,
+) -> None:
+    device = torch.device(os.environ["XLLM_KDA_TEST_NPU_DEVICE"])
+    torch.npu.set_device(device)
+    generator = torch.Generator().manual_seed(42)
+    sequence_lengths = (rows, rows + 1) if packed else (rows, rows)
+    input_shape = (sum(sequence_lengths), 16) if packed else (2, rows, 16)
+    query_start_loc = [0, rows, sum(sequence_lengths)] if packed else []
+    inputs = torch.randn(input_shape, generator=generator).to(device=device, dtype=dtype)
+    weight = torch.randn(kernel_width, 16, generator=generator).to(device=device, dtype=dtype)
+    state = torch.randn(2, kernel_width - 1, 16, generator=generator).to(device=device, dtype=dtype)
+    for _ in range(3):
+        native_causal_conv1d(inputs, weight, state, query_start_loc, activation_mode, run_mode)
+    torch.npu.synchronize()
+    graph = npu_runtime.npu.NPUGraph()
+    with npu_runtime.npu.graph(graph):
+        captured = native_causal_conv1d(inputs, weight, state, query_start_loc, activation_mode, run_mode)
+    for _ in range(3):
+        input_cpu = torch.randn(input_shape, generator=generator).to(dtype)
+        state_cpu = torch.randn(2, kernel_width - 1, 16, generator=generator).to(dtype)
+        expected_outputs = []
+        expected_states = []
+        for initial_state, sequence_input in zip(state_cpu, input_cpu.reshape(-1, 16).split(sequence_lengths)):
+            window = torch.cat((initial_state, sequence_input), dim=0)
+            convolved = functional.conv1d(
+                window.float().t().unsqueeze(0), weight.cpu().float().t().unsqueeze(1), groups=16
+            )
+            expected_outputs.append(convolved.squeeze(0).t())
+            expected_states.append(window[-(kernel_width - 1) :])
+        expected = torch.cat(expected_outputs).reshape(input_shape)
+        if activation_mode == 1:
+            expected = functional.silu(expected)
+        inputs.copy_(input_cpu)
+        state.copy_(state_cpu)
+        graph.replay()
+        torch.npu.synchronize()
+        eager_state = state_cpu.to(device)
+        eager = native_causal_conv1d(inputs, weight, eager_state, query_start_loc, activation_mode, run_mode)
+        torch.testing.assert_close(captured, eager, rtol=0, atol=0)
+        torch.testing.assert_close(state, eager_state, rtol=0, atol=0)
+        torch.testing.assert_close(state.cpu(), torch.stack(expected_states), rtol=0, atol=0)
+        torch.testing.assert_close(captured.cpu(), expected.to(dtype), rtol=2 * torch.finfo(dtype).eps, atol=1e-3)
 
 
 @pytest.mark.skipif(not os.getenv("XLLM_KDA_TEST_NPU_DEVICE"), reason="NPU device not configured")

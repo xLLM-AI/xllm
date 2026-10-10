@@ -13,6 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <optional>
+#include <vector>
+
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/utils.h"
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -36,7 +39,7 @@ void causal_conv1d_out(const torch::Tensor& output,
   check_tensor(weight, "weight", "causal_conv1d");
   check_tensor(conv_state, "conv_state", "causal_conv1d");
 
-  c10::optional<torch::Tensor> bias_tensor = c10::nullopt;
+  std::optional<torch::Tensor> bias_tensor = std::nullopt;
   if (bias_opt.has_value() && bias_opt.value().defined()) {
     bias_tensor = bias_opt.value();
   }
@@ -115,7 +118,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> causal_conv1d_qkv(
       << "causal_conv1d_qkv input width does not match the local Q/K/V layout";
 
   auto packed = torch::empty(x.sizes(), x.options().dtype(torch::kBFloat16));
-  c10::optional<torch::Tensor> bias_opt = c10::nullopt;
+  std::optional<torch::Tensor> bias_opt = std::nullopt;
   torch::IntArrayRef num_accepted_tokens_opt;
   EXEC_NPU_CMD(aclnnCausalConv1dQkv,
                x,
@@ -147,6 +150,67 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> causal_conv1d_qkv(
   auto v = packed_flat.narrow(0, q_elements + k_elements, v_elements)
                .view({1, num_tokens, num_v_heads, head_v_dim});
   return {q, k, v};
+}
+
+namespace {
+
+torch::Tensor causal_conv1d_python(const torch::Tensor& input,
+                                   const torch::Tensor& weight,
+                                   const torch::Tensor& conv_state,
+                                   torch::IntArrayRef query_start_loc,
+                                   int64_t activation_mode,
+                                   int64_t run_mode) {
+  CHECK(input.dim() == 2 || input.dim() == 3);
+  CHECK_EQ(weight.dim(), 2);
+  CHECK_EQ(conv_state.dim(), 3);
+  CHECK_GT(input.size(0), 0);
+  CHECK_GT(input.size(1), 0);
+  if (input.dim() == 3) {
+    CHECK(query_start_loc.empty());
+    CHECK_EQ(input.size(0), conv_state.size(0));
+  } else {
+    CHECK_EQ(query_start_loc.size(), conv_state.size(0) + 1);
+    CHECK_EQ(query_start_loc.front(), 0);
+    CHECK_EQ(query_start_loc.back(), input.size(0));
+  }
+  CHECK_EQ(input.size(-1), weight.size(1));
+  CHECK_EQ(input.size(-1), conv_state.size(2));
+  CHECK_EQ(conv_state.size(1), weight.size(0) - 1);
+  CHECK(activation_mode == 0 || activation_mode == 1);
+  CHECK(run_mode == 0 || run_mode == 1);
+  CHECK(input.scalar_type() == weight.scalar_type());
+  CHECK(input.scalar_type() == conv_state.scalar_type());
+  CHECK(input.is_contiguous());
+  CHECK(weight.is_contiguous());
+  CHECK(conv_state.is_contiguous());
+  constexpr int64_t kPadSlotId = -1;
+  std::vector<int64_t> initial_state_mode;
+  if (run_mode == 0) {
+    initial_state_mode.assign(conv_state.size(0), 1);
+  }
+  return causal_conv1d(input,
+                       weight,
+                       conv_state,
+                       std::nullopt,
+                       query_start_loc,
+                       torch::IntArrayRef{},
+                       initial_state_mode,
+                       torch::IntArrayRef{},
+                       activation_mode,
+                       kPadSlotId,
+                       run_mode);
+}
+
+}  // namespace
+
+TORCH_LIBRARY_FRAGMENT(xllm_ops, module) {
+  module.def(
+      "causal_conv1d(Tensor input, Tensor weight, Tensor(a!) conv_state, "
+      "int[] query_start_loc, int activation_mode, int run_mode) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, module) {
+  module.impl("causal_conv1d", TORCH_FN(causal_conv1d_python));
 }
 
 }  // namespace xllm::kernel::npu
