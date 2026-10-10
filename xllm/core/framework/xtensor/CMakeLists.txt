@@ -55,3 +55,18 @@ cc_library(
     :kv_cache_page_state
     glog::glog
 )
+
+# Weight transfer is an XTensor adapter. The Mooncake engine itself remains in
+# the KV transfer target because both cache and weight transfers share it.
+cc_library(
+  NAME
+    mooncake_weight_transfer
+  HDRS
+    mooncake_weight_transfer.h
+  SRCS
+    $<$<BOOL:${USE_NPU}>:mooncake_weight_transfer.cpp>
+  DEPS
+    :xtensor
+    :kv_cache_transfer
+    torch
+)

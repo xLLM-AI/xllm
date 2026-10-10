@@ -114,6 +114,7 @@ cc_library(
     :kv_cache
     :kv_cache_estimation
     :kv_cache_transfer
+    :mooncake_weight_transfer
     :linear_state_restore
     :kv_transfer_completion
     :models

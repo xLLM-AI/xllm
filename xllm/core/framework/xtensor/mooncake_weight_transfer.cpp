@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "framework/kv_cache_transfer/mooncake_weight_transfer.h"
+#include "framework/xtensor/mooncake_weight_transfer.h"
 
 #include <glog/logging.h>
 

@@ -21,7 +21,7 @@ limitations under the License.
 
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
-#include "framework/kv_cache_transfer/mooncake_weight_transfer.h"
+#include "framework/xtensor/mooncake_weight_transfer.h"
 #endif
 
 namespace xllm {
