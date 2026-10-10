@@ -24,7 +24,6 @@ import torch.distributed as dist
 from xllm.python.attention.backend import has_rope_dim
 from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.layers.sfa_dcp_ref import remap_sparse_indices
-from xllm.python.model_executor.forward_context import get_execution_buffer
 
 # Must match xllm/python/kernels_npu/tilelang/sfa_dcp_remap.py AOT specializations.
 _REMAP_TOPK = 2048
@@ -334,29 +333,16 @@ class AscendSFADCPImpl:
             physical_block_size=int(self.layout.physical_block_size),
             dcp_size=int(self.layout.dcp_size),
         ):
-            out = get_execution_buffer(
-                ("SFA_DCP_REMAP_OUT", tuple(topk_indices.shape)),
-                lambda: torch.empty_like(topk_indices),
+            return remap_sparse_indices(
+                topk_indices,
+                self.layout,
+                index_topk=index_topk,
             )
-            out.copy_(
-                remap_sparse_indices(
-                    topk_indices,
-                    self.layout,
-                    index_topk=index_topk,
-                )
-            )
-            return out
 
-        prefix_out = get_execution_buffer(
-            ("SFA_DCP_REMAP_PREFIX_OUT", tuple(prefix.shape)),
-            lambda: torch.empty_like(prefix),
-        )
+        prefix_out = torch.empty_like(prefix)
         num_tokens = int(prefix.numel() // index_topk)
         scratch_n = num_tokens * index_topk
-        idx_scratch = get_execution_buffer(
-            ("SFA_DCP_REMAP_SCRATCH", scratch_n),
-            lambda: torch.empty(scratch_n, dtype=torch.int32, device=topk_indices.device),
-        )
+        idx_scratch = torch.empty(scratch_n, dtype=torch.int32, device=topk_indices.device)
         fused = torch.ops.xllm_ops.sfa_dcp_remap_out(
             prefix,
             int(self.layout.physical_block_size),
@@ -367,10 +353,7 @@ class AscendSFADCPImpl:
         )
         if last_dim == index_topk:
             return fused
-        out = get_execution_buffer(
-            ("SFA_DCP_REMAP_WIDE", tuple(topk_indices.shape)),
-            lambda: torch.empty_like(topk_indices),
-        )
+        out = torch.empty_like(topk_indices)
         _fill_wide_remap(
             out=out,
             packed_prefix=fused,
@@ -405,14 +388,8 @@ class AscendSFADCPImpl:
             scatter_dim=1,
             dtype=output.dtype,
         )
-        send = get_execution_buffer(
-            ("DCP_PACKED_A2A_SEND", *send_shape, str(output.dtype)),
-            lambda: torch.empty(send_shape, dtype=output.dtype, device=output.device),
-        )
-        recv = get_execution_buffer(
-            ("DCP_PACKED_A2A_RECV", *send_shape, str(output.dtype)),
-            lambda: torch.empty(send_shape, dtype=output.dtype, device=output.device),
-        )
+        send = torch.empty(send_shape, dtype=output.dtype, device=output.device)
+        recv = torch.empty(send_shape, dtype=output.dtype, device=output.device)
         pack_dcp_output_lse(
             output,
             lse_th,
@@ -422,13 +399,10 @@ class AscendSFADCPImpl:
         )
         dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
         h_local = num_heads // dcp_size
-        merged = get_execution_buffer(
-            ("SFA_DCP_MERGE_OUT", num_tokens, h_local, head_dim, str(output.dtype)),
-            lambda: torch.empty(
-                (num_tokens, h_local, head_dim),
-                dtype=output.dtype,
-                device=output.device,
-            ),
+        merged = torch.empty(
+            (num_tokens, h_local, head_dim),
+            dtype=output.dtype,
+            device=output.device,
         )
         return fused_dcp_lse_combine(recv, head_dim, scatter_dim=1, output=merged)
 

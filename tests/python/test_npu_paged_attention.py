@@ -795,33 +795,28 @@ def _invalid_sparse_attention_output(query: torch.Tensor, invalid: str) -> torch
     return query.new_empty(shape)[..., ::2]
 
 
-@pytest.mark.parametrize("available", [False, True])
 @pytest.mark.parametrize("layout", ["TND", "BSND"])
 @pytest.mark.parametrize("invalid", ["shape", "dtype", "device", "contiguous"])
-def test_sparse_attention_rejects_invalid_output_before_dispatch(available: bool, layout: str, invalid: str) -> None:
+def test_sparse_attention_rejects_invalid_output_before_dispatch(layout: str, invalid: str) -> None:
     shape = (2, 2, 4) if layout == "TND" else (1, 2, 2, 4)
     query = torch.ones(shape, dtype=torch.bfloat16)
     output = _invalid_sparse_attention_output(query, invalid)
     with (
-        patch.object(sparse_attention, "supports_sparse_flash_attention_lse_out", return_value=available) as capability,
         patch.object(torch.ops.xllm_ops, "sparse_flash_attention_lse_out", create=True) as native,
         patch.object(torch.ops.npu, "npu_sparse_flash_attention", create=True) as fallback,
         pytest.raises(ValueError, match=invalid),
     ):
         sparse_attention.sparse_flash_attention_out(*_sparse_attention_out_args(query, output, layout))
-    capability.assert_not_called()
     native.assert_not_called()
     fallback.assert_not_called()
 
 
-@pytest.mark.parametrize("available", [False, True])
 @pytest.mark.parametrize("layout", ["TND", "BSND"])
 @pytest.mark.parametrize("rope", [False, True])
-def test_sparse_attention_preserves_output_storage_across_dispatch(available: bool, layout: str, rope: bool) -> None:
+def test_sparse_attention_preserves_output_storage_across_dispatch(layout: str, rope: bool) -> None:
     shape = (2, 2, 4) if layout == "TND" else (1, 2, 2, 4)
     query = torch.ones(shape, dtype=torch.bfloat16)
     output = torch.empty_like(query)
-    address = output.data_ptr()
     expected = torch.full_like(query, 3)
 
     def write_native(*args: object) -> torch.Tensor:
@@ -829,7 +824,6 @@ def test_sparse_attention_preserves_output_storage_across_dispatch(available: bo
         return output
 
     with (
-        patch.object(sparse_attention, "supports_sparse_flash_attention_lse_out", return_value=available),
         patch.object(
             torch.ops.xllm_ops, "sparse_flash_attention_lse_out", side_effect=write_native, create=True
         ) as native,
@@ -844,9 +838,8 @@ def test_sparse_attention_preserves_output_storage_across_dispatch(available: bo
             *_sparse_attention_out_args(query, output, layout, rope=rope)
         )
     assert result is output
-    assert result.data_ptr() == address
     torch.testing.assert_close(result, expected)
-    if available and layout == "TND" and rope:
+    if layout == "TND" and rope:
         native.assert_called_once()
         assert native.call_args.args[-1] is output
         fallback.assert_not_called()

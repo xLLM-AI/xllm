@@ -1394,23 +1394,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 self.graph_index_history_max_kv,
             )
             num_blocks = (max_kv + block_size - 1) // block_size
-            out = get_execution_buffer(
-                (
-                    "KPOOL_INDEX_HISTORY",
-                    num_seqs,
-                    max_kv,
-                    width,
-                    str(device),
-                    index_cache.dtype,
-                ),
-                lambda: torch.empty(
-                    num_seqs,
-                    max_kv,
-                    width,
-                    dtype=index_cache.dtype,
-                    device=device,
-                ),
-            )
+            out = torch.empty(num_seqs, max_kv, width, dtype=index_cache.dtype, device=device)
             flat = index_cache.view(-1, width)
             bt = block_table[:num_seqs, :num_blocks].to(torch.int64)
             block_offsets = torch.arange(block_size, device=device)
@@ -1463,11 +1447,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             actual_seq_q = self._mla_actual_seq_q
         if actual_seq_kv is None:
             actual_seq_kv = self._mla_actual_seq_kv
-        out = get_execution_buffer(
-            ("SFA_OUTPUT", layer_id, str(q_latent.device), q_latent.dtype) + tuple(q_latent.shape),
-            lambda: torch.empty_like(q_latent),
-            shared=True,
-        )
+        out = torch.empty_like(q_latent)
         return kernels.sparse_flash_attention_out(
             q_latent,
             nope_cache,

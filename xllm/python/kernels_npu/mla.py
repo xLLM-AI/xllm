@@ -19,10 +19,7 @@ from __future__ import annotations
 import torch
 import torch_npu
 
-from xllm.python.model_executor.forward_context import (
-    get_execution_buffer,
-    get_forward_context_or_none,
-)
+from xllm.python.model_executor.forward_context import get_forward_context_or_none
 
 from .linear import atb_matmul_ein_sum
 from .normalization import rms_norm, rms_norm_dynamic_quant
@@ -412,37 +409,15 @@ def deepseek_mla_preprocess_decode_dynamic(
     q_output = None
     if graph_buffers is not None:
         token_count = hidden.shape[0]
-        qkv_output = get_execution_buffer(
-            (
-                "MLA_PREPROCESS_QKV_A",
-                qkv_weight.data_ptr(),
-                token_count,
-                tuple(qkv_weight.shape),
-                qkv_weight.dtype,
-                hidden.device,
-                torch.bfloat16,
-            ),
-            lambda: torch.empty(
-                (token_count, qkv_weight.shape[1]),
-                dtype=torch.bfloat16,
-                device=hidden.device,
-            ),
+        qkv_output = torch.empty(
+            (token_count, qkv_weight.shape[1]),
+            dtype=torch.bfloat16,
+            device=hidden.device,
         )
-        q_output = get_execution_buffer(
-            (
-                "MLA_PREPROCESS_Q_B",
-                q_b_weight.data_ptr(),
-                token_count,
-                tuple(q_b_weight.shape),
-                q_b_weight.dtype,
-                hidden.device,
-                torch.bfloat16,
-            ),
-            lambda: torch.empty(
-                (token_count, q_b_weight.shape[1]),
-                dtype=torch.bfloat16,
-                device=hidden.device,
-            ),
+        q_output = torch.empty(
+            (token_count, q_b_weight.shape[1]),
+            dtype=torch.bfloat16,
+            device=hidden.device,
         )
 
     if hidden_scale is None:

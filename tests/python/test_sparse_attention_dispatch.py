@@ -24,9 +24,8 @@ from xllm.python.kernels_npu import sparse_attention
 
 @pytest.mark.parametrize("rope", [False, True])
 @pytest.mark.parametrize("entry", ["allocate", "out", "lse"])
-@pytest.mark.parametrize("out_available", [False, True])
 def test_sparse_attention_preserves_backend_and_output_contract(
-    monkeypatch: pytest.MonkeyPatch, rope: bool, entry: str, out_available: bool
+    monkeypatch: pytest.MonkeyPatch, rope: bool, entry: str
 ) -> None:
     query = torch.zeros(2, 4, 8)
     key = torch.zeros(1, 16, 1, 8)
@@ -48,7 +47,6 @@ def test_sparse_attention_preserves_backend_and_output_contract(
     monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse", custom, raising=False)
     monkeypatch.setattr(torch.ops.npu, "npu_sparse_flash_attention", native, raising=False)
     monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse_out", custom_out, raising=False)
-    monkeypatch.setattr(sparse_attention, "supports_sparse_flash_attention_lse_out", lambda: out_available)
     args = (
         query,
         key,
@@ -73,10 +71,8 @@ def test_sparse_attention_preserves_backend_and_output_contract(
         tail = (31, 7, 2, True)
     elif entry == "out":
         buffer = torch.zeros_like(query)
-        pointer = buffer.data_ptr()
         result = sparse_attention.sparse_flash_attention_out(*args, output=buffer)
         assert result is buffer
-        assert result.data_ptr() == pointer
         torch.testing.assert_close(result, expected[0])
         tail = (9223372036854775807, 9223372036854775807, 2, False)
     else:
@@ -84,7 +80,7 @@ def test_sparse_attention_preserves_backend_and_output_contract(
         assert result is expected[0]
         tail = (9223372036854775807, 9223372036854775807, 2, False)
 
-    if entry == "out" and rope and out_available:
+    if entry == "out" and rope:
         custom_out.assert_called_once_with(*args, *tail, buffer)
         custom.assert_not_called()
         native.assert_not_called()
@@ -128,7 +124,6 @@ def test_partial_rope_pair_is_rejected_before_operator_execution(
     monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse", custom, raising=False)
     monkeypatch.setattr(torch.ops.npu, "npu_sparse_flash_attention", native, raising=False)
     monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse_out", custom_out, raising=False)
-    monkeypatch.setattr(sparse_attention, "supports_sparse_flash_attention_lse_out", lambda: True)
     tensor = torch.zeros(1)
     key_rope = tensor if query_rope is None else None
     args = (

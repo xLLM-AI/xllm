@@ -16,8 +16,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import torch
 
 try:
@@ -193,12 +191,6 @@ def pool_key_indexer(
         quant_mode=quant_mode,
         return_value=return_value,
     )
-
-
-@lru_cache(maxsize=1)
-def supports_sparse_flash_attention_lse_out() -> bool:
-    """Return whether the native SFA output-buffer wrapper is available."""
-    return hasattr(torch.ops.xllm_ops, "sparse_flash_attention_lse_out")
 
 
 def lightning_indexer(
@@ -479,13 +471,7 @@ def sparse_flash_attention_out(
     _validate_sparse_attention_output(query, output)
     if (query_rope is None) != (key_rope is None):
         raise ValueError("query_rope and key_rope must both be present or absent")
-    if (
-        query_rope is not None
-        and supports_sparse_flash_attention_lse_out()
-        and layout_query == "TND"
-        and layout_kv == "PA_BSND"
-        and sparse_mode == 3
-    ):
+    if query_rope is not None and layout_query == "TND" and layout_kv == "PA_BSND" and sparse_mode == 3:
         return torch.ops.xllm_ops.sparse_flash_attention_lse_out(
             query,
             key,
@@ -716,5 +702,4 @@ __all__ = [
     "sparse_flash_attention_out",
     "sparse_flash_attention_lse",
     "sparse_flash_attention_lse_out",
-    "supports_sparse_flash_attention_lse_out",
 ]

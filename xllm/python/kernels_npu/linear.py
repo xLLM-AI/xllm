@@ -82,15 +82,9 @@ def atb_matmul_ein_sum_out(x: torch.Tensor, weight: torch.Tensor, out: torch.Ten
     return torch.ops.xllm_ops.atb_matmul_ein_sum_out(x, weight, out)
 
 
-def supports_atb_matmul_ein_sum_out() -> bool:
-    """Check the native output-buffer capability during model initialization."""
-    return getattr(torch.ops.xllm_ops, "atb_matmul_ein_sum_out", None) is not None
-
-
 __all__ = [
     "atb_matmul_ein_sum",
     "atb_matmul_ein_sum_out",
-    "supports_atb_matmul_ein_sum_out",
     "prepare_row_parallel_weight",
     "prepare_quant_weight",
 ]

@@ -54,7 +54,6 @@ from xllm.python.model_executor.cp_utils import (
     cp_shard_rows,
 )
 from xllm.python.model_executor.forward_context import (
-    get_execution_buffer,
     get_forward_context,
     record_layer_event,
 )
@@ -839,7 +838,6 @@ class DeepseekV3MLAAttention(Attention):
             "npu",
             "privateuseone",
         )
-        self._use_wuv_out = self._use_fused_mla_decode and kernels.supports_atb_matmul_ein_sum_out()
         self._use_mlapo_v2 = self._mlapo_enabled(cfg, device)
 
         self._fused_mla_ready = False
@@ -1176,39 +1174,18 @@ class DeepseekV3MLAAttention(Attention):
 
     def _project_attention_output(self, attn_out: torch.Tensor) -> torch.Tensor:
         context = get_forward_context()
-        if context.execution_state is not None and self._use_wuv_out:
+        if context.execution_state is not None and self._use_fused_mla_decode:
             value_shape = (attn_out.shape[0], self.num_heads_local, self.v_head_dim)
-            v_full = get_execution_buffer(
-                (
-                    "MLA_W_UV_OUTPUT",
-                    id(self),
-                    self.layer_id,
-                    attn_out.device.type,
-                    attn_out.device.index,
-                    *value_shape,
-                    attn_out.dtype,
-                ),
-                lambda: torch.empty(value_shape, dtype=attn_out.dtype, device=attn_out.device),
-            )
+            v_full = torch.empty(value_shape, dtype=attn_out.dtype, device=attn_out.device)
             kernels.atb_matmul_ein_sum_out(attn_out, self.W_UV, v_full)
+            v_full = v_full.view(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         else:
             v_full = kernels.atb_matmul_ein_sum(attn_out, self.W_UV)
-        v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
+            v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         if context.execution_state is None:
             return self._reduce_attention_output(self.o_proj(v_full))
         output_shape = (v_full.shape[0], self.o_proj.out_features)
-        output = get_execution_buffer(
-            (
-                "MLA_O_PROJ_OUTPUT",
-                id(self),
-                self.layer_id,
-                v_full.device.type,
-                v_full.device.index,
-                *output_shape,
-                torch.bfloat16,
-            ),
-            lambda: torch.empty(output_shape, dtype=torch.bfloat16, device=v_full.device),
-        )
+        output = torch.empty(output_shape, dtype=torch.bfloat16, device=v_full.device)
         return self._reduce_attention_output(self.o_proj.forward_out(v_full, output))
 
     def _forward_with_topk(
@@ -1559,15 +1536,8 @@ class DeepseekV3Indexer(nn.Module):
     ) -> torch.Tensor:
         key_heads = index_cache.size(2) if index_cache.dim() >= 3 else 1
         shape = (q.size(0), key_heads, self.topk)
-        key = (id(self), self.layer_id, shape, q.dtype, q.device)
-        indices = get_execution_buffer(
-            ("LIGHTNING_INDEXER_INDICES",) + key,
-            lambda: torch.empty(shape, dtype=torch.int32, device=q.device),
-        )
-        values = get_execution_buffer(
-            ("LIGHTNING_INDEXER_VALUES",) + key,
-            lambda: torch.empty(shape, dtype=torch.bfloat16, device=q.device),
-        )
+        indices = torch.empty(shape, dtype=torch.int32, device=q.device)
+        values = torch.empty(shape, dtype=torch.bfloat16, device=q.device)
         return kernels.lightning_indexer_out(
             q,
             index_cache,

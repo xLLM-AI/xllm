@@ -30,7 +30,6 @@ from xllm.python.model_executor.forward_context import (  # noqa: E402
 )
 from xllm.python.models.deepseek_v32 import (  # noqa: E402
     DeepseekV3Config,
-    DeepseekV3MLAAttention,
     DeepseekV3MoE,
     W8A8AttentionLinear,
 )
@@ -303,51 +302,3 @@ def test_attention_projection_out_requires_quantization_format(monkeypatch: pyte
     with pytest.raises(RuntimeError, match="quantization format must be selected"):
         projection.forward_out(torch.zeros(2, 4), torch.empty(2, 6, dtype=torch.bfloat16))
     native_out.assert_not_called()
-
-
-@pytest.mark.parametrize("is_graph", (False, True))
-@pytest.mark.parametrize("native_out", (False, True))
-def test_attention_value_projection_reuses_graph_output(
-    monkeypatch: pytest.MonkeyPatch, is_graph: bool, native_out: bool
-) -> None:
-    attention = DeepseekV3MLAAttention(_config(), 1, torch.bfloat16, torch.device("cpu"))
-    attention._use_wuv_out = native_out
-    attention.W_UV.normal_()
-    state = AclGraphExecutionState(persistent_buffers={}) if is_graph else None
-    context = ForwardContext(MagicMock(), torch.device("cpu"), MagicMock(), [], execution_state=state)
-    observed: list[torch.Tensor] = []
-
-    def project_out(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-        out.copy_(torch.einsum("thd,hdo->tho", x, weight))
-        observed.append(out)
-        return out
-
-    def project(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        output = torch.einsum("thd,hdo->tho", x, weight)
-        observed.append(output)
-        return output
-
-    def output_projection(x: torch.Tensor) -> torch.Tensor:
-        return x.sum(-1, keepdim=True).expand(x.shape[0], attention.o_proj.out_features).clone()
-
-    monkeypatch.setattr(kernels, "atb_matmul_ein_sum", project)
-    monkeypatch.setattr(kernels, "atb_matmul_ein_sum_out", project_out)
-    monkeypatch.setattr(attention.o_proj, "forward", output_projection)
-
-    def output_projection_out(x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-        out.copy_(output_projection(x))
-        return out
-
-    monkeypatch.setattr(attention.o_proj, "forward_out", output_projection_out)
-    for tokens in (2, 2, 4):
-        x = torch.randn(tokens, attention.num_heads_local, attention.kv_lora_rank, dtype=torch.bfloat16)
-        expected = output_projection(torch.einsum("thd,hdo->tho", x, attention.W_UV).flatten(1))
-        with forward_context(context):
-            actual = attention._project_attention_output(x)
-        torch.testing.assert_close(actual, expected)
-    if is_graph and native_out:
-        assert observed[0].data_ptr() == observed[1].data_ptr()
-        assert observed[2].data_ptr() != observed[1].data_ptr()
-        assert len([key for key in state.persistent_buffers if key[0] == "MLA_W_UV_OUTPUT"]) == 2
-    elif state is not None:
-        assert not [key for key in state.persistent_buffers if key[0] == "MLA_W_UV_OUTPUT"]
