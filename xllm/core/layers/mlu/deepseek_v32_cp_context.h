@@ -24,8 +24,8 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/kv_cache/layout/kv_shard_layout.h"
 #include "framework/batch/batch_forward_type.h"
-#include "framework/kv_cache/kv_shard_layout.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
 #include "layers/common/kv_shard_batch_metadata.h"

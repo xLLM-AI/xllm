@@ -57,7 +57,6 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/framework/batch/batch.h"
-#include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -65,6 +64,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/kv_cache/block/block.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/params_utils.h"
 #include "core/util/threadpool.h"

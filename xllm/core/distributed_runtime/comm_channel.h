@@ -25,8 +25,8 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
-#include "framework/kv_cache/kv_cache_shape.h"
-#include "framework/kv_cache_transfer/prefetch_result.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/prefetch_result.h"
 #include "framework/xtensor/xtensor.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"

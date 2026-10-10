@@ -22,7 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model/model_output.h"

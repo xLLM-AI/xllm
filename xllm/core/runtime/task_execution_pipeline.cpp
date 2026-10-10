@@ -20,7 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 
-#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/task_execution_pipeline_speculative.h"

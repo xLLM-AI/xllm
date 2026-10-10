@@ -29,11 +29,11 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/batch/forward_input_builder.h"
-#include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/json_object_grammar.h"
+#include "core/kv_cache/block/block_manager_impl.h"
 #include "core/runtime/dit_forward_params.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/forward_shared_memory_manager.h"

@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <cstddef>
 
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/mooncake_weight_transfer.h"
 #endif

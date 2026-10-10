@@ -1,0 +1,78 @@
+include(cc_library)
+
+add_subdirectory(block)
+add_subdirectory(prefix)
+add_subdirectory(transfer)
+
+cc_library(
+  NAME
+    deepseek_v4_cache_policy
+  HDRS
+    layout/deepseek_v4_cache_policy.h
+  DEPS
+    torch
+)
+
+cc_library(
+  NAME
+    kv_cache_estimation
+  HDRS
+    layout/kv_cache_capacity.h
+    layout/kv_cache_estimation.h
+  SRCS
+    layout/kv_cache_estimation.cpp
+  DEPS
+    :common
+    :config
+    :deepseek_v4_cache_policy
+    :block_utils
+    :platform
+    glog::glog
+    proto::xllm_proto
+    torch
+)
+
+cc_library(
+  NAME
+    kv_cache
+  HDRS
+    layout/cache_layout_builder.h
+    layout/cache_layout_types.h
+    storage/deepseek_v4_kv_cache_impl.h
+    storage/indexed_kv_cache_impl.h
+    storage/kpool_kv_cache_impl.h
+    storage/kv_cache.h
+    storage/kv_cache_impl.h
+    layout/kv_cache_shape.h
+    layout/kv_shard_layout.h
+    storage/kv_cache_tensor_allocator.h
+    layout/kv_cache_tensor_role.h
+    storage/kv_cache_utils.h
+    layout/layerwise_split_layout.h
+    storage/linear_attention_kv_cache_impl.h
+    storage/quantized_kv_cache_impl.h
+  SRCS
+    layout/cache_layout_builder.cpp
+    storage/deepseek_v4_kv_cache_impl.cpp
+    storage/indexed_kv_cache_impl.cpp
+    storage/kpool_kv_cache_impl.cpp
+    storage/kv_cache.cpp
+    storage/kv_cache_impl.cpp
+    layout/kv_cache_shape.cpp
+    layout/kv_shard_layout.cpp
+    storage/kv_cache_tensor_allocator.cpp
+    storage/kv_cache_utils.cpp
+    storage/linear_attention_kv_cache_impl.cpp
+    storage/quantized_kv_cache_impl.cpp
+  DEPS
+    :block_utils
+    :common
+    :deepseek_v4_cache_policy
+    :kv_cache_estimation
+    :xtensor
+    glog::glog
+    torch
+    $<$<BOOL:${USE_MLU}>:cndrv>
+    $<$<BOOL:${USE_NPU}>:ascendcl>
+    $<$<BOOL:${USE_NPU}>:torch_npu>
+)

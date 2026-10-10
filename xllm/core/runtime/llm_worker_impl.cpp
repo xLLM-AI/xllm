@@ -30,8 +30,8 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "framework/kv_cache/linear_state_restore.h"
-#include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)

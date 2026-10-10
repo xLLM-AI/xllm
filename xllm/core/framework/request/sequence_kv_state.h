@@ -22,8 +22,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
+#include "core/kv_cache/block/block.h"
 #include "core/util/slice.h"
-#include "framework/block/block.h"
 #include "util/hash_util.h"
 
 namespace xllm {

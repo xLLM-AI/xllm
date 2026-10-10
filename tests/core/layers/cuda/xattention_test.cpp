@@ -26,7 +26,7 @@ limitations under the License.
 
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "layers/cuda/flashinfer_workspace.h"
 #include "layers/cuda/xattention_workspace.h"
 

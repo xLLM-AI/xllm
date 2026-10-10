@@ -13,21 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "block_manager_pool.h"
+#include "core/framework/block/block_manager_pool.h"
 
 #include <algorithm>
 #include <limits>
 
-#include "block_manager_impl.h"
 #include "common/global_flags.h"
-#include "composite_block_manager.h"
-#include "concurrent_block_manager_impl.h"
+#include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "framework/block/xtensor_block_manager_impl.h"
+#include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/block/concurrent_block_manager_impl.h"
+#include "core/kv_cache/block/linear_state_block_manager.h"
+#include "core/kv_cache/block/xtensor_block_manager_impl.h"
 #include "framework/model/model_input_params.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
-#include "linear_state_block_manager.h"
 
 namespace xllm {
 

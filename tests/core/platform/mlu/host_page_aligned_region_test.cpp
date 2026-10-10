@@ -25,7 +25,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/framework/kv_cache/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 

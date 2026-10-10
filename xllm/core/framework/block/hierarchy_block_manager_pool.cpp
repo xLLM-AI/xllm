@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "hierarchy_block_manager_pool.h"
+#include "core/framework/block/hierarchy_block_manager_pool.h"
 
 #include <folly/executors/InlineExecutor.h>
 
@@ -24,10 +24,10 @@ limitations under the License.
 #include <unordered_map>
 #include <utility>
 
-#include "block_manager_impl.h"
-#include "composite_block_manager.h"
-#include "concurrent_block_manager_impl.h"
-#include "sliding_window_block_manager.h"
+#include "core/framework/block/composite_block_manager.h"
+#include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/block/concurrent_block_manager_impl.h"
+#include "core/kv_cache/block/sliding_window_block_manager.h"
 
 namespace xllm {
 

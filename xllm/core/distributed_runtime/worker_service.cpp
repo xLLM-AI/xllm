@@ -39,7 +39,7 @@ limitations under the License.
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/speculative/metrics.h"
-#include "framework/kv_cache/kv_cache_shape.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"

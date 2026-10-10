@@ -20,9 +20,9 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/prefetch_result.h"
 #include "forward_params.h"
-#include "framework/kv_cache/kv_cache_shape.h"
-#include "framework/kv_cache_transfer/prefetch_result.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"

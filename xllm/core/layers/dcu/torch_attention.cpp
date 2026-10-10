@@ -18,7 +18,7 @@ limitations under the License.
 #include <ATen/ops/scaled_dot_product_attention.h>
 #include <glog/logging.h>
 
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "kernels/dcu/attention_runner.h"
 #include "kernels/ops_api.h"
 #include "layers/common/attention_metadata.h"

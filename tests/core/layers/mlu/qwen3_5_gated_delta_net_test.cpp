@@ -23,8 +23,8 @@ limitations under the License.
 #include <vector>
 
 #include "common/constants.h"
-#include "framework/kv_cache/kv_cache.h"
-#include "framework/kv_cache/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_state.h"

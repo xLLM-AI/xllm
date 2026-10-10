@@ -26,8 +26,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "framework/kv_cache_transfer/cache_layout.h"
-#include "framework/kv_cache_transfer/reshard_planner.h"
+#include "core/kv_cache/transfer/cache_layout.h"
+#include "core/kv_cache/transfer/reshard_planner.h"
 #include "mooncake_transfer_engine.pb.h"
 #include "platform/device.h"
 

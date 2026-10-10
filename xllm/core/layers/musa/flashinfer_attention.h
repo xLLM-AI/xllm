@@ -20,7 +20,7 @@ limitations under the License.
 #include <optional>
 #include <tuple>
 
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "layers/common/attention_metadata.h"
 #include "layers/cuda/base_attention_impl.h"
 

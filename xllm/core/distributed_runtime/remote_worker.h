@@ -22,7 +22,7 @@ limitations under the License.
 #include "comm_channel.h"
 #include "common/macros.h"
 #include "common/types.h"
-#include "framework/kv_cache/kv_cache_shape.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"

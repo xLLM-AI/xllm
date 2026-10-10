@@ -23,8 +23,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "framework/kv_cache/kv_cache.h"
-#include "framework/kv_cache/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/quantization/quant_args.h"

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "hierarchy_block_manager_pool.h"
+#include "core/framework/block/hierarchy_block_manager_pool.h"
 
 #include <gtest/gtest.h>
 
@@ -25,12 +25,12 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
-#include "block_manager_impl.h"
 #include "common/global_flags.h"
+#include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/block/sliding_window_block_manager.h"
 #include "framework/block/block_manager_pool.h"
-#include "framework/block/block_utils.h"
 #include "framework/block/composite_block_manager.h"
-#include "framework/block/sliding_window_block_manager.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"

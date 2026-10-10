@@ -22,11 +22,11 @@ limitations under the License.
 #include <string_view>
 #include <type_traits>
 
-#include "core/framework/kv_cache/kv_cache_estimation.h"
-#include "core/framework/kv_cache/kv_cache_shape.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/rec_causal_lm.h"
 #include "core/framework/speculative/mtp_utils.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 #include "core/runtime/options.h"

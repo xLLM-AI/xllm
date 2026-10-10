@@ -21,7 +21,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "framework/kv_cache/kv_shard_layout.h"
+#include "core/kv_cache/layout/kv_shard_layout.h"
 
 namespace xllm::layer {
 

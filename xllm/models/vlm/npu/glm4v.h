@@ -23,9 +23,9 @@ limitations under the License.
 
 #include <unordered_map>
 
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "models/llm/npu/glm4.h"
 #include "models/model_registry.h"

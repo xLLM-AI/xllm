@@ -28,9 +28,9 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/parallel_state/parallel_topology.h"
+#include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/platform/platform.h"
 #include "core/util/utils.h"
-#include "framework/kv_cache/layerwise_split_layout.h"
 #include "models/model_registry.h"
 
 namespace xllm {
