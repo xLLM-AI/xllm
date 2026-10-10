@@ -60,6 +60,7 @@ limitations under the License.
 #include "llm/qwen3_next.h"                              // IWYU pragma: keep
 #include "rec/npu/onerec.h"                              // IWYU pragma: keep
 #include "vlm/glm5_next_vlm.h"                           // IWYU pragma: keep
+#include "vlm/joyai_asr.h"                               // IWYU pragma: keep
 #include "vlm/npu/glm4v.h"                               // IWYU pragma: keep
 #include "vlm/npu/glm4v_moe.h"                           // IWYU pragma: keep
 #include "vlm/npu/kimi_k25.h"                            // IWYU pragma: keep

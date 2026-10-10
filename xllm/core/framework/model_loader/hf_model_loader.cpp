@@ -531,6 +531,12 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
     return false;
   }
 
+  if (!load_hf_audio_preprocessor_args(model_weights_path, args_)) {
+    LOG(ERROR) << "Failed to load audio preprocess args from "
+               << model_weights_path;
+    return false;
+  }
+
   // Some hacky logics to support loading of old models
   // always use float16 for quantization
   // TODO: support quantization for other data types

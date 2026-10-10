@@ -27,13 +27,15 @@ Mistral3PromptProcessor::Mistral3PromptProcessor(const ModelArgs& args) {
   image_token_id_ = args.image_token_id();
 }
 
-void Mistral3PromptProcessor::process(std::string& prompt,
+bool Mistral3PromptProcessor::process(std::string& prompt,
                                       const MMData& mm_data) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
     image_grid_thw = res.value();
 
-  if (!image_grid_thw.defined()) return;
+  if (!image_grid_thw.defined()) {
+    return true;
+  }
 
   auto merge_length = merge_size_ * merge_size_;
 
@@ -63,9 +65,10 @@ void Mistral3PromptProcessor::process(std::string& prompt,
   }
 
   prompt = std::move(data);
+  return true;
 }
 
-void Mistral3PromptProcessor::find_mm_spans(
+bool Mistral3PromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
   auto& mm_items = mm_data.items<MMItemVec>();
@@ -96,6 +99,7 @@ void Mistral3PromptProcessor::find_mm_spans(
     item.mutable_state().mutable_mm_token_num() = length;
     ++global_mm_index;
   }
+  return true;
 }
 
 size_t Mistral3PromptProcessor::find_image_token(const std::string& prompt,

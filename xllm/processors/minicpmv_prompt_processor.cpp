@@ -32,7 +32,7 @@ MiniCPMPromptProcessor::MiniCPMPromptProcessor(const ModelArgs& args) {
   scale_resolution_ = args.mm_scale_resolution();
 }
 
-void MiniCPMPromptProcessor::process(std::string& prompt,
+bool MiniCPMPromptProcessor::process(std::string& prompt,
                                      const MMData& mm_data) {
   std::vector<torch::Tensor> image_sizes;
   mm_data.get("image_sizes", image_sizes);
@@ -41,7 +41,7 @@ void MiniCPMPromptProcessor::process(std::string& prompt,
   std::sregex_iterator image_tag_begin(prompt.begin(), prompt.end(), pattern);
   std::sregex_iterator image_tag_end;
   if (image_tag_begin == image_tag_end) {
-    return;
+    return true;
   }
 
   std::vector<std::pair<int32_t, int32_t>> image_size_list;
@@ -73,9 +73,10 @@ void MiniCPMPromptProcessor::process(std::string& prompt,
   }
   new_prompt += text_chunks.back();
   prompt = std::move(new_prompt);
+  return true;
 }
 
-void MiniCPMPromptProcessor::find_mm_spans(
+bool MiniCPMPromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
   int32_t global_mm_index = 0;
@@ -125,6 +126,7 @@ void MiniCPMPromptProcessor::find_mm_spans(
     }
     span_tokens.push_back(token);
   }
+  return true;
 }
 
 std::string MiniCPMPromptProcessor::get_image_id_placeholder(

@@ -22,7 +22,7 @@ submodule structure, so multiple model families load the same layout once.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 import torch
 
@@ -46,12 +46,17 @@ class _LinearModule(_WeightModule, Protocol):
 
 
 class _GqaAttentionModule(Protocol):
-    """Structural contract :func:`load_gqa_fused_attention` requires of ``module``."""
+    """Shared QKV and output projections."""
 
     @property
     def qkv_proj(self) -> _LinearModule: ...
     @property
     def o_proj(self) -> _LinearModule: ...
+
+
+class _GqaNorms(_GqaAttentionModule, Protocol):
+    """Per-head normalization required only when Q/K norms are enabled."""
+
     @property
     def q_norm(self) -> _WeightModule: ...
     @property
@@ -79,17 +84,29 @@ class _CausalLMBackbone(Protocol):
     def layers(self) -> Sequence[_BackboneLayer]: ...
 
 
+def _has_gqa_norms(module: _GqaAttentionModule) -> TypeGuard[_GqaNorms]:
+    # Registered nn.Module children are resolved through __getattr__.
+    return hasattr(module, "q_norm") and hasattr(module, "k_norm")
+
+
 def load_gqa_fused_attention(
     module: _GqaAttentionModule,
     state: ScopedWeightLoader,
     context: ParallelLoadContext,
     n_kv_heads: int,
+    qk_norm: bool = True,
 ) -> None:
     """Load a fused-QKV GQA attention block's shared weights.
 
     Backend-specific finalization (e.g. row-parallel weight prep) differs by
-    caller and stays with the caller after this returns.
+    caller and stays with the caller after this returns. ``qk_norm=False``
+    fits Qwen2-family towers, which carry no per-head q/k RMSNorm.
     """
+    norms: _GqaNorms | None = None
+    if qk_norm:
+        if not _has_gqa_norms(module):
+            raise TypeError("qk_norm=True requires q_norm and k_norm modules")
+        norms = module
     state.load_fused(
         module.qkv_proj.weight,
         gqa_qkv_shards(".weight", n_kv_heads, context.tp_rank, context.tp_size),
@@ -105,8 +122,9 @@ def load_gqa_fused_attention(
     # o_proj bias is replicated (added after the all-reduce), so load unsharded.
     if module.o_proj.bias is not None:
         state.load_tensor(module.o_proj.bias, "o_proj.bias")
-    state.load_tensor(module.q_norm.weight, "q_norm.weight")
-    state.load_tensor(module.k_norm.weight, "k_norm.weight")
+    if norms is not None:
+        state.load_tensor(norms.q_norm.weight, "q_norm.weight")
+        state.load_tensor(norms.k_norm.weight, "k_norm.weight")
 
 
 def load_causal_lm_weights(

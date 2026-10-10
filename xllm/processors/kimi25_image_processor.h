@@ -129,8 +129,8 @@ class KimiK25PromptProcessor final : public PromptProcessor {
   explicit KimiK25PromptProcessor(const ModelArgs& args);
   ~KimiK25PromptProcessor() override = default;
 
-  void process(std::string& prompt, const MMData& mm_data) override;
-  void find_mm_spans(const std::vector<int32_t>& token_ids,
+  bool process(std::string& prompt, const MMData& mm_data) override;
+  bool find_mm_spans(const std::vector<int32_t>& token_ids,
                      MMData& mm_data) override;
 
  private:

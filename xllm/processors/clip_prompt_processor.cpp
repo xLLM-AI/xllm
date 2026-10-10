@@ -23,7 +23,7 @@ CLIPVLPromptProcessor::CLIPVLPromptProcessor(const ModelArgs& args) {
   merge_size_ = args.mm_image_merge_size();
 }
 
-void CLIPVLPromptProcessor::process(std::string& prompt,
+bool CLIPVLPromptProcessor::process(std::string& prompt,
                                     const MMData& mm_data) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
@@ -36,7 +36,7 @@ void CLIPVLPromptProcessor::process(std::string& prompt,
   }
 
   if (!image_grid_thw.defined() && !video_grid_thw.defined()) {
-    return;
+    return true;
   }
 
   const int32_t merge_length = merge_size_ * merge_size_;
@@ -100,6 +100,7 @@ void CLIPVLPromptProcessor::process(std::string& prompt,
     data.append(prompt, begin, std::string::npos);
   }
   prompt = std::move(data);
+  return true;
 }
 
 std::pair<CLIPVLPromptProcessor::TokenType, size_t>

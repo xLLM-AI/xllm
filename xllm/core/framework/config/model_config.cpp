@@ -47,6 +47,13 @@ DEFINE_string(task,
               "generate",
               "The task to use the model for(e.g. generate, embed, mm_embed).");
 
+DEFINE_bool(use_ctc,
+            false,
+            "Enable the CTC head of audio models whose checkpoint ships "
+            "one. The server renders the CTC chat-template region "
+            "(context variable use_ctc, default off) only while this is "
+            "on, so a client must not emit its own CTC segment.");
+
 DEFINE_int32(limit_image_per_prompt,
              8,
              "Maximum number of image per prompt. Only applicable for "
@@ -127,6 +134,7 @@ void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(python_model_path);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(backend);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(task);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(use_ctc);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(limit_image_per_prompt);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_encoder_cache_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_processor_cache_items);
@@ -182,6 +190,7 @@ void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(model_impl);
   XLLM_CONFIG_ASSIGN_FROM_JSON(backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(task);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(use_ctc);
   XLLM_CONFIG_ASSIGN_FROM_JSON(limit_image_per_prompt);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_encoder_cache_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_processor_cache_items);
@@ -204,6 +213,7 @@ void ModelConfig::append_config_json(
       config_json, default_config, model_impl);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, task);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, use_ctc);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, limit_image_per_prompt);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -56,6 +56,7 @@ class ModelConfig final {
          "model_impl",
          "backend",
          "task",
+         "use_ctc",
          "python_model_path",
          "limit_image_per_prompt",
          "max_encoder_cache_size",
@@ -82,6 +83,8 @@ class ModelConfig final {
   PROPERTY(std::string, backend);
 
   PROPERTY(std::string, task) = "generate";
+
+  PROPERTY(bool, use_ctc) = false;
 
   PROPERTY(int32_t, limit_image_per_prompt) = 8;
 

@@ -31,8 +31,9 @@ class PromptProcessor {
  public:
   virtual ~PromptProcessor() = default;
 
-  virtual void process(std::string& prompt, const MMData& mm_data) = 0;
-  virtual void find_mm_spans(const std::vector<int32_t>& token_ids,
+  // false rejects the request at construction.
+  virtual bool process(std::string& prompt, const MMData& mm_data) = 0;
+  virtual bool find_mm_spans(const std::vector<int32_t>& token_ids,
                              MMData& mm_data) = 0;
 };
 

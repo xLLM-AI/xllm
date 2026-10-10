@@ -32,7 +32,7 @@ Qwen3VLPromptProcessor::Qwen3VLPromptProcessor(const ModelArgs& args) {
   temporal_patch_size_ = args.mm_temporal_patch_size();
 }
 
-void Qwen3VLPromptProcessor::process(std::string& prompt,
+bool Qwen3VLPromptProcessor::process(std::string& prompt,
                                      const MMData& mm_data) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
@@ -42,7 +42,9 @@ void Qwen3VLPromptProcessor::process(std::string& prompt,
   if (auto res = mm_data.get<torch::Tensor>("video_grid_thw"))
     video_grid_thw = res.value();
 
-  if (!image_grid_thw.defined() && !video_grid_thw.defined()) return;
+  if (!image_grid_thw.defined() && !video_grid_thw.defined()) {
+    return true;
+  }
 
   std::vector<VideoMetadata> video_metadata;
   mm_data.get_metadata(MMType::VIDEO, video_metadata);
@@ -145,9 +147,10 @@ void Qwen3VLPromptProcessor::process(std::string& prompt,
 
   if (begin < prompt.size()) data.append(prompt, begin, std::string::npos);
   prompt = std::move(data);
+  return true;
 }
 
-void Qwen3VLPromptProcessor::find_mm_spans(
+bool Qwen3VLPromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
   auto start = token_ids.begin();
@@ -239,6 +242,7 @@ void Qwen3VLPromptProcessor::find_mm_spans(
 
     start = std::next(vision_end_it);
   }
+  return true;
 }
 
 std::pair<Qwen3VLPromptProcessor::TokenType, size_t>

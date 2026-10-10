@@ -43,6 +43,8 @@ from xllm.python.layers import (
     RMSNorm,
     RotaryEmbedding,
     RowParallelLinear,
+    apply_rotary_half,
+    gather_half_rope_cos_sin,
 )
 from xllm.python.model_executor.cp_utils import (
     CpContext,
@@ -156,14 +158,6 @@ def _yarn_linear_ramp_mask(low: float, high: float, dim: int, dtype: torch.dtype
     return torch.clamp(linear, 0, 1)
 
 
-def _gather_half_rope_cos_sin(
-    cos_sin_cache: torch.Tensor, positions: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    cos_sin = cos_sin_cache[positions]
-    half = cos_sin.size(-1) // 2
-    return cos_sin[..., :half], cos_sin[..., half:]
-
-
 def _expand_interleave_rope_cos_sin(
     half_cos: torch.Tensor, half_sin: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -176,7 +170,7 @@ def _gather_interleave_cos_sin(
     cos_sin_cache: torch.Tensor, positions: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather per-token cos/sin and double for ``npu_interleave_rope``."""
-    return _expand_interleave_rope_cos_sin(*_gather_half_rope_cos_sin(cos_sin_cache, positions))
+    return _expand_interleave_rope_cos_sin(*gather_half_rope_cos_sin(cos_sin_cache, positions))
 
 
 def _interleave_rope_with(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -186,17 +180,8 @@ def _interleave_rope_with(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor)
 
 def _apply_half_rope(cos_sin_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
     """Half-rotate RoPE (NeoX style) for ``[T, H, D]`` tensors."""
-    half_cos, half_sin = _gather_half_rope_cos_sin(cos_sin_cache, positions)
-    return _apply_half_rope_with_cos_sin(x, half_cos, half_sin)
-
-
-def _apply_half_rope_with_cos_sin(x: torch.Tensor, half_cos: torch.Tensor, half_sin: torch.Tensor) -> torch.Tensor:
-    c = half_cos.unsqueeze(1)
-    s = half_sin.unsqueeze(1)
-    half = half_cos.size(-1)
-    x1 = x[..., :half]
-    x2 = x[..., half:]
-    return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
+    half_cos, half_sin = gather_half_rope_cos_sin(cos_sin_cache, positions)
+    return apply_rotary_half(x, half_cos, half_sin)
 
 
 def _select_indexer_query_cos_sin(
@@ -275,7 +260,7 @@ class DeepseekYarnRotaryEmbedding(RotaryEmbedding):
         self.register_buffer("cos_sin_cache", cache.contiguous(), persistent=False)
 
     def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        half_cos, half_sin = _gather_half_rope_cos_sin(self.cos_sin_cache, positions)
+        half_cos, half_sin = gather_half_rope_cos_sin(self.cos_sin_cache, positions)
         cos, sin = _expand_interleave_rope_cos_sin(half_cos, half_sin)
         return half_cos, half_sin, cos, sin
 
@@ -1433,7 +1418,7 @@ class DeepseekV3Indexer(nn.Module):
         else:
             _validate_rope_cos_sin(cos_sin, k, self.rope_dim, False, "indexer cache K")
             k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-            k_pe = _apply_half_rope_with_cos_sin(k_pe.unsqueeze(1), *cos_sin).squeeze(1)
+            k_pe = apply_rotary_half(k_pe.unsqueeze(1), *cos_sin).squeeze(1)
             k = torch.cat([k_pe, k_nope], dim=-1)
         if ctx.cp_context is not None:
             # Only the padded K rows obey the equal-size CP gather contract.
@@ -1466,7 +1451,7 @@ class DeepseekV3Indexer(nn.Module):
             return self._apply_interleaved_rope(q, cos_sin)
         _validate_rope_cos_sin(cos_sin, q, self.rope_dim, False, "indexer query")
         q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-        q_pe = _apply_half_rope_with_cos_sin(q_pe, *cos_sin)
+        q_pe = apply_rotary_half(q_pe, *cos_sin)
         return torch.cat([q_pe, q_nope], dim=-1)
 
     def _select_qli(

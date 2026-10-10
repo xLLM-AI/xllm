@@ -221,6 +221,7 @@ struct ModelArgs {
   PROPERTY(int32_t, vision_token_id) = 0;
   PROPERTY(int32_t, image_token_id) = 0;
   PROPERTY(int32_t, video_token_id) = 0;
+  PROPERTY(int32_t, audio_token_id) = 0;
 
   // glm4v moe
   PROPERTY(int32_t, image_start_token_id) = 0;
@@ -463,6 +464,26 @@ struct ModelArgs {
 
   PROPERTY(int64_t, mm_image_token_index) = 0;
   PROPERTY(int64_t, mm_pad_token_id) = 0;
+
+  // mm audio begin
+  // JoyaiASR
+  PROPERTY(int64_t, mm_audio_sampling_rate) = 16000;
+  PROPERTY(int64_t, mm_audio_num_mel_bins) = 80;
+  PROPERTY(int64_t, mm_audio_frame_length) = 400;
+  PROPERTY(int64_t, mm_audio_frame_shift) = 160;
+  PROPERTY(int64_t, mm_audio_max_frames) = 3000;
+  PROPERTY(int64_t, mm_audio_downsample_rate) = 2;
+  PROPERTY(std::vector<double>, mm_audio_cmvn_means) = {};
+  PROPERTY(std::vector<double>, mm_audio_cmvn_inverse_std) = {};
+  PROPERTY(int64_t, mm_audio_idim) = 80;
+  PROPERTY(int64_t, mm_audio_d_model) = 1280;
+  PROPERTY(int64_t, mm_audio_n_layers) = 16;
+  PROPERTY(int64_t, mm_audio_n_head) = 20;
+  PROPERTY(int64_t, mm_audio_kernel_size) = 33;
+  PROPERTY(int64_t, mm_audio_pe_maxlen) = 5000;
+
+  // ctc head
+  PROPERTY(int64_t, mm_audio_ctc_pad_token_id) = 151643;
 
   // whether to tie weight embeddings
   PROPERTY(bool, tie_word_embeddings) = false;

@@ -39,6 +39,8 @@ DECLARE_string(backend);
 
 DECLARE_string(model_impl);
 
+DECLARE_bool(use_ctc);
+
 DECLARE_string(python_model_path);
 
 DECLARE_string(task);

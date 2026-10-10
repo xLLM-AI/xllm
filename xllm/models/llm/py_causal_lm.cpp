@@ -355,6 +355,7 @@ py::dict PyCausalLM::build_config_dict(
   d["enable_eplb"] = eplb_config.enable_eplb();
   d["redundant_experts_num"] = eplb_config.redundant_experts_num();
   d["eplb_use_decode_only_load"] = eplb_config.eplb_use_decode_only_load();
+  d["use_ctc"] = ModelConfig::get_instance().use_ctc();
   // Checkpoint directory: python models use it to discover side-car files
   // shipped with the weights (e.g. optional/quarot.safetensors).
   d["model_path"] = ModelConfig::get_instance().model();

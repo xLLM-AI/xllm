@@ -153,6 +153,12 @@ def _register_builtin_models() -> None:
         "Glm5NextMtpForCausalLM",
         "glm5_next_mtp",
     )
+    _register_model_path(
+        "xllm.python.models.joyai_asr",
+        "JoyaiASRForConditionalGeneration",
+        "joyai_asr",
+        "JoyaiASRForConditionalGeneration",
+    )
 
 
 _register_builtin_models()

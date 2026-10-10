@@ -22,9 +22,9 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "mm_batch_data.h"
-#include "mm_data.h"
-#include "mm_input.h"
+#include "core/framework/multimodal/mm_batch_data.h"
+#include "core/framework/multimodal/mm_data.h"
+#include "core/framework/multimodal/mm_input.h"
 
 namespace xllm {
 

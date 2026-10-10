@@ -29,7 +29,7 @@ Qwen2VLPromptProcessor::Qwen2VLPromptProcessor(const ModelArgs& args) {
   video_token_id_ = args.video_token_id();
 }
 
-void Qwen2VLPromptProcessor::process(std::string& prompt,
+bool Qwen2VLPromptProcessor::process(std::string& prompt,
                                      const MMData& mm_data) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
@@ -42,7 +42,7 @@ void Qwen2VLPromptProcessor::process(std::string& prompt,
   }
 
   if (!image_grid_thw.defined() && !video_grid_thw.defined()) {
-    return;
+    return true;
   }
 
   const int32_t merge_length = merge_size_ * merge_size_;
@@ -106,9 +106,10 @@ void Qwen2VLPromptProcessor::process(std::string& prompt,
     data.append(prompt, begin, std::string::npos);
   }
   prompt = std::move(data);
+  return true;
 }
 
-void Qwen2VLPromptProcessor::find_mm_spans(
+bool Qwen2VLPromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
   auto start = token_ids.begin();
@@ -140,6 +141,7 @@ void Qwen2VLPromptProcessor::find_mm_spans(
     ++global_mm_index;
     start = std::next(vision_end_it);
   }
+  return true;
 }
 
 std::pair<Qwen2VLPromptProcessor::TokenType, size_t>

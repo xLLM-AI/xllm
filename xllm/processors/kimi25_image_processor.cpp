@@ -616,7 +616,7 @@ KimiK25PromptProcessor::KimiK25PromptProcessor(const ModelArgs& args) {
   vision_end_token_id_ = args.vision_end_token_id();
 }
 
-void KimiK25PromptProcessor::process(std::string& prompt,
+bool KimiK25PromptProcessor::process(std::string& prompt,
                                      const MMData& mm_data) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
@@ -629,7 +629,7 @@ void KimiK25PromptProcessor::process(std::string& prompt,
   }
 
   if (!image_grid_thw.defined() && !video_grid_thw.defined()) {
-    return;
+    return true;
   }
 
   std::vector<int32_t> image_token_counts =
@@ -696,9 +696,10 @@ void KimiK25PromptProcessor::process(std::string& prompt,
   }
 
   prompt = std::move(data);
+  return true;
 }
 
-void KimiK25PromptProcessor::find_mm_spans(
+bool KimiK25PromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
   auto start = token_ids.begin();
@@ -736,6 +737,7 @@ void KimiK25PromptProcessor::find_mm_spans(
     ++global_mm_index;
     start = std::next(vision_end_it);
   }
+  return true;
 }
 
 std::vector<int32_t> KimiK25PromptProcessor::get_media_token_counts(

@@ -35,9 +35,11 @@ class CLIPVLPromptProcessor final : public PromptProcessor {
  public:
   explicit CLIPVLPromptProcessor(const ModelArgs& args);
 
-  void process(std::string& prompt, const MMData& mm_data) override;
-  void find_mm_spans(const std::vector<int32_t>& token_ids,
-                     MMData& mm_data) override {}
+  bool process(std::string& prompt, const MMData& mm_data) override;
+  bool find_mm_spans(const std::vector<int32_t>& token_ids,
+                     MMData& mm_data) override {
+    return true;
+  }
 
  private:
   std::pair<TokenType, size_t> find_vision_token(const std::string& prompt,

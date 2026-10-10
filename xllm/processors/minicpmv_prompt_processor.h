@@ -30,8 +30,8 @@ class MiniCPMPromptProcessor final : public PromptProcessor {
  public:
   explicit MiniCPMPromptProcessor(const ModelArgs& args);
 
-  void process(std::string& prompt, const MMData& mm_data) override;
-  void find_mm_spans(const std::vector<int32_t>& token_ids,
+  bool process(std::string& prompt, const MMData& mm_data) override;
+  bool find_mm_spans(const std::vector<int32_t>& token_ids,
                      MMData& mm_data) override;
 
  private:

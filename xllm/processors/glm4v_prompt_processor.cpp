@@ -29,7 +29,7 @@ GLM4VPromptProcessor::GLM4VPromptProcessor(const ModelArgs& args) {
   image_token_id_ = args.image_token_id();
 }
 
-void GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
+bool GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
   torch::Tensor image_grid_thw;
   if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
     image_grid_thw = res.value();
@@ -41,7 +41,7 @@ void GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
   }
 
   if (!image_grid_thw.defined() && !video_grid_thw.defined()) {
-    return;
+    return true;
   }
 
   std::vector<VideoMetadata> video_metadata;
@@ -122,9 +122,10 @@ void GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
     data.append(prompt, begin, std::string::npos);
   }
   prompt = std::move(data);
+  return true;
 }
 
-void GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
+bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
                                          MMData& mm_data) {
   const size_t tokens_num = token_ids.size();
   int32_t global_mm_index = 0;
@@ -181,6 +182,7 @@ void GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
       image_span_length = 0;
     }
   }
+  return true;
 }
 
 std::pair<GLM4VPromptProcessor::TokenType, size_t>

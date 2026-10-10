@@ -27,6 +27,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -318,7 +319,15 @@ std::shared_ptr<Request> VLMRequestFactory::create(
       throw_prompt_as_is_error(messages);
     }
   } else {
-    prompt = chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
+    // Server-side template context for audio models (audio_token_id set):
+    // the CTC region follows --use_ctc, so the rendered prompt and the
+    // embedding injection cannot disagree. A request kwarg of the same name
+    // is overridden on purpose.
+    nlohmann::ordered_json chat_template_kwargs = sp.chat_template_kwargs;
+    if (model_args_->audio_token_id() != 0) {
+      chat_template_kwargs["use_ctc"] = ModelConfig::get_instance().use_ctc();
+    }
+    prompt = chat_template_->apply(messages, sp.tools, chat_template_kwargs);
   }
   if (!prompt.has_value()) {
     std::string error_message = "Failed to construct prompt from messages";

@@ -79,3 +79,26 @@ class RotaryEmbedding(nn.Module):
         cos = cos_half.view(1, num_tokens, 1, self.head_dim)
         sin = cos_half.view(1, num_tokens, 1, self.head_dim)
         return cos, sin
+
+
+def gather_half_rope_cos_sin(cos_sin_cache: torch.Tensor, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather per-token ``(cos_half, sin_half)`` rows from a cache built by
+    :class:`RotaryEmbedding` (first half cos, second half sin)."""
+    cos_sin = cos_sin_cache[positions]
+    half = cos_sin.size(-1) // 2
+    return cos_sin[..., :half], cos_sin[..., half:]
+
+
+def apply_rotary_half(x: torch.Tensor, half_cos: torch.Tensor, half_sin: torch.Tensor) -> torch.Tensor:
+    """NEOX rotate-half RoPE from half-width cos/sin rows.
+
+    ``x``: [num_tokens, num_heads, head_dim]; ``half_cos``/``half_sin``:
+    [num_tokens, head_dim // 2] (as returned by :func:`gather_half_rope_cos_sin`),
+    broadcast over heads.
+    """
+    cos = half_cos.unsqueeze(1)
+    sin = half_sin.unsqueeze(1)
+    half = half_cos.size(-1)
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)

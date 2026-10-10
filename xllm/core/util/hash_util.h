@@ -34,7 +34,8 @@ constexpr uint32_t XXH3_128BITS_HASH_VALUE_LEN = sizeof(XXH128_hash_t);
 struct XXH3Key {
   uint8_t data[XXH3_128BITS_HASH_VALUE_LEN];
 
-  XXH3Key() {}
+  // Zero-init: unset keys are a deterministic all-zero, rejectable downstream.
+  XXH3Key() : data{} {}
   XXH3Key(const uint8_t* const input_data) {
     std::memcpy(data, input_data, XXH3_128BITS_HASH_VALUE_LEN);
   }

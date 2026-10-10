@@ -206,6 +206,9 @@ class ModelExecutor:
         acl_graph_decode_batch_size_limit: int | None = None,
     ) -> None:
         self.model = model
+        configure_runtime = getattr(model, "configure_runtime", None)
+        if configure_runtime is not None:
+            configure_runtime(config)
         # MTP width is a process-level graph contract.  The runner may accept
         # fewer tokens after verification, but it must never change the
         # capture width for a live executor.

@@ -26,7 +26,11 @@ from xllm.python.layers.fused_moe import FusedMoE
 from xllm.python.layers.gated_mlp import GatedMLP
 from xllm.python.layers.layernorm import GemmaRMSNorm, RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.rotary_embedding import RotaryEmbedding
+from xllm.python.layers.rotary_embedding import (
+    RotaryEmbedding,
+    apply_rotary_half,
+    gather_half_rope_cos_sin,
+)
 
 __all__ = [
     "Attention",
@@ -36,6 +40,8 @@ __all__ = [
     "RMSNorm",
     "GemmaRMSNorm",
     "RotaryEmbedding",
+    "apply_rotary_half",
+    "gather_half_rope_cos_sin",
     "ColumnParallelLinear",
     "RowParallelLinear",
     "HiddenParallelEmbedding",

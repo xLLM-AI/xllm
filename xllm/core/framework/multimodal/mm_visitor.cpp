@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "mm_visitor.h"
+#include "core/framework/multimodal/mm_visitor.h"
 
 #include <absl/strings/match.h>
 #include <glog/logging.h>
@@ -23,7 +23,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
-#include "framework/encoder_cache/encoder_cache.h"
+#include "core/framework/encoder_cache/encoder_cache.h"
 #include "processors/processor_cache.h"
 
 namespace xllm {
@@ -244,7 +244,16 @@ bool EncoderOutputScatterVisitor::visit(MMDataItem& item) {
   const std::string embedding_key = get_embedding_key(item.type());
   const auto& vec =
       std::get<std::vector<torch::Tensor>>(data_.at(embedding_key));
-  item.add(embedding_key, vec[*idx]);
+  CHECK_LT(static_cast<size_t>(*idx), vec.size())
+      << "Missing encoder output for key: " << embedding_key;
+  const auto& embedding = vec[*idx];
+  if (item.type() == MMType::AUDIO) {
+    CHECK(embedding.defined());
+    CHECK_EQ(embedding.dim(), 2);
+    CHECK_EQ(embedding.size(0), item.state().mm_token_num())
+        << "audio encoder row count differs from mm_token_num";
+  }
+  item.add(embedding_key, embedding);
   ++(*idx);
   return true;
 }
@@ -281,6 +290,11 @@ EncoderEmbeddingGatherVisitor::EncoderEmbeddingGatherVisitor(
       total_scheduled_tokens_(std::accumulate(per_seq_scheduled_lens_.begin(),
                                               per_seq_scheduled_lens_.end(),
                                               0)) {
+  CHECK_EQ(per_seq_context_lens_.size(), per_seq_scheduled_lens_.size());
+  for (size_t i = 0; i < per_seq_context_lens_.size(); ++i) {
+    CHECK_GE(per_seq_context_lens_[i], per_seq_scheduled_lens_[i])
+        << "kv length below q length for seq " << i;
+  }
   if (per_seq_scheduled_lens_.size() > 1) {
     std::partial_sum(per_seq_scheduled_lens_.begin(),
                      per_seq_scheduled_lens_.end() - 1,
@@ -305,6 +319,9 @@ bool EncoderEmbeddingGatherVisitor::visit(MMDataItem& item) {
 
   int32_t seq_index = state.seq_index();
   CHECK_GE(seq_index, 0);
+  CHECK_LT(static_cast<size_t>(seq_index), per_seq_scheduled_lens_.size());
+  CHECK(state.mm_token_mask().defined())
+      << "multimodal item without an mm_token_mask";
 
   auto token_pos = item.state().token_pos();
   int32_t start_pos = state.schedule_data().start_pos;
@@ -324,6 +341,10 @@ bool EncoderEmbeddingGatherVisitor::visit(MMDataItem& item) {
       req_start_idx_ + token_pos.offset - computed_tokens_num + start_pos;
   int32_t req_end_pos =
       req_start_idx_ + token_pos.offset - computed_tokens_num + end_pos;
+  CHECK_GE(req_start_pos, req_start_idx_)
+      << "multimodal scatter range starts before its sequence window";
+  CHECK_LE(req_end_pos, req_start_idx_ + schedule_tokens_num)
+      << "multimodal scatter range ends past its sequence window";
 
   if (item.type() == MMType::IMAGE) {
     image_mask_.slice(/*dim*/ 0,
