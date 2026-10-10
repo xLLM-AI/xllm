@@ -47,8 +47,7 @@ void KVCachePageState::init(size_t block_mem_size) {
 std::vector<int64_t> KVCachePageState::alloc(size_t num_blocks) {
   require_init();
   if (full()) {
-    throw std::runtime_error("VirtualPage " +
-                             std::to_string(page_.page_index) +
+    throw std::runtime_error("VirtualPage " + std::to_string(page_.page_index) +
                              " is already full");
   }
 
