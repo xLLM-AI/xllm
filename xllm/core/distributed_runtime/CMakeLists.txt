@@ -6,6 +6,8 @@ if(USE_NPU OR USE_CUDA OR USE_MUSA OR USE_MLU OR USE_DCU)
   add_subdirectory(spawn_worker_server)
 endif()
 
+add_subdirectory(memory)
+
 cc_library(
   NAME 
     distributed_runtime

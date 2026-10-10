@@ -25,7 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
-#include "core/framework/xtensor/xtensor.h"  // For offset_t type definition
+#include "core/virtual_memory/mapped_memory_region.h"  // For offset_t type definition
 #include "util/threadpool.h"
 #include "xtensor_dist.pb.h"
 

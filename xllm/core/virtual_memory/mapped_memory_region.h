@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,32 +17,36 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <cstddef>
 #include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "core/framework/xtensor/phy_page.h"
 #include "core/platform/vmm_api.h"
+#include "core/virtual_memory/physical_page.h"
 
 namespace xllm {
 
-// Type definitions (page_id_t is defined in phy_page.h)
+// Type definitions (page_id_t is defined in physical_page.h)
 using offset_t = page_id_t;
 
-/* NOTE: XTensorAllocator is thread-safe but XTensor is not. */
-class XTensor {
+// Mapping operations require synchronization by the caller.
+class MappedMemoryRegion final {
  public:
-  XTensor(size_t size, torch::Dtype dtype, torch::Device dev);
+  MappedMemoryRegion(size_t size,
+                     torch::Dtype dtype,
+                     torch::Device dev,
+                     size_t page_size);
 
-  // Constructor for weight tensor using pre-allocated page_ids (non-contiguous)
-  // page_ids: physical page IDs from PhyPagePool (allocated via
-  // allocate_pages_from_right)
-  XTensor(const std::vector<page_id_t>& page_ids,
-          torch::Dtype dtype,
-          torch::Device dev);
+  // Map externally selected pages in the supplied logical order.
+  // The region owns this reservation and releases it during destruction.
+  MappedMemoryRegion(std::vector<page_id_t> page_ids,
+                     torch::Dtype dtype,
+                     torch::Device dev,
+                     size_t page_size);
 
-  ~XTensor();
+  ~MappedMemoryRegion();
 
   bool map(offset_t offset);
   bool unmap(offset_t offset);
@@ -50,32 +54,19 @@ class XTensor {
   // Validate every target and reserve all missing pages before changing any
   // mapping. Duplicate targets and existing mappings are idempotent.
   static bool map_pages(
-      const std::vector<std::pair<XTensor*, offset_t>>& targets);
+      const std::vector<std::pair<MappedMemoryRegion*, offset_t>>& targets);
 
-  // Map/unmap all pages (for weight tensors)
+  // Map/unmap every page in the virtual range.
   bool map_all();
   bool unmap_all();
 
-  // Map all pages using pre-allocated page_ids (for weight fallback)
+  // Map all pages using reserved physical page IDs.
   // page_ids: physical page IDs to use
   // Returns true on success
   bool map_with_page_ids(const std::vector<page_id_t>& page_ids);
 
-  // Check if this XTensor uses pre-allocated pages (weight fallback mode)
+  // Check whether this region owns a reservation of externally selected pages.
   bool is_using_preallocated_pages() const { return use_preallocated_pages_; }
-
-  // Allocate a chunk of memory from this tensor (bump allocator style)
-  // Used for weight tensors where each layer allocates its own portion.
-  // ptr: output parameter, set to the allocated memory address
-  // size: size in bytes to allocate
-  // Returns true on success, false on failure
-  bool allocate(void*& ptr, size_t size);
-
-  // Get the current allocation offset (for debugging/info)
-  size_t alloc_offset() const noexcept { return alloc_offset_; }
-
-  // Reset allocation offset (e.g., for reuse)
-  void reset_alloc_offset() { alloc_offset_ = 0; }
 
   // Convert the underlying memory to a torch::Tensor.
   // For NPU devices, uses convert_to_torch_tensor; for others, uses from_blob.
@@ -91,17 +82,15 @@ class XTensor {
   inline size_t page_size() const noexcept { return page_size_; }
   inline VirPtr vaddr() const noexcept { return vaddr_; }
 
-  // Getters for compatibility
+  // Geometry for non-owning tensor views.
   inline torch::Dtype dtype() const noexcept { return dtype_; }
   inline const torch::Device& device() const noexcept { return dev_; }
 
-  // Alias for vaddr() for backward compatibility
+  // Non-owning base virtual address.
   inline VirPtr get_base_ptr() const noexcept { return vaddr_; }
 
-  // Get the global physical page_id for a given offset within this XTensor.
-  // Returns the page_id from PhyPagePool, or -1 if the offset is not mapped.
-  // This is used for PD disaggregation to convert block offsets to
-  // GlobalXTensor offsets.
+  // Get the pool page_id for a mapped page-aligned byte offset.
+  // Returns -1 if the offset is invalid or has no transferred page mapping.
   page_id_t get_phy_page_id(offset_t offset) const;
 
  private:
@@ -109,19 +98,14 @@ class XTensor {
 
   VirPtr vaddr_;
   size_t size_;
-  size_t
-      page_size_;  // Page size
-                   // (::xllm::KVCacheConfig::get_instance().phy_page_granularity_size())
+  size_t page_size_;
   torch::Dtype dtype_;
   torch::Device dev_;
 
-  // Maps page id -> PhyPage (page id = offset / page_size_)
-  std::unordered_map<page_id_t, std::unique_ptr<PhyPage>> mapping_;
+  // Maps page id -> PhysicalPage (page id = offset / page_size_)
+  std::unordered_map<page_id_t, std::unique_ptr<PhysicalPage>> mapping_;
 
-  // Bump allocator offset for weight allocation
-  size_t alloc_offset_ = 0;
-
-  // For weight fallback mode: use pre-allocated pages from PhyPagePool
+  // Reservation of externally selected pool pages.
   bool use_preallocated_pages_ = false;
   std::vector<page_id_t> preallocated_page_ids_;  // Stored for cleanup
   size_t mapped_preallocated_pages_ = 0;

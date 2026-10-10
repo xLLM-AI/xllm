@@ -19,7 +19,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/framework/xtensor/phy_page.h"
+#include "core/virtual_memory/physical_page.h"
 
 namespace xllm {
 

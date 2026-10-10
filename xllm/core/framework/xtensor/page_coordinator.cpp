@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/framework/xtensor/phy_page_pool.h"
+#include "core/virtual_memory/physical_page_pool.h"
 
 namespace xllm {
 
@@ -28,14 +28,13 @@ WeightPageReservation XTensorPageCoordinator::reserve_weight_pages(
     return reservation;
   }
 
-  auto& pool = PhyPagePool::get_instance();
-  reservation.contiguous_start =
-      pool.allocate_contiguous_from_right(num_pages);
+  auto& pool = PhysicalPagePool::get_instance();
+  reservation.contiguous_start = pool.allocate_contiguous_from_right(num_pages);
   if (reservation.contiguous_start >= 0) {
     reservation.page_ids.reserve(num_pages);
     for (size_t i = 0; i < num_pages; ++i) {
-      reservation.page_ids.push_back(
-          reservation.contiguous_start + static_cast<page_id_t>(i));
+      reservation.page_ids.push_back(reservation.contiguous_start +
+                                     static_cast<page_id_t>(i));
     }
     return reservation;
   }
@@ -52,7 +51,7 @@ void XTensorPageCoordinator::release_weight_pages(
   if (reservation.page_ids.empty()) {
     return;
   }
-  PhyPagePool::get_instance().free_weight_pages(reservation.page_ids);
+  PhysicalPagePool::get_instance().release_reserved_pages(reservation.page_ids);
 }
 
 }  // namespace xllm

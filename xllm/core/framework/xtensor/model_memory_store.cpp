@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "core/framework/xtensor/model_memory_store.h"
 
-#include "core/framework/xtensor/xtensor.h"
+#include "core/virtual_memory/mapped_memory_region.h"
 
 namespace xllm {
 

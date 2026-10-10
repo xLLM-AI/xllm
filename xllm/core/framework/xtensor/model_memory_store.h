@@ -27,11 +27,11 @@ limitations under the License.
 
 namespace xllm {
 
-class XTensor;
+class MappedMemoryRegion;
 
 struct ModelTensors {
-  std::vector<std::unique_ptr<XTensor>> k_tensors;
-  std::vector<std::unique_ptr<XTensor>> v_tensors;
+  std::vector<std::unique_ptr<MappedMemoryRegion>> k_tensors;
+  std::vector<std::unique_ptr<MappedMemoryRegion>> v_tensors;
   int64_t num_layers = 0;
   size_t kv_tensor_size_per_layer = 0;
   WeightAllocation weight;

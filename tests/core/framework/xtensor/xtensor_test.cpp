@@ -13,8 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/xtensor/xtensor.h"
-
 #include <acl/acl.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -24,10 +22,10 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
-#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/xtensor/global_xtensor.h"
-#include "core/framework/xtensor/phy_page_pool.h"
 #include "core/platform/vmm_api.h"
+#include "core/virtual_memory/mapped_memory_region.h"
+#include "core/virtual_memory/physical_page_pool.h"
 #include "tests/core/framework/xtensor/xtensor_test_utils.h"
 #include "tests/npu_test_environment.h"
 
@@ -62,11 +60,10 @@ class XTensorTest : public ::testing::Test {
       GTEST_SKIP() << "No NPU device available";
     }
     ASSERT_EQ(aclrtSetDevice(/*device_id=*/0), ACL_SUCCESS);
-    auto& pool = PhyPagePool::get_instance();
-    pool.init(device_, kPoolPages);
+    auto& pool = PhysicalPagePool::get_instance();
+    page_size_ = vmm::get_recommended_granularity(device_.index());
+    pool.init(device_, kPoolPages, page_size_);
     resources_initialized_ = true;
-    page_size_ = static_cast<size_t>(
-        KVCacheConfig::get_instance().phy_page_granularity_size());
     ASSERT_GT(page_size_, 0);
     ASSERT_EQ(pool.num_available(), kPoolPages);
   }
@@ -75,7 +72,7 @@ class XTensorTest : public ::testing::Test {
     if (!resources_initialized_) {
       return;
     }
-    EXPECT_EQ(PhyPagePool::get_instance().num_available(), kPoolPages);
+    EXPECT_EQ(PhysicalPagePool::get_instance().num_available(), kPoolPages);
     XTensorTestPeer::release_resources();
   }
 
@@ -85,20 +82,21 @@ class XTensorTest : public ::testing::Test {
 };
 
 TEST_F(XTensorTest, ShortageAcrossTensorsLeavesBothUnmapped) {
-  auto& pool = PhyPagePool::get_instance();
-  XTensor blocker((kPoolPages - 1) * page_size_, torch::kUInt8, device_);
+  auto& pool = PhysicalPagePool::get_instance();
+  MappedMemoryRegion blocker(
+      (kPoolPages - 1) * page_size_, torch::kUInt8, device_, page_size_);
   ASSERT_TRUE(blocker.map_all());
-  XTensor first(page_size_, torch::kUInt8, device_);
-  XTensor second(page_size_, torch::kUInt8, device_);
+  MappedMemoryRegion first(page_size_, torch::kUInt8, device_, page_size_);
+  MappedMemoryRegion second(page_size_, torch::kUInt8, device_, page_size_);
   ASSERT_EQ(pool.num_available(), 1);
 
-  EXPECT_FALSE(XTensor::map_pages({{&first, 0}, {&second, 0}}));
+  EXPECT_FALSE(MappedMemoryRegion::map_pages({{&first, 0}, {&second, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(second.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), 1);
 
   ASSERT_TRUE(blocker.unmap(/*offset=*/0));
-  ASSERT_TRUE(XTensor::map_pages({{&first, 0}, {&second, 0}}));
+  ASSERT_TRUE(MappedMemoryRegion::map_pages({{&first, 0}, {&second, 0}}));
   EXPECT_GE(first.get_phy_page_id(/*offset=*/0), 0);
   EXPECT_GE(second.get_phy_page_id(/*offset=*/0), 0);
   EXPECT_NE(first.get_phy_page_id(/*offset=*/0),
@@ -107,42 +105,54 @@ TEST_F(XTensorTest, ShortageAcrossTensorsLeavesBothUnmapped) {
 }
 
 TEST_F(XTensorTest, LaterInvalidTargetDoesNotMapEarlierTarget) {
-  auto& pool = PhyPagePool::get_instance();
-  XTensor first(page_size_, torch::kUInt8, device_);
-  XTensor second(page_size_, torch::kUInt8, device_);
+  auto& pool = PhysicalPagePool::get_instance();
+  MappedMemoryRegion first(page_size_, torch::kUInt8, device_, page_size_);
+  MappedMemoryRegion second(page_size_, torch::kUInt8, device_, page_size_);
   const std::vector<offset_t> invalid_offsets = {
       -1, 1, static_cast<offset_t>(page_size_)};
   for (offset_t offset : invalid_offsets) {
-    EXPECT_FALSE(XTensor::map_pages({{&first, 0}, {&second, offset}}));
+    EXPECT_FALSE(
+        MappedMemoryRegion::map_pages({{&first, 0}, {&second, offset}}));
     EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
     EXPECT_EQ(second.get_phy_page_id(/*offset=*/0), -1);
     EXPECT_EQ(pool.num_available(), kPoolPages);
   }
-  EXPECT_FALSE(XTensor::map_pages({{&first, 0}, {nullptr, 0}}));
+  EXPECT_FALSE(MappedMemoryRegion::map_pages({{&first, 0}, {nullptr, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages);
 
-  XTensor wrong_device(page_size_, torch::kUInt8, torch::Device(torch::kCPU));
-  EXPECT_FALSE(XTensor::map_pages({{&first, 0}, {&wrong_device, 0}}));
+  MappedMemoryRegion wrong_device(
+      page_size_, torch::kUInt8, torch::Device(torch::kCPU), page_size_);
+  EXPECT_FALSE(
+      MappedMemoryRegion::map_pages({{&first, 0}, {&wrong_device, 0}}));
+  EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
+  EXPECT_EQ(pool.num_available(), kPoolPages);
+
+  MappedMemoryRegion wrong_page_size(
+      page_size_, torch::kUInt8, device_, 2 * page_size_);
+  EXPECT_FALSE(
+      MappedMemoryRegion::map_pages({{&first, 0}, {&wrong_page_size, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages);
 
   const auto weight_page_ids = pool.allocate_pages_from_right(/*count=*/1);
   ASSERT_EQ(weight_page_ids.size(), 1);
-  XTensor weight_tensor(weight_page_ids, torch::kUInt8, device_);
-  EXPECT_FALSE(XTensor::map_pages({{&first, 0}, {&weight_tensor, 0}}));
+  MappedMemoryRegion weight_tensor(
+      weight_page_ids, torch::kUInt8, device_, page_size_);
+  EXPECT_FALSE(
+      MappedMemoryRegion::map_pages({{&first, 0}, {&weight_tensor, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages - 1);
 }
 
 TEST_F(XTensorTest, DuplicateAndExistingTargetsAreIdempotent) {
-  auto& pool = PhyPagePool::get_instance();
-  XTensor first(2 * page_size_, torch::kUInt8, device_);
-  XTensor second(page_size_, torch::kUInt8, device_);
+  auto& pool = PhysicalPagePool::get_instance();
+  MappedMemoryRegion first(2 * page_size_, torch::kUInt8, device_, page_size_);
+  MappedMemoryRegion second(page_size_, torch::kUInt8, device_, page_size_);
   ASSERT_TRUE(first.map(/*offset=*/0));
   const page_id_t existing_page = first.get_phy_page_id(/*offset=*/0);
   const offset_t next_offset = static_cast<offset_t>(page_size_);
-  const std::vector<std::pair<XTensor*, offset_t>> targets = {
+  const std::vector<std::pair<MappedMemoryRegion*, offset_t>> targets = {
       {&first, 0},
       {&first, 0},
       {&first, next_offset},
@@ -150,7 +160,7 @@ TEST_F(XTensorTest, DuplicateAndExistingTargetsAreIdempotent) {
       {&second, 0},
       {&second, 0}};
 
-  ASSERT_TRUE(XTensor::map_pages(targets));
+  ASSERT_TRUE(MappedMemoryRegion::map_pages(targets));
   EXPECT_EQ(pool.num_available(), kPoolPages - 3);
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), existing_page);
   EXPECT_GE(first.get_phy_page_id(next_offset), 0);
@@ -159,17 +169,18 @@ TEST_F(XTensorTest, DuplicateAndExistingTargetsAreIdempotent) {
   EXPECT_NE(second.get_phy_page_id(/*offset=*/0), existing_page);
   EXPECT_NE(second.get_phy_page_id(/*offset=*/0),
             first.get_phy_page_id(next_offset));
-  EXPECT_TRUE(XTensor::map_pages(targets));
-  EXPECT_TRUE(XTensor::map_pages({}));
+  EXPECT_TRUE(MappedMemoryRegion::map_pages(targets));
+  EXPECT_TRUE(MappedMemoryRegion::map_pages({}));
   EXPECT_EQ(pool.num_available(), kPoolPages - 3);
 }
 
 TEST_F(XTensorTest, MapAllExhaustionPreservesExistingMapping) {
-  auto& pool = PhyPagePool::get_instance();
-  XTensor tensor(3 * page_size_, torch::kUInt8, device_);
+  auto& pool = PhysicalPagePool::get_instance();
+  MappedMemoryRegion tensor(3 * page_size_, torch::kUInt8, device_, page_size_);
   ASSERT_TRUE(tensor.map(/*offset=*/0));
   const page_id_t existing_page = tensor.get_phy_page_id(/*offset=*/0);
-  XTensor blocker(2 * page_size_, torch::kUInt8, device_);
+  MappedMemoryRegion blocker(
+      2 * page_size_, torch::kUInt8, device_, page_size_);
   ASSERT_TRUE(blocker.map_all());
   ASSERT_EQ(pool.num_available(), 1);
 
@@ -189,11 +200,11 @@ TEST_F(XTensorTest, MapAllExhaustionPreservesExistingMapping) {
 }
 
 TEST_F(XTensorTest, RealMapUnmapRemapPreservesContents) {
-  auto& pool = PhyPagePool::get_instance();
+  auto& pool = PhysicalPagePool::get_instance();
   auto& global_tensor = GlobalXTensor::get_instance();
   global_tensor.init(device_);
   ASSERT_TRUE(global_tensor.is_initialized());
-  XTensor tensor(page_size_, torch::kUInt8, device_);
+  MappedMemoryRegion tensor(page_size_, torch::kUInt8, device_, page_size_);
   ASSERT_TRUE(tensor.map(/*offset=*/0));
   const page_id_t page_id = tensor.get_phy_page_id(/*offset=*/0);
   const std::vector<uint8_t> expected(256, 0x42);
@@ -229,30 +240,8 @@ TEST_F(XTensorTest, RealMapUnmapRemapPreservesContents) {
   EXPECT_EQ(observed, expected);
 }
 
-TEST_F(XTensorTest, AllocationOverflowPreservesCursorAndOutput) {
-  XTensor tensor(page_size_, torch::kUInt8, device_);
-  void* first_ptr = nullptr;
-  ASSERT_TRUE(tensor.allocate(first_ptr, /*size=*/1));
-  EXPECT_EQ(first_ptr, vir_ptr_to_void_ptr(tensor.vaddr()));
-  void* rejected_ptr = nullptr;
-  EXPECT_FALSE(
-      tensor.allocate(rejected_ptr, std::numeric_limits<size_t>::max()));
-  EXPECT_EQ(rejected_ptr, nullptr);
-  EXPECT_EQ(tensor.alloc_offset(), 1);
-
-  void* last_ptr = nullptr;
-  ASSERT_TRUE(tensor.allocate(last_ptr, page_size_ - 1));
-  EXPECT_EQ(vir_ptr_to_uintptr(tensor.vaddr()) + 1,
-            reinterpret_cast<uintptr_t>(last_ptr));
-  EXPECT_EQ(tensor.alloc_offset(), page_size_);
-  EXPECT_FALSE(tensor.allocate(last_ptr, /*size=*/1));
-  EXPECT_EQ(tensor.alloc_offset(), page_size_);
-  EXPECT_EQ(vir_ptr_to_uintptr(tensor.vaddr()) + 1,
-            reinterpret_cast<uintptr_t>(last_ptr));
-}
-
 TEST_F(XTensorTest, TensorViewsRespectByteBoundsAndAlignment) {
-  XTensor tensor(page_size_, torch::kBFloat16, device_);
+  MappedMemoryRegion tensor(page_size_, torch::kBFloat16, device_, page_size_);
   ASSERT_TRUE(tensor.map_all());
   const torch::Tensor view = tensor.to_torch_tensor(/*offset=*/2, {2, 3});
   EXPECT_EQ(view.numel(), 6);
@@ -276,11 +265,27 @@ TEST_F(XTensorTest, TensorViewsRespectByteBoundsAndAlignment) {
                "num_elems");
 }
 
+TEST_F(XTensorTest, RegisteredSharedMappingCannotReset) {
+  auto& global_tensor = GlobalXTensor::get_instance();
+  global_tensor.init(device_);
+  ASSERT_TRUE(global_tensor.is_initialized());
+  global_tensor.set_mooncake_registered(true);
+  EXPECT_DEATH(global_tensor.reset(),
+               "GlobalXTensor must be unregistered before reset");
+  EXPECT_TRUE(global_tensor.is_initialized());
+  EXPECT_TRUE(global_tensor.is_mooncake_registered());
+  global_tensor.set_mooncake_registered(false);
+}
+
 TEST_F(XTensorTest, VirtualSizeOverflowIsRejectedBeforeReservation) {
+  EXPECT_DEATH(MappedMemoryRegion(std::numeric_limits<size_t>::max(),
+                                  torch::kUInt8,
+                                  device_,
+                                  page_size_),
+               "size");
   EXPECT_DEATH(
-      XTensor(std::numeric_limits<size_t>::max(), torch::kUInt8, device_),
+      MappedMemoryRegion(/*size=*/0, torch::kUInt8, device_, page_size_),
       "size");
-  EXPECT_DEATH(XTensor(/*size=*/0, torch::kUInt8, device_), "size");
 }
 
 }  // namespace

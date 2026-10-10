@@ -21,9 +21,8 @@ limitations under the License.
 #include <chrono>
 
 #include "common/global_flags.h"
-#include "framework/xtensor/page_allocator.h"
-#include "framework/xtensor/phy_page_pool.h"
-#include "framework/xtensor/xtensor_allocator.h"
+#include "core/framework/xtensor/page_allocator.h"
+#include "core/framework/xtensor/xtensor_allocator.h"
 
 namespace xllm {
 
@@ -105,7 +104,7 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
 
   // Allocate the remaining blocks from pages
   while (remaining_need > 0) {
-    VirtPage* page = nullptr;
+    KVCachePageState* page = nullptr;
 
     if (avail_pages_.empty()) {
       // Allocate a new page for this DP group
@@ -223,7 +222,7 @@ void XTensorBlockManagerImpl::free_blocks(const std::vector<int32_t>& indices) {
 
   for (auto& [page_id, idxs] : idx_dict) {
     // Find the page - it must be in either full_pages or avail_pages
-    VirtPage* page = nullptr;
+    KVCachePageState* page = nullptr;
     bool was_in_full = false;
 
     auto full_it = full_pages_.find(page_id);
@@ -338,7 +337,8 @@ size_t XTensorBlockManagerImpl::available_size_internal() const {
   size_t reserved_pages =
       page_allocator.get_num_reserved_virt_pages(model_id_, dp_rank_);
   size_t blocks_from_reserved_pages =
-      reserved_pages * VirtPage::get_num_blocks(page_size_, block_mem_size_);
+      reserved_pages *
+      KVCachePageState::get_num_blocks(page_size_, block_mem_size_);
 
   return avail_blocks + blocks_from_reserved_pages;
 }
@@ -398,7 +398,7 @@ size_t XTensorBlockManagerImpl::get_mapped_memory_size() const {
 size_t XTensorBlockManagerImpl::get_num_allocated_blocks() const {
   // Blocks from fully allocated pages
   size_t blocks_per_page =
-      VirtPage::get_num_blocks(page_size_, block_mem_size_);
+      KVCachePageState::get_num_blocks(page_size_, block_mem_size_);
   size_t blocks_from_full_pages = full_pages_.size() * blocks_per_page;
 
   // Blocks from partially allocated pages

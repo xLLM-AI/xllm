@@ -27,7 +27,7 @@ limitations under the License.
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/prefetch_result.h"
-#include "framework/xtensor/xtensor.h"
+#include "core/virtual_memory/mapped_memory_region.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
 #include "worker.pb.h"

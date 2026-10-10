@@ -13,18 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/xtensor/virt_page.h"
+#include "core/kv_cache/block/kv_cache_page_state.h"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace xllm {
 namespace {
 
-TEST(VirtPageTest, PaddingBlockIsFirstAndRemovedFromAvailableBlocks) {
-  VirtPage page(/*page_id=*/0, /*page_size=*/16);
+TEST(KVCachePageStateTest, PaddingBlockIsFirstAndRemovedFromAvailableBlocks) {
+  KVCachePageState page(VirtualPage{/*page_index=*/0, /*page_size=*/16});
   page.init(/*block_mem_size=*/4);
   EXPECT_TRUE(page.empty());
   EXPECT_EQ(page.alloc(/*num_blocks=*/1), std::vector<int64_t>({0}));
@@ -34,8 +35,8 @@ TEST(VirtPageTest, PaddingBlockIsFirstAndRemovedFromAvailableBlocks) {
   EXPECT_TRUE(page.full());
 }
 
-TEST(VirtPageTest, AllocationAndBatchFreeRestorePageCapacity) {
-  VirtPage page(/*page_id=*/1, /*page_size=*/16);
+TEST(KVCachePageStateTest, AllocationAndBatchFreeRestorePageCapacity) {
+  KVCachePageState page(VirtualPage{/*page_index=*/1, /*page_size=*/16});
   page.init(/*block_mem_size=*/4);
   std::vector<int64_t> blocks = page.alloc(/*num_blocks=*/10);
   EXPECT_EQ(blocks, std::vector<int64_t>({4, 5, 6, 7}));
@@ -46,10 +47,11 @@ TEST(VirtPageTest, AllocationAndBatchFreeRestorePageCapacity) {
   EXPECT_EQ(page.alloc(/*num_blocks=*/4), blocks);
 }
 
-TEST(VirtPageTest, NonDivisibleGeometrySkipsBlocksCrossingPageBoundaries) {
+TEST(KVCachePageStateTest,
+     NonDivisibleGeometrySkipsBlocksCrossingPageBoundaries) {
   std::vector<int64_t> allocated_blocks;
   for (int64_t page_id = 0; page_id < 4; ++page_id) {
-    VirtPage page(page_id, /*page_size=*/12);
+    KVCachePageState page(VirtualPage{page_id, /*page_size=*/12});
     page.init(/*block_mem_size=*/5);
     std::vector<int64_t> blocks = page.alloc(/*num_blocks=*/12);
     for (int64_t block : blocks) {
@@ -64,8 +66,8 @@ TEST(VirtPageTest, NonDivisibleGeometrySkipsBlocksCrossingPageBoundaries) {
   EXPECT_EQ(allocated_blocks, std::vector<int64_t>({0, 1, 3, 5, 6, 8}));
 }
 
-TEST(VirtPageTest, SingleFreeMakesAllocatedBlockAvailableAgain) {
-  VirtPage page(/*page_id=*/1, /*page_size=*/12);
+TEST(KVCachePageStateTest, SingleFreeMakesAllocatedBlockAvailableAgain) {
+  KVCachePageState page(VirtualPage{/*page_index=*/1, /*page_size=*/12});
   page.init(/*block_mem_size=*/5);
   EXPECT_EQ(page.num_free_blocks(), 1);
   EXPECT_EQ(page.alloc(/*num_blocks=*/1), std::vector<int64_t>({3}));
@@ -73,6 +75,18 @@ TEST(VirtPageTest, SingleFreeMakesAllocatedBlockAvailableAgain) {
   page.free(/*block_id=*/3);
   EXPECT_TRUE(page.empty());
   EXPECT_EQ(page.alloc(/*num_blocks=*/1), std::vector<int64_t>({3}));
+}
+
+TEST(KVCachePageStateTest, FullPageRejectsAllocationAndReusesFreeOrder) {
+  KVCachePageState page(VirtualPage{/*page_index=*/0, /*page_size=*/16});
+  page.init(/*block_mem_size=*/4);
+  EXPECT_EQ(page.alloc(/*num_blocks=*/4), std::vector<int64_t>({0, 1, 2, 3}));
+  EXPECT_THROW(page.alloc(/*num_blocks=*/1), std::runtime_error);
+  EXPECT_TRUE(page.full());
+
+  page.free(/*block_id=*/3);
+  page.free_batch(std::vector<int64_t>{1, 0, 2});
+  EXPECT_EQ(page.alloc(/*num_blocks=*/4), std::vector<int64_t>({3, 1, 0, 2}));
 }
 
 }  // namespace

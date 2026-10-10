@@ -19,23 +19,21 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
-#include "core/framework/xtensor/xtensor.h"
+#include "core/virtual_memory/mapped_memory_region.h"
 
 namespace xllm {
 
 WeightAllocation::~WeightAllocation() = default;
 
-WeightAllocation::WeightAllocation(WeightAllocation&& other) noexcept =
-    default;
+WeightAllocation::WeightAllocation(WeightAllocation&& other) noexcept = default;
 
-WeightAllocation& WeightAllocation::operator=(WeightAllocation&& other) noexcept =
-    default;
+WeightAllocation& WeightAllocation::operator=(
+    WeightAllocation&& other) noexcept = default;
 
-void WeightAllocation::set_contiguous(
-    page_id_t start_page_id,
-    size_t num_pages,
-    void* base_ptr,
-    std::vector<WeightSegment> segments) {
+void WeightAllocation::set_contiguous(page_id_t start_page_id,
+                                      size_t num_pages,
+                                      void* base_ptr,
+                                      std::vector<WeightSegment> segments) {
   tensor_.reset();
   start_page_id_ = start_page_id;
   num_pages_ = num_pages;
@@ -45,7 +43,7 @@ void WeightAllocation::set_contiguous(
 }
 
 void WeightAllocation::set_fragmented(
-    std::unique_ptr<XTensor> tensor,
+    std::unique_ptr<MappedMemoryRegion> tensor,
     size_t num_pages,
     std::vector<WeightSegment> segments) {
   start_page_id_ = -1;
@@ -62,19 +60,13 @@ bool WeightAllocation::allocate(void*& ptr, size_t size, size_t page_size) {
     return false;
   }
 
-  if (tensor_ != nullptr) {
-    if (!tensor_->allocate(ptr, size)) {
-      return false;
-    }
-    current_offset_ = tensor_->alloc_offset();
-    return true;
-  }
-
-  if (page_size == 0 ||
-      num_pages_ > std::numeric_limits<size_t>::max() / page_size) {
+  if (tensor_ == nullptr &&
+      (page_size == 0 ||
+       num_pages_ > std::numeric_limits<size_t>::max() / page_size)) {
     return false;
   }
-  const size_t region_size = num_pages_ * page_size;
+  const size_t region_size =
+      tensor_ == nullptr ? num_pages_ * page_size : tensor_->size();
   if (current_offset_ > region_size || size > region_size - current_offset_) {
     return false;
   }

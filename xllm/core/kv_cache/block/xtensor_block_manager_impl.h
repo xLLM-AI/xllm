@@ -24,7 +24,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/kv_cache/block/block_manager.h"
-#include "framework/xtensor/virt_page.h"
+#include "core/kv_cache/block/kv_cache_page_state.h"
 
 namespace xllm {
 
@@ -163,11 +163,11 @@ class XTensorBlockManagerImpl : public BlockManager {
   // Number of available blocks in avail_pages
   std::atomic<size_t> num_avail_blocks_;
 
-  // Pages with free blocks (page_id -> VirtPage)
-  std::unordered_map<int64_t, std::unique_ptr<VirtPage>> avail_pages_;
+  // Pages with free blocks (page_id -> KVCachePageState)
+  std::unordered_map<int64_t, std::unique_ptr<KVCachePageState>> avail_pages_;
 
-  // Pages that are fully allocated (page_id -> VirtPage)
-  std::unordered_map<int64_t, std::unique_ptr<VirtPage>> full_pages_;
+  // Pages that are fully allocated (page_id -> KVCachePageState)
+  std::unordered_map<int64_t, std::unique_ptr<KVCachePageState>> full_pages_;
 
   // Reserved blocks for pre-allocation
   std::vector<int32_t> reserved_blocks_;
