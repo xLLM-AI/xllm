@@ -33,16 +33,16 @@ limitations under the License.
 #include <unordered_set>
 
 #include "common/metrics.h"
-#include "core/framework/block/block_utils.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
-#include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/speculative/mtp_utils.h"
+#include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"

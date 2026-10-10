@@ -24,7 +24,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/eplb/eplb_controller.h"
-#include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "framework/speculative/mtp_utils.h"
 #include "llm_engine.h"
 #include "util/utils.h"

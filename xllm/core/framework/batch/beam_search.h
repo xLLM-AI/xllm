@@ -19,7 +19,7 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "framework/block/block.h"
+#include "core/kv_cache/block/block.h"
 
 namespace xllm {
 

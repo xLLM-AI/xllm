@@ -21,7 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "block_manager.h"
+#include "core/kv_cache/block/block_manager.h"
 
 namespace xllm {
 

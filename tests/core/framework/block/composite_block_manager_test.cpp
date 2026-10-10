@@ -13,13 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "composite_block_manager.h"
+#include "core/framework/block/composite_block_manager.h"
 
 #include <gtest/gtest.h>
 
 #include <set>
 
-#include "framework/block/block_utils.h"
+#include "core/kv_cache/block/block_utils.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"

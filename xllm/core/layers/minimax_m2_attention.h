@@ -20,7 +20,7 @@ limitations under the License.
 #include "common/attention.h"
 #include "common/linear.h"
 #include "common/rotary_embedding.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model_context/model_context.h"
 #include "framework/state_dict/state_dict.h"
 #include "minimax_m2_tensor_parallel_rms_norm.h"

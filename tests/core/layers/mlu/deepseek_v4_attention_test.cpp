@@ -27,8 +27,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "framework/block/block_utils.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/deepseek_v4/dsa_cache_mapping.h"

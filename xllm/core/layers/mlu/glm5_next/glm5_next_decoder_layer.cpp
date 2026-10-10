@@ -23,7 +23,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "framework/kv_cache/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "layers/mlu/dsa_topk_relay.h"
 

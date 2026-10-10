@@ -21,11 +21,11 @@ limitations under the License.
 #include <array>
 #include <limits>
 
-#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/dflash2_sampling.h"
 #include "core/framework/sampling/gumbel_sampling.h"
 #include "core/framework/speculative/verify_layout.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"

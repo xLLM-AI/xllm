@@ -27,12 +27,12 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/common/rotary_embedding_util.h"
 #include "core/layers/npu/npu_column_parallel_linear_impl.h"

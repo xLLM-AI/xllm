@@ -21,11 +21,11 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "engine.h"
 #include "framework/batch/rec_batch_group.h"
 #include "framework/batch/rec_forward_input_factory.h"
 #include "framework/block/block_manager_pool.h"
-#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/worker.h"

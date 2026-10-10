@@ -21,8 +21,8 @@ limitations under the License.
 #include <memory>
 
 #include "common/macros.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "executor_impl_factory.h"
-#include "framework/kv_cache/kv_cache.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_input_params.h"
 #include "runtime/executor_impl.h"

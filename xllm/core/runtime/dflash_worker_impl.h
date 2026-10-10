@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/speculative/embedding_cache.h"
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
 #include "framework/sampling/draft_proposal.h"
 #include "runtime/draft_model_spec_worker_impl.h"

@@ -25,7 +25,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/config/model_config.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "models/model_registry.h"
 #include "options.h"

@@ -25,7 +25,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "kernels/dcu/attention_runner.h"
 #include "kernels/dcu/dcu_ops_api.h"
 #include "kernels/ops_api.h"

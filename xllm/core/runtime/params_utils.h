@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include "framework/kv_cache_transfer/prefetch_result.h"
+#include "core/kv_cache/transfer/prefetch_result.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/request/sequence.h"

@@ -18,7 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
-#include "framework/kv_cache/kv_shard_layout.h"
+#include "core/kv_cache/layout/kv_shard_layout.h"
 #include "layers/mlu/dsa_topk_state.h"
 
 namespace xllm::layer {

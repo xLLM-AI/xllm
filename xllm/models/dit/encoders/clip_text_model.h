@@ -25,10 +25,10 @@ limitations under the License.
 #include <regex>
 #include <unordered_map>
 
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #if defined(USE_NPU)
 #include "core/layers/npu/npu_siglip_encoder_layer_impl.h"
 #endif

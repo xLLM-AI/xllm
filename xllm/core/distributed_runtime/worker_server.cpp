@@ -47,7 +47,7 @@ limitations under the License.
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/collective_communicator.h"
 #include "framework/parallel_state/dit_collective_communicator.h"

@@ -15,9 +15,9 @@ limitations under the License.
 
 #include "flashinfer_attention.h"
 
+#include "core/kv_cache/storage/kv_cache.h"
 #include "flashinfer_planinfo.h"
 #include "flashinfer_workspace.h"
-#include "framework/kv_cache/kv_cache.h"
 #include "kernels/cuda/cuda_ops_api.h"
 #include "kernels/ops_api.h"
 #include "layers/common/attention_metadata.h"

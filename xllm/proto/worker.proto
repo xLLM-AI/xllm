@@ -111,7 +111,7 @@ enum TransferType {
   D2H2G = 4;
 }
 
-// Mirrors xllm::BlockType (framework/block/block.h). Kept in wire order so
+// Mirrors xllm::BlockType (core/kv_cache/block/block.h). Kept in wire order so
 // numeric values round-trip losslessly across RPC (serialized by number, not
 // name). Enumerator 4 was historically named SINGLE; it is now EMBEDDING to
 // match the C++ enum, with the value pinned at 4 for wire compatibility.

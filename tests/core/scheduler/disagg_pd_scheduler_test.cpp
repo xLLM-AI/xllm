@@ -35,13 +35,13 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
+#include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
 #include "distributed_runtime/engine.h"
 #include "distributed_runtime/kv_cache_transfer_coordinator.h"
-#include "framework/block/block_manager_impl.h"
 #include "framework/block/block_manager_pool.h"
-#include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"

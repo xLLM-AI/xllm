@@ -18,7 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
-#include "framework/kv_cache/kv_shard_layout.h"
+#include "core/kv_cache/layout/kv_shard_layout.h"
 #include "layers/common/attention_metadata.h"
 #include "layers/common/kv_shard_batch_metadata.h"
 

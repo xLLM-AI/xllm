@@ -24,13 +24,13 @@ limitations under the License.
 #include <optional>
 
 #include "common/types.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_cache_store.h"
+#include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "executor.h"
 #include "forward_params.h"
 #include "framework/eplb/eplb_executor.h"
-#include "framework/kv_cache/kv_cache_shape.h"
-#include "framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
-#include "framework/kv_cache_transfer/kv_cache_store.h"
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"

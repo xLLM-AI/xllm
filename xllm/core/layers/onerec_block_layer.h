@@ -20,7 +20,7 @@ limitations under the License.
 #include <atomic>
 #include <cstdint>
 
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_input_params.h"
 
 #if defined(USE_NPU)

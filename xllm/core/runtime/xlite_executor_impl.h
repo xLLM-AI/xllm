@@ -23,10 +23,10 @@ limitations under the License.
 
 #include <vector>
 
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/xlite/xlite_attn_meta_builder.h"
 #include "core/layers/xlite/xlite_causal_lm_base.h"
 #include "core/layers/xlite/xlite_init_utils.h"

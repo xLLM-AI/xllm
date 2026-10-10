@@ -29,9 +29,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "executor_impl.h"
 #include "executor_impl_factory.h"

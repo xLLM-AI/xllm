@@ -19,10 +19,10 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/framework/kv_cache/kv_cache_capacity.h"
-#include "core/framework/kv_cache/kv_cache_shape.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 #include "core/runtime/llm_worker_impl.h"

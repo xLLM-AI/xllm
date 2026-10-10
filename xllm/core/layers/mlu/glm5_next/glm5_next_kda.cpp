@@ -22,7 +22,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "framework/kv_cache/kv_cache_shape.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/state_dict/utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"

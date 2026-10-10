@@ -21,7 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/framework/kv_cache_transfer/kv_cache_transfer_coordinator_base.h"
+#include "core/kv_cache/transfer/kv_cache_transfer_coordinator_base.h"
 
 namespace xllm {
 

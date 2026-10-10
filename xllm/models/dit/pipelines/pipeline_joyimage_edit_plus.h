@@ -28,7 +28,6 @@ limitations under the License.
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/dit_cache/dit_cache.h"
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
@@ -37,6 +36,7 @@ limitations under the License.
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/tokenizer/tokenizer.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/dit_forward_params.h"
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
 #include "models/dit/processors/vae_image_processor.h"

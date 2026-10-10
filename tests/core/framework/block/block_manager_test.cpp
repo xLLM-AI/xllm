@@ -20,14 +20,14 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "block_manager_impl.h"
-#include "block_manager_pool.h"
 #include "common/global_flags.h"
+#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/block/linear_state_block_manager.h"
+#include "core/kv_cache/prefix/block_hasher.h"
 #include "framework/block/block_manager_pool_test_peer.h"
-#include "framework/block/linear_state_block_manager.h"
 #include "framework/model/model_input_params.h"
-#include "framework/prefix_cache/block_hasher.h"
 #include "framework/request/incremental_decoder.h"
 
 namespace xllm {

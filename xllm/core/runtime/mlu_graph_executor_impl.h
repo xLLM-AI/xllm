@@ -21,9 +21,9 @@ limitations under the License.
 #include <cstddef>
 #include <optional>
 
+#include "core/kv_cache/storage/kv_cache.h"
 #include "executor_impl.h"
 #include "executor_impl_factory.h"
-#include "framework/kv_cache/kv_cache.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_input_params.h"
 #include "options.h"

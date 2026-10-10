@@ -36,9 +36,9 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "framework/kv_cache/kv_cache_capacity.h"
-#include "framework/kv_cache/kv_cache_shape.h"
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "util/net.h"
@@ -46,7 +46,7 @@ limitations under the License.
 
 #define private public
 #define protected public
-#include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
+#include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
 #undef private
 #undef protected
 

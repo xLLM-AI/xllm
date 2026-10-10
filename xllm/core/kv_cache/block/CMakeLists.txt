@@ -1,0 +1,57 @@
+include(cc_binary)
+include(cc_library)
+
+cc_library(
+  NAME
+    block_utils
+  HDRS
+    block_utils.h
+  SRCS
+    block_utils.cpp
+  DEPS
+    glog::glog
+)
+
+# Retain framework adapters in the aggregate target until their dependencies
+# can be separated from the cache domain without changing behavior.
+cc_library(
+  NAME
+    block
+  HDRS
+    block.h
+    block_manager.h
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/embedding_block_manager.h
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/block_manager_pool.h
+    linear_state_block_manager.h
+    block_manager_impl.h
+    concurrent_block_manager_impl.h
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/hierarchy_block_manager_pool.h
+    sliding_window_block_manager.h
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/composite_block_manager.h
+    xtensor_block_manager_impl.h
+  SRCS
+    block.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/embedding_block_manager.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/block_manager_pool.cpp
+    linear_state_block_manager.cpp
+    concurrent_block_manager_impl.cpp
+    block_manager_impl.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/hierarchy_block_manager_pool.cpp
+    sliding_window_block_manager.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/framework/block/composite_block_manager.cpp
+    xtensor_block_manager_impl.cpp
+  DEPS
+    :block_utils
+    $<$<BOOL:${USE_NPU}>:torch_npu>
+    $<$<BOOL:${USE_NPU}>:graph>
+    :request
+    :common
+    :prefix_cache
+    :kv_transfer_completion
+    glog::glog
+    Boost::serialization
+    SMHasherSupport
+    torch
+    :xtensor
+)
+target_link_libraries(block PRIVATE Folly::folly)

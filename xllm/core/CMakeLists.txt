@@ -1,6 +1,7 @@
 add_subdirectory(common)
 add_subdirectory(distributed_runtime)
 add_subdirectory(framework)
+add_subdirectory(kv_cache)
 if(USE_MLU)
   add_subdirectory(triton_jit)
 endif()

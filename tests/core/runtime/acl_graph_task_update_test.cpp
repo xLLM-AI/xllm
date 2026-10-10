@@ -26,10 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch.h"
-#include "core/framework/block/block.h"
-#include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
@@ -39,6 +36,9 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kernels/ops_api.h"
+#include "core/kv_cache/block/block.h"
+#include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/layers/npu/npu_lm_head_impl.h"

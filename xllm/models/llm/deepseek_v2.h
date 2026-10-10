@@ -24,7 +24,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/model/model_output.h"
-#include "framework/kv_cache/kv_shard_layout.h"
+#include "core/kv_cache/layout/kv_shard_layout.h"
 #if defined(USE_DCU)
 #include "core/layers/dcu/deepseek_v2_decoder_layer_impl.h"
 #elif defined(USE_MLU)

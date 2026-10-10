@@ -20,7 +20,7 @@ limitations under the License.
 #include <queue>
 #include <vector>
 
-#include "block_manager.h"
+#include "core/kv_cache/block/block_manager.h"
 #include "framework/block/embedding_block_manager.h"
 #include "framework/block/kv_cache_manager.h"
 

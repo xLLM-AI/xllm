@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include "framework/kv_cache/kv_shard_layout.h"
+#include "core/kv_cache/layout/kv_shard_layout.h"
 #include "layers/common/dcp_attention_merge.h"
 #include "layers/mlu/dsa_topk_state.h"
 

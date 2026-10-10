@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/rec_config.h"
-#include "framework/block/block_manager_impl.h"
+#include "core/kv_cache/block/block_manager_impl.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "request.h"

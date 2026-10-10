@@ -26,10 +26,10 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/batch/batch_forward_type.h"
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/platform/device.h"
 #include "core/runtime/dcu_graph_executor_impl.h"
 #include "core/runtime/options.h"

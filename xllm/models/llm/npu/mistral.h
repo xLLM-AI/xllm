@@ -17,9 +17,9 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/activation.h"
 #include "core/layers/common/attention.h"
 #include "core/layers/common/linear.h"

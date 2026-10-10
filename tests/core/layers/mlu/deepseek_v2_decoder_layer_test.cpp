@@ -24,7 +24,7 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"
