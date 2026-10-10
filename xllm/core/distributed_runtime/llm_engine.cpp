@@ -361,13 +361,13 @@ bool LLMEngine::allocate_kv_cache(
                                         : block_size)
       .host_num_blocks(kv_cache_cap.n_blocks() * options_.host_blocks_factor())
       .enable_linear_state(enable_state_cache)
-      .enable_prefix_cache(kv_cache_config.enable_xtensor()
+      .enable_prefix_cache(kv_cache_config.enable_virtual_memory()
                                ? false
                                : options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .prefetch_batch_size(options_.prefetch_batch_size())
-      .enable_xtensor(kv_cache_config.enable_xtensor())
+      .enable_virtual_memory(kv_cache_config.enable_virtual_memory())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
@@ -503,8 +503,8 @@ bool LLMEngine::allocate_kv_cache(
       return false;
     }
   }
-  // XTensor mode: reserve padding blocks and start prealloc thread.
-  kv_cache_manager_->reserve_xtensor_padding_blocks();
+  // VirtualMemory mode: reserve padding blocks and start prealloc thread.
+  kv_cache_manager_->reserve_padding_blocks();
 
   return true;
 }

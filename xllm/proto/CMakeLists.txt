@@ -25,5 +25,5 @@ proto_library(
     mooncake_transfer_engine.proto
     embedding_data.proto
     anthropic.proto
-    xtensor_dist.proto
+    model_memory_dist.proto
 )

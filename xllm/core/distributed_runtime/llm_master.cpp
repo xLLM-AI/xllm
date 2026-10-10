@@ -27,7 +27,7 @@ limitations under the License.
 #include "api_service/call.h"
 #include "common/metrics.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
-#include "core/distributed_runtime/xtensor_controller.h"
+#include "core/distributed_runtime/model_memory_controller.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
@@ -248,9 +248,9 @@ LLMMaster::LLMMaster(const Options& options)
           speculative_engine_->get_distributed_worker_manager();
     }
   }
-  xtensor_controller_ = std::make_shared<XTensorController>(
-      XTensorController::Options{
-          .enabled = KVCacheConfig::get_instance().enable_xtensor(),
+  model_memory_controller_ = std::make_shared<ModelMemoryController>(
+      ModelMemoryController::Options{
+          .enabled = KVCacheConfig::get_instance().enable_virtual_memory(),
           .model_id = engine_options.model_id(),
           .block_size = engine_options.block_size()},
       distributed_worker_manager_);
@@ -270,14 +270,14 @@ LLMMaster::LLMMaster(const Options& options)
              int32_t dp_size,
              int32_t tp_size,
              MasterStatus master_status) {
-        return xtensor_controller_->initialize_model(
+        return model_memory_controller_->initialize_model(
             model_loader, num_layers, dp_size, tp_size, master_status);
       };
   auto initialize_engine = [this, &prepare_model](auto* engine) {
     CHECK(
         engine->init(master_status_, prepare_model, kv_transfer_coordinator_));
     if (llm_engine_ != nullptr) {
-      CHECK(xtensor_controller_->finish_initialization(master_status_));
+      CHECK(model_memory_controller_->finish_initialization(master_status_));
     }
     model_args_ = engine->model_args();
     if (options_.enable_service_routing()) {
@@ -334,7 +334,7 @@ LLMMaster::LLMMaster(const Options& options)
         engine,
         scheduler_options,
         distributed_worker_manager_,
-        llm_engine_ != nullptr ? xtensor_controller_ : nullptr,
+        llm_engine_ != nullptr ? model_memory_controller_ : nullptr,
         kv_transfer_coordinator_);
   };
   if (!use_ssm_engine) {
@@ -622,7 +622,7 @@ bool LLMMaster::sleep() {
     LOG(ERROR) << "Sleep is not supported for speculative engines.";
     return false;
   }
-  return xtensor_controller_->sleep(master_status_);
+  return model_memory_controller_->sleep(master_status_);
 }
 
 bool LLMMaster::wakeup() {
@@ -637,7 +637,7 @@ bool LLMMaster::wakeup(const WakeupOptions& options) {
   }
   WakeupOptions opts = options;
   opts.master_status = master_status_;
-  return xtensor_controller_->wakeup(opts);
+  return model_memory_controller_->wakeup(opts);
 }
 
 bool LLMMaster::link_p2p(const std::vector<std::string>& remote_addrs) {

@@ -88,7 +88,7 @@ TEST(KVCacheEstimationTest, RuntimeBudgetCapsBeforeVlmEncoderReservation) {
   EXPECT_EQ(capacity.cache_size_in_bytes(), 4 * 1024 * 1024);
 }
 
-TEST(KVCacheEstimationTest, XTensorBudgetBypassesWorkerAndRuntimeCaps) {
+TEST(KVCacheEstimationTest, VirtualMemoryBudgetBypassesWorkerAndRuntimeCaps) {
   ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   runtime_options.max_memory_utilization(0.1).max_cache_size(1024).block_size(
@@ -96,7 +96,7 @@ TEST(KVCacheEstimationTest, XTensorBudgetBypassesWorkerAndRuntimeCaps) {
 
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
-  context.xtensor_cache_size = 7 * 1024 * 1024;
+  context.virtual_memory_cache_size = 7 * 1024 * 1024;
 
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(runtime_options, context);
@@ -113,7 +113,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorDerivesTensorParallelHeads) {
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
   context.world_size = 2;
-  context.xtensor_cache_size = 1024 * 1024;
+  context.virtual_memory_cache_size = 1024 * 1024;
 
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(runtime_options, context);
@@ -133,7 +133,7 @@ TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
   context.world_size = 2;
-  context.xtensor_cache_size = 1024 * 1024;
+  context.virtual_memory_cache_size = 1024 * 1024;
 
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(runtime_options, context);
@@ -153,7 +153,7 @@ TEST(KVCacheEstimationTest, SpeculativeEmbeddingCostDependsOnAlgorithm) {
 
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
-  context.xtensor_cache_size = 1024 * 1024;
+  context.virtual_memory_cache_size = 1024 * 1024;
 
   runtime_options.speculative_algorithm("DFlash");
   const KVCacheCapacity block_diffusion_capacity =
@@ -203,7 +203,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorDerivesLinearHeadCounts) {
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
   context.world_size = 2;
-  context.xtensor_cache_size = 2 * 1024 * 1024;
+  context.virtual_memory_cache_size = 2 * 1024 * 1024;
 
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(runtime_options, context);

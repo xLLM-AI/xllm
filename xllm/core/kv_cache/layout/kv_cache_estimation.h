@@ -45,7 +45,7 @@ struct KVCacheEstimateContext {
   int64_t world_size = 1;
   int64_t linear_state_cache_block_limit = 0;
   std::vector<KVCacheMemorySnapshot> worker_memory;
-  std::optional<int64_t> xtensor_cache_size;
+  std::optional<int64_t> virtual_memory_cache_size;
   bool is_multimodal = false;
 };
 

@@ -6,8 +6,6 @@ if(USE_NPU OR USE_CUDA OR USE_MUSA OR USE_MLU OR USE_DCU)
   add_subdirectory(spawn_worker_server)
 endif()
 
-add_subdirectory(memory)
-
 cc_library(
   NAME 
     distributed_runtime
@@ -36,7 +34,7 @@ cc_library(
     kv_transfer_topology.h
     kv_cache_transfer_coordinator.h
     xservice_client.h
-    xtensor_controller.h
+    model_memory_controller.h
   SRCS
     master.cpp
     master_factory.cpp
@@ -59,7 +57,7 @@ cc_library(
     comm_channel.cpp
     shm_channel.cpp
     xservice_client.cpp
-    xtensor_controller.cpp
+    model_memory_controller.cpp
   DEPS
     :api_service
     :models
@@ -75,7 +73,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
-    :xtensor
+    :model_memory_manager
     absl::strings
     absl::time
 )
@@ -141,4 +139,42 @@ cc_library(
     :chat_template
     glog::glog
     $<$<BOOL:${USE_MLU}>:torch_mlu>
+)
+
+# Model lifecycle and RPC coordination share one runtime facade.
+# Generic allocation mechanisms remain framework leaf targets.
+cc_library(
+  NAME
+    model_memory_manager
+  HDRS
+    model_memory_options.h
+    model_page_allocator.h
+    model_memory_manager.h
+    model_memory_cluster.h
+    model_memory_dist_client.h
+    model_memory_dist_service.h
+    model_memory_dist_server.h
+  SRCS
+    model_page_allocator.cpp
+    model_memory_manager.cpp
+    model_memory_cluster.cpp
+    model_memory_dist_client.cpp
+    model_memory_dist_service.cpp
+    model_memory_dist_server.cpp
+  DEPS
+    torch
+    Folly::folly
+    :common
+    :config
+    glog::glog
+    proto::xllm_proto
+    :collective_service
+    :platform
+    :xllm_server
+    :global_memory_region
+    :kv_cache_page_state
+    :kv_cache_memory_interfaces
+    :worker_page_budget
+    :virtual_memory_kv_cache_storage
+    :model_weight_store
 )

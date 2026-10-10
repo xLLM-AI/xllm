@@ -82,7 +82,7 @@ message WakeupRequest {
 
 // A single weight segment for P2P transfer
 message WakeupWeightSegment {
-  uint64 offset = 1;  // Byte offset from source GlobalXTensor base
+  uint64 offset = 1;  // Byte offset from source GlobalMemoryRegion base
   uint64 size = 2;    // Segment size in bytes
 }
 
@@ -174,9 +174,9 @@ message TransferKVInfo {
   string request_id = 1;
   int32 dp_rank = 4;
   InstanceInfo remote_instance_info = 5;
-  // XTensor mode: destination offsets from D-node (per-layer)
-  // Each XTensorLayerOffsets contains K/V offsets for all blocks at one layer
-  repeated XTensorLayerOffsets dst_xtensor_layer_offsets = 6;
+  // VirtualMemory mode: destination offsets from D-node (per-layer)
+  // Each KVCacheLayerOffsets contains K/V offsets for all blocks at one layer
+  repeated KVCacheLayerOffsets dst_kv_cache_layer_offsets = 6;
   repeated KVTransferMapping mappings = 22;
 }
 

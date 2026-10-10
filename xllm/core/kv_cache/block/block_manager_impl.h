@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include "core/kv_cache/block/block_manager.h"
+#include "core/kv_cache/prefix/prefix_cache.h"
 
 namespace xllm {
 
@@ -37,7 +38,8 @@ class BlockManagerImpl : public BlockManager {
 
   // Flat incremental growth: allocate ceil(num_tokens/block_size) - held blocks
   // and return them (does not insert into the sequence). The shared default for
-  // flat-KV / compressed / xtensor leaves; SlidingWindow and Single override.
+  // flat-KV / compressed / virtual memory leaves; SlidingWindow and Single
+  // override.
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
       size_t num_tokens) override;

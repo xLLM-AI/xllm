@@ -69,10 +69,10 @@ struct KVCacheCreateOptions {
   // types). When non-empty it drives the linear-layer decision per layer
   // instead of the periodic full_attention_interval.
   PROPERTY(std::vector<std::string>, layer_types) = {};
-  // model_id are required for XTensor mode
+  // model_id are required for VirtualMemory mode
   PROPERTY(std::string, model_id);
   PROPERTY(std::string, model_type);
-  PROPERTY(bool, enable_xtensor) = false;
+  PROPERTY(bool, enable_virtual_memory) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
   // Empty keeps the legacy full allocation. Otherwise false means that the

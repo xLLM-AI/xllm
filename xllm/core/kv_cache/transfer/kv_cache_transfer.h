@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/transfer/kv_cache_transfer_memory_provider.h"
 #include "framework/model/model_args.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
@@ -65,9 +66,9 @@ class KVCacheTransfer {
     std::string dst_addr;
     std::vector<KVTransferMapping> mappings;
 
-    // XTensor mode: destination offsets from D-node (per-layer)
-    // dst_xtensor_layer_offsets[layer_id] = {k_offsets, v_offsets}
-    std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
+    // VirtualMemory mode: destination offsets from D-node (per-layer)
+    // dst_kv_cache_layer_offsets[layer_id] = {k_offsets, v_offsets}
+    std::vector<KVCacheLayerOffsets> dst_kv_cache_layer_offsets;
   };
 
   static std::vector<std::string> rotate_dst_rank(
@@ -164,7 +165,8 @@ class KVCacheTransferFactory {
       uint16_t transfer_listen_port,
       const Device& device,
       const std::string& model_type = "",
-      const std::string& model_id = "");
+      const std::string& model_id = "",
+      std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider = nullptr);
 };
 
 }  // namespace xllm

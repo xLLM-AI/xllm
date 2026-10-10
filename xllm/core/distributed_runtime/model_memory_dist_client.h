@@ -1,0 +1,98 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#pragma once
+
+#include <brpc/channel.h>
+#include <folly/futures/Future.h>
+#include <torch/types.h>
+
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include "common/macros.h"
+#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"  // For offset_t type definition
+#include "model_memory_dist.pb.h"
+#include "util/threadpool.h"
+
+namespace xllm {
+
+// Memory info returned by GetMemoryInfo RPC
+struct MemoryInfo {
+  int64_t available_memory;  // Available memory in bytes
+  int64_t total_memory;      // Total memory in bytes
+};
+
+// Remote client for distributed model memory operations via brpc
+class ModelMemoryDistClient final {
+ public:
+  explicit ModelMemoryDistClient(int32_t global_rank,
+                                 const std::string& server_address,
+                                 const torch::Device& device);
+  ~ModelMemoryDistClient() = default;
+
+  // Wait for server to be ready
+  bool wait_for_server_ready(const std::string& server_address);
+
+  // Get memory info from remote worker (available/total memory)
+  folly::SemiFuture<MemoryInfo> get_memory_info_async();
+
+  // Initialize PhysicalPagePool on remote worker with specified number of pages
+  folly::SemiFuture<bool> init_physical_page_pool_async(int64_t num_pages);
+
+  // KV tensor operations (partial mapping by offsets)
+  folly::SemiFuture<bool> map_to_kv_tensors_async(
+      const std::string& model_id,
+      const std::vector<offset_t>& offsets);
+  folly::SemiFuture<bool> unmap_from_kv_tensors_async(
+      const std::string& model_id,
+      const std::vector<offset_t>& offsets);
+
+  // Weight pages allocation from GlobalMemoryRegion
+  folly::SemiFuture<bool> alloc_weight_pages_async(const std::string& model_id,
+                                                   size_t num_pages);
+  folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
+
+  // Get mapped KV cache offsets for KV cache blocks (used in PD disaggregation)
+  // Returns per-layer K/V offsets for each block
+  // Result: layer_offsets[layer_id] = {k_offsets, v_offsets}
+  // Returns empty vector on error
+  folly::SemiFuture<
+      std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>>
+  get_kv_cache_offsets_async(const std::string& model_id,
+                             const std::vector<int32_t>& block_ids,
+                             uint64_t block_size_bytes);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ModelMemoryDistClient);
+
+ private:
+  int32_t global_rank_;
+  torch::Device device_;
+
+  // brpc connection resources
+  brpc::Channel channel_;
+  brpc::ChannelOptions options_;
+  std::unique_ptr<proto::ModelMemoryDist_Stub> stub_;
+
+  // Thread pool for async operations
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"ModelMemoryDistClient.async"};
+};
+
+}  // namespace xllm

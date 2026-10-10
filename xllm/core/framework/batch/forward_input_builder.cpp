@@ -70,21 +70,21 @@ uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
   return static_cast<uint32_t>(sample_slot.token_position - 1);
 }
 
-void append_xtensor_offsets(TransferKVInfo* info,
-                            const TransferKVInfo& full_info,
-                            size_t remote_id_count,
-                            const std::vector<size_t>& remote_idxs) {
-  if (full_info.dst_xtensor_layer_offsets.empty()) {
+void append_kv_cache_offsets(TransferKVInfo* info,
+                             const TransferKVInfo& full_info,
+                             size_t remote_id_count,
+                             const std::vector<size_t>& remote_idxs) {
+  if (full_info.dst_kv_cache_layer_offsets.empty()) {
     return;
   }
 
-  info->dst_xtensor_layer_offsets.reserve(
-      full_info.dst_xtensor_layer_offsets.size());
-  for (const XTensorLayerOffsets& full_layer :
-       full_info.dst_xtensor_layer_offsets) {
+  info->dst_kv_cache_layer_offsets.reserve(
+      full_info.dst_kv_cache_layer_offsets.size());
+  for (const KVCacheLayerOffsets& full_layer :
+       full_info.dst_kv_cache_layer_offsets) {
     CHECK_EQ(full_layer.k_offsets.size(), remote_id_count);
     CHECK_EQ(full_layer.v_offsets.size(), remote_id_count);
-    XTensorLayerOffsets layer;
+    KVCacheLayerOffsets layer;
     layer.k_offsets.reserve(remote_idxs.size());
     layer.v_offsets.reserve(remote_idxs.size());
     for (size_t remote_idx : remote_idxs) {
@@ -93,7 +93,7 @@ void append_xtensor_offsets(TransferKVInfo* info,
       layer.k_offsets.emplace_back(full_layer.k_offsets[remote_idx]);
       layer.v_offsets.emplace_back(full_layer.v_offsets[remote_idx]);
     }
-    info->dst_xtensor_layer_offsets.emplace_back(std::move(layer));
+    info->dst_kv_cache_layer_offsets.emplace_back(std::move(layer));
   }
 }
 
@@ -289,7 +289,7 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
   info.rank_local_mapping = full_info.rank_local_mapping;
   info.dp_rank = full_info.dp_rank;
   info.remote_instance_info = full_info.remote_instance_info;
-  info.dst_xtensor_layer_offsets.clear();
+  info.dst_kv_cache_layer_offsets.clear();
 
   for (const KVTransferMapping& full_mapping : full_info.mappings) {
     const std::optional<BlockType> block_type =
@@ -430,7 +430,7 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
       continue;
     }
     if (is_flat_kv) {
-      append_xtensor_offsets(
+      append_kv_cache_offsets(
           &info, full_info, full_mapping.remote_ids.size(), remote_idxs);
     }
     info.mappings.emplace_back(std::move(step_mapping));

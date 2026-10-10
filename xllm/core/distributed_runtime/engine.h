@@ -73,7 +73,7 @@ class Engine {
   TokenizerArgs tokenizer_args_;
 
   // kv cache manager
-  // support `block manager` and `xtensor manager` currently.
+  // support `block manager` and `virtual memory manager` currently.
   std::unique_ptr<KVCacheManager> kv_cache_manager_;
 
   // tokenizer

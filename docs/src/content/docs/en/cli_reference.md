@@ -4,7 +4,7 @@ sidebar:
   order: 100
 ---
 
-xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. For native configuration, explicitly supplied command-line flags override JSON configuration values, which override compiled defaults. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
+xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. For native configuration, explicitly supplied command-line flags override JSON configuration values, which override compiled defaults. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags. For virtual memory options, either explicitly supplied CLI spelling overrides JSON. When both spellings appear in the same source, the canonical name (`enable_virtual_memory` or `virtual_memory_master_node_addr`) takes precedence. Configuration dumps use canonical names only.
 
 > **Device selection**: xLLM no longer provides `--devices` / `--device_id` / `--draft_devices`. The available devices are determined by the visible-device mask environment variables (`ASCEND_RT_VISIBLE_DEVICES` for NPU, `CUDA_VISIBLE_DEVICES` for NVIDIA, `MLU_VISIBLE_DEVICES` for Cambricon, `HIP_VISIBLE_DEVICES` for DCU, `MUSA_VISIBLE_DEVICES` for Moore Threads). Each service process selects one runtime logical device from its visible devices according to its global `node_rank`; visible-device subsetting and reordering are resolved by the hardware runtime. The draft model always shares the selected device with the target model.
 
@@ -54,7 +54,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `enable_manual_loader` | `bool` | `false` | Pin decoder layer weights to host memory and use async H2D transfer. Required by `enable_rolling_load`; also implied by `enable_xtensor`. |
+| `enable_manual_loader` | `bool` | `false` | Pin decoder layer weights to host memory and use async H2D transfer. Required by `enable_rolling_load`; also implied by `enable_virtual_memory`. |
 | `enable_rolling_load` | `bool` | `false` | Enable rolling weight load: keep only N decoder layer weight slots in HBM and stream-load each layer just in time. Requires `enable_manual_loader=true`. NPU only. |
 | `rolling_load_num_cached_layers` | `int32` | `2` | Number of decoder layer weight slots to keep in HBM when `enable_rolling_load=true`. |
 | `rolling_load_num_rolling_slots` | `int32` | `-1` | Number of rolling slots used by decoder rolling load. Fixed slots are `rolling_load_num_cached_layers - rolling_load_num_rolling_slots`. `-1` means auto, `min(2, preload_count)`. Must be in `[-1, rolling_load_num_cached_layers]`. |
@@ -73,7 +73,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_in_batch_prefix_cache` | `bool` | `false` | Whether to cache admitted prefill full blocks into the prefix cache so that later requests in the same batch can share them. |
 | `max_linear_state_cache_slots` | `int64` | `0` | Maximum number of active linear-attention state cache slots. `0` derives an automatic capacity from the available KV Cache budget. |
 | `xxh3_128bits_seed` | `uint32` | `1024` | Default XXH3 128-bit hash seed. |
-| `enable_xtensor` | `bool` | `false` | Whether to enable XTensor for model weights with the physical page pool. |
+| `enable_virtual_memory` | `bool` | `false` | Enable virtual memory for model weights and KV Cache with the physical page pool. |
+| `enable_xtensor` | `bool` | `false` | Legacy CLI and JSON alias for `enable_virtual_memory`. |
 | `phy_page_granularity_size` | `int64` | `2097152` | Granularity size of one physical page in bytes, default 2 MiB, for continuous KV Cache. |
 
 ## KVCacheStoreConfig
@@ -155,7 +156,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `master_node_addr` | `string` | `"127.0.0.1:19888"` | Master address for multi-node distributed serving, for example `10.18.1.1:9999`. |
-| `xtensor_master_node_addr` | `string` | `"127.0.0.1:19889"` | Master address for the XTensor distributed service, for example `10.18.1.1:9999`. |
+| `virtual_memory_master_node_addr` | `string` | `"127.0.0.1:19889"` | Master address for the virtual memory distributed service, for example `10.18.1.1:9999`. |
+| `xtensor_master_node_addr` | `string` | `"127.0.0.1:19889"` | Legacy CLI and JSON alias for `virtual_memory_master_node_addr`. |
 | `nnodes` | `int32` | `1` | Number of multi-node nodes. |
 | `node_rank` | `int32` | `0` | Rank of the current node. |
 | `etcd_addr` | `string` | `""` | etcd address used to save instance metadata. |

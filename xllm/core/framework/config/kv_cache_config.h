@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <utility>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -51,6 +52,7 @@ class KVCacheConfig final {
          "enable_in_batch_prefix_cache",
          "max_linear_state_cache_slots",
          "xxh3_128bits_seed",
+         "enable_virtual_memory",
          "enable_xtensor",
          "phy_page_granularity_size"}};
     return kOptionCategory;
@@ -74,7 +76,22 @@ class KVCacheConfig final {
 
   PROPERTY(uint32_t, xxh3_128bits_seed) = 1024;
 
-  PROPERTY(bool, enable_xtensor) = false;
+  PROPERTY(bool, enable_virtual_memory) = false;
+
+  // Compatibility accessors for the former configuration name.
+  [[nodiscard]] const bool& enable_xtensor() const& noexcept {
+    return enable_virtual_memory();
+  }
+  [[nodiscard]] bool& enable_xtensor() & noexcept {
+    return enable_virtual_memory();
+  }
+  [[nodiscard]] bool&& enable_xtensor() && noexcept {
+    return std::move(*this).enable_virtual_memory();
+  }
+  KVCacheConfig& enable_xtensor(bool value) & {
+    return enable_virtual_memory(value);
+  }
+  void enable_xtensor(bool value) && = delete;
 
   PROPERTY(int64_t, phy_page_granularity_size) = 2 * 1024 * 1024;
 };

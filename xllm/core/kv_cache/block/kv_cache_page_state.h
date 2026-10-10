@@ -21,15 +21,13 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/virtual_memory/virtual_page.h"
-
 namespace xllm {
 
 // Tracks the KV blocks that fit entirely within a virtual page. Mapping and
 // physical-page ownership belong to the virtual-memory backend.
 class KVCachePageState final {
  public:
-  explicit KVCachePageState(VirtualPage page);
+  KVCachePageState(int64_t page_id, size_t page_size);
   ~KVCachePageState() = default;
 
   // Initialize the page with block memory size
@@ -57,10 +55,10 @@ class KVCachePageState final {
   const std::vector<int64_t>& get_free_blocks() const;
 
   // Region-local page index, retained as page_id for allocator compatibility.
-  int64_t page_id() const { return page_.page_index; }
+  int64_t page_id() const { return page_id_; }
 
   // Get page size
-  size_t page_size() const { return page_.page_size; }
+  size_t page_size() const { return page_size_; }
 
   // Static utility functions
   /**
@@ -87,7 +85,8 @@ class KVCachePageState final {
  private:
   void require_init() const;
 
-  VirtualPage page_;
+  int64_t page_id_;
+  size_t page_size_;
 
   std::optional<int64_t> start_block_;
   std::optional<int64_t> end_block_;

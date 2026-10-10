@@ -33,12 +33,13 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/kv_cache/block/block.h"
-#include "core/kv_cache/prefix/prefix_cache.h"
-#include "framework/request/request.h"
-#include "framework/request/sequence.h"
+#include "core/kv_cache/prefix/block_hasher.h"
 #include "util/timer.h"
 
 namespace xllm {
+
+class Sequence;
+class KVCacheState;
 
 class BlockManager {
  public:
@@ -74,10 +75,10 @@ class BlockManager {
     // executor thread, so leaves are wrapped in ConcurrentBlockManagerImpl when
     // this is set to make those mutations thread-safe against the scheduler.
     PROPERTY(bool, enable_host_offload) = false;
-    // xtensor (VMM) KV leaf parameters. When enable_xtensor is set, the KV leaf
-    // is an XTensorBlockManagerImpl instead of a flat BlockManagerImpl; these
-    // carry the construction args the spec builder needs.
-    PROPERTY(bool, enable_xtensor) = false;
+    // Virtual memory (VMM) KV leaf parameters. When enable_virtual_memory is
+    // set, the KV leaf is a PagedKVCacheBlockManager; these carry the
+    // construction args the spec builder needs.
+    PROPERTY(bool, enable_virtual_memory) = false;
     PROPERTY(int64_t, num_layers) = 0;
     PROPERTY(int64_t, slot_size) = 0;
     PROPERTY(std::string, model_id);
@@ -200,12 +201,13 @@ class BlockManager {
   virtual void release_out_of_window(Sequence* /*seq*/,
                                      KVCacheState& /*kv_state*/) {}
 
-  // Post-construction init hook: only the xtensor leaf needs it (KV tensors
-  // must be created on the worker before VMM physical pages can be mapped to
-  // reserve the padding block). Empty base default; the composite fans it out
-  // to every leaf, so non-xtensor leaves are a no-op. This keeps the
-  // out-of-band timing free of any dynamic_cast through the composite.
-  virtual void reserve_xtensor_padding_blocks() {}
+  // Post-construction init hook: only the virtual memory leaf needs it (KV
+  // tensors must be created on the worker before VMM physical pages can be
+  // mapped to reserve the padding block). Empty base default; the composite
+  // fans it out to every leaf, so non-virtual memory leaves are a no-op. This
+  // keeps the out-of-band timing free of any dynamic_cast through the
+  // composite.
+  virtual void reserve_padding_blocks() {}
 
  protected:
   // the options for the block manager

@@ -123,7 +123,8 @@ class ModelContext {
   // factors
   void derive_optimization_config();
 
-  std::string model_id_;  // Model identifier for XTensor multi-model support
+  std::string
+      model_id_;  // Model identifier for VirtualMemory multi-model support
   std::string model_impl_;
   ModelArgs model_args_;
   QuantArgs quant_args_;

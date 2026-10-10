@@ -23,13 +23,14 @@ limitations under the License.
 
 #include "core/common/device_monitor.h"
 #include "core/common/metrics.h"
+#include "core/distributed_runtime/model_page_allocator.h"
+#include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_client.h"
-#include "core/virtual_memory/physical_page_pool.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -48,11 +49,12 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
   context.linear_state_cache_block_limit =
       get_npu_linear_state_cache_block_limit(model_args.model_type());
   const KVCacheConfig& config = KVCacheConfig::get_instance();
-  if (config.enable_xtensor() && !is_multimodal) {
+  if (config.enable_virtual_memory() && !is_multimodal) {
     const auto& phy_pool = PhysicalPagePool::get_instance();
     CHECK(phy_pool.is_initialized()) << "PhysicalPagePool not initialized";
-    context.xtensor_cache_size = static_cast<int64_t>(phy_pool.num_total()) *
-                                 config.phy_page_granularity_size();
+    context.virtual_memory_cache_size =
+        static_cast<int64_t>(phy_pool.num_total()) *
+        config.phy_page_granularity_size();
   } else {
     CHECK(!worker_clients.empty()) << "KV cache estimation requires workers";
     std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
@@ -128,15 +130,19 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     }
   }
 
+  KVCachePageAllocator* page_allocator =
+      options.enable_virtual_memory() ? &ModelPageAllocator::get_instance()
+                                      : nullptr;
   std::unique_ptr<KVCacheManager> manager;
   if (options.enable_host_offload()) {
     CHECK(transfer_coordinator != nullptr)
         << "KV cache transfer coordinator is required for host-offload KV "
            "cache manager";
     manager = std::make_unique<HierarchyBlockManagerPool>(
-        options, std::move(transfer_coordinator), dp_size);
+        options, std::move(transfer_coordinator), dp_size, page_allocator);
   } else {
-    manager = std::make_unique<BlockManagerPool>(options, dp_size);
+    manager =
+        std::make_unique<BlockManagerPool>(options, dp_size, page_allocator);
   }
 
   return KVCacheManagerFactoryResult{std::move(manager), std::move(shape)};

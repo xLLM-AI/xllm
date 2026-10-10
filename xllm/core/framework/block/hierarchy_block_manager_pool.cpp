@@ -25,6 +25,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/block/composite_block_manager.h"
+#include "core/framework/request/sequence.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
@@ -492,8 +493,9 @@ void finalize_prefetch(Sequence* sequence,
 HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const BlockManagerPool::Options& options,
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
-    int32_t dp_size)
-    : BlockManagerPool(options, dp_size),
+    int32_t dp_size,
+    KVCachePageAllocator* page_allocator)
+    : BlockManagerPool(options, dp_size, page_allocator),
       transfer_coordinator_(std::move(transfer_coordinator)) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   host_block_managers_.reserve(dp_size);

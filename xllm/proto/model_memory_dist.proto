@@ -1,0 +1,98 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+syntax = "proto3";
+
+option go_package = "jd.com/jd-infer/xllm;xllm";
+package xllm.proto;
+option cc_enable_arenas = true;
+option cc_generic_services = true;
+
+import "common.proto";
+
+// Request for KV tensor mapping with model_id and offsets
+message KvTensorRequest {
+  string model_id = 1;
+  repeated uint64 offsets = 2;
+}
+
+// Response for memory info query
+// Returns 0 for both fields on failure
+message MemoryInfoResponse {
+  int64 available_memory = 1;  // Available memory in bytes
+  int64 total_memory = 2;      // Total memory in bytes
+}
+
+// Request for initializing PhysicalPagePool
+message InitPhysicalPagePoolRequest {
+  int64 num_pages = 1;  // Number of physical pages to allocate
+}
+
+// Request for allocating weight pages from GlobalMemoryRegion
+message AllocWeightPagesRequest {
+  string model_id = 1;
+  uint64 num_pages = 2;  // Number of pages to allocate
+}
+
+// Response for weight pages allocation (just success/failure)
+
+// Request for freeing weight pages
+message FreeWeightPagesRequest {
+  string model_id = 1;
+}
+
+// Request for getting physical memory offsets for KV cache blocks
+message GetKVCacheOffsetsRequest {
+  string model_id = 1;
+  repeated int32 block_ids = 2;
+  uint64 block_size_bytes = 3;
+}
+
+// Per-layer K/V offsets for mapped KV cache
+message KVCacheLayerOffsetsProto {
+  repeated uint64 k_offsets = 1;
+  repeated uint64 v_offsets = 2;
+}
+
+// Response for physical memory offsets
+message GetKVCacheOffsetsResponse {
+  // Per-layer offsets: layer_offsets[layer_id] contains K/V offsets for all blocks
+  repeated KVCacheLayerOffsetsProto layer_offsets = 1;
+}
+
+// Coordinates worker KV cache mappings and model weight page allocations.
+service ModelMemoryDist {
+  rpc Hello (Status) returns (Status);
+  
+  // Memory info query (called before init to get available memory)
+  rpc GetMemoryInfo (Status) returns (MemoryInfoResponse);
+  
+  // Initialize PhysicalPagePool with specified number of pages
+  rpc InitPhysicalPagePool (InitPhysicalPagePoolRequest) returns (Status);
+  
+  // KV tensor operations (partial mapping by offsets)
+  // KV mappings are created before physical pages are mapped
+  // Size = PhysicalPagePool::num_total() * page_size
+  rpc MapToKvTensors (KvTensorRequest) returns (Status);
+  rpc UnmapFromKvTensors (KvTensorRequest) returns (Status);
+  
+  // Weight pages allocation from GlobalMemoryRegion
+  rpc AllocWeightPages (AllocWeightPagesRequest) returns (Status);
+  rpc FreeWeightPages (FreeWeightPagesRequest) returns (Status);
+  
+  // Get physical memory offsets for KV cache blocks (used in PD disaggregation)
+  // Returns GlobalMemoryRegion offsets for each block at each layer
+  rpc GetKVCacheOffsets (GetKVCacheOffsetsRequest) returns (GetKVCacheOffsetsResponse);
+}

@@ -734,12 +734,12 @@ int64_t estimate_layerwise_split_block_count(
 int64_t KVCacheEstimator::estimate_memory_budget(
     const runtime::Options& options,
     const KVCacheEstimateContext& context) const {
-  if (context.xtensor_cache_size.has_value()) {
-    CHECK_GT(*context.xtensor_cache_size, 0)
-        << "XTensor KV cache budget must be positive";
-    LOG(INFO) << "XTensor mode: available memory from PhyPagePool: "
-              << readable_size(*context.xtensor_cache_size);
-    return *context.xtensor_cache_size;
+  if (context.virtual_memory_cache_size.has_value()) {
+    CHECK_GT(*context.virtual_memory_cache_size, 0)
+        << "VirtualMemory KV cache budget must be positive";
+    LOG(INFO) << "VirtualMemory mode: available memory from PhysicalPagePool: "
+              << readable_size(*context.virtual_memory_cache_size);
+    return *context.virtual_memory_cache_size;
   }
 
   CHECK(!context.worker_memory.empty())
@@ -808,9 +808,9 @@ KVCacheCapacity KVCacheEstimator::estimate(
   const bool is_mtp_draft_engine =
       options.is_draft_engine() &&
       SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm());
-  estimate_options.enable_prefix_cache = options.enable_prefix_cache() &&
-                                         !kv_cache_config.enable_xtensor() &&
-                                         !is_mtp_draft_engine;
+  estimate_options.enable_prefix_cache =
+      options.enable_prefix_cache() &&
+      !kv_cache_config.enable_virtual_memory() && !is_mtp_draft_engine;
   estimate_options.enable_disagg_pd = options.enable_disagg_pd();
   estimate_options.instance_role = options.instance_role();
   if (!context.is_multimodal) {

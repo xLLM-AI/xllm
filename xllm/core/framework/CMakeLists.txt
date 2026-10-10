@@ -7,13 +7,15 @@ if(USE_NPU)
   )
 endif()
 add_subdirectory(batch)
-add_subdirectory(xtensor)
+add_subdirectory(block)
+add_subdirectory(allocator)
 add_subdirectory(config)
 add_subdirectory(chat_template)
 add_subdirectory(kv_cache)
 add_subdirectory(model)
 add_subdirectory(model_context)
 add_subdirectory(model_loader)
+add_subdirectory(transfer)
 add_subdirectory(parallel_state)
 add_subdirectory(multimodal)
 add_subdirectory(encoder_cache)
@@ -26,8 +28,8 @@ add_subdirectory(eplb)
 add_subdirectory(dit_cache)
 add_subdirectory(speculative)
 
-# Factory orchestration may query WorkerClient and XTensor, while :block and
-# :kv_cache_estimation remain independent of the runtime implementation.
+# Factory orchestration may query WorkerClient and virtual memory, while
+# :kv_cache_block and :kv_cache_estimation avoid runtime manager dependencies.
 cc_library(
   NAME
     kv_cache_manager_factory
@@ -38,7 +40,7 @@ cc_library(
   DEPS
     :block
     :kv_cache
-    :xtensor
+    :model_memory_manager
     :common
     :config
     :runtime

@@ -66,7 +66,7 @@ cc_library(
     :kv_cache
     :block_hasher
     :encoder_cache
-    :block
+    :kv_cache_block_types
     :tokenizer
     :chat_template
     :multimodal

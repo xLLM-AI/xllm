@@ -28,7 +28,7 @@ class DisaggPDService : public proto::DisaggPDService {
   explicit DisaggPDService(
       DisaggPDScheduler* scheduler,
       Engine* engine,
-      std::shared_ptr<XTensorController> xtensor_controller = nullptr);
+      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr);
   explicit DisaggPDService() {}
   virtual ~DisaggPDService() = default;
 

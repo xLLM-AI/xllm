@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <unordered_set>
 
+#include "core/framework/request/sequence.h"
 #include "core/kv_cache/prefix/prefix_cache_factory.h"
 namespace xllm {
 namespace {

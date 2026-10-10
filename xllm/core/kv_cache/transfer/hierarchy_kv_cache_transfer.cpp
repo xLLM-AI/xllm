@@ -368,7 +368,7 @@ void HierarchyKVCacheTransfer::create_host_cache(CacheDomain* domain) {
     }
     KVCacheCreateOptions host_options = domain->create_options;
     host_options.device(torch::Device(torch::kCPU))
-        .enable_xtensor(false)
+        .enable_virtual_memory(false)
         .tensor_allocator(nullptr)
         .host_blocks_factor(options_.host_blocks_factor());
 #if defined(USE_NPU)

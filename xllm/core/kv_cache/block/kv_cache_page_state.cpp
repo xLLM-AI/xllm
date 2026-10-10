@@ -22,17 +22,17 @@ limitations under the License.
 
 namespace xllm {
 
-KVCachePageState::KVCachePageState(VirtualPage page) : page_(page) {}
+KVCachePageState::KVCachePageState(int64_t page_id, size_t page_size)
+    : page_id_(page_id), page_size_(page_size) {}
 
 void KVCachePageState::require_init() const {
-  CHECK(start_block_.has_value()) << "VirtualPage not initialized";
-  CHECK(end_block_.has_value()) << "VirtualPage not initialized";
-  CHECK(num_kv_blocks_.has_value()) << "VirtualPage not initialized";
+  CHECK(start_block_.has_value()) << "KVCachePageState not initialized";
+  CHECK(end_block_.has_value()) << "KVCachePageState not initialized";
+  CHECK(num_kv_blocks_.has_value()) << "KVCachePageState not initialized";
 }
 
 void KVCachePageState::init(size_t block_mem_size) {
-  auto [start, end] =
-      get_block_range(page_.page_index, page_.page_size, block_mem_size);
+  auto [start, end] = get_block_range(page_id_, page_size_, block_mem_size);
   start_block_ = start;
   end_block_ = end;
   num_kv_blocks_ = end - start;
@@ -47,7 +47,7 @@ void KVCachePageState::init(size_t block_mem_size) {
 std::vector<int64_t> KVCachePageState::alloc(size_t num_blocks) {
   require_init();
   if (full()) {
-    throw std::runtime_error("VirtualPage " + std::to_string(page_.page_index) +
+    throw std::runtime_error("KVCachePageState " + std::to_string(page_id_) +
                              " is already full");
   }
 

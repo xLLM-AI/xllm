@@ -53,9 +53,9 @@ std::unique_ptr<Master> create_master(const std::string& backend,
 
 std::unique_ptr<LLMMaster> fork_llm_master(LLMMaster* master,
                                            const Options& options) {
-  // sleep/wakeup/fork_master requires --enable_xtensor=true
-  if (!KVCacheConfig::get_instance().enable_xtensor()) {
-    LOG(WARNING) << "fork_master requires xtensor to be enabled";
+  // sleep/wakeup/fork_master requires --enable_virtual_memory=true
+  if (!KVCacheConfig::get_instance().enable_virtual_memory()) {
+    LOG(WARNING) << "fork_master requires virtual memory to be enabled";
     return nullptr;
   }
 
