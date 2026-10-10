@@ -29,6 +29,7 @@ limitations under the License.
 #include <sstream>
 
 #include "core/common/global_flags.h"
+#include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/execution_config.h"
@@ -110,12 +111,15 @@ int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
 
 }  // namespace
 
-ProfileManager::ProfileManager(Engine* engine,
-                               const Options& options,
-                               StepCallback step_callback,
-                               ResultCallback result_callback)
+ProfileManager::ProfileManager(
+    Engine* engine,
+    const Options& options,
+    StepCallback step_callback,
+    ResultCallback result_callback,
+    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(options),
       engine_(engine),
+      distributed_worker_manager_(std::move(distributed_worker_manager)),
       step_callback_(std::move(step_callback)),
       result_callback_(std::move(result_callback)),
       batch_factory_(options.dp_size()) {
@@ -518,7 +522,9 @@ void ProfileManager::train_speculative_validate_time_predictor(
   // runs static, which corrupts collectives and shape assumptions.
   // Treat broadcast failure as fatal for the adaptive path and leave the
   // registry unset so every rank consistently falls back to static.
-  if (!engine_->set_speculative_validate_time_predictor(predictor)) {
+  if (distributed_worker_manager_ == nullptr ||
+      !distributed_worker_manager_->set_speculative_validate_time_predictor(
+          predictor)) {
     LOG(ERROR)
         << "Failed to broadcast speculative validate predictor to workers. "
         << "Disabling adaptive speculative decode on all ranks to avoid "

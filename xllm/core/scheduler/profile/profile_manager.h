@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "core/common/macros.h"
@@ -34,6 +35,8 @@ limitations under the License.
 #include "core/scheduler/profile/time_predictor.h"
 
 namespace xllm {
+class DistributedWorkerManager;
+
 std::vector<int32_t> build_step_time_profile_batch_sizes(
     int32_t max_seqs_per_batch);
 
@@ -95,14 +98,18 @@ class ProfileManager {
       { engine->step(batch) } -> std::same_as<ForwardOutput>;
       { engine->update_last_step_result(batch) } -> std::same_as<void>;
     }
-  ProfileManager(TargetEngine* engine, const Options& options)
+  ProfileManager(TargetEngine* engine,
+                 const Options& options,
+                 std::shared_ptr<DistributedWorkerManager>
+                     distributed_worker_manager = nullptr)
       : ProfileManager(
             static_cast<Engine*>(engine),
             options,
             [engine](BatchGroup& batch) { return engine->step(batch); },
             [engine](BatchGroup& batch) {
               engine->update_last_step_result(batch);
-            }) {}
+            },
+            std::move(distributed_worker_manager)) {}
 
   int32_t get_token_budget();
 
@@ -244,10 +251,12 @@ class ProfileManager {
  private:
   friend class ContinuousSchedulerBase;
 
-  ProfileManager(Engine* engine,
-                 const Options& options,
-                 StepCallback step_callback,
-                 ResultCallback result_callback);
+  ProfileManager(
+      Engine* engine,
+      const Options& options,
+      StepCallback step_callback,
+      ResultCallback result_callback,
+      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager);
 
   std::unique_ptr<TimePredictor> prefill_time_predictor_;
   std::unique_ptr<TimePredictor> decode_time_predictor_;
@@ -256,6 +265,7 @@ class ProfileManager {
   const Options options_;
 
   Engine* engine_;
+  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
   StepCallback step_callback_;
   ResultCallback result_callback_;
   BatchFactory batch_factory_;

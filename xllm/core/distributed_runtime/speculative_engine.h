@@ -54,10 +54,6 @@ class SpeculativeEngineBase : public Engine {
 
   const ModelArgs& model_args() const override { return model_args_; }
 
-  bool set_speculative_validate_time_predictor(
-      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
-      override;
-
   // Return the options used by the target engine.
   const runtime::Options& options() const { return engine_->options(); }
 

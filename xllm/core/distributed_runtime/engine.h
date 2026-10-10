@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <memory>
 
-#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -49,11 +48,6 @@ class Engine {
 
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
-
-  virtual bool set_speculative_validate_time_predictor(
-      const SpeculativeProfileRegistry::ValidateTimePredictor&) {
-    return false;
-  }
 
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {

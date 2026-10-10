@@ -73,10 +73,6 @@ class LLMEngine : public Engine {
             std::shared_ptr<KVCacheTransferCoordinatorBase>
                 transfer_coordinator = nullptr);
 
-  bool set_speculative_validate_time_predictor(
-      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
-      override;
-
   void update_last_step_result(BatchGroup& batch);
 
   std::shared_ptr<DistributedWorkerManager> get_distributed_worker_manager()
