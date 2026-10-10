@@ -112,6 +112,8 @@ class Glm5NextKPoolIndexerImpl final : public torch::nn::Module {
       torch::Tensor& tail_cache,
       const AttentionMetadata& attn_metadata);
 
+  void verify_loaded_weights(const std::string& prefix) const;
+
   void load_state_dict(const StateDict& state_dict);
 
   int64_t output_width() const { return index_topk_ + index_kpool_ - 1; }

@@ -638,4 +638,52 @@ AttentionMetadata AttentionMetadataBuilder::build(
       params, enable_mla, compute_dtype, device, attn_mask, build_options);
 }
 
+torch::Tensor AttentionMetadataBuilder::build_chunk_indices(
+    const torch::Tensor& cu_seqlens,
+    int64_t chunk_size) {
+  CHECK_GT(chunk_size, 0);
+  torch::Tensor sequence_lengths = cu_seqlens.diff();
+  torch::Tensor num_chunks =
+      ((sequence_lengths + chunk_size - 1) / chunk_size).to(torch::kInt64);
+  torch::Tensor sequence_ids =
+      torch::arange(num_chunks.size(0), num_chunks.options());
+  torch::Tensor batch = torch::repeat_interleave(sequence_ids, num_chunks);
+  torch::Tensor local_chunks =
+      torch::arange(batch.size(0), num_chunks.options());
+  if (num_chunks.numel() > 1) {
+    torch::Tensor chunk_starts = num_chunks.cumsum(0) - num_chunks;
+    local_chunks.sub_(chunk_starts.index_select(0, batch));
+  }
+  return torch::stack({batch, local_chunks}, /*dim=*/1).to(torch::kInt32);
+}
+
+void AttentionMetadataBuilder::build_linear_prefill(
+    AttentionMetadata& attn_metadata,
+    int64_t block_size) {
+  if (!attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill) {
+    return;
+  }
+
+  constexpr int64_t kPadSlotId = -1;
+  constexpr int64_t kDefaultMaxNumPrograms = 1024;
+  attn_metadata.chunk_indices =
+      build_chunk_indices(attn_metadata.q_cu_seq_lens, block_size);
+  const int64_t schedule_size = attn_metadata.chunk_indices.size(0);
+  const int64_t max_num_programs =
+      std::max(kDefaultMaxNumPrograms, schedule_size) * 2;
+  torch::Tensor batch_ptr = torch::full(
+      {max_num_programs}, kPadSlotId, attn_metadata.chunk_indices.options());
+  torch::Tensor token_block_offset_ptr = torch::full(
+      {max_num_programs}, kPadSlotId, attn_metadata.chunk_indices.options());
+  batch_ptr.narrow(/*dim=*/0, /*start=*/0, /*length=*/schedule_size)
+      .copy_(attn_metadata.chunk_indices.select(/*dim=*/1, /*index=*/0));
+  token_block_offset_ptr
+      .narrow(/*dim=*/0, /*start=*/0, /*length=*/schedule_size)
+      .copy_(attn_metadata.chunk_indices.select(/*dim=*/1, /*index=*/1));
+
+  attn_metadata.batch = std::move(batch_ptr);
+  attn_metadata.token_block_offset = std::move(token_block_offset_ptr);
+  attn_metadata.tot = static_cast<int32_t>(schedule_size);
+}
+
 }  // namespace xllm::layer

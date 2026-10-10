@@ -78,6 +78,8 @@ class KVCacheShape final {
   bool has_conv_cache_shape() const;
   bool has_ssm_cache_shape() const;
   int64_t linear_ssm_checkpoint_stride() const;
+  static int64_t linear_ssm_checkpoint_stride(int64_t logical_slots,
+                                              int64_t physical_rows);
   bool has_grouped_cache_layout() const {
     return shape_kind_ == ShapeKind::GROUPED_POOL;
   }

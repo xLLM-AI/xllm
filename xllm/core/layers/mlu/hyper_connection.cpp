@@ -16,6 +16,8 @@ limitations under the License.
 #include "layers/mlu/hyper_connection.h"
 
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "kernels/mlu/mlu_ops_api.h"
@@ -49,6 +51,31 @@ torch::Tensor flat_matrix(const torch::Tensor& x, int64_t rows, int64_t cols) {
 
 namespace xllm {
 namespace layer {
+
+StateDict get_hc_state(const StateDict& state_dict,
+                       const std::string& module_prefix,
+                       const std::string& checkpoint_prefix) {
+  StateDict module_state = state_dict.get_dict_with_prefix(module_prefix);
+  if (module_state.size() > 0) {
+    return module_state;
+  }
+
+  std::unordered_map<std::string, torch::Tensor> tensors;
+  const torch::Tensor fn = state_dict.get_tensor(checkpoint_prefix + "fn");
+  const torch::Tensor base = state_dict.get_tensor(checkpoint_prefix + "base");
+  const torch::Tensor scale =
+      state_dict.get_tensor(checkpoint_prefix + "scale");
+  if (fn.defined()) {
+    tensors.emplace("hc_fn", fn);
+  }
+  if (base.defined()) {
+    tensors.emplace("hc_base", base);
+  }
+  if (scale.defined()) {
+    tensors.emplace("hc_scale", scale);
+  }
+  return StateDict(std::move(tensors));
+}
 
 MHCFusionPlan resolve_mhc_fusion(const MHCFusionContext& context) {
   const bool use_fused_mhc =

@@ -70,9 +70,6 @@ class ChunkGatedDeltaRuleImpl : public torch::nn::Module {
   torch::Tensor prepare_chunk_offsets(const torch::Tensor& cu_seqlens,
                                       int64_t chunk_size) const;
 
-  torch::Tensor prepare_chunk_indices(const torch::Tensor& cu_seqlens,
-                                      int64_t chunk_size) const;
-
   torch::Tensor l2norm(const torch::Tensor& x, int64_t dim, double eps = 1e-6) {
     auto denom = x.norm(2.0, dim, true).clamp_min(eps).expand_as(x);
     return x / denom;

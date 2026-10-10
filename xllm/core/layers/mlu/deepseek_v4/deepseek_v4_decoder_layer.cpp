@@ -19,44 +19,10 @@ limitations under the License.
 
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <vector>
 
 namespace xllm {
 namespace layer {
-namespace {
-
-StateDict get_alias_dict(const StateDict& state_dict,
-                         const std::vector<std::string>& prefixes) {
-  return state_dict.get_dict_with_prefix(prefixes);
-}
-
-StateDict get_hc_state(const StateDict& state_dict,
-                       const std::string& module_prefix,
-                       const std::string& legacy_prefix) {
-  StateDict module_state = state_dict.get_dict_with_prefix(module_prefix);
-  if (module_state.size() > 0) {
-    return module_state;
-  }
-
-  std::unordered_map<std::string, torch::Tensor> tensors;
-  torch::Tensor fn = state_dict.get_tensor(legacy_prefix + "fn");
-  torch::Tensor base = state_dict.get_tensor(legacy_prefix + "base");
-  torch::Tensor scale = state_dict.get_tensor(legacy_prefix + "scale");
-  if (fn.defined()) {
-    tensors.emplace("hc_fn", fn);
-  }
-  if (base.defined()) {
-    tensors.emplace("hc_base", base);
-  }
-  if (scale.defined()) {
-    tensors.emplace("hc_scale", scale);
-  }
-  return StateDict(tensors);
-}
-
-}  // namespace
-
 DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id)
@@ -83,29 +49,15 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
           hc_mult, hidden_size, hc_sinkhorn_iters, hc_eps, norm_eps, options));
   hc_post_ = register_module("hc_post", MHCPost(norm_eps));
 
-  attn_norm_ =
-      register_module("input_layernorm",
-                      RMSNorm(hidden_size, model_args.rms_norm_eps(), options));
-  ffn_norm_ =
-      register_module("post_attention_layernorm",
-                      RMSNorm(hidden_size, model_args.rms_norm_eps(), options));
+  attn_norm_ = register_module("input_layernorm", RMSNorm(context));
+  ffn_norm_ = register_module("post_attention_layernorm", RMSNorm(context));
   attention_ = register_module(
       "self_attn",
       DeepseekV4Attention(
           model_args, quant_args, parallel_args, options, layer_id_));
 
-  const std::shared_ptr<ModelStreamRegistry>& stream_registry =
-      context.stream_registry();
-  sparse_moe_ = register_module(
-      "mlp",
-      DeepseekV4SparseMoEBlock(
-          model_args,
-          quant_args,
-          parallel_args,
-          options,
-          use_hash_,
-          stream_registry->get(ExecutionStreamRole::COMMUNICATION),
-          stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
+  sparse_moe_ =
+      register_module("mlp", DeepseekV4SparseMoEBlock(context, use_hash_));
 }
 
 void DeepseekV4DecoderLayerImpl::set_cache_mapping(
@@ -114,24 +66,26 @@ void DeepseekV4DecoderLayerImpl::set_cache_mapping(
 }
 
 void DeepseekV4DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
-  StateDict attn_state = get_alias_dict(state_dict, {"self_attn.", "attn."});
+  StateDict attn_state = state_dict.get_dict_with_prefix(
+      std::vector<std::string>{"self_attn.", "attn."});
   if (attn_state.size() > 0) {
     attention_->load_state_dict(attn_state);
   }
 
-  StateDict attn_norm_state =
-      get_alias_dict(state_dict, {"input_layernorm.", "attn_norm."});
+  StateDict attn_norm_state = state_dict.get_dict_with_prefix(
+      std::vector<std::string>{"input_layernorm.", "attn_norm."});
   if (attn_norm_state.size() > 0) {
     attn_norm_->load_state_dict(attn_norm_state);
   }
 
-  StateDict ffn_norm_state =
-      get_alias_dict(state_dict, {"post_attention_layernorm.", "ffn_norm."});
+  StateDict ffn_norm_state = state_dict.get_dict_with_prefix(
+      std::vector<std::string>{"post_attention_layernorm.", "ffn_norm."});
   if (ffn_norm_state.size() > 0) {
     ffn_norm_->load_state_dict(ffn_norm_state);
   }
 
-  StateDict moe_state = get_alias_dict(state_dict, {"mlp.", "ffn."});
+  StateDict moe_state =
+      state_dict.get_dict_with_prefix(std::vector<std::string>{"mlp.", "ffn."});
   if (moe_state.size() > 0) {
     sparse_moe_->load_state_dict(moe_state);
   }

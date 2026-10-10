@@ -49,6 +49,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from xllm.python.layers import ColumnParallelLinear, RowParallelLinear
+from xllm.python.model_loader import ModelWeightLoader
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.glm5_next import (
     Glm5NextConfig,
@@ -676,121 +677,60 @@ class Glm5NextVisionModel(nn.Module):
     # -- weight loading ----------------------------------------------------
 
     def load_weights(self, state_dicts: list, prefix: str = "model.visual.") -> None:
-        """Load HF checkpoint weights into this vision tower.
+        """Load vision weights through the shared checkpoint loader."""
+        loader = ModelWeightLoader(
+            self,
+            state_dicts,
+            self.cfg.tp_size,
+            self.cfg.tp_rank,
+            src_prefixes=(prefix,),
+        )
 
-        ``state_dicts`` is the list of ``StateDict`` objects from the xLLM weight
-        loader. ``prefix`` is the key prefix in the checkpoint (``model.visual.``
-        for a full GLM-5.3-Flash-VL checkpoint).
-        """
+        for name in (
+            "patch_embed.proj.weight",
+            "patch_embed.proj.bias",
+        ):
+            loader.copy_replicated(name)
 
-        def find(name: str):
-            full = prefix + name
-            for sd in state_dicts:
-                if sd.has(full):
-                    return sd
-            return None
+        def copy_qkv(name: str) -> None:
+            tensor = loader.get_tensor(name)
+            third = tensor.size(0) // 3
+            shards = [loader.shard(tensor.narrow(0, index * third, third), dim=0) for index in range(3)]
+            loader.copy_in(name, torch.cat(shards, dim=0))
 
-        def load_tensor(name: str) -> torch.Tensor:
-            sd = find(name)
-            assert sd is not None, f"checkpoint tensor not found: {prefix + name}"
-            return sd.get_tensor(prefix + name)
-
-        def copy_in(param_name: str, tensor: torch.Tensor) -> None:
-            param = self.get_parameter(param_name)
-            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-        tp = self.cfg.tp_size
-        rank = self.cfg.tp_rank
-
-        def shard(t: torch.Tensor, dim: int) -> torch.Tensor:
-            """Narrow ``t`` to this rank's contiguous slice along ``dim``.
-
-            Mirrors ``W8A8WeightLoader.shard`` / the LLM loader. At ``tp==1`` it
-            is a no-op so the byte-identical replicated load is preserved.
-            """
-            if tp <= 1:
-                return t
-            cs = t.size(dim) // tp
-            return t.narrow(dim, rank * cs, cs).contiguous()
-
-        def shard_qkv(t: torch.Tensor) -> torch.Tensor:
-            """Shard the merged qkv weight/bias per-head across TP ranks.
-
-            The checkpoint layout is ``[q(num_heads*hd) | k(...) | v(...)]``
-            along dim 0 (the output dim of the ``nn.Linear(dim, 3*dim)``). A
-            contiguous ``shard(t, dim=0)`` would split across the q/k boundary
-            (rank 0 of a tp=3 run would own all of q and nothing of k/v), so
-            each third is narrowed to this rank's head block SEPARATELY and
-            re-cat'd, giving the local layout ``[q_local | k_local | v_local]``
-            that matches the ``reshape(seq, 3, num_heads_local, head_dim)`` in
-            :meth:`VisionAttention.forward`. Mirrors the KDA conv1d / MoE
-            gate_up shard-then-cat fix in ``glm5_next.py``. At ``tp==1`` the
-            shard is a no-op, leaving the merged tensor byte-identical.
-            """
-            if tp <= 1:
-                return t
-            third = t.size(0) // 3
-            parts = [shard(t.narrow(0, j * third, third), dim=0) for j in range(3)]
-            return torch.cat(parts, dim=0).contiguous()
-
-        # patch_embed (Conv3d, REPLICATED — Conv TP-sharding is non-standard).
-        copy_in("patch_embed.proj.weight", load_tensor("patch_embed.proj.weight"))
-        copy_in("patch_embed.proj.bias", load_tensor("patch_embed.proj.bias"))
-
-        # blocks
-        for i in range(self.cfg.depth):
-            p = f"blocks.{i}."
-            # norms (RMSNorm, replicated).
-            copy_in(p + "norm1.weight", load_tensor(p + "norm1.weight"))
-            copy_in(p + "norm2.weight", load_tensor(p + "norm2.weight"))
-            copy_in(p + "attn.q_norm.weight", load_tensor(p + "attn.q_norm.weight"))
-            copy_in(p + "attn.k_norm.weight", load_tensor(p + "attn.k_norm.weight"))
-            # attn.qkv: ColumnParallelLinear — shard the merged qkv per-head.
-            copy_in(p + "attn.qkv.weight", shard_qkv(load_tensor(p + "attn.qkv.weight")))
-            # attn.proj: RowParallelLinear — shard the INPUT dim (dim 1); the
-            # bias is replicated (full out) and added once after all-reduce.
-            copy_in(p + "attn.proj.weight", shard(load_tensor(p + "attn.proj.weight"), dim=1))
-            # mlp.gate/up: ColumnParallelLinear — shard the intermediate (dim 0).
-            copy_in(p + "mlp.gate_proj.weight", shard(load_tensor(p + "mlp.gate_proj.weight"), dim=0))
-            copy_in(p + "mlp.up_proj.weight", shard(load_tensor(p + "mlp.up_proj.weight"), dim=0))
-            # mlp.down_proj: RowParallelLinear — shard the input dim (dim 1);
-            # bias replicated.
-            copy_in(p + "mlp.down_proj.weight", shard(load_tensor(p + "mlp.down_proj.weight"), dim=1))
+        for index in range(self.cfg.depth):
+            block = f"blocks.{index}."
+            for name in (
+                "norm1.weight",
+                "norm2.weight",
+                "attn.q_norm.weight",
+                "attn.k_norm.weight",
+            ):
+                loader.copy_replicated(block + name)
+            copy_qkv(block + "attn.qkv.weight")
+            loader.copy_shard(block + "attn.proj.weight", dim=1)
+            loader.copy_shard(block + "mlp.gate_proj.weight", dim=0)
+            loader.copy_shard(block + "mlp.up_proj.weight", dim=0)
+            loader.copy_shard(block + "mlp.down_proj.weight", dim=1)
             if self.cfg.attention_bias:
-                # qkv bias follows the same per-head shard as the weight; the
-                # gate/up ColumnParallel biases also shard on dim 0; the
-                # RowParallel (proj, down_proj) biases are replicated.
-                copy_in(p + "attn.qkv.bias", shard_qkv(load_tensor(p + "attn.qkv.bias")))
-                copy_in(p + "attn.proj.bias", load_tensor(p + "attn.proj.bias"))
-                copy_in(p + "mlp.gate_proj.bias", shard(load_tensor(p + "mlp.gate_proj.bias"), dim=0))
-                copy_in(p + "mlp.up_proj.bias", shard(load_tensor(p + "mlp.up_proj.bias"), dim=0))
-                copy_in(p + "mlp.down_proj.bias", load_tensor(p + "mlp.down_proj.bias"))
+                copy_qkv(block + "attn.qkv.bias")
+                loader.copy_replicated(block + "attn.proj.bias")
+                loader.copy_shard(block + "mlp.gate_proj.bias", dim=0)
+                loader.copy_shard(block + "mlp.up_proj.bias", dim=0)
+                loader.copy_replicated(block + "mlp.down_proj.bias")
 
-        # post_layernorm (RMSNorm, replicated).
-        copy_in("post_layernorm.weight", load_tensor("post_layernorm.weight"))
-
-        # downsample (Conv2d, REPLICATED).
-        copy_in("downsample.weight", load_tensor("downsample.weight"))
-        copy_in("downsample.bias", load_tensor("downsample.bias"))
-
-        # merger: proj (nn.Linear dim->dim) + post_projection_norm (LayerNorm)
-        # stay REPLICATED; gate/up (ColumnParallel) shard dim 0; down_proj
-        # (RowParallel) shards dim 1. bias=False for GLM-5.3-Flash so no biases.
-        copy_in("merger.proj.weight", load_tensor("merger.proj.weight"))
-        copy_in("merger.post_projection_norm.weight", load_tensor("merger.post_projection_norm.weight"))
-        copy_in("merger.post_projection_norm.bias", load_tensor("merger.post_projection_norm.bias"))
-        copy_in("merger.gate_proj.weight", shard(load_tensor("merger.gate_proj.weight"), dim=0))
-        copy_in("merger.up_proj.weight", shard(load_tensor("merger.up_proj.weight"), dim=0))
-        copy_in("merger.down_proj.weight", shard(load_tensor("merger.down_proj.weight"), dim=1))
-
-        # ViT RowParallelLinear: do NOT call ``process_weights_after_loading``
-        # (which would transpose + Fractal-NZ-cast the weight and route forward
-        # through ``torch.matmul``). The ViT is bf16 and unquantized; keeping
-        # the checkpoint ``[N, K]`` layout makes ``RowParallelLinear.forward``
-        # fall through to ``F.linear`` — bit-identical to the transformers
-        # reference (verified per-block, 317/317 tensors, with fused-bias). The
-        # NZ-fractal matmul is a pure NPU perf optimization that the small ViT
-        # (one forward per prefill) does not need.
+        for name in (
+            "post_layernorm.weight",
+            "downsample.weight",
+            "downsample.bias",
+            "merger.proj.weight",
+            "merger.post_projection_norm.weight",
+            "merger.post_projection_norm.bias",
+        ):
+            loader.copy_replicated(name)
+        loader.copy_shard("merger.gate_proj.weight", dim=0)
+        loader.copy_shard("merger.up_proj.weight", dim=0)
+        loader.copy_shard("merger.down_proj.weight", dim=1)
 
 
 # ---------------------------------------------------------------------------

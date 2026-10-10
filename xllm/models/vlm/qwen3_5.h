@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/model/model_output.h"
+#include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
 #include "models/model_registry.h"
@@ -30,6 +31,9 @@ limitations under the License.
 #include "models/llm/qwen3_5.h"
 #include "models/vlm/npu/qwen3_vl.h"
 #elif defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_MLU)
+#include "core/kernels/mlu/mlu_ops_api.h"
+#endif
 #include "core/layers/common/qwen3_next_rms_norm.h"
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/qwen3_5_decoder_layer.h"
@@ -151,70 +155,19 @@ class Qwen3_5ModelImpl final
   layer::AttentionMetadata get_attention_metadata(
       const ModelInputParams& params,
       const torch::Tensor& h) {
+#if defined(USE_MLU)
+    constexpr int64_t prefill_block_size =
+        kernel::mlu::kCausalConv1dPrefillBlockSize;
+#else
+    constexpr int64_t prefill_block_size = 64;
+#endif
     auto attn_metadata =
         layer::AttentionMetadataBuilder::build(params,
                                                /*enable_mla=*/false,
                                                /*attn_mask=*/{},
                                                h.device());
-    // Init batch and token_block_offset for GDN attention
-    if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
-      constexpr int32_t kBlockM = 64;
-      constexpr int64_t pad_slot_id = -1;
-      constexpr int64_t default_max_num_programs = 1024;
-      constexpr int64_t chunk_size = 64;
-      auto seqlens = attn_metadata.q_cu_seq_lens.diff();
-      auto nums = (seqlens + kBlockM - 1) / kBlockM;
-      nums = nums.to(torch::kLong);
-      int32_t tot = nums.sum().item<int32_t>();
-      torch::Tensor range_batch = torch::arange(nums.size(0), nums.options());
-      torch::Tensor mlist_tensor = torch::repeat_interleave(range_batch, nums);
-      int64_t mlist_len = mlist_tensor.size(0);
-      int64_t max_num_programs =
-          std::max(default_max_num_programs, mlist_len) * 2;
-      torch::Tensor batch_ptr =
-          torch::full({max_num_programs},
-                      pad_slot_id,
-                      torch::dtype(torch::kInt32).device(seqlens.device()));
-      torch::Tensor token_block_offset_ptr =
-          torch::full({max_num_programs},
-                      pad_slot_id,
-                      torch::dtype(torch::kInt32).device(seqlens.device()));
-
-      std::vector<torch::Tensor> vec;
-      vec.reserve(nums.size(0));
-      for (int64_t i = 0; i < nums.size(0); ++i) {
-        vec.emplace_back(
-            torch::arange(nums[i].item<int64_t>(), nums.options()));
-      }
-      torch::Tensor offsetlist_tensor = torch::cat(vec, -1).to(torch::kInt32);
-      batch_ptr.narrow(0, 0, mlist_len).copy_(mlist_tensor);
-      token_block_offset_ptr.narrow(0, 0, mlist_len).copy_(offsetlist_tensor);
-
-      // Compute chunk indices for the chunked GDN kernel
-      {
-        torch::Tensor lengths = seqlens;
-        torch::Tensor num_chunks = (lengths + chunk_size - 1) / chunk_size;
-        num_chunks = num_chunks.to(torch::kLong);
-        torch::Tensor cumsum = torch::cumsum(num_chunks, 0);
-        int64_t total_chunks = cumsum[-1].item<int64_t>();
-        torch::Tensor arange_total =
-            torch::arange(total_chunks, attn_metadata.q_cu_seq_lens.options());
-        torch::Tensor zeros = torch::zeros({1}, cumsum.options());
-        torch::Tensor prefix = torch::cat(
-            {zeros, cumsum.slice(/*dim=*/0, /*start=*/0, /*end=*/-1)});
-        torch::Tensor repeats_prefix =
-            torch::repeat_interleave(prefix, num_chunks);
-        torch::Tensor indices = arange_total - repeats_prefix;
-        torch::Tensor mask = indices == 0;
-        torch::Tensor col0 = mask.cumsum(0) - 1;
-        attn_metadata.chunk_indices = torch::stack({col0, indices}, /*dim=*/1)
-                                          .to(attn_metadata.q_cu_seq_lens)
-                                          .to(torch::kInt32);
-      }
-      attn_metadata.tot = tot;
-      attn_metadata.batch = batch_ptr;
-      attn_metadata.token_block_offset = token_block_offset_ptr;
-    }
+    layer::AttentionMetadataBuilder::build_linear_prefill(attn_metadata,
+                                                          prefill_block_size);
     return attn_metadata;
   }
 };

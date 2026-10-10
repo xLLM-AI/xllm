@@ -71,7 +71,6 @@ torch::Tensor causal_conv1d_fn(
     stride_o_token = static_cast<int32_t>(out.stride(2));
   }
 
-  constexpr int32_t kBlockM = 64;
   constexpr int32_t kBlockN = 2048;
   int32_t np2_statelen = 1;
   while (np2_statelen < state_len) {
@@ -129,7 +128,7 @@ torch::Tensor causal_conv1d_fn(
            /*IS_APC_ENABLED=*/0,
            /*HAS_NULL_BLOCK=*/1,
            /*NP2_STATELEN=*/np2_statelen,
-           /*BLOCK_M=*/kBlockM,
+           /*BLOCK_M=*/kCausalConv1dPrefillBlockSize,
            /*BLOCK_N=*/kBlockN);
 
   return out;

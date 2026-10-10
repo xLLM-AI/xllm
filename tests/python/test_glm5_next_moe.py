@@ -33,7 +33,7 @@ def test_quantized_expert_scales_are_loaded_in_kernel_dtypes(
         tp_size=1,
     )
     module = glm5_next.Glm5NextMoE(config, torch.bfloat16, torch.device("cpu"))
-    module.shared_experts = torch.nn.Identity()
+    monkeypatch.setattr(module.shared_experts, "forward", lambda hidden: hidden)
     module.use_w8a8 = True
     model = torch.nn.Module()
     model.model = torch.nn.Module()
@@ -103,7 +103,6 @@ def test_nonquantized_experts_do_not_allocate_quantization_scales() -> None:
         tp_size=1,
     )
     module = glm5_next.Glm5NextMoE(config, torch.bfloat16, torch.device("cpu"))
-    module.shared_experts = torch.nn.Identity()
 
     module.process_weights_after_loading()
 

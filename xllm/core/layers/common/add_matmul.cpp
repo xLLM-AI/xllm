@@ -152,45 +152,32 @@ void AddMatmulWeightTransposedImpl::load_state_dict(
     const StateDict& state_dict) {
   resolve_weight_quant_method_for_linear_load(
       quant_args_, state_dict, nullptr, resolved_weight_quant_method_);
+  CHECK(!quant_args_.preserve_smooth())
+      << "Preserved smooth is unsupported by this projection: "
+      << state_dict.prefix();
 
   if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
-    std::vector<weight::LazyParameterSpec> specs;
-    specs.push_back(
-        weight::LazyParameterSpec{&weight_,
-                                  &weight_is_loaded_,
-                                  "weight",
-                                  {weight_.size(0), weight_.size(1)},
-                                  options_.dtype(torch::kInt8)});
-    weight::ensure_parameter_storage(this, specs);
-
-    std::vector<weight::LazyParameterSpec> scale_specs;
-    scale_specs.push_back(
-        weight::LazyParameterSpec{&weight_scale_,
-                                  &weight_scale_is_loaded_,
-                                  "weight_scale",
-                                  {weight_.size(0)},
-                                  options_.dtype(torch::kFloat32)});
-    scale_specs.push_back(
-        weight::LazyParameterSpec{&weight_offset_,
-                                  &weight_offset_is_loaded_,
-                                  "weight_offset",
-                                  {weight_.size(0)},
-                                  options_.dtype(torch::kFloat32)});
-    weight::ensure_parameter_storage(this, scale_specs);
-
-    if (state_dict.has("weight")) {
-      weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
-    }
-    if (state_dict.has("weight_scale")) {
-      weight::load_weight(
-          state_dict, "weight_scale", weight_scale_, weight_scale_is_loaded_);
-    }
-    if (state_dict.has("weight_offset")) {
-      weight::load_weight(state_dict,
-                          "weight_offset",
-                          weight_offset_,
-                          weight_offset_is_loaded_);
-    }
+    weight::ensure_parameter_storage(this,
+                                     {{&weight_,
+                                       &weight_is_loaded_,
+                                       "weight",
+                                       {weight_.size(0), weight_.size(1)},
+                                       options_.dtype(torch::kInt8)},
+                                      {&weight_scale_,
+                                       &weight_scale_is_loaded_,
+                                       "weight_scale",
+                                       {weight_.size(0)},
+                                       options_.dtype(torch::kFloat32)},
+                                      {&weight_offset_,
+                                       &weight_offset_is_loaded_,
+                                       "weight_offset",
+                                       {weight_.size(0)},
+                                       options_.dtype(torch::kFloat32)}});
+    weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
+    weight::load_weight(
+        state_dict, "weight_scale", weight_scale_, weight_scale_is_loaded_);
+    weight::load_weight(
+        state_dict, "weight_offset", weight_offset_, weight_offset_is_loaded_);
   } else {
     if (state_dict.has("weight")) {
       weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);

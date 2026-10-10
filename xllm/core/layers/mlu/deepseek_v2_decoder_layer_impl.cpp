@@ -142,6 +142,7 @@ void DeepseekV2DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
 }
 
 void DeepseekV2DecoderLayerImpl::verify_loaded_weights() const {
+  attention_->verify_loaded_weights();
   if (sparse_moe_) {
     sparse_moe_->verify_loaded_weights();
   }

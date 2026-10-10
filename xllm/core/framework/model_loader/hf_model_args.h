@@ -22,6 +22,7 @@ limitations under the License.
 namespace xllm {
 
 class ModelArgs;
+class QuantArgs;
 class JsonReader;
 
 // Normalize speculators-format Eagle3 draft configs for the qwen3_eagle3
@@ -30,8 +31,22 @@ void normalize_speculators_config(nlohmann::json* config);
 
 void normalize_config_torch_dtype(JsonReader& reader);
 
+bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args);
+
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,
                         ModelArgs* args);
+
+bool load_hf_audio_preprocessor_args(
+    const std::filesystem::path& model_weights_path,
+    ModelArgs& args);
+
+bool load_hf_image_preprocessor_args(
+    const std::filesystem::path& model_weights_path,
+    ModelArgs& args);
+
+bool load_hf_video_preprocessor_args(
+    const std::filesystem::path& model_weights_path,
+    ModelArgs& args);
 
 }  // namespace xllm

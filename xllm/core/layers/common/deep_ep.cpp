@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <utility>
+
 #include "framework/parallel_state/process_group.h"
 #include "kernels/ops_api.h"
 
@@ -81,16 +83,16 @@ DeepEPImpl::DeepEPImpl(int64_t dispatch_token_size,
                        int64_t combine_token_size,
                        int64_t max_num_tokens_per_rank,
                        int64_t num_global_experts,
-                       const ParallelArgs& parallel_args,
-                       const torch::TensorOptions& options)
-    : parallel_args_(parallel_args), options_(options) {
+                       ParallelArgs parallel_args,
+                       torch::TensorOptions options)
+    : parallel_args_(std::move(parallel_args)), options_(std::move(options)) {
   // make sure the size of moe_ep_group is equal nranks
-  CHECK(parallel_args.ep_size() == parallel_args.world_size_)
+  CHECK(parallel_args_.ep_size() == parallel_args_.world_size_)
       << "DeepEp only support the condition of ep_size == world_size";
 
-  ProcessGroup* moe_ep_group = parallel_args.moe_ep_group_;
-  int32_t rank = parallel_args.rank_;
-  int32_t nranks = parallel_args.world_size_;
+  ProcessGroup* moe_ep_group = parallel_args_.moe_ep_group_;
+  int32_t rank = parallel_args_.rank_;
+  int32_t nranks = parallel_args_.world_size_;
 
   // Step 1: Call moe_all2all_create to obtain the deep ep handle and buffer
   // tensors

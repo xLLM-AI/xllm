@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <string>
+
 namespace xllm {
 namespace layer {
 
@@ -23,6 +25,7 @@ struct FusedMoEArgs {
   bool enable_result_reduction = true;
   bool skip_gate_load = false;
   bool use_hash = false;
+  std::string module_prefix;
 };
 
 }  // namespace layer

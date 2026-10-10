@@ -105,7 +105,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     q_a_proj_ = register_module(
         "q_a_proj",
         ReplicatedLinear(
-            hidden_size, q_lora_rank_, false, QuantArgs(), options));
+            hidden_size, q_lora_rank_, false, quant_args, options));
     q_a_layernorm_ =
         register_module("q_a_layernorm", RMSNorm(q_lora_rank_, eps_, options));
     q_b_proj_ = register_module(
@@ -136,7 +136,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
                       ReplicatedLinear(hidden_size,
                                        kv_lora_rank_ + qk_rope_head_dim_,
                                        false,
-                                       QuantArgs(),
+                                       quant_args,
                                        options));
   kv_a_layernorm_ =
       register_module("kv_a_layernorm", RMSNorm(kv_lora_rank_, eps_, options));
@@ -637,6 +637,10 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
 }
 
 void DeepseekV2AttentionImpl::load_state_dict(const StateDict& state_dict) {
+  if (state_dict.size() == 0) {
+    return;
+  }
+  weight_prefix_ = state_dict.prefix();
   // load q proj weights
   if (q_proj_) {
     q_proj_->load_state_dict(state_dict.get_dict_with_prefix("q_proj."));
@@ -674,6 +678,35 @@ void DeepseekV2AttentionImpl::load_state_dict(const StateDict& state_dict) {
     }
     w_vc_ = w_vc_.transpose(1, 2);
     has_trans_ = true;
+  }
+}
+
+void DeepseekV2AttentionImpl::verify_loaded_weights() const {
+  if (q_proj_) {
+    CHECK(q_proj_->is_weight_loaded()) << weight_prefix_ << "q_proj";
+  } else {
+    CHECK(q_a_proj_->is_weight_loaded()) << weight_prefix_ << "q_a_proj";
+    CHECK(q_b_proj_->is_weight_loaded()) << weight_prefix_ << "q_b_proj";
+    q_a_layernorm_->verify_loaded_weights(weight_prefix_ + "q_a_layernorm.");
+  }
+  CHECK(kv_a_proj_with_mqa_->is_weight_loaded())
+      << weight_prefix_ << "kv_a_proj_with_mqa";
+  CHECK(kv_b_proj_->is_weight_loaded()) << weight_prefix_ << "kv_b_proj";
+  CHECK(o_proj_->is_weight_loaded()) << weight_prefix_ << "o_proj";
+  kv_a_layernorm_->verify_loaded_weights(weight_prefix_ + "kv_a_layernorm.");
+  if (use_fused_mla_qkv_ && q_b_proj_) {
+    CHECK_EQ(q_b_proj_->weight().scalar_type(), torch::kInt8)
+        << weight_prefix_ << "q_b_proj: fused MLA requires SmoothQuant INT8";
+    CHECK(q_b_proj_->per_channel_scale().defined()) << weight_prefix_;
+    CHECK(q_b_proj_->smooth().has_value()) << weight_prefix_;
+  }
+  if (has_indexer_) {
+    if (use_kpool_indexer_) {
+      glm5_next_kpool_indexer_->verify_loaded_weights(weight_prefix_ +
+                                                      "indexer.");
+    } else {
+      indexer_->verify_loaded_weights(weight_prefix_ + "indexer.");
+    }
   }
 }
 

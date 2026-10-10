@@ -23,13 +23,14 @@ namespace {
 QuantArgs ct_args() {
   QuantArgs args;
   args.quant_method() = "compressed-tensors";
+  args.bits() = 8;
   args.is_compressed_tensors_w8a8_dynamic() = true;
   args.ignored_modules() = {"re:.*gate$"};
   return args;
 }
 
 TEST(CompressedTensorsTest, ResolvesQuantizationIndependentlyOfShardOrder) {
-  const auto args = ct_args();
+  auto args = ct_args();
   const std::vector<std::string> prefixes = {"q.", "k.", "v."};
   const std::vector<StateDict> shards = {
       StateDict({{"q.weight", torch::ones({4, 8}, torch::kInt8)}}),
@@ -48,7 +49,7 @@ TEST(CompressedTensorsTest, ResolvesQuantizationIndependentlyOfShardOrder) {
 }
 
 TEST(CompressedTensorsTest, KeepsIgnoredModulesFloatingPoint) {
-  const auto args = ct_args();
+  auto args = ct_args();
   const StateDict shard({{"weight", torch::ones({4, 8})}}, "model.mlp.gate.");
   std::optional<std::string> resolved = "w8a8_dynamic";
   resolve_weight_quant_method_for_linear_load(args, shard, nullptr, resolved);
@@ -66,7 +67,7 @@ TEST(CompressedTensorsTest, PreservesExplicitQuantDescription) {
 }
 
 TEST(CompressedTensorsDeathTest, RejectsMixedFusionAndInvalidWeights) {
-  const auto args = ct_args();
+  auto args = ct_args();
   const std::vector<std::string> prefixes = {"gate.", "up."};
   std::optional<std::string> resolved;
   const StateDict mixed({{"up.weight", torch::ones({4, 8}, torch::kInt8)}},

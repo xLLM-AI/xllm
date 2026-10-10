@@ -79,9 +79,6 @@ class Glm5NextKDAImpl final : public torch::nn::Module {
  private:
   torch::Tensor get_linear_state_indices(const ModelInputParams& input_params,
                                          const torch::Device& device) const;
-  int64_t get_checkpoint_stride(const KVCache& kv_cache) const;
-  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> split_mixed_qkv(
-      const torch::Tensor& mixed_qkv) const;
 
   int64_t num_heads_ = 0;
   int64_t local_num_heads_ = 0;
@@ -108,8 +105,6 @@ class Glm5NextKDAImpl final : public torch::nn::Module {
   RmsNormGated o_norm_{nullptr};
   kernel::mlu::ChunkKDA chunk_kda_{nullptr};
 
-  bool f_a_is_loaded_ = false;
-  bool g_a_is_loaded_ = false;
   bool o_norm_is_loaded_ = false;
 
   DEFINE_WEIGHT(dt_bias);

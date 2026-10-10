@@ -165,6 +165,45 @@ TEST(HFModelLoaderTest, Qwen35MoeBackendAwareModelTypeSelection) {
 }
 
 #if defined(USE_MLU)
+TEST(HFModelLoaderTest, Glm5NextRootArgsLoadNativeMluFields) {
+  ModelArgsLoader loader = ModelRegistry::get_model_args_loader("glm5_next");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "glm5_next",
+      "text_config": {
+        "num_hidden_layers": 4,
+        "layer_types": [
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "deepseek_sparse_attention"
+        ],
+        "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
+        "index_kpool": 4,
+        "index_kpool_compress": true,
+        "index_kpool_always_select_tail": true
+      }
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_EQ(args.index_kpool(), 4);
+  EXPECT_TRUE(args.index_kpool_compress());
+  EXPECT_TRUE(args.index_kpool_always_select_tail());
+  EXPECT_EQ(args.mlp_layer_types(),
+            (std::vector<std::string>{"dense", "dense", "dense", "sparse"}));
+}
+
+TEST(HFModelLoaderTest, Glm5NextRootTypeHasNativeMluRegistration) {
+  EXPECT_EQ(ModelRegistry::get_model_backend("glm5_next"), "llm");
+  CausalLMFactory factory = ModelRegistry::get_causallm_factory("glm5_next");
+  EXPECT_TRUE(static_cast<bool>(factory));
+}
+
 TEST(HFModelLoaderTest, Qwen35MoeRootTypeHasCausalModelFactory) {
   CausalLMFactory factory = ModelRegistry::get_causallm_factory("qwen3_5_moe");
   EXPECT_TRUE(static_cast<bool>(factory));
@@ -862,7 +901,7 @@ TEST(HFModelLoaderTest, LoadCompressedTensorsWithoutSmooth) {
   EXPECT_FALSE(load_quant_cfg(reader, args));
 }
 
-TEST(HFModelLoaderTest, RejectCompressedTensorsPreservedSmooth) {
+TEST(HFModelLoaderTest, LoadCompressedTensorsPreservedSmooth) {
   const auto base = nlohmann::json::parse(R"json({
     "quant_method": "compressed-tensors",
     "config_groups": {"group_0": {
@@ -878,7 +917,11 @@ TEST(HFModelLoaderTest, RejectCompressedTensorsPreservedSmooth) {
       JsonReader reader;
       ASSERT_TRUE(reader.parse_text(nlohmann::json({{key, config}}).dump()));
       QuantArgs args;
-      EXPECT_FALSE(load_quant_cfg(reader, args));
+      EXPECT_EQ(load_quant_cfg(reader, args), target == "weights");
+      if (target == "weights") {
+        EXPECT_TRUE(args.for_module("model.layers.0.self_attn.o_proj")
+                        .preserve_smooth());
+      }
     }
   }
 }
@@ -917,11 +960,10 @@ TEST(HFModelLoaderTest, RejectUnsupportedCompressedTensorsScheme) {
       {{"transform_config", {{"rotation", true}}}},
       {{"config_groups", nullptr}},
       {{"config_groups", {{"group_0", {{"weights", {{"symmetric", false}}}}}}}},
-      {{"config_groups", {{"group_0", {{"targets", {"Conv2d"}}}}}}},
       {{"config_groups",
         {{"group_0", {{"input_activations", {{"strategy", "tensor"}}}}}}}},
       {{"config_groups",
-        {{"group_1", base.at("config_groups").at("group_0")}}}}};
+        {{"group_0", {{"targets", nlohmann::json::array()}}}}}}};
   for (const auto& patch : overrides) {
     auto config = base;
     config.merge_patch(patch);
@@ -1052,6 +1094,206 @@ TEST(HFModelLoaderTest, NumAuxLayersFallsBackToThreeWhenListOmitted) {
 
   args.layers_to_capture({1, 2, 3, 4});
   EXPECT_EQ(AuxHiddenCapture::num_aux_layers(args), 4);
+}
+
+namespace {
+nlohmann::json mixed_quant_config() {
+  return nlohmann::json::parse(R"json(
+    {
+      "quantization_config": {
+        "quant_method": "compressed-tensors",
+        "format": "mixed-precision",
+        "ignore": ["re:.*mlp\\.gate$", "re:.*norm$"],
+        "config_groups": {
+          "dense_w8a8": {
+            "format": "int-quantized",
+            "targets": ["re:.*self_attn\\.(q_b_proj|o_proj)$",
+                        "re:.*mlp\\.shared_experts\\..*proj$"],
+            "weights": {
+              "type": "int", "num_bits": 8, "dynamic": false,
+              "strategy": "channel", "symmetric": true,
+              "preserve_smooth": true
+            },
+            "input_activations": {
+              "type": "int", "num_bits": 8, "dynamic": true,
+              "strategy": "token", "symmetric": true,
+              "preserve_smooth": false
+            }
+          },
+          "experts_w4a8": {
+            "format": "int4-le-pack-quantized",
+            "targets": ["re:.*layers\\.[0-9]+\\.mlp\\.experts\\.[0-9]+\\.(gate_proj|up_proj|down_proj)$"],
+            "weights": {
+              "type": "int", "num_bits": 4, "dynamic": false,
+              "strategy": "group", "group_size": 128, "symmetric": true,
+              "preserve_smooth": true
+            },
+            "input_activations": {
+              "type": "int", "num_bits": 8, "dynamic": true,
+              "strategy": "token", "symmetric": true,
+              "preserve_smooth": false
+            }
+          }
+        }
+      }
+    }
+  )json");
+}
+}  // namespace
+
+TEST(HFModelLoaderTest, LoadCompressedTensorsMixedPrecision) {
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(mixed_quant_config().dump()));
+
+  QuantArgs args;
+  ASSERT_TRUE(load_quant_cfg(reader, args));
+  EXPECT_EQ(args.quant_method(), "compressed-tensors");
+  EXPECT_EQ(args.compressed_groups().size(), 2);
+  EXPECT_TRUE(args.is_compressed_tensors_w8a8_dynamic());
+  EXPECT_EQ(args.bits(), 8);
+  const auto expert_args =
+      args.for_module("model.layers.3.mlp.experts.7.gate_proj");
+  EXPECT_EQ(expert_args.bits(), 4);
+  EXPECT_EQ(expert_args.moe_weight_bits(), 4);
+  EXPECT_EQ(expert_args.group_size(), 128);
+  EXPECT_TRUE(args.activation_dynamic());
+  EXPECT_TRUE(args.should_ignore_module("model.layers.0.mlp.gate"));
+  EXPECT_EQ(args.for_module("model.layers.3.self_attn.o_proj").bits(), 8);
+  const auto shared_args =
+      args.for_module("model.layers.3.mlp.shared_experts.up_proj");
+  EXPECT_EQ(shared_args.bits(), 8);
+  EXPECT_FALSE(shared_args.quant_method().empty());
+  EXPECT_TRUE(
+      args.for_module("model.layers.3.mlp.gate").quant_method().empty());
+  EXPECT_TRUE(args.for_module("model.layers.3.self_attn.kv_b_proj")
+                  .quant_method()
+                  .empty());
+  EXPECT_TRUE(
+      args.for_module("model.layers.3.self_attn.o_proj").preserve_smooth());
+  EXPECT_FALSE(
+      args.for_module("model.layers.3.self_attn.kv_b_proj").preserve_smooth());
+  EXPECT_FALSE(args.for_module("model.layers.3.mlp.gate").preserve_smooth());
+}
+
+TEST(HFModelLoaderTest, ValidateMixedPrecisionModuleSelection) {
+  const std::vector<std::string> targets = {
+      R"(re:.*layers\.[0-9]+\.mlp\.experts\.[0-9]+\.(gate_proj|up_proj|down_proj)$)",
+      R"(re:.*layers\.(3|7)\.mlp\.experts\.0\.(up_proj|gate_proj)$)",
+      "model.layers.3.mlp.experts.0.gate_proj"};
+  for (const auto& target : targets) {
+    SCOPED_TRACE(target);
+    auto config = mixed_quant_config();
+    config["quantization_config"]["config_groups"]["experts_w4a8"]["targets"] =
+        {target};
+    JsonReader reader;
+    ASSERT_TRUE(reader.parse_text(config.dump()));
+    QuantArgs args;
+    ASSERT_TRUE(load_quant_cfg(reader, args));
+    EXPECT_EQ(args.for_module("model.layers.3.mlp.experts.0.gate_proj").bits(),
+              4);
+    EXPECT_EQ(args.for_module("model.layers.46.mlp.experts.0.gate_proj")
+                  .quant_method()
+                  .empty(),
+              target != targets.front());
+  }
+}
+
+TEST(HFModelLoaderTest, ResolveGroupsIndependentlyOfNamesAndSmooth) {
+  for (const std::string format : {"mixed-precision", "int-quantized"}) {
+    for (bool dense_smooth : {false, true}) {
+      for (bool expert_smooth : {false, true}) {
+        auto config = mixed_quant_config();
+        auto& quant = config["quantization_config"];
+        quant["format"] = format;
+        auto& groups = quant["config_groups"];
+        groups["attention"] = groups["dense_w8a8"];
+        groups["routed"] = groups["experts_w4a8"];
+        groups.erase("dense_w8a8");
+        groups.erase("experts_w4a8");
+        groups["attention"]["weights"]["preserve_smooth"] = dense_smooth;
+        groups["routed"]["weights"]["preserve_smooth"] = expert_smooth;
+        JsonReader reader;
+        ASSERT_TRUE(reader.parse_text(config.dump()));
+        QuantArgs args;
+        ASSERT_TRUE(load_quant_cfg(reader, args));
+        const auto dense = args.for_module("model.layers.3.self_attn.o_proj");
+        const auto expert =
+            args.for_module("model.layers.3.mlp.experts.0.up_proj");
+        EXPECT_EQ(dense.bits(), 8);
+        EXPECT_EQ(dense.preserve_smooth(), dense_smooth);
+        EXPECT_EQ(expert.bits(), 4);
+        EXPECT_EQ(expert.preserve_smooth(), expert_smooth);
+      }
+    }
+  }
+}
+
+TEST(HFModelLoaderTest, SingleGroupDefaultsWithoutSmooth) {
+  auto config = mixed_quant_config();
+  auto& groups = config["quantization_config"]["config_groups"];
+  groups.erase("experts_w4a8");
+  groups["dense_w8a8"]["weights"].erase("preserve_smooth");
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(config.dump()));
+  QuantArgs args;
+  ASSERT_TRUE(load_quant_cfg(reader, args));
+  const auto local = args.for_module("model.layers.3.self_attn.o_proj");
+  EXPECT_EQ(local.bits(), 8);
+  EXPECT_FALSE(local.preserve_smooth());
+  EXPECT_TRUE(args.for_module("model.layers.3.mlp.experts.0.up_proj")
+                  .quant_method()
+                  .empty());
+}
+
+TEST(HFModelLoaderTest, SameBitwidthHasLayerSpecificSmooth) {
+  auto config = mixed_quant_config();
+  auto& groups = config["quantization_config"]["config_groups"];
+  groups.erase("experts_w4a8");
+  groups["layer_zero"] = groups["dense_w8a8"];
+  groups["layer_zero"]["targets"] = {"model.layers.0.self_attn.o_proj"};
+  groups["layer_zero"]["weights"]["preserve_smooth"] = false;
+  groups["dense_w8a8"]["targets"] = {"model.layers.1.self_attn.o_proj"};
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(config.dump()));
+  QuantArgs args;
+  ASSERT_TRUE(load_quant_cfg(reader, args));
+  EXPECT_FALSE(
+      args.for_module("model.layers.0.self_attn.o_proj").preserve_smooth());
+  EXPECT_TRUE(
+      args.for_module("model.layers.1.self_attn.o_proj").preserve_smooth());
+}
+
+TEST(HFModelLoaderDeathTest, ConflictingGroupsFailUnlessIgnored) {
+  auto config = mixed_quant_config();
+  auto& groups = config["quantization_config"]["config_groups"];
+  groups["duplicate"] = groups["dense_w8a8"];
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(config.dump()));
+  QuantArgs args;
+  ASSERT_TRUE(load_quant_cfg(reader, args));
+  EXPECT_TRUE(
+      args.for_module("model.layers.3.self_attn.o_proj").preserve_smooth());
+  groups["duplicate"]["weights"]["preserve_smooth"] = false;
+  ASSERT_TRUE(reader.parse_text(config.dump()));
+  ASSERT_TRUE(load_quant_cfg(reader, args));
+  EXPECT_DEATH(args.for_module("model.layers.3.self_attn.o_proj"),
+               "Conflicting");
+  args.ignored_modules() = {"model.layers.3.self_attn.o_proj"};
+  EXPECT_TRUE(args.for_module("model.layers.3.self_attn.o_proj")
+                  .quant_method()
+                  .empty());
+}
+
+TEST(HFModelLoaderTest, RejectMixedPrecisionMalformedRegex) {
+  for (const std::string group : {"experts_w4a8", "dense_w8a8"}) {
+    auto config = mixed_quant_config();
+    config["quantization_config"]["config_groups"][group]["targets"] = {
+        "re:*("};
+    JsonReader reader;
+    ASSERT_TRUE(reader.parse_text(config.dump()));
+    QuantArgs args;
+    EXPECT_FALSE(load_quant_cfg(reader, args));
+  }
 }
 
 }  // namespace xllm

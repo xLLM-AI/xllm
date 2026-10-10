@@ -15,27 +15,12 @@ limitations under the License.
 #pragma once
 
 #include "models/model_registry.h"
-// Only the config-args loader (REGISTER_MODEL_ARGS) is needed for the
-// --model_impl=python path; deliberately do NOT pull deepseek_v32.h (which,
-// on NPU, transitively requires the NPU-only DeepseekV2DecoderLayer).
 
 namespace xllm {
 
-// glm5_next is served via --model_impl=python (PyCausalLM + the pure-torch
-// xllm.python.models.glm5_next.Glm5NextForCausalLM, or Glm5NextVLModel
-// for
-// --backend=vlm). No C++ model class is needed; this header only registers the
-// config.json -> ModelArgs loader so PyCausalLM::build_config_dict forwards
-// the right fields to the python model.
-// KDA (linear_attn_config: gate_lower_bound/safe_gate/full_attn_layers) and mHC
-// (hc_mult/hc_eps/hc_sinkhorn_iters) fields are intentionally NOT plumbed here:
-// the python Glm5NextConfig.from_dict defaults match the real 300B config, so
-// the python side resolves them correctly without C++ plumbing.
-// VLM note: the multimodal token ids and vision_config.* fields ARE plumbed
-// (see the VLM block below) so the C++ multimodal processor
-// (GLM4VPromptProcessor, registered in vlm/glm5_next_vlm.h) resolves GLM
-// image token ids / merge size, and the Python GlmOcr ViT (glm5_next_vl.py)
-// receives the real vision dims instead of its (different) defaults.
+// Shared config loader for the Python implementation and the native MLU text
+// model. Text-side fields in GLM-5.3-Flash checkpoints are nested under
+// text_config.
 
 namespace glm5_next_args {
 
@@ -71,6 +56,8 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
     return std::vector<int32_t>{154879};
   });
   LOAD_ARG_OR(bos_token_id, "text_config.bos_token_id", 0);
+  LOAD_ARG_OR(pad_token_id, "text_config.pad_token_id", 151329);
+  LOAD_ARG_OR(tie_word_embeddings, "text_config.tie_word_embeddings", false);
   LOAD_ARG_OR(rope_theta, "text_config.rope_parameters.rope_theta", 10000.0f);
 
   // MoE parameters
@@ -84,6 +71,14 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
   LOAD_ARG_OR(norm_topk_prob, "text_config.norm_topk_prob", true);
   LOAD_ARG_OR(n_group, "text_config.n_group", 1);
   LOAD_ARG_OR(topk_group, "text_config.topk_group", 1);
+  LOAD_ARG_OR(scoring_func, "text_config.scoring_func", "sigmoid");
+  LOAD_ARG_OR(topk_method, "text_config.topk_method", "noaux_tc");
+  LOAD_ARG_OR(swiglu_limit, "text_config.swiglu_limit", 10.0f);
+
+  // Multi-stream residual connection parameters.
+  LOAD_ARG_OR(hc_mult, "text_config.hc_mult", 4);
+  LOAD_ARG_OR(hc_sinkhorn_iters, "text_config.hc_sinkhorn_iters", 20);
+  LOAD_ARG_OR(hc_eps, "text_config.hc_eps", 1e-6f);
 
   // MLA (NoPE: qk_rope=0) + DSA indexer parameters
   LOAD_ARG_OR(qk_nope_head_dim, "text_config.qk_nope_head_dim", 256);
@@ -132,6 +127,9 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
   LOAD_ARG_OR(linear_conv_kernel_dim,
               "text_config.linear_attn_config.short_conv_kernel_size",
               args->linear_conv_kernel_dim());
+  LOAD_ARG_OR(linear_lower_bound,
+              "text_config.linear_attn_config.gate_lower_bound",
+              -5.0f);
   // recurrent_state must be fp32 for numerical stability.
   LOAD_ARG_OR(mamba_ssm_dtype, "text_config.mamba_ssm_dtype", "float32");
   // layer_types mirrors the python _resolve_schedules derivation so C++ and

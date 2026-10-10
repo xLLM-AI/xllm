@@ -804,6 +804,18 @@ std::tuple<torch::Tensor, torch::Tensor> Glm5NextKPoolIndexerImpl::forward(
           std::move(selection.context_lens)};
 }
 
+void Glm5NextKPoolIndexerImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  CHECK(wq_b_->is_weight_loaded()) << prefix << "wq_b";
+  CHECK(wk_->is_weight_loaded()) << prefix << "wk";
+  CHECK(weights_proj_->is_weight_loaded()) << prefix << "weights_proj";
+  k_norm_->verify_loaded_weights(prefix + "k_norm.");
+  CHECK(index_kpool_compress_gate_is_loaded_)
+      << prefix << "index_kpool_compress_gate";
+  CHECK(index_kpool_compress_ape_is_loaded_)
+      << prefix << "index_kpool_compress_ape";
+}
+
 void Glm5NextKPoolIndexerImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {
     return;

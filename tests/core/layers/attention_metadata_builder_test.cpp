@@ -46,6 +46,39 @@ ModelInputParams make_params() {
   return params;
 }
 
+TEST(AttentionMetadataBuilderTest, LinearPrefillSchedulesRespectChunkSize) {
+  for (const int32_t block_size : {16, 64}) {
+    for (const bool chunked : {false, true}) {
+      AttentionMetadata metadata;
+      metadata.is_prefill = !chunked;
+      metadata.is_chunked_prefill = chunked;
+      metadata.q_cu_seq_lens =
+          torch::tensor({0, block_size, 2 * block_size + 1}, torch::kInt32);
+      AttentionMetadataBuilder::build_linear_prefill(metadata, block_size);
+      EXPECT_EQ(metadata.tot, 3);
+      EXPECT_TRUE(torch::equal(metadata.batch.narrow(0, 0, 3),
+                               torch::tensor({0, 1, 1}, torch::kInt32)));
+      EXPECT_TRUE(torch::equal(metadata.token_block_offset.narrow(0, 0, 3),
+                               torch::tensor({0, 0, 1}, torch::kInt32)));
+      EXPECT_TRUE(
+          torch::equal(metadata.chunk_indices,
+                       torch::tensor({{0, 0}, {1, 0}, {1, 1}}, torch::kInt32)));
+      EXPECT_TRUE(metadata.batch.slice(0, 3).eq(-1).all().item<bool>());
+      EXPECT_TRUE(
+          metadata.token_block_offset.slice(0, 3).eq(-1).all().item<bool>());
+    }
+  }
+}
+
+TEST(AttentionMetadataBuilderTest, LinearDecodeDoesNotRequirePrefillLengths) {
+  AttentionMetadata metadata;
+  metadata.is_prefill = false;
+  metadata.is_chunked_prefill = false;
+  AttentionMetadataBuilder::build_linear_prefill(metadata, /*block_size=*/64);
+  EXPECT_FALSE(metadata.batch.defined());
+  EXPECT_FALSE(metadata.chunk_indices.defined());
+}
+
 TEST(AttentionMetadataBuilderTest, MaterializesCanonicalInitialStateMask) {
   ModelInputParams params = make_params();
 

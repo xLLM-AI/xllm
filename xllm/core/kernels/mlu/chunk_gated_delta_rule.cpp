@@ -138,27 +138,6 @@ torch::Tensor ChunkGatedDeltaRuleImpl::prepare_chunk_offsets(
   return combined.cumsum(-1).to(torch::kInt32);
 }
 
-torch::Tensor ChunkGatedDeltaRuleImpl::prepare_chunk_indices(
-    const torch::Tensor& cu_seqlens,
-    int64_t chunk_size) const {
-  torch::Tensor lengths = prepare_lens(cu_seqlens);
-  torch::Tensor num_chunks = (lengths + chunk_size - 1) / chunk_size;
-  num_chunks = num_chunks.to(torch::kLong);
-  torch::Tensor cumsum = torch::cumsum(num_chunks, 0);
-  int64_t total = cumsum[-1].item<int64_t>();
-  torch::Tensor arange_total = torch::arange(total, cu_seqlens.options());
-
-  torch::Tensor zeros = torch::zeros({1}, cumsum.options());
-  torch::Tensor prefix = torch::cat({zeros, cumsum.slice(0, 0, -1)});
-  torch::Tensor repeats_prefix = torch::repeat_interleave(prefix, num_chunks);
-
-  torch::Tensor indices = arange_total - repeats_prefix;
-  torch::Tensor mask = indices == 0;
-  torch::Tensor col0 = mask.cumsum(0) - 1;
-  auto out = torch::stack({col0, indices}, 1).to(cu_seqlens);
-  return out.to(torch::kInt32);
-}
-
 // ============================================================================
 // Core Computation Methods
 // ============================================================================

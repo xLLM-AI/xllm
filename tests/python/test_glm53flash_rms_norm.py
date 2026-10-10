@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dispatch and semantic tests for GLM-5.3-Flash RMS normalization."""
+"""Shared and GLM-specific RMS normalization semantics."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import pytest
 import torch
 
 import xllm.python.models.glm5_next as glm5_next
+from xllm.python.layers.layernorm import RMSNorm
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -31,8 +32,8 @@ def test_rms_norm_cpu_stub_matches_reference(
     shape: tuple[int, ...],
     eps: float,
 ) -> None:
-    layer = glm5_next.Glm5NextRMSNorm(
-        hidden_size=shape[-1],
+    layer = RMSNorm(
+        dim=shape[-1],
         eps=eps,
         dtype=dtype,
         device=torch.device("cpu"),
@@ -49,38 +50,6 @@ def test_rms_norm_cpu_stub_matches_reference(
     ).to(dtype)
 
     torch.testing.assert_close(output, expected)
-
-
-def test_rms_norm_uses_vendor_rms_norm_kernel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layer = glm5_next.Glm5NextRMSNorm(
-        hidden_size=8,
-        eps=1e-5,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
-    )
-    value = torch.randn(1, 6, 8)
-    expected = torch.empty_like(value)
-    calls: list[tuple[torch.Tensor, torch.Tensor, float]] = []
-
-    def _rms_norm(
-        input_value: torch.Tensor,
-        weight: torch.Tensor,
-        eps: float,
-    ) -> torch.Tensor:
-        calls.append((input_value, weight, eps))
-        return expected
-
-    monkeypatch.setattr(glm5_next.kernels, "rms_norm", _rms_norm, raising=False)
-
-    output = layer(value)
-
-    assert output is expected
-    assert len(calls) == 1
-    assert calls[0][0] is value
-    assert calls[0][1] is layer.weight
-    assert calls[0][2] == layer.variance_epsilon
 
 
 def test_gated_rms_norm_uses_sigmoid_fused_kernel_once(

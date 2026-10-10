@@ -25,6 +25,8 @@ limitations under the License.
 #include "kernels/mlu/chunk_gated_delta_rule.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
+#include "layers/common/attention_metadata.h"
+#include "layers/common/attention_metadata_builder.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -92,70 +94,6 @@ class Qwen3_5GatedDeltaNetSpecVerifyOpsTest
 std::string spec_verify_width_name(
     const ::testing::TestParamInfo<int64_t>& info) {
   return "Width" + std::to_string(info.param);
-}
-
-// Build the (batch, token_block_offset, tot) triple used by the MLU
-// causal_conv1d_fn kernel. Mirrors the layout prepared by the Qwen3.5 model
-// (block_size = 8, padded with pad_slot_id = -1).
-struct ConvBatchMeta {
-  torch::Tensor batch;
-  torch::Tensor token_block_offset;
-  int32_t tot = 0;
-};
-
-ConvBatchMeta MakeConvBatchMeta(const torch::Tensor& q_cu_seq_lens,
-                                const torch::Device& device) {
-  constexpr int32_t block_size = 64;
-  constexpr int32_t pad_slot_id = -1;
-  constexpr int64_t default_max_num_programs = 1024;
-
-  auto seqlens = q_cu_seq_lens.diff();
-  auto nums = (seqlens + block_size - 1) / block_size;
-  nums = nums.to(torch::kLong);
-  int32_t tot = nums.sum().item<int32_t>();
-  torch::Tensor range_batch = torch::arange(nums.size(0), nums.options());
-  torch::Tensor mlist_tensor = torch::repeat_interleave(range_batch, nums);
-  int64_t mlist_len = mlist_tensor.size(0);
-  int64_t max_num_programs = std::max(default_max_num_programs, mlist_len) * 2;
-
-  auto opts = torch::dtype(torch::kInt32).device(device);
-  torch::Tensor batch_ptr = torch::full({max_num_programs}, pad_slot_id, opts);
-  torch::Tensor token_block_offset_ptr =
-      torch::full({max_num_programs}, pad_slot_id, opts);
-
-  std::vector<torch::Tensor> vec;
-  vec.reserve(nums.size(0));
-  for (int64_t i = 0; i < nums.size(0); ++i) {
-    vec.emplace_back(torch::arange(nums[i].item<int64_t>(), nums.options()));
-  }
-  torch::Tensor offsetlist_tensor = torch::cat(vec, -1).to(torch::kInt32);
-  batch_ptr.narrow(0, 0, mlist_len).copy_(mlist_tensor);
-  token_block_offset_ptr.narrow(0, 0, mlist_len).copy_(offsetlist_tensor);
-
-  return {batch_ptr, token_block_offset_ptr, tot};
-}
-
-// Build chunk_indices [num_chunks, 2] (int32) from cu_seqlens with
-// chunk_size=64, matching ChunkGatedDeltaRuleImpl::prepare_chunk_indices.
-torch::Tensor MakeChunkIndices(const torch::Tensor& cu_seqlens,
-                               int64_t chunk_size) {
-  auto lengths = cu_seqlens.narrow(0, 1, cu_seqlens.size(0) - 1) -
-                 cu_seqlens.narrow(0, 0, cu_seqlens.size(0) - 1);
-  torch::Tensor num_chunks = (lengths + chunk_size - 1) / chunk_size;
-  num_chunks = num_chunks.to(torch::kLong);
-  torch::Tensor cumsum = torch::cumsum(num_chunks, 0);
-  int64_t total = cumsum[-1].item<int64_t>();
-  torch::Tensor arange_total = torch::arange(total, cu_seqlens.options());
-  torch::Tensor zeros = torch::zeros({1}, cumsum.options());
-  torch::Tensor prefix =
-      torch::cat({zeros, cumsum.slice(/*dim=*/0, /*start=*/0, /*end=*/-1)});
-  torch::Tensor repeats_prefix = torch::repeat_interleave(prefix, num_chunks);
-  torch::Tensor indices = arange_total - repeats_prefix;
-  torch::Tensor mask = indices == 0;
-  torch::Tensor col0 = mask.cumsum(0) - 1;
-  return torch::stack({col0, indices}, /*dim=*/1)
-      .to(cu_seqlens)
-      .to(torch::kInt32);
 }
 
 torch::Tensor L2NormalizeLastDim(const torch::Tensor& x) {
@@ -564,7 +502,12 @@ TEST_F(Qwen3_5GatedDeltaNetOpsTest, CausalConv1dFnPrefill) {
   auto conv_states = Zeros({batch_size, channels, state_len}, torch::kBFloat16);
   auto q_cu_seq_lens =
       torch::arange(0, (batch_size + 1) * seq_len, seq_len, opts_int);
-  auto batch_meta = MakeConvBatchMeta(q_cu_seq_lens, device_);
+  AttentionMetadata batch_meta;
+  batch_meta.q_cu_seq_lens = q_cu_seq_lens;
+  batch_meta.is_prefill = true;
+  batch_meta.is_chunked_prefill = false;
+  AttentionMetadataBuilder::build_linear_prefill(
+      batch_meta, kernel::mlu::kCausalConv1dPrefillBlockSize);
 
   // cache_indices: per-batch conv-state slot; has_initial_states: false.
   auto cache_indices = torch::arange(0, batch_size, opts_int);
@@ -1472,7 +1415,8 @@ TEST_F(Qwen3_5GatedDeltaNetOpsTest, ChunkGatedDeltaRuleForward) {
   auto cu_seqlens =
       torch::arange(0, (batch_size + 1) * seq_len, seq_len, opts_int);
   constexpr int64_t chunk_size = 64;
-  auto chunk_indices = MakeChunkIndices(cu_seqlens, chunk_size);
+  auto chunk_indices =
+      AttentionMetadataBuilder::build_chunk_indices(cu_seqlens, chunk_size);
 
   auto chunk_gdr = ChunkGatedDeltaRule(num_k_heads, num_v_heads);
   chunk_gdr->to(device_);

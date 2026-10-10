@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -164,7 +163,7 @@ std::optional<std::string> resolve_moe_quant_method(
   std::optional<std::string> first_quant;
   for (const auto& local_prefix_group : kExpertPrefixGroups) {
     if (auto quant = quant_args.get_quant_method_from_prefixes(
-            state_dict, local_prefix_group);
+            state_dict.prefix(), local_prefix_group);
         quant.has_value()) {
       if (!first_quant.has_value()) {
         first_quant = quant;
@@ -176,22 +175,12 @@ std::optional<std::string> resolve_moe_quant_method(
     }
   }
   if (!first_quant.has_value()) {
-    std::string quantize_type = quant_args.quantize_type();
-    std::transform(
-        quantize_type.begin(),
-        quantize_type.end(),
-        quantize_type.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const auto quantize_type = to_lower_copy(quant_args.quantize_type());
     if (quantize_type == "w4a8_dynamic") {
       first_quant = quantize_type;
     }
   }
   return first_quant;
-}
-
-bool is_w8a8_dynamic_quant_method(
-    const std::optional<std::string>& quant_method) {
-  return quant_method.has_value() && quant_method.value() == "w8a8_dynamic";
 }
 
 bool is_w4a8_dynamic_quant_method(
@@ -201,7 +190,7 @@ bool is_w4a8_dynamic_quant_method(
 
 bool is_supported_dynamic_moe_quant_method(
     const std::optional<std::string>& quant_method) {
-  return is_w8a8_dynamic_quant_method(quant_method) ||
+  return is_w8a8_dynamic_quant(quant_method) ||
          is_w4a8_dynamic_quant_method(quant_method);
 }
 
@@ -772,7 +761,7 @@ void FusedMoEImpl::validate_resolved_quant_method() const {
   if (!resolved_moe_quant_method_.has_value()) {
     return;
   }
-  if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
     if (!is_gated_ || (hidden_act_ != "silu" && hidden_act_ != "swiglu")) {
       LOG(WARNING) << "W8A8_DYNAMIC FusedMoE currently uses dequant+swiglu "
                       "path, but got is_gated="
@@ -814,7 +803,7 @@ void FusedMoEImpl::ensure_quant_weight_layout() {
   };
 
   const auto fp32_options = options_.dtype(torch::kFloat32);
-  if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
     auto w2_scale_options = options_.dtype() == torch::kBFloat16
                                 ? options_.dtype(torch::kBFloat16)
                                 : options_.dtype(torch::kFloat32);
@@ -2062,7 +2051,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
 
   torch::Tensor gemm1_out;
   torch::Tensor gemm2_out;
-  if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
     CHECK(w13_scale_is_loaded_ && w13_scale_.defined())
         << "w13_scale is required for W8A8 fused MoE.";
     CHECK(w2_scale_is_loaded_ && w2_scale_.defined())
@@ -2383,7 +2372,7 @@ bool FusedMoEImpl::can_use_ep2_dispatch_combine(
     if (input_params.enable_graph && !dispatch_ffn_combine_prepared_) {
       return false;
     }
-    return is_w8a8_dynamic_quant_method(resolved_moe_quant_method_) &&
+    return is_w8a8_dynamic_quant(resolved_moe_quant_method_) &&
            xllm::kernel::has_dispatch_ffn_combine() && w13_is_loaded_ &&
            w2_is_loaded_ && w13_scale_is_loaded_ && w2_scale_is_loaded_ &&
            hidden_act_ == xllm::kernel::kActModeSilu && is_gated_;
@@ -2395,7 +2384,7 @@ bool FusedMoEImpl::can_use_ep2_dispatch_combine(
     if (input_params.enable_graph && !dispatch_gmm_combine_decode_prepared_) {
       return false;
     }
-    return is_w8a8_dynamic_quant_method(resolved_moe_quant_method_) &&
+    return is_w8a8_dynamic_quant(resolved_moe_quant_method_) &&
            xllm::kernel::has_dispatch_gmm_combine_decode() && w13_is_loaded_ &&
            w2_is_loaded_ && w13_scale_is_loaded_ && w2_scale_is_loaded_ &&
            hidden_act_ == xllm::kernel::kActModeSilu && is_gated_;
@@ -2414,7 +2403,7 @@ bool FusedMoEImpl::prepare_dispatch_ffn_combine_inputs() {
   if (fused_mc2_mode() != 1) {
     return false;
   }
-  if (!is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (!is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
     return false;
   }
   if (!xllm::kernel::has_dispatch_ffn_combine()) {
@@ -2462,7 +2451,7 @@ bool FusedMoEImpl::prepare_dispatch_gmm_combine_decode_inputs() {
   if (fused_mc2_mode() != 2) {
     return false;
   }
-  if (!is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (!is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
     return false;
   }
   if (!xllm::kernel::has_dispatch_gmm_combine_decode()) {
@@ -2704,7 +2693,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   torch::Tensor gemm1_out;
   torch::Tensor gemm2_out;
   const auto hidden_states_dtype = hidden_states.dtype().toScalarType();
-  if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
     CHECK(w13_scale_is_loaded_ && w13_scale_.defined())
         << "w13_scale is required for W8A8 EP2 dispatch/combine.";
     CHECK(w2_scale_is_loaded_ && w2_scale_.defined())
@@ -3103,7 +3092,7 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
                                              w2_);
   }
 
-  if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+  if (is_supported_dynamic_moe_quant_method(resolved_moe_quant_method_)) {
     prefixes = {"gate_proj.", "up_proj."};
     LOAD_MOE_FUSED_WEIGHT("weight_scale", w1_scale, w3_scale, w13_scale);
     if (!w13_scale_is_loaded_) {
@@ -3114,32 +3103,24 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
     if (!w2_scale_is_loaded_) {
       LOAD_MOE_WEIGHT("w2.", "weight_scale", w2_scale, -1);
     }
-    if (!w13_scale_is_loaded_) {
-      w13_scale_is_loaded_ = load_fused_up_scale_fallback(state_dict,
-                                                          rank,
-                                                          world_size,
-                                                          start_expert_id,
-                                                          num_experts_per_rank,
-                                                          w13_scale_);
-    }
-    if (!w2_scale_is_loaded_) {
-      w2_scale_is_loaded_ = load_fused_down_scale_fallback(
-          state_dict, start_expert_id, num_experts_per_rank, w2_scale_);
+    if (is_w8a8_dynamic_quant(resolved_moe_quant_method_)) {
+      if (!w13_scale_is_loaded_) {
+        w13_scale_is_loaded_ =
+            load_fused_up_scale_fallback(state_dict,
+                                         rank,
+                                         world_size,
+                                         start_expert_id,
+                                         num_experts_per_rank,
+                                         w13_scale_);
+      }
+      if (!w2_scale_is_loaded_) {
+        w2_scale_is_loaded_ = load_fused_down_scale_fallback(
+            state_dict, start_expert_id, num_experts_per_rank, w2_scale_);
+      }
     }
   }
 
   if (is_w4a8_dynamic_quant_method(resolved_moe_quant_method_)) {
-    prefixes = {"gate_proj.", "up_proj."};
-    LOAD_MOE_FUSED_WEIGHT("weight_scale", w1_scale, w3_scale, w13_scale);
-    if (!w13_scale_is_loaded_) {
-      prefixes = {"w1.", "w3."};
-      LOAD_MOE_FUSED_WEIGHT("weight_scale", w1_scale, w3_scale, w13_scale);
-    }
-    LOAD_MOE_WEIGHT("down_proj.", "weight_scale", w2_scale, -1);
-    if (!w2_scale_is_loaded_) {
-      LOAD_MOE_WEIGHT("w2.", "weight_scale", w2_scale, -1);
-    }
-
     if (quant_args_.group_size() > 0) {
       prefixes = {"gate_proj.", "up_proj."};
       LOAD_MOE_FUSED_WEIGHT("weight_scale_second",

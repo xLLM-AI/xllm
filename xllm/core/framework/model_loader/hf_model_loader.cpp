@@ -31,6 +31,7 @@ limitations under the License.
 #include <filesystem>
 #include <limits>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -46,7 +47,6 @@ limitations under the License.
 #include "core/framework/tokenizer/tiktoken_tokenizer.h"
 #include "core/framework/tokenizer/tokenizer_factory.h"
 #include "core/platform/device.h"
-#include "core/platform/platform.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/json_reader.h"
 #include "core/util/model_config_utils.h"
@@ -59,207 +59,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-
-bool is_compressed_tensors_fp8_scheme(const nlohmann::json& config) {
-  auto type_it = config.find("type");
-  auto num_bits_it = config.find("num_bits");
-  return type_it != config.end() && !type_it->is_null() &&
-         num_bits_it != config.end() && !num_bits_it->is_null() &&
-         boost::iequals(type_it->get<std::string>(), "float") &&
-         num_bits_it->get<int64_t>() == 8;
-}
-
-bool is_compressed_tensors_int8_scheme(const nlohmann::json& config,
-                                       bool expected_dynamic) {
-  auto type_it = config.find("type");
-  auto num_bits_it = config.find("num_bits");
-  auto dynamic_it = config.find("dynamic");
-  const bool dynamic = dynamic_it != config.end() && !dynamic_it->is_null()
-                           ? dynamic_it->get<bool>()
-                           : false;
-  return type_it != config.end() && !type_it->is_null() &&
-         num_bits_it != config.end() && !num_bits_it->is_null() &&
-         boost::iequals(type_it->get<std::string>(), "int") &&
-         num_bits_it->get<int64_t>() == 8 && dynamic == expected_dynamic;
-}
-
-const nlohmann::json* get_compressed_tensors_config(
-    const JsonReader& reader,
-    const std::string& config_key) {
-  const auto quant_method =
-      reader.value<std::string>(config_key + ".quant_method");
-  if (!quant_method.has_value() ||
-      !boost::iequals(*quant_method, "compressed-tensors")) {
-    return nullptr;
-  }
-
-  const nlohmann::json* quant_config = reader.resolve(config_key);
-  if (quant_config == nullptr || !quant_config->is_object()) {
-    LOG(ERROR) << config_key << " must be an object for "
-               << "compressed-tensors quantization.";
-    return nullptr;
-  }
-  return quant_config;
-}
-
-bool load_ct_w8a8_dynamic_config(const nlohmann::json& config,
-                                 const nlohmann::json& group,
-                                 QuantArgs& args) {
-  const auto& weights = group.at("weights");
-  const auto& activations = group.at("input_activations");
-  if (weights.value("preserve_smooth", false) ||
-      activations.value("preserve_smooth", false)) {
-    LOG(ERROR) << "Compressed-tensors INT8 does not support preserve_smooth";
-    return false;
-  }
-  // Older checkpoints omit these fields. Keep their existing symmetric,
-  // channel-weight / token-activation interpretation, but reject explicit
-  // schemes that cannot be represented by the shared W8A8 loading path.
-  if (config.value("format", "int-quantized") != "int-quantized" ||
-      config.at("config_groups").size() != 1 ||
-      !weights.value("symmetric", true) ||
-      !activations.value("symmetric", true) ||
-      weights.value("strategy", "channel") != "channel" ||
-      activations.value("strategy", "token") != "token" ||
-      group.value("targets", std::vector<std::string>{"Linear"}) !=
-          std::vector<std::string>{"Linear"} ||
-      (group.contains("output_activations") &&
-       !group.at("output_activations").is_null()) ||
-      (config.contains("kv_cache_scheme") &&
-       !config.at("kv_cache_scheme").is_null()) ||
-      (config.contains("transform_config") &&
-       !config.at("transform_config").is_null() &&
-       !config.at("transform_config").empty())) {
-    LOG(ERROR)
-        << "Compressed-tensors INT8 requires one symmetric channel/token "
-           "W8A8 Linear group without output, KV-cache or transform "
-           "quantization";
-    return false;
-  }
-  args.bits() = 8;
-  args.moe_weight_bits() = 8;
-  args.is_sym() = true;
-  args.activation_dynamic() = true;
-  args.is_compressed_tensors_w8a8_dynamic() = true;
-  return true;
-}
-
-bool load_ct_quant_config(const nlohmann::json& config, QuantArgs& quant_args) {
-  quant_args.quant_method() = "compressed-tensors";
-  quant_args.ignored_modules() =
-      config.value("ignore", std::vector<std::string>{});
-  auto config_groups_it = config.find("config_groups");
-  if (config_groups_it == config.end() || !config_groups_it->is_object()) {
-    LOG(ERROR) << "config_groups must be an object for "
-               << "compressed-tensors quantization.";
-    return false;
-  }
-
-  for (const auto& [group_name, group] : config_groups_it->items()) {
-    if (!group.is_object()) {
-      continue;
-    }
-
-    auto weights_it = group.find("weights");
-    auto input_activations_it = group.find("input_activations");
-    if (weights_it == group.end() || input_activations_it == group.end() ||
-        !weights_it->is_object() || !input_activations_it->is_object()) {
-      continue;
-    }
-
-    if (!is_compressed_tensors_fp8_scheme(*weights_it) ||
-        !is_compressed_tensors_fp8_scheme(*input_activations_it)) {
-      if (is_compressed_tensors_int8_scheme(*weights_it,
-                                            /*expected_dynamic=*/false) &&
-          is_compressed_tensors_int8_scheme(*input_activations_it,
-                                            /*expected_dynamic=*/true)) {
-        return load_ct_w8a8_dynamic_config(config, group, quant_args);
-      }
-      continue;
-    }
-
-    quant_args.quant_method() = kQuantMethodFp8;
-    quant_args.bits() = 8;
-    quant_args.moe_weight_bits() = 8;
-
-    auto dynamic_it = input_activations_it->find("dynamic");
-    if (dynamic_it != input_activations_it->end() && !dynamic_it->is_null()) {
-      quant_args.activation_dynamic() = dynamic_it->get<bool>();
-    }
-    if (quant_args.activation_dynamic() && !Platform::is_dcu()) {
-      LOG(ERROR) << "Compressed-tensors dynamic FP8 requires DCU.";
-      return false;
-    }
-    return true;
-  }
-
-  LOG(ERROR) << "Failed to find a supported FP8 or dynamic INT8 scheme in "
-                "compressed-tensors config_groups";
-  return false;
-}
-
-bool validate_smoothquant_mixed_w4a8(const JsonReader& reader,
-                                     QuantArgs& quant_args) {
-  const auto expert_weight_precision =
-      reader.value<std::string>("quantization_config.expert_weight_precision");
-  const int64_t experts_weight_bits =
-      reader.value_or<int64_t>("quantization_config.experts_weight_bits", 0);
-
-  const bool is_w4a8 = (expert_weight_precision.has_value() &&
-                        boost::iequals(*expert_weight_precision, "int4")) ||
-                       experts_weight_bits == 4;
-  if (!is_w4a8) {
-    return true;
-  }
-
-  quant_args.moe_weight_bits() = 4;
-
-  if (!quant_args.only_expert_per_group()) {
-    LOG(ERROR) << "DeepSeek mixed W4A8 requires "
-                  "quantization_config.only_expert_per_group=true.";
-    return false;
-  }
-  if (quant_args.quant_method() != "smoothquant") {
-    LOG(ERROR) << "DeepSeek mixed W4A8 only supports "
-                  "quant_method=smoothquant.";
-    return false;
-  }
-  if (quant_args.bits() != 8) {
-    LOG(ERROR) << "DeepSeek mixed W4A8 requires quantization_config.bits=8, "
-               << "but got bits=" << quant_args.bits();
-    return false;
-  }
-
-  const auto weight_precision =
-      reader.value<std::string>("quantization_config.weight_precision");
-  if (weight_precision.has_value() &&
-      !boost::iequals(*weight_precision, "int8")) {
-    LOG(ERROR) << "DeepSeek mixed W4A8 requires weight_precision=int8, but got "
-               << *weight_precision;
-    return false;
-  }
-
-  const auto activation_precision =
-      reader.value<std::string>("quantization_config.activation_precision");
-  if (activation_precision.has_value() &&
-      !boost::iequals(*activation_precision, "int8")) {
-    LOG(ERROR)
-        << "DeepSeek mixed W4A8 requires activation_precision=int8, but got "
-        << *activation_precision;
-    return false;
-  }
-
-  const auto expert_activation_precision = reader.value<std::string>(
-      "quantization_config.expert_activation_precision");
-  if (expert_activation_precision.has_value() &&
-      !boost::iequals(*expert_activation_precision, "int8")) {
-    LOG(ERROR) << "DeepSeek mixed W4A8 requires "
-                  "expert_activation_precision=int8, but got "
-               << *expert_activation_precision;
-    return false;
-  }
-  return true;
-}
 
 bool try_parse_layer_id_with_prefix(const std::string& tensor_name,
                                     const std::string& prefix,
@@ -414,65 +213,6 @@ void check_safetensors_cleanup(::Status status,
 }
 
 }  // namespace
-
-bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
-  if (!reader.contains("quantization_config") &&
-      !reader.contains("compression_config")) {
-    return true;
-  }
-
-  quant_args.only_expert_per_group() =
-      reader.value_or<bool>("quantization_config.only_expert_per_group", false);
-
-  if (auto v = reader.value<std::string>("quantization_config.quant_method")) {
-    quant_args.quant_method() = v.value();
-  }
-  // Checkpoint format parsing is independent of backend execution support.
-  const nlohmann::json* ct_config =
-      get_compressed_tensors_config(reader, "quantization_config");
-  if (ct_config == nullptr) {
-    ct_config = get_compressed_tensors_config(reader, "compression_config");
-  }
-  if (ct_config != nullptr) {
-    return load_ct_quant_config(*ct_config, quant_args);
-  }
-  if (auto v = reader.value<int64_t>("quantization_config.bits")) {
-    quant_args.bits() = v.value();
-    quant_args.moe_weight_bits() = v.value();
-  }
-  if (auto v = reader.value<int64_t>("quantization_config.group_size")) {
-    quant_args.group_size() = v.value();
-  }
-  if (auto v = reader.value<bool>("quantization_config.desc_act")) {
-    quant_args.desc_act() = v.value();
-  }
-  if (auto v = reader.value<bool>("quantization_config.sym")) {
-    quant_args.is_sym() = v.value();
-  }
-  if (auto v =
-          reader.value<std::string>("quantization_config.activation_scheme")) {
-    std::string activation_scheme = v.value();
-    if (boost::iequals(activation_scheme, "static")) {
-      quant_args.activation_dynamic() = false;
-    } else if (boost::iequals(activation_scheme, "dynamic")) {
-      quant_args.activation_dynamic() = true;
-    } else {
-      LOG(ERROR) << "quantization_config.activation_scheme only support "
-                    "dynamic and static.";
-      return false;
-    }
-  }
-  if (auto v = reader.value<std::string>("quantization_config.fmt")) {
-    // TODO(liangzhiwei20): check fp8 quantization format
-    quant_args.fmt() = v.value();
-  }
-  if (const auto* block_size =
-          reader.resolve("quantization_config.weight_block_size")) {
-    quant_args.weight_block_size() = block_size->get<std::vector<int64_t>>();
-  }
-
-  return validate_smoothquant_mixed_w4a8(reader, quant_args);
-}
 
 HFModelLoader::HFModelLoader(const std::string& model_weights_path)
     : model_weights_path_(model_weights_path) {
@@ -763,7 +503,8 @@ bool HFModelLoader::load_rec_vocab(const std::string& model_weights_path) {
 }
 
 bool HFModelLoader::load_args(const std::string& model_weights_path) {
-  if (!load_model_args(model_weights_path)) {
+  if (!load_hf_model_args(
+          model_weights_path, ModelConfig::get_instance().backend(), &args_)) {
     LOG(ERROR) << "Failed to load model args from " << model_weights_path;
     return false;
   }
@@ -778,13 +519,13 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
     return false;
   }
 
-  if (!load_image_preprocessor_args(model_weights_path)) {
+  if (!load_hf_image_preprocessor_args(model_weights_path, args_)) {
     LOG(ERROR) << "Failed to load image preprocess args from "
                << model_weights_path;
     return false;
   }
 
-  if (!load_video_preprocessor_args(model_weights_path)) {
+  if (!load_hf_video_preprocessor_args(model_weights_path, args_)) {
     LOG(ERROR) << "Failed to load video preprocess args from "
                << model_weights_path;
     return false;
@@ -800,11 +541,6 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
   }
 
   return true;
-}
-
-bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
-  return load_hf_model_args(
-      model_weights_path, ModelConfig::get_instance().backend(), &args_);
 }
 
 bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
@@ -1089,199 +825,6 @@ bool HFModelLoader::load_tokenizer_args(const std::string& model_weights_path) {
                  << tokenizer_args_file_path;
       return false;
     }
-  }
-
-  return true;
-}
-
-bool HFModelLoader::load_image_preprocessor_args(
-    const std::string& model_weights_path) {
-  // image preprocessor args
-  JsonReader image_preprocess_reader;
-  const std::string flat_file_path =
-      model_weights_path + "/preprocessor_config.json";
-  const std::string nested_file_path =
-      model_weights_path + "/processor_config.json";
-  bool parsed = false;
-  std::string used_file_path;
-  if (image_preprocess_reader.parse(flat_file_path)) {
-    parsed = true;
-    used_file_path = flat_file_path;
-  } else if (image_preprocess_reader.parse(nested_file_path)) {
-    // GLM-5.3-Flash ships a single ``processor_config.json`` whose image
-    // fields live under the ``image_processor`` sub-object. Resolve every key
-    // as ``image_processor.<key>`` first, then the flat top-level form, so
-    // legacy flat ``preprocessor_config.json`` files keep working.
-    parsed = true;
-    used_file_path = nested_file_path;
-  }
-  if (parsed) {
-    LOG(INFO) << "Success to parse image preprocess args file: "
-              << used_file_path;
-    const nlohmann::json root = image_preprocess_reader.data();
-    // Resolve a key against the nested ``image_processor`` sub-object first,
-    // then the flat top-level layout; returns nullptr if neither exists.
-    auto resolve_field = [&](const std::string& key) -> const nlohmann::json* {
-      if (auto* ptr =
-              JsonReader::resolve_path(root, "image_processor." + key)) {
-        return ptr;
-      }
-      return JsonReader::resolve_path(root, key);
-    };
-    auto field_int = [&](const std::string& key, int default_value) -> int {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
-        return ptr->get<int>();
-      }
-      return default_value;
-    };
-    auto field_bool = [&](const std::string& key, bool default_value) -> bool {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
-        return ptr->get<bool>();
-      }
-      return default_value;
-    };
-    auto field_double = [&](const std::string& key,
-                            double default_value) -> double {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
-        return ptr->get<double>();
-      }
-      return default_value;
-    };
-    auto field_double_vec =
-        [&](const std::string& key) -> std::optional<std::vector<double>> {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && ptr->is_array()) {
-        return ptr->get<std::vector<double>>();
-      }
-      return std::nullopt;
-    };
-
-    args_.mm_image_do_center_crop() = field_bool("do_center_crop", false);
-    args_.mm_image_crop_height_size() = field_int("crop_size.height", 335);
-    args_.mm_image_crop_width_size() = field_int("crop_size.width", 335);
-
-    args_.mm_image_do_resize() = field_bool("do_resize", false);
-    args_.mm_image_resize_shortest_edge() =
-        field_int("size.shortest_edge", 335);
-    args_.mm_image_resample() = field_int("resample", 335);
-
-    args_.mm_image_do_rescale() = field_bool("do_rescale", false);
-    args_.mm_image_rescale_factor() = field_double("rescale_factor", 0);
-
-    args_.mm_image_do_normalize() = field_bool("do_normalize", false);
-
-    if (auto v = field_double_vec("image_mean")) {
-      args_.mm_image_normalize_mean() = std::move(*v);
-    }
-    if (auto v = field_double_vec("image_std")) {
-      args_.mm_image_normalize_std() = std::move(*v);
-    }
-    if (auto v = field_double_vec("norm_mean")) {
-      args_.mm_image_normalize_mean() = std::move(*v);
-    }
-    if (auto v = field_double_vec("norm_std")) {
-      args_.mm_image_normalize_std() = std::move(*v);
-    }
-
-    args_.mm_image_shortest_edge() = field_int("size.shortest_edge", 0);
-    args_.mm_image_longest_edge() = field_int("size.longest_edge", 0);
-
-    args_.mm_image_min_pixels() = field_int("min_pixels", 0);
-    args_.mm_image_max_pixels() = field_int("max_pixels", 0);
-
-    // per-token resize budget (token units; multiplied by pixels_per_token
-    // inside the image processor). When both are > 0 the token-budget
-    // smart_resize is used, matching HF Glm5NextImageProcessor.
-    args_.mm_image_min_tokens() = field_int("min_image_tokens", 0);
-    args_.mm_image_max_tokens() = field_int("max_image_tokens", 0);
-
-    args_.mm_image_patch_size() = field_int("patch_size", 0);
-    args_.mm_image_temporal_patch_size() = field_int("temporal_patch_size", 0);
-    args_.mm_image_merge_size() = field_int("merge_size", 0);
-
-    args_.mm_image_feature_size() = field_int("image_feature_size", 0);
-    args_.mm_scale_resolution() = field_int("scale_resolution", 0);
-    args_.mm_slice_mode() = field_bool("slice_mode", false);
-    args_.mm_use_image_id() = field_bool("use_image_id", false);
-  }
-
-  return true;
-}
-
-bool HFModelLoader::load_video_preprocessor_args(
-    const std::string& model_weights_path) {
-  // video preprocessor args
-  JsonReader video_preprocess_reader;
-  const std::string flat_file_path =
-      model_weights_path + "/video_preprocessor_config.json";
-  const std::string nested_file_path =
-      model_weights_path + "/processor_config.json";
-  bool parsed = false;
-  std::string used_file_path;
-  if (video_preprocess_reader.parse(flat_file_path)) {
-    parsed = true;
-    used_file_path = flat_file_path;
-  } else if (video_preprocess_reader.parse(nested_file_path)) {
-    // GLM-5.3-Flash nests video fields under ``video_processor``.
-    parsed = true;
-    used_file_path = nested_file_path;
-  }
-  if (parsed) {
-    LOG(INFO) << "Success to parse video preprocess args file: "
-              << used_file_path;
-    const nlohmann::json root = video_preprocess_reader.data();
-    auto resolve_field = [&](const std::string& key) -> const nlohmann::json* {
-      if (auto* ptr =
-              JsonReader::resolve_path(root, "video_processor." + key)) {
-        return ptr;
-      }
-      return JsonReader::resolve_path(root, key);
-    };
-    auto field_int = [&](const std::string& key, int default_value) -> int {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
-        return ptr->get<int>();
-      }
-      return default_value;
-    };
-    auto field_bool = [&](const std::string& key, bool default_value) -> bool {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && !ptr->is_null() && !ptr->is_object()) {
-        return ptr->get<bool>();
-      }
-      return default_value;
-    };
-    auto field_double_vec =
-        [&](const std::string& key) -> std::optional<std::vector<double>> {
-      const auto* ptr = resolve_field(key);
-      if (ptr != nullptr && ptr->is_array()) {
-        return ptr->get<std::vector<double>>();
-      }
-      return std::nullopt;
-    };
-
-    args_.mm_video_shortest_edge() = field_int("size.shortest_edge", 0);
-    args_.mm_video_longest_edge() = field_int("size.longest_edge", 0);
-
-    if (auto v = field_double_vec("image_mean")) {
-      args_.mm_video_normalize_mean() = std::move(*v);
-    }
-    if (auto v = field_double_vec("image_std")) {
-      args_.mm_video_normalize_std() = std::move(*v);
-    }
-
-    args_.mm_video_patch_size() = field_int("patch_size", 0);
-    args_.mm_video_temporal_patch_size() = field_int("temporal_patch_size", 0);
-    args_.mm_video_merge_size() = field_int("merge_size", 0);
-    args_.mm_video_do_rescale() = field_bool("do_rescale", false);
-
-    // per-token resize budget for video (token units). When both are > 0
-    // the token-budget smart_resize is used.
-    args_.mm_video_min_tokens() = field_int("min_image_tokens", 0);
-    args_.mm_video_max_tokens() = field_int("max_image_tokens", 0);
   }
 
   return true;

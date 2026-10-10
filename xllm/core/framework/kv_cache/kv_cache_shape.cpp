@@ -211,13 +211,18 @@ int64_t KVCacheShape::linear_ssm_checkpoint_stride() const {
     return 1;
   }
   CHECK(!conv_cache_shape().empty() && !ssm_cache_shape().empty());
-  CHECK_GT(conv_cache_shape()[0], 0);
-  CHECK_EQ(ssm_cache_shape()[0] % conv_cache_shape()[0], 0)
-      << "SSM physical rows must be divisible by logical sequence slots.";
   const int64_t checkpoint_stride =
-      ssm_cache_shape()[0] / conv_cache_shape()[0];
+      linear_ssm_checkpoint_stride(conv_cache_shape()[0], ssm_cache_shape()[0]);
   CHECK_GT(checkpoint_stride, 0);
   return checkpoint_stride;
+}
+
+int64_t KVCacheShape::linear_ssm_checkpoint_stride(int64_t logical_slots,
+                                                   int64_t physical_rows) {
+  CHECK_GT(logical_slots, 0);
+  CHECK_EQ(physical_rows % logical_slots, 0)
+      << "SSM physical rows must be divisible by logical sequence slots.";
+  return physical_rows / logical_slots;
 }
 
 void KVCacheShape::print_shapes() const {

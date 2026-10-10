@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -510,6 +511,9 @@ void fused_compress_multi_kv(const torch::Tensor& kv,
                              int64_t max_seqlen,
                              bool overlap,
                              torch::Tensor& compressed_kv);
+
+// Token block size shared by prefill scheduling and the convolution kernel.
+inline constexpr int32_t kCausalConv1dPrefillBlockSize = 64;
 
 torch::Tensor causal_conv1d_fn(
     const torch::Tensor& x,

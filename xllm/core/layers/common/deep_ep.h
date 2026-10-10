@@ -70,8 +70,8 @@ class DeepEPImpl : public torch::nn::Module {
              int64_t combine_token_size,
              int64_t max_num_tokens_per_rank,
              int64_t num_global_experts,
-             const ParallelArgs& parallel_args,
-             const torch::TensorOptions& options);
+             ParallelArgs parallel_args,
+             torch::TensorOptions options);
 
   ~DeepEPImpl();
 
@@ -130,8 +130,8 @@ class DeepEPImpl : public torch::nn::Module {
  private:
   int64_t handle_ = 0;  // Communication handle
   bool is_initialized_ = false;
-  const ParallelArgs& parallel_args_;
-  const torch::TensorOptions& options_;
+  ParallelArgs parallel_args_;
+  torch::TensorOptions options_;
 
   // Buffers created for communication; registered to support module
   // state/save/load and .to(device)

@@ -30,6 +30,8 @@ limitations under the License.
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
+#include "kernels/mlu/mlu_ops_api.h"
+#include "layers/common/attention_metadata_builder.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -182,75 +184,11 @@ class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
     weight_dict_["linear_attn.A_log"] = seeded("A_log", {kNumVHeads});
   }
 
-  // Build (batch, token_block_offset, tot) for the GDN conv kernel.
-  struct ConvBatchMeta {
-    torch::Tensor batch;
-    torch::Tensor token_block_offset;
-    int32_t tot = 0;
-  };
-
-  ConvBatchMeta MakeConvBatchMeta(const torch::Tensor& q_cu_seq_lens) {
-    constexpr int32_t block_size = 64;
-    constexpr int32_t pad_slot_id = -1;
-    constexpr int64_t default_max_num_programs = 1024;
-
-    auto seqlens = q_cu_seq_lens.diff();
-    auto nums = (seqlens + block_size - 1) / block_size;
-    nums = nums.to(torch::kLong);
-    int32_t tot = nums.sum().item<int32_t>();
-    torch::Tensor range_batch = torch::arange(nums.size(0), nums.options());
-    torch::Tensor mlist_tensor = torch::repeat_interleave(range_batch, nums);
-    int64_t mlist_len = mlist_tensor.size(0);
-    int64_t max_num_programs =
-        std::max(default_max_num_programs, mlist_len) * 2;
-
-    auto opts = torch::dtype(torch::kInt32).device(device_);
-    torch::Tensor batch_ptr =
-        torch::full({max_num_programs}, pad_slot_id, opts);
-    torch::Tensor token_block_offset_ptr =
-        torch::full({max_num_programs}, pad_slot_id, opts);
-    std::vector<torch::Tensor> vec;
-    vec.reserve(nums.size(0));
-    for (int64_t i = 0; i < nums.size(0); ++i) {
-      vec.emplace_back(torch::arange(nums[i].item<int64_t>(), nums.options()));
-    }
-    torch::Tensor offsetlist = torch::cat(vec, -1).to(torch::kInt32);
-    batch_ptr.narrow(0, 0, mlist_len).copy_(mlist_tensor);
-    token_block_offset_ptr.narrow(0, 0, mlist_len).copy_(offsetlist);
-    return {batch_ptr, token_block_offset_ptr, tot};
-  }
-
-  torch::Tensor MakeChunkIndices(const torch::Tensor& cu_seqlens,
-                                 int64_t chunk_size) {
-    auto lengths = cu_seqlens.narrow(0, 1, cu_seqlens.size(0) - 1) -
-                   cu_seqlens.narrow(0, 0, cu_seqlens.size(0) - 1);
-    torch::Tensor num_chunks = (lengths + chunk_size - 1) / chunk_size;
-    num_chunks = num_chunks.to(torch::kLong);
-    torch::Tensor cumsum = torch::cumsum(num_chunks, 0);
-    int64_t total = cumsum[-1].item<int64_t>();
-    torch::Tensor arange_total = torch::arange(total, cu_seqlens.options());
-    torch::Tensor zeros = torch::zeros({1}, cumsum.options());
-    torch::Tensor prefix =
-        torch::cat({zeros, cumsum.slice(/*dim=*/0, /*start=*/0, /*end=*/-1)});
-    torch::Tensor repeats_prefix = torch::repeat_interleave(prefix, num_chunks);
-    torch::Tensor indices = arange_total - repeats_prefix;
-    torch::Tensor mask = indices == 0;
-    torch::Tensor col0 = mask.cumsum(0) - 1;
-    return torch::stack({col0, indices}, /*dim=*/1)
-        .to(cu_seqlens)
-        .to(torch::kInt32);
-  }
-
   AttentionMetadata MakePrefillMetadata(int64_t batch_size, int64_t seq_len) {
     auto opts_int = torch::dtype(torch::kInt32).device(device_);
     AttentionMetadata metadata;
     metadata.q_cu_seq_lens =
         torch::arange(0, (batch_size + 1) * seq_len, seq_len, opts_int);
-    metadata.chunk_indices = MakeChunkIndices(metadata.q_cu_seq_lens, 64);
-    auto conv_meta = MakeConvBatchMeta(metadata.q_cu_seq_lens);
-    metadata.batch = conv_meta.batch;
-    metadata.token_block_offset = conv_meta.token_block_offset;
-    metadata.tot = conv_meta.tot;
     metadata.has_initial_states = torch::zeros(
         {batch_size},
         torch::TensorOptions().dtype(torch::kBool).device(device_));
@@ -261,6 +199,8 @@ class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
     metadata.is_prefill = true;
     metadata.is_chunked_prefill = false;
     metadata.is_dummy = false;
+    AttentionMetadataBuilder::build_linear_prefill(
+        metadata, kernel::mlu::kCausalConv1dPrefillBlockSize);
     return metadata;
   }
 

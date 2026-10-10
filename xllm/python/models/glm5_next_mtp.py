@@ -43,6 +43,7 @@ import torch.nn as nn
 
 from xllm.python import kernels
 from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear
 from xllm.python.model_executor.forward_context import record_layer_event
 from xllm.python.model_loader import QLinearWeightLoader
@@ -51,7 +52,6 @@ from xllm.python.models.glm5_next import (
     Glm5NextForCausalLM,
     Glm5NextMlaAttention,
     Glm5NextMoE,
-    Glm5NextRMSNorm,
 )
 
 if TYPE_CHECKING:
@@ -89,11 +89,11 @@ class Glm5NextMtpDecoderLayer(nn.Module):
     def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.layer_id = 0
-        self.input_layernorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         # Draft schedule: layer 0 is deepseek_sparse_attention (the appended
         # MTP layer carries a full indexer), MoE MLP (first_k_dense_replace=0).
         self.self_attn = Glm5NextMlaAttention(cfg, 0, dtype, device)
-        self.post_attention_layernorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.mlp = Glm5NextMoE(cfg, dtype, device)
 
     def forward(
@@ -106,19 +106,11 @@ class Glm5NextMtpDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, _ = self.self_attn(hidden_states, position_ids, attention_mask)
         # MLA attention returns [B*S, D] (2D); reshape back to [B, S, D] to
-        # match residual — parity with Glm5NextDecoderLayer._forward_ref.
+        # match residual — parity with Glm5NextDecoderLayer.forward.
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.view(residual.shape[0], residual.shape[1], -1)
 
-        # Fuse the post-attention residual-add + RMSNorm into one npu_add_rms_norm
-        # (normed = RMSNorm(attn_out + residual); residual is updated to the sum
-        # for the post-MLP add below).
-        hidden_states, residual = kernels.fused_add_rms_norm(
-            hidden_states,
-            residual,
-            self.post_attention_layernorm.weight,
-            self.post_attention_layernorm.variance_epsilon,
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -159,8 +151,8 @@ class Glm5NextMtpModel(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.enorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
-        self.hnorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.enorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.hnorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         # Fuses [norm(token_embed) ‖ norm(carried hidden)] -> hidden.
         self.eh_proj = ColumnParallelLinear(
             2 * cfg.hidden_size,
@@ -174,7 +166,7 @@ class Glm5NextMtpModel(nn.Module):
         self.layers = nn.ModuleList([Glm5NextMtpDecoderLayer(cfg, dtype, device)])
         # Checkpoint name: model.layers.<n>.shared_head.norm — exported as
         # model.norm.weight by the MTP exporter.
-        self.norm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
 
     def forward(
         self,
@@ -197,7 +189,7 @@ class Glm5NextMtpModel(nn.Module):
             carried,
             self.enorm.weight,
             self.hnorm.weight,
-            self.enorm.variance_epsilon,
+            self.enorm.eps,
         )
         hidden_states = self.eh_proj(eh)
 

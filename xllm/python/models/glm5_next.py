@@ -62,6 +62,7 @@ _has_mhc_fused = hasattr(kernels, "hc_pre") and kernels.hc_pre is not None
 _SCORES_SLAB_CAP_BYTES = int(1.5 * 1024**3)
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.kda import KdaForgetGate
+from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear
 from xllm.python.layers.qlinear import QLinear
 from xllm.python.models.base import PyModelBase
@@ -90,18 +91,6 @@ except ImportError:  # pragma: no cover - stub-loader path
 
 # Paged pool cache: write-time incremental compression + direct pool read
 # (see glm5_next_kpool.py).
-
-
-class Glm5NextRMSNorm(nn.Module):
-    """RMSNorm matching transformers through the platform kernel API."""
-
-    def __init__(self, hidden_size: int, eps: float, dtype: torch.dtype, device: torch.device) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype, device=device))
-        self.variance_epsilon = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return kernels.rms_norm(x, self.weight, self.variance_epsilon)
 
 
 class _UnweightedRMSNorm(nn.Module):
@@ -1119,7 +1108,7 @@ class Glm5NextMlaAttention(Attention):
         self.q_a_proj = QLinear(
             self.hidden_size, self.q_lora_rank, device=dev, dtype=dt, kind="static", bias=cfg.attention_bias
         )
-        self.q_a_layernorm = Glm5NextRMSNorm(self.q_lora_rank, self.eps, dtype, device)
+        self.q_a_layernorm = RMSNorm(self.q_lora_rank, self.eps, dtype, device)
         # q_b_proj: column-parallel (out = num_heads_local * (qk_nope + qk_rope))
         self.q_b_proj = QLinear(self.q_lora_rank, num_heads * self.qk_head_dim, device=dev, dtype=dt, kind="static")
         # kv_a: replicated (latent + rope)
@@ -1131,7 +1120,7 @@ class Glm5NextMlaAttention(Attention):
             kind="static",
             bias=cfg.attention_bias,
         )
-        self.kv_a_layernorm = Glm5NextRMSNorm(self.kv_lora_rank, self.eps, dtype, device)
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, self.eps, dtype, device)
         self.register_buffer("_qkv_a_weight", None, persistent=False)
         self.register_buffer("_qkv_a_bias", None, persistent=False)
         # kv_b: column-parallel fp (absorbed split reads .weight; stays fp, see
@@ -1304,17 +1293,8 @@ class Glm5NextMLP(nn.Module):
         )
 
     def process_weights_after_loading(self) -> None:
-        # W8A8: each QLinear's ``_w8a8`` submodule must run its
-        # ``W8A8DynamicLinear.process_weights_after_loading`` transpose, which
-        # flips the loaded ``[out, in]`` weight into ``[in, out]`` that
-        # ``quant_matmul`` (transpose2=False) consumes. ``_call_process_weights``
-        # is non-recursive, so without this forward Glm5NextMLP leaves the
-        # ``gate_up_proj`` / ``down_proj`` int8 weights untransposed and the
-        # matmul aborts on a dim mismatch (hidden vs 2*inter_local). The bf16
-        # path is a no-op (QLinear.process_weights_after_loading guards on
-        # ``use_w8a8``), so this is safe for both.
-        _call_process_weights_after_loading(self.gate_up_proj)
-        _call_process_weights_after_loading(self.down_proj)
+        self.gate_up_proj.process_weights_after_loading()
+        self.down_proj.process_weights_after_loading()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
@@ -1493,7 +1473,7 @@ class Glm5NextMoE(nn.Module):
         bf16: no-op on int8 expert weights, only shared experts processed."""
         if not self.use_w8a8:
             # bf16 branch: int8 experts not loaded, leave untouched; shared goes through its own process
-            _call_process_weights_after_loading(self.shared_experts)
+            self.shared_experts.process_weights_after_loading()
             return
         assert torch.all(self.experts_w13_offset == 0), (
             "Glm5NextMoE int8-grouped path needs symmetric int8 experts (experts_w13_offset == 0)"
@@ -1516,7 +1496,7 @@ class Glm5NextMoE(nn.Module):
         self.experts_w13_offset.data = self.experts_w13_offset.data.view(self.num_experts, -1).contiguous()
         self.experts_w2_scale.data = self.experts_w2_scale.data.view(self.num_experts, -1).contiguous()
         self.experts_w2_offset.data = self.experts_w2_offset.data.view(self.num_experts, -1).contiguous()
-        _call_process_weights_after_loading(self.shared_experts)
+        self.shared_experts.process_weights_after_loading()
 
     def _topk(self, hidden_states: torch.Tensor):
         cfg = self.cfg
@@ -1653,6 +1633,20 @@ class Glm5NextHyperConnection(nn.Module):
             collapsed = (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
             return post, comb, collapsed
 
+    def post(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        if _has_mhc_fused:
+            return kernels.hc_post(hidden_states, residual, post, comb)
+        dtype = hidden_states.dtype
+        return post.to(dtype).unsqueeze(-1) * hidden_states.unsqueeze(-2) + torch.matmul(
+            comb.to(dtype).transpose(-1, -2), residual
+        )
+
 
 class Glm5NextHyperHead(nn.Module):
     """Final mHC stream collapse — unweighted mean over the hc_mult streams."""
@@ -1668,12 +1662,12 @@ class Glm5NextDecoderLayer(nn.Module):
     def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.layer_id = layer_id
-        self.input_layernorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_dsa(layer_id):
             self.self_attn = Glm5NextMlaAttention(cfg, layer_id, dtype, device)
         else:
             self.self_attn = Glm5NextKdaAttention(cfg, layer_id, dtype, device)
-        self.post_attention_layernorm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_moe(layer_id):
             self.mlp = Glm5NextMoE(cfg, dtype, device)
         else:
@@ -1689,22 +1683,6 @@ class Glm5NextDecoderLayer(nn.Module):
         attention_mask: torch.Tensor,
         prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # hidden_states: [B, S, hc_mult, D] (4 residual streams).
-        if _has_mhc_fused:
-            return self._forward_fused(hidden_states, position_ids, attention_mask, prev_topk_indices)
-        else:
-            return self._forward_ref(hidden_states, position_ids, attention_mask, prev_topk_indices)
-
-    def _forward_fused(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        prev_topk_indices: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # --- Fused NPU kernel path (matches DeepSeek V4 C++ decoder layer) ---
-
-        # Attention mHC pre-collapse
         residual = hidden_states
         post, comb, hidden_states = self.attn_hc(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
@@ -1713,64 +1691,16 @@ class Glm5NextDecoderLayer(nn.Module):
             hidden_states, topk = attn_out
         else:
             hidden_states, topk = attn_out, None
-        # MLA attention returns [B*S, D] (2D); reshape to [B, S, D] for hc_post.
-        # KDA attention already returns [B, S, D] so the dim check is a no-op.
+        # MLA returns [B*S, D]; mHC post expects [B, S, D].
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.view(residual.shape[0], residual.shape[1], -1)
-        # Fused post-attention mHC recombination: hc_post returns [B,S,hc_mult,D]
-        hidden_states = kernels.hc_post(
-            hidden_states,
-            residual,
-            post,
-            comb,
-        )
-
-        # FFN mHC pre-collapse
-        residual = hidden_states
-        post, comb, hidden_states = self.ffn_hc(hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        # MLP / MoE preserves shape, so hidden_states is already [B, S, D] (3D).
-        hidden_states = kernels.hc_post(
-            hidden_states,
-            residual,
-            post,
-            comb,
-        )
-        return hidden_states, topk
-
-    def _forward_ref(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        prev_topk_indices: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # --- Fallback: pure-Python reference implementation ---
-        residual = hidden_states
-        post, comb, hidden_states = self.attn_hc(hidden_states)  # collapsed -> [B,S,D]
-        hidden_states = self.input_layernorm(hidden_states)
-        attn_out = self.self_attn(hidden_states, position_ids, attention_mask, prev_topk_indices)
-        if isinstance(attn_out, tuple):
-            hidden_states, topk = attn_out
-        else:
-            hidden_states, topk = attn_out, None
-        # MLA attention returns [B*S, D] (2D); reshape to [B, S, D].
-        if hidden_states.dim() == 2:
-            hidden_states = hidden_states.view(residual.shape[0], residual.shape[1], -1)
-        dtype = hidden_states.dtype
-        hidden_states = post.to(dtype).unsqueeze(-1) * hidden_states.unsqueeze(-2) + torch.matmul(
-            comb.to(dtype).transpose(-1, -2), residual
-        )
+        hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
 
         residual = hidden_states
         post, comb, hidden_states = self.ffn_hc(hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        dtype = hidden_states.dtype
-        hidden_states = post.to(dtype).unsqueeze(-1) * hidden_states.unsqueeze(-2) + torch.matmul(
-            comb.to(dtype).transpose(-1, -2), residual
-        )
+        hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
         return hidden_states, topk
 
 
@@ -1786,7 +1716,7 @@ class Glm5NextModel(nn.Module):
             device=device,
         )
         self.layers = nn.ModuleList([Glm5NextDecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
-        self.norm = Glm5NextRMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.hc_head = Glm5NextHyperHead()
         # Set externally by the VL composer (get_input_embeddings) before the
         # runner drives forward(); when set, it replaces embed_tokens(input_ids)
@@ -1847,16 +1777,6 @@ def _w8a8_shard_dims(fp_dim: Optional[int]) -> Optional[dict]:
     if fp_dim == 1:
         return {"weight": 1}
     return {"weight": 0, "deq_scale": 0, "quant_bias": 0}
-
-
-def _call_process_weights_after_loading(module: nn.Module) -> None:
-    """Invoke ``process_weights_after_loading`` if the module defines it.
-
-    The fp path is a no-op for QLinear (only DSA's ``kv_b_proj`` W_UK/W_UV split
-    does real work), but the call is harmless and keeps the w8a8 path ready."""
-    fn = getattr(module, "process_weights_after_loading", None)
-    if fn is not None:
-        fn()
 
 
 _HC_PATTERN = re.compile(r"^model\.layers\.(\d+)\.(attn|ffn)_hc\.(fn|base|scale)$")
@@ -2024,7 +1944,7 @@ class Glm5NextForCausalLM(PyModelBase):
             L.copy_replicated(idx + "k_norm.bias")
             L.copy_replicated(idx + "index_kpool_compress_ape")
         # Splits kv_b_proj.weight into absorbed W_UK / W_UV (NoPE path).
-        _call_process_weights_after_loading(self.model.layers[i].self_attn)
+        self.model.layers[i].self_attn.process_weights_after_loading()
 
     def _load_kda_attn(self, L, attn: str, i: int) -> None:
         """Load floating-point KDA inputs; per-projection W8A8 is not supported here."""
@@ -2072,7 +1992,7 @@ class Glm5NextForCausalLM(PyModelBase):
         L.copy_shard(attn + "forget_gate.dt_bias", dim=0)
         L.copy_shard(attn + "forget_gate.A_log", dim=0)
         L.copy_replicated(attn + "o_norm.weight")
-        _call_process_weights_after_loading(self.model.layers[i].self_attn)
+        self.model.layers[i].self_attn.process_weights_after_loading()
 
     def _load_mlp_fp_or_w8a8(self, L, mlp_pfx: str) -> None:
         """Load a ``Glm5NextMLP`` (gate_up_proj + down_proj) from the OLD-style
@@ -2221,10 +2141,10 @@ class Glm5NextForCausalLM(PyModelBase):
             else:
                 self._load_experts_bf16(L, mlp, n)
             self._load_mlp_fp_or_w8a8(L, mlp + "shared_experts.")
-            _call_process_weights_after_loading(moe)
+            moe.process_weights_after_loading()
         else:
             self._load_mlp_fp_or_w8a8(L, mlp)
-            _call_process_weights_after_loading(self.model.layers[i].mlp)
+            self.model.layers[i].mlp.process_weights_after_loading()
 
 
 # Registration is centralised in xllm.python.registry; import there.

@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "core/framework/quantization/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/framework/state_dict/utils.h"
 #include "kernels/ops_api.h"
 
 namespace xllm {
@@ -45,49 +46,59 @@ inline void check_ct_scale(const torch::Tensor& scale,
 }
 
 inline void resolve_weight_quant_method_for_linear_load(
-    const QuantArgs& quant_args,
+    QuantArgs& quant_args,
     const StateDict& state_dict,
     const std::vector<std::string>* local_prefixes,
     std::optional<std::string>& resolved_weight_quant_method) {
   const auto prefixes = local_prefixes == nullptr || local_prefixes->empty()
                             ? std::vector<std::string>{""}
                             : *local_prefixes;
-  if (quant_args.is_compressed_tensors_w8a8_dynamic()) {
-    for (const std::string& prefix : prefixes) {
-      CHECK(!state_dict.has(prefix + "smooth"))
-          << "Compressed-tensors INT8 does not support smooth tensors: "
-          << state_dict.prefix() << prefix << "smooth";
+  if (quant_args.compressed_groups().empty()) {
+    const auto resolved = quant_args.get_quant_method_from_prefixes(
+        state_dict.prefix(), prefixes);
+    if (resolved.has_value()) {
+      resolved_weight_quant_method = resolved;
+      return;
     }
   }
-  auto resolved =
-      quant_args.get_quant_method_from_prefixes(state_dict, prefixes);
-  if (resolved.has_value()) {
-    resolved_weight_quant_method = resolved.value();
-    return;
-  }
   if (quant_args.is_compressed_tensors_w8a8_dynamic()) {
-    // Resolve from the scheme, even when weight and scale arrive in separate
-    // safetensors shards. Only ignored modules may load floating weights.
-    std::optional<bool> ignored;
+    std::optional<bool> skip_quant;
+    std::optional<bool> preserve_smooth;
     for (const std::string& prefix : prefixes) {
       std::string module = std::string(state_dict.prefix()) + prefix;
       if (!module.empty() && module.back() == '.') {
         module.pop_back();
       }
-      const bool skip = quant_args.should_ignore_module(module);
-      CHECK(!ignored.has_value() || ignored.value() == skip)
+      const auto local = quant_args.for_module(module);
+      const bool skip = local.quant_method().empty();
+      CHECK(skip || local.bits() == 8)
+          << "Linear only supports compressed-tensors W8A8: " << module;
+      CHECK(!skip_quant.has_value() || *skip_quant == skip)
           << "Cannot fuse quantized and ignored projections: " << module;
-      ignored = skip;
-      check_ct_scale(state_dict.get_tensor(prefix + "weight_scale"), module);
+      CHECK(!preserve_smooth.has_value() ||
+            *preserve_smooth == local.preserve_smooth())
+          << "Cannot fuse projections with different preserve_smooth: "
+          << module;
+      skip_quant = skip;
+      preserve_smooth = local.preserve_smooth();
+      if (local.preserve_smooth()) {
+        const auto smooth = state_dict.get_tensor(prefix + "smooth");
+        CHECK(!smooth.defined() || smooth.is_floating_point())
+            << "Smooth must be floating point: " << module;
+      }
+      if (!skip) {
+        check_ct_scale(state_dict.get_tensor(prefix + "weight_scale"), module);
+      }
       torch::Tensor weight = state_dict.get_tensor(prefix + "weight");
       CHECK(!weight.defined() || (skip ? weight.is_floating_point()
                                        : weight.scalar_type() == torch::kInt8))
           << "Weight dtype disagrees with compressed-tensors scheme: "
           << module;
     }
+    quant_args.preserve_smooth() = *preserve_smooth;
     resolved_weight_quant_method =
-        ignored.value() ? std::nullopt
-                        : std::make_optional<std::string>("w8a8_dynamic");
+        *skip_quant ? std::nullopt
+                    : std::make_optional(kQuantMethodW8a8Dynamic);
     return;
   }
 
@@ -129,6 +140,39 @@ inline torch::Tensor npu_w8a8_dynamic_quantized_linear_forward(
     quant_matmul_params.bias = bias;
   }
   return kernel::quant_matmul(quant_matmul_params);
+}
+
+inline void load_smooth_from_prefixes(const StateDict& state_dict,
+                                      const std::vector<std::string>& prefixes,
+                                      torch::Tensor& smooth,
+                                      std::vector<torch::Tensor>& tensors,
+                                      bool& smooth_is_loaded) {
+  if (smooth_is_loaded || !weight::load_tensor_list(state_dict,
+                                                    prefixes,
+                                                    "smooth",
+                                                    /*dim=*/-1,
+                                                    /*rank=*/0,
+                                                    /*world_size=*/1,
+                                                    tensors)) {
+    return;
+  }
+  torch::Tensor first;
+  for (const auto& tensor : tensors) {
+    CHECK_EQ(tensor.numel(), smooth.numel())
+        << "Smooth size mismatch for " << state_dict.prefix();
+    CHECK(tensor.is_floating_point()) << "Smooth must be floating point";
+    auto candidate = tensor.flatten().to(torch::kFloat32);
+    if (!first.defined()) {
+      first = candidate;
+      continue;
+    }
+    CHECK(torch::allclose(first, candidate))
+        << "Smooth values differ between projections: " << state_dict.prefix();
+  }
+  torch::NoGradGuard no_grad;
+  smooth.copy_(first.view(smooth.sizes()));
+  smooth_is_loaded = true;
+  tensors.clear();
 }
 
 inline torch::Tensor npu_w8a8_dynamic_linear_forward(

@@ -452,34 +452,29 @@ class DiTParallelLinearImpl : public torch::nn::Module {
 
     layer::resolve_weight_quant_method_for_linear_load(
         quant_args_, state_dict, nullptr, resolved_weight_quant_method_);
+    CHECK(!quant_args_.preserve_smooth())
+        << "Preserved smooth is unsupported by this projection: "
+        << state_dict.prefix();
 
     int64_t weight_axis = tp.column_parallel ? 0 : 1;
     if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
-      // Convert tp_weight from original dtype to int8.
-      std::vector<weight::LazyParameterSpec> specs;
-      specs.push_back(
-          weight::LazyParameterSpec{&tp_weight_,
-                                    &tp_weight_loaded_,
-                                    "weight",
-                                    {tp_weight_.size(0), tp_weight_.size(1)},
-                                    tensor_options_.dtype(torch::kInt8)});
-      weight::ensure_parameter_storage(this, specs);
-
-      int64_t weight_scale_size = tp_weight_.size(0);
-      std::vector<weight::LazyParameterSpec> scale_specs;
-      scale_specs.push_back(
-          weight::LazyParameterSpec{&tp_weight_scale_,
-                                    &tp_weight_scale_is_loaded_,
-                                    "weight_scale",
-                                    {weight_scale_size},
-                                    tensor_options_.dtype(torch::kFloat32)});
-      scale_specs.push_back(
-          weight::LazyParameterSpec{&tp_weight_offset_,
-                                    &tp_weight_offset_is_loaded_,
-                                    "weight_offset",
-                                    {weight_scale_size},
-                                    tensor_options_.dtype(torch::kFloat32)});
-      weight::ensure_parameter_storage(this, scale_specs);
+      weight::ensure_parameter_storage(
+          this,
+          {{&tp_weight_,
+            &tp_weight_loaded_,
+            "weight",
+            {tp_weight_.size(0), tp_weight_.size(1)},
+            tensor_options_.dtype(torch::kInt8)},
+           {&tp_weight_scale_,
+            &tp_weight_scale_is_loaded_,
+            "weight_scale",
+            {tp_weight_.size(0)},
+            tensor_options_.dtype(torch::kFloat32)},
+           {&tp_weight_offset_,
+            &tp_weight_offset_is_loaded_,
+            "weight_offset",
+            {tp_weight_.size(0)},
+            tensor_options_.dtype(torch::kFloat32)}});
 
       weight::load_sharded_weight(state_dict,
                                   "weight",
@@ -496,26 +491,22 @@ class DiTParallelLinearImpl : public torch::nn::Module {
                                     tp.tp_size(),
                                     tp_weight_scale_,
                                     tp_weight_scale_is_loaded_);
-        if (state_dict.has("weight_offset")) {
-          weight::load_sharded_weight(state_dict,
-                                      "weight_offset",
-                                      /*axis=*/0,
-                                      tp.tp_rank(),
-                                      tp.tp_size(),
-                                      tp_weight_offset_,
-                                      tp_weight_offset_is_loaded_);
-        }
+        weight::load_sharded_weight(state_dict,
+                                    "weight_offset",
+                                    /*axis=*/0,
+                                    tp.tp_rank(),
+                                    tp.tp_size(),
+                                    tp_weight_offset_,
+                                    tp_weight_offset_is_loaded_);
       } else {
         weight::load_weight(state_dict,
                             "weight_scale",
                             tp_weight_scale_,
                             tp_weight_scale_is_loaded_);
-        if (state_dict.has("weight_offset")) {
-          weight::load_weight(state_dict,
-                              "weight_offset",
-                              tp_weight_offset_,
-                              tp_weight_offset_is_loaded_);
-        }
+        weight::load_weight(state_dict,
+                            "weight_offset",
+                            tp_weight_offset_,
+                            tp_weight_offset_is_loaded_);
       }
     } else {
       weight::load_sharded_weight(state_dict,

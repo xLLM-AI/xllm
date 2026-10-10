@@ -208,8 +208,8 @@ def test_model_records_each_event_after_its_layer(model_type: str, monkeypatch: 
     model.norm = nn.Identity()
     model.hc_head = _HyperHead()
     model._inputs_embeds = None
-    model.enorm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-6)
-    model.hnorm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-6)
+    model.enorm = SimpleNamespace(weight=torch.ones(4), eps=1e-6)
+    model.hnorm = SimpleNamespace(weight=torch.ones(4), eps=1e-6)
     model.eh_proj = nn.Linear(8, 4)
     context = ForwardContext(
         attention_backend=MagicMock(),

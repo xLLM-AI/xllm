@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "attention.h"
 #include "core/layers/mlu/dsa_topk_relay.h"
@@ -89,8 +90,10 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict);
+  void verify_loaded_weights() const;
 
  private:
+  std::string weight_prefix_;
   struct HeadInfo {
     int64_t attn = 1;
     int64_t proj = 1;

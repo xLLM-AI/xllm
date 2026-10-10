@@ -22,33 +22,17 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/state_dict/utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
-#include "layers/mlu/qwen3_5/qwen3_5_gated_delta_net.h"
+#include "layers/common/attention_metadata_builder.h"
+#include "layers/mlu/linear_attention_utils.h"
 
 namespace xllm {
 namespace layer {
 
 namespace {
-
-// Qwen3.5 GDN uses 64-token metadata chunks. GLM5-Next KDA chooses its own
-// kernel chunk size, so build indices for that size at the KDA call site.
-torch::Tensor make_kda_chunk_indices(const torch::Tensor& cu_seqlens,
-                                     int64_t chunk_size) {
-  torch::Tensor lengths = cu_seqlens.diff();
-  torch::Tensor num_chunks =
-      ((lengths + chunk_size - 1) / chunk_size).to(torch::kLong);
-  torch::Tensor offsets = torch::cumsum(num_chunks, /*dim=*/0);
-  const int64_t total_chunks = offsets[-1].item<int64_t>();
-  torch::Tensor flat = torch::arange(total_chunks, cu_seqlens.options());
-  torch::Tensor prefixes =
-      torch::cat({torch::zeros({1}, offsets.options()),
-                  offsets.slice(/*dim=*/0, /*start=*/0, /*end=*/-1)});
-  torch::Tensor local = flat - torch::repeat_interleave(prefixes, num_chunks);
-  torch::Tensor sequence = (local == 0).cumsum(/*dim=*/0) - 1;
-  return torch::stack({sequence, local}, /*dim=*/1).to(torch::kInt32);
-}
 
 torch::Tensor l2_normalize(const torch::Tensor& input) {
   return input /
@@ -363,15 +347,11 @@ void Glm5NextKDAImpl::load_state_dict(const StateDict& state_dict) {
   load_column_linear(f_b_proj_, state_dict, "f_b_proj.");
   load_column_linear(g_b_proj_, state_dict, "g_b_proj.");
 
-  StateDict f_a_state = state_dict.get_dict_with_prefix("f_a_proj.");
-  if (f_a_state.size() > 0 && !f_a_is_loaded_) {
-    f_a_proj_->load_state_dict(f_a_state);
-    f_a_is_loaded_ = f_a_state.get_tensor("weight").defined();
+  if (!f_a_proj_->is_weight_loaded()) {
+    f_a_proj_->load_state_dict(state_dict.get_dict_with_prefix("f_a_proj."));
   }
-  StateDict g_a_state = state_dict.get_dict_with_prefix("g_a_proj.");
-  if (g_a_state.size() > 0 && !g_a_is_loaded_) {
-    g_a_proj_->load_state_dict(g_a_state);
-    g_a_is_loaded_ = g_a_state.get_tensor("weight").defined();
+  if (!g_a_proj_->is_weight_loaded()) {
+    g_a_proj_->load_state_dict(state_dict.get_dict_with_prefix("g_a_proj."));
   }
 
   load_conv_linear(q_conv1d_, state_dict, "q_conv1d");
@@ -427,10 +407,12 @@ void Glm5NextKDAImpl::verify_loaded_weights(const std::string& prefix) const {
   CHECK(b_proj_ && b_proj_->is_weight_loaded())
       << "Missing required weight after all shards loaded: " << prefix
       << "b_proj.weight";
-  CHECK(f_a_is_loaded_) << "Missing required weight after all shards loaded: "
-                        << prefix << "f_a_proj.weight";
-  CHECK(g_a_is_loaded_) << "Missing required weight after all shards loaded: "
-                        << prefix << "g_a_proj.weight";
+  CHECK(f_a_proj_ && f_a_proj_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "f_a_proj.weight";
+  CHECK(g_a_proj_ && g_a_proj_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "g_a_proj.weight";
   CHECK(f_b_proj_ && f_b_proj_->is_weight_loaded())
       << "Missing required weight after all shards loaded: " << prefix
       << "f_b_proj.weight";
@@ -472,21 +454,6 @@ torch::Tensor Glm5NextKDAImpl::get_linear_state_indices(
       torch::TensorOptions().dtype(torch::kInt).device(device));
 }
 
-int64_t Glm5NextKDAImpl::get_checkpoint_stride(const KVCache& kv_cache) const {
-  torch::Tensor conv_cache = kv_cache.get_conv_cache();
-  torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
-  CHECK_GT(conv_cache.size(0), 0) << "GLM5-Next KDA conv cache must have rows";
-  CHECK_EQ(ssm_cache.size(0) % conv_cache.size(0), 0)
-      << "GLM5-Next KDA SSM checkpoint layout mismatch";
-  return ssm_cache.size(0) / conv_cache.size(0);
-}
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-Glm5NextKDAImpl::split_mixed_qkv(const torch::Tensor& mixed_qkv) const {
-  return layer::split_mixed_qkv(
-      mixed_qkv, local_num_heads_, local_num_heads_, head_dim_, head_dim_);
-}
-
 torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
                                        const AttentionMetadata& attn_metadata,
                                        KVCache& kv_cache,
@@ -513,7 +480,8 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
 
   torch::Tensor conv_cache = kv_cache.get_conv_cache().transpose(-1, -2);
   torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
-  const int64_t checkpoint_stride = get_checkpoint_stride(kv_cache);
+  const int64_t checkpoint_stride = KVCacheShape::linear_ssm_checkpoint_stride(
+      kv_cache.get_conv_cache().size(0), ssm_cache.size(0));
   if (input_params.is_spec_verify) {
     CHECK_EQ(checkpoint_stride, attn_metadata.max_query_len)
         << "GLM5-Next KDA Spec Verify checkpoint stride mismatch";
@@ -532,44 +500,8 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
   torch::Tensor core_output;
 
-  if (input_params.is_spec_verify) {
-    mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
-        mixed_qkv,
-        conv_cache,
-        conv_weight,
-        /*bias_opt=*/std::nullopt,
-        logical_state_indices,
-        /*activation=*/true,
-        /*pad_slot_id=*/-1,
-        attn_metadata.q_cu_seq_lens,
-        static_cast<int32_t>(attn_metadata.max_query_len),
-        input_params.num_accepted_tokens);
-    std::tie(q, k, v) = split_mixed_qkv(mixed_qkv);
-
-    torch::Tensor state_indices = build_rebased_ssm_state_indices(
-        logical_state_indices, checkpoint_stride, attn_metadata.max_query_len);
-    xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
-    params.A_log = A_log_;
-    params.a = raw_gate.view({num_tokens, local_projection_size_});
-    params.dt_bias = dt_bias_;
-    params.q = q;
-    params.k = k;
-    params.v = v;
-    params.b = beta;
-    params.initial_state_source = ssm_cache;
-    params.initial_state_indices = state_indices;
-    params.cu_seqlens = attn_metadata.q_cu_seq_lens;
-    params.scale =
-        static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
-    params.num_accepted_tokens = input_params.num_accepted_tokens;
-    params.use_qk_l2norm_in_kernel = true;
-    params.is_kda = true;
-    params.kda_use_safe_gate = true;
-    params.kda_gate_lower_bound = gate_lower_bound_;
-    core_output = xllm::kernel::fused_sigmoid_gating_delta_rule_update(params)
-                      .squeeze(/*dim=*/0)
-                      .contiguous();
-  } else if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
+  if (!input_params.is_spec_verify &&
+      (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill)) {
     mixed_qkv = mixed_qkv.transpose(/*dim0=*/0, /*dim1=*/1);
     mixed_qkv = xllm::kernel::mlu::causal_conv1d_fn(
         mixed_qkv,
@@ -586,7 +518,8 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
         /*num_accepted_tokens=*/std::nullopt,
         /*inplace_final_state=*/true);
     mixed_qkv = mixed_qkv.transpose(/*dim0=*/0, /*dim1=*/1);
-    std::tie(q, k, v) = split_mixed_qkv(mixed_qkv);
+    std::tie(q, k, v) = split_mixed_qkv(
+        mixed_qkv, local_num_heads_, local_num_heads_, head_dim_, head_dim_);
 
     torch::Tensor log_gate =
         glm5_next_safe_gate(raw_gate, A_log_, dt_bias_, gate_lower_bound_);
@@ -595,7 +528,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     initial_state.index_put_(
         {~attn_metadata.has_initial_states, torch::indexing::Ellipsis}, 0.0f);
     torch::Tensor cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
-    torch::Tensor chunk_indices = make_kda_chunk_indices(
+    torch::Tensor chunk_indices = AttentionMetadataBuilder::build_chunk_indices(
         cu_seqlens, kernel::mlu::kda_prefill_chunk_size());
     torch::Tensor final_state;
     std::tie(core_output, final_state) =
@@ -613,15 +546,30 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     ssm_cache.index_put_({state_base_indices},
                          final_state.to(ssm_cache.scalar_type()));
   } else {
-    mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
-        mixed_qkv,
-        conv_cache,
-        conv_weight,
-        /*bias_opt=*/std::nullopt,
-        logical_state_indices,
-        /*activation=*/true,
-        /*pad_slot_id=*/-1);
-    std::tie(q, k, v) = split_mixed_qkv(mixed_qkv);
+    if (input_params.is_spec_verify) {
+      mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
+          mixed_qkv,
+          conv_cache,
+          conv_weight,
+          /*bias_opt=*/std::nullopt,
+          logical_state_indices,
+          /*activation=*/true,
+          /*pad_slot_id=*/-1,
+          attn_metadata.q_cu_seq_lens,
+          static_cast<int32_t>(attn_metadata.max_query_len),
+          input_params.num_accepted_tokens);
+    } else {
+      mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
+          mixed_qkv,
+          conv_cache,
+          conv_weight,
+          /*bias_opt=*/std::nullopt,
+          logical_state_indices,
+          /*activation=*/true,
+          /*pad_slot_id=*/-1);
+    }
+    std::tie(q, k, v) = split_mixed_qkv(
+        mixed_qkv, local_num_heads_, local_num_heads_, head_dim_, head_dim_);
 
     xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
     params.A_log = A_log_;
@@ -632,10 +580,18 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     params.v = v;
     params.b = beta;
     params.initial_state_source = ssm_cache;
-    params.initial_state_indices = state_base_indices;
+    params.initial_state_indices =
+        input_params.is_spec_verify
+            ? build_rebased_ssm_state_indices(logical_state_indices,
+                                              checkpoint_stride,
+                                              attn_metadata.max_query_len)
+            : state_base_indices;
     params.cu_seqlens = attn_metadata.q_cu_seq_lens;
     params.scale =
         static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
+    if (input_params.is_spec_verify) {
+      params.num_accepted_tokens = input_params.num_accepted_tokens;
+    }
     params.use_qk_l2norm_in_kernel = true;
     params.is_kda = true;
     params.kda_use_safe_gate = true;

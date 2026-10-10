@@ -28,8 +28,6 @@ limitations under the License.
 
 namespace xllm {
 
-bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args);
-
 class HFModelLoader : public ModelLoader {
  public:
   HFModelLoader(const std::string& model_weights_path);
@@ -47,11 +45,8 @@ class HFModelLoader : public ModelLoader {
  private:
   bool load_args(const std::string& model_weights_path);
   bool load_rec_vocab(const std::string& model_weights_path);
-  bool load_model_args(const std::string& model_weights_path);
   bool load_quant_args(const std::string& model_weights_path);
   bool load_tokenizer_args(const std::string& model_weights_path);
-  bool load_image_preprocessor_args(const std::string& model_weights_path);
-  bool load_video_preprocessor_args(const std::string& model_weights_path);
   std::string model_weights_path() const override {
     return model_weights_path_;
   }

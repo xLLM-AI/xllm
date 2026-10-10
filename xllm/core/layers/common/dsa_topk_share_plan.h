@@ -55,11 +55,23 @@ class DsaTopkSharePlan final {
     has_indexer_ = has_dsa_indexer(args);
 
     if (!has_indexer_ ||
-        (args.index_topk_pattern().empty() && args.index_topk_freq() <= 1)) {
+        (args.indexer_types().empty() && args.index_topk_pattern().empty() &&
+         args.index_topk_freq() <= 1)) {
       return;
     }
 
-    if (!args.index_topk_pattern().empty()) {
+    if (!args.indexer_types().empty()) {
+      const auto& types = args.indexer_types();
+      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+        if (static_cast<size_t>(layer_id) >= types.size()) {
+          break;
+        }
+        const std::string& type = types[static_cast<size_t>(layer_id)];
+        CHECK(type == "full" || type == "shared")
+            << "DSA indexer type must be full or shared, got " << type;
+        decisions_[static_cast<size_t>(layer_id)].reuse_topk = type == "shared";
+      }
+    } else if (!args.index_topk_pattern().empty()) {
       const std::string& pattern = args.index_topk_pattern();
       CHECK_EQ(static_cast<int64_t>(pattern.size()), num_layers)
           << "DSA top-k sharing pattern length must equal num_hidden_layers.";
@@ -78,14 +90,16 @@ class DsaTopkSharePlan final {
       }
     }
 
-    for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    bool next_dsa_reuses = false;
+    for (int64_t layer_id = num_layers; layer_id-- > 0;) {
+      if (!is_full_attention_layer(args, layer_id)) {
+        continue;
+      }
       DsaTopkShareDecision& decision =
           decisions_[static_cast<size_t>(layer_id)];
       has_reuse_ = has_reuse_ || decision.reuse_topk;
-      const bool next_layer_reuses =
-          layer_id + 1 < num_layers &&
-          decisions_[static_cast<size_t>(layer_id + 1)].reuse_topk;
-      decision.output_topk = !decision.reuse_topk && next_layer_reuses;
+      decision.output_topk = !decision.reuse_topk && next_dsa_reuses;
+      next_dsa_reuses = decision.reuse_topk;
     }
   }
 

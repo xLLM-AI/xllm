@@ -1087,6 +1087,13 @@ DcpIndexerLocalCandidates IndexerImpl::forward_dcp_local_prefill_from_sp(
   return DcpIndexerLocalCandidates{scores, global_slots};
 }
 
+void IndexerImpl::verify_loaded_weights(const std::string& prefix) const {
+  CHECK(wq_b_->is_weight_loaded()) << prefix << "wq_b";
+  CHECK(wk_->is_weight_loaded()) << prefix << "wk";
+  CHECK(weights_proj_->is_weight_loaded()) << prefix << "weights_proj";
+  k_norm_->verify_loaded_weights(prefix + "k_norm.");
+}
+
 // load the weight from the checkpoint
 void IndexerImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {

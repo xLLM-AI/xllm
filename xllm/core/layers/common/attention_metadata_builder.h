@@ -49,6 +49,13 @@ class AttentionMetadataBuilder {
       const torch::Tensor& slots,
       int32_t block_size);
 
+  static torch::Tensor build_chunk_indices(const torch::Tensor& cu_seqlens,
+                                           int64_t chunk_size);
+
+  // Build convolution scheduling and chunk indices for linear attention.
+  static void build_linear_prefill(AttentionMetadata& attn_metadata,
+                                   int64_t block_size);
+
   // Build AttentionMetadata from ModelInputParams with default compute_dtype
   // ("float").
   static AttentionMetadata build(

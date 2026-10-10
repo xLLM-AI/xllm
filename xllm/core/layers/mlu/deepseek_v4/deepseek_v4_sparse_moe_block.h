@@ -19,10 +19,12 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
+#include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
@@ -37,6 +39,7 @@ class DeepseekV4SparseMoEBlockTestPeer;
 class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
  public:
   DeepseekV4SparseMoEBlockImpl() = default;
+  DeepseekV4SparseMoEBlockImpl(ModelContext context, bool use_hash);
   DeepseekV4SparseMoEBlockImpl(
       const ModelArgs& model_args,
       const QuantArgs& quant_args,
@@ -44,7 +47,8 @@ class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
       const torch::TensorOptions& options,
       bool use_hash,
       const std::shared_ptr<Stream>& routed_comm_stream,
-      const std::shared_ptr<Stream>& shared_compute_stream);
+      const std::shared_ptr<Stream>& shared_compute_stream,
+      const std::string& module_prefix = "");
 
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;
@@ -70,6 +74,9 @@ class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
       int64_t hidden_rows,
       const ModelInputParams& input_params) const;
 
+  std::optional<ModelContext> context_;
+  bool use_hash_ = false;
+  std::optional<std::string> weight_prefix_;
   ParallelArgs parallel_args_;
   bool enable_deep_ep_ = false;
   FusedMoE moe_{nullptr};

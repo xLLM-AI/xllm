@@ -151,6 +151,8 @@ class IndexerImpl : public torch::nn::Module {
       const v32_cp::DeepseekV32CPContext& sp_ctx,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
 
+  void verify_loaded_weights(const std::string& prefix) const;
+
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);
 

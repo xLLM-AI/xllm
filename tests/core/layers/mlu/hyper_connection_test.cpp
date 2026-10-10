@@ -33,6 +33,28 @@ namespace xllm {
 namespace layer {
 namespace {
 
+TEST(HCStateTest, ResolvesLegacyWeightsAcrossSeparateShards) {
+  for (const std::string prefix : {"hc_attn_", "hc_ffn_"}) {
+    for (const std::string suffix : {"fn", "base", "scale"}) {
+      const torch::Tensor tensor = torch::ones({2}, torch::kFloat32);
+      const StateDict shard({{prefix + suffix, tensor}});
+      const StateDict resolved = get_hc_state(shard, "hc_pre.", prefix);
+      EXPECT_EQ(resolved.size(), 1);
+      EXPECT_TRUE(torch::equal(resolved.get_tensor("hc_" + suffix), tensor));
+    }
+  }
+}
+
+TEST(HCStateTest, PrefersModuleWeightsAndPreservesEmptyShards) {
+  const torch::Tensor canonical = torch::ones({2}, torch::kFloat32);
+  const StateDict state({{"hc_pre.hc_fn", canonical},
+                         {"hc_attn_fn", torch::zeros_like(canonical)}});
+  const StateDict resolved = get_hc_state(state, "hc_pre.", "hc_attn_");
+  EXPECT_EQ(resolved.size(), 1);
+  EXPECT_TRUE(torch::equal(resolved.get_tensor("hc_fn"), canonical));
+  EXPECT_EQ(get_hc_state(state, "ffn_hc_pre.", "hc_ffn_").size(), 0);
+}
+
 struct HCConfig {
   int64_t hc_mult = 4;
   int64_t dim = 4096;

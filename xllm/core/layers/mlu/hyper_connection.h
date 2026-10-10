@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <tuple>
 
 #include "framework/state_dict/state_dict.h"
@@ -26,6 +27,11 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+
+// Resolve module-local mHC weights or legacy checkpoint aliases.
+StateDict get_hc_state(const StateDict& state_dict,
+                       const std::string& module_prefix,
+                       const std::string& checkpoint_prefix);
 
 struct PendingMHC final {
   torch::Tensor x;

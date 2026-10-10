@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
@@ -46,6 +47,12 @@ std::pair<int32_t, int32_t> split_range(int32_t size,
 
 }  // namespace
 
+DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(ModelContext context,
+                                                           bool use_hash)
+    : context_(std::move(context)),
+      use_hash_(use_hash),
+      parallel_args_(context_->get_parallel_args()) {}
+
 DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(
     const ModelArgs& model_args,
     const QuantArgs& quant_args,
@@ -53,13 +60,16 @@ DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(
     const torch::TensorOptions& options,
     bool use_hash,
     const std::shared_ptr<Stream>& routed_comm_stream,
-    const std::shared_ptr<Stream>& shared_compute_stream)
+    const std::shared_ptr<Stream>& shared_compute_stream,
+    const std::string& module_prefix)
     : parallel_args_(parallel_args) {
   enable_deep_ep_ =
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
       parallel_args_.ep_size() > 1;
-  const FusedMoEArgs moe_args{
-      .is_gated = true, .enable_result_reduction = false, .use_hash = use_hash};
+  const FusedMoEArgs moe_args{.is_gated = true,
+                              .enable_result_reduction = false,
+                              .use_hash = use_hash,
+                              .module_prefix = module_prefix};
   moe_ = register_module("moe",
                          FusedMoE(model_args,
                                   moe_args,
@@ -72,16 +82,41 @@ DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(
 
 void DeepseekV4SparseMoEBlockImpl::load_state_dict(
     const StateDict& state_dict) {
+  if (state_dict.size() == 0) {
+    return;
+  }
+  CHECK(!weight_prefix_ || *weight_prefix_ == state_dict.prefix())
+      << "MoE checkpoint prefix changed between shards";
+  if (!moe_) {
+    CHECK(context_.has_value()) << "MoE construction context is missing";
+    std::string module_prefix(state_dict.prefix());
+    if (!module_prefix.empty() && module_prefix.back() == '.') {
+      module_prefix.pop_back();
+    }
+    const FusedMoEArgs moe_args{.is_gated = true,
+                                .enable_result_reduction = false,
+                                .use_hash = use_hash_,
+                                .module_prefix = module_prefix};
+    enable_deep_ep_ =
+        ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
+        parallel_args_.ep_size() > 1;
+    moe_ = register_module("moe", FusedMoE(*context_, moe_args));
+    moe_->train(is_training());
+    weight_prefix_ = std::string(state_dict.prefix());
+    context_.reset();
+  }
   moe_->load_state_dict(state_dict);
 }
 
 void DeepseekV4SparseMoEBlockImpl::verify_loaded_weights() const {
+  CHECK(moe_) << "Missing required MoE weights";
   moe_->verify_loaded_weights();
 }
 
 FusedMoEImpl::RouteInfo DeepseekV4SparseMoEBlockImpl::prep_route(
     torch::Tensor& hidden_states,
     const std::optional<torch::Tensor>& input_ids) {
+  CHECK(moe_) << "MoE weights must be loaded before routing";
   return moe_->prep_route(hidden_states, input_ids);
 }
 
@@ -147,6 +182,7 @@ torch::Tensor DeepseekV4SparseMoEBlockImpl::forward_selected(
     const torch::Tensor& topk_weights,
     const torch::Tensor& topk_ids,
     const ModelInputParams& input_params) {
+  CHECK(moe_) << "MoE weights must be loaded before forward";
   std::vector<int64_t> hidden_shape = hidden_states.sizes().vec();
   torch::Tensor hidden_rows =
       hidden_states.reshape({-1, hidden_states.size(-1)}).contiguous();
@@ -203,6 +239,7 @@ torch::Tensor DeepseekV4SparseMoEBlockImpl::forward_cp(
     const torch::Tensor& local_hidden_states,
     const std::optional<torch::Tensor>& local_input_ids,
     const mlu_v4_cp::DeepseekV4CpContext& cp_context) {
+  CHECK(moe_) << "MoE weights must be loaded before forward";
   ProcessGroup* ep_group = routed_pg();
   ProcessGroup* tp_group = parallel_args_.tp_group_;
   CHECK(ep_group != nullptr);
