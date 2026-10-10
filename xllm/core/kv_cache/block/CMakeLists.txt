@@ -3,6 +3,18 @@ include(cc_library)
 
 cc_library(
   NAME
+    kv_cache_page_state
+  HDRS
+    kv_cache_page_state.h
+  SRCS
+    kv_cache_page_state.cpp
+  DEPS
+    :virtual_page
+    glog::glog
+)
+
+cc_library(
+  NAME
     block_utils
   HDRS
     block_utils.h

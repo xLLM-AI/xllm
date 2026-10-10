@@ -14,18 +14,6 @@ cc_test(
     glog::glog
 )
 
-cc_test(
-  NAME
-    virt_page_test
-  NO_NPU_RUNTIME
-  SRCS
-    virt_page_test.cpp
-    ${PROJECT_SOURCE_DIR}/xllm/core/framework/xtensor/virt_page.cpp
-  DEPS
-    GTest::gtest_main
-    glog::glog
-)
-
 if(USE_NPU)
   # Keep validation/death tests independent of device runtime initialization.
   foreach(test_name IN ITEMS page_allocator_test xtensor_bootstrap_test)

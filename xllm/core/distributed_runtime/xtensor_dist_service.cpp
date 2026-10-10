@@ -22,10 +22,11 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/device_monitor.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/xtensor/global_xtensor.h"
-#include "core/framework/xtensor/phy_page_pool.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/platform/device.h"
+#include "core/virtual_memory/physical_page_pool.h"
 
 namespace xllm {
 
@@ -93,16 +94,19 @@ void XTensorDistService::InitPhyPagePool(
               << ", num_pages=" << num_pages;
 
     try {
-      // Initialize PhyPagePool with specified number of pages
-      PhyPagePool::get_instance().init(device_, num_pages);
+      // Initialize PhysicalPagePool with specified number of pages
+      const size_t page_size = static_cast<size_t>(
+          KVCacheConfig::get_instance().phy_page_granularity_size());
+      PhysicalPagePool::get_instance().init(device_, num_pages, page_size);
 
-      // Initialize GlobalXTensor after PhyPagePool
+      // Initialize GlobalXTensor after PhysicalPagePool
       GlobalXTensor::get_instance().init(device_);
       LOG(INFO) << "GlobalXTensor initialized on worker " << global_rank_;
 
       response->set_ok(true);
     } catch (const std::exception& e) {
-      LOG(ERROR) << "Failed to init PhyPagePool/GlobalXTensor: " << e.what();
+      LOG(ERROR) << "Failed to init PhysicalPagePool/GlobalXTensor: "
+                 << e.what();
       response->set_ok(false);
     }
   });
@@ -170,7 +174,7 @@ void XTensorDistService::AllocWeightPages(
     LOG(INFO) << "AllocWeightPages: model_id=" << model_id
               << ", num_pages=" << num_pages;
 
-    auto& pool = PhyPagePool::get_instance();
+    auto& pool = PhysicalPagePool::get_instance();
     auto& allocator = XTensorAllocator::get_instance();
 
     // Try contiguous allocation first (from GlobalXTensor)
@@ -187,7 +191,7 @@ void XTensorDistService::AllocWeightPages(
       return;
     }
 
-    // Fallback: try non-contiguous allocation using XTensor
+    // Fallback: try non-contiguous allocation using MappedMemoryRegion
     LOG(WARNING) << "Contiguous allocation failed for " << num_pages
                  << " pages, trying non-contiguous fallback (XTensor)";
 
@@ -221,7 +225,7 @@ void XTensorDistService::FreeWeightPages(
 
     LOG(INFO) << "FreeWeightPages: model_id=" << model_id;
 
-    // Free weight pages via XTensorAllocator (frees pages in PhyPagePool)
+    // Free weight pages via XTensorAllocator (frees pages in PhysicalPagePool)
     auto& allocator = XTensorAllocator::get_instance();
     size_t num_freed = allocator.free_weight(model_id);
 

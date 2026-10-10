@@ -18,7 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/framework/xtensor/global_xtensor.h"
-#include "core/framework/xtensor/phy_page_pool.h"
+#include "core/virtual_memory/physical_page_pool.h"
 
 namespace xllm {
 
@@ -30,7 +30,7 @@ class XTensorTestPeer final {
     auto& global_tensor = GlobalXTensor::get_instance();
     CHECK(!global_tensor.is_mooncake_registered());
     global_tensor.reset();
-    CHECK(PhyPagePool::get_instance().reset());
+    CHECK(PhysicalPagePool::get_instance().reset());
   }
 };
 

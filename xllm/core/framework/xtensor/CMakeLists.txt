@@ -6,14 +6,10 @@ cc_library(
     xtensor
   HDRS
     options.h
-    phy_page.h
-    phy_page_pool.h
-    virt_page.h
     page_allocator.h
     page_coordinator.h
     global_xtensor.h
     model_memory_store.h
-    xtensor.h
     xtensor_allocator.h
     xtensor_cluster.h
     weight_allocation.h
@@ -43,27 +39,18 @@ cc_library(
     :platform
     :xllm_server
     :xtensor_local
+    :kv_cache_page_state
 )
 
 cc_library(
   NAME
     xtensor_local
   HDRS
-    phy_page.h
-    phy_page_pool.h
-    virt_page.h
     global_xtensor.h
-    xtensor.h
   SRCS
-    phy_page.cpp
-    phy_page_pool.cpp
-    virt_page.cpp
     global_xtensor.cpp
-    xtensor.cpp
   DEPS
-    torch
-    :common
-    :config
-    :platform
+    :virtual_memory_torch
+    :kv_cache_page_state
     glog::glog
 )

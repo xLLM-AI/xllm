@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/xtensor/virt_page.h"
+#include "core/kv_cache/block/kv_cache_page_state.h"
 
 #include <glog/logging.h>
 
@@ -22,17 +22,17 @@ limitations under the License.
 
 namespace xllm {
 
-VirtPage::VirtPage(int64_t page_id, size_t page_size)
-    : page_id_(page_id), page_size_(page_size) {}
+KVCachePageState::KVCachePageState(VirtualPage page) : page_(page) {}
 
-void VirtPage::require_init() const {
+void KVCachePageState::require_init() const {
   CHECK(start_block_.has_value()) << "VirtPage not initialised";
   CHECK(end_block_.has_value()) << "VirtPage not initialised";
   CHECK(num_kv_blocks_.has_value()) << "VirtPage not initialised";
 }
 
-void VirtPage::init(size_t block_mem_size) {
-  auto [start, end] = get_block_range(page_id_, page_size_, block_mem_size);
+void KVCachePageState::init(size_t block_mem_size) {
+  auto [start, end] =
+      get_block_range(page_.page_index, page_.page_size, block_mem_size);
   start_block_ = start;
   end_block_ = end;
   num_kv_blocks_ = end - start;
@@ -44,10 +44,10 @@ void VirtPage::init(size_t block_mem_size) {
   }
 }
 
-std::vector<int64_t> VirtPage::alloc(size_t num_blocks) {
+std::vector<int64_t> KVCachePageState::alloc(size_t num_blocks) {
   require_init();
   if (full()) {
-    throw std::runtime_error("VirtPage " + std::to_string(page_id_) +
+    throw std::runtime_error("VirtPage " + std::to_string(page_.page_index) +
                              " is already full");
   }
 
@@ -58,46 +58,48 @@ std::vector<int64_t> VirtPage::alloc(size_t num_blocks) {
   return block_ids;
 }
 
-void VirtPage::free(int64_t block_id) {
+void KVCachePageState::free(int64_t block_id) {
   require_init();
   free_list_.push_back(block_id);
 }
 
-void VirtPage::free_batch(const std::vector<int64_t>& block_ids) {
+void KVCachePageState::free_batch(const std::vector<int64_t>& block_ids) {
   require_init();
   free_list_.insert(free_list_.end(), block_ids.begin(), block_ids.end());
 }
 
-bool VirtPage::empty() const {
+bool KVCachePageState::empty() const {
   require_init();
   return free_list_.size() == *num_kv_blocks_;
 }
 
-bool VirtPage::full() const {
+bool KVCachePageState::full() const {
   require_init();
   return free_list_.empty();
 }
 
-size_t VirtPage::num_free_blocks() const {
+size_t KVCachePageState::num_free_blocks() const {
   require_init();
   return free_list_.size();
 }
 
-const std::vector<int64_t>& VirtPage::get_free_blocks() const {
+const std::vector<int64_t>& KVCachePageState::get_free_blocks() const {
   require_init();
   return free_list_;
 }
 
-std::pair<int64_t, int64_t> VirtPage::get_block_range(int64_t page_id,
-                                                      size_t page_size,
-                                                      size_t block_mem_size) {
+std::pair<int64_t, int64_t> KVCachePageState::get_block_range(
+    int64_t page_id,
+    size_t page_size,
+    size_t block_mem_size) {
   int64_t start_block =
       (page_id * page_size + block_mem_size - 1) / block_mem_size;
   int64_t end_block = ((page_id + 1) * page_size) / block_mem_size;
   return {start_block, end_block};
 }
 
-size_t VirtPage::get_num_blocks(size_t page_size, size_t block_mem_size) {
+size_t KVCachePageState::get_num_blocks(size_t page_size,
+                                        size_t block_mem_size) {
   return page_size / block_mem_size;
 }
 

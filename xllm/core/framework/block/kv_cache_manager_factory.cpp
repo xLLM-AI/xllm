@@ -25,11 +25,11 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/xtensor/phy_page_pool.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_client.h"
+#include "core/virtual_memory/physical_page_pool.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -49,8 +49,8 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
       get_npu_linear_state_cache_block_limit(model_args.model_type());
   const KVCacheConfig& config = KVCacheConfig::get_instance();
   if (config.enable_xtensor() && !is_multimodal) {
-    const auto& phy_pool = PhyPagePool::get_instance();
-    CHECK(phy_pool.is_initialized()) << "PhyPagePool not initialized";
+    const auto& phy_pool = PhysicalPagePool::get_instance();
+    CHECK(phy_pool.is_initialized()) << "PhysicalPagePool not initialized";
     context.xtensor_cache_size = static_cast<int64_t>(phy_pool.num_total()) *
                                  config.phy_page_granularity_size();
   } else {

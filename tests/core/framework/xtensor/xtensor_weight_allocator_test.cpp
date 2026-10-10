@@ -21,11 +21,15 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <utility>
 #include <vector>
 
 #include "core/framework/xtensor/global_xtensor.h"
-#include "core/framework/xtensor/phy_page_pool.h"
+#include "core/framework/xtensor/weight_allocation.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
+#include "core/virtual_memory/mapped_memory_region.h"
+#include "core/virtual_memory/physical_page_pool.h"
 #include "tests/core/framework/xtensor/xtensor_test_utils.h"
 #include "tests/npu_test_environment.h"
 
@@ -71,8 +75,9 @@ class XTensorWeightAllocatorTest : public ::testing::Test {
 
     const torch::Device device("npu:0");
     XTensorAllocator::get_instance().init(device);
-    auto& pool = PhyPagePool::get_instance();
-    pool.init(device, kPoolPages);
+    auto& pool = PhysicalPagePool::get_instance();
+    const size_t page_size = vmm::get_recommended_granularity(device.index());
+    pool.init(device, kPoolPages, page_size);
     GlobalXTensor::get_instance().init(device);
     resources_initialized_ = true;
     ASSERT_TRUE(GlobalXTensor::get_instance().is_initialized());
@@ -84,8 +89,8 @@ class XTensorWeightAllocatorTest : public ::testing::Test {
       return;
     }
     XTensorAllocator::get_instance().free_weight(kModelId);
-    auto& pool = PhyPagePool::get_instance();
-    pool.free_weight_pages(blocking_page_ids_);
+    auto& pool = PhysicalPagePool::get_instance();
+    pool.release_reserved_pages(blocking_page_ids_);
     EXPECT_EQ(pool.num_available(), kPoolPages);
     XTensorAllocatorTestPeer::release_resources();
     XTensorTestPeer::release_resources();
@@ -96,11 +101,11 @@ class XTensorWeightAllocatorTest : public ::testing::Test {
 };
 
 TEST_F(XTensorWeightAllocatorTest, FragmentedTransferMatchesMappedWeights) {
-  auto& pool = PhyPagePool::get_instance();
+  auto& pool = PhysicalPagePool::get_instance();
   blocking_page_ids_ = pool.allocate_pages_from_right(kPoolPages);
   ASSERT_EQ(blocking_page_ids_.size(), kPoolPages);
   const std::vector<page_id_t> weight_page_ids = {9, 7};
-  pool.free_weight_pages(weight_page_ids);
+  pool.release_reserved_pages(weight_page_ids);
   std::erase_if(blocking_page_ids_,
                 [](page_id_t page_id) { return page_id == 9 || page_id == 7; });
 
@@ -160,8 +165,38 @@ TEST_F(XTensorWeightAllocatorTest, ContiguousAllocationRejectsOverflow) {
   EXPECT_FALSE(allocator.allocate_weight(kModelId, rejected_ptr, /*size=*/1));
 }
 
+TEST_F(XTensorWeightAllocatorTest,
+       FragmentedAllocationOverflowPreservesCursorAndOutput) {
+  auto& pool = PhysicalPagePool::get_instance();
+  const size_t page_size = pool.page_size();
+  auto page_ids = pool.allocate_pages_from_right(/*count=*/1);
+  ASSERT_EQ(page_ids.size(), 1);
+  auto region = std::make_unique<MappedMemoryRegion>(
+      std::move(page_ids), torch::kUInt8, pool.device(), page_size);
+  const uintptr_t base_address = vir_ptr_to_uintptr(region->vaddr());
+  WeightAllocation allocation;
+  allocation.set_fragmented(std::move(region), /*num_pages=*/1, {});
+
+  void* first_ptr = nullptr;
+  ASSERT_TRUE(allocation.allocate(first_ptr, /*size=*/1, page_size));
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(first_ptr), base_address);
+  void* rejected_ptr = nullptr;
+  EXPECT_FALSE(allocation.allocate(
+      rejected_ptr, std::numeric_limits<size_t>::max(), page_size));
+  EXPECT_EQ(rejected_ptr, nullptr);
+  EXPECT_EQ(allocation.current_offset(), 1);
+
+  void* last_ptr = nullptr;
+  ASSERT_TRUE(allocation.allocate(last_ptr, page_size - 1, page_size));
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(last_ptr), base_address + 1);
+  EXPECT_EQ(allocation.current_offset(), page_size);
+  EXPECT_FALSE(allocation.allocate(last_ptr, /*size=*/1, page_size));
+  EXPECT_EQ(allocation.current_offset(), page_size);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(last_ptr), base_address + 1);
+}
+
 TEST_F(XTensorWeightAllocatorTest, ExhaustionDoesNotConsumePages) {
-  auto& pool = PhyPagePool::get_instance();
+  auto& pool = PhysicalPagePool::get_instance();
   auto& allocator = XTensorAllocator::get_instance();
   EXPECT_FALSE(
       allocator.broadcast_alloc_weight_pages(kModelId, kPoolPages + 1));
@@ -180,13 +215,13 @@ TEST_F(XTensorWeightAllocatorTest, FailedFallbackPreservesExistingWeights) {
   ASSERT_EQ(after.size(), 1);
   EXPECT_EQ(after[0].offset, before[0].offset);
   EXPECT_EQ(after[0].size, before[0].size);
-  EXPECT_EQ(PhyPagePool::get_instance().num_available(), kPoolPages - 1);
+  EXPECT_EQ(PhysicalPagePool::get_instance().num_available(), kPoolPages - 1);
   void* weight_ptr = nullptr;
   EXPECT_TRUE(allocator.allocate_weight(kModelId, weight_ptr, /*size=*/1));
 }
 
 TEST_F(XTensorWeightAllocatorTest, KvShortageLeavesEveryLayerUnmapped) {
-  auto& pool = PhyPagePool::get_instance();
+  auto& pool = PhysicalPagePool::get_instance();
   auto& allocator = XTensorAllocator::get_instance();
   const size_t page_size = GlobalXTensor::get_instance().page_size();
   const std::vector<int64_t> dims = {static_cast<int64_t>(page_size)};
@@ -208,7 +243,7 @@ TEST_F(XTensorWeightAllocatorTest, KvShortageLeavesEveryLayerUnmapped) {
     EXPECT_EQ(offsets.second, std::numeric_limits<uint64_t>::max());
   }
 
-  pool.free_weight_pages(blocking_page_ids_);
+  pool.release_reserved_pages(blocking_page_ids_);
   blocking_page_ids_.clear();
   ASSERT_TRUE(allocator.map_to_kv_tensors(kModelId, {/*offset=*/0}));
   EXPECT_EQ(pool.num_available(), kPoolPages - 4);

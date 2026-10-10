@@ -21,16 +21,16 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/virtual_memory/virtual_page.h"
+
 namespace xllm {
 
-/**
- * VirtPage class represents a virtual memory page that can contain multiple
- * blocks. A page manages a range of blocks and tracks which blocks are free.
- */
-class VirtPage {
+// Tracks the KV blocks that fit entirely within a virtual page. Mapping and
+// physical-page ownership belong to the virtual-memory backend.
+class KVCachePageState final {
  public:
-  VirtPage(int64_t page_id, size_t page_size);
-  ~VirtPage() = default;
+  explicit KVCachePageState(VirtualPage page);
+  ~KVCachePageState() = default;
 
   // Initialize the page with block memory size
   void init(size_t block_mem_size);
@@ -56,11 +56,11 @@ class VirtPage {
   // Get list of free blocks
   const std::vector<int64_t>& get_free_blocks() const;
 
-  // Get page id
-  int64_t page_id() const { return page_id_; }
+  // Region-local page index, retained as page_id for allocator compatibility.
+  int64_t page_id() const { return page_.page_index; }
 
   // Get page size
-  size_t page_size() const { return page_size_; }
+  size_t page_size() const { return page_.page_size; }
 
   // Static utility functions
   /**
@@ -87,8 +87,7 @@ class VirtPage {
  private:
   void require_init() const;
 
-  int64_t page_id_;
-  size_t page_size_;
+  VirtualPage page_;
 
   std::optional<int64_t> start_block_;
   std::optional<int64_t> end_block_;

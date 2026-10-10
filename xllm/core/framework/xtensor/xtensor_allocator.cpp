@@ -30,12 +30,12 @@ limitations under the License.
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/xtensor/global_xtensor.h"
-#include "core/framework/xtensor/phy_page.h"
-#include "core/framework/xtensor/phy_page_pool.h"
 #include "core/framework/xtensor/weight_transfer_segments.h"
-#include "core/framework/xtensor/xtensor.h"
 #include "core/platform/device.h"
 #include "core/platform/vmm_api.h"
+#include "core/virtual_memory/mapped_memory_region.h"
+#include "core/virtual_memory/physical_page.h"
+#include "core/virtual_memory/physical_page_pool.h"
 #include "server/xllm_server_registry.h"
 
 namespace xllm {
@@ -76,13 +76,13 @@ void XTensorAllocator::destroy() {
       page_ids.push_back(model.weight.start_page_id() +
                          static_cast<page_id_t>(i));
     }
-    PhyPagePool::get_instance().free_weight_pages(page_ids);
+    PhysicalPagePool::get_instance().release_reserved_pages(page_ids);
     VLOG(1) << "Released weight pages for model " << model_id;
   }
   model_store_.clear();
   cluster_.clear();
   GlobalXTensor::get_instance().reset();
-  CHECK(PhyPagePool::get_instance().reset())
+  CHECK(PhysicalPagePool::get_instance().reset())
       << "Cannot reset physical page pool while pages are in use";
   initialized_ = false;
 }
@@ -145,9 +145,9 @@ void XTensorAllocator::setup_multi_node_xtensor_dist(
     XllmServer* collective_server =
         ServerRegistry::get_instance().register_server(
             cluster_.collective_server_name());
-    CHECK(collective_server->start(
-        collective_service, master_node_addr,
-        cluster_.collective_server_name()))
+    CHECK(collective_server->start(collective_service,
+                                   master_node_addr,
+                                   cluster_.collective_server_name()))
         << "Failed to start XTensor collective server on address: "
         << master_node_addr;
   }
@@ -207,9 +207,11 @@ int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
               << available_memory << ", total_memory=" << total_memory
               << ", cache_size=" << cache_size << ", num_pages=" << num_pages;
 
-    PhyPagePool::get_instance().init(dev_, num_pages);
+    const size_t page_size = static_cast<size_t>(
+        KVCacheConfig::get_instance().phy_page_granularity_size());
+    PhysicalPagePool::get_instance().init(dev_, num_pages, page_size);
 
-    // Initialize GlobalXTensor after PhyPagePool
+    // Initialize GlobalXTensor after PhysicalPagePool
     GlobalXTensor::get_instance().init(dev_);
     LOG(INFO) << "GlobalXTensor initialized (local)";
 
@@ -268,7 +270,7 @@ int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
             << ", cache_size=" << cache_size << ", num_pages=" << num_pages;
 
   if (num_pages <= 0) {
-    LOG(ERROR) << "Insufficient memory for PhyPagePool";
+    LOG(ERROR) << "Insufficient memory for PhysicalPagePool";
     return 0;
   }
 
@@ -283,14 +285,14 @@ int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
   auto init_results = folly::collectAll(init_futures).get();
   for (size_t i = 0; i < init_results.size(); ++i) {
     if (!init_results[i].hasValue() || !init_results[i].value()) {
-      LOG(ERROR) << "Failed to init PhyPagePool on worker: " << i;
+      LOG(ERROR) << "Failed to init PhysicalPagePool on worker: " << i;
       return 0;
     }
   }
 
-  LOG(INFO) << "Successfully initialized PhyPagePool on all "
-            << cluster_.world_size()
-            << " workers with " << num_pages << " pages each";
+  LOG(INFO) << "Successfully initialized PhysicalPagePool on all "
+            << cluster_.world_size() << " workers with " << num_pages
+            << " pages each";
   return num_pages;
 }
 
@@ -344,11 +346,10 @@ bool XTensorAllocator::broadcast_map_to_kv_tensors(
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(model_tp_size);
   for (int32_t r = start_rank;
-       r < end_rank &&
-           r < static_cast<int32_t>(cluster_.clients().size());
-    ++r) {
-    futures.push_back(cluster_.clients()[r]->map_to_kv_tensors_async(
-        model_id, offsets));
+       r < end_rank && r < static_cast<int32_t>(cluster_.clients().size());
+       ++r) {
+    futures.push_back(
+        cluster_.clients()[r]->map_to_kv_tensors_async(model_id, offsets));
   }
 
   // Wait for all futures to complete
@@ -385,11 +386,10 @@ bool XTensorAllocator::broadcast_unmap_from_kv_tensors(
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(model_tp_size);
   for (int32_t r = start_rank;
-       r < end_rank &&
-           r < static_cast<int32_t>(cluster_.clients().size());
-    ++r) {
-    futures.push_back(cluster_.clients()[r]->unmap_from_kv_tensors_async(
-        model_id, offsets));
+       r < end_rank && r < static_cast<int32_t>(cluster_.clients().size());
+       ++r) {
+    futures.push_back(
+        cluster_.clients()[r]->unmap_from_kv_tensors_async(model_id, offsets));
   }
 
   // Wait for all futures to complete
@@ -416,8 +416,8 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
     }
 
     if (reservation.contiguous_start >= 0) {
-      return record_weight_allocation(model_id, reservation.contiguous_start,
-                                      num_pages);
+      return record_weight_allocation(
+          model_id, reservation.contiguous_start, num_pages);
     }
     return record_weight_fallback_allocation(model_id, reservation.page_ids);
   }
@@ -428,8 +428,8 @@ bool XTensorAllocator::broadcast_alloc_weight_pages(const std::string& model_id,
       model_world_size, static_cast<int32_t>(cluster_.clients().size()));
   futures.reserve(num_workers);
   for (int32_t i = 0; i < num_workers; ++i) {
-    futures.push_back(cluster_.clients()[i]->alloc_weight_pages_async(
-        model_id, num_pages));
+    futures.push_back(
+        cluster_.clients()[i]->alloc_weight_pages_async(model_id, num_pages));
   }
 
   // Wait for all futures to complete
@@ -465,8 +465,7 @@ bool XTensorAllocator::broadcast_free_weight_pages(
       model_world_size, static_cast<int32_t>(cluster_.clients().size()));
   futures.reserve(num_workers);
   for (int32_t i = 0; i < num_workers; ++i) {
-    futures.push_back(
-        cluster_.clients()[i]->free_weight_pages_async(model_id));
+    futures.push_back(cluster_.clients()[i]->free_weight_pages_async(model_id));
   }
 
   // Wait for all futures to complete
@@ -513,7 +512,7 @@ std::vector<torch::Tensor> XTensorAllocator::create_kv_tensors_impl_(
   auto& model = get_or_create_model_tensors(model_id);
 
   // Select target tensors based on name
-  std::vector<std::unique_ptr<XTensor>>* target_tensors = nullptr;
+  std::vector<std::unique_ptr<MappedMemoryRegion>>* target_tensors = nullptr;
   if (strcmp(name, "K") == 0) {
     target_tensors = &model.k_tensors;
   } else if (strcmp(name, "V") == 0) {
@@ -578,7 +577,7 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
   CHECK_EQ(tensors->v_tensors.size(), tensors->num_layers);
   CHECK_LE(offsets.size(),
            std::numeric_limits<size_t>::max() / tensors->k_tensors.size() / 2);
-  std::vector<std::pair<XTensor*, offset_t>> targets;
+  std::vector<std::pair<MappedMemoryRegion*, offset_t>> targets;
   targets.reserve(offsets.size() * tensors->k_tensors.size() * 2);
   for (size_t i = 0; i < tensors->k_tensors.size(); ++i) {
     for (offset_t offset : offsets) {
@@ -586,7 +585,7 @@ bool XTensorAllocator::map_to_kv_tensors(const std::string& model_id,
       targets.emplace_back(tensors->v_tensors[i].get(), offset);
     }
   }
-  return XTensor::map_pages(targets);
+  return MappedMemoryRegion::map_pages(targets);
 }
 
 bool XTensorAllocator::unmap_from_kv_tensors(
@@ -639,7 +638,7 @@ bool XTensorAllocator::record_weight_allocation(const std::string& model_id,
 
   auto& global_xtensor = GlobalXTensor::get_instance();
   void* base_ptr = global_xtensor.get_vaddr_by_page_id(start_page_id);
-  auto& pool = PhyPagePool::get_instance();
+  auto& pool = PhysicalPagePool::get_instance();
   CHECK_GE(start_page_id, 0);
   CHECK_LT(static_cast<size_t>(start_page_id), pool.num_total());
   CHECK_LE(num_pages, pool.num_total() - static_cast<size_t>(start_page_id));
@@ -651,7 +650,7 @@ bool XTensorAllocator::record_weight_allocation(const std::string& model_id,
     for (size_t i = 0; i < num_pages; ++i) {
       page_ids.emplace_back(start_page_id + static_cast<page_id_t>(i));
     }
-    pool.free_weight_pages(page_ids);
+    pool.release_reserved_pages(page_ids);
     return false;
   }
 
@@ -660,8 +659,8 @@ bool XTensorAllocator::record_weight_allocation(const std::string& model_id,
   std::vector<WeightSegment> segments = {
       {static_cast<uint64_t>(start_page_id) * page_size,
        static_cast<uint64_t>(num_pages) * page_size}};
-  tensors.weight.set_contiguous(start_page_id, num_pages, base_ptr,
-                                std::move(segments));
+  tensors.weight.set_contiguous(
+      start_page_id, num_pages, base_ptr, std::move(segments));
 
   LOG(INFO) << "XTensorAllocator: recorded weight allocation for model "
             << model_id << ", start_page=" << start_page_id
@@ -674,15 +673,19 @@ bool XTensorAllocator::record_weight_fallback_allocation(
     const std::vector<page_id_t>& page_ids) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  // Create XTensor with the non-contiguous preallocated pages
-  auto weight_xtensor =
-      std::make_unique<XTensor>(page_ids, torch::kBFloat16, dev_);
+  // Create MappedMemoryRegion with the non-contiguous preallocated pages
+  auto weight_xtensor = std::make_unique<MappedMemoryRegion>(
+      page_ids,
+      torch::kBFloat16,
+      dev_,
+      static_cast<size_t>(
+          KVCacheConfig::get_instance().phy_page_granularity_size()));
   auto& global_xtensor = GlobalXTensor::get_instance();
   if (is_null_vir_ptr(weight_xtensor->vaddr()) ||
       !global_xtensor.is_initialized()) {
     LOG(ERROR) << "XTensorAllocator: failed to create XTensor for model "
                << model_id;
-    // The XTensor destructor returns its reserved pages to the pool.
+    // The MappedMemoryRegion destructor returns its reserved pages to the pool.
     return false;
   }
 
@@ -695,8 +698,8 @@ bool XTensorAllocator::record_weight_fallback_allocation(
   for (const auto& [offset, size] : raw_segments) {
     segments.emplace_back(offset, size);
   }
-  tensors.weight.set_fragmented(std::move(weight_xtensor), page_ids.size(),
-                                std::move(segments));
+  tensors.weight.set_fragmented(
+      std::move(weight_xtensor), page_ids.size(), std::move(segments));
 
   LOG(INFO) << "XTensorAllocator: recorded XTensor allocation for model "
             << model_id << ", num_pages=" << page_ids.size()
@@ -737,13 +740,18 @@ std::vector<torch::Tensor> XTensorAllocator::create_tensors_internal_(
     const std::vector<int64_t>& dims,
     torch::Dtype dtype,
     int64_t num_layers,
-    std::vector<std::unique_ptr<XTensor>>& tensors_out) {
+    std::vector<std::unique_ptr<MappedMemoryRegion>>& tensors_out) {
   std::vector<torch::Tensor> tensors;
   tensors.reserve(num_layers);
   tensors_out.reserve(num_layers);
 
   for (int64_t i = 0; i < num_layers; i++) {
-    auto xtensor = std::make_unique<XTensor>(size, dtype, dev_);
+    auto xtensor = std::make_unique<MappedMemoryRegion>(
+        size,
+        dtype,
+        dev_,
+        static_cast<size_t>(
+            KVCacheConfig::get_instance().phy_page_granularity_size()));
     tensors.push_back(xtensor->to_torch_tensor(0, dims));
     tensors_out.push_back(std::move(xtensor));
   }
@@ -755,13 +763,8 @@ void XTensorAllocator::init_device_() {
   device.set_device();
   device.init_device_context();
 
-  // Create a dummy PhyPage to initialize the granularity size
-  // This will set
-  // ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size()
-  auto dummy_page = std::make_shared<PhyPage>(dev_);
-
-  size_t chunk_sz =
-      ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
+  const size_t chunk_sz = vmm::get_recommended_granularity(dev_.index());
+  KVCacheConfig::get_instance().phy_page_granularity_size(chunk_sz);
   LOG(INFO) << "Device initialized with granularity size: " << chunk_sz
             << " bytes";
 }
@@ -777,9 +780,9 @@ size_t XTensorAllocator::free_weight(const std::string& model_id) {
 
   size_t num_pages = tensors->weight.num_pages();
 
-  // Handle XTensor fallback case
+  // Handle MappedMemoryRegion fallback case
   if (tensors->weight.is_fragmented()) {
-    // XTensor's destructor will unmap and free pages
+    // MappedMemoryRegion's destructor will unmap and free pages
     tensors->weight.reset();
     LOG(INFO) << "Freed " << num_pages
               << " weight pages (XTensor fallback) for model " << model_id;
@@ -787,7 +790,7 @@ size_t XTensorAllocator::free_weight(const std::string& model_id) {
     // Normal path: free contiguous pages from GlobalXTensor
     page_id_t start_page = tensors->weight.start_page_id();
 
-    // Build page_ids vector and free via PhyPagePool
+    // Build page_ids vector and free via PhysicalPagePool
     std::vector<page_id_t> page_ids;
     page_ids.reserve(num_pages);
     for (size_t i = 0; i < num_pages; ++i) {
@@ -843,7 +846,7 @@ std::pair<uint64_t, uint64_t> XTensorAllocator::get_global_offsets_for_block(
     return {INVALID_OFFSET, INVALID_OFFSET};
   }
 
-  // Calculate the offset within the XTensor for this block
+  // Calculate the offset within the MappedMemoryRegion for this block
   // The offset must be aligned to page_size
   size_t page_size =
       ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
@@ -933,10 +936,8 @@ bool XTensorAllocator::get_xtensor_offsets(
   }
 
   if (dp_rank < 0 ||
-      dp_rank >=
-          static_cast<int32_t>(cluster_.dp_group_clients().size())) {
-    LOG(ERROR) << "Invalid dp_rank: " << dp_rank
-               << ", dp_group_clients.size()="
+      dp_rank >= static_cast<int32_t>(cluster_.dp_group_clients().size())) {
+    LOG(ERROR) << "Invalid dp_rank: " << dp_rank << ", dp_group_clients.size()="
                << cluster_.dp_group_clients().size();
     return false;
   }

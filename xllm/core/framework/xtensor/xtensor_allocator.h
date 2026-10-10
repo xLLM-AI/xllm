@@ -31,17 +31,19 @@ limitations under the License.
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/page_coordinator.h"
 #include "core/framework/xtensor/xtensor_cluster.h"
-#include "core/framework/xtensor/xtensor.h"
+#include "core/virtual_memory/mapped_memory_region.h"
 
 namespace xllm {
 
 /**
- * XTensorAllocator manages XTensor objects for KV cache and model weights.
+ * XTensorAllocator manages MappedMemoryRegion objects for KV cache and model
+ * weights.
  *
  * This is a singleton class that:
- * - Creates and manages XTensor objects per model (indexed by model_id)
+ * - Creates and manages MappedMemoryRegion objects per model (indexed by
+ * model_id)
  * - Handles distributed XTensor operations via RPC
- * - Coordinates PhyPagePool initialization across workers
+ * - Coordinates PhysicalPagePool initialization across workers
  */
 class XTensorAllocator {
  public:
@@ -95,18 +97,19 @@ class XTensorAllocator {
   bool allocate_weight(const std::string& model_id, void*& ptr, size_t size);
 
   // Free weight allocation (called by sleep), including both contiguous
-  // GlobalXTensor and fallback XTensor allocations.
+  // GlobalXTensor and fallback MappedMemoryRegion allocations.
   // Returns the number of pages freed.
   size_t free_weight(const std::string& model_id);
 
   // ============== Multi-node Setup ==============
 
-  // Multi-node XTensor dist setup (called by rank0 to connect to other workers)
+  // Multi-node MappedMemoryRegion dist setup (called by rank0 to connect to
+  // other workers)
   void setup_multi_node_xtensor_dist(const xtensor::Options& options,
                                      const std::string& master_node_addr,
                                      int32_t dp_size);
 
-  // Initialize PhyPagePool on all workers
+  // Initialize PhysicalPagePool on all workers
   int64_t init_phy_page_pools(double max_memory_utilization = 0.9,
                               int64_t max_cache_size = 0);
 
@@ -138,7 +141,7 @@ class XTensorAllocator {
                                     size_t num_pages);
   bool broadcast_free_weight_pages(const std::string& model_id);
 
-  // Get XTensor dist clients (for distributed operations)
+  // Get MappedMemoryRegion dist clients (for distributed operations)
   const std::vector<std::shared_ptr<XTensorDistClient>>&
   get_xtensor_dist_clients() const {
     return cluster_.clients();
@@ -147,7 +150,7 @@ class XTensorAllocator {
   // Get device
   const torch::Device& device() const { return dev_; }
 
-  // Get XTensor offsets for blocks via RPC (used by Engine in PD
+  // Get MappedMemoryRegion offsets for blocks via RPC (used by Engine in PD
   // disaggregation) Calls worker in the specified DP group to compute offsets
   // Parameters:
   //   dp_rank: Target DP rank (which DP group to query)
@@ -164,7 +167,8 @@ class XTensorAllocator {
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
           layer_offsets);
 
-  // ============== PD Disaggregation Support (XTensor Mode) ==============
+  // ============== PD Disaggregation Support (MappedMemoryRegion Mode)
+  // ==============
 
   // Convert a block_id to GlobalXTensor offsets for KV cache transfer.
   // This is only used when --enable_xtensor=true for PD disaggregation.
@@ -223,7 +227,7 @@ class XTensorAllocator {
       const std::vector<int64_t>& dims,
       torch::Dtype dtype,
       int64_t num_layers,
-      std::vector<std::unique_ptr<XTensor>>& tensors_out);
+      std::vector<std::unique_ptr<MappedMemoryRegion>>& tensors_out);
 
   // Device initialization (platform-agnostic)
   void init_device_();

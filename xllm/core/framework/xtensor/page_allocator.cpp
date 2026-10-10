@@ -447,7 +447,7 @@ void PageAllocator::wait_for_model_transition(
              [&state] { return state.transition == ModelTransition::IDLE; });
 }
 
-std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
+std::unique_ptr<KVCachePageState> PageAllocator::alloc_kv_cache_page(
     const std::string& model_id,
     int32_t dp_rank) {
   std::unique_lock<std::mutex> lock(mtx_);
@@ -477,7 +477,8 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
       cond_.notify_all();
     }
     update_memory_usage();
-    return std::make_unique<VirtPage>(virt_page_id, page_size_);
+    return std::make_unique<KVCachePageState>(
+        VirtualPage{virt_page_id, page_size_});
   }
 
   if (dp_pages.free_virt_page_list.empty() ||
@@ -515,7 +516,8 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
     trigger_preallocation();
   }
 
-  return std::make_unique<VirtPage>(virt_page_id, page_size_);
+  return std::make_unique<KVCachePageState>(
+      VirtualPage{virt_page_id, page_size_});
 }
 
 void PageAllocator::free_kv_cache_pages(

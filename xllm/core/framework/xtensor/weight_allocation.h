@@ -20,12 +20,12 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/framework/xtensor/phy_page.h"
 #include "core/framework/xtensor/weight_transfer_segments.h"
+#include "core/virtual_memory/physical_page.h"
 
 namespace xllm {
 
-class XTensor;
+class MappedMemoryRegion;
 
 // Owns the model-local weight reservation and its logical transfer layout.
 class WeightAllocation final {
@@ -42,7 +42,7 @@ class WeightAllocation final {
                       size_t num_pages,
                       void* base_ptr,
                       std::vector<WeightSegment> segments);
-  void set_fragmented(std::unique_ptr<XTensor> tensor,
+  void set_fragmented(std::unique_ptr<MappedMemoryRegion> tensor,
                       size_t num_pages,
                       std::vector<WeightSegment> segments);
 
@@ -54,7 +54,7 @@ class WeightAllocation final {
   void* base_ptr() const { return base_ptr_; }
   size_t current_offset() const { return current_offset_; }
   bool is_fragmented() const { return tensor_ != nullptr; }
-  XTensor* tensor() const { return tensor_.get(); }
+  MappedMemoryRegion* tensor() const { return tensor_.get(); }
   const std::vector<WeightSegment>& segments() const { return segments_; }
 
  private:
@@ -62,7 +62,7 @@ class WeightAllocation final {
   size_t num_pages_ = 0;
   void* base_ptr_ = nullptr;
   size_t current_offset_ = 0;
-  std::unique_ptr<XTensor> tensor_;
+  std::unique_ptr<MappedMemoryRegion> tensor_;
   std::vector<WeightSegment> segments_;
 };
 

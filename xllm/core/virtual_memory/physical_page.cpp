@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,16 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "phy_page.h"
+#include "core/virtual_memory/physical_page.h"
 
 namespace xllm {
-PhyPage::PhyPage(torch::Device device, page_id_t page_id)
-    : device_(device), page_id_(page_id) {
+PhysicalPage::PhysicalPage(torch::Device device,
+                           size_t page_size,
+                           page_id_t page_id)
+    : device_(device), page_size_(page_size), page_id_(page_id) {
   int32_t device_id = device_.index();
 
   // create a physical memory handle for the device
-  vmm::create_phy_mem_handle(phy_handle_, device_id);
+  vmm::create_phy_mem_handle(phy_handle_, device_id, page_size_);
 }
 
-PhyPage::~PhyPage() { vmm::release_phy_mem_handle(phy_handle_); }
+PhysicalPage::~PhysicalPage() { vmm::release_phy_mem_handle(phy_handle_); }
 }  // namespace xllm

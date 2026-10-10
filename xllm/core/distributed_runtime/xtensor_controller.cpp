@@ -26,8 +26,8 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/xtensor/page_allocator.h"
-#include "core/framework/xtensor/phy_page_pool.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
+#include "core/virtual_memory/physical_page_pool.h"
 
 namespace xllm {
 
@@ -77,8 +77,8 @@ int64_t get_effective_xtensor_weight_size(const ModelLoader& model_loader,
       max_layer_size;
   const int64_t total_weight_size = non_decoder_size + rolling_buffer_size;
 
-  LOG(INFO) << "XTensor rolling_load weight budget: total=" << all_size
-            << ", non_decoder=" << non_decoder_size
+  LOG(INFO) << "MappedMemoryRegion rolling_load weight budget: total="
+            << all_size << ", non_decoder=" << non_decoder_size
             << ", all_decoder=" << all_decoder_size
             << ", max_layer=" << max_layer_size
             << ", rolling_buffer=" << rolling_buffer_size << " ("
@@ -106,15 +106,16 @@ bool XTensorController::initialize_model(const ModelLoader& model_loader,
   }
   if (distributed_worker_manager_ == nullptr ||
       distributed_worker_manager_->get_worker_clients().empty()) {
-    LOG(ERROR) << "No worker clients available to initialize XTensor model.";
+    LOG(ERROR) << "No worker clients available to initialize "
+                  "MappedMemoryRegion model.";
     return false;
   }
 
   auto& page_allocator = PageAllocator::get_instance();
   if (!page_allocator.is_initialized()) {
-    auto& phy_pool = PhyPagePool::get_instance();
+    auto& phy_pool = PhysicalPagePool::get_instance();
     CHECK(phy_pool.is_initialized())
-        << "PhyPagePool must be initialized before PageAllocator";
+        << "PhysicalPagePool must be initialized before PageAllocator";
     const size_t num_phy_pages = phy_pool.num_total();
     const int32_t max_world_size = static_cast<int32_t>(
         distributed_worker_manager_->get_worker_clients().size());
@@ -143,7 +144,7 @@ bool XTensorController::initialize_model(const ModelLoader& model_loader,
   const size_t num_pages = (weight_size_per_tp + page_size - 1) / page_size +
                            kXTensorWeightPageSafetyMargin;
 
-  LOG(INFO) << "XTensor weight allocation: total_weight_size="
+  LOG(INFO) << "MappedMemoryRegion weight allocation: total_weight_size="
             << total_weight_size << ", tp_size=" << tp_size
             << ", weight_size_per_tp=" << weight_size_per_tp
             << ", num_pages=" << num_pages

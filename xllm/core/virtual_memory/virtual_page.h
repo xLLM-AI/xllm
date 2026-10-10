@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,32 +15,16 @@ limitations under the License.
 
 #pragma once
 
-#include <torch/types.h>
-
-#include "platform/vmm_api.h"
+#include <cstddef>
+#include <cstdint>
 
 namespace xllm {
 
-// Page ID type for physical page identification
-using page_id_t = int64_t;
-
-class PhyPage {
- public:
-  // Constructor with page_id (-1 means unassigned)
-  PhyPage(torch::Device device, page_id_t page_id = -1);
-
-  ~PhyPage();
-
-  const torch::Device& device() const { return device_; }
-
-  PhyMemHandle get_phy_handle() const { return phy_handle_; }
-
-  // Get the page ID
-  page_id_t page_id() const { return page_id_; }
-
- private:
-  torch::Device device_;
-  PhyMemHandle phy_handle_;
-  page_id_t page_id_;  // Unique identifier for this page in the pool
+// A page's geometry within one reserved virtual address region. page_index is
+// relative to that region; it does not identify a physical backing page.
+struct VirtualPage {
+  int64_t page_index = 0;
+  size_t page_size = 0;
 };
+
 }  // namespace xllm
