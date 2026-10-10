@@ -1,0 +1,3 @@
+# Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
+recursive-include csrc *.cpp
+global-exclude *.so _xlite_build.json

@@ -22,7 +22,7 @@ import subprocess
 import sys
 from typing import Any
 
-from setuptools import Command, Extension, find_namespace_packages, setup
+from setuptools import Command, Extension, find_namespace_packages, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.install import install
 
@@ -1139,7 +1139,9 @@ if __name__ == "__main__":
         ext_modules=[CMakeExtension("xllm", "xllm/")],
         cmdclass={"build_ext": ExtBuild, "test": test_cmd, "install": InstallWheel, "bdist_wheel": BuildDistWheel},
         options=options,
-        packages=find_namespace_packages(include=["scripts", "scripts.*"]),
+        packages=find_namespace_packages(include=["scripts", "scripts.*"]) + find_packages(where="xllm-kernel/python"),
+        package_dir={"xllm_kernel": "xllm-kernel/python/xllm_kernel"},
+        package_data={"xllm_kernel": ["_xlite*.so", "_xlite_build.json"]},
         zip_safe=False,
         py_modules=[
             "xllm/launch_server",

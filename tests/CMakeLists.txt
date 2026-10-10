@@ -4,6 +4,8 @@ endif()
 
 if(USE_NPU)
   add_subdirectory(python)
+  add_subdirectory("${PROJECT_SOURCE_DIR}/xllm-kernel/test"
+    "${CMAKE_CURRENT_BINARY_DIR}/kernel")
   get_filename_component(_xllm_build_import_root
     "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}" DIRECTORY)
 
