@@ -62,6 +62,7 @@ from xllm.python.model_executor.forward_context import (
 )
 from xllm.python.model_executor.v4_cp_context import DeepseekV4CpContext, build_deepseek_v4_cp_context
 from xllm.python.model_loader import W8A8WeightLoader
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3MLP,
@@ -308,6 +309,8 @@ class DeepseekV4Config:
     cp_rank: int = 0
     dp_size: int = 1
     dp_rank: int = 0
+    layers_to_capture: tuple[int, ...] = ()
+    num_speculative_tokens: int = 0
 
     @classmethod
     def from_dict(cls, d: dict) -> DeepseekV4Config:
@@ -401,6 +404,8 @@ class DeepseekV4Config:
             cp_rank=int(d.get("cp_rank", 0)),
             dp_size=int(d.get("dp_size", 1)),
             dp_rank=int(d.get("dp_rank", 0)),
+            layers_to_capture=tuple(int(layer_id) for layer_id in d.get("layers_to_capture", [])),
+            num_speculative_tokens=int(d.get("num_speculative_tokens", 0)),
         )
 
     def head_split(self) -> tuple[int, int]:
@@ -1713,6 +1718,10 @@ class DeepseekV4Model(_DeepseekV4ForwardSetup, nn.Module):
         self.hc_head_base = nn.Parameter(torch.empty(cfg.hc_mult, dtype=torch.float32, device=device))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32, device=device))
         self.rotary, self.compress_rotary_c4, self.compress_rotary_c128 = _build_rotary_tables(cfg, dtype, device)
+        self.aux_hidden_capture = AuxHiddenCapture(
+            cfg.layers_to_capture,
+            transform=lambda hidden: hidden.mean(dim=1) if hidden.dim() == 3 else hidden,
+        )
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
         """Final HyperConnection head.
@@ -1731,7 +1740,9 @@ class DeepseekV4Model(_DeepseekV4ForwardSetup, nn.Module):
             self.cfg.hc_eps,
         )
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input_ids: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         hidden = self.embed_tokens(input_ids)
         positions = positions.to(torch.int64).contiguous()
         cos_sin_cache = self.rotary.cos_sin_cache
@@ -1746,6 +1757,7 @@ class DeepseekV4Model(_DeepseekV4ForwardSetup, nn.Module):
             # Queries use CP-local rows; MoE token IDs retain global order.
             hidden = cp_ctx.shard_rows(hidden)
             positions = cp_ctx.local_positions
+        aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden)
         hidden = hidden.unsqueeze(1).expand(-1, self.cfg.hc_mult, -1).contiguous()
         residual: torch.Tensor | None = None
         select_layer_rope = getattr(backend, "select_dsa_layer_rope", None)
@@ -1770,13 +1782,18 @@ class DeepseekV4Model(_DeepseekV4ForwardSetup, nn.Module):
                 layer_cos_sin_cache,
                 input_ids,
             )
+            self.aux_hidden_capture.capture_layer(layer_id, hidden, None, aux_hidden_buffer)
             record_layer_event(layer_id)
         if cp_ctx is not None and cp_ctx.enabled():
             hidden = cp_ctx.gather_restore(hidden)
+            if aux_hidden_buffer is not None:
+                aux_hidden_buffer = cp_ctx.gather_restore(aux_hidden_buffer)
+        if aux_hidden_buffer is None and self.cfg.num_speculative_tokens > 0:
+            aux_hidden_buffer = hidden.flatten(1)
         # hc_head: merge the hc_mult streams back into a single hidden vector.
         merged = self._hc_head(residual if residual is not None else hidden)
         hidden = self.norm(merged, None)
-        return hidden
+        return self.aux_hidden_capture.finalize(hidden, aux_hidden_buffer)
 
 
 class DeepseekV4ForCausalLM(PyModelBase):

@@ -16,15 +16,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 
 
 class AuxHiddenCapture:
     """Captures selected layer outputs into a buffer in config order."""
 
-    def __init__(self, layers_to_capture: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        layers_to_capture: tuple[int, ...],
+        transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
         self._layers_to_capture = layers_to_capture
         self._capture_slots = {layer_id: slot_id for slot_id, layer_id in enumerate(layers_to_capture)}
+        self._transform = transform
 
     @property
     def enabled(self) -> bool:
@@ -46,6 +53,8 @@ class AuxHiddenCapture:
         if slot_id is None:
             return
         assert buffer is not None
+        if self._transform is not None:
+            hidden = self._transform(hidden)
         hidden_size = hidden.shape[-1]
         slot = buffer.narrow(-1, slot_id * hidden_size, hidden_size)
         if residual is None:

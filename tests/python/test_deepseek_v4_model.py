@@ -96,6 +96,8 @@ def test_config_from_dict_reads_dsv4_fields() -> None:
     assert cfg.hc_mult == 4
     assert cfg.index_topk == 512
     assert cfg.rope_scaling_factor == 16.0
+    assert cfg.layers_to_capture == ()
+    assert cfg.num_speculative_tokens == 0
 
 
 def test_config_prefers_dsv4_model_args_over_zero_legacy_rope_fields() -> None:
@@ -130,6 +132,19 @@ def test_config_prefers_dsv4_model_args_over_zero_legacy_rope_fields() -> None:
 def test_config_accepts_native_and_legacy_hash_layer_fields(fields: dict, expected: int) -> None:
     cfg = DeepseekV4Config.from_dict({**_DSV4_CONFIG, **fields})
     assert cfg.n_hash_layers == expected
+
+
+def test_config_reads_target_hidden_capture_fields() -> None:
+    cfg = DeepseekV4Config.from_dict(
+        {
+            **_DSV4_CONFIG,
+            "layers_to_capture": [7, 3],
+            "num_speculative_tokens": 4,
+        }
+    )
+
+    assert cfg.layers_to_capture == (7, 3)
+    assert cfg.num_speculative_tokens == 4
 
 
 def test_rotary_cache_matches_cpp_cpu_float32_construction() -> None:
@@ -428,6 +443,176 @@ def test_model_accepts_cp_config() -> None:
 def test_causal_lm_accepts_data_parallelism_config() -> None:
     model = DeepseekV4ForCausalLM({**_DSV4_CONFIG, "dp_size": 2})
     assert model.cfg.dp_size == 2
+
+
+def _capture_test_model(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    layers_to_capture: tuple[int, ...],
+    num_speculative_tokens: int,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+) -> DeepseekV4Model:
+    class Embedding(torch.nn.Module):
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            values = input_ids.to(torch.float32)
+            return torch.stack((values, values + 10.0), dim=-1)
+
+    class Layer(torch.nn.Module):
+        def forward(
+            self,
+            hidden: torch.Tensor,
+            residual: torch.Tensor | None,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            input_ids: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, None]:
+            del residual, positions, cos_sin_cache, input_ids
+            return hidden + 1.0, None
+
+    class Norm(torch.nn.Module):
+        def forward(self, hidden: torch.Tensor, residual: torch.Tensor | None) -> torch.Tensor:
+            del residual
+            return hidden + 5.0
+
+    backend = SimpleNamespace(
+        reset_forward=MagicMock(),
+        prepare_dsa_metadata_for_forward=MagicMock(),
+        select_dsa_layer_rope=MagicMock(),
+        localize_dsa_metadata_for_cp=MagicMock(),
+    )
+    metadata = SimpleNamespace(
+        dsa_graph_mode=False,
+        dsa_metadata=SimpleNamespace(input_rope_by_ratio={}),
+        is_dummy=True,
+        is_prefill=False,
+        is_chunked_prefill=False,
+        q_seq_lens_host=None,
+        kv_seq_lens_host=torch.empty(0, dtype=torch.int32),
+    )
+    monkeypatch.setattr(
+        deepseek_v4,
+        "get_forward_context",
+        lambda: SimpleNamespace(attention_backend=backend, metadata=metadata),
+    )
+    model = DeepseekV4Model.__new__(DeepseekV4Model)
+    torch.nn.Module.__init__(model)
+    model.cfg = SimpleNamespace(
+        cp_size=cp_size,
+        cp_rank=cp_rank,
+        hc_mult=2,
+        compress_ratios=(1,),
+        layers_to_capture=layers_to_capture,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    model.embed_tokens = Embedding()
+    model.layers = torch.nn.ModuleList([Layer()])
+    model.norm = Norm()
+    model.rotary = SimpleNamespace(cos_sin_cache=torch.empty(0))
+    model.compress_rotary_c4 = SimpleNamespace(cos_sin_cache=torch.empty(0))
+    model.compress_rotary_c128 = SimpleNamespace(cos_sin_cache=torch.empty(0))
+    model.aux_hidden_capture = deepseek_v4.AuxHiddenCapture(layers_to_capture)
+    model.attach_rope_tables_to_backend = MagicMock()
+    model._hc_head = MagicMock(side_effect=lambda hidden: hidden.mean(dim=1))
+    model._test_metadata = metadata
+    return model
+
+
+def test_model_returns_pre_hc_hidden_for_mtp_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _capture_test_model(
+        monkeypatch,
+        layers_to_capture=(),
+        num_speculative_tokens=1,
+    )
+    input_ids = torch.tensor([1, 2])
+    embedded = model.embed_tokens(input_ids)
+
+    output = model(input_ids, torch.tensor([0, 1]))
+
+    assert isinstance(output, tuple)
+    hidden, target_hidden = output
+    expected_streams = embedded.unsqueeze(1).expand(-1, 2, -1) + 1.0
+    torch.testing.assert_close(target_hidden, expected_streams.flatten(1))
+    torch.testing.assert_close(hidden, expected_streams.mean(dim=1) + 5.0)
+
+
+def test_layer_capture_takes_precedence_over_mtp_target_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _capture_test_model(
+        monkeypatch,
+        layers_to_capture=(0,),
+        num_speculative_tokens=1,
+    )
+    input_ids = torch.tensor([1, 2])
+    embedded = model.embed_tokens(input_ids)
+
+    output = model(input_ids, torch.tensor([0, 1]))
+
+    assert isinstance(output, tuple)
+    hidden, aux_hidden = output
+    expected_streams = embedded.unsqueeze(1).expand(-1, 2, -1) + 1.0
+    torch.testing.assert_close(aux_hidden, expected_streams.mean(dim=1))
+    torch.testing.assert_close(hidden, expected_streams.mean(dim=1) + 5.0)
+
+
+@pytest.mark.parametrize(
+    ("token_count", "cp_rank"),
+    [(4, 0), (5, 1), (1, 1)],
+)
+def test_layer_capture_restores_global_rows_with_context_parallelism(
+    monkeypatch: pytest.MonkeyPatch,
+    token_count: int,
+    cp_rank: int,
+) -> None:
+    model = _capture_test_model(
+        monkeypatch,
+        layers_to_capture=(0,),
+        num_speculative_tokens=1,
+        cp_size=2,
+        cp_rank=cp_rank,
+    )
+    input_ids = torch.arange(1, token_count + 1)
+    positions = torch.arange(token_count)
+    model._test_metadata.is_dummy = False
+    model._test_metadata.is_prefill = True
+    model._test_metadata.q_seq_lens_host = torch.tensor([token_count])
+    model._test_metadata.kv_seq_lens_host = torch.tensor([token_count])
+    for rotary in (model.rotary, model.compress_rotary_c4, model.compress_rotary_c128):
+        rotary.cos_sin_cache = torch.zeros((token_count, 2))
+
+    embedded = model.embed_tokens(input_ids)
+    expected_streams = embedded.unsqueeze(1).expand(-1, 2, -1) + 1.0
+    expected_aux = expected_streams.mean(dim=1)
+    gathered = iter((expected_streams, expected_aux))
+    collective_inputs: list[torch.Tensor] = []
+
+    class _FakeDistributed:
+        @staticmethod
+        def all_gather_variable(
+            tensor: torch.Tensor,
+            token_counts: list[int],
+            rank: int,
+            group_name: str,
+        ) -> torch.Tensor:
+            del token_counts, rank, group_name
+            collective_inputs.append(tensor)
+            return next(gathered)
+
+    from xllm.python.model_executor import v4_cp_context
+
+    monkeypatch.setattr(v4_cp_context, "distributed", _FakeDistributed())
+
+    output = model(input_ids, positions)
+
+    assert isinstance(output, tuple)
+    hidden, aux_hidden = output
+    torch.testing.assert_close(hidden, expected_aux + 5.0)
+    torch.testing.assert_close(aux_hidden, expected_aux)
+    assert len(collective_inputs) == 2
+    assert collective_inputs[0].shape[0] == collective_inputs[1].shape[0]
 
 
 @pytest.mark.parametrize(
