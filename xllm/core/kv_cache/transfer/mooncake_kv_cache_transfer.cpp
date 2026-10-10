@@ -28,8 +28,6 @@ limitations under the License.
 #include "core/kv_cache/layout/cache_layout_builder.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/push_route.h"
-#include "framework/xtensor/global_xtensor.h"
-#include "framework/xtensor/xtensor_allocator.h"
 #include "util/net.h"
 #include "util/uuid.h"
 
@@ -42,9 +40,9 @@ std::string get_merge_key(const uint64_t dst_cluster_id,
   return std::to_string(dst_cluster_id) + "_" + dst_addr;
 }
 
-void merge_xtensor_offsets(
-    std::vector<XTensorLayerOffsets>& merged_layer_offsets,
-    const std::vector<XTensorLayerOffsets>& layer_offsets) {
+void merge_kv_cache_offsets(
+    std::vector<KVCacheLayerOffsets>& merged_layer_offsets,
+    const std::vector<KVCacheLayerOffsets>& layer_offsets) {
   if (layer_offsets.empty()) {
     return;
   }
@@ -114,15 +112,15 @@ void merge_kv_info(
     kv_info.dst_cluster_id = dst_cluster_id;
     kv_info.dst_addr = dst_addr;
     append_mappings(kv_info.mappings, info.mappings);
-    merge_xtensor_offsets(kv_info.dst_xtensor_layer_offsets,
-                          info.dst_xtensor_layer_offsets);
+    merge_kv_cache_offsets(kv_info.dst_kv_cache_layer_offsets,
+                           info.dst_kv_cache_layer_offsets);
     merged_kv_infos.emplace(key, std::move(kv_info));
     return;
   }
 
   append_mappings(it->second.mappings, info.mappings);
-  merge_xtensor_offsets(it->second.dst_xtensor_layer_offsets,
-                        info.dst_xtensor_layer_offsets);
+  merge_kv_cache_offsets(it->second.dst_kv_cache_layer_offsets,
+                         info.dst_kv_cache_layer_offsets);
 }
 
 }  // namespace
@@ -731,20 +729,24 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
 }
 
 // ============================================================================
-// MooncakeKVCacheTransferXTensor
+// MooncakeKVCacheTransferVirtualMemory
 // ============================================================================
 
-MooncakeKVCacheTransferXTensor::MooncakeKVCacheTransferXTensor(
+MooncakeKVCacheTransferVirtualMemory::MooncakeKVCacheTransferVirtualMemory(
     const int32_t device_id,
     const uint16_t listen_port,
-    const torch::Device& device)
+    const torch::Device& device,
+    std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider)
     : MooncakeKVCacheTransferBase(
           device_id,
           listen_port,
           device,
-          std::make_unique<MooncakeTransferEngine>(listen_port, device)) {}
+          std::make_unique<MooncakeTransferEngine>(listen_port, device)),
+      memory_provider_(std::move(memory_provider)) {
+  CHECK(memory_provider_ != nullptr);
+}
 
-void MooncakeKVCacheTransferXTensor::register_kv_cache(
+void MooncakeKVCacheTransferVirtualMemory::register_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
     const KVCacheShape& kv_cache_shape,
     torch::ScalarType dtype) {
@@ -770,7 +772,8 @@ void MooncakeKVCacheTransferXTensor::register_kv_cache(
   if (pending_registration_context_.has_value()) {
     registration_context = *pending_registration_context_;
     registration_context->layout_family.append("_xtensor");
-    const auto& global_xtensor = GlobalXTensor::get_instance();
+    const KVCacheTransferMemoryRegion memory_region =
+        memory_provider_->memory_region();
     tensor_manifests.reserve(kv_caches.size() * 2);
     for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
       const std::vector<KVCacheTensor> transfer_tensors =
@@ -778,7 +781,8 @@ void MooncakeKVCacheTransferXTensor::register_kv_cache(
       for (const KVCacheTensor& cache_tensor : transfer_tensors) {
         CHECK(cache_tensor.role == KVCacheTensorRole::KEY ||
               cache_tensor.role == KVCacheTensorRole::VALUE)
-            << "XTensor MoonCake transfer supports only K/V tensors, role="
+            << "VirtualMemory MoonCake transfer supports only K/V tensors, "
+               "role="
             << cache_tensor.role.to_string();
         const torch::Tensor& tensor = cache_tensor.tensor;
         CHECK(tensor.defined() && tensor.numel() > 0);
@@ -791,15 +795,15 @@ void MooncakeKVCacheTransferXTensor::register_kv_cache(
         const uint64_t resource_stride =
             tensor_bytes / static_cast<uint64_t>(resource_count);
         CHECK_EQ(resource_stride, static_cast<uint64_t>(size_per_block_))
-            << "XTensor K/V resources must use the allocator block size";
+            << "VirtualMemory K/V resources must use the allocator block size";
 
         KVCacheTensor described_tensor = cache_tensor;
         std::string descriptor_error;
         CHECK(describe_cache_tensor(registration_context->tensor_layout,
                                     &described_tensor,
                                     &descriptor_error))
-            << "Failed to describe XTensor cache tensor, layer=" << layer_id
-            << ", role=" << cache_tensor.role.to_string() << ": "
+            << "Failed to describe VirtualMemory cache tensor, layer="
+            << layer_id << ", role=" << cache_tensor.role.to_string() << ": "
             << descriptor_error;
         CHECK(described_tensor.shard_descriptor.has_value());
 
@@ -817,8 +821,7 @@ void MooncakeKVCacheTransferXTensor::register_kv_cache(
         manifest.contiguous = true;
         manifest.resource_count = static_cast<uint64_t>(resource_count);
         manifest.resource_stride_bytes = resource_stride;
-        manifest.buffer_bytes =
-            static_cast<uint64_t>(global_xtensor.total_size());
+        manifest.buffer_bytes = static_cast<uint64_t>(memory_region.size_bytes);
         manifest.block_token_capacity = static_cast<uint64_t>(std::max<int64_t>(
             registration_context->tensor_layout.block_token_capacity, 0));
         manifest.explicit_resource_offsets = true;
@@ -835,34 +838,32 @@ void MooncakeKVCacheTransferXTensor::register_kv_cache(
   }
 }
 
-void MooncakeKVCacheTransferXTensor::register_kv_cache_impl() {
-  // XTensor mode registers one shared GlobalXTensor memory region.
-  auto& global_xtensor = GlobalXTensor::get_instance();
-  if (!global_xtensor.is_initialized()) {
-    LOG(FATAL) << "GlobalXTensor not initialized in xtensor mode";
-  }
+void MooncakeKVCacheTransferVirtualMemory::register_kv_cache_impl() {
+  const KVCacheTransferMemoryRegion memory_region =
+      memory_provider_->memory_region();
+  CHECK(memory_region.base_address != nullptr);
+  CHECK_GT(memory_region.size_bytes, 0);
 
-  if (global_xtensor.is_mooncake_registered()) {
-    LOG(INFO) << "GlobalXTensor already registered to mooncake, skip";
+  if (memory_provider_->is_registered()) {
+    LOG(INFO) << "GlobalMemoryRegion already registered to mooncake, skip";
     return;
   }
 
-  std::vector<void*> addrs = {global_xtensor.base_vaddr()};
-  std::vector<size_t> lens = {global_xtensor.total_size()};
+  std::vector<void*> addrs = {memory_region.base_address};
+  std::vector<size_t> lens = {memory_region.size_bytes};
   std::vector<uint64_t> buf_bytes = {static_cast<uint64_t>(size_per_block_)};
 
   if (!mooncake_te_->register_memory(addrs, lens, buf_bytes)) {
-    LOG(FATAL) << "register GlobalXTensor failed";
+    LOG(FATAL) << "register GlobalMemoryRegion failed";
   }
 
-  global_xtensor.set_mooncake_registered(true);
+  memory_provider_->mark_registered();
   LOG(INFO) << "register_kv_cache_impl success, total_size="
-            << global_xtensor.total_size()
-            << ", num_pages=" << global_xtensor.num_total_pages()
+            << memory_region.size_bytes
             << ", size_per_block=" << size_per_block_;
 }
 
-bool MooncakeKVCacheTransferXTensor::pull_kv_blocks(
+bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
@@ -872,11 +873,11 @@ bool MooncakeKVCacheTransferXTensor::pull_kv_blocks(
         return mapping.group_id == cache_group_id(BlockType::KV);
       });
   if (mapping_it == mappings.end()) {
-    LOG(ERROR) << "Missing XTensor KV transfer mapping.";
+    LOG(ERROR) << "Missing VirtualMemory KV transfer mapping.";
     return false;
   }
   if (mapping_it->local_ids.size() != mapping_it->remote_ids.size()) {
-    LOG(ERROR) << "XTensor KV transfer mapping size mismatch, local="
+    LOG(ERROR) << "VirtualMemory KV transfer mapping size mismatch, local="
                << mapping_it->local_ids.size()
                << ", remote=" << mapping_it->remote_ids.size();
     return false;
@@ -888,7 +889,7 @@ bool MooncakeKVCacheTransferXTensor::pull_kv_blocks(
   return true;
 }
 
-bool MooncakeKVCacheTransferXTensor::push_kv_blocks(
+bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     bool is_spec_draft,
@@ -899,18 +900,17 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks(
       merged_kv_infos, layer_synchronizer, kv_split_rank, kv_split_size);
 }
 
-bool MooncakeKVCacheTransferXTensor::pull_kv_blocks_impl(
+bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
     const std::string& src_addr,
     const std::vector<uint64_t>& src_blocks,
     const std::vector<uint64_t>& dst_blocks) {
   if (model_id_.empty()) {
-    LOG(ERROR) << "model_id not set for XTensor mode pull";
+    LOG(ERROR) << "model_id not set for VirtualMemory mode pull";
     return false;
   }
 
-  auto& allocator = XTensorAllocator::get_instance();
-
-  // For each layer, convert block_ids to GlobalXTensor offsets and transfer
+  // For each layer, convert block_ids to GlobalMemoryRegion offsets and
+  // transfer
   for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
     std::vector<uint64_t> src_offsets;
     std::vector<uint64_t> dst_offsets;
@@ -918,18 +918,20 @@ bool MooncakeKVCacheTransferXTensor::pull_kv_blocks_impl(
     dst_offsets.reserve(dst_blocks.size() * 2);
 
     for (size_t i = 0; i < src_blocks.size(); ++i) {
-      // Source block -> GlobalXTensor offsets
-      auto [src_k_off, src_v_off] = allocator.get_global_offsets_for_block(
-          model_id_, layer_id, src_blocks[i], size_per_block_);
+      // Source block -> GlobalMemoryRegion offsets
+      auto [src_k_off, src_v_off] =
+          memory_provider_->get_global_offsets_for_block(
+              model_id_, layer_id, src_blocks[i], size_per_block_);
       if (src_k_off == UINT64_MAX || src_v_off == UINT64_MAX) {
         LOG(ERROR) << "Failed to get source offsets for block " << src_blocks[i]
                    << " at layer " << layer_id;
         return false;
       }
 
-      // Destination block -> GlobalXTensor offsets
-      auto [dst_k_off, dst_v_off] = allocator.get_global_offsets_for_block(
-          model_id_, layer_id, dst_blocks[i], size_per_block_);
+      // Destination block -> GlobalMemoryRegion offsets
+      auto [dst_k_off, dst_v_off] =
+          memory_provider_->get_global_offsets_for_block(
+              model_id_, layer_id, dst_blocks[i], size_per_block_);
       if (dst_k_off == UINT64_MAX || dst_v_off == UINT64_MAX) {
         LOG(ERROR) << "Failed to get dest offsets for block " << dst_blocks[i]
                    << " at layer " << layer_id;
@@ -963,13 +965,13 @@ bool MooncakeKVCacheTransferXTensor::pull_kv_blocks_impl(
   return true;
 }
 
-bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
+bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     int32_t kv_split_rank,
     int32_t kv_split_size) {
   if (model_id_.empty()) {
-    LOG(ERROR) << "model_id not set for XTensor mode push";
+    LOG(ERROR) << "model_id not set for VirtualMemory mode push";
     return false;
   }
 
@@ -982,12 +984,10 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
     keys = rotate_dst_rank(keys, kv_split_rank);
   }
 
-  auto& allocator = XTensorAllocator::get_instance();
-
   bool result = true;
   for (int64_t layer_index = 0; layer_index < num_layers_; ++layer_index) {
     if (!layer_synchronizer->synchronize_layer(layer_index)) {
-      LOG(ERROR) << "Synchronize XTensor KV cache layer failed, layer="
+      LOG(ERROR) << "Synchronize VirtualMemory KV cache layer failed, layer="
                  << layer_index;
       result = false;
       continue;
@@ -1002,11 +1002,11 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
             return mapping.group_id == cache_group_id(BlockType::KV);
           });
       if (mapping_it == kv_info.mappings.end()) {
-        LOG(ERROR) << "Missing XTensor KV transfer mapping.";
+        LOG(ERROR) << "Missing VirtualMemory KV transfer mapping.";
         return false;
       }
       if (mapping_it->local_ids.size() != mapping_it->remote_ids.size()) {
-        LOG(ERROR) << "XTensor KV transfer mapping size mismatch, local="
+        LOG(ERROR) << "VirtualMemory KV transfer mapping size mismatch, local="
                    << mapping_it->local_ids.size()
                    << ", remote=" << mapping_it->remote_ids.size();
         return false;
@@ -1016,10 +1016,10 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
         continue;
       }
 
-      // Check if we have XTensor offsets from D-node
-      bool has_dst_offsets = !kv_info.dst_xtensor_layer_offsets.empty() &&
+      // Check if we have VirtualMemory offsets from D-node
+      bool has_dst_offsets = !kv_info.dst_kv_cache_layer_offsets.empty() &&
                              static_cast<size_t>(layer_index) <
-                                 kv_info.dst_xtensor_layer_offsets.size();
+                                 kv_info.dst_kv_cache_layer_offsets.size();
 
       std::vector<uint64_t> src_offsets;
       std::vector<uint64_t> dst_offsets;
@@ -1027,9 +1027,11 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
       dst_offsets.reserve(src_blocks.size() * 2);
 
       for (size_t i = 0; i < src_blocks.size(); ++i) {
-        // Source block -> GlobalXTensor offsets (calculate locally on P-node)
-        auto [src_k_off, src_v_off] = allocator.get_global_offsets_for_block(
-            model_id_, layer_index, src_blocks[i], size_per_block_);
+        // Source block -> GlobalMemoryRegion offsets (calculate locally on
+        // P-node)
+        auto [src_k_off, src_v_off] =
+            memory_provider_->get_global_offsets_for_block(
+                model_id_, layer_index, src_blocks[i], size_per_block_);
         if (src_k_off == UINT64_MAX || src_v_off == UINT64_MAX) {
           LOG(ERROR) << "Failed to get source offsets for block "
                      << src_blocks[i] << " at layer " << layer_index;
@@ -1040,19 +1042,20 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
         uint64_t dst_k_off, dst_v_off;
         if (has_dst_offsets) {
           const auto& layer_offsets =
-              kv_info.dst_xtensor_layer_offsets[layer_index];
+              kv_info.dst_kv_cache_layer_offsets[layer_index];
           if (i < layer_offsets.k_offsets.size() &&
               i < layer_offsets.v_offsets.size()) {
             dst_k_off = layer_offsets.k_offsets[i];
             dst_v_off = layer_offsets.v_offsets[i];
           } else {
-            LOG(ERROR) << "XTensor offset index out of range for block " << i
-                       << " at layer " << layer_index;
+            LOG(ERROR) << "VirtualMemory offset index out of range for block "
+                       << i << " at layer " << layer_index;
             return false;
           }
         } else {
-          LOG(ERROR) << "No XTensor destination offsets from D-node for layer "
-                     << layer_index;
+          LOG(ERROR)
+              << "No VirtualMemory destination offsets from D-node for layer "
+              << layer_index;
           return false;
         }
 
@@ -1063,7 +1066,7 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
         src_offsets.push_back(src_v_off);
         dst_offsets.push_back(dst_v_off);
       }
-      auto* xtensor_te =
+      auto* virtual_memory_engine =
           static_cast<MooncakeTransferEngine*>(mooncake_te_.get());
       ExplicitResourceMapping key_mapping;
       key_mapping.group_id = mapping_it->group_id;
@@ -1090,21 +1093,22 @@ bool MooncakeKVCacheTransferXTensor::push_kv_blocks_impl(
       }
 
       std::vector<ByteRegion> regions;
-      const Status bind_status = xtensor_te->bind_outgoing_regions_explicit(
-          kv_info.dst_addr,
-          {key_mapping, value_mapping},
-          CacheNamespace::MAIN,
-          layer_index,
-          &regions);
+      const Status bind_status =
+          virtual_memory_engine->bind_outgoing_regions_explicit(
+              kv_info.dst_addr,
+              {key_mapping, value_mapping},
+              CacheNamespace::MAIN,
+              layer_index,
+              &regions);
       if (!bind_status.ok()) {
-        LOG(ERROR) << "Bind XTensor KV byte regions failed, layer="
+        LOG(ERROR) << "Bind VirtualMemory KV byte regions failed, layer="
                    << layer_index << ", destination=" << kv_info.dst_addr
                    << ": " << bind_status.message();
         result = false;
         continue;
       }
       const bool ret =
-          regions.empty() || xtensor_te->move_memory_regions(
+          regions.empty() || virtual_memory_engine->move_memory_regions(
                                  kv_info.dst_addr,
                                  regions,
                                  MooncakeTransferEngine::MoveOpcode::WRITE);

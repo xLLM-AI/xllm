@@ -14,7 +14,7 @@ add_subdirectory(sampling)
 add_subdirectory(speculative)
 add_subdirectory(state_dict)
 add_subdirectory(tokenizer)
-add_subdirectory(xtensor)
+add_subdirectory(virtual_memory)
 
 cc_test(
   NAME
@@ -27,7 +27,7 @@ cc_test(
     GTest::gtest_main
 )
 target_link_libraries(hf_model_loader_test PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+  "$<LINK_GROUP:RESCAN,virtual_memory_manager,xllm_server>")
 
 cc_test(
   NAME
@@ -40,4 +40,4 @@ cc_test(
     GTest::gtest_main
 )
 target_link_libraries(causal_lm_test PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+  "$<LINK_GROUP:RESCAN,virtual_memory_manager,xllm_server>")

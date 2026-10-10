@@ -45,7 +45,7 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "framework/request/sequence.h"
-#include "framework/xtensor/page_allocator.h"
+#include "framework/virtual_memory/virtual_memory_allocator.h"
 #include "scheduler/continuous_scheduler.h"
 #include "util/env_var.h"
 #include "util/timer.h"
@@ -234,8 +234,8 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
 
   // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)
-  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
-    auto& page_allocator = PageAllocator::get_instance();
+  if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
+    auto& page_allocator = VirtualMemoryAllocator::get_instance();
     if (page_allocator.is_initialized()) {
       instance_info_.total_phy_pages = page_allocator.get_num_total_phy_pages();
     }
@@ -373,8 +373,8 @@ proto::DisaggPDService_Stub* DisaggPDScheduler::create_rpc_channel(
 }
 
 void DisaggPDScheduler::start_rpc_server() {
-  std::unique_ptr<DisaggPDService> service =
-      std::make_unique<DisaggPDService>(this, engine_, xtensor_controller_);
+  std::unique_ptr<DisaggPDService> service = std::make_unique<DisaggPDService>(
+      this, engine_, virtual_memory_controller_);
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {
@@ -692,21 +692,21 @@ void DisaggPDScheduler::dispatch_requests() {
           // TODO: remote_instances_info_ is not multi-thread safe.
           info.remote_instance_info = remote_instances_info_[selected_instance];
 
-          // XTensor mode: save destination offsets from D-node
-          if (resp.xtensor_layer_offsets_size() > 0) {
-            info.dst_xtensor_layer_offsets.reserve(
-                resp.xtensor_layer_offsets_size());
-            for (const auto& layer_offsets : resp.xtensor_layer_offsets()) {
-              XTensorLayerOffsets layer;
+          // VirtualMemory mode: save destination offsets from D-node
+          if (resp.kv_cache_layer_offsets_size() > 0) {
+            info.dst_kv_cache_layer_offsets.reserve(
+                resp.kv_cache_layer_offsets_size());
+            for (const auto& layer_offsets : resp.kv_cache_layer_offsets()) {
+              KVCacheLayerOffsets layer;
               layer.k_offsets.assign(layer_offsets.k_offsets().begin(),
                                      layer_offsets.k_offsets().end());
               layer.v_offsets.assign(layer_offsets.v_offsets().begin(),
                                      layer_offsets.v_offsets().end());
-              info.dst_xtensor_layer_offsets.emplace_back(std::move(layer));
+              info.dst_kv_cache_layer_offsets.emplace_back(std::move(layer));
             }
-            VLOG(5) << "Received XTensor offsets from D-node for request "
-                    << requests[i]->request_id()
-                    << ", num_layers=" << info.dst_xtensor_layer_offsets.size();
+            VLOG(5) << "Received VirtualMemory offsets from D-node for request "
+                    << requests[i]->request_id() << ", num_layers="
+                    << info.dst_kv_cache_layer_offsets.size();
           }
 
           sequence->kv_state().set_transfer_kv_info(std::move(info));
@@ -1328,7 +1328,7 @@ bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
   const BlockManagerPool* block_manager = engine_->block_manager_pool();
   CHECK(block_manager != nullptr);
   const BlockManagerPool::Options& block_options = block_manager->options();
-  if (block_options.enable_xtensor() ||
+  if (block_options.enable_virtual_memory() ||
       !block_options.manager_types().empty() ||
       (block_options.enable_host_offload() &&
        options_.instance_role() != InstanceRole::DECODE)) {

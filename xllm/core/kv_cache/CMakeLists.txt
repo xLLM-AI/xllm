@@ -6,6 +6,19 @@ add_subdirectory(transfer)
 
 cc_library(
   NAME
+    kv_cache_memory_regions
+  HDRS
+    storage/kv_cache_memory_regions.h
+  SRCS
+    storage/kv_cache_memory_regions.cpp
+  DEPS
+    :virtual_memory_torch
+    glog::glog
+    torch
+)
+
+cc_library(
+  NAME
     deepseek_v4_cache_policy
   HDRS
     layout/deepseek_v4_cache_policy.h
@@ -69,7 +82,6 @@ cc_library(
     :common
     :deepseek_v4_cache_policy
     :kv_cache_estimation
-    :xtensor
     glog::glog
     torch
     $<$<BOOL:${USE_MLU}>:cndrv>

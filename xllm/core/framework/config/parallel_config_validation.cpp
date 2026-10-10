@@ -136,7 +136,7 @@ std::optional<std::string> validate_context_parallel_config(
               .empty() &&
           options.host_blocks_factor() <= 1.0 &&
           !options.enable_kvcache_store() &&
-          !KVCacheConfig::get_instance().enable_xtensor() &&
+          !KVCacheConfig::get_instance().enable_virtual_memory() &&
           !options.enable_disagg_pd() &&
           options.instance_role() == InstanceRole::DEFAULT &&
           options.draft_model_path().value_or("").empty() &&
@@ -145,7 +145,8 @@ std::optional<std::string> validate_context_parallel_config(
           is_npu_model_dcp_capable(resolved_name);
       if (!supported_runtime) {
         return "Qwen3.5 DCP supports only replicated-GQA local NPU TORCH LLM "
-               "generation without CP, EP/EPLB, host/KVStore/XTensor offload, "
+               "generation without CP, EP/EPLB, host/KVStore/VirtualMemory "
+               "offload, "
                "P/D, or speculative decoding, and requires "
                "enable_fia_decode=true";
       }

@@ -1,0 +1,80 @@
+include(cc_binary)
+include(cc_library)
+
+cc_library(
+  NAME
+    virtual_memory_manager
+  HDRS
+    virtual_memory_options.h
+    virtual_memory_allocator.h
+    weight_page_coordinator.h
+    global_memory_region.h
+    model_weight_store.h
+    virtual_memory_manager.h
+    virtual_memory_kv_cache_tensor_allocator.h
+    virtual_memory_kv_cache_transfer_memory_provider.h
+    virtual_memory_cluster.h
+    weight_allocation.h
+    weight_transfer_segments.h
+    ../../distributed_runtime/virtual_memory_dist_client.h
+    ../../distributed_runtime/virtual_memory_dist_service.h
+    ../../distributed_runtime/virtual_memory_dist_server.h
+  SRCS
+    virtual_memory_allocator.cpp
+    weight_page_coordinator.cpp
+    model_weight_store.cpp
+    virtual_memory_manager.cpp
+    virtual_memory_kv_cache_tensor_allocator.cpp
+    virtual_memory_kv_cache_transfer_memory_provider.cpp
+    virtual_memory_cluster.cpp
+    weight_allocation.cpp
+    ../../distributed_runtime/virtual_memory_dist_client.cpp
+    ../../distributed_runtime/virtual_memory_dist_service.cpp
+    ../../distributed_runtime/virtual_memory_dist_server.cpp
+  DEPS
+    torch
+    :minja
+    Folly::folly
+    :common
+    mooncake_store
+    glog::glog
+    proto::xllm_proto
+    :collective_service
+    :platform
+    :xllm_server
+    :global_memory_region
+    :kv_cache_page_state
+    :worker_page_budget
+    :kv_cache_memory_regions
+)
+
+cc_library(
+  NAME
+    global_memory_region
+  HDRS
+    global_memory_region.h
+  SRCS
+    global_memory_region.cpp
+  DEPS
+    :virtual_memory_torch
+    glog::glog
+)
+
+# Weight transfer is a runtime adapter using the shared Mooncake engine.
+set(XLLM_WEIGHT_TRANSFER_SRCS)
+if(USE_NPU)
+  list(APPEND XLLM_WEIGHT_TRANSFER_SRCS mooncake_weight_transfer.cpp)
+endif()
+
+cc_library(
+  NAME
+    mooncake_weight_transfer
+  HDRS
+    mooncake_weight_transfer.h
+  SRCS
+    ${XLLM_WEIGHT_TRANSFER_SRCS}
+  DEPS
+    :virtual_memory_manager
+    :mooncake_transfer_engine
+    torch
+)

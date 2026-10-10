@@ -52,7 +52,7 @@ class ModelLoader {
   }
 
   // Returns the total byte size of non-decoder-layer weights
-  // (embed_tokens, norm, lm_head). Used by rolling load to size XTensor
+  // (embed_tokens, norm, lm_head). Used by rolling load to size VirtualMemory
   // weight pages without including decoder layer weights.
   virtual int64_t get_non_decoder_weight_size() const { return 0; }
 

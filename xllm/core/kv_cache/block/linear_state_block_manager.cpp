@@ -21,7 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "framework/request/sequence.h"
+#include "core/framework/request/sequence.h"
 
 namespace xllm {
 

@@ -48,11 +48,12 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
   context.linear_state_cache_block_limit =
       get_npu_linear_state_cache_block_limit(model_args.model_type());
   const KVCacheConfig& config = KVCacheConfig::get_instance();
-  if (config.enable_xtensor() && !is_multimodal) {
+  if (config.enable_virtual_memory() && !is_multimodal) {
     const auto& phy_pool = PhysicalPagePool::get_instance();
     CHECK(phy_pool.is_initialized()) << "PhysicalPagePool not initialized";
-    context.xtensor_cache_size = static_cast<int64_t>(phy_pool.num_total()) *
-                                 config.phy_page_granularity_size();
+    context.virtual_memory_cache_size =
+        static_cast<int64_t>(phy_pool.num_total()) *
+        config.phy_page_granularity_size();
   } else {
     CHECK(!worker_clients.empty()) << "KV cache estimation requires workers";
     std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;

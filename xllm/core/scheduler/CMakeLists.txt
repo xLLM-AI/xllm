@@ -67,7 +67,7 @@ target_link_libraries(continuous_scheduler_benchmark
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>)
 target_link_libraries(continuous_scheduler_benchmark PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+  "$<LINK_GROUP:RESCAN,virtual_memory_manager,xllm_server>")
 target_link_options(continuous_scheduler_benchmark
                     PRIVATE
                     $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)

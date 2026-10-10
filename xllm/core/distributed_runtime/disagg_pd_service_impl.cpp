@@ -22,7 +22,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/types.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/distributed_runtime/xtensor_controller.h"
+#include "core/distributed_runtime/virtual_memory_controller.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/sampling/json_object_grammar.h"
@@ -35,10 +35,10 @@ namespace xllm {
 DisaggPDServiceImpl::DisaggPDServiceImpl(
     DisaggPDScheduler* scheduler,
     Engine* engine,
-    std::shared_ptr<XTensorController> xtensor_controller)
+    std::shared_ptr<VirtualMemoryController> virtual_memory_controller)
     : scheduler_(scheduler),
       engine_(engine),
-      xtensor_controller_(std::move(xtensor_controller)) {
+      virtual_memory_controller_(std::move(virtual_memory_controller)) {
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
@@ -301,9 +301,9 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         group->set_group_id(cache_group_id(BlockType::LINEAR));
         group->add_ids(static_cast<uint64_t>(linear_state_id));
       }
-      // XTensor mode: calculate and return GlobalXTensor offsets
-      if (xtensor_controller_ != nullptr &&
-          ::xllm::KVCacheConfig::get_instance().enable_xtensor() &&
+      // VirtualMemory mode: calculate and return GlobalMemoryRegion offsets
+      if (virtual_memory_controller_ != nullptr &&
+          ::xllm::KVCacheConfig::get_instance().enable_virtual_memory() &&
           !block_ids.empty()) {
         std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
             layer_offsets;
@@ -311,7 +311,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         bool offsets_available = false;
         if (block_manager != nullptr) {
           offsets_available =
-              xtensor_controller_->get_xtensor_offsets_for_blocks(
+              virtual_memory_controller_->get_kv_cache_offsets_for_blocks(
                   dp_rank,
                   block_ids,
                   static_cast<uint64_t>(block_manager->options().slot_size()),
@@ -322,7 +322,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         if (offsets_available) {
           // Fill proto with per-layer offsets
           for (const auto& [k_offsets, v_offsets] : layer_offsets) {
-            auto* layer_proto = resp->add_xtensor_layer_offsets();
+            auto* layer_proto = resp->add_kv_cache_layer_offsets();
             for (const auto& k_off : k_offsets) {
               layer_proto->add_k_offsets(k_off);
             }
@@ -330,11 +330,11 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
               layer_proto->add_v_offsets(v_off);
             }
           }
-          VLOG(5) << "XTensor offsets added for request " << req.req_id()
+          VLOG(5) << "VirtualMemory offsets added for request " << req.req_id()
                   << ", num_blocks=" << block_ids.size()
                   << ", num_layers=" << layer_offsets.size();
         } else {
-          LOG(WARNING) << "Failed to get XTensor offsets for request "
+          LOG(WARNING) << "Failed to get VirtualMemory offsets for request "
                        << req.req_id();
         }
       }

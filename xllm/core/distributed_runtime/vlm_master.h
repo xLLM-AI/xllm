@@ -37,7 +37,7 @@ limitations under the License.
 
 namespace xllm {
 
-class XTensorController;
+class VirtualMemoryController;
 class KVCacheTransferCoordinator;
 
 class VLMMaster : public Master {
@@ -92,8 +92,8 @@ class VLMMaster : public Master {
  private:
   std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;
 
-  // The LLM draft prepares XTensor pages before loading worker weights.
-  std::unique_ptr<XTensorController> draft_xtensor_controller_;
+  // The LLM draft prepares VirtualMemory pages before loading worker weights.
+  std::unique_ptr<VirtualMemoryController> draft_virtual_memory_controller_;
 
   // Exactly one of these owners is populated for VLM and VLM speculative
   // execution respectively.

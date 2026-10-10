@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <vector>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -64,10 +66,15 @@ DEFINE_int64(max_linear_state_cache_slots,
 
 DEFINE_uint32(xxh3_128bits_seed, 1024, "Default XXH3 128-bits hash seed.");
 
-DEFINE_bool(
-    enable_xtensor,
-    false,
-    "Whether to enable xtensor for model weights with physical page pool.");
+DEFINE_bool(enable_virtual_memory,
+            false,
+            "Whether to enable virtual memory for model weights and KV cache "
+            "with the physical page pool.");
+
+DEFINE_bool(enable_xtensor,
+            false,
+            "Legacy alias for enable_virtual_memory. The canonical flag takes "
+            "precedence when both are explicitly supplied.");
 
 DEFINE_int64(
     phy_page_granularity_size,
@@ -87,7 +94,13 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_in_batch_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_linear_state_cache_slots);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(xxh3_128bits_seed);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_xtensor);
+  const bool use_legacy_flag =
+      config::is_flag_specified("enable_xtensor") &&
+      !config::is_flag_specified("enable_virtual_memory");
+  enable_virtual_memory(use_legacy_flag ? FLAGS_enable_xtensor
+                                        : FLAGS_enable_virtual_memory);
+  FLAGS_enable_virtual_memory = enable_virtual_memory();
+  FLAGS_enable_xtensor = enable_virtual_memory();
   XLLM_CONFIG_ASSIGN_FROM_FLAG(phy_page_granularity_size);
 }
 
@@ -101,7 +114,16 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_in_batch_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_linear_state_cache_slots);
   XLLM_CONFIG_ASSIGN_FROM_JSON(xxh3_128bits_seed);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_xtensor);
+  // Either command-line spelling overrides both JSON spellings. Within JSON,
+  // prefer the canonical key, including an explicitly supplied false value.
+  if (!config::is_flag_specified("enable_virtual_memory") &&
+      !config::is_flag_specified("enable_xtensor")) {
+    enable_virtual_memory(json.value_or<bool>(
+        std::vector<std::string>{"enable_virtual_memory", "enable_xtensor"},
+        enable_virtual_memory()));
+    FLAGS_enable_virtual_memory = enable_virtual_memory();
+    FLAGS_enable_xtensor = enable_virtual_memory();
+  }
   XLLM_CONFIG_ASSIGN_FROM_JSON(phy_page_granularity_size);
 }
 
@@ -127,7 +149,7 @@ void KVCacheConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, xxh3_128bits_seed);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_xtensor);
+      config_json, default_config, enable_virtual_memory);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, phy_page_granularity_size);
 }

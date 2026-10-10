@@ -26,7 +26,7 @@ if(USE_NPU)
   # Let CMake resolve static library cycles without a partial RESCAN group.
   target_link_libraries(mtp_prefix_cache_test PRIVATE
     Folly::folly OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf c_sec
-    :xtensor :xllm_server)
+    :virtual_memory_manager :xllm_server)
   add_dependencies(mtp_prefix_cache_test brpc-static)
 endif()
 
@@ -50,6 +50,6 @@ if(USE_NPU)
 
   target_link_libraries(block_test PRIVATE Folly::folly OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf c_sec)
   target_link_libraries(block_test PRIVATE
-    "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+    "$<LINK_GROUP:RESCAN,virtual_memory_manager,xllm_server>")
   add_dependencies(block_test brpc-static)
 endif()

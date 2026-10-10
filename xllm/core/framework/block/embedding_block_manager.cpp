@@ -19,6 +19,8 @@ limitations under the License.
 
 #include <utility>
 
+#include "core/framework/request/sequence.h"
+
 namespace xllm {
 namespace {
 

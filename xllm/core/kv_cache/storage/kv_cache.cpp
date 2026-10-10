@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kpool_kv_cache_impl.h"
 #include "core/kv_cache/storage/linear_attention_kv_cache_impl.h"
 #include "core/kv_cache/storage/quantized_kv_cache_impl.h"
-#include "framework/xtensor/xtensor_allocator.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
 
@@ -345,39 +344,39 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
     return;
   }
 
-  if (create_options.enable_xtensor()) {
+  if (create_options.enable_virtual_memory()) {
     CHECK(layer_cache_owned.empty())
-        << "XTensor does not support layerwise split.";
+        << "VirtualMemory does not support layerwise split.";
     CHECK(kv_cache_shape.has_key_cache_shape())
-        << "key_cache_shape must be initialized for XTensor mode.";
+        << "key_cache_shape must be initialized for VirtualMemory mode.";
     CHECK(kv_cache_shape.has_value_cache_shape())
-        << "value_cache_shape must be initialized for XTensor mode.";
+        << "value_cache_shape must be initialized for VirtualMemory mode.";
     CHECK(!kv_cache_shape.has_index_cache_shape())
-        << "Only support key and value cache for XTensor mode.";
+        << "Only support key and value cache for VirtualMemory mode.";
     CHECK(!kv_cache_shape.has_conv_cache_shape())
-        << "Only support key and value cache for XTensor mode.";
+        << "Only support key and value cache for VirtualMemory mode.";
     CHECK(!kv_cache_shape.has_ssm_cache_shape())
-        << "Only support key and value cache for XTensor mode.";
+        << "Only support key and value cache for VirtualMemory mode.";
     CHECK(!create_options.model_id().empty())
-        << "model_id must not be empty for XTensor mode.";
+        << "model_id must not be empty for VirtualMemory mode.";
     CHECK(!create_options.enable_linear_attention())
-        << "Linear attention is not supported for XTensor mode.";
+        << "Linear attention is not supported for VirtualMemory mode.";
 
-    XTensorAllocator& allocator = XTensorAllocator::get_instance();
-    std::vector<torch::Tensor> k_tensors =
-        allocator.create_k_tensors(create_options.model_id(),
-                                   kv_cache_shape.key_cache_shape(),
-                                   create_options.dtype(),
-                                   num_layers);
-    std::vector<torch::Tensor> v_tensors =
-        allocator.create_v_tensors(create_options.model_id(),
-                                   kv_cache_shape.value_cache_shape(),
-                                   create_options.dtype(),
-                                   num_layers);
+    CHECK(create_options.tensor_allocator() != nullptr)
+        << "Virtual memory KV cache requires a tensor allocator.";
+    KVCacheTensorAllocator& allocator = *create_options.tensor_allocator();
 
     for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-      torch::Tensor k_tensor = k_tensors[layer_idx];
-      torch::Tensor v_tensor = v_tensors[layer_idx];
+      torch::Tensor k_tensor =
+          allocator.allocate(KVCacheTensorRole::KEY,
+                             kv_cache_shape.key_cache_shape(),
+                             create_options.dtype(),
+                             create_options.device());
+      torch::Tensor v_tensor =
+          allocator.allocate(KVCacheTensorRole::VALUE,
+                             kv_cache_shape.value_cache_shape(),
+                             create_options.dtype(),
+                             create_options.device());
 #if defined(USE_NPU)
       k_tensor = at_npu::native::npu_format_cast(k_tensor, ACL_FORMAT_ND);
       v_tensor = at_npu::native::npu_format_cast(v_tensor, ACL_FORMAT_ND);

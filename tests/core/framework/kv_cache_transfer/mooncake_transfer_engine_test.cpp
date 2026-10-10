@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "framework/kv_cache_transfer/mooncake_transfer_engine.h"
+#include "core/transfer/mooncake_transfer_engine.h"
 
 #include <brpc/controller.h>
 #include <gtest/gtest.h>
@@ -25,20 +25,24 @@ limitations under the License.
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_cache_transfer_memory_provider.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "util/net.h"
@@ -154,6 +158,12 @@ class RecordingMooncakeTransferEngine final : public MooncakeTransferEngine {
     CachePeerMode mode;
   };
 
+  struct RegionMoveCall {
+    std::string remote_addr;
+    std::vector<ByteRegion> regions;
+    MoveOpcode opcode;
+  };
+
   RecordingMooncakeTransferEngine(uint16_t listen_port,
                                   const torch::Device& device)
       : MooncakeTransferEngine(listen_port, device) {}
@@ -171,6 +181,14 @@ class RecordingMooncakeTransferEngine final : public MooncakeTransferEngine {
                           const std::vector<BufferTransferMapping>& mappings,
                           MoveOpcode opcode) override {
     move_calls.emplace_back(MoveCall{remote_addr, mappings, opcode});
+    return move_result;
+  }
+
+  bool move_memory_regions(const std::string& remote_addr,
+                           const std::vector<ByteRegion>& regions,
+                           MoveOpcode opcode) override {
+    region_move_calls.emplace_back(
+        RegionMoveCall{remote_addr, regions, opcode});
     return move_result;
   }
 
@@ -215,10 +233,227 @@ class RecordingMooncakeTransferEngine final : public MooncakeTransferEngine {
   std::vector<std::vector<size_t>> registered_lens;
   std::vector<std::vector<uint64_t>> registered_block_bytes;
   std::vector<MoveCall> move_calls;
+  std::vector<RegionMoveCall> region_move_calls;
   std::vector<PeerCall> peer_calls;
   std::vector<std::string> opened_sessions;
   std::vector<std::string> closed_sessions;
 };
+
+struct MemoryProviderOffsetQuery {
+  std::string model_id;
+  int64_t layer_id;
+  uint64_t block_id;
+  size_t block_size;
+};
+
+struct SharedTransferMemoryState {
+  std::array<uint8_t, 256> backing{};
+  bool registered = false;
+  int32_t registration_count = 0;
+  std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> block_offsets;
+  std::vector<MemoryProviderOffsetQuery> offset_queries;
+};
+
+class RecordingKVCacheTransferMemoryProvider final
+    : public KVCacheTransferMemoryProvider {
+ public:
+  explicit RecordingKVCacheTransferMemoryProvider(
+      std::shared_ptr<SharedTransferMemoryState> state)
+      : state_(std::move(state)) {}
+
+  KVCacheTransferMemoryRegion memory_region() const override {
+    return {state_->backing.data(), state_->backing.size()};
+  }
+
+  bool is_registered() const override { return state_->registered; }
+
+  void mark_registered() override {
+    state_->registered = true;
+    ++state_->registration_count;
+  }
+
+  std::pair<uint64_t, uint64_t> get_global_offsets_for_block(
+      const std::string& model_id,
+      int64_t layer_id,
+      uint64_t block_id,
+      size_t block_size) const override {
+    state_->offset_queries.emplace_back(
+        MemoryProviderOffsetQuery{model_id, layer_id, block_id, block_size});
+    const auto offset_it = state_->block_offsets.find(block_id);
+    if (offset_it == state_->block_offsets.end()) {
+      return {std::numeric_limits<uint64_t>::max(),
+              std::numeric_limits<uint64_t>::max()};
+    }
+    return offset_it->second;
+  }
+
+ private:
+  std::shared_ptr<SharedTransferMemoryState> state_;
+};
+
+void register_virtual_memory_transfer_cache(
+    MooncakeKVCacheTransferVirtualMemory& transfer) {
+  proto::KVCacheShape proto_shape;
+  proto_shape.add_key_cache_shape(4);
+  proto_shape.add_key_cache_shape(2);
+  proto_shape.add_value_cache_shape(4);
+  proto_shape.add_value_cache_shape(2);
+  const KVCacheShape shape = KVCacheShape::from_proto(proto_shape);
+  std::vector<KVCache> caches;
+  caches.reserve(1);
+  caches.emplace_back(
+      KVCacheTensors{torch::zeros({4, 2}, torch::dtype(torch::kFloat32)),
+                     torch::zeros({4, 2}, torch::dtype(torch::kFloat32))});
+  transfer.register_kv_cache(caches, shape, torch::kFloat32);
+}
+
+TEST(MooncakeKVCacheTransferVirtualMemoryTest,
+     RegistersSharedMemoryRegionOnce) {
+  auto shared_state = std::make_shared<SharedTransferMemoryState>();
+  MooncakeKVCacheTransferVirtualMemory first_transfer(
+      /*device_id=*/0,
+      /*listen_port=*/0,
+      torch::Device(torch::kCPU),
+      std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+  auto first_engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  RecordingMooncakeTransferEngine* first_engine_ptr = first_engine.get();
+  first_transfer.mooncake_te_ = std::move(first_engine);
+
+  register_virtual_memory_transfer_cache(first_transfer);
+
+  ASSERT_EQ(first_engine_ptr->registered_addrs.size(), 1U);
+  EXPECT_EQ(first_engine_ptr->registered_addrs[0],
+            std::vector<void*>({shared_state->backing.data()}));
+  ASSERT_EQ(first_engine_ptr->registered_lens.size(), 1U);
+  EXPECT_EQ(first_engine_ptr->registered_lens[0],
+            std::vector<size_t>({shared_state->backing.size()}));
+  ASSERT_EQ(first_engine_ptr->registered_block_bytes.size(), 1U);
+  EXPECT_EQ(first_engine_ptr->registered_block_bytes[0],
+            std::vector<uint64_t>({2 * sizeof(float)}));
+  EXPECT_TRUE(shared_state->registered);
+
+  MooncakeKVCacheTransferVirtualMemory second_transfer(
+      /*device_id=*/0,
+      /*listen_port=*/0,
+      torch::Device(torch::kCPU),
+      std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+  auto second_engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  RecordingMooncakeTransferEngine* second_engine_ptr = second_engine.get();
+  second_transfer.mooncake_te_ = std::move(second_engine);
+
+  register_virtual_memory_transfer_cache(second_transfer);
+
+  EXPECT_TRUE(second_engine_ptr->registered_addrs.empty());
+  EXPECT_TRUE(second_engine_ptr->registered_lens.empty());
+  EXPECT_TRUE(second_engine_ptr->registered_block_bytes.empty());
+  EXPECT_EQ(shared_state->registration_count, 1);
+}
+
+TEST(MooncakeKVCacheTransferVirtualMemoryTest, PullUsesProviderBlockOffsets) {
+  auto shared_state = std::make_shared<SharedTransferMemoryState>();
+  shared_state->block_offsets = {{2, {16, 48}}, {3, {80, 112}}};
+  shared_state->offset_queries.reserve(2);
+  MooncakeKVCacheTransferVirtualMemory transfer(
+      /*device_id=*/0,
+      /*listen_port=*/0,
+      torch::Device(torch::kCPU),
+      std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch::Device(torch::kCPU));
+  RecordingMooncakeTransferEngine* engine_ptr = engine.get();
+  transfer.mooncake_te_ = std::move(engine);
+  register_virtual_memory_transfer_cache(transfer);
+  transfer.set_model_id("provider-test-model");
+  KVTransferMapping mapping;
+  mapping.group_id = cache_group_id(BlockType::KV);
+  mapping.local_ids = {3};
+  mapping.remote_ids = {2};
+
+  ASSERT_TRUE(
+      transfer.pull_kv_blocks(/*src_cluster_id=*/1, "source", {mapping}));
+
+  ASSERT_EQ(shared_state->offset_queries.size(), 2U);
+  EXPECT_EQ(shared_state->offset_queries[0].block_id, 2U);
+  EXPECT_EQ(shared_state->offset_queries[1].block_id, 3U);
+  for (const MemoryProviderOffsetQuery& query : shared_state->offset_queries) {
+    EXPECT_EQ(query.model_id, "provider-test-model");
+    EXPECT_EQ(query.layer_id, 0);
+    EXPECT_EQ(query.block_size, 2 * sizeof(float));
+  }
+  ASSERT_EQ(engine_ptr->region_move_calls.size(), 1U);
+  const RecordingMooncakeTransferEngine::RegionMoveCall& call =
+      engine_ptr->region_move_calls[0];
+  EXPECT_EQ(call.remote_addr, "source");
+  EXPECT_EQ(call.opcode, MooncakeTransferEngine::MoveOpcode::READ);
+  ASSERT_EQ(call.regions.size(), 2U);
+  EXPECT_EQ(call.regions[0].local_offset, 80U);
+  EXPECT_EQ(call.regions[0].remote_offset, 16U);
+  EXPECT_EQ(call.regions[1].local_offset, 112U);
+  EXPECT_EQ(call.regions[1].remote_offset, 48U);
+  for (const ByteRegion& region : call.regions) {
+    EXPECT_EQ(region.local_buffer_id, 0);
+    EXPECT_EQ(region.remote_buffer_id, 0);
+    EXPECT_EQ(region.length, 2 * sizeof(float));
+  }
+}
+
+TEST(MooncakeKVCacheTransferVirtualMemoryTest,
+     PullRejectsInvalidProviderOffsetsBeforeTransfer) {
+  struct InvalidBlockOffsetCase {
+    uint64_t block_id;
+    std::pair<uint64_t, uint64_t> offsets;
+  };
+  constexpr uint64_t kInvalidOffset = std::numeric_limits<uint64_t>::max();
+  const std::array<InvalidBlockOffsetCase, 4> invalid_cases = {
+      {{2, {kInvalidOffset, 48}},
+       {2, {16, kInvalidOffset}},
+       {3, {kInvalidOffset, 112}},
+       {3, {80, kInvalidOffset}}}};
+  for (const InvalidBlockOffsetCase& invalid_case : invalid_cases) {
+    SCOPED_TRACE(testing::Message()
+                 << "block_id=" << invalid_case.block_id
+                 << ", key_offset=" << invalid_case.offsets.first
+                 << ", value_offset=" << invalid_case.offsets.second);
+    auto shared_state = std::make_shared<SharedTransferMemoryState>();
+    shared_state->block_offsets = {{2, {16, 48}}, {3, {80, 112}}};
+    shared_state->block_offsets[invalid_case.block_id] = invalid_case.offsets;
+    shared_state->offset_queries.reserve(2);
+    MooncakeKVCacheTransferVirtualMemory transfer(
+        /*device_id=*/0,
+        /*listen_port=*/0,
+        torch::Device(torch::kCPU),
+        std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+    auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+        /*listen_port=*/0, torch::Device(torch::kCPU));
+    RecordingMooncakeTransferEngine* engine_ptr = engine.get();
+    transfer.mooncake_te_ = std::move(engine);
+    register_virtual_memory_transfer_cache(transfer);
+    transfer.set_model_id("provider-test-model");
+    KVTransferMapping mapping;
+    mapping.group_id = cache_group_id(BlockType::KV);
+    mapping.local_ids = {3};
+    mapping.remote_ids = {2};
+
+    EXPECT_FALSE(
+        transfer.pull_kv_blocks(/*src_cluster_id=*/1, "source", {mapping}));
+
+    EXPECT_TRUE(engine_ptr->region_move_calls.empty());
+    EXPECT_TRUE(engine_ptr->move_calls.empty());
+    const size_t expected_queries = invalid_case.block_id == 2 ? 1 : 2;
+    ASSERT_EQ(shared_state->offset_queries.size(), expected_queries);
+    EXPECT_EQ(shared_state->offset_queries.front().block_id, 2U);
+    EXPECT_EQ(shared_state->offset_queries.back().block_id,
+              invalid_case.block_id);
+    for (const MemoryProviderOffsetQuery& query :
+         shared_state->offset_queries) {
+      EXPECT_EQ(query.model_id, "provider-test-model");
+      EXPECT_EQ(query.layer_id, 0);
+      EXPECT_EQ(query.block_size, 2 * sizeof(float));
+    }
+  }
+}
 
 TEST(MooncakeTransferEngineTest, LinksAllPcpSourcesWithOneActiveOwner) {
   MooncakeTransferEngineCore& core = MooncakeTransferEngineCore::get_instance();

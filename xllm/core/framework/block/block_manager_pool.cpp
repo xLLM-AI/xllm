@@ -20,14 +20,14 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/block/composite_block_manager.h"
+#include "core/framework/block/paged_kv_cache_block_manager.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
-#include "core/kv_cache/block/xtensor_block_manager_impl.h"
 #include "core/virtual_memory/physical_page_pool.h"
 #include "framework/model/model_input_params.h"
-#include "framework/xtensor/page_allocator.h"
+#include "framework/virtual_memory/virtual_memory_allocator.h"
 
 namespace xllm {
 
@@ -51,7 +51,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       .compress_ratios(options_.compress_ratios())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .hasher_type(options_.hasher_type())
-      .enable_xtensor(options_.enable_xtensor())
+      .enable_virtual_memory(options_.enable_virtual_memory())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
       .model_id(options_.model_id())
@@ -62,11 +62,12 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
 
   for (int32_t i = 0; i < dp_size; ++i) {
     // The pool always holds a CompositeBlockManager. Its KV leaf is a flat
-    // BlockManagerImpl, or an XTensorBlockManagerImpl when enable_xtensor (the
-    // builder picks); SWA / C4 / C128 come from manager_types; the LINEAR leaf
-    // is added by the builder when enable_linear_state. The per-sequence
-    // EMBEDDING resource leaf is appended here under the EMBEDDING key when
-    // spec decode needs it. Every leaf is routed by its BlockType.
+    // BlockManagerImpl, or an PagedKVCacheBlockManager when
+    // enable_virtual_memory (the builder picks); SWA / C4 / C128 come from
+    // manager_types; the LINEAR leaf is added by the builder when
+    // enable_linear_state. The per-sequence EMBEDDING resource leaf is appended
+    // here under the EMBEDDING key when spec decode needs it. Every leaf is
+    // routed by its BlockType.
     auto leaves = build_composite_leaves(block_options, /*dp_rank=*/i);
     if (options_.num_speculative_tokens() > 0) {
       // EMBEDDING leaf needs the same concurrency wrapper as the other leaves
@@ -166,7 +167,7 @@ void BlockManagerPool::deallocate(Sequence* sequence) {
   int32_t dp_rank = get_dp_rank(sequence);
   // The composite fans deallocate (with final cache) out across all leaves,
   // including the EMBEDDING resource leaf, the LINEAR leaf, and the (flat or
-  // xtensor) KV leaf.
+  // virtual memory) KV leaf.
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   composite->deallocate_for_sequence(sequence);
@@ -337,7 +338,7 @@ void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
   }
   int32_t dp_rank = get_dp_rank(sequence);
   // Fan out the in-batch publish to the prefix leaf (KV); the composite no-ops
-  // for shapes without a prefix-capable KV leaf (DSV4 / xtensor).
+  // for shapes without a prefix-capable KV leaf (DSV4 / virtual memory).
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
       ->cache_for_sequence(sequence, num_tokens);
 }
@@ -416,18 +417,19 @@ void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
   sequence->reset();
 }
 
-void BlockManagerPool::reserve_xtensor_padding_blocks() {
-  if (!options_.enable_xtensor()) {
+void BlockManagerPool::reserve_padding_blocks() {
+  if (!options_.enable_virtual_memory()) {
     return;
   }
-  // The xtensor KV leaf is a CompositeBlockManager leaf now; fan the padding
-  // reservation out through the composite (no dynamic_cast). Non-xtensor leaves
-  // inherit the empty base default and are no-ops.
+  // The virtual memory KV leaf is a CompositeBlockManager leaf now; fan the
+  // padding reservation out through the composite (no dynamic_cast).
+  // Non-virtual memory leaves inherit the empty base default and are no-ops.
   for (auto& manager : block_managers_) {
-    manager->reserve_xtensor_padding_blocks();
+    manager->reserve_padding_blocks();
   }
-  // Start prealloc thread once (PageAllocator is shared by all managers).
-  PageAllocator::get_instance().start_prealloc_thread();
+  // Start prealloc thread once (VirtualMemoryAllocator is shared by all
+  // managers).
+  VirtualMemoryAllocator::get_instance().start_prealloc_thread();
 }
 
 }  // namespace xllm

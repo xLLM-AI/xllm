@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <iterator>
 
+#include "core/framework/request/sequence.h"
 #include "core/kv_cache/prefix/prefix_cache.h"
 
 namespace xllm {

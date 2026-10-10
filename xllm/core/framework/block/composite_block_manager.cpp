@@ -21,13 +21,14 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/block/embedding_block_manager.h"
+#include "core/framework/block/paged_kv_cache_block_manager.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/request/sequence.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
-#include "core/kv_cache/block/xtensor_block_manager_impl.h"
 
 namespace xllm {
 
@@ -119,28 +120,28 @@ std::unique_ptr<BlockManager> maybe_concurrent(
   return leaf;
 }
 
-// Xtensor VMM manager or flat free-list BlockManagerImpl. Xtensor has no
-// prefix cache.
+// Choose the paged virtual memory manager or the flat free-list manager.
+// The paged manager does not support prefix caching.
 std::unique_ptr<BlockManager> make_kv_leaf(const BlockManager::Options& kv_opts,
                                            int32_t dp_rank) {
-  if (!kv_opts.enable_xtensor()) {
+  if (!kv_opts.enable_virtual_memory()) {
     return std::make_unique<BlockManagerImpl>(kv_opts);
   }
   CHECK_GT(kv_opts.num_layers(), 0)
-      << "num_layers must be set when enable_xtensor is true";
+      << "num_layers must be set when enable_virtual_memory is true";
   CHECK_GT(kv_opts.slot_size(), 0)
-      << "slot_size must be set when enable_xtensor is true";
+      << "slot_size must be set when enable_virtual_memory is true";
   const size_t page_size =
       ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
   // K and V share block size; divide by 2.
   const size_t block_mem_size =
       static_cast<size_t>(kv_opts.block_size()) * kv_opts.slot_size() / 2;
-  return std::make_unique<XTensorBlockManagerImpl>(kv_opts,
-                                                   kv_opts.num_layers(),
-                                                   block_mem_size,
-                                                   page_size,
-                                                   dp_rank,
-                                                   kv_opts.model_id());
+  return std::make_unique<PagedKVCacheBlockManager>(kv_opts,
+                                                    kv_opts.num_layers(),
+                                                    block_mem_size,
+                                                    page_size,
+                                                    dp_rank,
+                                                    kv_opts.model_id());
 }
 
 using ProbeResult = CompositeBlockManager::ProbeResult;
@@ -363,12 +364,12 @@ CompositeBlockManager::LeafMap build_composite_leaves(
   }
 
   if (options.manager_types().empty()) {
-    // Normal / Qwen / xtensor: a single KV leaf. Prefix cache is on only for
-    // the flat (non-xtensor) KV leaf.
+    // Normal / Qwen / virtual memory: a single KV leaf. Prefix cache is on only
+    // for the flat (non-virtual memory) KV leaf.
     BlockManager::Options kv_opts = options;
     kv_opts.block_type(BlockType::KV);
     const bool kv_prefix_cache =
-        prefix_cache_on && !options.enable_xtensor() && kv_participates;
+        prefix_cache_on && !options.enable_virtual_memory() && kv_participates;
     kv_opts.enable_prefix_cache(kv_prefix_cache);
     leaves.emplace(
         BlockType::KV,
@@ -989,9 +990,9 @@ size_t CompositeBlockManager::num_total_blocks() const {
   return leaf == nullptr ? 0 : leaf->leaf->num_total_blocks();
 }
 
-void CompositeBlockManager::reserve_xtensor_padding_blocks() {
+void CompositeBlockManager::reserve_padding_blocks() {
   for (auto& [type, entry] : leaves_) {
-    entry.leaf->reserve_xtensor_padding_blocks();
+    entry.leaf->reserve_padding_blocks();
   }
 }
 

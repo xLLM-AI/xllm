@@ -66,6 +66,7 @@ cc_library(
   HDRS
     kv_cache_transfer.h
     kv_cache_transfer_coordinator_base.h
+    kv_cache_transfer_memory_provider.h
     kv_cache_store.h
     mooncake_store_backend.h
     host_transfer/layout.h
@@ -74,7 +75,6 @@ cc_library(
     host_transfer/compact_transfer.h
     prefetch_result.h
     hierarchy_kv_cache_transfer.h
-    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:../../framework/kv_cache_transfer/mooncake_transfer_engine.h>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.h>
   SRCS
     kv_cache_transfer.cpp
@@ -88,15 +88,14 @@ cc_library(
     host_transfer/compact_load_executor.cpp
     host_transfer/compact_offload_executor.cpp
     hierarchy_kv_cache_transfer.cpp
-    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:../../framework/kv_cache_transfer/mooncake_transfer_engine.cpp>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>
   DEPS
     :cache_layout
     :common
     :kv_cache
+    :mooncake_transfer_engine
     :push_route
     :reshard_planner
-    :xtensor
     :util
     :platform
     $<$<BOOL:${USE_NPU}>:graph>

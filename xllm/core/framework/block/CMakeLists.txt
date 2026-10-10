@@ -1,2 +1,29 @@
-# The block and block_utils targets are defined in core/kv_cache/block.
-# Framework cache adapters remain in that aggregate target during migration.
+include(cc_library)
+
+# Runtime adapters combine cache domain leaves with model and worker lifecycle.
+cc_library(
+  NAME
+    block
+  HDRS
+    embedding_block_manager.h
+    block_manager_pool.h
+    hierarchy_block_manager_pool.h
+    composite_block_manager.h
+    paged_kv_cache_block_manager.h
+  SRCS
+    embedding_block_manager.cpp
+    block_manager_pool.cpp
+    hierarchy_block_manager_pool.cpp
+    composite_block_manager.cpp
+    paged_kv_cache_block_manager.cpp
+  DEPS
+    :kv_cache_block
+    :kv_transfer_completion
+    :virtual_memory_manager
+    :config
+    :common
+    :request
+    glog::glog
+    Folly::folly
+    torch
+)

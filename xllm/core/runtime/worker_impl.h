@@ -47,8 +47,8 @@ limitations under the License.
 #include "runtime/vlm_forward_params.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
-#include "framework/xtensor/mooncake_weight_transfer.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
+#include "framework/virtual_memory/mooncake_weight_transfer.h"
 #include "layers/npu/loader/rolling_load_manager.h"
 #endif
 
@@ -426,8 +426,8 @@ class WorkerImpl {
 
   bool wakeup_local(const WakeupOptions& options);
 
-  // Original xtensor (PageAllocator) sleep path.
-  bool xtensor_sleep(MasterStatus master_status);
+  // Original virtual memory (VirtualMemoryAllocator) sleep path.
+  bool virtual_memory_sleep(MasterStatus master_status);
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   void refresh_cuda_block_copy_runtime_state();

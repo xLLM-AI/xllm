@@ -28,15 +28,15 @@ namespace xllm {
 class Engine;
 class Request;
 class DisaggPDScheduler;
-class XTensorController;
+class VirtualMemoryController;
 
 // a class to handle disagg_pd requests
 class DisaggPDServiceImpl {
  public:
-  explicit DisaggPDServiceImpl(
-      DisaggPDScheduler* scheduler,
-      Engine* engine,
-      std::shared_ptr<XTensorController> xtensor_controller = nullptr);
+  explicit DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
+                               Engine* engine,
+                               std::shared_ptr<VirtualMemoryController>
+                                   virtual_memory_controller = nullptr);
   ~DisaggPDServiceImpl() = default;
 
   virtual void decode_recv_new_requests(const proto::DisaggRequests* request,
@@ -64,7 +64,7 @@ class DisaggPDServiceImpl {
 
   DisaggPDScheduler* scheduler_;  // not owned
   Engine* engine_;                // not owned
-  std::shared_ptr<XTensorController> xtensor_controller_;
+  std::shared_ptr<VirtualMemoryController> virtual_memory_controller_;
   XServiceClient* xservice_client_ = nullptr;
   std::mutex json_object_grammar_mutex_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;

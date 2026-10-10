@@ -24,9 +24,9 @@ namespace xllm {
 DisaggPDService::DisaggPDService(
     DisaggPDScheduler* scheduler,
     Engine* engine,
-    std::shared_ptr<XTensorController> xtensor_controller) {
+    std::shared_ptr<VirtualMemoryController> virtual_memory_controller) {
   disagg_pd_service_impl_ = std::make_unique<DisaggPDServiceImpl>(
-      scheduler, engine, std::move(xtensor_controller));
+      scheduler, engine, std::move(virtual_memory_controller));
 }
 
 void DisaggPDService::ReleaseReservation(

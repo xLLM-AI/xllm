@@ -108,21 +108,21 @@ message DisaggResponse {
   int32 status_code = 2;
   int32 dp_rank = 4;
 
-  // XTensor mode: GlobalXTensor offsets for each block (per-layer)
+  // VirtualMemory mode: GlobalMemoryRegion offsets for each block (per-layer)
   // For each layer, there are K and V offsets for each block.
   // Layout: [layer0_block0_k, layer0_block0_v, layer0_block1_k, layer0_block1_v, ...]
   //         [layer1_block0_k, layer1_block0_v, ...]
-  repeated XTensorLayerOffsets xtensor_layer_offsets = 5;
+  repeated KVCacheLayerOffsets kv_cache_layer_offsets = 5;
   // Group-aware block allocation. group_id is defined by the cache layout and
   // is opaque to the PD protocol.
   repeated KVTransferGroup groups = 20;
 }
 
-// XTensor mode: offsets for one layer
-message XTensorLayerOffsets {
-  // K cache offsets for each block in GlobalXTensor
+// VirtualMemory mode: offsets for one layer
+message KVCacheLayerOffsets {
+  // K cache offsets for each block in GlobalMemoryRegion
   repeated uint64 k_offsets = 1;
-  // V cache offsets for each block in GlobalXTensor
+  // V cache offsets for each block in GlobalMemoryRegion
   repeated uint64 v_offsets = 2;
 }
 

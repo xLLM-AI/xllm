@@ -32,7 +32,7 @@ same basic flow; you do not need to understand them to locate the main path.
 | `Batch`, `BatchGroup` | A `Batch` contains work selected for one execution step. A `BatchGroup` holds the batches for the data-parallel (DP) ranks in that step. | [`batch.h`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/framework/batch/batch.h), [`batch_group.h`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/framework/batch/batch_group.h) |
 | Rank and parallelism | A rank identifies a participant in parallel execution. DP distributes request work across groups; tensor parallelism (TP) splits model tensor computation across ranks; expert parallelism (EP) distributes mixture-of-experts model experts. | [`parallel_state/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/parallel_state) |
 | Continuous batching | The scheduler selects work again on each step, allowing new requests to join while completed requests leave. A batch is not fixed for the full lifetime of its requests. | [`continuous_scheduler.h`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/continuous_scheduler.h) |
-| KV cache, block, prefix cache | The KV cache stores attention state for reuse. Block managers allocate and reclaim cache capacity; prefix caching allows compatible requests to reuse cached prompt prefixes. | [`kv_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/kv_cache), [`block/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/block), [`prefix_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/prefix_cache) |
+| KV cache, block, prefix cache | The KV cache stores attention state for reuse. Block managers allocate and reclaim cache capacity; prefix caching allows compatible requests to reuse cached prompt prefixes. | [`kv_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/kv_cache), [`block/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/block), [`prefix_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/kv_cache/prefix) |
 | Logits and sampling | Logits are the model's scores for vocabulary tokens. Sampling applies generation settings to choose the next token from those scores. | [`sampling/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/sampling) |
 | Master, engine, worker, executor | The master connects request handling and scheduling; the engine coordinates batch execution across workers; a worker manages device-side execution; its executor selects how the model runs. | [`distributed_runtime/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/distributed_runtime), [`runtime/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/runtime) |
 
@@ -56,10 +56,8 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 │   │   │   ├── config/                    # Configuration categories and CLI options
 │   │   │   ├── request/                   # Request, sequence, and stopping state
 │   │   │   ├── batch/                     # Batches and model input builders
-│   │   │   ├── block/                     # Cache allocation and block management
-│   │   │   ├── kv_cache/                  # Cache tensors, layouts, and capacity estimation
-│   │   │   ├── prefix_cache/              # Prompt-prefix reuse
-│   │   │   ├── kv_cache_transfer/         # Cache transfer and external cache storage
+│   │   │   ├── block/                     # Composite cache and runtime allocation adapters
+│   │   │   ├── kv_cache/                  # Model-aware linear-state restore adapter
 │   │   │   ├── model/                     # Model interfaces and input/output types
 │   │   │   ├── model_loader/              # Model configuration and checkpoint loading
 │   │   │   ├── tokenizer/                 # Text and token conversion
@@ -67,7 +65,10 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 │   │   │   ├── sampling/                  # Token sampling and constrained decoding
 │   │   │   ├── parallel_state/            # Parallel groups and communication state
 │   │   │   ├── eplb/                      # Expert parallel load balancing
-│   │   │   └── xtensor/                   # Virtual memory and model memory management
+│   │   │   └── virtual_memory/            # Distributed allocation and weight lifecycle
+│   │   ├── kv_cache/                      # Cache domain: layout, storage, blocks, prefixes, transfer
+│   │   ├── virtual_memory/                # Shared physical pages and virtual mappings
+│   │   ├── transfer/                      # Shared Mooncake transport engine
 │   │   ├── runtime/                       # Workers and model executors
 │   │   ├── layers/                        # C++ neural-network layers
 │   │   ├── kernels/                       # Device operator implementations and wrappers
@@ -105,6 +106,44 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 ├── CMakeLists.txt                         # C++ build configuration
 └── setup.py                               # Python packaging and build entry
 ```
+
+## KV cache and virtual memory boundaries
+
+`core/kv_cache` owns cache layouts, capacity estimation, tensor allocation
+interfaces, KV mapped regions, block/page state, prefix reuse and KV transfer.
+`core/virtual_memory` provides `PhysicalPage`, `PhysicalPagePool`,
+`MappedMemoryRegion`, `SharedPageMapping` and `VirtualPage`; these primitives
+serve both cache and weight memory.
+
+`framework/virtual_memory` coordinates distributed page budgets, RPCs and
+model sleep/wakeup through `VirtualMemoryAllocator` and `VirtualMemoryManager`.
+`ModelWeightStore` and `WeightAllocation` hold weight reservations independently
+of `KVCacheMemoryRegions`. The framework's virtual-memory tensor allocator
+implements `KVCacheTensorAllocator`. Cache transfer obtains the registered
+region and physical offsets through `KVCacheTransferMemoryProvider`; neither
+storage nor transfer depends on the runtime manager. `PagedKVCacheBlockManager`
+stays in framework because it uses distributed allocation and model lifecycle.
+Block value types form `kv_cache_block_types`, used by request and prefix cache.
+Cache domain leaves are compiled by `kv_cache_block`; framework adapters form
+the `block` aggregate target.
+
+`core/transfer` builds the common Mooncake engine independently of cache and
+weight transfer adapters. `WorkerPageBudget` in `distributed_runtime/memory`
+accounts for capacity shared by those domains; the runtime allocator owns its
+synchronization.
+
+The canonical options are `enable_virtual_memory` and
+`virtual_memory_master_node_addr`. Their former `xtensor` spellings remain
+CLI/JSON aliases. Explicit CLI settings override JSON, and canonical names
+win when both spellings occur in the same source. Exported config uses the
+canonical names. The `_xtensor` registration signature remains a stable
+compatibility identifier.
+
+The renamed protobuf messages keep their field numbers. The distributed RPC
+service is now `VirtualMemoryDist`, including `GetKVCacheOffsets`, and the
+heartbeat JSON field is `virtual_memory_info`. Upgrade masters, workers and
+external heartbeat consumers together; the renamed RPC routes do not support
+mixed old/new deployments.
 
 The most useful distinction is between **state**, **scheduling**, and
 **execution**: `framework/` defines requests, batches, caches, and model

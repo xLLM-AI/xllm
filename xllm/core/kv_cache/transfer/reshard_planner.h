@@ -57,7 +57,7 @@ struct StridedRegionTemplate {
   bool remote_explicit_resource_offsets = false;
 };
 
-// Runtime resource binding for page-mapped buffers such as GlobalXTensor.
+// Runtime resource binding for page-mapped buffers such as GlobalMemoryRegion.
 // IDs preserve the logical cache-resource identity used for manifest bounds;
 // offsets are byte bases within the registered MoonCake buffer.
 struct ExplicitResourceMapping {

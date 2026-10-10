@@ -14,4 +14,4 @@ cc_test(
     GTest::gtest_main
 )
 target_link_libraries(profile_graph_warmup_test PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+  "$<LINK_GROUP:RESCAN,virtual_memory_manager,xllm_server>")

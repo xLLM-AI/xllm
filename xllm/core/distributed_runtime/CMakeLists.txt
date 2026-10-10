@@ -36,7 +36,7 @@ cc_library(
     kv_transfer_topology.h
     kv_cache_transfer_coordinator.h
     xservice_client.h
-    xtensor_controller.h
+    virtual_memory_controller.h
   SRCS
     master.cpp
     master_factory.cpp
@@ -59,7 +59,7 @@ cc_library(
     comm_channel.cpp
     shm_channel.cpp
     xservice_client.cpp
-    xtensor_controller.cpp
+    virtual_memory_controller.cpp
   DEPS
     :api_service
     :models
@@ -75,7 +75,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
-    :xtensor
+    :virtual_memory_manager
     absl::strings
     absl::time
 )

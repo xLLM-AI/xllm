@@ -77,9 +77,9 @@ cc_test(
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    xtensor_controller_test
+    virtual_memory_controller_test
   SRCS
-    xtensor_controller_test.cpp
+    virtual_memory_controller_test.cpp
   DEPS
     :distributed_runtime
     GTest::gtest_main

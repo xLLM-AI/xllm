@@ -178,6 +178,8 @@ DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_string(master_node_addr);
 
+DECLARE_string(virtual_memory_master_node_addr);
+
 DECLARE_string(xtensor_master_node_addr);
 
 // --- disaggregated prefill and decode config ---
@@ -286,6 +288,8 @@ DECLARE_int32(max_global_ttft_ms);
 DECLARE_int32(max_global_tpot_ms);
 
 DECLARE_int32(max_requests_per_batch);
+
+DECLARE_bool(enable_virtual_memory);
 
 DECLARE_bool(enable_xtensor);
 

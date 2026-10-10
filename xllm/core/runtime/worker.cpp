@@ -121,7 +121,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
           !options.enable_kvcache_store() &&
           !options.enable_offline_inference() &&
           !EPLBConfig::get_instance().enable_eplb() &&
-          !KVCacheConfig::get_instance().enable_xtensor() &&
+          !KVCacheConfig::get_instance().enable_virtual_memory() &&
           !LoadConfig::get_instance().enable_rolling_load() &&
           parallel_args.layerwise_split_size() == 1)
         << "Task pipeline requires Python LLM or fixed MTP/DFlash/DFlash2 with "

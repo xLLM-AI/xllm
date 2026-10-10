@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <utility>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -39,22 +40,39 @@ class DistributedConfig final {
   void initialize();
 
   [[nodiscard]] static const OptionCategory& option_category() {
-    static const OptionCategory kOptionCategory = {"DISTRIBUTED OPTIONS",
-                                                   {"master_node_addr",
-                                                    "xtensor_master_node_addr",
-                                                    "nnodes",
-                                                    "node_rank",
-                                                    "etcd_addr",
-                                                    "etcd_namespace",
-                                                    "enable_service_routing",
-                                                    "heart_beat_interval",
-                                                    "etcd_ttl"}};
+    static const OptionCategory kOptionCategory = {
+        "DISTRIBUTED OPTIONS",
+        {"master_node_addr",
+         "virtual_memory_master_node_addr",
+         "xtensor_master_node_addr",
+         "nnodes",
+         "node_rank",
+         "etcd_addr",
+         "etcd_namespace",
+         "enable_service_routing",
+         "heart_beat_interval",
+         "etcd_ttl"}};
     return kOptionCategory;
   }
 
   PROPERTY(std::string, master_node_addr) = "127.0.0.1:19888";
 
-  PROPERTY(std::string, xtensor_master_node_addr) = "127.0.0.1:19889";
+  PROPERTY(std::string, virtual_memory_master_node_addr) = "127.0.0.1:19889";
+
+  // Compatibility accessors for the former configuration name.
+  [[nodiscard]] const std::string& xtensor_master_node_addr() const& noexcept {
+    return virtual_memory_master_node_addr();
+  }
+  [[nodiscard]] std::string& xtensor_master_node_addr() & noexcept {
+    return virtual_memory_master_node_addr();
+  }
+  [[nodiscard]] std::string&& xtensor_master_node_addr() && noexcept {
+    return std::move(*this).virtual_memory_master_node_addr();
+  }
+  DistributedConfig& xtensor_master_node_addr(std::string value) & {
+    return virtual_memory_master_node_addr(std::move(value));
+  }
+  void xtensor_master_node_addr(std::string value) && = delete;
 
   PROPERTY(int32_t, nnodes) = 1;
 

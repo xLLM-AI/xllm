@@ -58,7 +58,8 @@ class CompositeBlockManager : public BlockManager {
   //                  budget and select its deepest checkpoint.
   //   SWA_COMPRESSED SWA + C4 + C128. Cross-leaf min, C128-stride clamp,
   //                  SWA tail-continuity, exact-repeat pop.
-  //   UNSUPPORTED    Prefix cache off (xtensor / --enable_prefix_cache=false).
+  //   UNSUPPORTED    Prefix cache off (virtual memory /
+  //   --enable_prefix_cache=false).
   enum class LeafCombination : int8_t {
     FLAT_KV,
     FLAT_KV_LINEAR,
@@ -131,7 +132,7 @@ class CompositeBlockManager : public BlockManager {
   Block allocate() override;
   size_t num_total_blocks() const override;
 
-  void reserve_xtensor_padding_blocks() override;
+  void reserve_padding_blocks() override;
 
   size_t num_sub_managers() const { return leaves_.size(); }
 
@@ -152,12 +153,12 @@ class CompositeBlockManager : public BlockManager {
 };
 
 // Build the leaf map for one DP rank. Base cache-bearing layouts are flat KV,
-// compressed SWA/C4/C128, and xtensor-backed KV.
+// compressed SWA/C4/C128, and virtual memory-backed KV.
 // A LINEAR leaf is added when enable_linear_state (GDN recurrent models).
 // Leaves are wrapped in ConcurrentBlockManagerImpl for disagg-PD / kvcache
 // store. The EMBEDDING leaf is appended by the pool caller only when spec
-// decode needs it. dp_rank is used by the xtensor KV leaf (per-rank VMM page
-// pool).
+// decode needs it. dp_rank is used by the virtual memory KV leaf (per-rank VMM
+// page pool).
 CompositeBlockManager::LeafMap build_composite_leaves(
     const BlockManager::Options& options,
     int32_t dp_rank = 0);
