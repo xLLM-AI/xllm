@@ -130,6 +130,16 @@ uint64_t mix_graph_key(uint64_t hash, uint64_t value) {
   return hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2));
 }
 
+uint64_t adapter_aware_graph_key_impl(
+    uint64_t base_key,
+    const std::vector<uint64_t>& adapter_ids) {
+  uint64_t hash = mix_graph_key(base_key, adapter_ids.size());
+  for (const uint64_t adapter_id : adapter_ids) {
+    hash = mix_graph_key(hash, adapter_id);
+  }
+  return hash;
+}
+
 bool has_non_uniform_positive_dp_token_counts(
     const std::vector<int32_t>& dp_token_counts) {
   if (dp_token_counts.size() <= 1) {
@@ -343,6 +353,11 @@ uint64_t get_mla_graph_key(uint32_t bucket_num_tokens,
   return kMlaGraphKeyMask | (hash & kMlaGraphKeyPayloadMask);
 }
 }  // namespace
+
+uint64_t adapter_aware_graph_key(uint64_t base_key,
+                                 const std::vector<uint64_t>& adapter_ids) {
+  return adapter_aware_graph_key_impl(base_key, adapter_ids);
+}
 
 bool AclGraph::capture(CausalLM* model,
                        const runtime::Options& options,
@@ -1651,22 +1666,28 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
               params, bucket_num_tokens, options_.block_size())) {
         const auto signature = make_static_graph_task_signature(params);
         CHECK(signature.has_value());
-        return static_mtp_graph_task_key(base_key, signature.value());
+        return adapter_aware_graph_key(
+            static_mtp_graph_task_key(base_key, signature.value()),
+            params.adapter_ids);
       }
-      return base_key;
+      return adapter_aware_graph_key(base_key, params.adapter_ids);
     }
-    return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
-           (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
+    const uint64_t base_key = static_cast<uint64_t>(bucket_num_tokens) |
+                              kSpecVerifyGraphKeyMask |
+                              (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
+    return adapter_aware_graph_key(base_key, params.adapter_ids);
   }
   if (model_->supports_mla_graph_kv_bucketing()) {
     const int32_t capture_kv_seq_len_bucket =
         get_mla_capture_kv_seq_len_bucket(params, options_);
-    return specialize_dp_ep_graph_key(
+    const uint64_t base_key = specialize_dp_ep_graph_key(
         get_mla_graph_key(bucket_num_tokens, capture_kv_seq_len_bucket),
         params);
+    return adapter_aware_graph_key(base_key, params.adapter_ids);
   }
-  return specialize_dp_ep_graph_key(static_cast<uint64_t>(bucket_num_tokens),
-                                    params);
+  const uint64_t base_key = specialize_dp_ep_graph_key(
+      static_cast<uint64_t>(bucket_num_tokens), params);
+  return adapter_aware_graph_key(base_key, params.adapter_ids);
 }
 
 }  // namespace xllm::npu

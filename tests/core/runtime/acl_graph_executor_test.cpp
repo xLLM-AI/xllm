@@ -97,6 +97,24 @@ class AclGraphExecutorTestEnvironment : public ::testing::Environment {
 
 namespace xllm {
 
+TEST(AclGraphAdapterKeyTest, SeparatesCapturedLoRARoutes) {
+  constexpr uint64_t kBaseKey = 8;
+  const uint64_t base_route =
+      npu::adapter_aware_graph_key(kBaseKey, std::vector<uint64_t>{0});
+  const uint64_t adapter_one_route =
+      npu::adapter_aware_graph_key(kBaseKey, std::vector<uint64_t>{1});
+  const uint64_t adapter_two_route =
+      npu::adapter_aware_graph_key(kBaseKey, std::vector<uint64_t>{2});
+
+  EXPECT_EQ(adapter_one_route,
+            npu::adapter_aware_graph_key(kBaseKey, std::vector<uint64_t>{1}));
+  EXPECT_NE(base_route, adapter_one_route);
+  EXPECT_NE(adapter_one_route, adapter_two_route);
+  EXPECT_NE(
+      adapter_one_route,
+      npu::adapter_aware_graph_key(kBaseKey, std::vector<uint64_t>{1, 1}));
+}
+
 TEST(DeepseekV4MetadataInputTest, KeepsOnlyDraftRegisteredBlockTables) {
   ModelInputParams target_input_params =
       ModelInputSnapshot(LlmModelParams()).view();
