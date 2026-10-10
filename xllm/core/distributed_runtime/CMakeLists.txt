@@ -6,8 +6,6 @@ if(USE_NPU OR USE_CUDA OR USE_MUSA OR USE_MLU OR USE_DCU)
   add_subdirectory(spawn_worker_server)
 endif()
 
-add_subdirectory(memory)
-
 cc_library(
   NAME 
     distributed_runtime
@@ -36,7 +34,7 @@ cc_library(
     kv_transfer_topology.h
     kv_cache_transfer_coordinator.h
     xservice_client.h
-    virtual_memory_controller.h
+    model_memory_controller.h
   SRCS
     master.cpp
     master_factory.cpp
@@ -59,7 +57,7 @@ cc_library(
     comm_channel.cpp
     shm_channel.cpp
     xservice_client.cpp
-    virtual_memory_controller.cpp
+    model_memory_controller.cpp
   DEPS
     :api_service
     :models
@@ -75,7 +73,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
-    :virtual_memory_manager
+    :model_memory_manager
     absl::strings
     absl::time
 )

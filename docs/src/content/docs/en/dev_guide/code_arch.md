@@ -65,9 +65,11 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 │   │   │   ├── sampling/                  # Token sampling and constrained decoding
 │   │   │   ├── parallel_state/            # Parallel groups and communication state
 │   │   │   ├── eplb/                      # Expert parallel load balancing
-│   │   │   └── virtual_memory/            # Distributed allocation and weight lifecycle
+│   │   │   └── allocator/                 # Model allocation policies and memory backends
+│   │   │       ├── virtual_memory/        # Generic physical pages and virtual mappings
+│   │   │       ├── kv_cache/              # KV cache allocation and mapping backend
+│   │   │       └── weight/                # Weight allocation and transfer adapters
 │   │   ├── kv_cache/                      # Cache domain: layout, storage, blocks, prefixes, transfer
-│   │   ├── virtual_memory/                # Shared physical pages and virtual mappings
 │   │   ├── transfer/                      # Shared Mooncake transport engine
 │   │   ├── runtime/                       # Workers and model executors
 │   │   ├── layers/                        # C++ neural-network layers
@@ -110,27 +112,39 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 ## KV cache and virtual memory boundaries
 
 `core/kv_cache` owns cache layouts, capacity estimation, tensor allocation
-interfaces, KV mapped regions, block/page state, prefix reuse and KV transfer.
-`core/virtual_memory` provides `PhysicalPage`, `PhysicalPagePool`,
-`MappedMemoryRegion`, `SharedPageMapping` and `VirtualPage`; these primitives
-serve both cache and weight memory.
+interfaces, block/page state, prefix reuse and KV transfer. It does not depend
+on framework allocation implementations. `framework/allocator` depends on
+these cache interfaces and owns model allocation policies and concrete memory
+backends.
 
-`framework/virtual_memory` coordinates distributed page budgets, RPCs and
-model sleep/wakeup through `VirtualMemoryAllocator` and `VirtualMemoryManager`.
-`ModelWeightStore` and `WeightAllocation` hold weight reservations independently
-of `KVCacheMemoryRegions`. The framework's virtual-memory tensor allocator
-implements `KVCacheTensorAllocator`. Cache transfer obtains the registered
-region and physical offsets through `KVCacheTransferMemoryProvider`; neither
-storage nor transfer depends on the runtime manager. `PagedKVCacheBlockManager`
+`framework/allocator/virtual_memory` provides `PhysicalPage`, `PhysicalPagePool`,
+`MappedMemoryRegion`, `SharedPageMapping` and `VirtualPage`. These generic
+primitives manage physical pages and virtual address mappings, without cache
+layouts, model state, weight policy or transfer registration.
+
+`ModelPageAllocator` in the allocator root coordinates per-model KV pages and
+weight capacity. Its shared `WorkerPageBudget` and lifecycle lock reserve the
+combined KV and weight demand atomically during wakeup. `ModelMemoryManager`
+coordinates model mappings and allocation operations. `GlobalMemoryRegion`
+stays alongside these facades because it also owns shared transfer registration
+state. The `weight` backend holds `ModelWeightStore`, `WeightAllocation` and
+weight allocation/transfer adapters.
+
+The `allocator/kv_cache` backend holds `KVCacheMemoryRegions` and implements
+`KVCacheTensorAllocator` through `PagedKVCacheTensorAllocator`. Cache transfer
+obtains the registered region and physical offsets through
+`KVCacheTransferMemoryProvider`. Core cache storage and transfer consume these
+interfaces without depending on the model memory manager. `PagedKVCacheBlockManager`
 stays in framework because it uses distributed allocation and model lifecycle.
 Block value types form `kv_cache_block_types`, used by request and prefix cache.
 Cache domain leaves are compiled by `kv_cache_block`; framework adapters form
 the `block` aggregate target.
 
+`distributed_runtime` owns `ModelMemoryController`, `ModelMemoryCluster` and
+the model memory RPC client, service and server. It orchestrates distributed
+workers; page capacity accounting belongs to the allocator.
 `core/transfer` builds the common Mooncake engine independently of cache and
-weight transfer adapters. `WorkerPageBudget` in `distributed_runtime/memory`
-accounts for capacity shared by those domains; the runtime allocator owns its
-synchronization.
+weight transfer adapters.
 
 The canonical options are `enable_virtual_memory` and
 `virtual_memory_master_node_addr`. Their former `xtensor` spellings remain
@@ -140,10 +154,10 @@ canonical names. The `_xtensor` registration signature remains a stable
 compatibility identifier.
 
 The renamed protobuf messages keep their field numbers. The distributed RPC
-service is now `VirtualMemoryDist`, including `GetKVCacheOffsets`, and the
-heartbeat JSON field is `virtual_memory_info`. Upgrade masters, workers and
-external heartbeat consumers together; the renamed RPC routes do not support
-mixed old/new deployments.
+service in `proto/model_memory_dist.proto` is `ModelMemoryDist`, including
+`GetKVCacheOffsets`, and the heartbeat JSON field is `virtual_memory_info`.
+Upgrade masters, workers and external heartbeat consumers together; the renamed
+RPC routes do not support mixed old/new deployments.
 
 The most useful distinction is between **state**, **scheduling**, and
 **execution**: `framework/` defines requests, batches, caches, and model

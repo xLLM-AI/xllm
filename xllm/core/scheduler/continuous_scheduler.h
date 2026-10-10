@@ -50,7 +50,7 @@ class DistributedWorkerManager;
 class RequestPriorityQueue;
 class SchedulerConfig;
 class SchedulerPolicy;
-class VirtualMemoryController;
+class ModelMemoryController;
 struct SchedulerState;
 
 struct DecodeRestoreEntry {
@@ -131,8 +131,7 @@ class ContinuousSchedulerBase : public Scheduler {
       const Options& options,
       StepCallback step_callback,
       ResultCallback result_callback,
-      std::shared_ptr<VirtualMemoryController> virtual_memory_controller =
-          nullptr,
+      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
           nullptr);
 
@@ -168,7 +167,7 @@ class ContinuousSchedulerBase : public Scheduler {
   // the engine to run the batch
   Engine* resource_engine_;
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
-  std::shared_ptr<VirtualMemoryController> virtual_memory_controller_;
+  std::shared_ptr<ModelMemoryController> model_memory_controller_;
 
   StepCallback step_callback_;
   ResultCallback result_callback_;
@@ -290,8 +289,7 @@ class ContinuousScheduler : public ContinuousSchedulerBase {
   ContinuousScheduler(
       EngineType* engine,
       const Options& options,
-      std::shared_ptr<VirtualMemoryController> virtual_memory_controller =
-          nullptr,
+      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
           nullptr)
     requires requires(EngineType* typed_engine, BatchGroup& batch) {
@@ -305,7 +303,7 @@ class ContinuousScheduler : public ContinuousSchedulerBase {
             [engine](BatchGroup& batch) {
               engine->update_last_step_result(batch);
             },
-            std::move(virtual_memory_controller),
+            std::move(model_memory_controller),
             std::move(distributed_worker_manager)),
         engine_(engine) {}
 
@@ -321,8 +319,7 @@ class ContinuousScheduler : public ContinuousSchedulerBase {
   ContinuousScheduler(
       TargetEngine* engine,
       const Options& options,
-      std::shared_ptr<VirtualMemoryController> virtual_memory_controller =
-          nullptr,
+      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
           nullptr)
       : ContinuousSchedulerBase(
@@ -332,7 +329,7 @@ class ContinuousScheduler : public ContinuousSchedulerBase {
             [engine](BatchGroup& batch) {
               engine->update_last_step_result(batch);
             },
-            std::move(virtual_memory_controller),
+            std::move(model_memory_controller),
             std::move(distributed_worker_manager)),
         engine_(static_cast<Engine*>(engine)) {}
 

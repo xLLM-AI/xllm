@@ -22,7 +22,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/types.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/distributed_runtime/virtual_memory_controller.h"
+#include "core/distributed_runtime/model_memory_controller.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/sampling/json_object_grammar.h"
@@ -35,10 +35,10 @@ namespace xllm {
 DisaggPDServiceImpl::DisaggPDServiceImpl(
     DisaggPDScheduler* scheduler,
     Engine* engine,
-    std::shared_ptr<VirtualMemoryController> virtual_memory_controller)
+    std::shared_ptr<ModelMemoryController> model_memory_controller)
     : scheduler_(scheduler),
       engine_(engine),
-      virtual_memory_controller_(std::move(virtual_memory_controller)) {
+      model_memory_controller_(std::move(model_memory_controller)) {
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
@@ -302,7 +302,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         group->add_ids(static_cast<uint64_t>(linear_state_id));
       }
       // VirtualMemory mode: calculate and return GlobalMemoryRegion offsets
-      if (virtual_memory_controller_ != nullptr &&
+      if (model_memory_controller_ != nullptr &&
           ::xllm::KVCacheConfig::get_instance().enable_virtual_memory() &&
           !block_ids.empty()) {
         std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
@@ -311,7 +311,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         bool offsets_available = false;
         if (block_manager != nullptr) {
           offsets_available =
-              virtual_memory_controller_->get_kv_cache_offsets_for_blocks(
+              model_memory_controller_->get_kv_cache_offsets_for_blocks(
                   dp_rank,
                   block_ids,
                   static_cast<uint64_t>(block_manager->options().slot_size()),

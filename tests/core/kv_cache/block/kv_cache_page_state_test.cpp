@@ -25,7 +25,7 @@ namespace xllm {
 namespace {
 
 TEST(KVCachePageStateTest, PaddingBlockIsFirstAndRemovedFromAvailableBlocks) {
-  KVCachePageState page(VirtualPage{/*page_index=*/0, /*page_size=*/16});
+  KVCachePageState page(/*page_id=*/0, /*page_size=*/16);
   page.init(/*block_mem_size=*/4);
   EXPECT_TRUE(page.empty());
   EXPECT_EQ(page.alloc(/*num_blocks=*/1), std::vector<int64_t>({0}));
@@ -36,7 +36,7 @@ TEST(KVCachePageStateTest, PaddingBlockIsFirstAndRemovedFromAvailableBlocks) {
 }
 
 TEST(KVCachePageStateTest, AllocationAndBatchFreeRestorePageCapacity) {
-  KVCachePageState page(VirtualPage{/*page_index=*/1, /*page_size=*/16});
+  KVCachePageState page(/*page_id=*/1, /*page_size=*/16);
   page.init(/*block_mem_size=*/4);
   std::vector<int64_t> blocks = page.alloc(/*num_blocks=*/10);
   EXPECT_EQ(blocks, std::vector<int64_t>({4, 5, 6, 7}));
@@ -51,7 +51,7 @@ TEST(KVCachePageStateTest,
      NonDivisibleGeometrySkipsBlocksCrossingPageBoundaries) {
   std::vector<int64_t> allocated_blocks;
   for (int64_t page_id = 0; page_id < 4; ++page_id) {
-    KVCachePageState page(VirtualPage{page_id, /*page_size=*/12});
+    KVCachePageState page(page_id, /*page_size=*/12);
     page.init(/*block_mem_size=*/5);
     std::vector<int64_t> blocks = page.alloc(/*num_blocks=*/12);
     for (int64_t block : blocks) {
@@ -67,7 +67,7 @@ TEST(KVCachePageStateTest,
 }
 
 TEST(KVCachePageStateTest, SingleFreeMakesAllocatedBlockAvailableAgain) {
-  KVCachePageState page(VirtualPage{/*page_index=*/1, /*page_size=*/12});
+  KVCachePageState page(/*page_id=*/1, /*page_size=*/12);
   page.init(/*block_mem_size=*/5);
   EXPECT_EQ(page.num_free_blocks(), 1);
   EXPECT_EQ(page.alloc(/*num_blocks=*/1), std::vector<int64_t>({3}));
@@ -78,7 +78,7 @@ TEST(KVCachePageStateTest, SingleFreeMakesAllocatedBlockAvailableAgain) {
 }
 
 TEST(KVCachePageStateTest, FullPageRejectsAllocationAndReusesFreeOrder) {
-  KVCachePageState page(VirtualPage{/*page_index=*/0, /*page_size=*/16});
+  KVCachePageState page(/*page_id=*/0, /*page_size=*/16);
   page.init(/*block_mem_size=*/4);
   EXPECT_EQ(page.alloc(/*num_blocks=*/4), std::vector<int64_t>({0, 1, 2, 3}));
   EXPECT_THROW(page.alloc(/*num_blocks=*/1), std::runtime_error);

@@ -24,11 +24,11 @@ limitations under the License.
 #include <optional>
 
 #include "common/types.h"
+#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
-#include "core/virtual_memory/mapped_memory_region.h"
 #include "executor.h"
 #include "forward_params.h"
 #include "framework/eplb/eplb_executor.h"
@@ -47,8 +47,8 @@ limitations under the License.
 #include "runtime/vlm_forward_params.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
+#include "core/framework/allocator/weight/mooncake_weight_transfer.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
-#include "framework/virtual_memory/mooncake_weight_transfer.h"
 #include "layers/npu/loader/rolling_load_manager.h"
 #endif
 
@@ -426,7 +426,7 @@ class WorkerImpl {
 
   bool wakeup_local(const WakeupOptions& options);
 
-  // Original virtual memory (VirtualMemoryAllocator) sleep path.
+  // Original virtual memory (ModelPageAllocator) sleep path.
   bool virtual_memory_sleep(MasterStatus master_status);
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)

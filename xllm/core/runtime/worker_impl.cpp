@@ -80,10 +80,12 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
+#include "core/framework/allocator/global_memory_region.h"
+#include "core/framework/allocator/kv_cache/paged_kv_cache_tensor_allocator.h"
+#include "core/framework/allocator/kv_cache/paged_kv_cache_transfer_memory_provider.h"
+#include "core/framework/allocator/model_memory_manager.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/mtp_utils.h"
-#include "core/framework/virtual_memory/virtual_memory_kv_cache_tensor_allocator.h"
-#include "core/framework/virtual_memory/virtual_memory_kv_cache_transfer_memory_provider.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -95,8 +97,6 @@ limitations under the License.
 #include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
-#include "framework/virtual_memory/global_memory_region.h"
-#include "framework/virtual_memory/virtual_memory_manager.h"
 #include "models/model_registry.h"
 #include "runtime/forward_params.h"
 #if defined(USE_NPU)
@@ -557,8 +557,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
     CHECK(tensor_allocator == nullptr)
         << "Virtual memory KV cache cannot use another tensor allocator.";
-    tensor_allocator = create_virtual_memory_kv_cache_tensor_allocator(
-        options_.model_id(), num_layers);
+    tensor_allocator =
+        create_paged_kv_cache_tensor_allocator(options_.model_id(), num_layers);
   }
 
   KVCacheCreateOptions create_options;
@@ -616,7 +616,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider;
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
-    memory_provider = create_virtual_memory_kv_cache_transfer_memory_provider();
+    memory_provider = create_paged_kv_cache_transfer_memory_provider();
   }
 #endif
   kv_cache_transfer_ =
@@ -2091,7 +2091,7 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
     }
   }
 
-  auto& allocator = VirtualMemoryManager::get_instance();
+  auto& allocator = ModelMemoryManager::get_instance();
   const std::optional<WeightAllocationInfo> weight_allocation =
       allocator.get_weight_allocation_info(options_.model_id());
   if (!weight_allocation.has_value() ||

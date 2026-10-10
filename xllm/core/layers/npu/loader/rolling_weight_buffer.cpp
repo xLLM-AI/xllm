@@ -19,8 +19,8 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/global_flags.h"
+#include "core/framework/allocator/model_memory_manager.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/virtual_memory/virtual_memory_manager.h"
 
 namespace xllm {
 namespace layer {
@@ -63,9 +63,9 @@ void RollingWeightBuffer::refresh_address() {
 
   if (use_virtual_memory_) {
     void* new_base_ptr = nullptr;
-    auto& allocator = VirtualMemoryManager::get_instance();
+    auto& allocator = ModelMemoryManager::get_instance();
     bool ok = allocator.allocate_weight(model_id_, new_base_ptr, total);
-    CHECK(ok) << "VirtualMemoryManager::allocate_weight failed for "
+    CHECK(ok) << "ModelMemoryManager::allocate_weight failed for "
                  "RollingWeightBuffer"
               << ", total=" << total;
     base_ptr_ = new_base_ptr;

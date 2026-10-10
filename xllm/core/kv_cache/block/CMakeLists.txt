@@ -9,7 +9,6 @@ cc_library(
   SRCS
     kv_cache_page_state.cpp
   DEPS
-    :virtual_page
     glog::glog
 )
 

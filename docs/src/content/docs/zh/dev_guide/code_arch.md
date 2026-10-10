@@ -63,9 +63,11 @@ sidebar:
 │   │   │   ├── sampling/                  # Token 采样与约束解码
 │   │   │   ├── parallel_state/            # 并行分组与通信状态
 │   │   │   ├── eplb/                      # 专家并行负载均衡
-│   │   │   └── virtual_memory/            # 分布式分配与权重生命周期
+│   │   │   └── allocator/                 # 模型分配策略与内存后端
+│   │   │       ├── virtual_memory/        # 通用物理页与虚拟映射
+│   │   │       ├── kv_cache/              # KV cache 分配与映射后端
+│   │   │       └── weight/                # 权重分配与传输适配器
 │   │   ├── kv_cache/                      # 缓存领域：布局、存储、块、前缀与传输
-│   │   ├── virtual_memory/                # 共用物理页与虚拟映射基础能力
 │   │   ├── transfer/                      # 共用 Mooncake 传输引擎
 │   │   ├── runtime/                       # Worker 与模型 executor
 │   │   ├── layers/                        # C++ 神经网络层
@@ -107,33 +109,40 @@ sidebar:
 
 ## KV cache 与虚拟内存的边界
 
-`core/kv_cache` 管理缓存布局、容量估算、tensor 分配接口、KV 映射区域、
-块与页状态、前缀复用及 KV 传输。`core/virtual_memory` 提供 `PhysicalPage`、
-`PhysicalPagePool`、`MappedMemoryRegion`、`SharedPageMapping` 和 `VirtualPage`，
-供 KV cache 与权重共用。
+`core/kv_cache` 管理缓存布局、容量估算、tensor 分配接口、块与页状态、
+前缀复用及 KV 传输，不依赖 framework 的分配实现。`framework/allocator`
+依赖这些缓存接口，负责模型分配策略与具体内存后端。
 
-`framework/virtual_memory` 的 `VirtualMemoryAllocator` 和
-`VirtualMemoryManager` 负责分布式页预算、RPC 与模型休眠/唤醒编排。
-`ModelWeightStore`、`WeightAllocation` 独立保存权重分配状态，
-`KVCacheMemoryRegions` 保存 KV 映射。framework 的虚拟内存 tensor allocator
-实现 `KVCacheTensorAllocator`，缓存存储通过该接口分配。KV 传输通过
-`KVCacheTransferMemoryProvider` 查询注册区域和物理偏移，两者均不依赖运行时 manager。
-`PagedKVCacheBlockManager` 涉及分布式分配和模型生命周期，因此保留在 framework。
-Block 值类型编译为 `kv_cache_block_types`，request 与 prefix 依赖该目标；
-缓存领域叶子编译为 `kv_cache_block`，framework 适配器组成 `block` 聚合目标。
+`framework/allocator/virtual_memory` 提供 `PhysicalPage`、`PhysicalPagePool`、
+`MappedMemoryRegion`、`SharedPageMapping` 和 `VirtualPage`。这些通用能力只管理
+物理页与虚拟地址映射，不包含缓存布局、模型状态、权重策略或传输注册。
 
-`core/transfer` 独立编译共用 Mooncake 引擎，KV 与权重传输适配器分别依赖它。
-`distributed_runtime/memory` 中的 `WorkerPageBudget` 记录两类内存共用的容量，
-同步由运行时 allocator 负责。
+allocator 根目录的 `ModelPageAllocator` 协调各模型的 KV 页与权重容量，
+通过共用的 `WorkerPageBudget` 和生命周期锁，在唤醒时原子预留 KV 与权重的总需求。
+`ModelMemoryManager` 协调模型映射与分配操作。`GlobalMemoryRegion` 还保存共享
+传输注册状态，因此与这些 facade 同层。`weight` 后端保存 `ModelWeightStore`、
+`WeightAllocation` 以及权重分配、传输适配器。
+
+`allocator/kv_cache` 后端保存 `KVCacheMemoryRegions`，通过
+`PagedKVCacheTensorAllocator` 实现 `KVCacheTensorAllocator`。KV 传输通过
+`KVCacheTransferMemoryProvider` 查询注册区域和物理偏移。core 的缓存存储与传输
+使用这些接口，不依赖模型内存 manager。`PagedKVCacheBlockManager` 涉及分布式
+分配和模型生命周期，因此保留在 framework。Block 值类型编译为
+`kv_cache_block_types`，request 与 prefix 依赖该目标；缓存领域叶子编译为
+`kv_cache_block`，framework 适配器组成 `block` 聚合目标。
+
+`distributed_runtime` 保存 `ModelMemoryController`、`ModelMemoryCluster` 和模型
+内存 RPC 的 client、service、server，负责分布式 worker 编排；页容量记账属于
+allocator。`core/transfer` 独立编译共用 Mooncake 引擎，KV 与权重传输适配器分别依赖它。
 
 配置使用新名称 `enable_virtual_memory`、`virtual_memory_master_node_addr`，
 旧 `xtensor` 拼写保留为 CLI/JSON 别名。显式 CLI 参数优先于 JSON；同一来源中
 新旧名称同时出现时，新名称优先。配置导出只使用新名称。注册签名 `_xtensor` 保留为兼容标识。
 
-Protobuf 消息重命名保持字段编号，但分布式 RPC 服务改为 `VirtualMemoryDist`，
-包括 `GetKVCacheOffsets`，heartbeat 的 JSON 字段改为 `virtual_memory_info`。
-master、worker 和外部 heartbeat 消费方需要一起升级，重命名后的 RPC 路由
-不支持新旧版本混合部署。
+Protobuf 消息重命名保持字段编号，`proto/model_memory_dist.proto` 中的分布式
+RPC 服务为 `ModelMemoryDist`，包括 `GetKVCacheOffsets`，heartbeat 的 JSON 字段
+为 `virtual_memory_info`。master、worker 和外部 heartbeat 消费方需要一起升级，
+重命名后的 RPC 路由不支持新旧版本混合部署。
 
 阅读时先区分**状态、调度、执行**：`framework/` 定义请求、批次、缓存和模型接口；
 `scheduler/` 决定下一轮运行哪些工作；`distributed_runtime/` 和 `runtime/` 负责

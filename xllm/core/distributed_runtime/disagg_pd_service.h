@@ -25,10 +25,10 @@ namespace xllm {
 
 class DisaggPDService : public proto::DisaggPDService {
  public:
-  explicit DisaggPDService(DisaggPDScheduler* scheduler,
-                           Engine* engine,
-                           std::shared_ptr<VirtualMemoryController>
-                               virtual_memory_controller = nullptr);
+  explicit DisaggPDService(
+      DisaggPDScheduler* scheduler,
+      Engine* engine,
+      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr);
   explicit DisaggPDService() {}
   virtual ~DisaggPDService() = default;
 

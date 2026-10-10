@@ -8,7 +8,7 @@ if(USE_NPU)
 endif()
 add_subdirectory(batch)
 add_subdirectory(block)
-add_subdirectory(virtual_memory)
+add_subdirectory(allocator)
 add_subdirectory(config)
 add_subdirectory(chat_template)
 add_subdirectory(kv_cache)
@@ -39,7 +39,7 @@ cc_library(
   DEPS
     :block
     :kv_cache
-    :virtual_memory_manager
+    :model_memory_manager
     :common
     :config
     :runtime

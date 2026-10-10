@@ -29,7 +29,7 @@ limitations under the License.
 
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/distributed_runtime/virtual_memory_controller.h"
+#include "core/distributed_runtime/model_memory_controller.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -58,7 +58,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
     const Options& options,
     StepCallback step_callback,
     ResultCallback result_callback,
-    std::shared_ptr<VirtualMemoryController> virtual_memory_controller,
+    std::shared_ptr<ModelMemoryController> model_memory_controller,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(options),
       batch_mode_(create_batch_mode(options)),
@@ -66,7 +66,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       batch_factory_(options.dp_size()),
       resource_engine_(engine),
       distributed_worker_manager_(std::move(distributed_worker_manager)),
-      virtual_memory_controller_(std::move(virtual_memory_controller)),
+      model_memory_controller_(std::move(model_memory_controller)),
       step_callback_(std::move(step_callback)),
       result_callback_(std::move(result_callback)),
       request_queue_(options.request_queue_size()) {
@@ -179,13 +179,13 @@ void ContinuousSchedulerBase::populate_heartbeat_request(
         *std::max_element(tbt.begin(), tbt.end()));
   }
 
-  if (include_virtual_memory_info && virtual_memory_controller_ != nullptr &&
+  if (include_virtual_memory_info && model_memory_controller_ != nullptr &&
       ::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
     std::vector<size_t> worker_free_phy_pages;
     std::unordered_map<std::string, std::vector<WeightSegment>>
         model_weight_segments;
-    virtual_memory_controller_->get_virtual_memory_info(worker_free_phy_pages,
-                                                        model_weight_segments);
+    model_memory_controller_->get_virtual_memory_info(worker_free_phy_pages,
+                                                      model_weight_segments);
 
     auto* virtual_memory_info = request.mutable_virtual_memory_info();
     for (size_t free_pages : worker_free_phy_pages) {

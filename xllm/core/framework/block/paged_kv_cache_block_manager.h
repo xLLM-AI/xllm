@@ -39,7 +39,7 @@ namespace xllm {
  * data
  *
  * Key features:
- * - Uses VirtualMemoryAllocator for physical page management
+ * - Uses ModelPageAllocator for physical page management
  * - Maps blocks to virtual pages
  * - Supports reserved blocks for pre-allocation
  * - Does NOT support prefix cache (prefix cache disabled)

@@ -32,16 +32,6 @@ cc_test(
 )
 
 cc_test(
-  NAME
-    worker_page_budget_test
-  SRCS
-    worker_page_budget_test.cpp
-  DEPS
-    :worker_page_budget
-    GTest::gtest_main
-)
-
-cc_test(
   NO_NPU_RUNTIME
   NAME
     collective_service_test
@@ -77,9 +67,9 @@ cc_test(
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    virtual_memory_controller_test
+    model_memory_controller_test
   SRCS
-    virtual_memory_controller_test.cpp
+    model_memory_controller_test.cpp
   DEPS
     :distributed_runtime
     GTest::gtest_main

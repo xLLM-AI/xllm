@@ -38,6 +38,9 @@ namespace py = pybind11;
 #include "core/common/types.h"
 #include "core/distributed_runtime/master.h"
 #include "core/distributed_runtime/master_factory.h"
+#include "core/framework/allocator/global_memory_region.h"
+#include "core/framework/allocator/model_memory_manager.h"
+#include "core/framework/allocator/model_memory_options.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -58,9 +61,6 @@ namespace py = pybind11;
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/virtual_memory/global_memory_region.h"
-#include "core/framework/virtual_memory/virtual_memory_manager.h"
-#include "core/framework/virtual_memory/virtual_memory_options.h"
 #include "core/platform/device_name_utils.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/startup.h"
@@ -457,18 +457,18 @@ int run() {
     // Parse devices
     const auto devices = DeviceNameUtils::parse_devices("auto");
 
-    // Initialize VirtualMemoryManager with first device
-    auto& allocator = VirtualMemoryManager::get_instance();
+    // Initialize ModelMemoryManager with first device
+    auto& allocator = ModelMemoryManager::get_instance();
     allocator.init(devices[0]);
 
     // Setup distributed VirtualMemory service for multi-GPU/multi-node
     if (distributed_config.nnodes() > 1) {
-      VirtualMemoryOptions virtual_memory_options;
-      virtual_memory_options.devices(devices)
+      ModelMemoryOptions model_memory_options;
+      model_memory_options.devices(devices)
           .nnodes(distributed_config.nnodes())
           .node_rank(distributed_config.node_rank());
-      allocator.setup_multi_node_virtual_memory_dist(
-          virtual_memory_options,
+      allocator.setup_multi_node_model_memory_dist(
+          model_memory_options,
           distributed_config.virtual_memory_master_node_addr(),
           parallel_config.dp_size());
     }

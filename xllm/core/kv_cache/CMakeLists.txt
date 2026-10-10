@@ -4,16 +4,15 @@ add_subdirectory(block)
 add_subdirectory(prefix)
 add_subdirectory(transfer)
 
+# Domain ports shared by cache storage and framework allocation adapters.
 cc_library(
   NAME
-    kv_cache_memory_regions
+    kv_cache_memory_interfaces
   HDRS
-    storage/kv_cache_memory_regions.h
-  SRCS
-    storage/kv_cache_memory_regions.cpp
+    storage/kv_cache_tensor_allocator.h
+    layout/kv_cache_tensor_role.h
+    transfer/kv_cache_transfer_memory_provider.h
   DEPS
-    :virtual_memory_torch
-    glog::glog
     torch
 )
 
@@ -82,6 +81,7 @@ cc_library(
     :common
     :deepseek_v4_cache_policy
     :kv_cache_estimation
+    :kv_cache_memory_interfaces
     glog::glog
     torch
     $<$<BOOL:${USE_MLU}>:cndrv>

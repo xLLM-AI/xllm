@@ -19,15 +19,15 @@ limitations under the License.
 #include <limits>
 
 #include "common/global_flags.h"
+#include "core/framework/allocator/model_page_allocator.h"
+#include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/block/paged_kv_cache_block_manager.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
-#include "core/virtual_memory/physical_page_pool.h"
 #include "framework/model/model_input_params.h"
-#include "framework/virtual_memory/virtual_memory_allocator.h"
 
 namespace xllm {
 
@@ -427,9 +427,9 @@ void BlockManagerPool::reserve_padding_blocks() {
   for (auto& manager : block_managers_) {
     manager->reserve_padding_blocks();
   }
-  // Start prealloc thread once (VirtualMemoryAllocator is shared by all
+  // Start prealloc thread once (ModelPageAllocator is shared by all
   // managers).
-  VirtualMemoryAllocator::get_instance().start_prealloc_thread();
+  ModelPageAllocator::get_instance().start_prealloc_thread();
 }
 
 }  // namespace xllm
