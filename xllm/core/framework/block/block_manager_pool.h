@@ -20,11 +20,13 @@ limitations under the License.
 #include <queue>
 #include <vector>
 
-#include "block_manager.h"
+#include "core/kv_cache/block/block_manager.h"
 #include "framework/block/embedding_block_manager.h"
 #include "framework/block/kv_cache_manager.h"
 
 namespace xllm {
+
+class KVCachePageAllocator;
 
 class BlockManagerPool : public KVCacheManager {
  public:
@@ -49,10 +51,12 @@ class BlockManagerPool : public KVCacheManager {
     // leaves in ConcurrentBlockManagerImpl so the async D2H offload callback
     // can free blocks off-thread safely.
     PROPERTY(bool, enable_host_offload) = false;
-    PROPERTY(bool, enable_xtensor) = false;
-    PROPERTY(int64_t, num_layers) = 0;  // Required when enable_xtensor is true
-    PROPERTY(int64_t, slot_size) = 0;   // Memory size per slot (for xtensor)
-    PROPERTY(std::string, model_id);    // Model ID for multi-model support
+    PROPERTY(bool, enable_virtual_memory) = false;
+    PROPERTY(int64_t,
+             num_layers) = 0;  // Required when enable_virtual_memory is true
+    PROPERTY(int64_t,
+             slot_size) = 0;  // Memory size per slot (for virtual memory)
+    PROPERTY(std::string, model_id);  // Model ID for multi-model support
     // Token-level sliding window size for CompositeBlockManager.
     PROPERTY(uint32_t, sliding_window_size) = 0;
     // Base SWA/cache-state block rows retained per sequence.
@@ -77,7 +81,9 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, instance_is_decode) = false;
   };
 
-  explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);
+  explicit BlockManagerPool(const Options& options,
+                            int32_t dp_size = 1,
+                            KVCachePageAllocator* page_allocator = nullptr);
 
   ~BlockManagerPool() = default;
 
@@ -117,9 +123,9 @@ class BlockManagerPool : public KVCacheManager {
   // get the options for the block manager
   const Options& options() const { return options_; }
 
-  // Reserve XTensor padding blocks for each DP manager.
+  // Reserve VirtualMemory padding blocks for each DP manager.
   // Should be called after KV tensors are created.
-  void reserve_xtensor_padding_blocks() override;
+  void reserve_padding_blocks() override;
 
  protected:
   // Select the DP rank with the most effective headroom. Prefix-cache-only
@@ -133,6 +139,9 @@ class BlockManagerPool : public KVCacheManager {
  private:
   friend class BlockManagerPoolTestPeer;
 
+  // Non-owning optional dependency, required for virtual-memory cache leaves.
+  // The runtime retains it until this pool and its blocks have been destroyed.
+  KVCachePageAllocator* page_allocator_;
   mutable std::atomic<size_t> dp_selection_cursor_{0};
   std::vector<std::vector<BlockTransferInfo>> swap_block_transfer_infos_;
 

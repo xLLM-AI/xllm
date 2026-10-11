@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "core/framework/config/kv_cache_config.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"

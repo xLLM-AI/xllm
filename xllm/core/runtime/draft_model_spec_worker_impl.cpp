@@ -26,17 +26,17 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/kv_cache/kv_cache_capacity.h"
-#include "core/framework/kv_cache/kv_cache_estimation.h"
-#include "core/framework/kv_cache/kv_cache_shape.h"
-#include "core/framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
-#include "core/framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/embedding_cache.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
+#include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/hash_util.h"
 #include "util/tensor_helper.h"
@@ -141,7 +141,7 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   estimate_options.enable_prefix_cache =
       kv_cache_config.enable_prefix_cache() &&
-      !kv_cache_config.enable_xtensor();
+      !kv_cache_config.enable_virtual_memory();
   estimate_options.enable_disagg_pd = options.enable_disagg_pd();
   estimate_options.instance_role = options.instance_role();
   estimate_options.dp_size = options.dp_size();

@@ -1,6 +1,7 @@
 add_subdirectory(common)
 add_subdirectory(distributed_runtime)
 add_subdirectory(framework)
+add_subdirectory(kv_cache)
 add_subdirectory(kernels)
 add_subdirectory(layers)
 add_subdirectory(platform)

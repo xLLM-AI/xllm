@@ -29,7 +29,7 @@ limitations under the License.
 
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/distributed_runtime/xtensor_controller.h"
+#include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -58,7 +58,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
     const Options& options,
     StepCallback step_callback,
     ResultCallback result_callback,
-    std::shared_ptr<XTensorController> xtensor_controller,
+    std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(options),
       batch_mode_(create_batch_mode(options)),
@@ -66,7 +66,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       batch_factory_(options.dp_size()),
       resource_engine_(engine),
       distributed_worker_manager_(std::move(distributed_worker_manager)),
-      xtensor_controller_(std::move(xtensor_controller)),
+      model_residency_coordinator_(std::move(model_residency_coordinator)),
       step_callback_(std::move(step_callback)),
       result_callback_(std::move(result_callback)),
       request_queue_(options.request_queue_size()) {
@@ -137,7 +137,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
         [this](xllm_service::proto::HeartbeatRequest& request) {
           populate_heartbeat_request(request, !options_.enable_disagg_pd());
         });
-    if (::xllm::KVCacheConfig::get_instance().enable_xtensor() &&
+    if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory() &&
         !options_.enable_disagg_pd()) {
       CHECK(distributed_worker_manager_ != nullptr);
       distributed_worker_manager_->get_cache_info(instance_info_.cluster_ids,
@@ -161,7 +161,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
 void ContinuousSchedulerBase::populate_heartbeat_request(
     xllm_service::proto::HeartbeatRequest& request,
-    bool include_xtensor_info) {
+    bool include_virtual_memory_info) {
   request.mutable_load_metrics()->set_gpu_cache_usage_perc(
       resource_engine_->block_manager_pool()->get_gpu_cache_usage_perc());
   request.mutable_load_metrics()->set_waiting_requests_num(
@@ -179,21 +179,21 @@ void ContinuousSchedulerBase::populate_heartbeat_request(
         *std::max_element(tbt.begin(), tbt.end()));
   }
 
-  if (include_xtensor_info && xtensor_controller_ != nullptr &&
-      ::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
+  if (include_virtual_memory_info && model_residency_coordinator_ != nullptr &&
+      ::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
     std::vector<size_t> worker_free_phy_pages;
     std::unordered_map<std::string, std::vector<WeightSegment>>
         model_weight_segments;
-    xtensor_controller_->get_xtensor_info(worker_free_phy_pages,
-                                          model_weight_segments);
+    model_residency_coordinator_->get_virtual_memory_info(
+        worker_free_phy_pages, model_weight_segments);
 
-    auto* xtensor_info = request.mutable_xtensor_info();
+    auto* virtual_memory_info = request.mutable_virtual_memory_info();
     for (size_t free_pages : worker_free_phy_pages) {
-      xtensor_info->add_worker_free_phy_pages(free_pages);
+      virtual_memory_info->add_worker_free_phy_pages(free_pages);
     }
     for (const auto& [model_id, segments] : model_weight_segments) {
       auto& segment_list =
-          (*xtensor_info->mutable_model_weight_segments())[model_id];
+          (*virtual_memory_info->mutable_model_weight_segments())[model_id];
       for (const auto& segment : segments) {
         auto* proto_segment = segment_list.add_segments();
         proto_segment->set_offset(segment.offset);

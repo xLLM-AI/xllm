@@ -1,55 +1,29 @@
-include(cc_binary)
 include(cc_library)
 
-cc_library(
-  NAME
-    block_utils
-  HDRS
-    block_utils.h
-  SRCS
-    block_utils.cpp
-  DEPS
-    glog::glog
-)
-
+# Runtime adapters combine cache domain leaves with model and worker lifecycle.
 cc_library(
   NAME
     block
   HDRS
-    block.h
-    block_manager.h
     embedding_block_manager.h
     block_manager_pool.h
-    linear_state_block_manager.h
-    block_manager_impl.h
-    concurrent_block_manager_impl.h
     hierarchy_block_manager_pool.h
-    sliding_window_block_manager.h
     composite_block_manager.h
-    xtensor_block_manager_impl.h
+    paged_kv_cache_block_manager.h
   SRCS
-    block.cpp
     embedding_block_manager.cpp
     block_manager_pool.cpp
-    linear_state_block_manager.cpp
-    concurrent_block_manager_impl.cpp
-    block_manager_impl.cpp
     hierarchy_block_manager_pool.cpp
-    sliding_window_block_manager.cpp
     composite_block_manager.cpp
-    xtensor_block_manager_impl.cpp
+    paged_kv_cache_block_manager.cpp
   DEPS
-    :block_utils
-    $<$<BOOL:${USE_NPU}>:torch_npu>
-    $<$<BOOL:${USE_NPU}>:graph>
-    :request
-    :common
-    :prefix_cache
+    :kv_cache_block
     :kv_transfer_completion
+    :kv_cache_memory_interfaces
+    :config
+    :common
+    :request
     glog::glog
-    Boost::serialization
-    SMHasherSupport
+    Folly::folly
     torch
-    :xtensor
 )
-target_link_libraries(block PRIVATE Folly::folly)

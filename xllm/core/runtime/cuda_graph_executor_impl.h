@@ -33,11 +33,11 @@ limitations under the License.
 #include <unordered_map>
 
 #include "core/common/macros.h"
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/kernels/cuda/llm_decode_metadata_update.h"
 #include "core/kernels/cuda/piecewise_graphs.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "executor_impl.h"
 #include "executor_impl_factory.h"
 #include "options.h"

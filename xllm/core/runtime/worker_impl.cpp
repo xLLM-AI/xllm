@@ -62,7 +62,7 @@ limitations under the License.
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_profiler.h"
@@ -80,21 +80,23 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
+#include "core/framework/allocator/global_memory_region.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/mtp_utils.h"
+#include "core/kv_cache/layout/layerwise_split_layout.h"
+#include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/storage/paged_kv_cache_tensor_allocator.h"
+#include "core/kv_cache/transfer/paged_kv_cache_transfer_memory_provider.h"
 #include "core/runtime/decode_graph_bucket.h"
+#include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/eplb/eplb_utils.h"
-#include "framework/kv_cache/kv_cache.h"
-#include "framework/kv_cache/layerwise_split_layout.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/model/aux_hidden_capture.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
-#include "framework/xtensor/global_xtensor.h"
-#include "framework/xtensor/xtensor_allocator.h"
 #include "models/model_registry.h"
 #include "runtime/forward_params.h"
 #if defined(USE_NPU)
@@ -441,7 +443,10 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
 #endif
 
 #if defined(USE_NPU)
-  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
+  if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
+    // Construct the memory owners before the shared transport so registered
+    // regions remain alive until the transport stops during process shutdown.
+    WorkerMemoryResources::get_instance();
     if (!weight_transfer_) {
       weight_transfer_ = std::make_unique<MooncakeWeightTransfer>(
           options_.transfer_listen_port(), device_.unwrap());
@@ -449,8 +454,8 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     if (!weight_transfer_->initialize()) {
       LOG(ERROR) << "Failed to initialize MooncakeWeightTransfer";
     }
-    if (!weight_transfer_->register_global_xtensor()) {
-      LOG(ERROR) << "Failed to register GlobalXTensor";
+    if (!weight_transfer_->register_global_memory_region()) {
+      LOG(ERROR) << "Failed to register GlobalMemoryRegion";
     }
   }
   if (::xllm::LoadConfig::get_instance().enable_rolling_load()) {
@@ -481,8 +486,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
 
   const bool has_grouped_cache = kv_cache_shape.has_grouped_cache_layout();
   if (has_grouped_cache) {
-    CHECK(!::xllm::KVCacheConfig::get_instance().enable_xtensor())
-        << "Grouped KV cache layout does not support XTensor cache.";
+    CHECK(!::xllm::KVCacheConfig::get_instance().enable_virtual_memory())
+        << "Grouped KV cache layout does not support VirtualMemory cache.";
   }
   const auto& args = context_.get_model_args();
   KVCacheCreateOptions layout_options =
@@ -552,6 +557,15 @@ bool WorkerImpl::allocate_kv_cache_storage(
     ssm_dtype = resolve_ssm_dtype(args.mamba_ssm_dtype(), dtype_);
   }
 
+  if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
+    CHECK(tensor_allocator == nullptr)
+        << "Virtual memory KV cache cannot use another tensor allocator.";
+    tensor_allocator = create_paged_kv_cache_tensor_allocator(
+        WorkerMemoryResources::get_instance().kv_cache_memory(),
+        options_.model_id(),
+        num_layers);
+  }
+
   KVCacheCreateOptions create_options;
   create_options.device(device_)
       .dtype(dtype_)
@@ -561,7 +575,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
       .layer_types(std::move(layout_options).layer_types())
       .model_id(options_.model_id())
       .model_type(args.model_type())
-      .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())
+      .enable_virtual_memory(
+          ::xllm::KVCacheConfig::get_instance().enable_virtual_memory())
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
       .layer_cache_owned(std::move(layer_cache_owned))
@@ -603,11 +618,20 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
   const ModelArgs& model_args = context_.get_model_args();
+  std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider;
+#if defined(USE_NPU)
+  if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
+    memory_provider = create_paged_kv_cache_transfer_memory_provider(
+        WorkerMemoryResources::get_instance().kv_cache_memory(),
+        GlobalMemoryRegion::get_instance());
+  }
+#endif
   kv_cache_transfer_ =
       KVCacheTransferFactory::create(options_.transfer_listen_port(),
                                      device_,
                                      model_args.model_type(),
-                                     options_.model_id());
+                                     options_.model_id(),
+                                     std::move(memory_provider));
   CHECK(kv_cache_transfer_ != nullptr)
       << "Failed to create KV cache transfer backend.";
   kv_cache_transfer_->initialize(device_.index());
@@ -1894,8 +1918,9 @@ folly::SemiFuture<bool> WorkerImpl::init_model_async(
   return future;
 }
 
-bool WorkerImpl::xtensor_sleep(MasterStatus master_status) {
-  // The memory for kvcache and model weights from hbm is released by xtensor;
+bool WorkerImpl::virtual_memory_sleep(MasterStatus master_status) {
+  // The memory for kvcache and model weights from hbm is released by the
+  // virtual memory manager;
   if (master_status == MasterStatus::LIGHT_SLEEP) {
     // only load model weights to host memory.
     auto model_loader = ModelLoader::create(model_weights_path_);
@@ -1908,7 +1933,7 @@ bool WorkerImpl::xtensor_sleep(MasterStatus master_status) {
 }
 
 bool WorkerImpl::sleep(MasterStatus master_status) {
-  return xtensor_sleep(master_status);
+  return virtual_memory_sleep(master_status);
 }
 
 bool WorkerImpl::start_profile() {
@@ -2073,18 +2098,20 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
     }
   }
 
-  auto& allocator = XTensorAllocator::get_instance();
-  auto* tensors = allocator.get_model_tensors(options_.model_id());
-  if (!tensors || tensors->weight.base_ptr() == nullptr ||
-      tensors->weight.num_pages() == 0) {
+  auto& memory_resources = WorkerMemoryResources::get_instance();
+  const std::optional<WeightAllocationInfo> weight_allocation =
+      memory_resources.get_weight_allocation_info(options_.model_id());
+  if (!weight_allocation.has_value() ||
+      weight_allocation->base_ptr == nullptr ||
+      weight_allocation->num_pages == 0) {
     LOG(ERROR) << "Weight region not initialized for model "
                << options_.model_id();
     return false;
   }
 
-  auto& global_xtensor = GlobalXTensor::get_instance();
-  if (!global_xtensor.is_initialized()) {
-    LOG(ERROR) << "GlobalXTensor not initialized";
+  auto& global_memory_region = GlobalMemoryRegion::get_instance();
+  if (!global_memory_region.is_initialized()) {
+    LOG(ERROR) << "GlobalMemoryRegion not initialized";
     return false;
   }
   if (!weight_transfer_) {
@@ -2094,8 +2121,8 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
 
   // Destination is always contiguous (local allocation).
   uint64_t dst_base_offset =
-      reinterpret_cast<uintptr_t>(tensors->weight.base_ptr()) -
-      reinterpret_cast<uintptr_t>(global_xtensor.base_vaddr());
+      reinterpret_cast<uintptr_t>(weight_allocation->base_ptr) -
+      reinterpret_cast<uintptr_t>(global_memory_region.base_vaddr());
   for (size_t i = 0; i < options.remote_addrs.size(); ++i) {
     const auto& segments = options.src_weight_segments[i];
     uint64_t dst_offset = dst_base_offset;
@@ -2515,7 +2542,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   status_ = Status::LOADED;
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    // todo: support xtensor
+    // todo: support virtual memory
     int32_t num_layers = args.n_layers() - args.first_k_dense_replace();
     const int32_t eplb_device_num =
         eplb::effective_device_num(context_.get_parallel_args().world_size(),

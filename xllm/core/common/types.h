@@ -220,7 +220,7 @@ struct RecItemInfo {
 // Weight segment info for P2P transfer (supports non-contiguous allocation)
 // Forward declaration needed by InstanceInfo
 struct WeightSegment {
-  uint64_t offset;  // Offset from GlobalXTensor base address
+  uint64_t offset;  // Offset from GlobalMemoryRegion base address
   uint64_t size;    // Segment size in bytes
 };
 
@@ -243,13 +243,13 @@ struct InstanceInfo {
   // tpot profiling data
   std::vector<std::tuple<int32_t, int32_t, double>> tpot_profiling_data;
 
-  // XTensor mode: per-worker free physical pages
+  // VirtualMemory mode: per-worker free physical pages
   std::vector<size_t> worker_free_phy_pages;
-  // XTensor mode: total physical pages per worker (all workers have the same
-  // total)
+  // VirtualMemory mode: total physical pages per worker (all workers have the
+  // same total)
   size_t total_phy_pages = 0;
-  // XTensor mode: model weight segments in GlobalXTensor (dp group 0 only)
-  // key: model_id, value: list of {offset, size} segments
+  // VirtualMemory mode: model weight segments in GlobalMemoryRegion (dp group 0
+  // only) key: model_id, value: list of {offset, size} segments
   std::unordered_map<std::string, std::vector<WeightSegment>>
       model_weight_segments;
 
@@ -278,7 +278,7 @@ struct InstanceInfo {
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;
     json_val["tpot_profiling_data"] = tpot_profiling_data;
-    // XTensor mode info
+    // VirtualMemory mode info
     json_val["worker_free_phy_pages"] = worker_free_phy_pages;
     json_val["total_phy_pages"] = total_phy_pages;
     // Serialize model_weight_segments: {model_id -> [{offset, size}, ...]}
@@ -295,10 +295,10 @@ struct InstanceInfo {
   }
 };
 
-// XTensor mode: per-layer offsets for KV cache transfer
-struct XTensorLayerOffsets {
-  std::vector<uint64_t> k_offsets;  // K cache offsets in GlobalXTensor
-  std::vector<uint64_t> v_offsets;  // V cache offsets in GlobalXTensor
+// VirtualMemory mode: per-layer offsets for KV cache transfer
+struct KVCacheLayerOffsets {
+  std::vector<uint64_t> k_offsets;  // K cache offsets in GlobalMemoryRegion
+  std::vector<uint64_t> v_offsets;  // V cache offsets in GlobalMemoryRegion
 };
 
 // Transfer mapping for one cache group. group_id is an opaque, stable
@@ -323,9 +323,9 @@ struct TransferKVInfo {
   int32_t dp_rank = 0;
   InstanceInfo remote_instance_info;
 
-  // XTensor mode: destination offsets from D-node (per-layer)
-  // Only populated when KVCacheConfig::enable_xtensor is true.
-  std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
+  // VirtualMemory mode: destination offsets from D-node (per-layer)
+  // Only populated when KVCacheConfig::enable_virtual_memory is true.
+  std::vector<KVCacheLayerOffsets> dst_kv_cache_layer_offsets;
 
   // One entry per cache id space. group_id is unique within one request.
   std::vector<KVTransferMapping> mappings;

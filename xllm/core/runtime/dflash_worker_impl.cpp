@@ -37,12 +37,12 @@ limitations under the License.
 #include "framework/parallel_state/process_group.h"
 #include "framework/sampling/sampling_params.h"
 #if defined(USE_NPU) || defined(USE_MLU)
-#include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
+#include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
 #endif
 #if defined(USE_NPU)
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/layers/npu_torch/deepseek_sparse_attention.h"
-#include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #endif
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/spec_input_builder.h"

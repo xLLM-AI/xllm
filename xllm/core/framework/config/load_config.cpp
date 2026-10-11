@@ -22,7 +22,7 @@ DEFINE_bool(enable_manual_loader,
             false,
             "Pin decoder layer weights to host memory and use async H2D "
             "transfer. Required by enable_rolling_load; also implied by "
-            "enable_xtensor.");
+            "enable_virtual_memory.");
 
 DEFINE_bool(enable_rolling_load,
             false,

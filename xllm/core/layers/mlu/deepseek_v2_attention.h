@@ -22,8 +22,8 @@ limitations under the License.
 #include <optional>
 
 #include "attention.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/mlu/dsa_topk_relay.h"
-#include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"

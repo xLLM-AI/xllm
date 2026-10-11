@@ -24,7 +24,7 @@ limitations under the License.
 
 #include "common/attention_metadata.h"
 #include "common/rms_norm.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"
 #include "framework/state_dict/state_dict.h"

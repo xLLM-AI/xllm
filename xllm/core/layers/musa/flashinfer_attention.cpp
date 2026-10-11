@@ -21,7 +21,7 @@ limitations under the License.
 #include <string>
 #include <tuple>
 
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "kernels/musa/musa_ops_api.h"
 #include "kernels/ops_api.h"
 #include "layers/common/attention_metadata.h"

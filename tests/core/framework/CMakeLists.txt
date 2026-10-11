@@ -1,5 +1,6 @@
 include(cc_test)
 
+add_subdirectory(allocator)
 add_subdirectory(batch)
 add_subdirectory(block)
 add_subdirectory(chat_template)
@@ -7,15 +8,16 @@ add_subdirectory(config)
 add_subdirectory(encoder_cache)
 add_subdirectory(eplb)
 add_subdirectory(kv_cache)
-add_subdirectory(kv_cache_transfer)
+add_subdirectory(model_loader)
+if(USE_NPU OR USE_MLU)
+  add_subdirectory(transfer)
+endif()
 add_subdirectory(parallel_state)
-add_subdirectory(prefix_cache)
 add_subdirectory(request)
 add_subdirectory(sampling)
 add_subdirectory(speculative)
 add_subdirectory(state_dict)
 add_subdirectory(tokenizer)
-add_subdirectory(xtensor)
 
 cc_test(
   NAME
@@ -27,8 +29,6 @@ cc_test(
     :xllm_server
     GTest::gtest_main
 )
-target_link_libraries(hf_model_loader_test PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
 
 cc_test(
   NAME
@@ -40,5 +40,3 @@ cc_test(
     :xllm_server
     GTest::gtest_main
 )
-target_link_libraries(causal_lm_test PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")

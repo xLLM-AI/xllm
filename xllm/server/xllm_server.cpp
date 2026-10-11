@@ -70,15 +70,15 @@ bool is_master_node() {
   return ::xllm::DistributedConfig::get_instance().node_rank() == 0;
 }
 
-bool is_xtensor_node() {
+bool is_virtual_memory_node() {
   return ::xllm::DistributedConfig::get_instance().node_rank() != 0 &&
-         ::xllm::KVCacheConfig::get_instance().enable_xtensor();
+         ::xllm::KVCacheConfig::get_instance().enable_virtual_memory();
 }
 
 const char* get_api_service_routes_for_current_mode() {
   static constexpr std::array<ApiRouteBinding, 2> kBindings = {{
       {"master_node", &is_master_node, kApiServiceRoutes},
-      {"xtensor_node", &is_xtensor_node, kForkOnlyRoute},
+      {"virtual_memory_node", &is_virtual_memory_node, kForkOnlyRoute},
   }};
   for (const auto& binding : kBindings) {
     if (binding.enabled()) {

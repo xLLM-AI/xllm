@@ -15,9 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include "core/kv_cache/block/linear_state_block_manager.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
-#include "framework/block/linear_state_block_manager.h"
 
 namespace xllm {
 

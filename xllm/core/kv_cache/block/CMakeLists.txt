@@ -1,0 +1,68 @@
+include(cc_binary)
+include(cc_library)
+
+cc_library(
+  NAME
+    kv_cache_page_state
+  HDRS
+    kv_cache_page_state.h
+  SRCS
+    kv_cache_page_state.cpp
+  DEPS
+    glog::glog
+)
+
+cc_library(
+  NAME
+    block_utils
+  HDRS
+    block_utils.h
+  SRCS
+    block_utils.cpp
+  DEPS
+    glog::glog
+)
+
+cc_library(
+  NAME
+    kv_cache_block_types
+  HDRS
+    block.h
+  SRCS
+    block.cpp
+  DEPS
+    :common
+    glog::glog
+    torch
+    xxHash
+)
+
+cc_library(
+  NAME
+    kv_cache_block
+  HDRS
+    block_manager.h
+    linear_state_block_manager.h
+    block_manager_impl.h
+    concurrent_block_manager_impl.h
+    sliding_window_block_manager.h
+  SRCS
+    linear_state_block_manager.cpp
+    concurrent_block_manager_impl.cpp
+    block_manager_impl.cpp
+    sliding_window_block_manager.cpp
+  DEPS
+    :kv_cache_block_types
+    :block_utils
+    $<$<BOOL:${USE_NPU}>:torch_npu>
+    $<$<BOOL:${USE_NPU}>:graph>
+    :request
+    :common
+    :prefix_cache
+    :kv_transfer_completion
+    glog::glog
+    Boost::serialization
+    SMHasherSupport
+    torch
+)
+target_link_libraries(kv_cache_block PRIVATE Folly::folly)

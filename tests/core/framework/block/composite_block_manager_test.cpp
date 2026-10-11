@@ -13,13 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "composite_block_manager.h"
+#include "core/framework/block/composite_block_manager.h"
 
 #include <gtest/gtest.h>
 
 #include <set>
+#include <utility>
 
-#include "framework/block/block_utils.h"
+#include "core/framework/block/block_manager_pool.h"
+#include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/storage/kv_cache_page_allocator.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -141,6 +144,68 @@ std::vector<Block> C128Blocks(Sequence& seq) {
   const Slice<Block> s = seq.kv_state().blocks(BlockType::C128);
   return std::vector<Block>(s.begin(), s.end());
 }
+
+// Supplies a small logical page pool without device mappings or RPCs.
+class TestKVCachePageAllocator final : public KVCachePageAllocator {
+ public:
+  explicit TestKVCachePageAllocator(int32_t dp_size)
+      : allocated_pages_(dp_size), next_page_ids_(dp_size, 0) {}
+
+  bool is_initialized() const override { return true; }
+  void start_prealloc_thread() override { ++prealloc_starts; }
+
+  std::unique_ptr<KVCachePageState> alloc_kv_cache_page(
+      const std::string& model_id,
+      int32_t dp_rank) override {
+    allocation_requests.emplace_back(model_id, dp_rank);
+    if (!allocated_pages_.at(dp_rank).empty()) {
+      return nullptr;
+    }
+    const int64_t page_id = next_page_ids_.at(dp_rank)++;
+    allocated_pages_.at(dp_rank).insert(page_id);
+    return std::make_unique<KVCachePageState>(page_id, page_size());
+  }
+
+  void free_kv_cache_pages(
+      const std::string& model_id,
+      int32_t dp_rank,
+      const std::vector<int64_t>& virtual_page_ids) override {
+    for (const int64_t page_id : virtual_page_ids) {
+      EXPECT_EQ(allocated_pages_.at(dp_rank).erase(page_id), 1u);
+      released_pages.emplace_back(model_id, dp_rank);
+    }
+  }
+
+  void trim_kv_cache(const std::string& /*model_id*/,
+                     int32_t /*dp_rank*/) override {}
+
+  size_t get_num_inuse_virt_pages(const std::string& /*model_id*/,
+                                  int32_t dp_rank) const override {
+    return allocated_pages_.at(dp_rank).size();
+  }
+  size_t get_num_reserved_virt_pages(const std::string& /*model_id*/,
+                                     int32_t dp_rank) const override {
+    return allocated_pages_.at(dp_rank).empty() ? 1 : 0;
+  }
+  int64_t get_virt_page_id(int64_t block_id,
+                           size_t block_memory_size) const override {
+    return block_id * static_cast<int64_t>(block_memory_size) /
+           static_cast<int64_t>(page_size());
+  }
+  size_t page_size() const override { return 64; }
+  size_t phy_pages_per_virt_page(
+      const std::string& /*model_id*/) const override {
+    return 4;
+  }
+
+  int32_t prealloc_starts = 0;
+  std::vector<std::pair<std::string, int32_t>> allocation_requests;
+  std::vector<std::pair<std::string, int32_t>> released_pages;
+
+ private:
+  std::vector<std::set<int64_t>> allocated_pages_;
+  std::vector<int64_t> next_page_ids_;
+};
 
 }  // namespace
 
@@ -1085,6 +1150,65 @@ TEST(CompositeBlockManagerTest, DecodeRoleLinearDefaultStrideDoesNotAbort) {
 
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
       original_chunk_stride;
+}
+
+TEST(CompositeBlockManagerTest, PagedPoolUsesInjectedAllocatorForEveryDpRank) {
+  TestKVCachePageAllocator allocator(/*dp_size=*/2);
+  BlockManagerPool::Options options;
+  options.num_blocks(8)
+      .block_size(4)
+      .enable_virtual_memory(true)
+      .num_layers(2)
+      .slot_size(8)
+      .model_id("injected-cache");
+  {
+    BlockManagerPool pool(options, /*dp_size=*/2, &allocator);
+    pool.reserve_padding_blocks();
+    ASSERT_EQ(allocator.allocation_requests.size(), 2u);
+    EXPECT_EQ(allocator.allocation_requests[0],
+              std::make_pair(std::string("injected-cache"), int32_t{0}));
+    EXPECT_EQ(allocator.allocation_requests[1],
+              std::make_pair(std::string("injected-cache"), int32_t{1}));
+    EXPECT_EQ(allocator.prealloc_starts, 1);
+
+    int32_t dp_rank = -1;
+    std::vector<Block> blocks = pool.allocate(/*num_tokens=*/8, dp_rank);
+    ASSERT_EQ(blocks.size(), 2u);
+    EXPECT_NE(blocks[0].id(), 0);
+    EXPECT_NE(blocks[1].id(), 0);
+  }
+  ASSERT_EQ(allocator.released_pages.size(), 2u);
+  const std::set<std::pair<std::string, int32_t>> released_pages(
+      allocator.released_pages.begin(), allocator.released_pages.end());
+  const std::set<std::pair<std::string, int32_t>> expected_released_pages = {
+      {"injected-cache", 0}, {"injected-cache", 1}};
+  EXPECT_EQ(released_pages, expected_released_pages);
+}
+
+TEST(CompositeBlockManagerTest, PagedShortageReturnsPagesToInjectedAllocator) {
+  TestKVCachePageAllocator allocator(/*dp_size=*/1);
+  BlockManager::Options options;
+  options.num_blocks(8)
+      .block_size(4)
+      .enable_virtual_memory(true)
+      .num_layers(2)
+      .slot_size(8)
+      .model_id("injected-cache");
+  auto leaves = build_composite_leaves(options, /*dp_rank=*/0, &allocator);
+  BlockManager& leaf = *leaves.at(BlockType::KV).leaf;
+
+  // One page holds four blocks. A five-block request must release its partial
+  // allocation, making the same page capacity available to the next request.
+  EXPECT_TRUE(leaf.allocate(/*num_blocks=*/5).empty());
+  EXPECT_EQ(allocator.get_num_inuse_virt_pages("injected-cache", /*dp_rank=*/0),
+            0u);
+  ASSERT_EQ(allocator.released_pages.size(), 1u);
+  std::vector<Block> blocks = leaf.allocate(/*num_blocks=*/1);
+  ASSERT_EQ(blocks.size(), 1u);
+  blocks.clear();
+  EXPECT_EQ(allocator.get_num_inuse_virt_pages("injected-cache", /*dp_rank=*/0),
+            0u);
+  EXPECT_EQ(allocator.released_pages.size(), 2u);
 }
 
 }  // namespace xllm

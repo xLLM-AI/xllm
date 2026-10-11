@@ -29,7 +29,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/message.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
-#include "core/distributed_runtime/xtensor_controller.h"
+#include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
@@ -286,12 +286,13 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         .kv_cache_dtype(options_.kv_cache_dtype());
     speculative_engine_ =
         std::make_unique<SpeculativeEngineBase<VLMEngine>>(engine_options);
-    draft_xtensor_controller_ = std::make_unique<XTensorController>(
-        XTensorController::Options{
-            .enabled = KVCacheConfig::get_instance().enable_xtensor(),
-            .model_id = engine_options.model_id(),
-            .block_size = engine_options.block_size()},
-        speculative_engine_->get_distributed_worker_manager());
+    draft_model_residency_coordinator_ =
+        std::make_unique<ModelResidencyCoordinator>(
+            ModelResidencyCoordinator::Options{
+                .enabled =
+                    KVCacheConfig::get_instance().enable_virtual_memory(),
+                .model_id = engine_options.model_id()},
+            speculative_engine_->get_distributed_worker_manager());
   } else {
     vlm_engine_ = std::make_unique<VLMEngine>(engine_options);
   }
@@ -324,7 +325,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
                int32_t dp_size,
                int32_t tp_size,
                MasterStatus master_status) {
-          return draft_xtensor_controller_->initialize_model(
+          return draft_model_residency_coordinator_->initialize_model(
               model_loader, num_layers, dp_size, tp_size, master_status);
         };
     CHECK(speculative_engine_->init(
@@ -359,14 +360,14 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         speculative_engine_.get(),
         scheduler_options,
         speculative_engine_->get_distributed_worker_manager(),
-        /*xtensor_controller=*/nullptr,
+        /*model_residency_coordinator=*/nullptr,
         kv_transfer_coordinator_);
   } else {
     scheduler_ = create_continuous_scheduler(
         vlm_engine_.get(),
         scheduler_options,
         vlm_engine_->get_distributed_worker_manager(),
-        /*xtensor_controller=*/nullptr,
+        /*model_residency_coordinator=*/nullptr,
         kv_transfer_coordinator_);
   }
 

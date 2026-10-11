@@ -24,8 +24,8 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/eplb/expert_buffer_manager.h"
-#include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"
 #include "framework/state_dict/state_dict.h"
@@ -78,7 +78,7 @@ class BaseLoader {
   // Manual-mode: re-allocate device storage, async H2D copy, rebuild views.
   virtual void reload_weights();
 
-  // Manual-mode P2P path: device buffer already filled (e.g. by xtensor
+  // Manual-mode P2P path: device buffer already filled (e.g. by virtual memory
   // allocator or rolling load), just rebuild views.
   virtual void reload_weights_from_device();
 

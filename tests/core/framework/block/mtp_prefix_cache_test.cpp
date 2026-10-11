@@ -23,9 +23,9 @@ limitations under the License.
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
-#include "core/framework/kv_cache_transfer/kv_cache_transfer_coordinator_base.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/transfer/kv_cache_transfer_coordinator_base.h"
 
 namespace xllm {
 namespace {

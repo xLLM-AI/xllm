@@ -23,8 +23,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/block/block_manager_pool.h"
-#include "core/framework/kv_cache/kv_cache_shape.h"
-#include "core/framework/kv_cache/kv_cache_utils.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 
 namespace xllm {
 

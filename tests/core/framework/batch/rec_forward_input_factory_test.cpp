@@ -23,13 +23,13 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/rec_batch_factory.h"
-#include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/kv_cache/block/block_manager_impl.h"
 
 namespace xllm {
 namespace {

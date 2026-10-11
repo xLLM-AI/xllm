@@ -18,7 +18,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "framework/xtensor/xtensor_allocator.h"
+#include "core/runtime/worker_memory_resources.h"
 #include "rolling_weight_buffer.h"
 
 #ifdef TORCH_HIGHER_THAN_PTA6
@@ -395,7 +395,7 @@ void BaseLoader::reload_weights() {
 void BaseLoader::reload_weights_from_device() {
   CHECK(mode_ == LoadMode::kManual)
       << "reload_weights_from_device is only valid in manual loader mode";
-  // P2P path: weights already transferred to GlobalXTensor weight region.
+  // P2P path: weights already transferred to GlobalMemoryRegion weight region.
   // Call allocate_weight to get the pointer into the pre-allocated region.
   allocate_device_storage();
   init_device_at_weights();
@@ -418,18 +418,18 @@ void BaseLoader::set_rolling_buffer(std::shared_ptr<RollingWeightBuffer> buf,
 void BaseLoader::allocate_device_storage() {
   if (rolling_buffer_ != nullptr) {
     // Rolling load path: use the pre-allocated slot instead of
-    // XTensorAllocator. Decoder layer weights bypass XTensor regardless of
-    // enable_xtensor flag.
+    // WorkerMemoryResources. Decoder layer weights bypass VirtualMemory
+    // regardless of enable_virtual_memory flag.
     CHECK_GE(layer_index_, 0) << "layer_index_ not set for rolling buffer";
     device_storage_ = rolling_buffer_->get_slot_ptr(layer_index_);
     CHECK(device_storage_ != nullptr)
         << "RollingWeightBuffer slot is null for layer " << layer_index_;
     return;
   }
-  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
-    auto& allocator = XTensorAllocator::get_instance();
-    bool ok =
-        allocator.allocate_weight(model_id_, device_storage_, storage_size_);
+  if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
+    auto& memory_resources = WorkerMemoryResources::get_instance();
+    bool ok = memory_resources.allocate_weight(
+        model_id_, device_storage_, storage_size_);
     CHECK(ok) << "Failed to allocate contiguous device storage size="
               << storage_size_;
     return;
@@ -582,9 +582,9 @@ void BaseLoader::release_device_storage() {
   if (device_storage_ == nullptr) {
     return;
   }
-  // Memory owned by xtensor / rolling buffer is released by those owners, not
-  // by aclrtFree here.
-  if (!::xllm::KVCacheConfig::get_instance().enable_xtensor() &&
+  // Memory owned by virtual memory / rolling buffer is released by those
+  // owners, not by aclrtFree here.
+  if (!::xllm::KVCacheConfig::get_instance().enable_virtual_memory() &&
       !rolling_buffer_) {
     auto ret = aclrtFree(device_storage_);
     if (ret != ACL_SUCCESS) {

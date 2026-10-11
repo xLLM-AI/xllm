@@ -23,12 +23,12 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/kv_cache/block/block_manager_impl.h"
 
 namespace xllm {
 namespace {

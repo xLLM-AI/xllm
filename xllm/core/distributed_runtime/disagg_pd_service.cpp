@@ -17,16 +17,13 @@ limitations under the License.
 
 #include <brpc/closure_guard.h>
 
-#include <utility>
-
 namespace xllm {
 
-DisaggPDService::DisaggPDService(
-    DisaggPDScheduler* scheduler,
-    Engine* engine,
-    std::shared_ptr<XTensorController> xtensor_controller) {
+DisaggPDService::DisaggPDService(DisaggPDScheduler* scheduler,
+                                 Engine* engine,
+                                 int32_t cache_block_size) {
   disagg_pd_service_impl_ = std::make_unique<DisaggPDServiceImpl>(
-      scheduler, engine, std::move(xtensor_controller));
+      scheduler, engine, cache_block_size);
 }
 
 void DisaggPDService::ReleaseReservation(

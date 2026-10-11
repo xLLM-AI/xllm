@@ -31,7 +31,7 @@ limitations under the License.
 #include "layers/common/fused_moe.h"
 #endif
 #include "common/rms_norm.h"
-#include "framework/kv_cache/kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"
 #include "minimax_m2_attention.h"

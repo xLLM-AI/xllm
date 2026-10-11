@@ -20,9 +20,9 @@ limitations under the License.
 #include <optional>
 
 #include "attention.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/mlu/dsa_topk_relay.h"
 #include "deepseek_v2_attention.h"
-#include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"

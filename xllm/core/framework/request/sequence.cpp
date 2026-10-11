@@ -37,8 +37,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_visitor.h"
-#include "core/framework/prefix_cache/block_hasher.h"
 #include "core/framework/tokenizer/tokenizer.h"
+#include "core/kv_cache/prefix/block_hasher.h"
 #include "core/util/slice.h"
 #include "core/util/tensor_helper.h"
 

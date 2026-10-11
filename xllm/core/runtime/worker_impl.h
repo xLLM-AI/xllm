@@ -24,13 +24,14 @@ limitations under the License.
 #include <optional>
 
 #include "common/types.h"
+#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_cache_store.h"
+#include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "executor.h"
 #include "forward_params.h"
 #include "framework/eplb/eplb_executor.h"
-#include "framework/kv_cache/kv_cache_shape.h"
-#include "framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
-#include "framework/kv_cache_transfer/kv_cache_store.h"
-#include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context/model_context.h"
@@ -40,14 +41,13 @@ limitations under the License.
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/tokenizer/tokenizer.h"
-#include "framework/xtensor/xtensor.h"
 #include "options.h"
 #include "platform/device.h"
 #include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
-#include "framework/kv_cache_transfer/mooncake_weight_transfer.h"
+#include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "layers/npu/loader/rolling_load_manager.h"
 #endif
@@ -426,8 +426,8 @@ class WorkerImpl {
 
   bool wakeup_local(const WakeupOptions& options);
 
-  // Original xtensor (PageAllocator) sleep path.
-  bool xtensor_sleep(MasterStatus master_status);
+  // Virtual memory residency sleep path.
+  bool virtual_memory_sleep(MasterStatus master_status);
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   void refresh_cuda_block_copy_runtime_state();

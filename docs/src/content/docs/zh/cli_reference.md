@@ -4,7 +4,7 @@ sidebar:
   order: 100
 ---
 
-xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。对于原生配置，显式指定的命令行 flag 优先于 JSON 配置值，后者优先于编译时默认值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
+xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。对于原生配置，显式指定的命令行 flag 优先于 JSON 配置值，后者优先于编译时默认值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。 对于虚拟内存参数，显式传入任意新旧命令行名称都会覆盖 JSON；同一来源中同时使用新旧名称时，以 `enable_virtual_memory` 或 `virtual_memory_master_node_addr` 为准。配置导出只使用新名称。
 
 > **设备选择**：xLLM 不再提供 `--devices` / `--device_id` / `--draft_devices` 参数。可用设备由可见设备掩码环境变量决定（NPU 用 `ASCEND_RT_VISIBLE_DEVICES`，NVIDIA 用 `CUDA_VISIBLE_DEVICES`，寒武纪用 `MLU_VISIBLE_DEVICES`，DCU 用 `HIP_VISIBLE_DEVICES`，摩尔线程用 `MUSA_VISIBLE_DEVICES`）。每个服务进程根据全局 `node_rank` 从其可见设备中选择一个运行时逻辑设备；可见设备的子集化与重排由硬件运行时解析。draft 模型始终与 target 模型共享所选设备。
 
@@ -54,7 +54,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `enable_manual_loader` | `bool` | `false` | 将 decoder layer 权重固定在 host 内存并使用异步 H2D 传输；`enable_rolling_load` 依赖该参数，`enable_xtensor` 也会隐式启用该能力。 |
+| `enable_manual_loader` | `bool` | `false` | 将 decoder layer 权重固定在 host 内存并使用异步 H2D 传输；`enable_rolling_load` 依赖该参数，`enable_virtual_memory` 也会隐式启用该能力。 |
 | `enable_rolling_load` | `bool` | `false` | 启用 rolling weight load：HBM 中仅保留 N 个 decoder layer 权重槽位，并按层即时加载；需要 `enable_manual_loader=true`，仅 NPU 支持。 |
 | `rolling_load_num_cached_layers` | `int32` | `2` | `enable_rolling_load=true` 时 HBM 中保留的 decoder layer 权重槽位数量。 |
 | `rolling_load_num_rolling_slots` | `int32` | `-1` | decoder rolling load 使用的 rolling 槽位数量；固定槽位数为 `rolling_load_num_cached_layers - rolling_load_num_rolling_slots`。`-1` 表示自动设置为 `min(2, preload_count)`，取值需在 `[-1, rolling_load_num_cached_layers]` 范围内。 |
@@ -73,7 +73,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_in_batch_prefix_cache` | `bool` | `false` | 是否将已准入的 prefill 完整 block 缓存进 prefix cache，使同一 batch 内的后续请求可以共享。 |
 | `max_linear_state_cache_slots` | `int64` | `0` | linear-attention state cache 的最大活跃槽位数；`0` 表示根据可用 KV Cache 预算自动推导容量。 |
 | `xxh3_128bits_seed` | `uint32` | `1024` | XXH3 128-bit 哈希的默认 seed。 |
-| `enable_xtensor` | `bool` | `false` | 是否为模型权重启用基于物理页池的 XTensor。 |
+| `enable_virtual_memory` | `bool` | `false` | 是否为模型权重和 KV Cache 启用基于物理页池的虚拟内存管理。 |
+| `enable_xtensor` | `bool` | `false` | `enable_virtual_memory` 的旧版命令行及 JSON 配置别名。 |
 | `phy_page_granularity_size` | `int64` | `2097152` | 单个物理页的粒度大小，单位 byte，默认 2 MiB；用于连续 KV Cache。 |
 
 ## KVCacheStoreConfig
@@ -155,7 +156,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `master_node_addr` | `string` | `"127.0.0.1:19888"` | 多机分布式服务的 master 地址，例如 `10.18.1.1:9999`。 |
-| `xtensor_master_node_addr` | `string` | `"127.0.0.1:19889"` | XTensor 分布式服务的 master 地址，例如 `10.18.1.1:9999`。 |
+| `virtual_memory_master_node_addr` | `string` | `"127.0.0.1:19889"` | 虚拟内存分布式服务的 master 地址，例如 `10.18.1.1:9999`。 |
+| `xtensor_master_node_addr` | `string` | `"127.0.0.1:19889"` | `virtual_memory_master_node_addr` 的旧版命令行及 JSON 配置别名。 |
 | `nnodes` | `int32` | `1` | 多机节点数量。 |
 | `node_rank` | `int32` | `0` | 当前节点 rank。 |
 | `etcd_addr` | `string` | `""` | 保存实例元信息的 etcd 地址。 |

@@ -30,7 +30,7 @@ sidebar:
 | `Batch`、`BatchGroup` | `Batch` 是一次执行步骤选中的工作集合；`BatchGroup` 汇总该步骤中各个数据并行（DP）rank 的 batch。 | [`batch.h`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/framework/batch/batch.h)、[`batch_group.h`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/framework/batch/batch_group.h) |
 | Rank 与并行方式 | Rank 标识并行执行中的参与者。DP 将请求工作分配到不同组；张量并行（TP）把模型的张量计算拆分到多个 rank；专家并行（EP）分布部署混合专家模型中的专家。 | [`parallel_state/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/parallel_state) |
 | Continuous batching（连续批处理） | 调度器每轮重新选择工作，让新请求加入、已完成请求退出。一个 batch 的成员不会在整个请求生命周期内保持固定。 | [`continuous_scheduler.h`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/continuous_scheduler.h) |
-| KV cache、block、prefix cache | KV cache 保存可复用的注意力状态；block manager 分配和回收缓存容量；prefix cache 让满足复用条件的请求共享已缓存的提示词前缀。 | [`kv_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/kv_cache)、[`block/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/block)、[`prefix_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/prefix_cache) |
+| KV cache、block、prefix cache | KV cache 保存可复用的注意力状态；block manager 分配和回收缓存容量；prefix cache 让满足复用条件的请求共享已缓存的提示词前缀。 | [`kv_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/kv_cache)、[`block/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/block)、[`prefix_cache/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/kv_cache/prefix) |
 | Logits 与采样 | Logits 是模型对词表中各 token 给出的分数；采样根据生成参数，从这些分数中选择下一个 token。 | [`sampling/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/framework/sampling) |
 | Master、engine、worker、executor | Master 连接请求处理与调度；engine 协调各 worker 执行批次；worker 管理设备上的执行；其中的 executor 选择模型的执行方式。 | [`distributed_runtime/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/distributed_runtime)、[`runtime/`](https://github.com/xLLM-AI/xllm/tree/main/xllm/core/runtime) |
 
@@ -54,19 +54,22 @@ sidebar:
 │   │   │   ├── config/                    # 分类配置与命令行选项
 │   │   │   ├── request/                   # 请求、序列与停止状态
 │   │   │   ├── batch/                     # 批次与模型输入构造
-│   │   │   ├── block/                     # 缓存分配与块管理
-│   │   │   ├── kv_cache/                  # 缓存张量、布局与容量估算
-│   │   │   ├── prefix_cache/              # 提示词前缀复用
-│   │   │   ├── kv_cache_transfer/         # 缓存传输与外部缓存存储
+│   │   │   ├── block/                     # 组合缓存与运行时分配适配器
+│   │   │   ├── kv_cache/                  # 依赖模型的线性状态恢复适配器
 │   │   │   ├── model/                     # 模型接口与输入输出类型
 │   │   │   ├── model_loader/              # 模型配置与 checkpoint 加载
+│   │   │   │   └── weight/                # 权重资源、分配策略与传输
 │   │   │   ├── tokenizer/                 # 文本与 token 转换
 │   │   │   ├── chat_template/             # 聊天消息转换为模型提示词
 │   │   │   ├── sampling/                  # Token 采样与约束解码
 │   │   │   ├── parallel_state/            # 并行分组与通信状态
 │   │   │   ├── eplb/                      # 专家并行负载均衡
-│   │   │   └── xtensor/                   # 虚拟内存与模型内存管理
-│   │   ├── runtime/                       # Worker 与模型 executor
+│   │   │   ├── transfer/                  # 共用字节传输、会话与内存注册
+│   │   │   └── allocator/                 # 通用内存能力与页预算记账
+│   │   │       ├── virtual_memory/        # 通用物理页与虚拟映射
+│   │   │       └── torch/                 # 映射字节区域上的 tensor 视图
+│   │   ├── kv_cache/                      # 缓存领域：布局、存储、块、前缀与传输
+│   │   ├── runtime/                       # Worker、本地资源与模型 executor
 │   │   ├── layers/                        # C++ 神经网络层
 │   │   ├── kernels/                       # 设备算子实现与封装
 │   │   ├── platform/                      # 设备、流、内存与通信接口
@@ -103,6 +106,142 @@ sidebar:
 ├── CMakeLists.txt                         # C++ 构建配置
 └── setup.py                               # Python 打包与构建入口
 ```
+
+## KV cache 与虚拟内存的边界
+
+内存基础能力同时服务 KV cache 和权重。各类资源的映射与分配策略归各自模块管理，
+本地资源由 runtime 持有，共享预算、跨 worker 操作及模型休眠、唤醒由分布式层协调。
+图中实线表示“使用或持有”，虚线表示接口实现或尚待拆分的耦合。
+
+```mermaid
+flowchart TB
+  subgraph runtime["runtime"]
+    worker["WorkerImpl<br/>组装与注入"]
+    resources["WorkerMemoryResources<br/>本地设备与资源生命周期"]
+  end
+
+  blocks["framework/block<br/>组合 manager 与分页适配器"]
+
+  subgraph distributed["distributed_runtime"]
+    residency["ModelResidencyCoordinator<br/>模型初始化、休眠与唤醒"]
+    coordination["DistributedMemoryCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
+    rpc["WorkerMemoryRpc<br/>client、service、server"]
+  end
+
+  subgraph cache["core/kv_cache"]
+    policy["layout、block 与 prefix<br/>KV 策略与状态"]
+    pages["storage / PagedKVCachePageAllocator<br/>页队列、预分配与 block 到页换算"]
+    backend["storage / KVCachePageBackend<br/>容量预留与映射接口"]
+    ports["storage 与 transfer 接口<br/>页分配、tensor 分配、内存 provider"]
+    storage["storage / KVCacheMemoryRegistry<br/>本地 KV 映射与分页 tensor 分配"]
+    kvtransfer["transfer<br/>内存 provider、KV peer/layout 状态<br/>重分片与缓存传输"]
+  end
+
+  subgraph framework["framework"]
+    weight["model_loader/weight<br/>WeightMemoryManager、store<br/>分配策略与权重传输"]
+    tensor["allocator/torch<br/>映射内存上的 tensor 视图"]
+    shared["allocator<br/>WorkerPageBudget / GlobalMemoryRegion"]
+    memory["allocator/virtual_memory<br/>物理页与字节映射"]
+    transport["transfer<br/>Mooncake 字节传输<br/>会话与内存注册"]
+  end
+
+  remaining["framework/request / Sequence<br/>framework/config 与 runtime options"]
+  worker --> resources
+  worker --> blocks
+  worker --> storage
+  worker --> kvtransfer
+  residency --> coordination
+  residency -->|worker 生命周期操作| worker
+  coordination --> pages
+  coordination --> rpc
+  coordination -->|本地执行| resources
+  coordination --> shared
+  rpc --> resources
+  resources --> storage
+  resources --> weight
+  resources --> shared
+  blocks --> policy
+  blocks --> ports
+  pages -.->|实现页分配接口| ports
+  pages --> backend
+  coordination -.->|实现映射后端| backend
+  storage -.->|实现 tensor 分配接口| ports
+  kvtransfer -.->|实现内存 provider| ports
+  storage --> tensor
+  tensor --> memory
+  shared --> memory
+  weight --> memory
+  weight --> shared
+  weight --> transport
+  kvtransfer --> storage
+  kvtransfer --> shared
+  kvtransfer --> transport
+  policy -.-> remaining
+```
+
+`framework/allocator/virtual_memory` 提供 `PhysicalPage`、`PhysicalPagePool`、
+`MappedMemoryRegion` 和 `SharedPageMapping`。映射区域管理字节、物理页与虚拟地址，
+tensor 的 shape、dtype 和视图构造放在 `framework/allocator/torch`；返回的 tensor
+视图不拥有底层区域。通用内存代码不负责 KV 布局、权重策略或模型生命周期。
+`GlobalMemoryRegion` 是带生命周期 lease 的共享映射 facade。传输注册及注册期间
+持有的映射 lease 属于 `framework/transfer`，该模块没有 KV 或 distributed-runtime
+目标依赖。
+
+`core/kv_cache/storage` 保存 `KVCacheMemoryRegions` 和 `KVCacheMemoryRegistry`，
+负责各模型本地的缓存映射及物理偏移查询。`PagedKVCacheTensorAllocator` 使用注入的
+registry 实现 `KVCacheTensorAllocator`。`core/kv_cache/transfer` 中的
+`PagedKVCacheTransferMemoryProvider` 使用该 registry 和注入的 `GlobalMemoryRegion`
+实现 `KVCacheTransferMemoryProvider`。`WorkerImpl` 提供这些依赖，具体缓存后端使用
+通用分配能力，不依赖分布式协调器。
+
+`framework/model_loader/weight` 管理 `WeightMemoryManager`、`ModelWeightStore`、
+`WeightAllocation` 和权重传输适配器，使用构造时传入的物理页池和共享映射，负责
+权重预留的所有权、连续或分散映射、区域内分配及清理。权重传输与 KV 传输共同使用
+Mooncake 字节传输。KV manifest、peer 状态和重分片 plan 仍属于
+`core/kv_cache/transfer`，由 `MooncakeKVCacheTransferEngine` 等类管理。
+
+`runtime/WorkerMemoryResources` 持有本地 KV registry 和 `WeightMemoryManager`，
+管理设备初始化、物理页池以及本地资源的创建与清理。它是独立的构建目标，
+不依赖 `runtime` 聚合目标、RPC 或 distributed-runtime。
+`distributed_runtime/WorkerMemoryRpcClient`、`WorkerMemoryRpcService` 和
+`WorkerMemoryRpcServer` 负责跨 worker 请求；service 只调用本地资源，
+不反向进入分布式协调器。
+
+`core/kv_cache/storage/PagedKVCachePageAllocator` 管理 KV 页队列、预分配和
+block 到虚拟页的换算，实现 `KVCachePageAllocator`。它通过注入的
+`KVCachePageBackend` 请求容量预留及 map/unmap，不包含权重策略或 RPC。
+map/unmap 接收每层 K/V 区域内的字节偏移，由 allocator 将虚拟页 ID 乘以页大小得到。
+`KVCacheManagerFactory` 将页分配接口经 pool 和组合 manager 注入
+`PagedKVCacheBlockManager`，block 适配器不访问分布式单例。
+
+`DistributedMemoryCoordinator` 实现该 backend，持有分页 allocator，使用通用的
+`WorkerPageBudget` 记账，并选择目标 worker、派发本地或 RPC 操作。
+模型初始化、休眠与唤醒由 `ModelResidencyCoordinator` 组织；KV 和权重的共同预算
+在唤醒时由分布式协调器以一个预算事务原子预留。初次以唤醒状态初始化时，先预留
+权重容量，后续 KV 页分配再从同一共享预算扣账。休眠先冻结 KV 分配和回收，等待预分配及执行中的
+映射结束，再改变映射与权重生命周期，避免预算释放与后台映射交错。
+分页策略归 KV cache，跨资源事务及分布式执行归 distributed-runtime。
+
+Block 值类型编译为 `kv_cache_block_types`，供 request 和 prefix cache 使用；
+缓存领域叶子编译为 `kv_cache_block`；framework 中的组合与分配适配器组成
+`block` 聚合目标。这是渐进的边界调整：缓存 block 策略仍操作 `Sequence`，
+容量估算仍读取 framework 配置与 runtime options，也仍有模型专属缓存策略。
+这些策略和输入边界需要后续切片，才能把 `core/kv_cache` 视为完全独立的领域模块。
+
+`proto/mooncake_transfer_engine.proto` 暂时作为兼容桥：保留原有 service 和 method
+名称，共用同一个 listener。通用传输服务处理 session RPC，把 cache RPC 转发给
+KV 扩展 service，不解释其消息。schema 仍包含 KV 消息，因此当前拆分消除了 C++
+领域与构建目标依赖，协议层尚未完全分离。
+
+配置使用新名称 `enable_virtual_memory`、`virtual_memory_master_node_addr`，
+旧 `xtensor` 拼写保留为 CLI/JSON 别名。显式 CLI 参数优先于 JSON；同一来源中
+新旧名称同时出现时，新名称优先。配置导出只使用新名称。注册签名 `_xtensor` 保留为兼容标识。
+
+本次本地资源、分布式协调器与 RPC C++ 类的拆分不修改 wire schema：
+`proto/model_memory_dist.proto` 仍使用 `ModelMemoryDist` 服务和
+`GetKVCacheOffsets` 方法。当前协议保持字段编号，heartbeat 的 JSON 字段为
+`virtual_memory_info`。这些协议名称与旧 xtensor 版本不同，master、worker 和外部
+heartbeat 消费方需要一起升级，不能混用重命名前后的 RPC 路由。
 
 阅读时先区分**状态、调度、执行**：`framework/` 定义请求、批次、缓存和模型接口；
 `scheduler/` 决定下一轮运行哪些工作；`distributed_runtime/` 和 `runtime/` 负责

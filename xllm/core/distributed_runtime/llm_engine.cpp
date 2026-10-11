@@ -43,13 +43,13 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/framework/prefix_cache/block_hasher.h"
+#include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/prefix/block_hasher.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/platform/platform.h"
 #include "core/util/model_config_utils.h"
-#include "framework/block/block_utils.h"
 #include "framework/block/kv_cache_manager_factory.h"
-#include "framework/kv_cache/kv_cache_shape.h"
-#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/speculative/mtp_utils.h"
 #include "models/model_registry.h"
@@ -361,13 +361,13 @@ bool LLMEngine::allocate_kv_cache(
                                         : block_size)
       .host_num_blocks(kv_cache_cap.n_blocks() * options_.host_blocks_factor())
       .enable_linear_state(enable_state_cache)
-      .enable_prefix_cache(kv_cache_config.enable_xtensor()
+      .enable_prefix_cache(kv_cache_config.enable_virtual_memory()
                                ? false
                                : options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .prefetch_batch_size(options_.prefetch_batch_size())
-      .enable_xtensor(kv_cache_config.enable_xtensor())
+      .enable_virtual_memory(kv_cache_config.enable_virtual_memory())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
@@ -503,8 +503,8 @@ bool LLMEngine::allocate_kv_cache(
       return false;
     }
   }
-  // XTensor mode: reserve padding blocks and start prealloc thread.
-  kv_cache_manager_->reserve_xtensor_padding_blocks();
+  // VirtualMemory mode: reserve padding blocks and start prealloc thread.
+  kv_cache_manager_->reserve_padding_blocks();
 
   return true;
 }

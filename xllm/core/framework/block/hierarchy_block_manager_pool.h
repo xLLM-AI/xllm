@@ -22,10 +22,10 @@ limitations under the License.
 #include <memory>
 #include <mutex>
 
-#include "block_manager_pool.h"
-#include "composite_block_manager.h"
-#include "core/framework/kv_cache_transfer/kv_cache_transfer_coordinator_base.h"
-#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
+#include "core/framework/block/block_manager_pool.h"
+#include "core/framework/block/composite_block_manager.h"
+#include "core/kv_cache/transfer/kv_cache_transfer_coordinator_base.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/timer.h"
 
@@ -47,7 +47,8 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   explicit HierarchyBlockManagerPool(
       const BlockManagerPool::Options& options,
       std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
-      int32_t dp_size = 1);
+      int32_t dp_size = 1,
+      KVCachePageAllocator* page_allocator = nullptr);
   ~HierarchyBlockManagerPool() override;
 
   bool allocate(Sequence* sequence, size_t num_tokens) override;

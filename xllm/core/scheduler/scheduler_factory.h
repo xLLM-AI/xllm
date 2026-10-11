@@ -49,7 +49,8 @@ std::unique_ptr<Scheduler> create_continuous_scheduler(
     SchedulerOptions options,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
         nullptr,
-    std::shared_ptr<XTensorController> xtensor_controller = nullptr,
+    std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
+        nullptr,
     std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
         nullptr) {
   switch (select_scheduler_kind(options)) {
@@ -58,25 +59,25 @@ std::unique_ptr<Scheduler> create_continuous_scheduler(
           engine,
           options,
           std::move(distributed_worker_manager),
-          std::move(xtensor_controller),
+          std::move(model_residency_coordinator),
           std::move(kv_transfer_coordinator));
     case SchedulerKind::ZERO_EVICTION:
       return std::make_unique<ZeroEvictionScheduler>(
           engine,
           options,
-          std::move(xtensor_controller),
+          std::move(model_residency_coordinator),
           std::move(distributed_worker_manager));
     case SchedulerKind::CONTINUOUS:
       return std::make_unique<ContinuousScheduler<TargetEngine>>(
           engine,
           options,
-          std::move(xtensor_controller),
+          std::move(model_residency_coordinator),
           std::move(distributed_worker_manager));
   }
   return std::make_unique<ContinuousScheduler<TargetEngine>>(
       engine,
       options,
-      std::move(xtensor_controller),
+      std::move(model_residency_coordinator),
       std::move(distributed_worker_manager));
 }
 
