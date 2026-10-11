@@ -16,63 +16,66 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/types.h>
 
-#include "core/distributed_runtime/model_memory_manager.h"
+#include "core/distributed_runtime/distributed_memory_coordinator.h"
+#include "core/distributed_runtime/worker_memory_rpc_options.h"
 #include "core/framework/config/distributed_config.h"
 
 namespace xllm {
 namespace {
 
-TEST(ModelMemoryBootstrapTest, RejectsMissingLocalDeviceBeforeStartingServers) {
-  ModelMemoryOptions options;
+TEST(WorkerMemoryRpcBootstrapTest,
+     RejectsMissingLocalDeviceBeforeStartingServers) {
+  WorkerMemoryRpcOptions options;
   EXPECT_DEATH(
-      ModelMemoryManager::get_instance().setup_multi_node_model_memory_dist(
+      DistributedMemoryCoordinator::get_instance().setup_worker_memory_rpc(
           options, "127.0.0.1:0", /*dp_size=*/1),
       "exactly one local device per process");
 }
 
-TEST(ModelMemoryBootstrapTest,
+TEST(WorkerMemoryRpcBootstrapTest,
      RejectsMultipleLocalDevicesBeforeStartingServers) {
-  ModelMemoryOptions options;
+  WorkerMemoryRpcOptions options;
   options.devices({torch::Device(torch::kCPU), torch::Device(torch::kCPU)});
   EXPECT_DEATH(
-      ModelMemoryManager::get_instance().setup_multi_node_model_memory_dist(
+      DistributedMemoryCoordinator::get_instance().setup_worker_memory_rpc(
           options, "127.0.0.1:0", /*dp_size=*/1),
       "exactly one local device per process");
 }
 
-TEST(ModelMemoryBootstrapTest, RejectsNonpositiveDpSizeBeforeDivision) {
-  ModelMemoryOptions options;
+TEST(WorkerMemoryRpcBootstrapTest, RejectsNonpositiveDpSizeBeforeDivision) {
+  WorkerMemoryRpcOptions options;
   options.devices({torch::Device(torch::kCPU)});
   EXPECT_DEATH(
-      ModelMemoryManager::get_instance().setup_multi_node_model_memory_dist(
+      DistributedMemoryCoordinator::get_instance().setup_worker_memory_rpc(
           options, "127.0.0.1:0", /*dp_size=*/0),
       "dp_size must be positive");
   EXPECT_DEATH(
-      ModelMemoryManager::get_instance().setup_multi_node_model_memory_dist(
+      DistributedMemoryCoordinator::get_instance().setup_worker_memory_rpc(
           options, "127.0.0.1:0", /*dp_size=*/-1),
       "dp_size must be positive");
 }
 
-TEST(ModelMemoryBootstrapTest, RejectsInvalidNodeRankBeforeStartingServers) {
-  ModelMemoryOptions options;
+TEST(WorkerMemoryRpcBootstrapTest,
+     RejectsInvalidNodeRankBeforeStartingServers) {
+  WorkerMemoryRpcOptions options;
   options.devices({torch::Device(torch::kCPU)});
   EXPECT_DEATH(
       {
         DistributedConfig::get_instance().nnodes(1).node_rank(1);
-        ModelMemoryManager::get_instance().setup_multi_node_model_memory_dist(
+        DistributedMemoryCoordinator::get_instance().setup_worker_memory_rpc(
             options, "127.0.0.1:0", /*dp_size=*/1);
       },
       "distributed_config.node_rank.*distributed_config.nnodes");
 }
 
-TEST(ModelMemoryBootstrapTest,
+TEST(WorkerMemoryRpcBootstrapTest,
      RejectsNondivisibleTopologyBeforeStartingServers) {
-  ModelMemoryOptions options;
+  WorkerMemoryRpcOptions options;
   options.devices({torch::Device(torch::kCPU)});
   EXPECT_DEATH(
       {
         DistributedConfig::get_instance().nnodes(3).node_rank(0);
-        ModelMemoryManager::get_instance().setup_multi_node_model_memory_dist(
+        DistributedMemoryCoordinator::get_instance().setup_worker_memory_rpc(
             options, "127.0.0.1:0", /*dp_size=*/2);
       },
       "world_size must be divisible by dp_size");

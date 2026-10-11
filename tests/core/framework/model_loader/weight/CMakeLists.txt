@@ -22,7 +22,7 @@ if(USE_NPU)
       model_weight_allocator_test.cpp
     DEPS
       :model_weight_store
-      :model_memory_manager
+      :worker_memory_resources
       :config
       GTest::gtest_main
       glog::glog

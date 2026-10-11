@@ -17,15 +17,16 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <cstdint>
 #include <vector>
 
-#include "common/macros.h"
+#include "core/common/macros.h"
 
 namespace xllm {
 
-class ModelMemoryOptions final {
+class WorkerMemoryRpcOptions final {
  public:
-  // Devices used by the model memory manager.
+  // Devices served by worker memory RPC servers on this node.
   PROPERTY(std::vector<torch::Device>, devices);
 
   // Multi-node configuration

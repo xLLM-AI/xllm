@@ -111,7 +111,7 @@ cc_library(
     :dit_cache
     :model
     :parallel_state
-    :model_memory_manager
+    :worker_memory_resources
     :global_memory_region
     :kv_cache
     :kv_cache_estimation
@@ -146,3 +146,23 @@ cc_library(
 if(USE_XLITE)
   xllm_link_xlite(runtime)
 endif()
+
+# This leaf owns local resources without depending on :runtime or RPC targets.
+cc_library(
+  NAME
+    worker_memory_resources
+  HDRS
+    worker_memory_resources.h
+  SRCS
+    worker_memory_resources.cpp
+  DEPS
+    :common
+    :config
+    :platform
+    :global_memory_region
+    :virtual_memory
+    :virtual_memory_kv_cache_storage
+    :model_weight_store
+    glog::glog
+    torch
+)

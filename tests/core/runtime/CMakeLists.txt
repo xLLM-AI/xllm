@@ -21,6 +21,22 @@ target_link_options(task_execution_pipeline_input_test PRIVATE
 
 if(USE_NPU)
   cc_test(
+    NAME
+      worker_memory_resources_test
+    SRCS
+      worker_memory_resources_test.cpp
+    DEPS
+      :worker_memory_resources
+      :config
+      GTest::gtest_main
+      glog::glog
+  )
+  set_tests_properties(
+    WorkerMemoryResourcesTest.KvShortageLeavesEveryLayerUnmapped
+    PROPERTIES TIMEOUT 60
+  )
+
+  cc_test(
     NAME task_execution_pipeline_speculative_test
     SRCS task_execution_pipeline_speculative_test.cpp
     DEPS :runtime GTest::gtest_main

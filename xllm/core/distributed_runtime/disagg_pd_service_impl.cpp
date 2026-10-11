@@ -21,8 +21,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/types.h"
+#include "core/distributed_runtime/distributed_memory_coordinator.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/distributed_runtime/model_memory_controller.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/sampling/json_object_grammar.h"
@@ -32,13 +32,12 @@ limitations under the License.
 
 namespace xllm {
 
-DisaggPDServiceImpl::DisaggPDServiceImpl(
-    DisaggPDScheduler* scheduler,
-    Engine* engine,
-    std::shared_ptr<ModelMemoryController> model_memory_controller)
+DisaggPDServiceImpl::DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
+                                         Engine* engine,
+                                         int32_t cache_block_size)
     : scheduler_(scheduler),
       engine_(engine),
-      model_memory_controller_(std::move(model_memory_controller)) {
+      cache_block_size_(cache_block_size) {
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
@@ -301,24 +300,27 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         group->set_group_id(cache_group_id(BlockType::LINEAR));
         group->add_ids(static_cast<uint64_t>(linear_state_id));
       }
-      // VirtualMemory mode: calculate and return GlobalMemoryRegion offsets
-      if (model_memory_controller_ != nullptr &&
-          ::xllm::KVCacheConfig::get_instance().enable_virtual_memory() &&
+      // Only paged KV managers have pool-relative memory offsets.
+      auto* block_manager = engine_->block_manager_pool();
+      if (block_manager != nullptr &&
+          block_manager->options().enable_virtual_memory() &&
           !block_ids.empty()) {
         std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
             layer_offsets;
-        auto* block_manager = engine_->block_manager_pool();
-        bool offsets_available = false;
-        if (block_manager != nullptr) {
-          offsets_available =
-              model_memory_controller_->get_kv_cache_offsets_for_blocks(
-                  dp_rank,
-                  block_ids,
-                  static_cast<uint64_t>(block_manager->options().slot_size()),
-                  layer_offsets);
-        } else {
-          LOG(ERROR) << "BlockManagerPool not available";
-        }
+        const auto& block_options = block_manager->options();
+        CHECK_GT(cache_block_size_, 0);
+        // KV split enlarges the manager's logical block length; offsets use
+        // the physical cache block length configured by the engine.
+        const uint64_t block_size_bytes =
+            static_cast<uint64_t>(block_options.slot_size()) *
+            static_cast<uint64_t>(cache_block_size_) / 2;
+        const bool offsets_available =
+            DistributedMemoryCoordinator::get_instance().get_kv_cache_offsets(
+                dp_rank,
+                block_options.model_id(),
+                block_ids,
+                block_size_bytes,
+                layer_offsets);
         if (offsets_available) {
           // Fill proto with per-layer offsets
           for (const auto& [k_offsets, v_offsets] : layer_offsets) {

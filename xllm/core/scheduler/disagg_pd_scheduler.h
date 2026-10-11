@@ -73,14 +73,15 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       TargetEngine* engine,
       const Options& options,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
-      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr,
+      std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
+          nullptr,
       std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
           nullptr)
       : DisaggPDScheduler(engine,
                           options,
                           SkipRuntimeStart{},
                           std::move(distributed_worker_manager),
-                          std::move(model_memory_controller),
+                          std::move(model_residency_coordinator),
                           std::move(kv_transfer_coordinator)) {
     CHECK(distributed_worker_manager_ != nullptr)
         << "Disaggregated PD requires a distributed worker manager.";
@@ -182,12 +183,13 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       SkipRuntimeStart,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
           nullptr,
-      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr,
+      std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
+          nullptr,
       std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
           nullptr)
       : ContinuousScheduler<>(engine,
                               options,
-                              std::move(model_memory_controller),
+                              std::move(model_residency_coordinator),
                               std::move(distributed_worker_manager)),
         kv_transfer_coordinator_(std::move(kv_transfer_coordinator)),
         server_name_("DisaggPDServer") {

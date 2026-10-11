@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/model_memory_controller.h"
+#include "core/distributed_runtime/model_residency_coordinator.h"
 
 #include <folly/futures/Future.h>
 #include <glog/logging.h>
@@ -21,13 +21,14 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/distributed_runtime/distributed_memory_coordinator.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/distributed_runtime/model_memory_manager.h"
-#include "core/distributed_runtime/model_page_allocator.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/kv_cache/storage/paged_kv_cache_page_allocator.h"
+#include "core/runtime/worker_memory_resources.h"
 
 namespace xllm {
 
@@ -77,8 +78,8 @@ int64_t get_effective_weight_size(const ModelLoader& model_loader,
       max_layer_size;
   const int64_t total_weight_size = non_decoder_size + rolling_buffer_size;
 
-  LOG(INFO) << "MappedMemoryRegion rolling_load weight budget: total="
-            << all_size << ", non_decoder=" << non_decoder_size
+  LOG(INFO) << "Rolling-load weight budget: total=" << all_size
+            << ", non_decoder=" << non_decoder_size
             << ", all_decoder=" << all_decoder_size
             << ", max_layer=" << max_layer_size
             << ", rolling_buffer=" << rolling_buffer_size << " ("
@@ -90,47 +91,48 @@ int64_t get_effective_weight_size(const ModelLoader& model_loader,
 
 }  // namespace
 
-ModelMemoryController::ModelMemoryController(
+ModelResidencyCoordinator::ModelResidencyCoordinator(
     Options options,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(std::move(options)),
       distributed_worker_manager_(std::move(distributed_worker_manager)) {}
 
-bool ModelMemoryController::initialize_model(const ModelLoader& model_loader,
-                                             int64_t num_layers,
-                                             int32_t dp_size,
-                                             int32_t tp_size,
-                                             MasterStatus master_status) {
+bool ModelResidencyCoordinator::initialize_model(
+    const ModelLoader& model_loader,
+    int64_t num_layers,
+    int32_t dp_size,
+    int32_t tp_size,
+    MasterStatus master_status) {
   if (!options_.enabled) {
     return true;
   }
   if (distributed_worker_manager_ == nullptr ||
       distributed_worker_manager_->get_worker_clients().empty()) {
-    LOG(ERROR) << "No worker clients available to initialize "
-                  "MappedMemoryRegion model.";
+    LOG(ERROR) << "No worker clients available to initialize model residency.";
     return false;
   }
 
-  auto& page_allocator = ModelPageAllocator::get_instance();
-  if (!page_allocator.is_initialized()) {
+  CHECK_GT(num_layers, 0);
+  CHECK_GT(dp_size, 0);
+  CHECK_GT(tp_size, 0);
+  auto& coordinator = DistributedMemoryCoordinator::get_instance();
+  if (!coordinator.is_initialized()) {
     auto& phy_pool = PhysicalPagePool::get_instance();
     CHECK(phy_pool.is_initialized())
-        << "PhysicalPagePool must be initialized before ModelPageAllocator";
-    const size_t num_phy_pages = phy_pool.num_total();
-    const int32_t max_world_size = static_cast<int32_t>(
+        << "PhysicalPagePool must precede the shared worker page budget";
+    const int32_t worker_count = static_cast<int32_t>(
         distributed_worker_manager_->get_worker_clients().size());
-    page_allocator.init(num_phy_pages,
-                        dp_size,
-                        max_world_size,
-                        /*enable_page_prealloc=*/true);
+    coordinator.init_page_budget(
+        phy_pool.num_total(),
+        dp_size,
+        worker_count,
+        KVCacheConfig::get_instance().phy_page_granularity_size(),
+        /*enable_prealloc=*/true);
   }
 
-  // Each model owns its logical page list and shares the physical page pool.
   const std::string& model_id = options_.model_id;
-  page_allocator.register_model(model_id, num_layers, master_status);
-  page_allocator.set_model_parallel_strategy(model_id, dp_size, tp_size);
-  auto& model_memory_manager = ModelMemoryManager::get_instance();
-  model_memory_manager.set_model_parallel_strategy(model_id, dp_size, tp_size);
+  coordinator.set_model_parallel_strategy(model_id, dp_size, tp_size);
+  coordinator.kv_cache_page_allocator().register_model(model_id, num_layers);
 
   const int64_t total_weight_size =
       get_effective_weight_size(model_loader, num_layers);
@@ -144,14 +146,14 @@ bool ModelMemoryController::initialize_model(const ModelLoader& model_loader,
   const size_t num_pages = (weight_size_per_tp + page_size - 1) / page_size +
                            kWeightPageSafetyMargin;
 
-  LOG(INFO) << "MappedMemoryRegion weight allocation: total_weight_size="
+  LOG(INFO) << "Model weight page budget: total_weight_size="
             << total_weight_size << ", tp_size=" << tp_size
             << ", weight_size_per_tp=" << weight_size_per_tp
             << ", num_pages=" << num_pages
             << ", master_status=" << master_status;
 
   if (master_status == MasterStatus::WAKEUP) {
-    if (!page_allocator.alloc_weight_pages(model_id, num_pages)) {
+    if (!coordinator.reserve_weight_pages(model_id, num_pages)) {
       LOG(ERROR) << "Failed to allocate weight pages";
       return false;
     }
@@ -160,7 +162,7 @@ bool ModelMemoryController::initialize_model(const ModelLoader& model_loader,
            "will load to device";
   } else if (master_status == MasterStatus::LIGHT_SLEEP ||
              master_status == MasterStatus::DEEP_SLEEP) {
-    page_allocator.set_weight_pages_count(model_id, num_pages);
+    coordinator.set_weight_page_count(model_id, num_pages);
     LOG(INFO) << "master_status=" << master_status
               << " (SLEEP): Recorded weight pages, num_pages=" << num_pages;
   }
@@ -168,14 +170,14 @@ bool ModelMemoryController::initialize_model(const ModelLoader& model_loader,
   return true;
 }
 
-bool ModelMemoryController::finish_initialization(MasterStatus master_status) {
+bool ModelResidencyCoordinator::finish_initialization(
+    MasterStatus master_status) {
   if (!options_.enabled || master_status == MasterStatus::WAKEUP) {
     return true;
   }
 
   // KV cache allocation must finish before releasing initial resources.
-  if (!ModelPageAllocator::get_instance().sleep_model(
-          options_.model_id, /*skip_weight_release=*/true)) {
+  if (!suspend_memory(/*skip_weight_release=*/true)) {
     LOG(ERROR) << "Failed to sleep model " << options_.model_id
                << " after init";
     return false;
@@ -186,7 +188,7 @@ bool ModelMemoryController::finish_initialization(MasterStatus master_status) {
   return true;
 }
 
-void ModelMemoryController::get_virtual_memory_info(
+void ModelResidencyCoordinator::get_virtual_memory_info(
     std::vector<size_t>& worker_free_phy_pages,
     std::unordered_map<std::string, std::vector<WeightSegment>>&
         model_weight_segments) const {
@@ -194,17 +196,15 @@ void ModelMemoryController::get_virtual_memory_info(
     return;
   }
 
-  // Worker 0 shares the master's process, so these queries need no RPC.
-  auto& page_allocator = ModelPageAllocator::get_instance();
-  if (page_allocator.is_initialized()) {
-    worker_free_phy_pages = page_allocator.get_all_worker_free_pages();
+  auto& coordinator = DistributedMemoryCoordinator::get_instance();
+  if (coordinator.is_initialized()) {
+    worker_free_phy_pages = coordinator.get_worker_free_page_counts();
   }
-
-  auto& model_memory_manager = ModelMemoryManager::get_instance();
-  model_weight_segments = model_memory_manager.get_all_model_weight_segments();
+  model_weight_segments =
+      WorkerMemoryResources::get_instance().get_all_model_weight_segments();
 }
 
-bool ModelMemoryController::sleep(MasterStatus master_status) {
+bool ModelResidencyCoordinator::sleep(MasterStatus master_status) {
   if (!options_.enabled) {
     LOG(WARNING) << "sleep requires --enable_virtual_memory=true";
     return false;
@@ -221,9 +221,8 @@ bool ModelMemoryController::sleep(MasterStatus master_status) {
             << ". Worker clients count: " << worker_clients.size();
 
   // Release weight and KV cache pages before changing worker model state.
-  auto& page_allocator = ModelPageAllocator::get_instance();
-  if (!page_allocator.sleep_model(options_.model_id)) {
-    LOG(ERROR) << "ModelPageAllocator sleep_model failed, aborting sleep flow";
+  if (!suspend_memory(/*skip_weight_release=*/false)) {
+    LOG(ERROR) << "Memory suspension failed, aborting sleep flow";
     return false;
   }
 
@@ -243,7 +242,7 @@ bool ModelMemoryController::sleep(MasterStatus master_status) {
   return true;
 }
 
-bool ModelMemoryController::wakeup(const WakeupOptions& options) {
+bool ModelResidencyCoordinator::wakeup(const WakeupOptions& options) {
   if (!options_.enabled) {
     LOG(WARNING) << "wakeup requires --enable_virtual_memory=true";
     return false;
@@ -260,12 +259,21 @@ bool ModelMemoryController::wakeup(const WakeupOptions& options) {
             << ". Worker clients count: " << worker_clients.size();
 
   // Restore weight and KV cache pages before workers load or transfer weights.
-  auto& page_allocator = ModelPageAllocator::get_instance();
-  if (!page_allocator.wakeup_model(options_.model_id)) {
-    LOG(ERROR)
-        << "ModelPageAllocator wakeup_model failed, aborting wakeup flow";
+  auto& coordinator = DistributedMemoryCoordinator::get_instance();
+  auto& pages = coordinator.kv_cache_page_allocator();
+  const auto plan = pages.begin_resume(options_.model_id);
+  if (!plan.has_value()) {
     return false;
   }
+  if (!coordinator.try_reserve_model_memory(options_.model_id, *plan)) {
+    pages.finish_resume(options_.model_id, /*success=*/false);
+    LOG(ERROR) << "Insufficient shared capacity to wake model "
+               << options_.model_id;
+    return false;
+  }
+  pages.map_pages(options_.model_id, *plan);
+  coordinator.restore_weight_pages(options_.model_id);
+  pages.finish_resume(options_.model_id, /*success=*/true);
 
   LOG(INFO) << "Waking up model " << options_.model_id
             << ", remote_addrs.size()=" << options.remote_addrs.size();
@@ -302,31 +310,19 @@ bool ModelMemoryController::wakeup(const WakeupOptions& options) {
   return true;
 }
 
-bool ModelMemoryController::get_kv_cache_offsets_for_blocks(
-    int32_t dp_rank,
-    const std::vector<int32_t>& block_ids,
-    uint64_t slot_size,
-    std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
-        layer_offsets) const {
-  if (!options_.enabled) {
+bool ModelResidencyCoordinator::suspend_memory(bool skip_weight_release) {
+  auto& coordinator = DistributedMemoryCoordinator::get_instance();
+  auto& pages = coordinator.kv_cache_page_allocator();
+  const auto plan = pages.begin_suspend(options_.model_id);
+  if (!plan.has_value()) {
     return false;
   }
-
-  const uint64_t block_size_bytes = slot_size * options_.block_size / 2;
-  auto& allocator = ModelMemoryManager::get_instance();
-  if (!allocator.get_kv_cache_offsets(dp_rank,
-                                      options_.model_id,
-                                      block_ids,
-                                      block_size_bytes,
-                                      layer_offsets)) {
-    LOG(ERROR) << "get_kv_cache_offsets_for_blocks via RPC failed for dp_rank="
-               << dp_rank << ", model_id=" << options_.model_id;
-    return false;
+  if (!skip_weight_release) {
+    coordinator.release_weight_pages(options_.model_id);
   }
-
-  VLOG(1) << "get_kv_cache_offsets_for_blocks: dp_rank=" << dp_rank
-          << ", num_blocks=" << block_ids.size()
-          << ", num_layers=" << layer_offsets.size();
+  pages.unmap_pages(options_.model_id, *plan);
+  coordinator.release_kv_mapping_budget(options_.model_id, *plan);
+  pages.finish_suspend(options_.model_id);
   return true;
 }
 

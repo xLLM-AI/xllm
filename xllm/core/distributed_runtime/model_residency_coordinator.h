@@ -30,17 +30,16 @@ namespace xllm {
 class DistributedWorkerManager;
 class ModelLoader;
 
-// Coordinates a model's KV cache and weight allocations and worker lifecycle
-// operations.
-class ModelMemoryController final {
+// Coordinates one model's preparation, suspension and restoration across
+// workers. Resource ownership and shared capacity live in separate services.
+class ModelResidencyCoordinator final {
  public:
   struct Options {
     bool enabled = false;
     std::string model_id;
-    int32_t block_size = 0;
   };
 
-  ModelMemoryController(
+  ModelResidencyCoordinator(
       Options options,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager);
 
@@ -64,15 +63,9 @@ class ModelMemoryController final {
   bool sleep(MasterStatus master_status);
   bool wakeup(const WakeupOptions& options);
 
-  // slot_size describes one token's combined K and V cache storage.
-  bool get_kv_cache_offsets_for_blocks(
-      int32_t dp_rank,
-      const std::vector<int32_t>& block_ids,
-      uint64_t slot_size,
-      std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
-          layer_offsets) const;
-
  private:
+  bool suspend_memory(bool skip_weight_release);
+
   const Options options_;
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
 };

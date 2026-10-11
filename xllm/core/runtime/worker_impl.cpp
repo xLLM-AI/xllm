@@ -80,7 +80,6 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
-#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/allocator/global_memory_region.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/mtp_utils.h"
@@ -89,6 +88,7 @@ limitations under the License.
 #include "core/kv_cache/storage/paged_kv_cache_tensor_allocator.h"
 #include "core/kv_cache/transfer/paged_kv_cache_transfer_memory_provider.h"
 #include "core/runtime/decode_graph_bucket.h"
+#include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/eplb/eplb_utils.h"
 #include "framework/kv_cache/linear_state_restore.h"
@@ -446,7 +446,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
     // Construct the memory owners before the shared transport so registered
     // regions remain alive until the transport stops during process shutdown.
-    ModelMemoryManager::get_instance();
+    WorkerMemoryResources::get_instance();
     if (!weight_transfer_) {
       weight_transfer_ = std::make_unique<MooncakeWeightTransfer>(
           options_.transfer_listen_port(), device_.unwrap());
@@ -561,7 +561,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
     CHECK(tensor_allocator == nullptr)
         << "Virtual memory KV cache cannot use another tensor allocator.";
     tensor_allocator = create_paged_kv_cache_tensor_allocator(
-        ModelMemoryManager::get_instance().kv_cache_memory(),
+        WorkerMemoryResources::get_instance().kv_cache_memory(),
         options_.model_id(),
         num_layers);
   }
@@ -622,7 +622,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
     memory_provider = create_paged_kv_cache_transfer_memory_provider(
-        ModelMemoryManager::get_instance().kv_cache_memory(),
+        WorkerMemoryResources::get_instance().kv_cache_memory(),
         GlobalMemoryRegion::get_instance());
   }
 #endif
@@ -2098,9 +2098,9 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
     }
   }
 
-  auto& allocator = ModelMemoryManager::get_instance();
+  auto& memory_resources = WorkerMemoryResources::get_instance();
   const std::optional<WeightAllocationInfo> weight_allocation =
-      allocator.get_weight_allocation_info(options_.model_id());
+      memory_resources.get_weight_allocation_info(options_.model_id());
   if (!weight_allocation.has_value() ||
       weight_allocation->base_ptr == nullptr ||
       weight_allocation->num_pages == 0) {

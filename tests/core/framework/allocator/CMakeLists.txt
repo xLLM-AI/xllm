@@ -14,16 +14,6 @@ cc_test(
 )
 
 if(USE_NPU)
-  # Keep validation/death tests independent of device runtime initialization.
-  foreach(test_name IN ITEMS model_page_allocator_test model_memory_bootstrap_test)
-    cc_test(
-      NAME ${test_name}
-      NO_NPU_RUNTIME
-      SRCS ${test_name}.cpp
-      DEPS :model_memory_manager :config GTest::gtest_main glog::glog
-    )
-  endforeach()
-
   cc_test(
     NAME
       virtual_memory_test

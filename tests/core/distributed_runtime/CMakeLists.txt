@@ -67,29 +67,39 @@ cc_test(
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    model_memory_controller_test
+    model_residency_coordinator_test
   SRCS
-    model_memory_controller_test.cpp
+    model_residency_coordinator_test.cpp
   DEPS
     :distributed_runtime
     GTest::gtest_main
 )
 
+cc_test(
+  NO_NPU_RUNTIME
+  NAME
+    distributed_memory_coordinator_test
+  SRCS
+    distributed_memory_coordinator_test.cpp
+  DEPS
+    :distributed_memory_coordinator
+    GTest::gtest_main
+    glog::glog
+)
+
 if(USE_NPU)
+  # Bootstrap validation runs before device initialization or server startup.
   cc_test(
     NAME
-      model_memory_manager_test
+      worker_memory_rpc_bootstrap_test
+    NO_NPU_RUNTIME
     SRCS
-      model_memory_manager_test.cpp
+      worker_memory_rpc_bootstrap_test.cpp
     DEPS
-      :model_memory_manager
+      :distributed_memory_coordinator
       :config
       GTest::gtest_main
       glog::glog
-  )
-  set_tests_properties(
-    ModelMemoryManagerTest.KvShortageLeavesEveryLayerUnmapped
-    PROPERTIES TIMEOUT 60
   )
 
   cc_test(

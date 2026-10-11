@@ -426,7 +426,7 @@ class WorkerImpl {
 
   bool wakeup_local(const WakeupOptions& options);
 
-  // Original virtual memory (ModelPageAllocator) sleep path.
+  // Virtual memory residency sleep path.
   bool virtual_memory_sleep(MasterStatus master_status);
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)

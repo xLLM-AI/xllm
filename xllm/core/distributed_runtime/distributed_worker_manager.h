@@ -32,7 +32,7 @@ namespace xllm {
 class WorkerServer;
 class ThreadPool;
 class DistributedWorkerManagerTest;
-class ModelMemoryControllerTest;
+class ModelResidencyCoordinatorTest;
 class KVCacheTransferCoordinatorTest;
 class DisaggPDSchedulerTestPeer;
 class SchedulerMetricsTestPeer;
@@ -79,7 +79,7 @@ class DistributedWorkerManager final {
 
  private:
   friend class DistributedWorkerManagerTest;
-  friend class ModelMemoryControllerTest;
+  friend class ModelResidencyCoordinatorTest;
   friend class KVCacheTransferCoordinatorTest;
   friend class DisaggPDSchedulerTestPeer;
   friend class SchedulerMetricsTestPeer;

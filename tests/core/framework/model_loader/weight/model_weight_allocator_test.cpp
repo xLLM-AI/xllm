@@ -25,21 +25,21 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/allocator/global_memory_region.h"
 #include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/model_loader/weight/weight_allocation.h"
 #include "core/framework/model_loader/weight/weight_memory_manager.h"
+#include "core/runtime/worker_memory_resources.h"
 #include "tests/core/framework/allocator/virtual_memory_test_utils.h"
 #include "tests/npu_test_environment.h"
 
 namespace xllm {
 
-class ModelMemoryManagerTestPeer final {
+class WorkerMemoryResourcesTestPeer final {
  public:
   static void release_resources() {
-    ModelMemoryManager::get_instance().destroy();
+    WorkerMemoryResources::get_instance().destroy();
   }
 };
 
@@ -75,7 +75,7 @@ class ModelWeightAllocatorTest : public ::testing::Test {
     ASSERT_EQ(aclrtSetDevice(/*device_id=*/0), ACL_SUCCESS);
 
     const torch::Device device("npu:0");
-    ModelMemoryManager::get_instance().init(device);
+    WorkerMemoryResources::get_instance().init(device);
     auto& pool = PhysicalPagePool::get_instance();
     const size_t page_size = vmm::get_recommended_granularity(device.index());
     pool.init(device, kPoolPages, page_size);
@@ -89,11 +89,11 @@ class ModelWeightAllocatorTest : public ::testing::Test {
     if (!resources_initialized_) {
       return;
     }
-    ModelMemoryManager::get_instance().free_weight(kModelId);
+    WorkerMemoryResources::get_instance().free_weight(kModelId);
     auto& pool = PhysicalPagePool::get_instance();
     pool.release_reserved_pages(blocking_page_ids_);
     EXPECT_EQ(pool.num_available(), kPoolPages);
-    ModelMemoryManagerTestPeer::release_resources();
+    WorkerMemoryResourcesTestPeer::release_resources();
     VirtualMemoryTestPeer::release_resources();
   }
 
@@ -110,9 +110,8 @@ TEST_F(ModelWeightAllocatorTest, FragmentedTransferMatchesMappedWeights) {
   std::erase_if(blocking_page_ids_,
                 [](page_id_t page_id) { return page_id == 9 || page_id == 7; });
 
-  auto& allocator = ModelMemoryManager::get_instance();
-  ASSERT_TRUE(
-      allocator.broadcast_alloc_weight_pages(kModelId, /*num_pages=*/2));
+  auto& allocator = WorkerMemoryResources::get_instance();
+  ASSERT_TRUE(allocator.alloc_weight_pages(kModelId, /*num_pages=*/2));
   ASSERT_EQ(pool.num_available(), 0);
   const size_t page_size = GlobalMemoryRegion::get_instance().page_size();
   void* weight_ptr = nullptr;
@@ -150,9 +149,8 @@ TEST_F(ModelWeightAllocatorTest, FragmentedTransferMatchesMappedWeights) {
 }
 
 TEST_F(ModelWeightAllocatorTest, ContiguousAllocationRejectsOverflow) {
-  auto& allocator = ModelMemoryManager::get_instance();
-  ASSERT_TRUE(
-      allocator.broadcast_alloc_weight_pages(kModelId, /*num_pages=*/1));
+  auto& allocator = WorkerMemoryResources::get_instance();
+  ASSERT_TRUE(allocator.alloc_weight_pages(kModelId, /*num_pages=*/1));
   const size_t page_size = GlobalMemoryRegion::get_instance().page_size();
   void* weight_ptr = nullptr;
   ASSERT_TRUE(allocator.allocate_weight(kModelId, weight_ptr, /*size=*/1));
@@ -198,24 +196,21 @@ TEST_F(ModelWeightAllocatorTest,
 
 TEST_F(ModelWeightAllocatorTest, ExhaustionDoesNotConsumePages) {
   auto& pool = PhysicalPagePool::get_instance();
-  auto& allocator = ModelMemoryManager::get_instance();
-  EXPECT_FALSE(
-      allocator.broadcast_alloc_weight_pages(kModelId, kPoolPages + 1));
+  auto& allocator = WorkerMemoryResources::get_instance();
+  EXPECT_FALSE(allocator.alloc_weight_pages(kModelId, kPoolPages + 1));
   EXPECT_EQ(pool.num_available(), kPoolPages);
   EXPECT_TRUE(allocator.get_model_weight_segments(kModelId).empty());
 }
 
 TEST_F(ModelWeightAllocatorTest, DuplicateReservationPreservesExistingWeights) {
-  auto& allocator = ModelMemoryManager::get_instance();
-  ASSERT_TRUE(
-      allocator.broadcast_alloc_weight_pages(kModelId, /*num_pages=*/1));
+  auto& allocator = WorkerMemoryResources::get_instance();
+  ASSERT_TRUE(allocator.alloc_weight_pages(kModelId, /*num_pages=*/1));
   const auto before = allocator.get_model_weight_segments(kModelId);
   ASSERT_EQ(before.size(), 1);
   void* first_ptr = nullptr;
   ASSERT_TRUE(allocator.allocate_weight(kModelId, first_ptr, /*size=*/1));
 
-  EXPECT_FALSE(
-      allocator.broadcast_alloc_weight_pages(kModelId, /*num_pages=*/2));
+  EXPECT_FALSE(allocator.alloc_weight_pages(kModelId, /*num_pages=*/2));
   const auto after = allocator.get_model_weight_segments(kModelId);
   ASSERT_EQ(after.size(), 1);
   EXPECT_EQ(after[0].offset, before[0].offset);

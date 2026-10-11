@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/model_memory_dist_client.h"
+#include "core/distributed_runtime/worker_memory_rpc_client.h"
 
 #include <brpc/controller.h>
 #include <glog/logging.h>
@@ -21,12 +21,11 @@ limitations under the License.
 #include <chrono>
 #include <thread>
 
-#include "common/global_flags.h"
 #include "core/framework/config/service_config.h"
 
 namespace xllm {
 
-ModelMemoryDistClient::ModelMemoryDistClient(int32_t global_rank,
+WorkerMemoryRpcClient::WorkerMemoryRpcClient(int32_t global_rank,
                                              const std::string& server_address,
                                              const torch::Device& device)
     : global_rank_(global_rank), device_(device) {
@@ -42,22 +41,22 @@ ModelMemoryDistClient::ModelMemoryDistClient(int32_t global_rank,
   wait_for_server_ready(server_address);
 }
 
-bool ModelMemoryDistClient::wait_for_server_ready(
+bool WorkerMemoryRpcClient::wait_for_server_ready(
     const std::string& server_address) {
   proto::Status req;
   proto::Status resp;
 
-  int try_count = 0;
+  int32_t try_count = 0;
   brpc::Controller cntl;
-  const int sleep_time_second = 3;
+  constexpr int32_t kReconnectDelaySeconds = 3;
   while (try_count <
          ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     cntl.Reset();
     stub_->Hello(&cntl, &req, &resp, nullptr);
     if (cntl.Failed() || !resp.ok()) {
-      std::this_thread::sleep_for(std::chrono::seconds(sleep_time_second));
+      std::this_thread::sleep_for(std::chrono::seconds(kReconnectDelaySeconds));
     } else {
-      LOG(INFO) << "ModelMemoryDistClient connected to server: "
+      LOG(INFO) << "WorkerMemoryRpcClient connected to server: "
                 << server_address << ", global_rank: " << global_rank_;
       break;
     }
@@ -65,14 +64,14 @@ bool ModelMemoryDistClient::wait_for_server_ready(
   }
   if (try_count >=
       ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
-    LOG(ERROR) << "ModelMemoryDistClient Hello failed, global_rank: "
+    LOG(ERROR) << "WorkerMemoryRpcClient Hello failed, global_rank: "
                << global_rank_ << ", error: " << cntl.ErrorText();
     return false;
   }
   return true;
 }
 
-folly::SemiFuture<MemoryInfo> ModelMemoryDistClient::get_memory_info_async() {
+folly::SemiFuture<MemoryInfo> WorkerMemoryRpcClient::get_memory_info_async() {
   folly::Promise<MemoryInfo> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
@@ -91,7 +90,7 @@ folly::SemiFuture<MemoryInfo> ModelMemoryDistClient::get_memory_info_async() {
   return future;
 }
 
-folly::SemiFuture<bool> ModelMemoryDistClient::init_physical_page_pool_async(
+folly::SemiFuture<bool> WorkerMemoryRpcClient::init_physical_page_pool_async(
     int64_t num_pages) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
@@ -112,7 +111,7 @@ folly::SemiFuture<bool> ModelMemoryDistClient::init_physical_page_pool_async(
   return future;
 }
 
-folly::SemiFuture<bool> ModelMemoryDistClient::map_to_kv_tensors_async(
+folly::SemiFuture<bool> WorkerMemoryRpcClient::map_to_kv_tensors_async(
     const std::string& model_id,
     const std::vector<offset_t>& offsets) {
   folly::Promise<bool> promise;
@@ -139,7 +138,7 @@ folly::SemiFuture<bool> ModelMemoryDistClient::map_to_kv_tensors_async(
   return future;
 }
 
-folly::SemiFuture<bool> ModelMemoryDistClient::unmap_from_kv_tensors_async(
+folly::SemiFuture<bool> WorkerMemoryRpcClient::unmap_from_kv_tensors_async(
     const std::string& model_id,
     const std::vector<offset_t>& offsets) {
   folly::Promise<bool> promise;
@@ -166,7 +165,7 @@ folly::SemiFuture<bool> ModelMemoryDistClient::unmap_from_kv_tensors_async(
   return future;
 }
 
-folly::SemiFuture<bool> ModelMemoryDistClient::alloc_weight_pages_async(
+folly::SemiFuture<bool> WorkerMemoryRpcClient::alloc_weight_pages_async(
     const std::string& model_id,
     size_t num_pages) {
   folly::Promise<bool> promise;
@@ -189,7 +188,7 @@ folly::SemiFuture<bool> ModelMemoryDistClient::alloc_weight_pages_async(
   return future;
 }
 
-folly::SemiFuture<bool> ModelMemoryDistClient::free_weight_pages_async(
+folly::SemiFuture<bool> WorkerMemoryRpcClient::free_weight_pages_async(
     const std::string& model_id) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
@@ -212,7 +211,7 @@ folly::SemiFuture<bool> ModelMemoryDistClient::free_weight_pages_async(
 
 folly::SemiFuture<
     std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>>
-ModelMemoryDistClient::get_kv_cache_offsets_async(
+WorkerMemoryRpcClient::get_kv_cache_offsets_async(
     const std::string& model_id,
     const std::vector<int32_t>& block_ids,
     uint64_t block_size_bytes) {
@@ -247,7 +246,7 @@ ModelMemoryDistClient::get_kv_cache_offsets_async(
     ResultType layer_offsets;
     layer_offsets.reserve(resp.layer_offsets_size());
 
-    for (int i = 0; i < resp.layer_offsets_size(); ++i) {
+    for (int32_t i = 0; i < resp.layer_offsets_size(); ++i) {
       const auto& layer_proto = resp.layer_offsets(i);
       std::vector<uint64_t> k_offsets(layer_proto.k_offsets().begin(),
                                       layer_proto.k_offsets().end());

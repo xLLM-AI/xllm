@@ -71,7 +71,7 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 │   │   │       ├── virtual_memory/        # Generic physical pages and virtual mappings
 │   │   │       └── torch/                 # Tensor views over mapped byte regions
 │   │   ├── kv_cache/                      # Cache domain: layout, storage, blocks, prefixes, transfer
-│   │   ├── runtime/                       # Workers and model executors
+│   │   ├── runtime/                       # Workers, local resources and model executors
 │   │   ├── layers/                        # C++ neural-network layers
 │   │   ├── kernels/                       # Device operator implementations and wrappers
 │   │   ├── platform/                      # Devices, streams, memory, and communication APIs
@@ -112,21 +112,33 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 ## KV cache and virtual memory boundaries
 
 The memory facilities serve both KV cache and weights. Resource-specific
-mapping and allocation policy stay with each resource; shared budgets and
-model sleep/wakeup stay in distributed coordination. In the diagram, a solid
-arrow means "uses or owns"; a dashed arrow marks interface implementation or
-a coupling that remains to be separated.
+mapping and allocation policy stay with each resource. Runtime owns local
+resources; distributed coordination manages shared budgets, worker operations,
+and model sleep/wakeup. In the diagram, a solid arrow means "uses or owns";
+a dashed arrow marks interface implementation or a coupling that remains to
+be separated.
 
 ```mermaid
 flowchart TB
-  worker["runtime / WorkerImpl<br/>composition and injection"]
+  subgraph runtime["runtime"]
+    worker["WorkerImpl<br/>composition and injection"]
+    resources["WorkerMemoryResources<br/>local device and resource lifecycle"]
+  end
+
   blocks["framework/block<br/>composite managers and paged adapter"]
-  coordination["distributed_runtime<br/>ModelMemoryManager / ModelPageAllocator<br/>cluster, RPC and model transitions"]
+
+  subgraph distributed["distributed_runtime"]
+    residency["ModelResidencyCoordinator<br/>model initialization, sleep and wakeup"]
+    coordination["DistributedMemoryCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
+    rpc["WorkerMemoryRpc<br/>client, service and server"]
+  end
 
   subgraph cache["core/kv_cache"]
     policy["layout, block and prefix<br/>KV policy and state"]
+    pages["storage / PagedKVCachePageAllocator<br/>page queues, preallocation and block-to-page conversion"]
+    backend["storage / KVCachePageBackend<br/>capacity reservation and mapping interface"]
     ports["storage and transfer interfaces<br/>page allocator, tensor allocator, memory provider"]
-    storage["storage<br/>KVCacheMemoryRegistry<br/>KV mappings and paged tensor allocation"]
+    storage["storage / KVCacheMemoryRegistry<br/>local KV mappings and paged tensor allocation"]
     kvtransfer["transfer<br/>memory provider, KV peer/layout state<br/>resharding and cache transfer"]
   end
 
@@ -139,16 +151,25 @@ flowchart TB
   end
 
   remaining["framework/request / Sequence<br/>framework/config and runtime options"]
-  worker --> coordination
+  worker --> resources
   worker --> blocks
   worker --> storage
   worker --> kvtransfer
+  residency --> coordination
+  residency -->|worker lifecycle operations| worker
+  coordination --> pages
+  coordination --> rpc
+  coordination -->|local execution| resources
+  coordination --> shared
+  rpc --> resources
+  resources --> storage
+  resources --> weight
+  resources --> shared
   blocks --> policy
   blocks --> ports
-  coordination -.->|implements page allocator| ports
-  coordination --> storage
-  coordination --> weight
-  coordination --> shared
+  pages -.->|implements page allocator| ports
+  pages --> backend
+  coordination -.->|implements mapping backend| backend
   storage -.->|implements tensor allocator| ports
   kvtransfer -.->|implements memory provider| ports
   storage --> tensor
@@ -178,9 +199,8 @@ offset lookup. `PagedKVCacheTensorAllocator` uses an injected registry to
 implement `KVCacheTensorAllocator`. In `core/kv_cache/transfer`,
 `PagedKVCacheTransferMemoryProvider` uses that registry and an injected
 `GlobalMemoryRegion` to implement `KVCacheTransferMemoryProvider`.
-`WorkerImpl` supplies these dependencies. The concrete cache backends consume
-generic allocation facilities without reaching into the distributed model
-memory manager.
+`WorkerImpl` supplies these dependencies. Concrete cache backends consume
+generic allocation facilities without depending on distributed coordination.
 
 `framework/model_loader/weight` owns `WeightMemoryManager`, `ModelWeightStore`,
 `WeightAllocation` and the weight transfer adapter. It manages weight
@@ -190,16 +210,36 @@ construction. Both weight transfer and KV transfer use the shared Mooncake
 byte transport. KV manifests, peer state and resharding plans remain in
 `core/kv_cache/transfer`, including `MooncakeKVCacheTransferEngine`.
 
-`ModelMemoryManager` and `ModelPageAllocator` live directly in
-`distributed_runtime`, alongside `ModelMemoryController`, `ModelMemoryCluster`
-and the model memory RPC client, service and server. `ModelMemoryManager`
-composes the local KV registry and weight manager and dispatches distributed
-operations. `ModelPageAllocator` coordinates the combined KV and weight demand
-through `WorkerPageBudget` and its lifecycle lock, preserving shared capacity
-reservation during model sleep/wakeup. It implements the KV-only
-`KVCachePageAllocator` interface. `KVCacheManagerFactory` injects this interface
-through the pools and composite managers into `PagedKVCacheBlockManager`;
-the block adapter no longer accesses the distributed allocator singleton.
+`runtime/WorkerMemoryResources` owns the local KV registry and
+`WeightMemoryManager`, managing device initialization, the physical page pool,
+and local resource creation and cleanup. Its separate build target does not
+depend on the `runtime` aggregate, RPC or distributed-runtime targets.
+`distributed_runtime/WorkerMemoryRpcClient`, `WorkerMemoryRpcService` and
+`WorkerMemoryRpcServer` handle requests between workers. The service invokes
+local resources without calling back into distributed coordination.
+
+`core/kv_cache/storage/PagedKVCachePageAllocator` owns KV page queues,
+preallocation and block-to-virtual-page conversion, implementing
+`KVCachePageAllocator`. An injected `KVCachePageBackend` supplies capacity
+reservation and map/unmap operations; the allocator has no weight policy or
+RPC code. Map/unmap receive byte offsets within each layer's K/V region,
+computed by the allocator as virtual page ID times page size.
+`KVCacheManagerFactory` injects the page allocator interface through
+pools and composite managers into `PagedKVCacheBlockManager`, whose block
+adapter does not access a distributed singleton.
+
+`DistributedMemoryCoordinator` implements that backend, owns the paged
+allocator, accounts for capacity through generic `WorkerPageBudget`, and
+selects workers to dispatch local or RPC operations. `ModelResidencyCoordinator`
+organizes model initialization, sleep and wakeup. Distributed coordination
+atomically reserves the combined KV and weight budget in one transaction
+during wakeup. On initial awake startup, weights reserve capacity first;
+later KV page allocations debit the same shared budget. Suspension
+first freezes KV allocation and recycling and drains preallocation and
+in-flight mappings before changing mappings and the weight lifecycle. This
+prevents capacity release from racing with background mapping work. KV cache
+owns page policy; distributed-runtime owns cross-resource transactions and
+execution across workers.
 
 Block value types form `kv_cache_block_types`, used by request and prefix
 cache. Cache domain leaves are compiled by `kv_cache_block`; framework
@@ -224,11 +264,13 @@ win when both spellings occur in the same source. Exported config uses the
 canonical names. The `_xtensor` registration signature remains a stable
 compatibility identifier.
 
-The renamed protobuf messages keep their field numbers. The distributed RPC
-service in `proto/model_memory_dist.proto` is `ModelMemoryDist`, including
-`GetKVCacheOffsets`, and the heartbeat JSON field is `virtual_memory_info`.
-Upgrade masters, workers and external heartbeat consumers together; the renamed
-RPC routes do not support mixed old/new deployments.
+Splitting the local resource, distributed coordinator and RPC C++ classes
+does not change the wire schema. `proto/model_memory_dist.proto` retains the
+`ModelMemoryDist` service and `GetKVCacheOffsets` method. The current protocol
+preserves field numbers, and the heartbeat JSON field is `virtual_memory_info`.
+These protocol names differ from the former xtensor version. Upgrade masters,
+workers and external heartbeat consumers together; RPC routes from before
+and after that rename cannot be mixed.
 
 The most useful distinction is between **state**, **scheduling**, and
 **execution**: `framework/` defines requests, batches, caches, and model

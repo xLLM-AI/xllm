@@ -19,15 +19,16 @@ limitations under the License.
 #include <folly/futures/Future.h>
 #include <torch/types.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
-#include <tuple>
+#include <utility>
 #include <vector>
 
-#include "common/macros.h"
+#include "core/common/macros.h"
 #include "core/framework/allocator/virtual_memory/mapped_memory_region.h"  // For offset_t type definition
+#include "core/util/threadpool.h"
 #include "model_memory_dist.pb.h"
-#include "util/threadpool.h"
 
 namespace xllm {
 
@@ -37,13 +38,13 @@ struct MemoryInfo {
   int64_t total_memory;      // Total memory in bytes
 };
 
-// Remote client for distributed model memory operations via brpc
-class ModelMemoryDistClient final {
+// Sends memory resource commands to a worker via brpc.
+class WorkerMemoryRpcClient final {
  public:
-  explicit ModelMemoryDistClient(int32_t global_rank,
+  explicit WorkerMemoryRpcClient(int32_t global_rank,
                                  const std::string& server_address,
                                  const torch::Device& device);
-  ~ModelMemoryDistClient() = default;
+  ~WorkerMemoryRpcClient() = default;
 
   // Wait for server to be ready
   bool wait_for_server_ready(const std::string& server_address);
@@ -62,7 +63,7 @@ class ModelMemoryDistClient final {
       const std::string& model_id,
       const std::vector<offset_t>& offsets);
 
-  // Weight pages allocation from GlobalMemoryRegion
+  // Allocate weight pages from the worker's GlobalMemoryRegion.
   folly::SemiFuture<bool> alloc_weight_pages_async(const std::string& model_id,
                                                    size_t num_pages);
   folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
@@ -78,7 +79,7 @@ class ModelMemoryDistClient final {
                              uint64_t block_size_bytes);
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(ModelMemoryDistClient);
+  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcClient);
 
  private:
   int32_t global_rank_;
@@ -92,7 +93,7 @@ class ModelMemoryDistClient final {
   // Thread pool for async operations
   ThreadPool threadpool_{/*num_threads=*/1,
                          /*cpu_binding=*/false,
-                         /*pool_name=*/"ModelMemoryDistClient.async"};
+                         /*pool_name=*/"WorkerMemoryRpcClient.async"};
 };
 
 }  // namespace xllm

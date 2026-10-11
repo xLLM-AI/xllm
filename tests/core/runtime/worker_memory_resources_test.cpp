@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/model_memory_manager.h"
+#include "core/runtime/worker_memory_resources.h"
 
 #include <acl/acl.h>
 #include <glog/logging.h>
@@ -31,10 +31,10 @@ limitations under the License.
 
 namespace xllm {
 
-class ModelMemoryManagerTestPeer final {
+class WorkerMemoryResourcesTestPeer final {
  public:
   static void release_resources() {
-    ModelMemoryManager::get_instance().destroy();
+    WorkerMemoryResources::get_instance().destroy();
   }
 };
 
@@ -43,11 +43,11 @@ namespace {
 constexpr char kModelId[] = "virtual-memory-kv-regression";
 constexpr size_t kPoolPages = 10;
 
-class ModelMemoryEnvironment final : public ::testing::Environment {
+class WorkerMemoryEnvironment final : public ::testing::Environment {
  public:
   void SetUp() override {
     testing::init_npu_test_runtime();
-    google::InitGoogleLogging("model_memory_manager_test");
+    google::InitGoogleLogging("worker_memory_resources_test");
   }
 
   void TearDown() override {
@@ -57,9 +57,9 @@ class ModelMemoryEnvironment final : public ::testing::Environment {
 };
 
 ::testing::Environment* const kEnvironment =
-    ::testing::AddGlobalTestEnvironment(new ModelMemoryEnvironment);
+    ::testing::AddGlobalTestEnvironment(new WorkerMemoryEnvironment);
 
-class ModelMemoryManagerTest : public ::testing::Test {
+class WorkerMemoryResourcesTest : public ::testing::Test {
  protected:
   void SetUp() override {
     uint32_t device_count = 0;
@@ -70,7 +70,7 @@ class ModelMemoryManagerTest : public ::testing::Test {
     ASSERT_EQ(aclrtSetDevice(/*device_id=*/0), ACL_SUCCESS);
 
     const torch::Device device("npu:0");
-    ModelMemoryManager::get_instance().init(device);
+    WorkerMemoryResources::get_instance().init(device);
     auto& pool = PhysicalPagePool::get_instance();
     const size_t page_size = vmm::get_recommended_granularity(device.index());
     pool.init(device, kPoolPages, page_size);
@@ -86,7 +86,7 @@ class ModelMemoryManagerTest : public ::testing::Test {
     }
     auto& pool = PhysicalPagePool::get_instance();
     pool.release_reserved_pages(blocking_page_ids_);
-    ModelMemoryManagerTestPeer::release_resources();
+    WorkerMemoryResourcesTestPeer::release_resources();
     VirtualMemoryTestPeer::release_resources();
   }
 
@@ -94,9 +94,9 @@ class ModelMemoryManagerTest : public ::testing::Test {
   std::vector<page_id_t> blocking_page_ids_;
 };
 
-TEST_F(ModelMemoryManagerTest, KvShortageLeavesEveryLayerUnmapped) {
+TEST_F(WorkerMemoryResourcesTest, KvShortageLeavesEveryLayerUnmapped) {
   auto& pool = PhysicalPagePool::get_instance();
-  auto& allocator = ModelMemoryManager::get_instance();
+  auto& allocator = WorkerMemoryResources::get_instance();
   const size_t page_size = GlobalMemoryRegion::get_instance().page_size();
   const std::vector<int64_t> dims = {static_cast<int64_t>(page_size)};
   const auto k_tensors = allocator.create_k_tensors(

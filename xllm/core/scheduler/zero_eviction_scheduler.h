@@ -109,12 +109,13 @@ class ZeroEvictionScheduler final : public ContinuousScheduler<> {
   ZeroEvictionScheduler(
       TargetEngine* engine,
       const Options& options,
-      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr,
+      std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
+          nullptr,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
           nullptr)
       : ContinuousScheduler<>(engine,
                               options,
-                              std::move(model_memory_controller),
+                              std::move(model_residency_coordinator),
                               std::move(distributed_worker_manager)) {
     block_capacity_guard_ =
         std::make_unique<BlockCapacityGuard>(kv_cache_manager_);

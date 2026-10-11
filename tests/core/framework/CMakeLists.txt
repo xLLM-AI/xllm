@@ -29,8 +29,6 @@ cc_test(
     :xllm_server
     GTest::gtest_main
 )
-target_link_libraries(hf_model_loader_test PRIVATE
-  "$<LINK_GROUP:RESCAN,model_memory_manager,xllm_server>")
 
 cc_test(
   NAME
@@ -42,5 +40,3 @@ cc_test(
     :xllm_server
     GTest::gtest_main
 )
-target_link_libraries(causal_lm_test PRIVATE
-  "$<LINK_GROUP:RESCAN,model_memory_manager,xllm_server>")

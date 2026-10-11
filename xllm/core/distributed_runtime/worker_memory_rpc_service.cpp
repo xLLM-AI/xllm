@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/model_memory_dist_service.h"
+#include "core/distributed_runtime/worker_memory_rpc_service.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
@@ -23,23 +23,20 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/device_monitor.h"
-#include "core/distributed_runtime/model_memory_manager.h"
-#include "core/framework/allocator/global_memory_region.h"
-#include "core/framework/allocator/virtual_memory/physical_page_pool.h"
-#include "core/framework/config/kv_cache_config.h"
 #include "core/platform/device.h"
+#include "core/runtime/worker_memory_resources.h"
 
 namespace xllm {
 
-ModelMemoryDistService::ModelMemoryDistService(int32_t global_rank,
+WorkerMemoryRpcService::WorkerMemoryRpcService(int32_t global_rank,
                                                int32_t world_size,
                                                const torch::Device& device)
-    : global_rank_(global_rank),
+    : initialized_(false),
+      global_rank_(global_rank),
       world_size_(world_size),
-      device_(device),
-      initialized_(false) {}
+      device_(device) {}
 
-void ModelMemoryDistService::Hello(
+void WorkerMemoryRpcService::Hello(
     ::google::protobuf::RpcController* controller,
     const proto::Status* request,
     proto::Status* response,
@@ -53,7 +50,7 @@ void ModelMemoryDistService::Hello(
   }
 }
 
-void ModelMemoryDistService::GetMemoryInfo(
+void WorkerMemoryRpcService::GetMemoryInfo(
     ::google::protobuf::RpcController* controller,
     const proto::Status* request,
     proto::MemoryInfoResponse* response,
@@ -67,8 +64,8 @@ void ModelMemoryDistService::GetMemoryInfo(
     // Empty torch cache to get accurate memory info
     int32_t device_id = device_.index();
 
-    const auto available_memory = device.free_memory();
-    const auto total_memory = device.total_memory();
+    const int64_t available_memory = device.free_memory();
+    const int64_t total_memory = device.total_memory();
 
     // Update device monitor
     DeviceMonitor::get_instance().set_total_memory(device_id, total_memory);
@@ -83,7 +80,7 @@ void ModelMemoryDistService::GetMemoryInfo(
   });
 }
 
-void ModelMemoryDistService::InitPhysicalPagePool(
+void WorkerMemoryRpcService::InitPhysicalPagePool(
     ::google::protobuf::RpcController* controller,
     const proto::InitPhysicalPagePoolRequest* request,
     proto::Status* response,
@@ -96,13 +93,7 @@ void ModelMemoryDistService::InitPhysicalPagePool(
               << ", num_pages=" << num_pages;
 
     try {
-      // Initialize PhysicalPagePool with specified number of pages
-      const size_t page_size = static_cast<size_t>(
-          KVCacheConfig::get_instance().phy_page_granularity_size());
-      PhysicalPagePool::get_instance().init(device_, num_pages, page_size);
-
-      // Initialize GlobalMemoryRegion after PhysicalPagePool
-      GlobalMemoryRegion::get_instance().init(device_);
+      WorkerMemoryResources::get_instance().init_physical_page_pool(num_pages);
       LOG(INFO) << "GlobalMemoryRegion initialized on worker " << global_rank_;
 
       response->set_ok(true);
@@ -114,7 +105,7 @@ void ModelMemoryDistService::InitPhysicalPagePool(
   });
 }
 
-void ModelMemoryDistService::MapToKvTensors(
+void WorkerMemoryRpcService::MapToKvTensors(
     ::google::protobuf::RpcController* controller,
     const proto::KvTensorRequest* request,
     proto::Status* response,
@@ -127,18 +118,17 @@ void ModelMemoryDistService::MapToKvTensors(
     // Convert proto offsets to vector
     std::vector<offset_t> offsets;
     offsets.reserve(request->offsets_size());
-    for (int i = 0; i < request->offsets_size(); ++i) {
-      offsets.push_back(request->offsets(i));
+    for (int32_t i = 0; i < request->offsets_size(); ++i) {
+      offsets.emplace_back(request->offsets(i));
     }
 
-    // Call ModelMemoryManager to map
-    auto& allocator = ModelMemoryManager::get_instance();
-    bool success = allocator.map_to_kv_tensors(model_id, offsets);
+    auto& resources = WorkerMemoryResources::get_instance();
+    bool success = resources.map_to_kv_tensors(model_id, offsets);
     response->set_ok(success);
   });
 }
 
-void ModelMemoryDistService::UnmapFromKvTensors(
+void WorkerMemoryRpcService::UnmapFromKvTensors(
     ::google::protobuf::RpcController* controller,
     const proto::KvTensorRequest* request,
     proto::Status* response,
@@ -151,18 +141,17 @@ void ModelMemoryDistService::UnmapFromKvTensors(
     // Convert proto offsets to vector
     std::vector<offset_t> offsets;
     offsets.reserve(request->offsets_size());
-    for (int i = 0; i < request->offsets_size(); ++i) {
-      offsets.push_back(request->offsets(i));
+    for (int32_t i = 0; i < request->offsets_size(); ++i) {
+      offsets.emplace_back(request->offsets(i));
     }
 
-    // Call ModelMemoryManager to unmap
-    auto& allocator = ModelMemoryManager::get_instance();
-    bool success = allocator.unmap_from_kv_tensors(model_id, offsets);
+    auto& resources = WorkerMemoryResources::get_instance();
+    bool success = resources.unmap_from_kv_tensors(model_id, offsets);
     response->set_ok(success);
   });
 }
 
-void ModelMemoryDistService::AllocWeightPages(
+void WorkerMemoryRpcService::AllocWeightPages(
     ::google::protobuf::RpcController* controller,
     const proto::AllocWeightPagesRequest* request,
     proto::Status* response,
@@ -176,12 +165,12 @@ void ModelMemoryDistService::AllocWeightPages(
     LOG(INFO) << "AllocWeightPages: model_id=" << model_id
               << ", num_pages=" << num_pages;
 
-    auto& manager = ModelMemoryManager::get_instance();
-    response->set_ok(manager.alloc_weight_pages(model_id, num_pages));
+    auto& resources = WorkerMemoryResources::get_instance();
+    response->set_ok(resources.alloc_weight_pages(model_id, num_pages));
   });
 }
 
-void ModelMemoryDistService::FreeWeightPages(
+void WorkerMemoryRpcService::FreeWeightPages(
     ::google::protobuf::RpcController* controller,
     const proto::FreeWeightPagesRequest* request,
     proto::Status* response,
@@ -193,10 +182,9 @@ void ModelMemoryDistService::FreeWeightPages(
 
     LOG(INFO) << "FreeWeightPages: model_id=" << model_id;
 
-    // Free weight pages via ModelMemoryManager (frees pages in
-    // PhysicalPagePool)
-    auto& allocator = ModelMemoryManager::get_instance();
-    size_t num_freed = allocator.free_weight(model_id);
+    // Release the model's weight pages back to the worker's PhysicalPagePool.
+    auto& resources = WorkerMemoryResources::get_instance();
+    size_t num_freed = resources.free_weight(model_id);
 
     response->set_ok(num_freed > 0);
 
@@ -205,7 +193,7 @@ void ModelMemoryDistService::FreeWeightPages(
   });
 }
 
-void ModelMemoryDistService::GetKVCacheOffsets(
+void WorkerMemoryRpcService::GetKVCacheOffsets(
     ::google::protobuf::RpcController* controller,
     const proto::GetKVCacheOffsetsRequest* request,
     proto::GetKVCacheOffsetsResponse* response,
@@ -219,20 +207,21 @@ void ModelMemoryDistService::GetKVCacheOffsets(
     // Convert proto block_ids to vector
     std::vector<int32_t> block_ids;
     block_ids.reserve(request->block_ids_size());
-    for (int i = 0; i < request->block_ids_size(); ++i) {
-      block_ids.push_back(request->block_ids(i));
+    for (int32_t i = 0; i < request->block_ids_size(); ++i) {
+      block_ids.emplace_back(request->block_ids(i));
     }
 
-    auto& allocator = ModelMemoryManager::get_instance();
-    if (!allocator.is_initialized()) {
-      LOG(ERROR) << "ModelMemoryManager not initialized on worker";
+    auto& resources = WorkerMemoryResources::get_instance();
+    if (!resources.is_initialized()) {
+      LOG(ERROR) << "WorkerMemoryResources not initialized on worker";
       return;
     }
 
     const std::optional<int64_t> model_num_layers =
-        allocator.get_kv_cache_num_layers(model_id);
+        resources.get_kv_cache_num_layers(model_id);
     if (!model_num_layers.has_value()) {
-      LOG(ERROR) << "Model " << model_id << " not found in ModelMemoryManager";
+      LOG(ERROR) << "Model " << model_id
+                 << " not found in WorkerMemoryResources";
       return;
     }
 
@@ -243,7 +232,7 @@ void ModelMemoryDistService::GetKVCacheOffsets(
       auto* layer_offsets_proto = response->add_layer_offsets();
 
       for (const auto& block_id : block_ids) {
-        auto [k_offset, v_offset] = allocator.get_global_offsets_for_block(
+        auto [k_offset, v_offset] = resources.get_global_offsets_for_block(
             model_id, layer_id, block_id, block_size_bytes);
 
         if (k_offset == UINT64_MAX || v_offset == UINT64_MAX) {
