@@ -30,8 +30,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/macros.h"
+#include "core/distributed_runtime/distributed_memory_coordinator.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
-#include "core/distributed_runtime/model_page_allocator.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -235,9 +235,10 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
   // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
-    auto& page_allocator = ModelPageAllocator::get_instance();
-    if (page_allocator.is_initialized()) {
-      instance_info_.total_phy_pages = page_allocator.get_num_total_phy_pages();
+    auto& memory_coordinator = DistributedMemoryCoordinator::get_instance();
+    if (memory_coordinator.is_initialized()) {
+      instance_info_.total_phy_pages =
+          memory_coordinator.get_num_total_phy_pages();
     }
   }
 #endif
@@ -373,8 +374,8 @@ proto::DisaggPDService_Stub* DisaggPDScheduler::create_rpc_channel(
 }
 
 void DisaggPDScheduler::start_rpc_server() {
-  std::unique_ptr<DisaggPDService> service = std::make_unique<DisaggPDService>(
-      this, engine_, model_memory_controller_);
+  std::unique_ptr<DisaggPDService> service =
+      std::make_unique<DisaggPDService>(this, engine_, options_.block_size());
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {

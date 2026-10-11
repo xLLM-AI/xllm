@@ -136,6 +136,7 @@ cc_library(
     :eplb
     :parallel_state
     :state_dict
+    :worker_memory_resources
     :model
     glog::glog
     gflags::gflags

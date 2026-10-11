@@ -24,23 +24,23 @@ limitations under the License.
 #include <thread>
 
 #include "core/common/macros.h"
-#include "core/distributed_runtime/model_memory_options.h"
+#include "core/distributed_runtime/worker_memory_rpc_options.h"
 #include "model_memory_dist.pb.h"
 
 namespace xllm {
 
-class ModelMemoryDistServer final {
+class WorkerMemoryRpcServer final {
  public:
-  ModelMemoryDistServer(int32_t local_rank,
+  WorkerMemoryRpcServer(int32_t local_rank,
                         const std::string& master_node_addr,
                         const torch::Device& device,
-                        const ModelMemoryOptions& options);
-  ~ModelMemoryDistServer();
+                        const WorkerMemoryRpcOptions& options);
+  ~WorkerMemoryRpcServer();
 
   bool wait_until_ready();
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(ModelMemoryDistServer);
+  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcServer);
 
   void create_server(const std::string& master_node_addr,
                      const torch::Device& device,

@@ -13,5 +13,3 @@ cc_test(
     :request
     GTest::gtest_main
 )
-target_link_libraries(profile_graph_warmup_test PRIVATE
-  "$<LINK_GROUP:RESCAN,model_memory_manager,xllm_server>")

@@ -40,7 +40,7 @@ cc_library(
   DEPS
     :block
     :kv_cache
-    :model_memory_manager
+    :distributed_memory_coordinator
     :common
     :config
     :runtime

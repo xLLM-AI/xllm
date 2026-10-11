@@ -34,7 +34,7 @@ cc_library(
     kv_transfer_topology.h
     kv_cache_transfer_coordinator.h
     xservice_client.h
-    model_memory_controller.h
+    model_residency_coordinator.h
   SRCS
     master.cpp
     master_factory.cpp
@@ -57,7 +57,7 @@ cc_library(
     comm_channel.cpp
     shm_channel.cpp
     xservice_client.cpp
-    model_memory_controller.cpp
+    model_residency_coordinator.cpp
   DEPS
     :api_service
     :models
@@ -73,7 +73,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
-    :model_memory_manager
+    :distributed_memory_coordinator
     absl::strings
     absl::time
 )
@@ -141,40 +141,54 @@ cc_library(
     $<$<BOOL:${USE_MLU}>:torch_mlu>
 )
 
-# Model lifecycle and RPC coordination share one runtime facade.
-# Generic allocation mechanisms remain framework leaf targets.
+# Worker-local resource ownership stays independent of distributed orchestration.
 cc_library(
   NAME
-    model_memory_manager
+    worker_memory_rpc
   HDRS
-    model_memory_options.h
-    model_page_allocator.h
-    model_memory_manager.h
-    model_memory_cluster.h
-    model_memory_dist_client.h
-    model_memory_dist_service.h
-    model_memory_dist_server.h
+    worker_memory_rpc_options.h
+    worker_memory_rpc_client.h
+    worker_memory_rpc_service.h
+    worker_memory_rpc_server.h
   SRCS
-    model_page_allocator.cpp
-    model_memory_manager.cpp
-    model_memory_cluster.cpp
-    model_memory_dist_client.cpp
-    model_memory_dist_service.cpp
-    model_memory_dist_server.cpp
+    worker_memory_rpc_client.cpp
+    worker_memory_rpc_service.cpp
+    worker_memory_rpc_server.cpp
   DEPS
-    torch
-    Folly::folly
+    :worker_memory_resources
     :common
     :config
+    :collective_service
+    :platform
+    :util
+    :xllm_server
+    :virtual_memory
+    Folly::folly
     glog::glog
     proto::xllm_proto
+    torch
+)
+
+# Owns shared KV/weight budget transactions and implements the KV page backend.
+cc_library(
+  NAME
+    distributed_memory_coordinator
+  HDRS
+    distributed_memory_coordinator.h
+  SRCS
+    distributed_memory_coordinator.cpp
+  DEPS
+    :worker_memory_rpc
+    :worker_memory_resources
+    :worker_page_budget
+    :paged_kv_cache_page_allocator
+    :kv_cache_memory_interfaces
+    :common
+    :config
     :collective_service
     :platform
     :xllm_server
-    :global_memory_region
-    :kv_cache_page_state
-    :kv_cache_memory_interfaces
-    :worker_page_budget
-    :virtual_memory_kv_cache_storage
-    :model_weight_store
+    Folly::folly
+    glog::glog
+    torch
 )

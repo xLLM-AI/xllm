@@ -89,6 +89,8 @@ else()
     SRCS
       xllm.cpp
     DEPS
+      :distributed_memory_coordinator
+      :worker_memory_resources
       $<$<BOOL:${USE_NPU}>:npu_startup>
       :config
       :xllm_server

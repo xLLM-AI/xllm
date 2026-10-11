@@ -25,5 +25,3 @@ target_link_libraries(scheduler_test
                       $<$<BOOL:${USE_NPU}>:ascendcl>
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>)
-target_link_libraries(scheduler_test PRIVATE
-  "$<LINK_GROUP:RESCAN,model_memory_manager,xllm_server>")

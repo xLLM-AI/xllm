@@ -36,3 +36,16 @@ if(USE_NPU)
     PROPERTIES TIMEOUT 60
   )
 endif()
+
+# Page policy and injected backend regressions do not initialize a device.
+cc_test(
+  NO_NPU_RUNTIME
+  NAME
+    paged_kv_cache_page_allocator_test
+  SRCS
+    paged_kv_cache_page_allocator_test.cpp
+  DEPS
+    :paged_kv_cache_page_allocator
+    GTest::gtest_main
+    glog::glog
+)

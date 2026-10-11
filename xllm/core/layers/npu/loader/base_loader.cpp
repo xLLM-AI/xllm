@@ -16,9 +16,9 @@ limitations under the License.
 #include "base_loader.h"
 
 #include "core/common/global_flags.h"
-#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/runtime/worker_memory_resources.h"
 #include "rolling_weight_buffer.h"
 
 #ifdef TORCH_HIGHER_THAN_PTA6
@@ -418,7 +418,7 @@ void BaseLoader::set_rolling_buffer(std::shared_ptr<RollingWeightBuffer> buf,
 void BaseLoader::allocate_device_storage() {
   if (rolling_buffer_ != nullptr) {
     // Rolling load path: use the pre-allocated slot instead of
-    // ModelMemoryManager. Decoder layer weights bypass VirtualMemory
+    // WorkerMemoryResources. Decoder layer weights bypass VirtualMemory
     // regardless of enable_virtual_memory flag.
     CHECK_GE(layer_index_, 0) << "layer_index_ not set for rolling buffer";
     device_storage_ = rolling_buffer_->get_slot_ptr(layer_index_);
@@ -427,9 +427,9 @@ void BaseLoader::allocate_device_storage() {
     return;
   }
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
-    auto& allocator = ModelMemoryManager::get_instance();
-    bool ok =
-        allocator.allocate_weight(model_id_, device_storage_, storage_size_);
+    auto& memory_resources = WorkerMemoryResources::get_instance();
+    bool ok = memory_resources.allocate_weight(
+        model_id_, device_storage_, storage_size_);
     CHECK(ok) << "Failed to allocate contiguous device storage size="
               << storage_size_;
     return;

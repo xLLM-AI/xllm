@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/model_memory_dist_server.h"
+#include "core/distributed_runtime/worker_memory_rpc_server.h"
 
 #include <brpc/channel.h>
 #include <glog/logging.h>
@@ -21,7 +21,7 @@ limitations under the License.
 #include <chrono>
 #include <thread>
 
-#include "core/distributed_runtime/model_memory_dist_service.h"
+#include "core/distributed_runtime/worker_memory_rpc_service.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/platform/device.h"
@@ -30,7 +30,7 @@ limitations under the License.
 
 namespace xllm {
 
-void ModelMemoryDistServer::create_server(const std::string& master_node_addr,
+void WorkerMemoryRpcServer::create_server(const std::string& master_node_addr,
                                           const torch::Device& d,
                                           int32_t world_size,
                                           int32_t global_rank) {
@@ -38,19 +38,19 @@ void ModelMemoryDistServer::create_server(const std::string& master_node_addr,
   device.set_device();
 
   auto service =
-      std::make_shared<ModelMemoryDistService>(global_rank, world_size, d);
+      std::make_shared<WorkerMemoryRpcService>(global_rank, world_size, d);
 
   std::string addr = net::get_local_ip_addr();
   XllmServer* server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!server->start(service, addr + ":0", server_name_)) {
-    LOG(ERROR) << "Failed to start ModelMemoryDistServer on address: " << addr;
+    LOG(ERROR) << "Failed to start WorkerMemoryRpcServer on address: " << addr;
     readiness_.set_value(false);
     return;
   }
 
   std::string server_addr = addr + ":" + std::to_string(server->listen_port());
-  LOG(INFO) << "ModelMemoryDistServer " << global_rank
+  LOG(INFO) << "WorkerMemoryRpcServer " << global_rank
             << ": server address: " << server_addr;
 
   // Sync with master node
@@ -73,11 +73,11 @@ void ModelMemoryDistServer::create_server(const std::string& master_node_addr,
   server->run();
 }
 
-ModelMemoryDistServer::ModelMemoryDistServer(
+WorkerMemoryRpcServer::WorkerMemoryRpcServer(
     int32_t local_rank,
     const std::string& master_node_addr,
     const torch::Device& device,
-    const ModelMemoryOptions& options)
+    const WorkerMemoryRpcOptions& options)
     : readiness_result_(readiness_.get_future().share()) {
   const auto& devices = options.devices();
   int32_t each_node_ranks = static_cast<int32_t>(devices.size());
@@ -86,7 +86,7 @@ ModelMemoryDistServer::ModelMemoryDistServer(
   int32_t global_rank =
       ::xllm::DistributedConfig::get_instance().node_rank() * each_node_ranks +
       local_rank;
-  server_name_ = "ModelMemoryDistServer_" + std::to_string(global_rank);
+  server_name_ = "WorkerMemoryRpcServer_" + std::to_string(global_rank);
 
   server_thread_ = std::make_unique<std::thread>(
       [this, master_node_addr, device, world_size, global_rank] {
@@ -94,11 +94,11 @@ ModelMemoryDistServer::ModelMemoryDistServer(
       });
 }
 
-bool ModelMemoryDistServer::wait_until_ready() {
+bool WorkerMemoryRpcServer::wait_until_ready() {
   return readiness_result_.get();
 }
 
-bool ModelMemoryDistServer::sync_master_node(
+bool WorkerMemoryRpcServer::sync_master_node(
     const std::string& master_node_addr,
     proto::AddressInfo& addr_info,
     proto::CommUniqueIdList& uids) {
@@ -123,12 +123,12 @@ bool ModelMemoryDistServer::sync_master_node(
     cntl.Reset();
     stub.Sync(&cntl, &addr_info, &uids, nullptr);
     if (cntl.Failed()) {
-      LOG(WARNING) << "ModelMemoryDistServer#" << addr_info.global_rank()
+      LOG(WARNING) << "WorkerMemoryRpcServer#" << addr_info.global_rank()
                    << " try connect to engine server error, try again."
                    << " Error message: " << cntl.ErrorText();
       std::this_thread::sleep_for(std::chrono::seconds(kReconnectDelaySeconds));
     } else {
-      LOG(INFO) << "ModelMemoryDistServer#" << addr_info.global_rank()
+      LOG(INFO) << "WorkerMemoryRpcServer#" << addr_info.global_rank()
                 << " connect to " << master_node_addr << " success.";
       break;
     }
@@ -137,7 +137,7 @@ bool ModelMemoryDistServer::sync_master_node(
 
   if (try_count >=
       ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
-    LOG(ERROR) << "ModelMemoryDistServer#" << addr_info.global_rank()
+    LOG(ERROR) << "WorkerMemoryRpcServer#" << addr_info.global_rank()
                << " connect to " << master_node_addr << " failed."
                << " Error message: " << cntl.ErrorText();
     return false;
@@ -146,7 +146,7 @@ bool ModelMemoryDistServer::sync_master_node(
   return true;
 }
 
-ModelMemoryDistServer::~ModelMemoryDistServer() {
+WorkerMemoryRpcServer::~WorkerMemoryRpcServer() {
   readiness_result_.wait();
   XllmServer* server =
       ServerRegistry::get_instance().try_get_server(server_name_);

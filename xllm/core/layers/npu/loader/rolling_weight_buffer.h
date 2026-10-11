@@ -29,7 +29,8 @@ namespace layer {
 // Slot index = layer_index % num_slots.
 //
 // Memory allocation strategy:
-//   - enable_virtual_memory=true:  memory is allocated via ModelMemoryManager
+//   - enable_virtual_memory=true:  memory is allocated via
+//   WorkerMemoryResources
 //                           (counted in weight pages budget)
 //   - enable_virtual_memory=false: memory is allocated via aclrtMalloc
 class RollingWeightBuffer {

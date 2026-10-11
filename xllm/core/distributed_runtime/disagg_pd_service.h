@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 #include "common/macros.h"
@@ -25,10 +26,9 @@ namespace xllm {
 
 class DisaggPDService : public proto::DisaggPDService {
  public:
-  explicit DisaggPDService(
-      DisaggPDScheduler* scheduler,
-      Engine* engine,
-      std::shared_ptr<ModelMemoryController> model_memory_controller = nullptr);
+  explicit DisaggPDService(DisaggPDScheduler* scheduler,
+                           Engine* engine,
+                           int32_t cache_block_size);
   explicit DisaggPDService() {}
   virtual ~DisaggPDService() = default;
 

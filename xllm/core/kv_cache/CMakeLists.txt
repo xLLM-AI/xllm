@@ -10,12 +10,27 @@ cc_library(
     kv_cache_memory_interfaces
   HDRS
     storage/kv_cache_page_allocator.h
+    storage/kv_cache_page_backend.h
     storage/kv_cache_tensor_allocator.h
     layout/kv_cache_tensor_role.h
     transfer/kv_cache_transfer_memory_provider.h
   DEPS
     :kv_cache_page_state
     torch
+)
+
+# KV page queues and preallocation policy use an injected mapping backend.
+cc_library(
+  NAME
+    paged_kv_cache_page_allocator
+  HDRS
+    storage/paged_kv_cache_page_allocator.h
+  SRCS
+    storage/paged_kv_cache_page_allocator.cpp
+  DEPS
+    :kv_cache_memory_interfaces
+    :kv_cache_page_state
+    glog::glog
 )
 
 cc_library(
