@@ -18,22 +18,21 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <chrono>
 
-#include "common/global_flags.h"
-#include "core/framework/allocator/model_memory_manager.h"
-#include "core/framework/allocator/model_page_allocator.h"
 #include "core/framework/request/sequence.h"
 
 namespace xllm {
 
-PagedKVCacheBlockManager::PagedKVCacheBlockManager(const Options& options,
-                                                   int64_t num_layers,
-                                                   size_t block_mem_size,
-                                                   size_t page_size,
-                                                   int32_t dp_rank,
-                                                   const std::string& model_id)
+PagedKVCacheBlockManager::PagedKVCacheBlockManager(
+    const Options& options,
+    KVCachePageAllocator& page_allocator,
+    int64_t num_layers,
+    size_t block_mem_size,
+    size_t page_size,
+    int32_t dp_rank,
+    const std::string& model_id)
     : BlockManager(options),
+      page_allocator_(page_allocator),
       model_id_(model_id),
       dp_rank_(dp_rank),
       num_layers_(num_layers),
@@ -71,10 +70,8 @@ PagedKVCacheBlockManager::~PagedKVCacheBlockManager() {
   avail_pages_.clear();
   full_pages_.clear();
 
-  if (!page_ids.empty() &&
-      ModelPageAllocator::get_instance().is_initialized()) {
-    ModelPageAllocator::get_instance().free_kv_cache_pages(
-        model_id_, dp_rank_, page_ids);
+  if (!page_ids.empty() && page_allocator_.is_initialized()) {
+    page_allocator_.free_kv_cache_pages(model_id_, dp_rank_, page_ids);
   }
 }
 
@@ -111,8 +108,7 @@ std::vector<int32_t> PagedKVCacheBlockManager::alloc_internal(
 
     if (avail_pages_.empty()) {
       // Allocate a new page for this DP group
-      auto new_page = ModelPageAllocator::get_instance().alloc_kv_cache_page(
-          model_id_, dp_rank_);
+      auto new_page = page_allocator_.alloc_kv_cache_page(model_id_, dp_rank_);
       if (new_page == nullptr) {
         LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
@@ -214,7 +210,7 @@ void PagedKVCacheBlockManager::free_blocks(
     return;
   }
 
-  auto& page_allocator = ModelPageAllocator::get_instance();
+  auto& page_allocator = page_allocator_;
 
   // Group indices by page_id
   std::unordered_map<int64_t, std::vector<int64_t>> idx_dict;
@@ -337,7 +333,7 @@ size_t PagedKVCacheBlockManager::available_size_internal() const {
   // physical memory). free_page_list_ pages are not counted because they
   // require physical memory mapping which may fail if GPU memory is
   // insufficient.
-  auto& page_allocator = ModelPageAllocator::get_instance();
+  auto& page_allocator = page_allocator_;
   size_t reserved_pages =
       page_allocator.get_num_reserved_virt_pages(model_id_, dp_rank_);
   size_t blocks_from_reserved_pages =
@@ -387,11 +383,11 @@ void PagedKVCacheBlockManager::free_reserved() {
 
 void PagedKVCacheBlockManager::trim() {
   std::lock_guard<std::mutex> lock(mtx_);
-  ModelPageAllocator::get_instance().trim_kv_cache(model_id_, dp_rank_);
+  page_allocator_.trim_kv_cache(model_id_, dp_rank_);
 }
 
 size_t PagedKVCacheBlockManager::get_mapped_memory_size() const {
-  auto& page_allocator = ModelPageAllocator::get_instance();
+  auto& page_allocator = page_allocator_;
   // Each virtual page uses phy_pages_per_virt_page physical pages
   // Each physical page is phy_page_size bytes
   return page_allocator.get_num_inuse_virt_pages(model_id_, dp_rank_) *

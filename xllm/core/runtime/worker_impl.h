@@ -47,7 +47,7 @@ limitations under the License.
 #include "runtime/vlm_forward_params.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
-#include "core/framework/allocator/weight/mooncake_weight_transfer.h"
+#include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "layers/npu/loader/rolling_load_manager.h"
 #endif

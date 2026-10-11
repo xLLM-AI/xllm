@@ -31,7 +31,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/macros.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
-#include "core/framework/allocator/model_page_allocator.h"
+#include "core/distributed_runtime/model_page_allocator.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"

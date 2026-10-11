@@ -21,8 +21,14 @@ limitations under the License.
 
 namespace xllm {
 
+GlobalMemoryRegion::GlobalMemoryRegion() {
+  // The page owner must outlive this shared address space.
+  PhysicalPagePool::get_instance();
+}
+
 void GlobalMemoryRegion::init(const torch::Device& device) {
-  if (mapping_.is_initialized()) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (mapping_->is_initialized()) {
     LOG(WARNING) << "GlobalMemoryRegion already initialized";
     return;
   }
@@ -30,18 +36,24 @@ void GlobalMemoryRegion::init(const torch::Device& device) {
   auto& pool = PhysicalPagePool::get_instance();
   CHECK(pool.is_initialized()) << "PhysicalPagePool must be initialized first";
   CHECK_EQ(device, pool.device()) << "GlobalMemoryRegion device mismatch";
-  mapping_.init(device, pool.get_all_pages(), pool.page_size());
+  mapping_->init(device, pool.get_all_pages(), pool.page_size());
 }
 
 void GlobalMemoryRegion::reset() {
-  if (!mapping_.is_initialized()) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!mapping_->is_initialized()) {
     return;
   }
 
-  CHECK(!mooncake_registered_)
-      << "GlobalMemoryRegion must be unregistered before reset";
-  mapping_.reset();
-  mooncake_registered_ = false;
+  CHECK_EQ(mapping_.use_count(), 1)
+      << "GlobalMemoryRegion has active mapping leases";
+  mapping_->reset();
+}
+
+std::shared_ptr<void> GlobalMemoryRegion::acquire_mapping_lease() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  CHECK(mapping_->is_initialized()) << "GlobalMemoryRegion is not initialized";
+  return std::shared_ptr<void>(mapping_, mapping_->base_vaddr());
 }
 
 }  // namespace xllm

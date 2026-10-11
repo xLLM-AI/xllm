@@ -78,6 +78,22 @@ cc_test(
 if(USE_NPU)
   cc_test(
     NAME
+      model_memory_manager_test
+    SRCS
+      model_memory_manager_test.cpp
+    DEPS
+      :model_memory_manager
+      :config
+      GTest::gtest_main
+      glog::glog
+  )
+  set_tests_properties(
+    ModelMemoryManagerTest.KvShortageLeavesEveryLayerUnmapped
+    PROPERTIES TIMEOUT 60
+  )
+
+  cc_test(
+    NAME
       worker_service_test
     SRCS
       worker_service_test.cpp

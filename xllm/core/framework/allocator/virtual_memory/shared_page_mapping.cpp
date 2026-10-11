@@ -21,6 +21,8 @@ limitations under the License.
 
 namespace xllm {
 
+SharedPageMapping::~SharedPageMapping() { reset(); }
+
 void SharedPageMapping::init(const torch::Device& device,
                              const std::vector<PhysicalPage*>& pages,
                              size_t page_size) {

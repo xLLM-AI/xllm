@@ -13,17 +13,6 @@ cc_test(
     GTest::gtest_main
 )
 
-cc_test(
-  NAME
-    weight_transfer_segments_test
-  NO_NPU_RUNTIME
-  SRCS
-    weight_transfer_segments_test.cpp
-  DEPS
-    GTest::gtest_main
-    glog::glog
-)
-
 if(USE_NPU)
   # Keep validation/death tests independent of device runtime initialization.
   foreach(test_name IN ITEMS model_page_allocator_test model_memory_bootstrap_test)
@@ -35,13 +24,19 @@ if(USE_NPU)
     )
   endforeach()
 
-  foreach(test_name IN ITEMS virtual_memory_test model_weight_allocator_test)
-    cc_test(
-      NAME ${test_name}
-      SRCS ${test_name}.cpp
-      DEPS :model_memory_manager :config GTest::gtest_main glog::glog
-    )
-  endforeach()
+  cc_test(
+    NAME
+      virtual_memory_test
+    SRCS
+      virtual_memory_test.cpp
+    DEPS
+      :virtual_memory
+      :virtual_memory_torch
+      :global_memory_region
+      GTest::gtest_main
+      glog::glog
+  )
+
 endif()
 
 # Bound concurrency regressions and device initialization failures in CTest.

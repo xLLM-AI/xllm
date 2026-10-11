@@ -16,7 +16,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/types.h>
 
-#include "core/framework/allocator/model_memory_manager.h"
+#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/config/distributed_config.h"
 
 namespace xllm {

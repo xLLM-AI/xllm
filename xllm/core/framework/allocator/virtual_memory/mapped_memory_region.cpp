@@ -102,10 +102,9 @@ void release_preallocated_pages(const std::vector<page_id_t>& page_ids) {
 }  // namespace
 
 MappedMemoryRegion::MappedMemoryRegion(size_t size,
-                                       torch::Dtype dtype,
                                        torch::Device dev,
                                        size_t page_size)
-    : vaddr_(0), size_(0), page_size_(page_size), dtype_(dtype), dev_(dev) {
+    : vaddr_(0), size_(0), page_size_(page_size), dev_(dev) {
   CHECK_GT(size, 0);
   size_ = align_up(size, page_size_);
   CHECK_LE(size_, static_cast<size_t>(std::numeric_limits<offset_t>::max()));
@@ -113,13 +112,11 @@ MappedMemoryRegion::MappedMemoryRegion(size_t size,
 }
 
 MappedMemoryRegion::MappedMemoryRegion(std::vector<page_id_t> page_ids,
-                                       torch::Dtype dtype,
                                        torch::Device dev,
                                        size_t page_size)
     : vaddr_(0),
       size_(0),
       page_size_(page_size),
-      dtype_(dtype),
       dev_(dev),
       use_preallocated_pages_(true),
       preallocated_page_ids_(std::move(page_ids)) {
@@ -179,27 +176,27 @@ bool MappedMemoryRegion::map_pages(
   missing.reserve(targets.size());
   std::unordered_map<MappedMemoryRegion*, std::unordered_set<offset_t>> seen;
   seen.reserve(targets.size());
-  for (const auto& [tensor, offset] : targets) {
-    if (tensor == nullptr || tensor->use_preallocated_pages_ ||
-        !tensor->valid_offset_(offset) || tensor->dev_ != pool.device() ||
-        tensor->page_size_ != pool.page_size()) {
+  for (const auto& [region, offset] : targets) {
+    if (region == nullptr || region->use_preallocated_pages_ ||
+        !region->valid_offset_(offset) || region->dev_ != pool.device() ||
+        region->page_size_ != pool.page_size()) {
       LOG(ERROR) << "Invalid MappedMemoryRegion mapping target at offset "
                  << offset;
       return false;
     }
-    if (!seen[tensor].emplace(offset).second ||
-        tensor->mapping_.find(offset / tensor->page_size_) !=
-            tensor->mapping_.end()) {
+    if (!seen[region].emplace(offset).second ||
+        region->mapping_.find(offset / region->page_size_) !=
+            region->mapping_.end()) {
       continue;
     }
-    missing.emplace_back(tensor, offset);
+    missing.emplace_back(region, offset);
   }
 
   if (missing.empty()) {
     return true;
   }
-  for (const auto& [tensor, offsets] : seen) {
-    tensor->mapping_.reserve(tensor->mapping_.size() + offsets.size());
+  for (const auto& [region, offsets] : seen) {
+    region->mapping_.reserve(region->mapping_.size() + offsets.size());
   }
 
   auto pages = pool.batch_get(missing.size());
@@ -210,11 +207,11 @@ bool MappedMemoryRegion::map_pages(
   }
 
   for (size_t i = 0; i < missing.size(); ++i) {
-    auto [tensor, offset] = missing[i];
-    VirPtr addr = add_vir_ptr_offset(tensor->vaddr_, offset);
+    auto [region, offset] = missing[i];
+    VirPtr addr = add_vir_ptr_offset(region->vaddr_, offset);
     PhyMemHandle handle = pages[i]->get_phy_handle();
-    vmm::map(addr, handle, tensor->page_size_, tensor->dev_.index());
-    tensor->mapping_.emplace(offset / tensor->page_size_, std::move(pages[i]));
+    vmm::map(addr, handle, region->page_size_, region->dev_.index());
+    region->mapping_.emplace(offset / region->page_size_, std::move(pages[i]));
   }
   return true;
 }

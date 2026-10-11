@@ -16,7 +16,7 @@ limitations under the License.
 #include "base_loader.h"
 
 #include "core/common/global_flags.h"
-#include "core/framework/allocator/model_memory_manager.h"
+#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "rolling_weight_buffer.h"

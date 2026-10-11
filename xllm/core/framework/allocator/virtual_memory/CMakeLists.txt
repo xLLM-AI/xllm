@@ -7,7 +7,6 @@ cc_library(
   NAME
     virtual_memory
   HDRS
-    virtual_page.h
     physical_page.h
     physical_page_pool.h
     mapped_memory_region.h
@@ -18,18 +17,6 @@ cc_library(
     mapped_memory_region.cpp
     shared_page_mapping.cpp
   DEPS
-    :platform
-    torch
-    glog::glog
-)
-
-cc_library(
-  NAME
-    virtual_memory_torch
-  SRCS
-    mapped_memory_region_torch.cpp
-  DEPS
-    :virtual_memory
     :platform
     torch
     glog::glog

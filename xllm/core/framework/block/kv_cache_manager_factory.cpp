@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/common/device_monitor.h"
 #include "core/common/metrics.h"
+#include "core/distributed_runtime/model_page_allocator.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -129,15 +130,19 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     }
   }
 
+  KVCachePageAllocator* page_allocator =
+      options.enable_virtual_memory() ? &ModelPageAllocator::get_instance()
+                                      : nullptr;
   std::unique_ptr<KVCacheManager> manager;
   if (options.enable_host_offload()) {
     CHECK(transfer_coordinator != nullptr)
         << "KV cache transfer coordinator is required for host-offload KV "
            "cache manager";
     manager = std::make_unique<HierarchyBlockManagerPool>(
-        options, std::move(transfer_coordinator), dp_size);
+        options, std::move(transfer_coordinator), dp_size, page_allocator);
   } else {
-    manager = std::make_unique<BlockManagerPool>(options, dp_size);
+    manager =
+        std::make_unique<BlockManagerPool>(options, dp_size, page_allocator);
   }
 
   return KVCacheManagerFactoryResult{std::move(manager), std::move(shape)};

@@ -133,7 +133,7 @@ MooncakeKVCacheTransferBase::MooncakeKVCacheTransferBase(
     const int32_t device_id,
     const uint16_t listen_port,
     const torch::Device& device,
-    std::unique_ptr<MooncakeTransferEngine> engine)
+    std::unique_ptr<MooncakeKVCacheTransferEngine> engine)
     : device_id_(device_id),
       device_(device),
       listen_port_(listen_port),
@@ -261,7 +261,8 @@ MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
           device_id,
           listen_port,
           device,
-          std::make_unique<MooncakeTransferEngine>(listen_port, device)) {
+          std::make_unique<MooncakeKVCacheTransferEngine>(listen_port,
+                                                          device)) {
   (void)model_type;
 }
 
@@ -270,7 +271,7 @@ MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
     const uint16_t listen_port,
     const torch::Device& device,
     const std::string& model_type,
-    std::unique_ptr<MooncakeTransferEngine> engine)
+    std::unique_ptr<MooncakeKVCacheTransferEngine> engine)
     : MooncakeKVCacheTransferBase(device_id,
                                   listen_port,
                                   device,
@@ -591,11 +592,14 @@ void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
   addrs.reserve(kv_caches.size() * 4);
   lens.reserve(kv_caches.size() * 4);
   buf_bytes.reserve(kv_caches.size() * 4);
+  auto tensor_lifetime = std::make_shared<std::vector<torch::Tensor>>();
+  tensor_lifetime->reserve(kv_caches.size() * 4);
 
   for (const KVCache& cache : kv_caches) {
     const std::vector<KVCacheTensor> transfer_tensors =
         get_mooncake_tensors(cache);
     for (const KVCacheTensor& cache_tensor : transfer_tensors) {
+      tensor_lifetime->emplace_back(cache_tensor.tensor);
       add_buf(
           cache_tensor.tensor,
           addrs,
@@ -605,12 +609,16 @@ void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
     }
   }
 
-  if (!mooncake_te_->register_memory(addrs, lens, buf_bytes)) {
+  const size_t buffer_count = buf_bytes.size();
+  if (!mooncake_te_->register_memory(std::move(addrs),
+                                     std::move(lens),
+                                     std::move(buf_bytes),
+                                     std::move(tensor_lifetime))) {
     LOG(FATAL) << "register_kv_cache_impl failed";
   }
 
   LOG(INFO) << "register_kv_cache_impl success, registered_layers="
-            << kv_caches.size() << ", buffers=" << buf_bytes.size();
+            << kv_caches.size() << ", buffers=" << buffer_count;
 }
 
 bool MooncakeKVCacheTransferDefault::pull_kv_blocks(
@@ -741,7 +749,7 @@ MooncakeKVCacheTransferVirtualMemory::MooncakeKVCacheTransferVirtualMemory(
           device_id,
           listen_port,
           device,
-          std::make_unique<MooncakeTransferEngine>(listen_port, device)),
+          std::make_unique<MooncakeKVCacheTransferEngine>(listen_port, device)),
       memory_provider_(std::move(memory_provider)) {
   CHECK(memory_provider_ != nullptr);
 }
@@ -844,20 +852,17 @@ void MooncakeKVCacheTransferVirtualMemory::register_kv_cache_impl() {
   CHECK(memory_region.base_address != nullptr);
   CHECK_GT(memory_region.size_bytes, 0);
 
-  if (memory_provider_->is_registered()) {
-    LOG(INFO) << "GlobalMemoryRegion already registered to mooncake, skip";
-    return;
-  }
-
   std::vector<void*> addrs = {memory_region.base_address};
   std::vector<size_t> lens = {memory_region.size_bytes};
   std::vector<uint64_t> buf_bytes = {static_cast<uint64_t>(size_per_block_)};
 
-  if (!mooncake_te_->register_memory(addrs, lens, buf_bytes)) {
+  if (!mooncake_te_->register_memory(std::move(addrs),
+                                     std::move(lens),
+                                     std::move(buf_bytes),
+                                     memory_region.lifetime)) {
     LOG(FATAL) << "register GlobalMemoryRegion failed";
   }
 
-  memory_provider_->mark_registered();
   LOG(INFO) << "register_kv_cache_impl success, total_size="
             << memory_region.size_bytes
             << ", size_per_block=" << size_per_block_;
@@ -946,9 +951,7 @@ bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
       dst_offsets.push_back(dst_v_off);
     }
 
-    auto* transfer_engine =
-        static_cast<MooncakeTransferEngine*>(mooncake_te_.get());
-    auto ret = transfer_engine->move_memory_by_global_offsets(
+    const bool ret = mooncake_te_->move_memory_by_global_offsets(
         src_addr,
         src_offsets,
         dst_offsets,
@@ -1066,8 +1069,6 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
         src_offsets.push_back(src_v_off);
         dst_offsets.push_back(dst_v_off);
       }
-      auto* virtual_memory_engine =
-          static_cast<MooncakeTransferEngine*>(mooncake_te_.get());
       ExplicitResourceMapping key_mapping;
       key_mapping.group_id = mapping_it->group_id;
       key_mapping.role = static_cast<int32_t>(KVCacheTensorRole::KEY);
@@ -1093,13 +1094,12 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
       }
 
       std::vector<ByteRegion> regions;
-      const Status bind_status =
-          virtual_memory_engine->bind_outgoing_regions_explicit(
-              kv_info.dst_addr,
-              {key_mapping, value_mapping},
-              CacheNamespace::MAIN,
-              layer_index,
-              &regions);
+      const Status bind_status = mooncake_te_->bind_outgoing_regions_explicit(
+          kv_info.dst_addr,
+          {key_mapping, value_mapping},
+          CacheNamespace::MAIN,
+          layer_index,
+          &regions);
       if (!bind_status.ok()) {
         LOG(ERROR) << "Bind VirtualMemory KV byte regions failed, layer="
                    << layer_index << ", destination=" << kv_info.dst_addr
@@ -1108,7 +1108,7 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
         continue;
       }
       const bool ret =
-          regions.empty() || virtual_memory_engine->move_memory_regions(
+          regions.empty() || mooncake_te_->move_memory_regions(
                                  kv_info.dst_addr,
                                  regions,
                                  MooncakeTransferEngine::MoveOpcode::WRITE);

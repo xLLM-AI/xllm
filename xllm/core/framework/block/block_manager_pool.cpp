@@ -18,12 +18,8 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 
-#include "common/global_flags.h"
-#include "core/framework/allocator/model_page_allocator.h"
-#include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/block/paged_kv_cache_block_manager.h"
-#include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
@@ -31,8 +27,10 @@ limitations under the License.
 
 namespace xllm {
 
-BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
-    : options_(options) {
+BlockManagerPool::BlockManagerPool(const Options& options,
+                                   int32_t dp_size,
+                                   KVCachePageAllocator* page_allocator)
+    : page_allocator_(page_allocator), options_(options) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   block_managers_.reserve(dp_size);
 
@@ -68,7 +66,8 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
     // enable_linear_state. The per-sequence EMBEDDING resource leaf is appended
     // here under the EMBEDDING key when spec decode needs it. Every leaf is
     // routed by its BlockType.
-    auto leaves = build_composite_leaves(block_options, /*dp_rank=*/i);
+    auto leaves =
+        build_composite_leaves(block_options, /*dp_rank=*/i, page_allocator_);
     if (options_.num_speculative_tokens() > 0) {
       // EMBEDDING leaf needs the same concurrency wrapper as the other leaves
       // when sequence-level entry points run off the scheduler thread (disagg
@@ -427,9 +426,9 @@ void BlockManagerPool::reserve_padding_blocks() {
   for (auto& manager : block_managers_) {
     manager->reserve_padding_blocks();
   }
-  // Start prealloc thread once (ModelPageAllocator is shared by all
-  // managers).
-  ModelPageAllocator::get_instance().start_prealloc_thread();
+  // Start preallocation after every DP manager has reserved its padding.
+  CHECK(page_allocator_ != nullptr);
+  page_allocator_->start_prealloc_thread();
 }
 
 }  // namespace xllm

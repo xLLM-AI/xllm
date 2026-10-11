@@ -23,8 +23,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/device_monitor.h"
+#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/allocator/global_memory_region.h"
-#include "core/framework/allocator/model_memory_manager.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/platform/device.h"
@@ -176,43 +176,8 @@ void ModelMemoryDistService::AllocWeightPages(
     LOG(INFO) << "AllocWeightPages: model_id=" << model_id
               << ", num_pages=" << num_pages;
 
-    auto& pool = PhysicalPagePool::get_instance();
-    auto& allocator = ModelMemoryManager::get_instance();
-
-    // Try contiguous allocation first (from GlobalMemoryRegion)
-    page_id_t start_page = pool.allocate_contiguous_from_right(num_pages);
-    if (start_page >= 0) {
-      if (!allocator.record_weight_allocation(
-              model_id, start_page, num_pages)) {
-        response->set_ok(false);
-        return;
-      }
-      response->set_ok(true);
-      LOG(INFO) << "AllocWeightPages success: model_id=" << model_id
-                << ", start_page=" << start_page << ", num_pages=" << num_pages;
-      return;
-    }
-
-    // Fallback: try non-contiguous allocation using MappedMemoryRegion
-    LOG(WARNING)
-        << "Contiguous allocation failed for " << num_pages
-        << " pages, trying non-contiguous fallback (MappedMemoryRegion)";
-
-    std::vector<page_id_t> page_ids = pool.allocate_pages_from_right(num_pages);
-    if (page_ids.empty()) {
-      LOG(ERROR) << "Failed to allocate " << num_pages
-                 << " weight pages (both contiguous and non-contiguous)";
-      response->set_ok(false);
-      return;
-    }
-
-    if (!allocator.record_weight_fallback_allocation(model_id, page_ids)) {
-      response->set_ok(false);
-      return;
-    }
-    response->set_ok(true);
-    LOG(INFO) << "AllocWeightPages success (fallback): model_id=" << model_id
-              << ", num_pages=" << num_pages;
+    auto& manager = ModelMemoryManager::get_instance();
+    response->set_ok(manager.alloc_weight_pages(model_id, num_pages));
   });
 }
 

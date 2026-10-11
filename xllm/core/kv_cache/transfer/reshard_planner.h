@@ -21,17 +21,10 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
+#include "core/framework/transfer/byte_region.h"
 #include "core/kv_cache/transfer/cache_layout.h"
 
 namespace xllm {
-
-struct ByteRegion {
-  uint64_t local_buffer_id = 0;
-  uint64_t local_offset = 0;
-  uint64_t remote_buffer_id = 0;
-  uint64_t remote_offset = 0;
-  uint64_t length = 0;
-};
 
 struct StridedRegionTemplate {
   CacheNamespace cache_namespace = CacheNamespace::MAIN;

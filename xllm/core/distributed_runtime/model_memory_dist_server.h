@@ -24,7 +24,7 @@ limitations under the License.
 #include <thread>
 
 #include "core/common/macros.h"
-#include "core/framework/allocator/model_memory_options.h"
+#include "core/distributed_runtime/model_memory_options.h"
 #include "model_memory_dist.pb.h"
 
 namespace xllm {

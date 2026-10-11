@@ -28,7 +28,6 @@ class VirtualMemoryTestPeer final {
   // Environment shuts down the runtime. Singleton destruction runs too late.
   static void release_resources() {
     auto& global_tensor = GlobalMemoryRegion::get_instance();
-    CHECK(!global_tensor.is_mooncake_registered());
     global_tensor.reset();
     CHECK(PhysicalPagePool::get_instance().reset());
   }

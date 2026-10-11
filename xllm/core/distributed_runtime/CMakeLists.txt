@@ -140,3 +140,41 @@ cc_library(
     glog::glog
     $<$<BOOL:${USE_MLU}>:torch_mlu>
 )
+
+# Model lifecycle and RPC coordination share one runtime facade.
+# Generic allocation mechanisms remain framework leaf targets.
+cc_library(
+  NAME
+    model_memory_manager
+  HDRS
+    model_memory_options.h
+    model_page_allocator.h
+    model_memory_manager.h
+    model_memory_cluster.h
+    model_memory_dist_client.h
+    model_memory_dist_service.h
+    model_memory_dist_server.h
+  SRCS
+    model_page_allocator.cpp
+    model_memory_manager.cpp
+    model_memory_cluster.cpp
+    model_memory_dist_client.cpp
+    model_memory_dist_service.cpp
+    model_memory_dist_server.cpp
+  DEPS
+    torch
+    Folly::folly
+    :common
+    :config
+    glog::glog
+    proto::xllm_proto
+    :collective_service
+    :platform
+    :xllm_server
+    :global_memory_region
+    :kv_cache_page_state
+    :kv_cache_memory_interfaces
+    :worker_page_budget
+    :virtual_memory_kv_cache_storage
+    :model_weight_store
+)

@@ -19,7 +19,7 @@ cc_library(
   DEPS
     :kv_cache_block
     :kv_transfer_completion
-    :model_memory_manager
+    :kv_cache_memory_interfaces
     :config
     :common
     :request

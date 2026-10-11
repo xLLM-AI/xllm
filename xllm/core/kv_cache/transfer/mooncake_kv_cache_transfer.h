@@ -19,7 +19,7 @@ limitations under the License.
 
 #include "core/kv_cache/transfer/cache_layout.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
-#include "core/transfer/mooncake_transfer_engine.h"
+#include "core/kv_cache/transfer/mooncake_kv_cache_transfer_engine.h"
 
 namespace xllm {
 
@@ -27,10 +27,11 @@ namespace xllm {
 // Default and VirtualMemory subclasses inherit this class (single inheritance).
 class MooncakeKVCacheTransferBase : public KVCacheTransfer {
  public:
-  MooncakeKVCacheTransferBase(const int32_t device_id,
-                              const uint16_t listen_port,
-                              const torch::Device& device,
-                              std::unique_ptr<MooncakeTransferEngine> engine);
+  MooncakeKVCacheTransferBase(
+      const int32_t device_id,
+      const uint16_t listen_port,
+      const torch::Device& device,
+      std::unique_ptr<MooncakeKVCacheTransferEngine> engine);
   ~MooncakeKVCacheTransferBase() override = default;
 
   void initialize(int32_t device_id) override;
@@ -66,7 +67,7 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
   int64_t num_layers_ = 0;
   int64_t size_per_block_ = 0;
 
-  std::unique_ptr<MooncakeTransferEngine> mooncake_te_;
+  std::unique_ptr<MooncakeKVCacheTransferEngine> mooncake_te_;
   std::optional<CacheRegistrationContext> pending_registration_context_;
   WorkerCacheLayoutManifest local_cache_layout_;
   uint64_t layout_generation_ = 0;
@@ -88,7 +89,7 @@ class MooncakeKVCacheTransferDefault final
       const uint16_t listen_port,
       const torch::Device& device,
       const std::string& model_type,
-      std::unique_ptr<MooncakeTransferEngine> engine);
+      std::unique_ptr<MooncakeKVCacheTransferEngine> engine);
 
   void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,

@@ -118,6 +118,9 @@ message WorkerCacheLayoutManifest {
   repeated CacheTensorManifest tensors = 11;
 }
 
+// Keep the legacy service and method names for wire compatibility. The common
+// transport serves session RPCs; the KV adapter supplies the cache RPCs through
+// an extension on the same listener.
 service MooncakeTransferEngineService {
   rpc OpenSession(SessionInfo) returns (Status) {}
   rpc CloseSession(SessionInfo) returns (Status) {}

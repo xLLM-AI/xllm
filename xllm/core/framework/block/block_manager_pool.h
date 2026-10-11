@@ -26,6 +26,8 @@ limitations under the License.
 
 namespace xllm {
 
+class KVCachePageAllocator;
+
 class BlockManagerPool : public KVCacheManager {
  public:
   using HostBlockCounts = std::map<BlockType, uint32_t>;
@@ -79,7 +81,9 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, instance_is_decode) = false;
   };
 
-  explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);
+  explicit BlockManagerPool(const Options& options,
+                            int32_t dp_size = 1,
+                            KVCachePageAllocator* page_allocator = nullptr);
 
   ~BlockManagerPool() = default;
 
@@ -135,6 +139,9 @@ class BlockManagerPool : public KVCacheManager {
  private:
   friend class BlockManagerPoolTestPeer;
 
+  // Non-owning optional dependency, required for virtual-memory cache leaves.
+  // The runtime retains it until this pool and its blocks have been destroyed.
+  KVCachePageAllocator* page_allocator_;
   mutable std::atomic<size_t> dp_selection_cursor_{0};
   std::vector<std::vector<BlockTransferInfo>> swap_block_transfer_infos_;
 

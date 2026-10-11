@@ -25,6 +25,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "core/kv_cache/block/block_manager.h"
 #include "core/kv_cache/block/kv_cache_page_state.h"
+#include "core/kv_cache/storage/kv_cache_page_allocator.h"
 
 namespace xllm {
 
@@ -39,7 +40,7 @@ namespace xllm {
  * data
  *
  * Key features:
- * - Uses ModelPageAllocator for physical page management
+ * - Uses an injected KVCachePageAllocator for physical page management
  * - Maps blocks to virtual pages
  * - Supports reserved blocks for pre-allocation
  * - Does NOT support prefix cache (prefix cache disabled)
@@ -47,6 +48,7 @@ namespace xllm {
 class PagedKVCacheBlockManager final : public BlockManager {
  public:
   explicit PagedKVCacheBlockManager(const Options& options,
+                                    KVCachePageAllocator& page_allocator,
                                     int64_t num_layers,
                                     size_t block_mem_size,
                                     size_t page_size,
@@ -145,6 +147,10 @@ class PagedKVCacheBlockManager final : public BlockManager {
   size_t available_size_internal() const;
 
  private:
+  // Non-owning; the runtime keeps the allocator alive until all blocks and
+  // cache managers have been destroyed.
+  KVCachePageAllocator& page_allocator_;
+
   // Model ID (from options_.model_id())
   std::string model_id_;
 

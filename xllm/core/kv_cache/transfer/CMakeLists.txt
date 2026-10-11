@@ -23,6 +23,7 @@ cc_library(
   DEPS
     :cache_layout
     :common
+    :transfer_types
     glog::glog
 )
 
@@ -76,6 +77,7 @@ cc_library(
     prefetch_result.h
     hierarchy_kv_cache_transfer.h
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.h>
+    mooncake_kv_cache_transfer_engine.h
   SRCS
     kv_cache_transfer.cpp
     kv_cache_store.cpp
@@ -89,6 +91,7 @@ cc_library(
     host_transfer/compact_offload_executor.cpp
     hierarchy_kv_cache_transfer.cpp
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>
+    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer_engine.cpp>
   DEPS
     :cache_layout
     :common

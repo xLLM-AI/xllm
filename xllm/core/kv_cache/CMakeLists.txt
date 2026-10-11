@@ -9,10 +9,12 @@ cc_library(
   NAME
     kv_cache_memory_interfaces
   HDRS
+    storage/kv_cache_page_allocator.h
     storage/kv_cache_tensor_allocator.h
     layout/kv_cache_tensor_role.h
     transfer/kv_cache_transfer_memory_provider.h
   DEPS
+    :kv_cache_page_state
     torch
 )
 
@@ -23,6 +25,40 @@ cc_library(
     layout/deepseek_v4_cache_policy.h
   DEPS
     torch
+)
+
+# KV-specific mappings are a concrete cache storage backend. Generic byte
+# mappings and the Torch view adapter remain framework allocation facilities.
+cc_library(
+  NAME
+    virtual_memory_kv_cache_storage
+  HDRS
+    storage/kv_cache_memory_regions.h
+    storage/kv_cache_memory_registry.h
+    storage/paged_kv_cache_tensor_allocator.h
+  SRCS
+    storage/kv_cache_memory_regions.cpp
+    storage/kv_cache_memory_registry.cpp
+    storage/paged_kv_cache_tensor_allocator.cpp
+  DEPS
+    :kv_cache_memory_interfaces
+    :virtual_memory_torch
+    glog::glog
+    torch
+)
+
+cc_library(
+  NAME
+    paged_kv_cache_transfer_memory_provider
+  HDRS
+    transfer/paged_kv_cache_transfer_memory_provider.h
+  SRCS
+    transfer/paged_kv_cache_transfer_memory_provider.cpp
+  DEPS
+    :virtual_memory_kv_cache_storage
+    :global_memory_region
+    :kv_cache_memory_interfaces
+    glog::glog
 )
 
 cc_library(

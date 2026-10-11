@@ -493,8 +493,9 @@ void finalize_prefetch(Sequence* sequence,
 HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const BlockManagerPool::Options& options,
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
-    int32_t dp_size)
-    : BlockManagerPool(options, dp_size),
+    int32_t dp_size,
+    KVCachePageAllocator* page_allocator)
+    : BlockManagerPool(options, dp_size, page_allocator),
       transfer_coordinator_(std::move(transfer_coordinator)) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   host_block_managers_.reserve(dp_size);

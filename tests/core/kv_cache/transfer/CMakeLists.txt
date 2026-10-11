@@ -104,3 +104,16 @@ cc_test(
     GTest::gtest_main
 )
 endif()
+
+if(USE_NPU OR USE_MLU)
+cc_test(
+  NAME
+    mooncake_kv_cache_transfer_test
+  SRCS
+    mooncake_kv_cache_transfer_test.cpp
+  DEPS
+    :kv_cache_transfer
+    :xllm_server
+    GTest::gtest_main
+)
+endif()

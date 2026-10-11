@@ -1,3 +1,5 @@
+add_subdirectory(weight)
+
 include(cc_library)
 
 cc_library(

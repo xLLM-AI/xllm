@@ -19,7 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/global_flags.h"
-#include "core/framework/allocator/model_memory_manager.h"
+#include "core/distributed_runtime/model_memory_manager.h"
 #include "core/framework/config/kv_cache_config.h"
 
 namespace xllm {

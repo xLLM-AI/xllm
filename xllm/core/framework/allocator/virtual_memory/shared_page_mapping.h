@@ -31,7 +31,7 @@ namespace xllm {
 class SharedPageMapping final {
  public:
   SharedPageMapping() = default;
-  ~SharedPageMapping() = default;
+  ~SharedPageMapping();
 
   SharedPageMapping(const SharedPageMapping&) = delete;
   SharedPageMapping& operator=(const SharedPageMapping&) = delete;

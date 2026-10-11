@@ -31,18 +31,15 @@ namespace xllm {
 // Type definitions (page_id_t is defined in physical_page.h)
 using offset_t = page_id_t;
 
-// Mapping operations require synchronization by the caller.
+// Owns a virtual byte range and its physical page mappings. Mapping operations
+// require synchronization by the caller.
 class MappedMemoryRegion final {
  public:
-  MappedMemoryRegion(size_t size,
-                     torch::Dtype dtype,
-                     torch::Device dev,
-                     size_t page_size);
+  MappedMemoryRegion(size_t size, torch::Device dev, size_t page_size);
 
   // Map externally selected pages in the supplied logical order.
   // The region owns this reservation and releases it during destruction.
   MappedMemoryRegion(std::vector<page_id_t> page_ids,
-                     torch::Dtype dtype,
                      torch::Device dev,
                      size_t page_size);
 
@@ -68,22 +65,10 @@ class MappedMemoryRegion final {
   // Check whether this region owns a reservation of externally selected pages.
   bool is_using_preallocated_pages() const { return use_preallocated_pages_; }
 
-  // Convert the underlying memory to a torch::Tensor.
-  // For NPU devices, uses convert_to_torch_tensor; for others, uses from_blob.
-  torch::Tensor to_torch_tensor() const;
-
-  // Convert a portion of the underlying memory to a torch::Tensor.
-  // offset: byte offset from the start of the tensor
-  // dims: dimensions of the returned tensor
-  torch::Tensor to_torch_tensor(size_t offset,
-                                const std::vector<int64_t>& dims) const;
-
   inline size_t size() const noexcept { return size_; }
   inline size_t page_size() const noexcept { return page_size_; }
   inline VirPtr vaddr() const noexcept { return vaddr_; }
 
-  // Geometry for non-owning tensor views.
-  inline torch::Dtype dtype() const noexcept { return dtype_; }
   inline const torch::Device& device() const noexcept { return dev_; }
 
   // Non-owning base virtual address.
@@ -99,7 +84,6 @@ class MappedMemoryRegion final {
   VirPtr vaddr_;
   size_t size_;
   size_t page_size_;
-  torch::Dtype dtype_;
   torch::Device dev_;
 
   // Maps page id -> PhysicalPage (page id = offset / page_size_)

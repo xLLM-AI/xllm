@@ -27,7 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/framework/allocator/model_page_allocator.h"
+#include "core/distributed_runtime/model_page_allocator.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/model_loader/model_loader.h"

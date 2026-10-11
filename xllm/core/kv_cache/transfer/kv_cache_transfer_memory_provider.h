@@ -17,26 +17,26 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 
 namespace xllm {
 
-// Non-owning view of the shared region registered for cache transfers.
+// The optional lease keeps the mapping valid while registered for transfers.
 struct KVCacheTransferMemoryRegion {
   void* base_address = nullptr;
   size_t size_bytes = 0;
+  std::shared_ptr<void> lifetime;
 };
 
-// The runtime supplies registration state and physical offsets without exposing
+// The runtime supplies memory regions and physical offsets without exposing
 // its model lifecycle or distributed memory manager to cache transfer code.
 class KVCacheTransferMemoryProvider {
  public:
   virtual ~KVCacheTransferMemoryProvider() = default;
 
   virtual KVCacheTransferMemoryRegion memory_region() const = 0;
-  virtual bool is_registered() const = 0;
-  virtual void mark_registered() = 0;
 
   // Returns {UINT64_MAX, UINT64_MAX} for an invalid or unmapped block.
   virtual std::pair<uint64_t, uint64_t> get_global_offsets_for_block(

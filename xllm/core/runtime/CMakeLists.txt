@@ -111,8 +111,12 @@ cc_library(
     :dit_cache
     :model
     :parallel_state
+    :model_memory_manager
+    :global_memory_region
     :kv_cache
     :kv_cache_estimation
+    :virtual_memory_kv_cache_storage
+    :paged_kv_cache_transfer_memory_provider
     :kv_cache_transfer
     :mooncake_weight_transfer
     :linear_state_restore
