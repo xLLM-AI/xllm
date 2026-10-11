@@ -189,6 +189,12 @@ PYBIND11_MODULE(xllm_export, m) {
         }
         return obj.cast<RequestParams>();
       }))
+      .def("validate",
+           [](const RequestParams& params) {
+             params.verify_params([](RequestOutput output) -> bool {
+               throw py::value_error(output.status->message());
+             });
+           })
       .def_readwrite("request_id", &RequestParams::request_id)
       .def_readwrite("service_request_id", &RequestParams::service_request_id)
       .def_readwrite("x_request_id", &RequestParams::x_request_id)
@@ -202,6 +208,12 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("repetition_penalty", &RequestParams::repetition_penalty)
       .def_readwrite("temperature", &RequestParams::temperature)
       .def_readwrite("top_p", &RequestParams::top_p)
+      .def_readwrite("min_p", &RequestParams::min_p)
+      .def_readwrite("seed", &RequestParams::seed)
+      .def_readwrite("min_tokens", &RequestParams::min_tokens)
+      .def_readwrite("logit_bias", &RequestParams::logit_bias)
+      .def_readwrite("allowed_token_ids", &RequestParams::allowed_token_ids)
+      .def_readwrite("bad_words", &RequestParams::bad_words)
       .def_readwrite("top_k", &RequestParams::top_k)
       .def_readwrite("logprobs", &RequestParams::logprobs)
       .def_readwrite("top_logprobs", &RequestParams::top_logprobs)

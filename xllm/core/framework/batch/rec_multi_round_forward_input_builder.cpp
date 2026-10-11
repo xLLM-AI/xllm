@@ -226,7 +226,8 @@ void RecMultiRoundForwardInputBuilder::extract_tokens_and_positions(
         static_cast<int32_t>(state.flatten_tokens_vec.size() - 1),
         &sequence->token_to_count_map(),
         &adjusted_token_to_count_map,
-        /*sample=*/j == seq_len - 1);
+        /*sample=*/j == seq_len - 1,
+        sequence);
   }
 
   // `linear_state_ids` is consumed per sequence, so preserve one entry per
@@ -256,7 +257,11 @@ void RecMultiRoundForwardInputBuilder::extract_tokens_and_positions(
       static_cast<int32_t>(state_ptr->decode_sampling.size());
   for (int32_t i = 0; i < bw; ++i) {
     state_ptr->decode_sampling.append(sequence->sampling_param(),
-                                      sel_start + i);
+                                      sel_start + i,
+                                      nullptr,
+                                      nullptr,
+                                      true,
+                                      sequence);
   }
 }
 

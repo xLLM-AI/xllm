@@ -273,3 +273,10 @@ cc_test(
   ENVIRONMENT
     "${_api_json_test_env}"
 )
+
+cc_test(
+  NAME sampling_protocol_test
+  NO_NPU_RUNTIME
+  SRCS sampling_protocol_test.cpp
+  DEPS api_service GTest::gtest_main nlohmann_json::nlohmann_json
+)

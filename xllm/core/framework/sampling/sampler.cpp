@@ -14,20 +14,32 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "sampler.h"
+#include "core/framework/sampling/sampler.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <mutex>
 
 #include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/sampling/json_object_grammar.h"
-#include "logits_utils.h"
-#include "sampling_params.h"
+#include "core/framework/sampling/logits_utils.h"
+#include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
+namespace {
+
+uint64_t sampling_seed(int64_t seed, int64_t offset) {
+  uint64_t value = static_cast<uint64_t>(seed) +
+                   static_cast<uint64_t>(offset) * 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+}  // namespace
 
 SampleOutput Sampler::forward(torch::Tensor& logits,
                               const SamplingParameters& params,
@@ -35,7 +47,22 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   const torch::Tensor& effective_filter_mask =
       filter_mask.defined() ? filter_mask : params.filter_mask;
   SampleOutput output;
-  // apply frequency and presence penalties
+  // vLLM reports probabilities from the unmodified model distribution.
+  const torch::Tensor raw_logprobs =
+      params.logprobs && !params.use_beam_search
+          ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
+          : torch::Tensor();
+  if (params.logits_bias.defined()) {
+    logits.add_(params.logits_bias);
+  }
+  // Apply repetition before frequency and presence penalties.
+  if (params.repetition_penalties.defined()) {
+    apply_repetition_penalties(logits,
+                               params.unique_token_ids,
+                               params.repetition_penalties,
+                               params.unique_token_ids_lens);
+  }
+
   if (params.frequency_penalties.defined()) {
     apply_frequency_presence_penalties(logits,
                                        params.unique_token_ids,
@@ -44,16 +71,11 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
                                        params.presence_penalties);
   }
 
-  // apply repetition penalties
-  if (params.repetition_penalties.defined()) {
-    apply_repetition_penalties(
-        logits, params.unique_token_ids, params.repetition_penalties);
-  }
-
   torch::Tensor sample_logits = logits;
   torch::Tensor sample_temperatures = params.temperatures;
   torch::Tensor sample_top_k = params.top_k;
   torch::Tensor sample_top_p = params.top_p;
+  torch::Tensor sample_min_p = params.min_p;
   torch::Tensor sample_filter_bitmask = params.filter_bitmask;
   const bool use_sample_indices =
       params.selected_token_idxes.numel() != params.sample_idxes.numel();
@@ -68,6 +90,9 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     }
     if (params.top_p.defined()) {
       sample_top_p = params.top_p.index_select(/*dim=*/0, params.sample_idxes);
+    }
+    if (params.min_p.defined()) {
+      sample_min_p = params.min_p.index_select(/*dim=*/0, params.sample_idxes);
     }
     if (sample_filter_bitmask.defined()) {
       sample_filter_bitmask =
@@ -114,8 +139,11 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   }
 
   // apply temperatures, top-k and top-p
-  apply_top_k_top_p(
-      sample_logits, sample_temperatures, sample_top_k, sample_top_p);
+  if (sample_temperatures.defined()) {
+    apply_temperatures(sample_logits, sample_temperatures);
+  }
+  apply_min_p(sample_logits, sample_min_p);
+  apply_top_k_top_p(sample_logits, torch::Tensor(), sample_top_k, sample_top_p);
   if (use_sample_indices) {
     logits.index_copy_(/*dim=*/0, params.sample_idxes, sample_logits);
   }
@@ -130,7 +158,44 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   auto probs =
       torch::softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
   torch::Tensor samples;
-  if (params.all_random_sample) {
+  if (params.seeds.defined() && !params.all_greedy_sample) {
+    torch::Tensor seeds = params.seeds;
+    torch::Tensor offsets = params.seed_offsets;
+    if (use_sample_indices) {
+      seeds = seeds.index_select(0, params.sample_idxes);
+      offsets = offsets.index_select(0, params.sample_idxes);
+    }
+    seeds = seeds.to(torch::kCPU);
+    offsets = offsets.to(torch::kCPU);
+    const torch::Tensor sample_rows = params.do_sample.to(torch::kCPU);
+    std::vector<torch::Tensor> rows;
+    rows.reserve(probs.size(0));
+    for (int64_t row = 0; row < probs.size(0); ++row) {
+      const torch::Tensor probabilities = probs.select(0, row);
+      if (!sample_rows[row].item<bool>()) {
+        rows.emplace_back(probabilities.argmax(-1).view({1}));
+        continue;
+      }
+      const int64_t seed = seeds[row].item<int64_t>();
+      if (seed == -1) {
+        rows.emplace_back(random_sample(probabilities.unsqueeze(0)).view({1}));
+        continue;
+      }
+      // Cloning keeps this request independent from the process-global RNG.
+      auto default_generator =
+          torch::globalContext().defaultGenerator(probs.device());
+      auto generator = [&default_generator]() {
+        std::lock_guard<std::mutex> lock(default_generator.mutex());
+        return default_generator.clone();
+      }();
+      generator.set_current_seed(
+          sampling_seed(seed, offsets[row].item<int64_t>()));
+      rows.emplace_back(probabilities.multinomial(/*num_samples=*/1,
+                                                  /*replacement=*/false,
+                                                  generator));
+    }
+    samples = torch::cat(rows, /*dim=*/0);
+  } else if (params.all_random_sample) {
     samples = random_sample(probs);
   } else if (params.all_greedy_sample) {
     samples = greedy_sample(probs);
@@ -158,8 +223,12 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
       return output;
     }
     // log_softmax is equivalent to log(softmax) but more numerically stable
-    const auto logprobs = torch::log_softmax(
-        sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+    const torch::Tensor logprobs =
+        raw_logprobs.defined()
+            ? (use_sample_indices
+                   ? raw_logprobs.index_select(0, params.sample_idxes)
+                   : raw_logprobs)
+            : torch::log_softmax(sample_logits, /*dim=*/-1, torch::kFloat32);
     // select the logprobs for each sequence
     auto selected_logprobs =
         logprobs.gather(/*dim=*/-1, sample_indices.view({-1, 1}));

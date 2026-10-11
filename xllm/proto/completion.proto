@@ -40,7 +40,7 @@ message CompletionRequest {
   // the prompt token count + max_tokens can't exceed the model's max context length.
   optional uint32 max_tokens = 4;
 
-  // temperature of the sampling, between [0, 2]. default = 0.0
+  // finite, non-negative sampling temperature. default = 1.0
   // higher value will make the output more random.
   optional float temperature = 5;
 
@@ -59,7 +59,7 @@ message CompletionRequest {
   // whether to include the original prompt in the completion response. default = true
   optional bool echo = 10;
 
-  // up to 4 sequences where the API will stop generating further tokens.
+  // Stop strings that end generation.
   repeated string stop = 11;
 
   // presence penalty to reduce the likelihood of generating words already in the prompt.
@@ -68,7 +68,7 @@ message CompletionRequest {
   optional float presence_penalty = 12;
 
   // frequency penalty to reduce the likelihood of generating the same word multiple times.
-  // values between [0.0, 2.0]. 0.0 means no penalty. default = 0.0
+  // values between [-2.0, 2.0]. 0.0 means no penalty. default = 0.0
   // Positive values penalize new tokens based on their existing frequency in the text.
   optional float frequency_penalty = 13;
 
@@ -84,7 +84,7 @@ message CompletionRequest {
   // the list of token ids where the API will stop generating further tokens.
   repeated int32 stop_token_ids = 18;
 
-  // top_k sampling cutoff, default = -1 (no cutoff)
+  // top_k sampling cutoff, default = 0; 0 and -1 disable the cutoff
   optional int64 top_k = 19;
 
   // repetition penalty to penalize new tokens based on their occurrence in the
@@ -143,6 +143,14 @@ message CompletionRequest {
   optional bool include_stop_str_in_output = 42;
 
   repeated PromptInput prompts = 43;
+
+  // Minimum probability relative to the most likely token, in [0, 1].
+  optional float min_p = 44;
+  optional int64 seed = 45;
+  optional uint32 min_tokens = 46;
+  map<int32, float> logit_bias = 47;
+  repeated int32 allowed_token_ids = 48;
+  repeated string bad_words = 49;
 }
 
 message LogProbs {

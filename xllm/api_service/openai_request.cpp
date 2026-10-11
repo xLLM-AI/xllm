@@ -16,6 +16,7 @@ limitations under the License.
 #include "api_service/openai_request.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -134,13 +135,7 @@ Status normalize_generation(nlohmann::json& json,
   schema_error = false;
   // These controls need engine support; accepting and ignoring them changes
   // the requested sampling or output constraints.
-  for (const char* field : {"seed",
-                            "logit_bias",
-                            "min_p",
-                            "min_tokens",
-                            "prompt_logprobs",
-                            "allowed_token_ids",
-                            "bad_words",
+  for (const char* field : {"prompt_logprobs",
                             "structured_outputs",
                             "prompt_embeds",
                             "logprob_token_ids"}) {
@@ -202,6 +197,8 @@ Status normalize_generation(nlohmann::json& json,
                    0.0,
                    static_cast<double>(std::numeric_limits<float>::max()),
                    false},
+        std::tuple{"min_p", 0.0, 1.0, false},
+        std::tuple{"min_tokens", 0.0, 4294967295.0, true},
         std::tuple{"top_p", std::numeric_limits<double>::min(), 1.0, false},
         std::tuple{"top_k", -1.0, 2147483647.0, true},
         std::tuple{"presence_penalty", -2.0, 2.0, false},
@@ -235,6 +232,66 @@ Status normalize_generation(nlohmann::json& json,
   }
   if (json.contains("top_k") && json["top_k"] == 0) {
     json["top_k"] = -1;
+  }
+  if (json.contains("seed") && !json["seed"].is_null()) {
+    const auto& seed = json["seed"];
+    if (!seed.is_number_integer() ||
+        (seed.is_number_unsigned() &&
+         seed.get<uint64_t>() >
+             static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))) {
+      return invalid("seed must be a signed 64-bit integer.");
+    }
+  }
+  if (json.contains("min_tokens") && !json["min_tokens"].is_null() &&
+      json.contains("max_tokens") && !json["max_tokens"].is_null() &&
+      json["min_tokens"].get<uint64_t>() > json["max_tokens"].get<uint64_t>()) {
+    return invalid("min_tokens must not exceed max_tokens.");
+  }
+  for (const char* field : {"allowed_token_ids", "stop_token_ids"}) {
+    const auto it = json.find(field);
+    if (it == json.end() || it->is_null()) {
+      continue;
+    }
+    if (!it->is_array() ||
+        (std::string_view(field) == "allowed_token_ids" && it->empty())) {
+      return invalid(std::string(field) + " must be an array of token ids.");
+    }
+    for (const auto& token : *it) {
+      if (!token.is_number_integer() || token.get<double>() < 0 ||
+          token.get<double>() > std::numeric_limits<int32_t>::max()) {
+        return invalid(std::string(field) +
+                       " must contain non-negative int32 token ids.");
+      }
+    }
+  }
+  const auto words = json.find("bad_words");
+  if (words != json.end() && !words->is_null() &&
+      (!words->is_array() ||
+       !std::all_of(words->begin(), words->end(), [](const auto& word) {
+         return word.is_string() &&
+                !word.template get_ref<const std::string&>().empty();
+       }))) {
+    return invalid("bad_words must be an array of non-empty strings.");
+  }
+  auto bias = json.find("logit_bias");
+  if (bias != json.end() && !bias->is_null()) {
+    if (!bias->is_object()) {
+      return invalid("logit_bias must be an object.");
+    }
+    for (auto entry = bias->begin(); entry != bias->end(); ++entry) {
+      int32_t token = 0;
+      const std::string& key = entry.key();
+      const auto parsed =
+          std::from_chars(key.data(), key.data() + key.size(), token);
+      if (parsed.ec != std::errc() || parsed.ptr != key.data() + key.size() ||
+          token < 0 || !entry.value().is_number() ||
+          !std::isfinite(entry.value().get<double>())) {
+        return invalid(
+            "logit_bias requires non-negative token ids and finite numeric "
+            "biases.");
+      }
+      entry.value() = std::clamp(entry.value().get<double>(), -100.0, 100.0);
+    }
   }
   auto stop = json.find("stop");
   if (stop != json.end() && !stop->is_null()) {
@@ -276,7 +333,7 @@ Status normalize_generation(nlohmann::json& json,
   }
   Status status = validate_number(json,
                                   chat ? "top_logprobs" : "logprobs",
-                                  0,
+                                  -1,
                                   2000,
                                   /*integer=*/true,
                                   error_param);
@@ -285,7 +342,7 @@ Status normalize_generation(nlohmann::json& json,
   }
   if (chat && json.contains("top_logprobs") &&
       json["top_logprobs"].is_number() &&
-      json["top_logprobs"].get<int32_t>() > 0 &&
+      json["top_logprobs"].get<int32_t>() != 0 &&
       json.value("logprobs", nlohmann::json()) != true) {
     return invalid("when using top_logprobs, logprobs must be true.",
                    error_param,

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "speculative_worker_impl.h"
+#include "core/runtime/speculative_worker_impl.h"
 
 #include "common/global_flags.h"
 #include "core/framework/config/speculative_config.h"
@@ -282,6 +282,10 @@ void SpeculativeWorkerImpl<TargetInput>::update_sampling_params(
                                num_val_tokens);
   repeat_interleave_if_defined(sampling_params.temperatures, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.top_p, num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.min_p, num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.logits_bias, num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.seeds, num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.seed_offsets, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.top_k, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.unique_token_ids,
                                num_val_tokens);
@@ -318,6 +322,10 @@ void SpeculativeWorkerImpl<TargetInput>::update_sampling_params(
                                repeats_tensor);
   repeat_interleave_if_defined(sampling_params.temperatures, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.top_p, repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.min_p, repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.logits_bias, repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.seeds, repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.seed_offsets, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.top_k, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.unique_token_ids,
                                repeats_tensor);

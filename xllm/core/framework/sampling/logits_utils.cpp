@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "logits_utils.h"
+#include "core/framework/sampling/logits_utils.h"
 
 #include <torch/torch.h>
 
@@ -27,27 +27,31 @@ void apply_frequency_presence_penalties(
     const torch::Tensor& unique_token_counts,
     const torch::Tensor& frequency_penalties,
     const torch::Tensor& presence_penalties) {
-  auto score = logits.gather(/*dim=*/1, /*index=*/unique_token_ids);
-  score.sub_(unique_token_counts * frequency_penalties.unsqueeze(1));
-  score.sub_((unique_token_counts > 0) * presence_penalties.unsqueeze(1));
-
-  logits.scatter_(/*dim=*/1,
-                  /*index=*/unique_token_ids,
-                  /*core=*/score.to(logits.scalar_type()));
+  const torch::Tensor penalty =
+      unique_token_counts * frequency_penalties.unsqueeze(1) +
+      (unique_token_counts > 0) * presence_penalties.unsqueeze(1);
+  // Padded zero-count entries must never overwrite a real token's penalty.
+  logits.scatter_add_(
+      /*dim=*/1, unique_token_ids, (-penalty).to(logits.scalar_type()));
 }
 
 void apply_repetition_penalties(torch::Tensor& logits,
                                 const torch::Tensor& unique_token_ids,
-                                const torch::Tensor& penalties) {
-  auto unsqueezed_penalties = penalties.unsqueeze(1);
-  auto score = logits.gather(/*dim=*/1, /*index=*/unique_token_ids);
-  logits.scatter_(
-      /*dim=*/1,
-      /*index=*/unique_token_ids,
-      /*core=*/
-      torch::where(
-          score < 0, score * unsqueezed_penalties, score / unsqueezed_penalties)
-          .to(logits.scalar_type()));
+                                const torch::Tensor& penalties,
+                                const torch::Tensor& unique_token_ids_lens) {
+  const torch::Tensor scores = logits.gather(/*dim=*/1, unique_token_ids);
+  const torch::Tensor factors = penalties.unsqueeze(1);
+  torch::Tensor delta =
+      torch::where(scores < 0, scores * factors, scores / factors) - scores;
+  delta.masked_fill_(~torch::isfinite(scores), 0);
+  if (unique_token_ids_lens.defined()) {
+    const torch::Tensor positions =
+        torch::arange(unique_token_ids.size(1), unique_token_ids.options());
+    delta.masked_fill_(
+        positions.unsqueeze(0) >= unique_token_ids_lens.unsqueeze(1), 0);
+  }
+  logits.scatter_add_(
+      /*dim=*/1, unique_token_ids, delta.to(logits.scalar_type()));
 }
 
 void apply_temperatures(torch::Tensor& logits,
@@ -70,26 +74,38 @@ void apply_temperatures(torch::Tensor& logits,
 void apply_top_k_top_p_torch_impl(torch::Tensor& logits,
                                   const torch::Tensor& top_k,
                                   const torch::Tensor& top_p) {
-  const int64_t vocab = logits.size(-1);
-  const float inf = -std::numeric_limits<float>::infinity();
+  const int64_t vocab_size = logits.size(-1);
+  const float filter_value = -std::numeric_limits<float>::infinity();
+  auto [sorted_logits, indices] = logits.sort(/*dim=*/-1, /*descending=*/false);
+  if (top_k.defined()) {
+    const torch::Tensor k = torch::where(top_k <= 0, vocab_size, top_k)
+                                .clamp(1, vocab_size)
+                                .to(torch::kLong);
+    const torch::Tensor threshold = sorted_logits.gather(
+        /*dim=*/-1, (vocab_size - k).unsqueeze(-1));
+    // Preserve ties at the kth largest logit, as vLLM does.
+    sorted_logits.masked_fill_(sorted_logits < threshold, filter_value);
+  }
+  if (top_p.defined()) {
+    const torch::Tensor probabilities =
+        sorted_logits.softmax(-1, torch::kFloat32);
+    torch::Tensor mask = probabilities.cumsum(-1) <= (1 - top_p.unsqueeze(-1));
+    mask.select(/*dim=*/-1, /*index=*/vocab_size - 1).fill_(false);
+    sorted_logits.masked_fill_(mask, filter_value);
+  }
+  logits.scatter_(/*dim=*/-1, indices, sorted_logits);
+}
 
-  auto [sorted, idx] = logits.sort(-1, /*descending=*/true);
-
-  // top-k
-  auto k = top_k.unsqueeze(-1).clamp(1, vocab).to(torch::kLong);
-  auto k_mask = torch::arange(vocab, logits.device()).expand_as(sorted) >= k;
-  sorted.masked_fill_(k_mask, inf);
-
-  // top-p
-  auto p = top_p.unsqueeze(-1);
-  auto probs = sorted.softmax(-1);
-  auto cum = probs.cumsum(-1);
-  auto p_mask = cum > p;
-  // at least one
-  p_mask.index_put_({torch::indexing::Ellipsis, 0}, false);
-  sorted.masked_fill_(p_mask, inf);
-
-  logits.scatter_(-1, idx, sorted.to(logits.scalar_type()));
+void apply_min_p(torch::Tensor& logits, const torch::Tensor& min_p) {
+  if (!min_p.defined()) {
+    return;
+  }
+  const torch::Tensor max_logits =
+      std::get<0>(logits.max(/*dim=*/-1, /*keepdim=*/true));
+  const torch::Tensor threshold =
+      max_logits + min_p.to(torch::kFloat32).log().unsqueeze(-1);
+  logits.masked_fill_(logits < threshold,
+                      -std::numeric_limits<float>::infinity());
 }
 
 void apply_top_k_top_p(torch::Tensor& logits,
@@ -104,7 +120,7 @@ void apply_top_k_top_p(torch::Tensor& logits,
   }
 
 #if defined(USE_MLU)
-  if (top_k.defined() || top_p.defined()) {
+  if (!logits.device().is_cpu() && (top_k.defined() || top_p.defined())) {
     xllm::kernel::TopKPParams params;
     params.logits = logits;
     params.top_k = top_k;
@@ -114,64 +130,18 @@ void apply_top_k_top_p(torch::Tensor& logits,
   }
 #endif
 
-  if (top_k.defined() && top_p.defined()) {
 #if defined(USE_NPU)
-    constexpr int64_t kMaxInt64 = std::numeric_limits<int64_t>::max();
-    static thread_local torch::Tensor max_value_scalar;
-    const torch::Device& top_k_device = top_k.device();
-    if (!max_value_scalar.defined() ||
-        max_value_scalar.device() != top_k_device) {
-      max_value_scalar = torch::full(
-          {}, kMaxInt64, torch::TensorOptions().device(top_k_device));
-    }
-
-    auto processed_top_k =
-        torch::where(top_k <= 0, max_value_scalar, top_k).to(torch::kInt32);
+  if (!logits.device().is_cpu() && top_k.defined() && top_p.defined()) {
+    const int64_t vocab_size = logits.size(-1);
+    const torch::Tensor processed_top_k =
+        torch::where(top_k <= 0, vocab_size, top_k)
+            .clamp(1, vocab_size)
+            .to(torch::kInt32);
     xllm::kernel::npu::top_k_top_p(logits, processed_top_k, top_p);
-#elif defined(USE_MLU)
-    apply_top_k_top_p_torch_impl(logits, top_k, top_p);
-#endif
-  } else {
-    auto [sorted_logits, logits_idx] =
-        logits.sort(/*dim=*/-1, /*descending=*/true);
-
-    float filter_value = -std::numeric_limits<float>::infinity();
-
-    if (top_k.defined()) {
-      auto processed_top_k = top_k.unsqueeze(1);
-      constexpr int64_t kMaxInt64Else = std::numeric_limits<int64_t>::max();
-      static thread_local torch::Tensor max_value_scalar_else;
-      const torch::Device& top_k_device = processed_top_k.device();
-      if (!max_value_scalar_else.defined() ||
-          max_value_scalar_else.device() != top_k_device) {
-        max_value_scalar_else = torch::full(
-            {}, kMaxInt64Else, torch::TensorOptions().device(top_k_device));
-      }
-
-      processed_top_k = torch::where(
-          processed_top_k <= 0, max_value_scalar_else, processed_top_k);
-
-      auto vocab_size = logits.size(-1);
-      auto top_k_mask = torch::arange(vocab_size, sorted_logits.device())
-                            .expand_as(sorted_logits);
-      top_k_mask = top_k_mask >= processed_top_k;
-      sorted_logits.masked_fill_(top_k_mask, filter_value);
-    }
-
-    if (top_p.defined()) {
-      auto processed_top_p = top_p.unsqueeze(1);
-
-      auto probs = sorted_logits.softmax(/*dim=*/-1).to(torch::kFloat32);
-      auto probs_sum = probs.cumsum(/*dim=*/-1);
-      auto mask = (probs_sum - probs) > processed_top_p;
-
-      sorted_logits.masked_fill_(mask, filter_value);
-    }
-    logits = torch::empty_like(sorted_logits)
-                 .scatter_(/*dim=*/-1,
-                           /*index=*/logits_idx,
-                           /*core=*/sorted_logits.to(logits.scalar_type()));
+    return;
   }
+#endif
+  apply_top_k_top_p_torch_impl(logits, top_k, top_p);
 }
 
 }  // namespace xllm

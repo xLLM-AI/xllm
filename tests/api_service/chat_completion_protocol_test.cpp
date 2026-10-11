@@ -110,7 +110,7 @@ TEST(ChatCompletionRequestTest, GreedySamplingRequiresOneChoice) {
   }
 }
 
-TEST(ChatCompletionRequestTest, Vllm023AcceptsTemperaturesAboveTwo) {
+TEST(ChatCompletionRequestTest, AcceptsTemperaturesAboveTwo) {
   const auto [status, body] = normalize_openai_request(
       R"({"prompt":"hi","messages":[{"role":"user","content":"hi"}],"temperature":3})",
       OpenAIEndpoint::CHAT,

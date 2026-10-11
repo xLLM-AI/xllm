@@ -1002,7 +1002,10 @@ void ForwardInputBuilder::handle_sampling_parameters(Sequence* sequence,
   state.sampling.append(
       sequence->sampling_param(),
       static_cast<int32_t>(state.flatten_tokens_vec.size() - 1),
-      need_unique_tokens_ ? &sequence->token_to_count_map() : nullptr);
+      need_unique_tokens_ ? &sequence->token_to_count_map() : nullptr,
+      /*excluded_counts=*/nullptr,
+      /*sample=*/true,
+      sequence);
   if (enable_json_object_output_) {
     const JsonObjectGrammarState* json_state = sequence->json_object_state();
     state.json_object_states.push_back(

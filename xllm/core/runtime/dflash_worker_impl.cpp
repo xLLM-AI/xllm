@@ -120,6 +120,10 @@ void repeat_sampling_params(SamplingParameters& sampling_params,
   repeat_interleave_if_defined(sampling_params.repetition_penalties, repeats);
   repeat_interleave_if_defined(sampling_params.temperatures, repeats);
   repeat_interleave_if_defined(sampling_params.top_p, repeats);
+  repeat_interleave_if_defined(sampling_params.min_p, repeats);
+  repeat_interleave_if_defined(sampling_params.logits_bias, repeats);
+  repeat_interleave_if_defined(sampling_params.seeds, repeats);
+  repeat_interleave_if_defined(sampling_params.seed_offsets, repeats);
   repeat_interleave_if_defined(sampling_params.top_k, repeats);
   repeat_interleave_if_defined(sampling_params.unique_token_ids, repeats);
   repeat_interleave_if_defined(sampling_params.unique_token_counts, repeats);

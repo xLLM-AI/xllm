@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "disagg_pd_service_impl.h"
+#include "core/distributed_runtime/disagg_pd_service_impl.h"
 
 #include <glog/logging.h>
 
@@ -89,6 +89,26 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
   sampling_param.repetition_penalty = req.repetition_penalty();
   sampling_param.temperature = req.temperature();
   sampling_param.top_p = req.top_p();
+  sampling_param.min_p = req.min_p();
+  if (req.has_seed()) {
+    sampling_param.seed = req.seed();
+  }
+  sampling_param.min_tokens = req.min_tokens();
+  sampling_param.vocab_size = req.vocab_size();
+  for (const auto& [token, bias] : req.logit_bias()) {
+    sampling_param.logit_bias.emplace(token, bias);
+  }
+  if (req.allowed_token_ids_size() > 0) {
+    sampling_param.allowed_token_ids = std::vector<int32_t>(
+        req.allowed_token_ids().begin(), req.allowed_token_ids().end());
+  }
+  sampling_param.all_stop_token_ids.assign(req.all_stop_token_ids().begin(),
+                                           req.all_stop_token_ids().end());
+  sampling_param.bad_words_token_ids.reserve(req.bad_words_token_ids_size());
+  for (const auto& word : req.bad_words_token_ids()) {
+    sampling_param.bad_words_token_ids.emplace_back(word.seq_tokens().begin(),
+                                                    word.seq_tokens().end());
+  }
   sampling_param.top_k = req.top_k();
   sampling_param.logprobs = req.logprobs();
   sampling_param.top_logprobs = req.top_logprobs();
@@ -129,7 +149,8 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
                                    req.ignore_eos(),
                                    std::move(stop_tokens),
                                    std::move(stop_sequences),
-                                   std::move(stop_strings));
+                                   std::move(stop_strings),
+                                   req.min_tokens());
 
   auto output_callback = [this](const RequestOutput& output) -> bool {
     // response to xllm service to avoid the redirect cost.

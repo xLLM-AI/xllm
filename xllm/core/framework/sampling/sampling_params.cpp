@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "sampling_params.h"
+#include "core/framework/sampling/sampling_params.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
 #include <torch/types.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +29,43 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
+
+namespace {
+
+torch::Tensor concat_rows(const torch::Tensor& left,
+                          const torch::Tensor& right,
+                          int64_t left_rows,
+                          int64_t right_rows,
+                          double fill) {
+  if (!left.defined() && !right.defined()) {
+    return {};
+  }
+  const torch::Tensor& reference = left.defined() ? left : right;
+  if (reference.dim() == 1) {
+    return torch::cat(
+        {left.defined() ? left
+                        : torch::full({left_rows}, fill, reference.options()),
+         right.defined()
+             ? right
+             : torch::full({right_rows}, fill, reference.options())},
+        0);
+  }
+  const int64_t width = std::max(left.defined() ? left.size(1) : 0,
+                                 right.defined() ? right.size(1) : 0);
+  torch::Tensor joined =
+      torch::full({left_rows + right_rows, width}, fill, reference.options());
+  if (left.defined()) {
+    joined.narrow(0, 0, left_rows).narrow(1, 0, left.size(1)).copy_(left);
+  }
+  if (right.defined()) {
+    joined.narrow(0, left_rows, right_rows)
+        .narrow(1, 0, right.size(1))
+        .copy_(right);
+  }
+  return joined;
+}
+
+}  // namespace
 
 void SamplingParameters::init(
     const std::vector<const RequestSamplingParam*>& req_sampling_params,
@@ -37,6 +75,7 @@ void SamplingParameters::init(
     const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
     const std::vector<int32_t>& unique_token_lens_vec,
     const std::vector<torch::Tensor>& filter_mask_rows) {
+  *this = SamplingParameters();
   CHECK_EQ(req_sampling_params.size(), selected_token_idxes.size());
   CHECK_GE(req_sampling_params.size(), sample_idxes.size());
 
@@ -45,12 +84,14 @@ void SamplingParameters::init(
   std::vector<float> repetition_penalties;
   std::vector<float> temperatures;
   std::vector<float> top_p;
+  std::vector<float> min_p;
   std::vector<int64_t> top_k;
   frequency_penalties.reserve(req_sampling_params.size());
   presence_penalties.reserve(req_sampling_params.size());
   repetition_penalties.reserve(req_sampling_params.size());
   temperatures.reserve(req_sampling_params.size());
   top_p.reserve(req_sampling_params.size());
+  min_p.reserve(req_sampling_params.size());
   top_k.reserve(req_sampling_params.size());
   bool logprobs = false;
   int64_t max_top_logprobs = 0;
@@ -60,9 +101,11 @@ void SamplingParameters::init(
     frequency_penalties.push_back(p->frequency_penalty);
     presence_penalties.push_back(p->presence_penalty);
     repetition_penalties.push_back(p->repetition_penalty);
-    temperatures.push_back(p->temperature);
-    top_p.push_back(p->top_p);
-    top_k.push_back(p->top_k);
+    temperatures.emplace_back(
+        p->temperature > 0 ? std::max(p->temperature, 0.01F) : 0.0F);
+    top_p.emplace_back(p->temperature == 0 ? 1.0F : p->top_p);
+    top_k.emplace_back(p->temperature == 0 ? 0 : p->top_k);
+    min_p.emplace_back(p->temperature == 0 ? 0.0F : p->min_p);
     logprobs = logprobs || p->logprobs;
     is_embeddings = is_embeddings || p->is_embeddings;
     max_top_logprobs = std::max(max_top_logprobs, p->top_logprobs);
@@ -103,6 +146,11 @@ void SamplingParameters::init(
   if (std::any_of(
           top_p.begin(), top_p.end(), [](float t) { return t != 1.0; })) {
     this->top_p = make_pinned_cpu_tensor(top_p);
+  }
+
+  if (std::any_of(
+          min_p.begin(), min_p.end(), [](float value) { return value > 0; })) {
+    this->min_p = make_pinned_cpu_tensor(min_p);
   }
 
   this->selected_token_idxes = make_pinned_cpu_tensor(selected_token_idxes);
@@ -162,9 +210,7 @@ void SamplingParameters::init(
   do_sample.reserve(sample_idxes.size());
   for (const auto idx : sample_idxes) {
     const auto* p = req_sampling_params[idx];
-    // need to do sample if any of following is true
-    const bool sample = p->do_sample || p->temperature != 0.0 ||
-                        p->top_p != 1.0 || p->top_k > 0;
+    const bool sample = p->temperature != 0.0;
     do_sample.push_back(sample);
   }
   this->sample_idxes = make_pinned_cpu_tensor(sample_idxes);
@@ -221,6 +267,10 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   params.repetition_penalties = safe_to(repetition_penalties, options, true);
   params.temperatures = safe_to(temperatures, options, true);
   params.top_p = safe_to(top_p, options, true);
+  params.min_p = safe_to(min_p, options, true);
+  params.seed_offsets = safe_to(seed_offsets, device, true);
+  params.seeds = safe_to(seeds, device, true);
+  params.logits_bias = safe_to(logits_bias, device, true);
   params.top_k = safe_to(top_k, device, true);
 
   params.unique_token_ids = safe_to(unique_token_ids, device, true);
@@ -245,91 +295,56 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
 }
 
 void SamplingParameters::concat(const SamplingParameters& param) {
-  // selected_token_idxes and sample_idxes are accumulated variable across
-  // all sequences in the batch, so the offset of first
-  // SamplingParameters is added to the second SamplingParameters
-  this->selected_token_idxes =
-      safe_concat(this->selected_token_idxes,
-                  (param.selected_token_idxes.defined()
-                       ? (param.selected_token_idxes +
-                          this->selected_token_idxes[-1] + torch::tensor(1))
-                       : param.selected_token_idxes),
-                  0);
-  this->sample_idxes = safe_concat(
-      this->sample_idxes,
-      (param.sample_idxes.defined()
-           ? (param.sample_idxes + this->sample_idxes[-1] + torch::tensor(1))
-           : param.sample_idxes),
-      0);
-  this->frequency_penalties =
-      safe_concat(this->frequency_penalties, param.frequency_penalties, 0);
-  this->repetition_penalties =
-      safe_concat(this->repetition_penalties, param.repetition_penalties, 0);
-  this->temperatures = safe_concat(this->temperatures, param.temperatures, 0);
-  this->top_p = safe_concat(this->top_p, param.top_p, 0);
-  this->top_k = safe_concat(this->top_k, param.top_k, 0);
-  this->unique_token_ids =
-      safe_concat(this->unique_token_ids, param.unique_token_ids, 0);
-  this->unique_token_counts =
-      safe_concat(this->unique_token_counts, param.unique_token_counts, 0);
-  this->unique_token_ids_lens =
-      safe_concat(this->unique_token_ids_lens, param.unique_token_ids_lens, 0);
-  this->do_sample = safe_concat(this->do_sample, param.do_sample, 0);
-  this->acc_logprob = safe_concat(this->acc_logprob, param.acc_logprob, 0);
-  if (this->filter_mask.defined() && param.filter_mask.defined()) {
-    this->filter_mask = torch::cat({this->filter_mask, param.filter_mask}, 0);
-  } else if (this->filter_mask.defined() || param.filter_mask.defined()) {
-    const auto row_count = [](const SamplingParameters& value) {
-      if (value.filter_mask.defined()) {
-        return value.filter_mask.size(0);
-      }
-      return value.sample_idxes.defined() ? value.sample_idxes.numel() : 0;
-    };
-    const torch::Tensor& defined_mask =
-        this->filter_mask.defined() ? this->filter_mask : param.filter_mask;
-    const int64_t missing_rows =
-        this->filter_mask.defined() ? row_count(param) : row_count(*this);
-    torch::Tensor unconstrained_rows = torch::zeros(
-        {missing_rows, defined_mask.size(1)}, defined_mask.options());
-    this->filter_mask =
-        this->filter_mask.defined()
-            ? torch::cat({this->filter_mask, unconstrained_rows}, 0)
-            : torch::cat({unconstrained_rows, param.filter_mask}, 0);
+  if (!param.selected_token_idxes.defined() ||
+      param.selected_token_idxes.numel() == 0) {
+    return;
   }
-  if (this->filter_bitmask.defined() && param.filter_bitmask.defined()) {
-    this->filter_bitmask =
-        torch::cat({this->filter_bitmask, param.filter_bitmask}, 0);
-  } else if (this->filter_bitmask.defined() || param.filter_bitmask.defined()) {
-    const auto row_count = [](const SamplingParameters& value) {
-      if (value.filter_bitmask.defined()) {
-        return value.filter_bitmask.size(0);
-      }
-      return value.sample_idxes.defined() ? value.sample_idxes.numel() : 0;
-    };
-    const torch::Tensor& defined_mask = this->filter_bitmask.defined()
-                                            ? this->filter_bitmask
-                                            : param.filter_bitmask;
-    const int64_t missing_rows =
-        this->filter_bitmask.defined() ? row_count(param) : row_count(*this);
-    // All-ones words => allow all tokens (unconstrained).
-    torch::Tensor unconstrained_rows =
-        torch::full({missing_rows, defined_mask.size(1)},
-                    /*fill_value=*/static_cast<int32_t>(-1),
-                    defined_mask.options());
-    this->filter_bitmask =
-        this->filter_bitmask.defined()
-            ? torch::cat({this->filter_bitmask, unconstrained_rows}, 0)
-            : torch::cat({unconstrained_rows, param.filter_bitmask}, 0);
+  if (!selected_token_idxes.defined() || selected_token_idxes.numel() == 0) {
+    *this = param;
+    return;
   }
-  this->logprobs = this->logprobs || param.logprobs;
-  this->return_probs = this->return_probs || param.return_probs;
-  this->is_embeddings = this->is_embeddings || param.is_embeddings;
-  this->use_beam_search = this->use_beam_search || param.use_beam_search;
-  this->max_top_logprobs =
-      std::max(this->max_top_logprobs, param.max_top_logprobs);
-  this->num_return_sequences =
-      std::max(this->num_return_sequences, param.num_return_sequences);
-  return;
+  const int64_t left_rows = selected_token_idxes.numel();
+  const int64_t right_rows = param.selected_token_idxes.numel();
+  const int64_t left_samples = sample_idxes.numel();
+  const int64_t right_samples = param.sample_idxes.numel();
+  for (const auto& [member, fill] :
+       std::array<std::pair<torch::Tensor SamplingParameters::*, double>, 14>{
+           {{&SamplingParameters::frequency_penalties, 0},
+            {&SamplingParameters::presence_penalties, 0},
+            {&SamplingParameters::repetition_penalties, 1},
+            {&SamplingParameters::temperatures, 1},
+            {&SamplingParameters::top_p, 1},
+            {&SamplingParameters::top_k, 0},
+            {&SamplingParameters::min_p, 0},
+            {&SamplingParameters::logits_bias, 0},
+            {&SamplingParameters::seeds, -1},
+            {&SamplingParameters::seed_offsets, 0},
+            {&SamplingParameters::unique_token_ids, 0},
+            {&SamplingParameters::unique_token_counts, 0},
+            {&SamplingParameters::unique_token_ids_lens, 0},
+            {&SamplingParameters::filter_bitmask, -1}}}) {
+    this->*member =
+        concat_rows(this->*member, param.*member, left_rows, right_rows, fill);
+  }
+  filter_mask = concat_rows(
+      filter_mask, param.filter_mask, left_samples, right_samples, 0);
+  acc_logprob = concat_rows(
+      acc_logprob, param.acc_logprob, left_samples, right_samples, 0);
+  selected_token_idxes =
+      torch::cat({selected_token_idxes,
+                  param.selected_token_idxes + selected_token_idxes[-1] + 1},
+                 0);
+  sample_idxes = torch::cat({sample_idxes, param.sample_idxes + left_rows}, 0);
+  do_sample = torch::cat({do_sample, param.do_sample}, 0);
+  all_random_sample = all_random_sample && param.all_random_sample;
+  all_greedy_sample = all_greedy_sample && param.all_greedy_sample;
+  logprobs = logprobs || param.logprobs;
+  return_probs = return_probs || param.return_probs;
+  is_embeddings = is_embeddings || param.is_embeddings;
+  use_beam_search = use_beam_search || param.use_beam_search;
+  max_top_logprobs = std::max(max_top_logprobs, param.max_top_logprobs);
+  num_return_sequences =
+      std::max(num_return_sequences, param.num_return_sequences);
 }
 
 }  // namespace xllm

@@ -122,7 +122,7 @@ struct InputField {
   RowDomain domain;
 };
 
-constexpr std::array<InputField, 12> kFields = {{
+constexpr std::array<InputField, 13> kFields = {{
     {&SamplingParameters::selected_token_idxes,
      torch::kInt32,
      RowDomain::SELECTED},
@@ -137,6 +137,7 @@ constexpr std::array<InputField, 12> kFields = {{
      RowDomain::SELECTED},
     {&SamplingParameters::temperatures, torch::kFloat32, RowDomain::SELECTED},
     {&SamplingParameters::top_p, torch::kFloat32, RowDomain::SELECTED},
+    {&SamplingParameters::min_p, torch::kFloat32, RowDomain::SELECTED},
     {&SamplingParameters::top_k, torch::kInt64, RowDomain::SELECTED},
     {&SamplingParameters::unique_token_ids, torch::kInt64, RowDomain::HISTORY},
     {&SamplingParameters::unique_token_counts,
@@ -644,10 +645,11 @@ Status SlotBuffer::validate_model(const ModelInputHostView& input) const {
 
 Status SlotBuffer::validate_sampling(const SamplingParameters& input,
                                      uint32_t model_tokens) const {
-  if (input.filter_mask.defined() || input.filter_bitmask.defined() ||
-      input.acc_logprob.defined() || input.is_embeddings ||
-      input.use_beam_search || input.num_return_sequences != 0 ||
-      input.max_top_logprobs < 0 ||
+  if (input.logits_bias.defined() || input.seeds.defined() ||
+      input.seed_offsets.defined() || input.filter_mask.defined() ||
+      input.filter_bitmask.defined() || input.acc_logprob.defined() ||
+      input.is_embeddings || input.use_beam_search ||
+      input.num_return_sequences != 0 || input.max_top_logprobs < 0 ||
       model_tokens >
           static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
       static_cast<uint64_t>(input.max_top_logprobs) >
@@ -730,6 +732,9 @@ Status SlotBuffer::validate_sampling(const SamplingParameters& input,
       !valid_parameters(input.temperatures,
                         capacity_.parameter_dtype,
                         [](float value) { return value >= 0; }) ||
+      !valid_parameters(input.min_p,
+                        capacity_.parameter_dtype,
+                        [](float value) { return value >= 0 && value <= 1; }) ||
       !valid_parameters(input.top_p,
                         capacity_.parameter_dtype,
                         [](float value) { return value >= 0 && value <= 1; })) {

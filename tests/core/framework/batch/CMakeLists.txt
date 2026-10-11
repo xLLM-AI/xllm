@@ -64,6 +64,7 @@ cc_test(
     forward_input_factory_test
   SRCS
     forward_input_factory_test.cpp
+    sampling_input_builder_test.cpp
   DEPS
     :config
     :batch

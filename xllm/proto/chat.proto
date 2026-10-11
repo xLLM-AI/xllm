@@ -63,7 +63,7 @@ message ChatRequest {
   // "auto" - the model can pick between an end-user or calling a function.
   // string function_call = 4;
 
-  // temperature of the sampling, between [0, 2]. default = 0.0
+  // finite, non-negative sampling temperature. default = 1.0
   // higher value will make the output more random, while a lower value will make it more deterministic.
   // it is recommended altering this or top_p but not both.
   optional float temperature = 5;
@@ -77,7 +77,7 @@ message ChatRequest {
   // whether to stream partial completions back as they are generated. default = false
   optional bool stream = 8;
 
-  // up to 4 sequences where the API will stop generating further tokens.
+  // Stop strings that end generation.
   repeated string stop = 9;
 
   // the maximum number of tokens to generate in the chat completion. default = 16
@@ -88,14 +88,10 @@ message ChatRequest {
   // the model's likelihood to talk about new topics.
   optional float presence_penalty = 11;
 
-  // values between [0.0, 2.0]. default = 0.0
+  // values between [-2.0, 2.0]. default = 0.0
   // Positive values penalize new tokens based on their existing frequency in the text so far,
   // decreasing the model's likelihood to repeat the same line verbatim.
   optional float frequency_penalty = 12;
-
-  // TODO: logit_bias
-  // modify the likelihood of specified tokens appearing in the completion.
-  // map<int64, float> logit_bias = 13;
 
   // A unique identifier representing your end-user, which can help system to monitor and detect abuse.
   string user = 14;
@@ -108,7 +104,7 @@ message ChatRequest {
   // < 1.0 encourage the model to repeat tokens. default = 1.0
   optional float repetition_penalty = 17;
 
-  // top_k sampling cutoff, default = -1 (no cutoff)
+  // top_k sampling cutoff, default = 0; 0 and -1 disable the cutoff
   optional int64 top_k = 18;
 
   // whether to skip special tokens in the output. default = true
@@ -177,6 +173,14 @@ message ChatRequest {
   // default = false
   optional bool include_stop_str_in_output = 46;
   optional ResponseFormat response_format = 47;
+
+  // Minimum probability relative to the most likely token, in [0, 1].
+  optional float min_p = 48;
+  optional int64 seed = 49;
+  optional uint32 min_tokens = 50;
+  map<int32, float> logit_bias = 51;
+  repeated int32 allowed_token_ids = 52;
+  repeated string bad_words = 53;
 }
 
 message ChatLogProbData {

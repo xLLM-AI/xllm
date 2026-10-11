@@ -38,25 +38,31 @@ TEST(StoppingCheckerTest, IgnoreEosSkipsOnlyEosToken) {
             FinishReason::NONE);
 }
 
-TEST(StoppingCheckerTest, IgnoreEosSkipsStopTokens) {
-  // Models load their built-in end markers into stop_token_ids, and a request
-  // that sets stop_token_ids replaces that default, so ignore_eos bypasses the
-  // whole set rather than just eos_token. kimi_k2 ships two end markers
-  // {163585, 163586} with eos_token=163585; under ignore_eos neither may stop.
-  StoppingChecker checker(
-      /*max_generated_tokens=*/10,
-      /*max_context_len=*/0,
-      /*eos_token=*/163585,
-      /*ignore_eos=*/true,
-      /*stop_tokens=*/std::unordered_set<int32_t>{163585, 163586},
-      /*stop_sequences=*/std::vector<std::vector<int32_t>>{});
+TEST(StoppingCheckerTest, IgnoreEosHonorsExplicitStopTokens) {
+  StoppingChecker checker(/*max_generated_tokens=*/10,
+                          /*max_context_len=*/0,
+                          /*eos_token=*/2,
+                          /*ignore_eos=*/true,
+                          /*stop_tokens=*/{2, 3},
+                          /*stop_sequences=*/{});
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 2}, 1), FinishReason::STOP);
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 3}, 1), FinishReason::STOP);
+}
 
-  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 163585},
-                          /*num_prompt_tokens=*/1),
-            FinishReason::NONE);
-  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 163586},
-                          /*num_prompt_tokens=*/1),
-            FinishReason::NONE);
+TEST(StoppingCheckerTest, MinTokensDelaysStopStringsAndTokens) {
+  StoppingChecker checker(/*max_generated_tokens=*/4,
+                          /*max_context_len=*/0,
+                          /*eos_token=*/2,
+                          /*ignore_eos=*/false,
+                          /*stop_tokens=*/{3},
+                          /*stop_sequences=*/{{4}},
+                          /*stop_strings=*/{"stop"},
+                          /*min_generated_tokens=*/2);
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 2}, 1), FinishReason::NONE);
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 3}, 1), FinishReason::NONE);
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 4}, 1), FinishReason::NONE);
+  EXPECT_EQ(checker.check(std::vector<int32_t>{1, 5, 4}, 1),
+            FinishReason::STOP);
 }
 
 TEST(StoppingCheckerTest, StopTokensStopWhenEosNotIgnored) {

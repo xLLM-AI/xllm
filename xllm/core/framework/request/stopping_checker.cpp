@@ -13,19 +13,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "stopping_checker.h"
+#include "core/framework/request/stopping_checker.h"
 
-#include <absl/strings/match.h>
-#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
 
-#include "core/util/utils.h"
-
 namespace xllm {
+namespace {
+
+bool matches_suffix(const Slice<int32_t>& token_ids,
+                    const std::vector<int32_t>& suffix) {
+  return token_ids.size() >= suffix.size() &&
+         std::equal(
+             suffix.begin(), suffix.end(), token_ids.end() - suffix.size());
+}
+
+}  // namespace
 
 StoppingChecker::StoppingChecker(
     size_t max_generated_tokens,
@@ -34,8 +41,10 @@ StoppingChecker::StoppingChecker(
     bool ignore_eos,
     std::unordered_set<int32_t> stop_tokens,
     std::vector<std::vector<int32_t>> stop_sequences,
-    std::vector<std::string> stop_strings)
+    std::vector<std::string> stop_strings,
+    size_t min_generated_tokens)
     : max_generated_tokens_(max_generated_tokens),
+      min_generated_tokens_(min_generated_tokens),
       max_context_len_(max_context_len),
       eos_token_(eos_token),
       ignore_eos_(ignore_eos),
@@ -79,6 +88,10 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
   const int32_t last_token_id = token_ids[total_tokens - 1];
   const Slice<int32_t> valid_token_ids(token_ids.data(), total_tokens);
 
+  if (total_tokens - num_prompt_tokens < min_generated_tokens_) {
+    return FinishReason::NONE;
+  }
+
   // check eos token
   if (!ignore_eos_ && last_token_id == eos_token_) {
     if (matched_stop_token_count != nullptr) {
@@ -87,14 +100,8 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
     return FinishReason::STOP;
   }
 
-  // check stop tokens
-  // Models load their built-in end markers into stop_token_ids, often more
-  // than one (kimi_k2 -> {163585, 163586}, qwen3_5 -> {eos, 248046}), so
-  // ignore_eos_ must bypass the whole set to honor fixed-length generation;
-  // gating on eos_token_ alone would still cut off the other end markers. A
-  // request that supplies stop_token_ids replaces this default, so pairing it
-  // with ignore_eos is contradictory by construction and ignore_eos wins.
-  if (!ignore_eos_ && stop_tokens_.count(last_token_id) > 0) {
+  // Explicit stop tokens are independent of ignore_eos.
+  if (stop_tokens_.count(last_token_id) > 0) {
     if (stop_reason != nullptr) {
       *stop_reason = static_cast<int32_t>(last_token_id);
     }
@@ -107,8 +114,7 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
   // check stop sequences
   for (size_t index = 0; index < stop_sequences_.size(); ++index) {
     const auto& seq = stop_sequences_[index];
-    if (seq.back() == last_token_id &&
-        util::match_suffix(valid_token_ids, seq)) {
+    if (seq.back() == last_token_id && matches_suffix(valid_token_ids, seq)) {
       if (stop_reason != nullptr && index < stop_strings_.size() &&
           !stop_strings_[index].empty()) {
         *stop_reason = stop_strings_[index];
@@ -126,8 +132,7 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
   if (total_tokens > num_prompt_tokens) {
     for (size_t index = 0; index < generated_stop_sequences_.size(); ++index) {
       const auto& seq = generated_stop_sequences_[index];
-      if (seq.back() == last_token_id &&
-          util::match_suffix(valid_token_ids, seq)) {
+      if (seq.back() == last_token_id && matches_suffix(valid_token_ids, seq)) {
         if (stop_reason != nullptr && index < generated_stop_strings_.size()) {
           *stop_reason = generated_stop_strings_[index];
         }

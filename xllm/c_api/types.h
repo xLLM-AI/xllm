@@ -254,7 +254,7 @@ typedef struct XLLM_CAPI_EXPORT XLLM_RequestParams {
    */
   float repetition_penalty;
 
-  /** Sampling temperature (range: [0.0, 2.0]) */
+  /** Finite, non-negative sampling temperature. */
   float temperature;
 
   /** Request id */

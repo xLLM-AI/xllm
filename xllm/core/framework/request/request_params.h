@@ -20,21 +20,22 @@ limitations under the License.
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "common.pb.h"
-#include "common/macros.h"
 #include "completion.pb.h"
 #include "core/common/macros.h"
 #include "core/common/types.h"
+#include "core/framework/request/request.h"
+#include "core/framework/request/request_output.h"
+#include "core/framework/request/sample_slot.h"
 #include "embedding.pb.h"
 #include "multimodal.pb.h"
-#include "request.h"
-#include "request_output.h"
 #include "rerank.pb.h"
-#include "sample_slot.h"
 
 namespace xllm {
 
@@ -49,8 +50,10 @@ enum class ResponseFormatType : int8_t {
 // every translation unit that only needs RequestParams.
 struct RequestSamplingParam;
 struct SchedulerParam;
+class Tokenizer;
 
-struct RequestParams {
+class RequestParams final {
+ public:
   RequestParams() = default;
   RequestParams(const proto::CompletionRequest& request,
                 const std::string& x_rid,
@@ -92,6 +95,13 @@ struct RequestParams {
   // omits them).
   RequestSamplingParam to_sampling_param(size_t best_of) const;
 
+  std::optional<std::string> prepare_sampling_constraints(
+      RequestSamplingParam& sampling_param,
+      const Tokenizer* tokenizer,
+      int64_t vocab_size,
+      int32_t eos_token_id,
+      const std::unordered_set<int32_t>& model_stop_token_ids) const;
+
   // Projects the scheduler-related fields into a SchedulerParam. SLO/priority
   // weights are only meaningful for online requests, so they are left at their
   // defaults when `offline` is set.
@@ -107,7 +117,7 @@ struct RequestParams {
   bool streaming = false;
 
   // number of tokens to generate. truncated to model's max context length.
-  uint32_t max_tokens = 5120;
+  uint32_t max_tokens = 16;
 
   // number of sequences to generate for each prompt.
   uint32_t n = 1;
@@ -119,14 +129,13 @@ struct RequestParams {
   bool echo = false;
 
   // frequency penalty to reduce the likelihood of generating the same word
-  // multiple times. values between [0.0, 2.0]. 0.0 means no penalty. default =
+  // multiple times. values between [-2.0, 2.0]. 0.0 means no penalty. default =
   // 0.0 Positive values penalize new tokens based on their existing frequency
   // in the text.
   float frequency_penalty = 0.0;
 
-  // presence penalty to reduce the likelihood of generating words already in
-  // the prompt. values between [-2.0, 2.0]. Positive values penalize new tokens
-  // based on their existing in the prompt. default = 0.0
+  // Presence penalty based on tokens in generated text, in [-2.0, 2.0].
+  // Prompt tokens do not contribute to presence or frequency penalties.
   float presence_penalty = 0.0;
 
   // repetition penalty to penalize new tokens based on their occurrence in the
@@ -134,15 +143,24 @@ struct RequestParams {
   // < 1.0 encourage the model to repeat tokens. default = 1.0
   float repetition_penalty = 1.0;
 
-  // finite, non-negative sampling temperature. default = 0.0
+  // Finite, non-negative sampling temperature. Zero selects greedy decoding.
   // higher value will make the output more random.
-  float temperature = 0.0;
+  float temperature = 1.0;
 
-  // top_p sampling cutoff, between [0.0, 1.0]. default = 1.0
+  // top_p sampling cutoff, in (0.0, 1.0]. default = 1.0
   float top_p = 1.0;
 
-  // top_k sampling cutoff. default = -1 to disable.
-  int64_t top_k = -1;
+  // top_k sampling cutoff. Zero and -1 disable the cutoff.
+  int64_t top_k = 0;
+
+  // Minimum probability relative to the largest probability, in [0, 1].
+  float min_p = 0.0;
+
+  std::optional<int64_t> seed;
+  uint32_t min_tokens = 0;
+  std::unordered_map<int32_t, float> logit_bias;
+  std::optional<std::vector<int32_t>> allowed_token_ids;
+  std::vector<std::string> bad_words;
 
   // whether to return the log probabilities of the tokens. default = false.
   bool logprobs = false;

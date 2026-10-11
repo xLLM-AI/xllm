@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "sampling_params.h"
+#include "core/framework/sampling/sampling_params.h"
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -137,6 +137,56 @@ TEST(SamplingParamsTest, ConcatPadsUnconstrainedRows) {
   EXPECT_EQ(constrained.filter_mask.index({0, 1}).item<float>(), -1.0e9F);
   EXPECT_EQ(constrained.filter_mask.index({1, 0}).item<float>(), 0.0F);
   EXPECT_EQ(constrained.filter_mask.index({1, 1}).item<float>(), 0.0F);
+}
+
+TEST(SamplingParamsTest, NormalizesGreedyAndSmallTemperatureRows) {
+  RequestSamplingParam greedy;
+  greedy.temperature = 0;
+  greedy.top_k = 1;
+  greedy.top_p = 0.2;
+  greedy.min_p = 0.9;
+  RequestSamplingParam random;
+  random.temperature = 0.001;
+  random.min_p = 0.2;
+  SamplingParameters params;
+  params.init({&greedy, &random}, {0, 1}, {0, 1}, {}, {}, {});
+  EXPECT_TRUE(
+      torch::allclose(params.temperatures, torch::tensor({0.0F, 0.01F})));
+  EXPECT_TRUE(torch::allclose(params.min_p, torch::tensor({0.0F, 0.2F})));
+  EXPECT_TRUE(torch::equal(params.do_sample, torch::tensor({false, true})));
+  EXPECT_FALSE(params.top_k.defined());
+  EXPECT_FALSE(params.top_p.defined());
+  EXPECT_FALSE(params.all_random_sample);
+  EXPECT_FALSE(params.all_greedy_sample);
+}
+
+TEST(SamplingParamsTest, ConcatPreservesMixedPenaltyAndSamplingRows) {
+  RequestSamplingParam plain;
+  plain.temperature = 0;
+  RequestSamplingParam penalized;
+  penalized.presence_penalty = 1.0;
+  penalized.min_p = 0.3;
+  SamplingParameters first;
+  first.init({&plain, &plain}, {3, 4}, {1}, {}, {}, {});
+  SamplingParameters second;
+  second.init({&penalized}, {0}, {0}, {{2, 3}}, {{0, 2}}, {2});
+  second.seeds = torch::tensor({7}, torch::kLong);
+  second.seed_offsets = torch::tensor({2}, torch::kLong);
+  second.logits_bias = torch::tensor({{0.0F, 1.0F, 0.0F, 0.0F}});
+  first.concat(second);
+  EXPECT_TRUE(
+      torch::equal(first.sample_idxes, torch::tensor({1, 2}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(first.presence_penalties,
+                           torch::tensor({0.0F, 0.0F, 1.0F})));
+  EXPECT_TRUE(
+      torch::equal(first.seeds, torch::tensor({-1, -1, 7}, torch::kLong)));
+  EXPECT_EQ(first.unique_token_ids.size(0), 3);
+  EXPECT_EQ(first.unique_token_ids.size(1), 2);
+  EXPECT_EQ(first.unique_token_ids_lens[0].item<int32_t>(), 0);
+  EXPECT_EQ(first.logits_bias[2][1].item<float>(), 1.0F);
+  EXPECT_EQ(first.logits_bias[0].sum().item<float>(), 0.0F);
+  EXPECT_FALSE(first.all_random_sample);
+  EXPECT_FALSE(first.all_greedy_sample);
 }
 
 }  // namespace xllm

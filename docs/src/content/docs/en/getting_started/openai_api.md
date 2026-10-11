@@ -229,16 +229,22 @@ for choice in response.choices:
 
 | Parameter | xLLM behavior |
 | --- | --- |
-| `max_tokens` | Positive output-token limit. Set it explicitly; completions defaults to 16. |
+| `max_tokens` | Positive output-token limit. Completions and Python `SamplingParams` default to 16. Omitted chat limits and Python `max_tokens=None` use the remaining model context. |
 | `max_completion_tokens` | Chat-only alias; takes precedence over `max_tokens` when both are present. |
-| `temperature` | Non-negative; `0` selects greedy decoding. The HTTP default is `1.0`. |
+| `temperature` | Finite, non-negative value, default `1.0`; values above `2` are accepted, matching vLLM `0.23.0`. Positive values below `0.01` are raised to `0.01`; `0` selects greedy decoding and disables `top_k`, `top_p`, and `min_p`. |
 | `top_p` | Sampling cutoff in `(0, 1]`. |
 | `n` | Number of returned candidates; must be `1` with `temperature=0`. |
 | `stop` | A string or list of non-empty strings. |
 | `presence_penalty`, `frequency_penalty` | Values in `[-2, 2]`. |
-| `logprobs` | Boolean for chat; integer count for completions. Chat also uses `top_logprobs`. |
+| `logprobs` | Boolean for chat; integer count for completions and Python. Chat also uses `top_logprobs`. Counts of `0` return the sampled token, and `-1` returns the full vocabulary. Values are computed before penalties, biases, temperature, and filtering. |
 | `top_k` | Extension: integer cutoff; `-1` or `0` disables the cutoff. |
 | `repetition_penalty` | Extension: positive repetition penalty. |
+| `min_p` | Relative probability cutoff in `[0, 1]`, default `0`; applied after temperature and before top-k/top-p. |
+| `seed` | Optional signed 64-bit seed; `-1` means unset. Seeded streams are independent of batch position. Identical tokens across different engines or hardware are not guaranteed. |
+| `min_tokens` | Non-negative minimum output length, at most `max_tokens`. Blocks EOS and stop-token IDs until the minimum is reached. |
+| `logit_bias` | Token-ID-to-bias mapping; values are clipped to `[-100, 100]`. |
+| `allowed_token_ids` | Non-empty list of allowed token IDs. |
+| `bad_words` | List of non-empty strings; prevents completing their token sequences in generated text. |
 | `chat_template_kwargs` | Chat extension: template options supported by the model. |
 
 Pass extensions through the SDK's `extra_body`. In raw HTTP JSON, place them at the top level, without an `extra_body` wrapper:
@@ -263,7 +269,9 @@ For xLLM's `beam_width` extension, see [Online Service](/en/getting_started/onli
 
 ## Compatibility limits and errors
 
-- Non-null `seed`, `logit_bias`, `min_p`, `min_tokens`, `prompt_logprobs`, `structured_outputs`, and `prompt_embeds` are rejected with HTTP 400. Do not copy these options from other servers' examples.
+- `seed`, `min_tokens`, `logit_bias`, `allowed_token_ids`, `bad_words`, and full-vocabulary logprobs require `enable_task_pipeline=false`. `seed`, `min_tokens`, and `bad_words` also require `num_speculative_tokens=0`; `bad_words` requires `enable_schedule_overlap=false`. REC endpoints reject the new seed and token-constraint controls.
+- Non-null `prompt_logprobs`, `logprob_token_ids`, `structured_outputs`, and `prompt_embeds` remain unsupported and return HTTP 400. This interface does not implement all engine-level fields of vLLM `0.23.0` `SamplingParams`.
+- Frequency and presence penalties count generated tokens only; repetition penalties include prompt tokens. Explicit `stop_token_ids` remain active when `ignore_eos=true`.
 - `response_format={"type": "json_schema"}` is unsupported. Chat `json_object` requires the server's JSON-output configuration; it is not JSON Schema support.
 - Embedding requests do not support `dimensions`; see the [Embedding guide](/en/getting_started/openai_api_embeddings/).
 - HTTP 400 indicates an invalid or unsupported request. Inspect the JSON `error.message` and `error.param`. HTTP 404 for a model means its name does not match an available model; query `/v1/models`.

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "mtp_worker_impl.h"
+#include "core/runtime/mtp_worker_impl.h"
 
 #include <glog/logging.h>
 #if defined(USE_NPU)
@@ -3117,6 +3117,10 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
       !validate_sampling_params.repetition_penalties.defined() &&
       !validate_sampling_params.temperatures.defined() &&
       !validate_sampling_params.top_p.defined() &&
+      !validate_sampling_params.min_p.defined() &&
+      !validate_sampling_params.seed_offsets.defined() &&
+      !validate_sampling_params.seeds.defined() &&
+      !validate_sampling_params.logits_bias.defined() &&
       !validate_sampling_params.top_k.defined() &&
       !validate_sampling_params.unique_token_ids.defined() &&
       !validate_sampling_params.unique_token_counts.defined() &&

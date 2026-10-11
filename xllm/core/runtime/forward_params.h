@@ -194,6 +194,10 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
          plan.add(source.repetition_penalties, &target.repetition_penalties) &&
          plan.add(source.temperatures, &target.temperatures) &&
          plan.add(source.top_p, &target.top_p) &&
+         plan.add(source.min_p, &target.min_p) &&
+         plan.add(source.logits_bias, &target.logits_bias) &&
+         plan.add(source.seeds, &target.seeds) &&
+         plan.add(source.seed_offsets, &target.seed_offsets) &&
          plan.add(source.top_k, &target.top_k) &&
          plan.add(source.unique_token_ids, &target.unique_token_ids) &&
          plan.add(source.unique_token_counts, &target.unique_token_counts) &&

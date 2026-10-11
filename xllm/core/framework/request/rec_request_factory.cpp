@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "rec_request_factory.h"
+#include "core/framework/request/rec_request_factory.h"
 
 #include <absl/strings/str_join.h>
 #include <glog/logging.h>
@@ -601,6 +601,22 @@ std::shared_ptr<Request> RecRequestFactory::build_request_common(
   // kicks in when the client leaves those fields unset.)
   sampling_param.enable_beam_search(sp.beam_width);
   sampling_param.num_return_sequences = sp.num_return_sequences;
+  if (sp.seed.has_value() || sp.min_tokens > 0 || !sp.logit_bias.empty() ||
+      sp.allowed_token_ids.has_value() || !sp.bad_words.empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "seed, min_tokens, logit_bias, allowed_token_ids and "
+                        "bad_words require an LLM or VLM model");
+    return nullptr;
+  }
+  if (const auto error =
+          sp.prepare_sampling_constraints(sampling_param,
+                                          tokenizer_,
+                                          model_args_->vocab_size(),
+                                          model_args_->eos_token_id(),
+                                          model_args_->stop_token_ids())) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    return nullptr;
+  }
   // Model-aware complement to verify_params' 2000 cap: an oversized top-k
   // would throw inside the sampler and take the whole batch down with it.
   if (const auto error =
@@ -620,8 +636,10 @@ std::shared_ptr<Request> RecRequestFactory::build_request_common(
     if (sp.stop_token_ids.has_value()) {
       const auto& stop_token_ids = sp.stop_token_ids.value();
       stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
-    } else {
-      stop_tokens = model_args_->stop_token_ids();
+    }
+    if (!sp.ignore_eos) {
+      stop_tokens.insert(model_args_->stop_token_ids().begin(),
+                         model_args_->stop_token_ids().end());
     }
 
     std::vector<std::vector<int32_t>> stop_sequences;
@@ -650,7 +668,8 @@ std::shared_ptr<Request> RecRequestFactory::build_request_common(
                         sp.ignore_eos,
                         std::move(stop_tokens),
                         std::move(stop_sequences),
-                        sp.stop.value_or(std::vector<std::string>{}));
+                        sp.stop.value_or(std::vector<std::string>{}),
+                        sp.min_tokens);
   }
 
   RequestState req_state(std::move(prompt),

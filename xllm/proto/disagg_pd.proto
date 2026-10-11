@@ -91,6 +91,14 @@ message DisaggRequest {
   bool json_reasoning_enabled = 41;
   // Identifies this reservation even when callers reuse a request ID.
   string reservation_id = 42;
+  float min_p = 43;
+  optional int64 seed = 44;
+  uint32 min_tokens = 45;
+  map<int32, float> logit_bias = 46;
+  repeated int32 allowed_token_ids = 47;
+  repeated StopSequence bad_words_token_ids = 48;
+  repeated int32 all_stop_token_ids = 49;
+  int64 vocab_size = 50;
 
 }
 

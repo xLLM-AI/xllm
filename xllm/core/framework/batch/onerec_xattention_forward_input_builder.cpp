@@ -104,7 +104,12 @@ RecForwardInput OneRecXAttentionForwardInputBuilder::build_rec_forward_input(
         const int32_t selected_row = decode_hidden_row_offset +
                                      beam_idx * decode_hidden_seq_len +
                                      (decode_hidden_seq_len - 1);
-        decode_sampling.append(sampling_param, selected_row);
+        decode_sampling.append(sampling_param,
+                               selected_row,
+                               nullptr,
+                               nullptr,
+                               true,
+                               sequence_ptr.get());
       }
       decode_hidden_row_offset += beam_width * decode_hidden_seq_len;
     }

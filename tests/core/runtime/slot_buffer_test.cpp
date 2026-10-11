@@ -727,13 +727,14 @@ TEST_F(SlotBufferTest, NarrowAndFullBlockTablesReuseStrideWithoutStalePages) {
   }
 }
 
-constexpr std::array<torch::Tensor SamplingParameters::*, 12> kInputs = {
+constexpr std::array<torch::Tensor SamplingParameters::*, 13> kInputs = {
     &SamplingParameters::selected_token_idxes,
     &SamplingParameters::frequency_penalties,
     &SamplingParameters::presence_penalties,
     &SamplingParameters::repetition_penalties,
     &SamplingParameters::temperatures,
     &SamplingParameters::top_p,
+    &SamplingParameters::min_p,
     &SamplingParameters::top_k,
     &SamplingParameters::unique_token_ids,
     &SamplingParameters::unique_token_counts,
@@ -752,6 +753,7 @@ SamplingParameters make_input(int32_t rows, int32_t width) {
   input.repetition_penalties = torch::full({rows}, /*fill_value=*/1.15f);
   input.temperatures = torch::full({rows}, /*fill_value=*/0.85f);
   input.top_p = torch::full({rows}, /*fill_value=*/0.9f);
+  input.min_p = torch::full({rows}, /*fill_value=*/0.1f);
   input.top_k = torch::full({rows}, /*fill_value=*/16, torch::kInt64);
   input.unique_token_ids =
       torch::arange(width, torch::kInt64).expand({rows, width}).clone();
@@ -971,6 +973,9 @@ TEST_P(SlotSamplingInputTest, InvalidInputPreservesPriorBindingAndValues) {
   expect_rejected(invalid);
   invalid = valid;
   invalid.top_p = torch::full({4}, /*fill_value=*/1.1f);
+  expect_rejected(invalid);
+  invalid = valid;
+  invalid.min_p = torch::full({4}, /*fill_value=*/1.1f);
   expect_rejected(invalid);
   invalid = valid;
   invalid.unique_token_ids =

@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "request_params.h"
+#include "core/framework/request/request_params.h"
 
+#include <algorithm>
 #include <cmath>
 #include <type_traits>
 
@@ -23,11 +24,12 @@ limitations under the License.
 #include "core/common/instance_name.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/request/request.h"
+#include "core/framework/tokenizer/tokenizer.h"
 #include "core/util/uuid.h"
-#include "request.h"
 // Pulls in RequestSamplingParam and SchedulerParam definitions for the
 // projection helpers below.
-#include "request_state.h"
+#include "core/framework/request/request_state.h"
 
 namespace xllm {
 namespace {
@@ -214,6 +216,23 @@ RequestParams::RequestParams(const proto::CompletionRequest& request,
   if (request.has_top_k()) {
     top_k = request.top_k();
   }
+  if (request.has_min_p()) {
+    min_p = request.min_p();
+  }
+  if (request.has_seed() && request.seed() != -1) {
+    seed = request.seed();
+  }
+  if (request.has_min_tokens()) {
+    min_tokens = request.min_tokens();
+  }
+  for (const auto& [token, bias] : request.logit_bias()) {
+    logit_bias.emplace(token, std::clamp(bias, -100.0F, 100.0F));
+  }
+  if (request.allowed_token_ids_size() > 0) {
+    allowed_token_ids = std::vector<int32_t>(
+        request.allowed_token_ids().begin(), request.allowed_token_ids().end());
+  }
+  bad_words.assign(request.bad_words().begin(), request.bad_words().end());
   if (request.has_logprobs()) {
     logprobs = true;
     top_logprobs = request.logprobs();
@@ -333,6 +352,7 @@ std::vector<xllm::JsonTool> parse_tools_from_proto(
 
 template <typename ChatRequest>
 void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
+  params.max_tokens = 0;
   if constexpr (std::is_same_v<ChatRequest, proto::ChatRequest>) {
     if (request.has_response_format()) {
       const std::string& type = request.response_format().type();
@@ -413,6 +433,24 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
   if (request.has_top_k()) {
     params.top_k = request.top_k();
   }
+  if (request.has_min_p()) {
+    params.min_p = request.min_p();
+  }
+  if (request.has_seed() && request.seed() != -1) {
+    params.seed = request.seed();
+  }
+  if (request.has_min_tokens()) {
+    params.min_tokens = request.min_tokens();
+  }
+  for (const auto& [token, bias] : request.logit_bias()) {
+    params.logit_bias.emplace(token, std::clamp(bias, -100.0F, 100.0F));
+  }
+  if (request.allowed_token_ids_size() > 0) {
+    params.allowed_token_ids = std::vector<int32_t>(
+        request.allowed_token_ids().begin(), request.allowed_token_ids().end());
+  }
+  params.bad_words.assign(request.bad_words().begin(),
+                          request.bad_words().end());
   if (request.has_logprobs()) {
     params.logprobs = request.logprobs();
   }
@@ -634,7 +672,6 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     }
   }
 
-  // vLLM 0.23 permits any finite, non-negative sampling temperature.
   if (!std::isfinite(temperature) || temperature < 0.0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "temperature must be finite and non-negative",
@@ -643,10 +680,87 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     return false;
   }
 
-  // top_p between [0.0, 1.0]
-  if (top_p < 0.0 || top_p > 1.0) {
+  if (!std::isfinite(top_p) || top_p <= 0.0 || top_p > 1.0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "top_p must be between 0.0 and 1.0",
+                        "top_p must be in (0, 1]",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  if (top_k < -1) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "top_k must be -1, 0, or a positive integer",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  if (!std::isfinite(min_p) || min_p < 0 || min_p > 1) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "min_p must be in [0, 1]",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  if (!std::isfinite(repetition_penalty) || repetition_penalty <= 0) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "repetition_penalty must be finite and positive",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  if (temperature == 0 && n > 1 && beam_width <= 1) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "n must be 1 when using greedy sampling",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+
+  if (max_tokens > 0 && min_tokens > max_tokens) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "min_tokens must not exceed max_tokens",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+  if (allowed_token_ids.has_value() && allowed_token_ids->empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "allowed_token_ids must not be empty",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+  if (stop.has_value() &&
+      std::any_of(stop->begin(), stop->end(), [](const std::string& value) {
+        return value.empty();
+      })) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "stop must not contain empty strings",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
+  for (const auto& [token, bias] : logit_bias) {
+    if (token >= 0 && std::isfinite(bias)) {
+      continue;
+    }
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "logit_bias requires non-negative token ids and finite values",
+        service_request_id,
+        source_xservice_addr);
+    return false;
+  }
+  for (const std::string& word : bad_words) {
+    if (!word.empty()) {
+      continue;
+    }
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "bad_words must not contain empty strings",
                         service_request_id,
                         source_xservice_addr);
     return false;
@@ -686,11 +800,13 @@ bool RequestParams::verify_params(OutputCallback callback) const {
   // is checked first so that a negative count is reported as a client error
   // rather than silently repaired by the beam normalization.
   if (logprobs || beam_width > 1) {
-    if (top_logprobs < 0 || top_logprobs > 2000) {
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "logprobs must be between 0 and 2000",
-                          service_request_id,
-                          source_xservice_addr);
+    if (top_logprobs < (beam_width > 1 ? 0 : -1) || top_logprobs > 2000) {
+      CALLBACK_WITH_ERROR(
+          StatusCode::INVALID_ARGUMENT,
+          "logprobs must be -1 (all vocabulary) or between 0 and 2000; "
+          "beam search requires a non-negative count",
+          service_request_id,
+          source_xservice_addr);
       return false;
     }
     // Beam search raises top_logprobs to at least beam_width, so also validate
@@ -711,7 +827,8 @@ bool RequestParams::verify_params(OutputCallback callback) const {
   }
 
   // presence_penalty between [-2.0, 2.0]
-  if (presence_penalty < -2.0 || presence_penalty > 2.0) {
+  if (!std::isfinite(presence_penalty) || presence_penalty < -2.0 ||
+      presence_penalty > 2.0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "presence_penalty must be between -2.0 and 2.0",
                         service_request_id,
@@ -720,7 +837,8 @@ bool RequestParams::verify_params(OutputCallback callback) const {
   }
 
   // frequency_penalty between [-2.0, 2.0]
-  if (frequency_penalty < -2.0 || frequency_penalty > 2.0) {
+  if (!std::isfinite(frequency_penalty) || frequency_penalty < -2.0 ||
+      frequency_penalty > 2.0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "frequency_penalty must be between -2.0 and 2.0",
                         service_request_id,
@@ -735,9 +853,15 @@ RequestSamplingParam RequestParams::to_sampling_param(size_t best_of) const {
   sampling_param.frequency_penalty = frequency_penalty;
   sampling_param.presence_penalty = presence_penalty;
   sampling_param.repetition_penalty = repetition_penalty;
-  sampling_param.temperature = temperature;
-  sampling_param.top_p = top_p;
-  sampling_param.top_k = top_k;
+  sampling_param.temperature =
+      temperature > 0 ? std::max(temperature, 0.01F) : 0.0F;
+  sampling_param.top_p = temperature == 0 ? 1.0F : top_p;
+  sampling_param.top_k = temperature == 0 ? 0 : top_k;
+  sampling_param.min_p = temperature == 0 ? 0.0F : min_p;
+  sampling_param.seed = seed == -1 ? std::nullopt : seed;
+  sampling_param.min_tokens = min_tokens;
+  sampling_param.logit_bias = logit_bias;
+  sampling_param.allowed_token_ids = allowed_token_ids;
   sampling_param.logprobs = logprobs;
   sampling_param.top_logprobs = top_logprobs;
   sampling_param.is_embeddings = is_embeddings;
@@ -750,6 +874,86 @@ RequestSamplingParam RequestParams::to_sampling_param(size_t best_of) const {
   // normalizes logprobs/top_logprobs for beam expansion, REC copies both
   // fields, and VLM omits them entirely. Each factory layers them on as needed.
   return sampling_param;
+}
+
+std::optional<std::string> RequestParams::prepare_sampling_constraints(
+    RequestSamplingParam& sampling_param,
+    const Tokenizer* tokenizer,
+    int64_t vocab_size,
+    int32_t eos_token_id,
+    const std::unordered_set<int32_t>& model_stop_token_ids) const {
+  if (vocab_size <= 0 &&
+      (!logit_bias.empty() || allowed_token_ids.has_value() || min_tokens > 0 ||
+       !bad_words.empty())) {
+    return "Token constraints require a known vocabulary size";
+  }
+  sampling_param.vocab_size = vocab_size;
+  if (sampling_param.logprobs && sampling_param.top_logprobs == -1) {
+    if (vocab_size <= 0) {
+      return "logprobs=-1 requires a known vocabulary size";
+    }
+    sampling_param.top_logprobs = vocab_size;
+  }
+  const auto valid_token = [vocab_size](int32_t token) {
+    return token >= 0 && (vocab_size <= 0 || token < vocab_size);
+  };
+  for (const auto& [token, bias] : logit_bias) {
+    if (!valid_token(token)) {
+      return "logit_bias token id is outside the model vocabulary";
+    }
+    sampling_param.logit_bias[token] = std::clamp(bias, -100.0F, 100.0F);
+  }
+  if (allowed_token_ids.has_value() &&
+      !std::all_of(
+          allowed_token_ids->begin(), allowed_token_ids->end(), valid_token)) {
+    return "allowed_token_ids contains a token outside the model vocabulary";
+  }
+  if (stop_token_ids.has_value() &&
+      !std::all_of(
+          stop_token_ids->begin(), stop_token_ids->end(), valid_token)) {
+    return "stop_token_ids contains a token outside the model vocabulary";
+  }
+  std::unordered_set<int32_t> stop_ids = model_stop_token_ids;
+  if (eos_token_id >= 0) {
+    stop_ids.insert(eos_token_id);
+  }
+  if (stop_token_ids.has_value()) {
+    stop_ids.insert(stop_token_ids->begin(), stop_token_ids->end());
+  }
+  sampling_param.all_stop_token_ids.assign(stop_ids.begin(), stop_ids.end());
+  if (!bad_words.empty() && tokenizer == nullptr) {
+    return "bad_words requires a tokenizer";
+  }
+  sampling_param.bad_words_token_ids.reserve(bad_words.size() * 2);
+  for (const std::string& word : bad_words) {
+    const size_t first = word.find_first_not_of(" \t\n\r\f\v");
+    const std::string stripped =
+        first == std::string::npos ? "" : word.substr(first);
+    std::vector<int32_t> tokens;
+    if (!tokenizer->encode(stripped, &tokens, /*add_special_tokens=*/false) ||
+        tokens.empty()) {
+      return "bad_words entries must tokenize to at least one token";
+    }
+    if (!std::all_of(tokens.begin(), tokens.end(), valid_token)) {
+      return "bad_words contains a token outside the model vocabulary";
+    }
+    std::vector<int32_t> prefixed;
+    if (!tokenizer->encode(
+            " " + stripped, &prefixed, /*add_special_tokens=*/false)) {
+      return "Failed to tokenize bad_words with a leading space";
+    }
+    if (!std::all_of(prefixed.begin(), prefixed.end(), valid_token)) {
+      return "bad_words contains a token outside the model vocabulary";
+    }
+    const bool add_prefixed = !prefixed.empty() &&
+                              prefixed.size() == tokens.size() &&
+                              prefixed.front() != tokens.front();
+    sampling_param.bad_words_token_ids.emplace_back(std::move(tokens));
+    if (add_prefixed) {
+      sampling_param.bad_words_token_ids.emplace_back(std::move(prefixed));
+    }
+  }
+  return std::nullopt;
 }
 
 SchedulerParam RequestParams::to_scheduler_param() const {

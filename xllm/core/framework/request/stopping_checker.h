@@ -19,8 +19,8 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "core/framework/request/finish_reason.h"
 #include "core/util/slice.h"
-#include "finish_reason.h"
 
 namespace xllm {
 
@@ -34,7 +34,8 @@ class StoppingChecker {
                   bool ignore_eos,
                   std::unordered_set<int32_t> stop_tokens,
                   std::vector<std::vector<int32_t>> stop_sequences,
-                  std::vector<std::string> stop_strings = {});
+                  std::vector<std::string> stop_strings = {},
+                  size_t min_generated_tokens = 0);
 
   FinishReason check(const Slice<int32_t>& token_ids,
                      size_t num_prompt_tokens,
@@ -93,6 +94,7 @@ class StoppingChecker {
 
  private:
   size_t max_generated_tokens_ = 5120;
+  size_t min_generated_tokens_ = 0;
 
   size_t max_context_len_ = 0;
 

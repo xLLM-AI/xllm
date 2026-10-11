@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace xllm {
@@ -29,9 +30,17 @@ struct RequestSamplingParam {
   float frequency_penalty = 0.0;
   float presence_penalty = 0.0;
   float repetition_penalty = 1.0;
-  float temperature = 0.0;
+  float temperature = 1.0;
   float top_p = 1.0;
-  int64_t top_k = -1;
+  int64_t top_k = 0;
+  float min_p = 0.0;
+  std::optional<int64_t> seed;
+  uint32_t min_tokens = 0;
+  int64_t vocab_size = 0;
+  std::unordered_map<int32_t, float> logit_bias;
+  std::optional<std::vector<int32_t>> allowed_token_ids;
+  std::vector<std::vector<int32_t>> bad_words_token_ids;
+  std::vector<int32_t> all_stop_token_ids;
   bool logprobs = false;
   int64_t top_logprobs = 0;
   bool do_sample = false;
@@ -133,6 +142,14 @@ struct SamplingParameters {
 
   // [num_tokens] FloatTensor
   torch::Tensor top_p;
+
+  // Minimum probability relative to the largest probability in each row.
+  torch::Tensor min_p;
+
+  // Per-selected-row additive constraints and independent random streams.
+  torch::Tensor logits_bias;
+  torch::Tensor seeds;
+  torch::Tensor seed_offsets;
 
   // [num_tokens] LongTensor
   torch::Tensor top_k;

@@ -18,6 +18,7 @@ limitations under the License.
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -407,7 +408,7 @@ TEST(BatchPackedInputTest, MaterializedShmReadRebindsTaggedTensorArena) {
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(forward_input_to_packed_proto(source, &packed_input));
   ASSERT_GE(packed_input.payload().size(), 40u);
-  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 4u);
+  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 5u);
   EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[10]), 1u);
   const uint64_t arena_offset =
       read_packed_uint64(packed_input.payload(), /*offset=*/24);
@@ -644,6 +645,10 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
   ASSERT_TRUE(input.sampling_params.sample_idxes.defined());
+  input.sampling_params.min_p = torch::tensor({0.1F});
+  input.sampling_params.logits_bias = torch::tensor({{0.0F, -INFINITY, 2.0F}});
+  input.sampling_params.seeds = torch::tensor({42}, torch::kLong);
+  input.sampling_params.seed_offsets = torch::tensor({7}, torch::kLong);
   input.sampling_params.filter_bitmask =
       torch::tensor({{static_cast<int32_t>(0x5)}},
                     torch::TensorOptions().dtype(torch::kInt32));
@@ -667,6 +672,14 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
   EXPECT_EQ(unpacked_input.input_host_sample_count, 1);
   EXPECT_TRUE(tensor_equals_vector<int32_t>(
       unpacked_input.sampling_params.sample_idxes, {0}));
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.min_p,
+                           input.sampling_params.min_p));
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.logits_bias,
+                           input.sampling_params.logits_bias));
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.seeds,
+                           input.sampling_params.seeds));
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.seed_offsets,
+                           input.sampling_params.seed_offsets));
   ASSERT_TRUE(unpacked_input.sampling_params.filter_bitmask.defined());
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.filter_bitmask,
                            input.sampling_params.filter_bitmask));
@@ -719,7 +732,7 @@ TEST(BatchPackedInputTest, NativeDomainsRejectUnsupportedPackedSchemas) {
 
   for (const auto& packed_input : packed_inputs) {
     ASSERT_GE(packed_input.payload().size(), 40u);
-    for (int32_t version : {0, 2, 127}) {
+    for (int32_t version : {0, 2, 4, 127}) {
       SCOPED_TRACE(version);
       std::string payload = packed_input.payload();
       payload[8] = static_cast<char>(version);

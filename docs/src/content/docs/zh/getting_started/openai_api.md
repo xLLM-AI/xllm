@@ -229,16 +229,22 @@ for choice in response.choices:
 
 | 参数 | xLLM 行为 |
 | --- | --- |
-| `max_tokens` | 正整数，限制输出 token 数。建议显式设置；文本补全默认值为 16。 |
+| `max_tokens` | 正整数，限制输出 token 数。文本补全和 Python `SamplingParams` 默认值为 16；对话接口省略该值或 Python 设置 `max_tokens=None` 时使用剩余模型上下文长度。 |
 | `max_completion_tokens` | 仅用于对话；与 `max_tokens` 同时提供时优先使用该值。 |
-| `temperature` | 非负数；`0` 表示贪心解码。HTTP 默认值为 `1.0`。 |
+| `temperature` | 非负有限数，默认 `1.0`；与 vLLM `0.23.0` 一致，允许大于 `2`。小于 `0.01` 的正数会提高到 `0.01`；`0` 表示贪心解码，并关闭 `top_k`、`top_p` 和 `min_p`。 |
 | `top_p` | 采样截断阈值，范围为 `(0, 1]`。 |
 | `n` | 返回候选数；`temperature=0` 时必须为 `1`。 |
 | `stop` | 字符串或由非空字符串组成的列表。 |
 | `presence_penalty`、`frequency_penalty` | 范围为 `[-2, 2]`。 |
-| `logprobs` | 对话接口使用布尔值，补全接口使用整数数量；对话还可设置 `top_logprobs`。 |
+| `logprobs` | 对话接口使用布尔值，补全接口和 Python 使用整数数量；对话还可设置 `top_logprobs`。数量为 `0` 时仅返回采样 token，为 `-1` 时返回整个词表。概率在惩罚、偏置、温度和截断处理前计算。 |
 | `top_k` | 扩展参数：整数采样截断阈值，`-1` 或 `0` 表示不截断。 |
 | `repetition_penalty` | 扩展参数：正数，控制重复惩罚。 |
+| `min_p` | 相对概率阈值，范围 `[0, 1]`，默认 `0`；在温度处理后、top-k/top-p 前生效。 |
+| `seed` | 可选的有符号 64 位随机种子，`-1` 表示不设置。随机流不受批次位置影响；不同引擎或硬件不保证产生相同 token。 |
+| `min_tokens` | 最少输出 token 数，非负且不超过 `max_tokens`；达到该长度前禁止生成 EOS 和停止 token。 |
+| `logit_bias` | token ID 到偏置的映射，值截断到 `[-100, 100]`。 |
+| `allowed_token_ids` | 非空的允许生成 token ID 列表。 |
+| `bad_words` | 非空字符串列表，禁止在生成文本中完成对应 token 序列。 |
 | `chat_template_kwargs` | 对话扩展参数：传入模型支持的聊天模板选项。 |
 
 SDK 通过 `extra_body` 传入扩展参数；直接发送 HTTP JSON 时，将这些字段放在请求体顶层，无需 `extra_body` 包装：
@@ -263,7 +269,9 @@ xLLM 的 `beam_width` 扩展请参阅[在线服务](/zh/getting_started/online_s
 
 ## 兼容性限制与错误处理
 
-- 非空的 `seed`、`logit_bias`、`min_p`、`min_tokens`、`prompt_logprobs`、`structured_outputs` 和 `prompt_embeds` 会被拒绝并返回 HTTP 400，使用其他服务的示例时请移除这些选项。
+- `seed`、`min_tokens`、`logit_bias`、`allowed_token_ids`、`bad_words` 和全词表 logprobs 要求 `enable_task_pipeline=false`。`seed`、`min_tokens` 和 `bad_words` 还要求 `num_speculative_tokens=0`；`bad_words` 要求 `enable_schedule_overlap=false`。REC 接口会拒绝新增的随机种子和 token 约束参数。
+- 非空的 `prompt_logprobs`、`logprob_token_ids`、`structured_outputs` 和 `prompt_embeds` 仍不受支持，会返回 HTTP 400。此接口没有实现 vLLM `0.23.0` `SamplingParams` 的全部引擎层字段。
+- 频率惩罚和存在惩罚仅统计生成 token，重复惩罚同时考虑提示词。`ignore_eos=true` 时显式指定的 `stop_token_ids` 仍然生效。
 - 不支持 `response_format={"type": "json_schema"}`。对话接口的 `json_object` 需要服务端 JSON 输出配置，不能视为支持 JSON Schema。
 - Embedding 请求不支持 `dimensions`，详见 [Embedding 使用说明](/zh/getting_started/openai_api_embeddings/)。
 - HTTP 400 表示参数无效或不受支持，请查看 JSON 中的 `error.message` 和 `error.param`。模型相关的 HTTP 404 表示模型名不匹配，请查询 `/v1/models`。

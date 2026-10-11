@@ -123,7 +123,8 @@ TEST(RequestParamsTest, AcceptsNegativeFrequencyPenaltyAndMoreThanFourStops) {
 
 TEST(RequestParamsTest, TemperatureMustBeFiniteAndNonNegative) {
   RequestParams params;
-  for (const float temperature : {0.0f, 1.0f, 3.0f, 100.0f}) {
+  for (const float temperature :
+       {0.0f, 1.0f, 2.0f, 3.0f, 100.0f, std::numeric_limits<float>::max()}) {
     params.temperature = temperature;
     EXPECT_TRUE(params.verify_params([](RequestOutput) { return false; }));
   }
@@ -480,6 +481,91 @@ TEST(RequestParamsTest, AnthropicDeferredToolMetadataReachesTemplate) {
   RequestParams params(request, "", "");
   ASSERT_EQ(params.tools.size(), 1);
   EXPECT_EQ(params.tools[0].function.defer_loading, true);
+}
+
+TEST(RequestParamsTest, ParsesSamplingControlsForAllCompletionEndpoints) {
+  const std::string json = R"({"temperature":0.001,"min_p":0.2,"seed":7,
+    "min_tokens":3,"logit_bias":{"4":5},"allowed_token_ids":[4,5],"bad_words":["test"]})";
+  proto::CompletionRequest completion;
+  proto::ChatRequest chat;
+  proto::MMChatRequest multimodal;
+  ASSERT_TRUE(
+      google::protobuf::util::JsonStringToMessage(json, &completion).ok());
+  ASSERT_TRUE(google::protobuf::util::JsonStringToMessage(json, &chat).ok());
+  ASSERT_TRUE(
+      google::protobuf::util::JsonStringToMessage(json, &multimodal).ok());
+  for (const auto& params : {RequestParams(completion, "", ""),
+                             RequestParams(chat, "", ""),
+                             RequestParams(multimodal, "", "")}) {
+    EXPECT_TRUE(params.verify_params([](RequestOutput) { return false; }));
+    const auto sampling = params.to_sampling_param(/*best_of=*/1);
+    EXPECT_FLOAT_EQ(sampling.temperature, 0.01F);
+    EXPECT_FLOAT_EQ(sampling.min_p, 0.2F);
+    EXPECT_EQ(sampling.seed, 7);
+    EXPECT_EQ(sampling.min_tokens, 3u);
+    EXPECT_EQ(sampling.logit_bias.at(4), 5.0F);
+    ASSERT_TRUE(sampling.allowed_token_ids.has_value());
+    EXPECT_EQ(*sampling.allowed_token_ids, (std::vector<int32_t>{4, 5}));
+    EXPECT_EQ(params.bad_words, (std::vector<std::string>{"test"}));
+  }
+}
+
+TEST(RequestParamsTest, SamplingDefaultsAndGreedyNormalizationMatchVllm) {
+  RequestParams params;
+  EXPECT_EQ(params.temperature, 1.0F);
+  EXPECT_EQ(params.top_k, 0);
+  EXPECT_EQ(params.max_tokens, 16u);
+  EXPECT_FALSE(params.seed.has_value());
+  params.temperature = 0;
+  params.min_p = 0.5;
+  params.top_k = 2;
+  params.top_p = 0.8;
+  const auto sampling = params.to_sampling_param(/*best_of=*/1);
+  EXPECT_EQ(sampling.min_p, 0.0F);
+  EXPECT_EQ(sampling.top_p, 1.0F);
+  EXPECT_EQ(sampling.top_k, 0);
+  params.n = 2;
+  EXPECT_FALSE(params.verify_params([](RequestOutput) { return false; }));
+}
+
+TEST(RequestParamsTest, RejectsInvalidSamplingConstraints) {
+  RequestParams params;
+  params.min_tokens = 17;
+  EXPECT_FALSE(params.verify_params([](RequestOutput) { return false; }));
+  params.min_tokens = 0;
+  params.allowed_token_ids = std::vector<int32_t>();
+  EXPECT_FALSE(params.verify_params([](RequestOutput) { return false; }));
+  params.allowed_token_ids.reset();
+  params.bad_words = {""};
+  EXPECT_FALSE(params.verify_params([](RequestOutput) { return false; }));
+  params.bad_words.clear();
+  params.stop = std::vector<std::string>{""};
+  EXPECT_FALSE(params.verify_params([](RequestOutput) { return false; }));
+  params.stop.reset();
+  params.repetition_penalty = std::numeric_limits<float>::infinity();
+  EXPECT_FALSE(params.verify_params([](RequestOutput) { return false; }));
+}
+
+TEST(RequestParamsTest, ResolvesVocabularyDependentConstraints) {
+  RequestParams params;
+  params.logprobs = true;
+  params.top_logprobs = -1;
+  params.logit_bias = {{2, 200.0F}};
+  params.allowed_token_ids = std::vector<int32_t>{2, 3};
+  params.stop_token_ids = std::vector<int32_t>{4};
+  auto sampling = params.to_sampling_param(/*best_of=*/1);
+  EXPECT_FALSE(params.prepare_sampling_constraints(sampling, nullptr, 8, 6, {7})
+                   .has_value());
+  EXPECT_EQ(sampling.top_logprobs, 8);
+  EXPECT_EQ(sampling.logit_bias.at(2), 100.0F);
+  const std::unordered_set<int32_t> stops(sampling.all_stop_token_ids.begin(),
+                                          sampling.all_stop_token_ids.end());
+  EXPECT_EQ(stops, (std::unordered_set<int32_t>{4, 6, 7}));
+  params.allowed_token_ids = std::vector<int32_t>{8};
+  EXPECT_TRUE(params.prepare_sampling_constraints(sampling, nullptr, 8, 6, {7})
+                  .has_value());
+  EXPECT_TRUE(params.prepare_sampling_constraints(sampling, nullptr, 0, 6, {7})
+                  .has_value());
 }
 
 }  // namespace

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "rec_sampler.h"
+#include "core/framework/sampling/rec_sampler.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
@@ -26,8 +26,8 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
-#include "logits_utils.h"
-#include "sampler.h"
+#include "core/framework/sampling/logits_utils.h"
+#include "core/framework/sampling/sampler.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
 #endif
@@ -52,6 +52,7 @@ static inline bool can_use_fast_path(const SamplingParameters& params) {
   return params.use_beam_search && params.logprobs &&
          ::xllm::RecConfig::get_instance().enable_rec_fast_sampler() &&
          params.max_top_logprobs > 0 && !params.top_p.defined() &&
+         !params.min_p.defined() &&
          !::xllm::ModelConfig::get_instance().enable_qwen3_reranker() &&
          ::xllm::RecConfig::get_instance().max_decode_rounds() > 0;
 }
@@ -190,7 +191,7 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     const torch::Tensor& filter_mask,
     const RecSamplingContext* context) const {
   if (context != nullptr && context->device_constrained_sampler &&
-      !params.filter_mask.defined()) {
+      !params.filter_mask.defined() && !params.min_p.defined()) {
     auto sampled = context->device_constrained_sampler(logits,
                                                        params,
                                                        context->sequence_group,
@@ -206,6 +207,13 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     return sampler_.forward(logits, params, filter_mask);
   }
 
+  if (params.repetition_penalties.defined()) {
+    apply_repetition_penalties(logits,
+                               params.unique_token_ids,
+                               params.repetition_penalties,
+                               params.unique_token_ids_lens);
+  }
+
   if (params.frequency_penalties.defined()) {
     apply_frequency_presence_penalties(logits,
                                        params.unique_token_ids,
@@ -214,15 +222,11 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
                                        params.presence_penalties);
   }
 
-  if (params.repetition_penalties.defined()) {
-    apply_repetition_penalties(
-        logits, params.unique_token_ids, params.repetition_penalties);
-  }
-
   torch::Tensor sample_logits = logits;
   torch::Tensor sample_temperatures = params.temperatures;
   torch::Tensor sample_top_k = params.top_k;
   torch::Tensor sample_top_p = params.top_p;
+  torch::Tensor sample_min_p = params.min_p;
   const bool use_sample_indices =
       params.selected_token_idxes.numel() != params.sample_idxes.numel();
   if (use_sample_indices) {
@@ -233,6 +237,9 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     }
     if (params.top_k.defined()) {
       sample_top_k = params.top_k.index_select(/*dim=*/0, params.sample_idxes);
+    }
+    if (params.min_p.defined()) {
+      sample_min_p = params.min_p.index_select(/*dim=*/0, params.sample_idxes);
     }
     if (params.top_p.defined()) {
       sample_top_p = params.top_p.index_select(/*dim=*/0, params.sample_idxes);
@@ -253,8 +260,11 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     sample_logits = sample_logits + filter_mask;
   }
 
-  apply_top_k_top_p(
-      sample_logits, sample_temperatures, sample_top_k, sample_top_p);
+  if (sample_temperatures.defined()) {
+    apply_temperatures(sample_logits, sample_temperatures);
+  }
+  apply_min_p(sample_logits, sample_min_p);
+  apply_top_k_top_p(sample_logits, torch::Tensor(), sample_top_k, sample_top_p);
   if (use_sample_indices) {
     logits.index_copy_(/*dim=*/0, params.sample_idxes, sample_logits);
   }
@@ -307,17 +317,19 @@ SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
 
   SampleOutput output;
 
+  if (params.repetition_penalties.defined()) {
+    apply_repetition_penalties(logits,
+                               params.unique_token_ids,
+                               params.repetition_penalties,
+                               params.unique_token_ids_lens);
+  }
+
   if (params.frequency_penalties.defined()) {
     apply_frequency_presence_penalties(logits,
                                        params.unique_token_ids,
                                        params.unique_token_counts,
                                        params.frequency_penalties,
                                        params.presence_penalties);
-  }
-
-  if (params.repetition_penalties.defined()) {
-    apply_repetition_penalties(
-        logits, params.unique_token_ids, params.repetition_penalties);
   }
 
   torch::Tensor sample_logits = logits;

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "llm_request_factory.h"
+#include "core/framework/request/llm_request_factory.h"
 
 #include <glog/logging.h>
 
@@ -71,8 +71,6 @@ bool get_enable_thinking(const nlohmann::json& chat_template_kwargs) {
   }
   return enabled;
 }
-
-constexpr uint32_t kDefaultMaxTokens = 5120;
 
 void append_stop_sequence_variant(const Tokenizer& tokenizer,
                                   std::string_view stop,
@@ -252,8 +250,10 @@ std::optional<StoppingChecker> LLMRequestFactory::build_stopping_checker(
     const auto& stop_token_ids = sp.stop_token_ids.value();
     stop_tokens.reserve(stop_token_ids.size());
     stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
-  } else {
-    stop_tokens = model_args_->stop_token_ids();
+  }
+  if (!sp.ignore_eos) {
+    stop_tokens.insert(model_args_->stop_token_ids().begin(),
+                       model_args_->stop_token_ids().end());
   }
   std::vector<std::vector<int32_t>> stop_sequences;
   if (sp.stop.has_value()) {
@@ -279,7 +279,8 @@ std::optional<StoppingChecker> LLMRequestFactory::build_stopping_checker(
                          sp.ignore_eos,
                          std::move(stop_tokens),
                          std::move(stop_sequences),
-                         sp.stop.value_or(std::vector<std::string>{}));
+                         sp.stop.value_or(std::vector<std::string>{}),
+                         sp.min_tokens);
 }
 
 bool LLMRequestFactory::validate_prompt_not_finished(
@@ -361,10 +362,18 @@ std::shared_ptr<Request> LLMRequestFactory::create(
   }
   std::vector<int> local_prompt_tokens = std::move(encoded.value());
 
-  uint32_t max_tokens = sp.max_tokens;
-  if (max_tokens == 0) {
-    max_tokens = kDefaultMaxTokens;
+  const int64_t remaining = static_cast<int64_t>(max_generated_context_len_) -
+                            static_cast<int64_t>(local_prompt_tokens.size());
+  if (remaining <= 0 || sp.min_tokens > static_cast<uint64_t>(remaining)) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "The remaining model context cannot satisfy min_tokens");
+    return nullptr;
   }
+  const uint32_t max_tokens =
+      sp.max_tokens == 0
+          ? static_cast<uint32_t>(remaining)
+          : std::min(sp.max_tokens, static_cast<uint32_t>(remaining));
   uint32_t effective_max_tokens = max_tokens;
   if (sp.is_sample_request) {
     const uint32_t sample_slot_tokens =
@@ -381,6 +390,37 @@ std::shared_ptr<Request> LLMRequestFactory::create(
 
   const size_t best_of = sp.best_of.value_or(sp.n);
   RequestSamplingParam sampling_param = build_sampling_param(sp, best_of);
+  const bool has_constraints = !sp.logit_bias.empty() ||
+                               sp.allowed_token_ids.has_value() ||
+                               sp.min_tokens > 0 || !sp.bad_words.empty();
+  if (options_->enable_task_pipeline() &&
+      (has_constraints || sp.seed.has_value() || sp.top_logprobs == -1)) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "The requested sampling controls require enable_task_pipeline=false");
+    return nullptr;
+  }
+  if (options_->num_speculative_tokens() > 0 &&
+      (sp.seed.has_value() || sp.min_tokens > 0 || !sp.bad_words.empty())) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "seed, min_tokens and bad_words require num_speculative_tokens=0");
+    return nullptr;
+  }
+  if (options_->enable_schedule_overlap() && !sp.bad_words.empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "bad_words requires enable_schedule_overlap=false");
+    return nullptr;
+  }
+  if (const auto error =
+          sp.prepare_sampling_constraints(sampling_param,
+                                          tokenizer_,
+                                          model_args_->vocab_size(),
+                                          model_args_->eos_token_id(),
+                                          model_args_->stop_token_ids())) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    return nullptr;
+  }
   // Model-aware complement to verify_params' 2000 cap: an oversized top-k
   // would throw inside the sampler and take the whole batch down with it.
   if (const auto error =

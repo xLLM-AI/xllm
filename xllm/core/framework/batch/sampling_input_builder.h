@@ -24,6 +24,8 @@ limitations under the License.
 
 namespace xllm {
 
+class Sequence;
+
 // Common sampling-row layout for sequence and Rec inputs. Request parameters
 // are non-owning; row indices and token statistics belong to this build.
 class SamplingInputBuilder final {
@@ -35,7 +37,8 @@ class SamplingInputBuilder final {
               int32_t token_index,
               const TokenCounts* counts = nullptr,
               const TokenCounts* excluded_counts = nullptr,
-              bool sample = true);
+              bool sample = true,
+              const Sequence* sequence = nullptr);
   void merge(SamplingInputBuilder other, int32_t token_offset);
   SamplingParameters build();
 
@@ -48,6 +51,7 @@ class SamplingInputBuilder final {
 
  private:
   std::vector<const RequestSamplingParam*> params_;
+  std::vector<const Sequence*> sequences_;
   std::vector<int32_t> selected_token_indices_;
   std::vector<int32_t> sample_indices_;
   std::vector<std::vector<int64_t>> token_ids_;

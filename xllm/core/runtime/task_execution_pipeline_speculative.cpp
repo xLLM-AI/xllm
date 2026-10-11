@@ -145,12 +145,16 @@ SampleOutput sample_views(const TokenResultTensors& result) {
   return output;
 }
 
-constexpr std::array<torch::Tensor SamplingParameters::*, 10> kRepeatedRows = {
+constexpr std::array<torch::Tensor SamplingParameters::*, 14> kRepeatedRows = {
     &SamplingParameters::frequency_penalties,
     &SamplingParameters::presence_penalties,
     &SamplingParameters::repetition_penalties,
     &SamplingParameters::temperatures,
     &SamplingParameters::top_p,
+    &SamplingParameters::min_p,
+    &SamplingParameters::seed_offsets,
+    &SamplingParameters::seeds,
+    &SamplingParameters::logits_bias,
     &SamplingParameters::top_k,
     &SamplingParameters::unique_token_ids,
     &SamplingParameters::unique_token_counts,

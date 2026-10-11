@@ -35,9 +35,9 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/scheduler/disagg_pd_scheduler.h"
 #include "core/util/scope_guard.h"
 #include "disagg_pd.pb.h"
-#include "disagg_pd_scheduler.h"
 #include "distributed_runtime/engine.h"
 #include "distributed_runtime/xservice_client.h"
 #include "framework/block/block_manager_pool.h"
@@ -602,6 +602,25 @@ void DisaggPDScheduler::dispatch_requests() {
           requests[i]->state().sampling_param.repetition_penalty);
       req->set_temperature(requests[i]->state().sampling_param.temperature);
       req->set_top_p(requests[i]->state().sampling_param.top_p);
+      req->set_min_p(requests[i]->state().sampling_param.min_p);
+      const auto& sampling = requests[i]->state().sampling_param;
+      if (sampling.seed.has_value()) {
+        req->set_seed(*sampling.seed);
+      }
+      req->set_min_tokens(sampling.min_tokens);
+      req->set_vocab_size(sampling.vocab_size);
+      req->mutable_logit_bias()->insert(sampling.logit_bias.begin(),
+                                        sampling.logit_bias.end());
+      if (sampling.allowed_token_ids.has_value()) {
+        ADD_VECTOR_TO_PROTO(req->mutable_allowed_token_ids(),
+                            sampling.allowed_token_ids.value());
+      }
+      ADD_VECTOR_TO_PROTO(req->mutable_all_stop_token_ids(),
+                          sampling.all_stop_token_ids);
+      for (const auto& word : sampling.bad_words_token_ids) {
+        ADD_VECTOR_TO_PROTO(
+            req->add_bad_words_token_ids()->mutable_seq_tokens(), word);
+      }
       req->set_top_k(requests[i]->state().sampling_param.top_k);
       req->set_logprobs(requests[i]->state().sampling_param.logprobs);
       req->set_top_logprobs(requests[i]->state().sampling_param.top_logprobs);

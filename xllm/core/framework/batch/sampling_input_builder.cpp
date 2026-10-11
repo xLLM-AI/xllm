@@ -20,12 +20,15 @@ limitations under the License.
 #include <iterator>
 #include <limits>
 
+#include "core/framework/request/sequence.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm {
 
 void SamplingInputBuilder::reserve(size_t rows) {
   params_.reserve(rows);
+  sequences_.reserve(rows);
   selected_token_indices_.reserve(rows);
   sample_indices_.reserve(rows);
   token_ids_.reserve(rows);
@@ -37,7 +40,8 @@ void SamplingInputBuilder::append(const RequestSamplingParam* params,
                                   int32_t token_index,
                                   const TokenCounts* counts,
                                   const TokenCounts* excluded_counts,
-                                  bool sample) {
+                                  bool sample,
+                                  const Sequence* sequence) {
   CHECK(params != nullptr);
   CHECK_GE(token_index, 0);
   CHECK_LT(size(), std::numeric_limits<int32_t>::max());
@@ -45,6 +49,7 @@ void SamplingInputBuilder::append(const RequestSamplingParam* params,
     sample_indices_.emplace_back(static_cast<int32_t>(size()));
   }
   params_.emplace_back(params);
+  sequences_.emplace_back(sequence);
   selected_token_indices_.emplace_back(token_index);
   auto& ids = token_ids_.emplace_back();
   auto& frequencies = token_counts_.emplace_back();
@@ -82,6 +87,8 @@ void SamplingInputBuilder::merge(SamplingInputBuilder other,
     sample_indices_.emplace_back(index + row_offset);
   }
   params_.insert(params_.end(), other.params_.begin(), other.params_.end());
+  sequences_.insert(
+      sequences_.end(), other.sequences_.begin(), other.sequences_.end());
   token_ids_.insert(token_ids_.end(),
                     std::make_move_iterator(other.token_ids_.begin()),
                     std::make_move_iterator(other.token_ids_.end()));
@@ -106,6 +113,78 @@ SamplingParameters SamplingInputBuilder::build() {
               token_ids_,
               token_counts_,
               token_lengths_);
+  bool need_constraints = false;
+  bool need_seed = false;
+  int64_t vocab_size = 0;
+  for (const auto* params : params_) {
+    need_constraints = need_constraints || !params->logit_bias.empty() ||
+                       params->allowed_token_ids.has_value() ||
+                       params->min_tokens > 0 ||
+                       !params->bad_words_token_ids.empty();
+    need_seed = need_seed || params->seed.has_value();
+    vocab_size = std::max(vocab_size, params->vocab_size);
+  }
+  if (need_constraints) {
+    CHECK_GT(vocab_size, 0);
+    result.logits_bias = torch::zeros(
+        {static_cast<int64_t>(size()), vocab_size}, torch::kFloat32);
+    auto rows = result.logits_bias.accessor<float, 2>();
+    const float blocked = -std::numeric_limits<float>::infinity();
+    for (size_t row = 0; row < size(); ++row) {
+      const auto& params = *params_[row];
+      const Sequence* sequence = sequences_[row];
+      if (params.allowed_token_ids.has_value()) {
+        std::fill_n(rows[row].data(), vocab_size, blocked);
+        for (int32_t token : *params.allowed_token_ids) {
+          rows[row][token] = 0;
+        }
+      }
+      for (const auto& [token, bias] : params.logit_bias) {
+        rows[row][token] += bias;
+      }
+      const size_t generated =
+          sequence == nullptr ? 0 : sequence->num_generated_tokens();
+      if (generated < params.min_tokens) {
+        for (int32_t token : params.all_stop_token_ids) {
+          if (token >= 0 && token < vocab_size) {
+            rows[row][token] = blocked;
+          }
+        }
+      }
+      const Slice<int32_t> output =
+          sequence == nullptr
+              ? Slice<int32_t>()
+              : sequence->tokens().slice(sequence->num_prompt_tokens());
+      for (const auto& word : params.bad_words_token_ids) {
+        const size_t prefix = word.size() - 1;
+        if (output.size() < prefix) {
+          continue;
+        }
+        if (prefix == 0 ||
+            std::equal(word.begin(), word.end() - 1, output.end() - prefix)) {
+          rows[row][word.back()] = blocked;
+        }
+      }
+    }
+  }
+  if (need_seed) {
+    std::vector<int64_t> seeds;
+    std::vector<int64_t> offsets;
+    seeds.reserve(size());
+    offsets.reserve(size());
+    for (size_t row = 0; row < size(); ++row) {
+      seeds.emplace_back(params_[row]->seed.value_or(-1));
+      const Sequence* sequence = sequences_[row];
+      const uint64_t offset =
+          sequence == nullptr
+              ? 0
+              : (static_cast<uint64_t>(sequence->index()) << 32) +
+                    sequence->num_generated_tokens();
+      offsets.emplace_back(static_cast<int64_t>(offset));
+    }
+    result.seeds = make_pinned_cpu_tensor(seeds);
+    result.seed_offsets = make_pinned_cpu_tensor(offsets);
+  }
   return result;
 }
 

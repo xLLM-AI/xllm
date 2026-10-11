@@ -33,12 +33,16 @@ void apply_frequency_presence_penalties(
     const torch::Tensor& frequency_penalties,
     const torch::Tensor& presence_penalties);
 
-void apply_repetition_penalties(torch::Tensor& logits,
-                                const torch::Tensor& unique_token_ids,
-                                const torch::Tensor& penalties);
+void apply_repetition_penalties(
+    torch::Tensor& logits,
+    const torch::Tensor& unique_token_ids,
+    const torch::Tensor& penalties,
+    const torch::Tensor& unique_token_ids_lens = {});
 
 void apply_temperatures(torch::Tensor& logits,
                         const torch::Tensor& temperatures);
+
+void apply_min_p(torch::Tensor& logits, const torch::Tensor& min_p);
 
 void apply_top_k_top_p(torch::Tensor& logits,
                        const torch::Tensor& temperatures,
