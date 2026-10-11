@@ -23,6 +23,8 @@ limitations under the License.
 
 namespace xllm {
 
+WeightAllocation::WeightAllocation() = default;
+
 WeightAllocation::~WeightAllocation() = default;
 
 WeightAllocation::WeightAllocation(WeightAllocation&& other) noexcept = default;

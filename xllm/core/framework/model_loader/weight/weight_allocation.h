@@ -37,7 +37,7 @@ struct WeightAllocationInfo {
 // Owns the model-local weight reservation and its logical transfer layout.
 class WeightAllocation final {
  public:
-  WeightAllocation() = default;
+  WeightAllocation();
   ~WeightAllocation();
 
   WeightAllocation(const WeightAllocation&) = delete;

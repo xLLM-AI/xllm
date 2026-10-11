@@ -2114,25 +2114,22 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   std::string addr;
   transfer.get_cache_info(cluster_id, addr);
   ASSERT_FALSE(addr.empty());
-  ASSERT_TRUE(transfer.mooncake_te_->open_session(/*cluster_id=*/0, addr));
+  MooncakeTransferEngine& transfer_engine = *transfer.mooncake_te_;
+  ASSERT_TRUE(transfer_engine.open_session(/*control_endpoint=*/"", addr));
   KVTransferMapping mapping;
   mapping.group_id = cache_group_id(BlockType::KV);
   mapping.local_ids = {1};
   mapping.remote_ids = {0};
-  ASSERT_TRUE(transfer.pull_kv_blocks(
-      /*src_cluster_id=*/0, addr, {mapping}));
+  const bool transfer_success =
+      transfer.pull_kv_blocks(/*src_cluster_id=*/0, addr, {mapping});
+  EXPECT_TRUE(transfer_engine.close_session(/*control_endpoint=*/"", addr));
+  ASSERT_TRUE(transfer_success);
   device.synchronize_default_stream();
 
   EXPECT_TRUE(torch::equal(key_cache.index({1}), key_cache.index({0})));
   EXPECT_TRUE(torch::equal(value_cache.index({1}), value_cache.index({0})));
   EXPECT_TRUE(torch::equal(index_cache.index({1}), index_cache.index({0})));
   EXPECT_TRUE(torch::equal(index_scale->index({1}), index_scale->index({0})));
-
-  EXPECT_TRUE(transfer.unlink_cluster(
-      /*cluster_id=*/0,
-      addr,
-      static_cast<uint16_t>(listen_port),
-      /*force_flag=*/true));
 }
 #endif
 

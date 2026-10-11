@@ -7,6 +7,7 @@ cc_test(
     cache_layout_builder_test.cpp
   DEPS
     :kv_cache
+    :common_layers
     GTest::gtest_main
 )
 target_link_libraries(cache_layout_builder_test

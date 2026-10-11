@@ -59,6 +59,8 @@ cc_test(
   DEPS
     :config
     :request
+    :kv_cache_block
+    :prefix_cache
     GTest::gtest
     GTest::gtest_main
 )

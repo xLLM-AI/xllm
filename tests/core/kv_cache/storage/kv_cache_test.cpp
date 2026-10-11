@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "kv_cache.h"
+#include "core/kv_cache/storage/kv_cache.h"
 
 #include <gtest/gtest.h>
 
@@ -25,11 +25,11 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/kv_cache_tensor_allocator.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
-#include "kv_cache_estimation.h"
-#include "kv_cache_shape.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "worker.pb.h"

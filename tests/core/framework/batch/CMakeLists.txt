@@ -9,6 +9,7 @@ cc_test(
   DEPS
     :config
     :batch
+    :kv_cache_block
     absl::time
     GTest::gtest_main
     $<$<BOOL:${USE_MLU}>:torch_mlu>
@@ -47,6 +48,7 @@ cc_test(
     batch_packed_input_test.cpp
   DEPS
     :batch
+    :kv_cache_block
     GTest::gtest_main
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_NPU}>:torch_npu>
@@ -68,6 +70,7 @@ cc_test(
   DEPS
     :config
     :batch
+    :kv_cache_block
     GTest::gtest_main
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_NPU}>:torch_npu>
@@ -89,6 +92,7 @@ foreach(factory IN ITEMS vlm rec dit)
     DEPS
       :config
       :batch
+      $<$<NOT:$<STREQUAL:${factory},dit>>:kv_cache_block>
       GTest::gtest_main
       $<$<BOOL:${USE_MLU}>:torch_mlu>
       $<$<BOOL:${USE_NPU}>:torch_npu>

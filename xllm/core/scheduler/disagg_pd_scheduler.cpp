@@ -374,8 +374,8 @@ proto::DisaggPDService_Stub* DisaggPDScheduler::create_rpc_channel(
 }
 
 void DisaggPDScheduler::start_rpc_server() {
-  std::unique_ptr<DisaggPDService> service =
-      std::make_unique<DisaggPDService>(this, engine_, options_.block_size());
+  std::unique_ptr<DisaggPDService> service = std::make_unique<DisaggPDService>(
+      this, engine_, KVCacheConfig::get_instance().block_size());
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {

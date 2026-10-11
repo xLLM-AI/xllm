@@ -19,10 +19,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/config/dit_config.h"
-#include "core/framework/model/model_args.h"
 #include "core/framework/tokenizer/tokenizer.h"
-#include "models/model_registry.h"
-#include "processors/cacheable_multimodal_processor.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -78,32 +75,6 @@ void MultimodalProcessorBase::pad_to_max_length(
   const int32_t pad_count =
       max_sequence_length - static_cast<int32_t>(token_ids.size());
   token_ids.insert(token_ids.begin(), pad_count, pad_id.value());
-}
-
-std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
-    const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer,
-    int64_t max_cache_items,
-    const TokenizerArgs& tokenizer_args) {
-  const std::string& model_type = model_args.model_type();
-  std::string resolved_name;
-  std::string error_message;
-  CHECK(resolve_model_registration_name(
-      model_type, &resolved_name, &error_message))
-      << error_message;
-
-  MultimodalProcessorFactory multimodal_processor_factory =
-      ModelRegistry::get_multimodal_processor_factory(resolved_name);
-  CHECK(multimodal_processor_factory != nullptr)
-      << "Missing multimodal processor for model type: " << model_type;
-  std::unique_ptr<MultimodalProcessorBase> processor =
-      multimodal_processor_factory(
-          model_args, std::move(tokenizer), tokenizer_args);
-  if (max_cache_items == 0) {
-    return processor;
-  }
-  return std::make_unique<CacheableMultimodalProcessor>(std::move(processor),
-                                                        max_cache_items);
 }
 
 }  // namespace xllm
