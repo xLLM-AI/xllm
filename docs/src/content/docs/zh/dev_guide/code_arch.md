@@ -58,17 +58,17 @@ sidebar:
 │   │   │   ├── kv_cache/                  # 依赖模型的线性状态恢复适配器
 │   │   │   ├── model/                     # 模型接口与输入输出类型
 │   │   │   ├── model_loader/              # 模型配置与 checkpoint 加载
+│   │   │   │   └── weight/                # 权重资源、分配策略与传输
 │   │   │   ├── tokenizer/                 # 文本与 token 转换
 │   │   │   ├── chat_template/             # 聊天消息转换为模型提示词
 │   │   │   ├── sampling/                  # Token 采样与约束解码
 │   │   │   ├── parallel_state/            # 并行分组与通信状态
 │   │   │   ├── eplb/                      # 专家并行负载均衡
-│   │   │   └── allocator/                 # 模型分配策略与内存后端
+│   │   │   ├── transfer/                  # 共用字节传输、会话与内存注册
+│   │   │   └── allocator/                 # 通用内存能力与页预算记账
 │   │   │       ├── virtual_memory/        # 通用物理页与虚拟映射
-│   │   │       ├── kv_cache/              # KV cache 分配与映射后端
-│   │   │       └── weight/                # 权重分配与传输适配器
+│   │   │       └── torch/                 # 映射字节区域上的 tensor 视图
 │   │   ├── kv_cache/                      # 缓存领域：布局、存储、块、前缀与传输
-│   │   ├── transfer/                      # 共用 Mooncake 传输引擎
 │   │   ├── runtime/                       # Worker 与模型 executor
 │   │   ├── layers/                        # C++ 神经网络层
 │   │   ├── kernels/                       # 设备算子实现与封装
@@ -109,31 +109,96 @@ sidebar:
 
 ## KV cache 与虚拟内存的边界
 
-`core/kv_cache` 管理缓存布局、容量估算、tensor 分配接口、块与页状态、
-前缀复用及 KV 传输，不依赖 framework 的分配实现。`framework/allocator`
-依赖这些缓存接口，负责模型分配策略与具体内存后端。
+内存基础能力同时服务 KV cache 和权重。各类资源的映射与分配策略归各自模块管理，
+共享预算及模型休眠、唤醒由分布式层协调。图中实线表示“使用或持有”，虚线表示
+接口实现或尚待拆分的耦合。
+
+```mermaid
+flowchart TB
+  worker["runtime / WorkerImpl<br/>组装与注入"]
+  blocks["framework/block<br/>组合 manager 与分页适配器"]
+  coordination["distributed_runtime<br/>ModelMemoryManager / ModelPageAllocator<br/>集群、RPC 与模型状态转换"]
+
+  subgraph cache["core/kv_cache"]
+    policy["layout、block 与 prefix<br/>KV 策略与状态"]
+    ports["storage 与 transfer 接口<br/>页分配、tensor 分配、内存 provider"]
+    storage["storage<br/>KVCacheMemoryRegistry<br/>KV 映射与分页 tensor 分配"]
+    kvtransfer["transfer<br/>内存 provider、KV peer/layout 状态<br/>重分片与缓存传输"]
+  end
+
+  subgraph framework["framework"]
+    weight["model_loader/weight<br/>WeightMemoryManager、store<br/>分配策略与权重传输"]
+    tensor["allocator/torch<br/>映射内存上的 tensor 视图"]
+    shared["allocator<br/>WorkerPageBudget / GlobalMemoryRegion"]
+    memory["allocator/virtual_memory<br/>物理页与字节映射"]
+    transport["transfer<br/>Mooncake 字节传输<br/>会话与内存注册"]
+  end
+
+  remaining["framework/request / Sequence<br/>framework/config 与 runtime options"]
+  worker --> coordination
+  worker --> blocks
+  worker --> storage
+  worker --> kvtransfer
+  blocks --> policy
+  blocks --> ports
+  coordination -.->|实现页分配接口| ports
+  coordination --> storage
+  coordination --> weight
+  coordination --> shared
+  storage -.->|实现 tensor 分配接口| ports
+  kvtransfer -.->|实现内存 provider| ports
+  storage --> tensor
+  tensor --> memory
+  shared --> memory
+  weight --> memory
+  weight --> shared
+  weight --> transport
+  kvtransfer --> storage
+  kvtransfer --> shared
+  kvtransfer --> transport
+  policy -.-> remaining
+```
 
 `framework/allocator/virtual_memory` 提供 `PhysicalPage`、`PhysicalPagePool`、
-`MappedMemoryRegion`、`SharedPageMapping` 和 `VirtualPage`。这些通用能力只管理
-物理页与虚拟地址映射，不包含缓存布局、模型状态、权重策略或传输注册。
+`MappedMemoryRegion` 和 `SharedPageMapping`。映射区域管理字节、物理页与虚拟地址，
+tensor 的 shape、dtype 和视图构造放在 `framework/allocator/torch`；返回的 tensor
+视图不拥有底层区域。通用内存代码不负责 KV 布局、权重策略或模型生命周期。
+`GlobalMemoryRegion` 是带生命周期 lease 的共享映射 facade。传输注册及注册期间
+持有的映射 lease 属于 `framework/transfer`，该模块没有 KV 或 distributed-runtime
+目标依赖。
 
-allocator 根目录的 `ModelPageAllocator` 协调各模型的 KV 页与权重容量，
-通过共用的 `WorkerPageBudget` 和生命周期锁，在唤醒时原子预留 KV 与权重的总需求。
-`ModelMemoryManager` 协调模型映射与分配操作。`GlobalMemoryRegion` 还保存共享
-传输注册状态，因此与这些 facade 同层。`weight` 后端保存 `ModelWeightStore`、
-`WeightAllocation` 以及权重分配、传输适配器。
+`core/kv_cache/storage` 保存 `KVCacheMemoryRegions` 和 `KVCacheMemoryRegistry`，
+负责各模型本地的缓存映射及物理偏移查询。`PagedKVCacheTensorAllocator` 使用注入的
+registry 实现 `KVCacheTensorAllocator`。`core/kv_cache/transfer` 中的
+`PagedKVCacheTransferMemoryProvider` 使用该 registry 和注入的 `GlobalMemoryRegion`
+实现 `KVCacheTransferMemoryProvider`。`WorkerImpl` 提供这些依赖。具体缓存后端使用
+通用分配能力，不再访问分布式模型内存 manager。
 
-`allocator/kv_cache` 后端保存 `KVCacheMemoryRegions`，通过
-`PagedKVCacheTensorAllocator` 实现 `KVCacheTensorAllocator`。KV 传输通过
-`KVCacheTransferMemoryProvider` 查询注册区域和物理偏移。core 的缓存存储与传输
-使用这些接口，不依赖模型内存 manager。`PagedKVCacheBlockManager` 涉及分布式
-分配和模型生命周期，因此保留在 framework。Block 值类型编译为
-`kv_cache_block_types`，request 与 prefix 依赖该目标；缓存领域叶子编译为
-`kv_cache_block`，framework 适配器组成 `block` 聚合目标。
+`framework/model_loader/weight` 管理 `WeightMemoryManager`、`ModelWeightStore`、
+`WeightAllocation` 和权重传输适配器，使用构造时传入的物理页池和共享映射，负责
+权重预留的所有权、连续或分散映射、区域内分配及清理。权重传输与 KV 传输共同使用
+Mooncake 字节传输。KV manifest、peer 状态和重分片 plan 仍属于
+`core/kv_cache/transfer`，由 `MooncakeKVCacheTransferEngine` 等类管理。
 
-`distributed_runtime` 保存 `ModelMemoryController`、`ModelMemoryCluster` 和模型
-内存 RPC 的 client、service、server，负责分布式 worker 编排；页容量记账属于
-allocator。`core/transfer` 独立编译共用 Mooncake 引擎，KV 与权重传输适配器分别依赖它。
+`ModelMemoryManager` 与 `ModelPageAllocator` 直接放在 `distributed_runtime`，
+与 `ModelMemoryController`、`ModelMemoryCluster` 和模型内存 RPC 的
+client、service、server 同层。`ModelMemoryManager` 组装本地 KV registry 和权重
+manager，并派发分布式操作。`ModelPageAllocator` 使用 `WorkerPageBudget` 与自己的
+生命周期锁协调 KV 和权重的总需求，保留模型休眠、唤醒过程中的共享容量预留。
+它实现只暴露 KV 页操作的 `KVCachePageAllocator` 接口。
+`KVCacheManagerFactory` 将该接口经 pool 和组合 manager 注入
+`PagedKVCacheBlockManager`，block 适配器不再访问分布式 allocator 单例。
+
+Block 值类型编译为 `kv_cache_block_types`，供 request 和 prefix cache 使用；
+缓存领域叶子编译为 `kv_cache_block`；framework 中的组合与分配适配器组成
+`block` 聚合目标。这是渐进的边界调整：缓存 block 策略仍操作 `Sequence`，
+容量估算仍读取 framework 配置与 runtime options，也仍有模型专属缓存策略。
+这些策略和输入边界需要后续切片，才能把 `core/kv_cache` 视为完全独立的领域模块。
+
+`proto/mooncake_transfer_engine.proto` 暂时作为兼容桥：保留原有 service 和 method
+名称，共用同一个 listener。通用传输服务处理 session RPC，把 cache RPC 转发给
+KV 扩展 service，不解释其消息。schema 仍包含 KV 消息，因此当前拆分消除了 C++
+领域与构建目标依赖，协议层尚未完全分离。
 
 配置使用新名称 `enable_virtual_memory`、`virtual_memory_master_node_addr`，
 旧 `xtensor` 拼写保留为 CLI/JSON 别名。显式 CLI 参数优先于 JSON；同一来源中
