@@ -750,6 +750,7 @@ TEST(DisaggPDSchedulerTest, FailedPullReleasesBlocksWithoutEnqueueingDecode) {
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(pool->allocate(sequence));
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
   KVTransferMapping source_mapping;

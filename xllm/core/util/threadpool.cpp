@@ -247,15 +247,12 @@ MPMCThreadPool::MPMCThreadPool(size_t num_threads,
 }
 
 MPMCThreadPool::~MPMCThreadPool() {
-  // Mark shutdown first so workers see it once they wake up.
+  // Mark shutdown first so a woken worker sees it; signal after would let a
+  // worker wake, miss the flag, and go back to sleep before we join.
   stopped_.store(true, std::memory_order_release);
-  // Push a nullptr sentinel into each private queue to guarantee FIFO
-  // shutdown semantics (any tasks queued via `schedule_with_tid` before
-  // destruction are still drained in order). Also wake every worker.
-  // for (size_t i = 0; i < private_queues_.size(); ++i) {
-  //   private_queues_[i].push(nullptr);
-  //   sems_[i]->signal();
-  // }
+  for (auto& semaphore : sems_) {
+    semaphore->signal();
+  }
   for (auto& thread : threads_) {
     thread.join();
   }
@@ -301,15 +298,13 @@ void MPMCThreadPool::internal_loop(size_t index,
   block_counter->decrement_count();
 
   auto& sem = *sems_[index];
-  // auto& private_q = private_queues_[index];
 
   while (true) {
     // 1) Steal from the global queue.
     drain_global_queue();
 
-    // 2) Re-check shutdown before blocking. The destructor sets `stopped_`
-    //    *and* pushes a sentinel into every private queue, so this branch
-    //    is mostly belt-and-suspenders.
+    // 2) Re-check shutdown before blocking; the destructor sets `stopped_`
+    //    and signals every semaphore, so a shutdown wake lands here.
     if (stopped_.load(std::memory_order_acquire)) {
       drain_global_queue();
       return;
@@ -317,7 +312,7 @@ void MPMCThreadPool::internal_loop(size_t index,
 
     // 3) Block until someone signals us. A stray signal (e.g. the task we
     //    were woken for was stolen by another worker) is harmless: we just
-    //    loop back, find both queues empty, and re-block.
+    //    loop back, find the queue empty, and re-block.
     sem.wait();
   }
 }

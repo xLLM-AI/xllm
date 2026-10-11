@@ -1128,13 +1128,21 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     request = take_waiting_request(req_id);
   }
   auto& sequences = request->sequences();
-  if (sequences.empty() || sequences[0] == nullptr) {
-    LOG(ERROR) << "Request has no valid sequences, request_id: " << req_id;
-    for (auto& sequence : sequences) {
+  bool kv_restored = false;
+  ScopeGuard release_unqueued_blocks([this, &sequences, &kv_restored] {
+    BlockManagerPool* block_manager_pool = engine_->block_manager_pool();
+    for (const auto& sequence : sequences) {
       if (sequence != nullptr) {
-        kv_cache_manager_->deallocate(sequence.get());
+        if (kv_restored) {
+          block_manager_pool->deallocate(sequence.get());
+        } else {
+          block_manager_pool->deallocate_without_cache(sequence.get());
+        }
       }
     }
+  });
+  if (sequences.empty() || sequences[0] == nullptr) {
+    LOG(ERROR) << "Request has no valid sequences, request_id: " << req_id;
     return false;
   }
   Sequence* sequence = request->sequences()[0].get();
@@ -1153,19 +1161,16 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     const int32_t slot_id = sequence->get_embedding_block_id();
     if (slot_id < 0) {
       LOG(ERROR) << "Invalid MTP bootstrap slot, request_id: " << req_id;
-      kv_cache_manager_->deallocate(request.get());
       return false;
     }
     if (token_id < 0 ||
         token_id > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
       LOG(ERROR) << "Invalid MTP bootstrap token, request_id: " << req_id
                  << ", token_id: " << token_id;
-      kv_cache_manager_->deallocate(request.get());
       return false;
     }
     if (!mtp_bootstrap_embedding.defined()) {
       LOG(ERROR) << "Missing MTP bootstrap embedding, request_id: " << req_id;
-      kv_cache_manager_->deallocate(request.get());
       return false;
     }
 
@@ -1220,7 +1225,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
       if (!block_type.has_value()) {
         LOG(ERROR) << "Unknown source KV transfer group, request_id=" << req_id
                    << ", group_id=" << mapping.group_id;
-        kv_cache_manager_->deallocate(request.get());
         return false;
       }
 
@@ -1253,7 +1257,6 @@ bool DisaggPDScheduler::decode_recv_first_generation(
                    << ", group_id=" << mapping.group_id
                    << ", local=" << mapping.local_ids.size()
                    << ", remote=" << mapping.remote_ids.size();
-        kv_cache_manager_->deallocate(request.get());
         return false;
       }
     }
@@ -1269,19 +1272,19 @@ bool DisaggPDScheduler::decode_recv_first_generation(
                                                  source_mappings);
     if (!pulled) {
       LOG(ERROR) << "Failed to pull KV blocks, request_id: " << req_id;
-      kv_cache_manager_->deallocate(request.get());
       return false;
     }
     VLOG(1) << "Decode KV restore request_id=" << req_id
             << ", pull_ms=" << pull_timer.elapsed_seconds() * 1000.0;
   }
 
+  kv_restored = true;
   Timer enqueue_timer;
   if (!request_queue_.write(request)) {
     LOG(ERROR) << "Failed to enqueue decode request, request_id: " << req_id;
-    kv_cache_manager_->deallocate(request.get());
     return false;
   }
+  release_unqueued_blocks.dismiss();
   VLOG(1) << "Decode first-generation request_id=" << req_id
           << ", prepare_ms=" << prepare_seconds * 1000.0
           << ", enqueue_ms=" << enqueue_timer.elapsed_seconds() * 1000.0

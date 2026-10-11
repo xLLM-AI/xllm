@@ -102,6 +102,7 @@ def test_capture_shares_one_lazy_pool_across_runners_and_shapes(monkeypatch: pyt
                 static_input_ids=torch.arange(rows, dtype=torch.int32),
                 static_mtp_topk_indices=None,
                 static_metadata=_metadata(rows),
+                eplb=None,
                 execution_state=None,
             )
             graph_runner._capture(entry, stream)
@@ -269,9 +270,7 @@ def test_real_paged_backend_refreshes_captured_lengths_and_isolates_entries(
         if prepared:
             assert output is entry.static_output
         else:
-            # The legacy clone is queued before task update on a real device;
-            # CPU mocks verify ownership without emulating that stream queue.
-            assert output.data_ptr() != entry.static_output.data_ptr()
+            assert output.data_ptr() == entry.static_output.data_ptr()
         assert captured_lengths[index].kv == lengths
         # Preparing another entry must not alter this captured task's state.
         other = (index + 1) % len(inputs)

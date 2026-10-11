@@ -1134,6 +1134,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             graph=graph,
             static_output=static_output,
             static_metadata=SimpleNamespace(),
+            eplb=None,
             graph_tasks=[object()] if task_updates else [],
             execution_state=SimpleNamespace(persistent_buffers={}),
         )
@@ -1471,7 +1472,9 @@ def test_cp_mtp_decode_acl_replays_persistent_rows_and_detaches_outputs() -> Non
             return hidden + values.to(hidden.dtype).view(-1, 1), None, indices
 
     device = torch.device("npu:0")
-    runner = DecodeAclGraphRunner(_GraphModel(), _GraphBackend(), device, max_batch=4, max_model_len=16)
+    runner = DecodeAclGraphRunner(
+        _GraphModel(), _GraphBackend(), device, max_batch=4, max_model_len=16, num_decoding_tokens=4
+    )
     bindings: dict[tuple, tuple[int, ...]] = {}
     retained: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
     # Verify K+1 rows, repair two rows, then draft one row; repeat after a page

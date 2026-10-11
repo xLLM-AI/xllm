@@ -437,7 +437,7 @@ def test_taskless_metadata_fill_waits_only_when_stream_changes(same_stream: bool
     metadata = _metadata(torch.zeros(1, dtype=torch.int32))
     input_ids = torch.zeros(1, dtype=torch.int32)
     key = runner._graph_key(1, False, None, None)
-    entry = SimpleNamespace(static_metadata=metadata)
+    entry = SimpleNamespace(static_metadata=metadata, eplb=None)
     runner._graphs[key] = entry
 
     def fill_entry(*args: object) -> None:
