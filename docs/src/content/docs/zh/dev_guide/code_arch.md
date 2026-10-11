@@ -233,9 +233,11 @@ Block 值类型编译为 `kv_cache_block_types`，供 request 和 prefix cache �
 KV 扩展 service，不解释其消息。schema 仍包含 KV 消息，因此当前拆分消除了 C++
 领域与构建目标依赖，协议层尚未完全分离。
 
-配置使用新名称 `enable_virtual_memory`、`virtual_memory_master_node_addr`，
-旧 `xtensor` 拼写保留为 CLI/JSON 别名。显式 CLI 参数优先于 JSON；同一来源中
-新旧名称同时出现时，新名称优先。配置导出只使用新名称。注册签名 `_xtensor` 保留为兼容标识。
+配置使用 `enable_virtual_memory`、`worker_memory_master_node_addr`。
+启用虚拟内存且 `nnodes > 1` 时，rank 0 在 `worker_memory_master_node_addr`
+监听，收集各 worker 的内存 RPC 服务地址。各 worker 在此注册自己的服务地址，
+rank 0 再连接这些地址，派发内存操作。这套注册服务独立于 `master_node_addr`
+配置的执行 worker 注册服务。显式 CLI 参数优先于 JSON 配置。
 
 本次本地资源、分布式协调器与 RPC C++ 类的拆分不修改 wire schema：
 `proto/model_memory_dist.proto` 仍使用 `ModelMemoryDist` 服务和

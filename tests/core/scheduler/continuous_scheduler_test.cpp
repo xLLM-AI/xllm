@@ -166,7 +166,7 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
   TestableContinuousScheduler(TargetEngine* engine, const Options& options)
       : ContinuousScheduler<>(engine,
                               options,
-                              /*xtensor_controller=*/nullptr,
+                              /*model_residency_coordinator=*/nullptr,
                               /*distributed_worker_manager=*/nullptr) {}
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }
@@ -209,7 +209,7 @@ class RejectingReadyScheduler final : public ContinuousScheduler<> {
   RejectingReadyScheduler(FakeEngine* engine, const Options& options)
       : ContinuousScheduler<>(engine,
                               options,
-                              /*xtensor_controller=*/nullptr,
+                              /*model_residency_coordinator=*/nullptr,
                               /*distributed_worker_manager=*/nullptr) {}
 
  protected:
@@ -779,7 +779,7 @@ TEST(ContinuousSchedulerFactoryTest, ChunkedPrefillCreatesContinuousScheduler) {
       create_continuous_scheduler(engine.get(),
                                   opt,
                                   /*distributed_worker_manager=*/nullptr,
-                                  /*xtensor_controller=*/nullptr);
+                                  /*model_residency_coordinator=*/nullptr);
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
   EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),
@@ -796,7 +796,7 @@ TEST(ContinuousSchedulerFactoryTest,
       create_continuous_scheduler(engine.get(),
                                   opt,
                                   /*distributed_worker_manager=*/nullptr,
-                                  /*xtensor_controller=*/nullptr);
+                                  /*model_residency_coordinator=*/nullptr);
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
   EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),

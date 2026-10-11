@@ -6,7 +6,7 @@
   "indexer_cache_dtype": "int8",
   "enable_prefix_cache": false,
   "xxh3_128bits_seed": 2048,
-  "enable_xtensor": true,
+  "enable_virtual_memory": true,
   "phy_page_granularity_size": 4096,
   "max_tokens_per_batch": 2048,
   "max_seqs_per_batch": 32,

@@ -469,7 +469,7 @@ int run() {
           .node_rank(distributed_config.node_rank());
       memory_coordinator.setup_worker_memory_rpc(
           worker_memory_rpc_options,
-          distributed_config.virtual_memory_master_node_addr(),
+          distributed_config.worker_memory_master_node_addr(),
           parallel_config.dp_size());
     }
 

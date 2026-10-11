@@ -257,12 +257,13 @@ RPCs to a KV extension service without interpreting their messages. The
 schema still contains KV messages, so this boundary removes C++ domain and
 target dependencies rather than completing protocol separation.
 
-The canonical options are `enable_virtual_memory` and
-`virtual_memory_master_node_addr`. Their former `xtensor` spellings remain
-CLI/JSON aliases. Explicit CLI settings override JSON, and canonical names
-win when both spellings occur in the same source. Exported config uses the
-canonical names. The `_xtensor` registration signature remains a stable
-compatibility identifier.
+The options are `enable_virtual_memory` and `worker_memory_master_node_addr`.
+When virtual memory is enabled with `nnodes > 1`, rank 0 listens on
+`worker_memory_master_node_addr` to collect worker memory RPC server endpoints.
+Each worker registers its endpoint there, and rank 0 connects to those endpoints
+to dispatch memory operations. This registration service is separate from the
+execution worker registration service configured by `master_node_addr`.
+Explicit CLI settings override JSON configuration.
 
 Splitting the local resource, distributed coordinator and RPC C++ classes
 does not change the wire schema. `proto/model_memory_dist.proto` retains the

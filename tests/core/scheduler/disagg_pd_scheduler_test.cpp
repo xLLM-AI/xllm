@@ -202,7 +202,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
                           options,
                           SkipRuntimeStart{},
                           /*distributed_worker_manager=*/nullptr,
-                          /*xtensor_controller=*/nullptr,
+                          /*model_residency_coordinator=*/nullptr,
                           std::move(transfer_coordinator)) {}
 
   void admit_prefill(std::shared_ptr<Request> request,

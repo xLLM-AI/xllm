@@ -478,7 +478,7 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
   TestableContinuousScheduler(TargetEngine* engine, const Options& options)
       : ContinuousScheduler<>(engine,
                               options,
-                              /*xtensor_controller=*/nullptr,
+                              /*model_residency_coordinator=*/nullptr,
                               /*distributed_worker_manager=*/nullptr) {}
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }

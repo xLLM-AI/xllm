@@ -522,7 +522,7 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "int8");
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(kv_cache_config.xxh3_128bits_seed(), 2048);
-  EXPECT_TRUE(kv_cache_config.enable_xtensor());
+  EXPECT_TRUE(kv_cache_config.enable_virtual_memory());
   EXPECT_EQ(kv_cache_config.phy_page_granularity_size(), 4096);
 
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 2048);
@@ -749,11 +749,11 @@ TEST(ConfigPrecedenceTest, InitializeAppliesCliOverConfigOverDefault) {
   std::filesystem::remove(config_path);
 }
 
-TEST(VirtualMemoryConfigTest, LegacyJsonUsesCanonicalPropertiesAndExport) {
+TEST(VirtualMemoryConfigTest, JsonLoadsAndExportsMemoryOptions) {
   google::FlagSaver flag_saver;
   const JsonReader json = config::parse_json_string(R"json({
-    "enable_xtensor": true,
-    "xtensor_master_node_addr": "192.0.2.1:19889"
+    "enable_virtual_memory": true,
+    "worker_memory_master_node_addr": "192.0.2.1:19889"
   })json");
   KVCacheConfig kv_cache_config;
   DistributedConfig distributed_config;
@@ -762,126 +762,100 @@ TEST(VirtualMemoryConfigTest, LegacyJsonUsesCanonicalPropertiesAndExport) {
   distributed_config.from_json(json);
 
   EXPECT_TRUE(kv_cache_config.enable_virtual_memory());
-  EXPECT_TRUE(kv_cache_config.enable_xtensor());
-  EXPECT_EQ(distributed_config.virtual_memory_master_node_addr(),
+  EXPECT_EQ(distributed_config.worker_memory_master_node_addr(),
             "192.0.2.1:19889");
-  EXPECT_EQ(distributed_config.xtensor_master_node_addr(), "192.0.2.1:19889");
   EXPECT_TRUE(FLAGS_enable_virtual_memory);
-  EXPECT_TRUE(FLAGS_enable_xtensor);
-  EXPECT_EQ(FLAGS_virtual_memory_master_node_addr, "192.0.2.1:19889");
-  EXPECT_EQ(FLAGS_xtensor_master_node_addr, "192.0.2.1:19889");
+  EXPECT_EQ(FLAGS_worker_memory_master_node_addr, "192.0.2.1:19889");
 
   nlohmann::ordered_json exported = nlohmann::ordered_json::object();
   kv_cache_config.append_config_json(exported);
   distributed_config.append_config_json(exported);
   EXPECT_TRUE(exported.at("enable_virtual_memory").get<bool>());
-  EXPECT_EQ(exported.at("virtual_memory_master_node_addr").get<std::string>(),
+  EXPECT_EQ(exported.at("worker_memory_master_node_addr").get<std::string>(),
             "192.0.2.1:19889");
   EXPECT_FALSE(exported.contains("enable_xtensor"));
   EXPECT_FALSE(exported.contains("xtensor_master_node_addr"));
+  EXPECT_FALSE(exported.contains("virtual_memory_master_node_addr"));
 }
 
-TEST(VirtualMemoryConfigTest, CanonicalJsonKeysOverrideLegacyKeys) {
+TEST(VirtualMemoryConfigTest, JsonPreservesExplicitFalseAndEmptyValues) {
   google::FlagSaver flag_saver;
   const JsonReader json = config::parse_json_string(R"json({
     "enable_virtual_memory": false,
-    "enable_xtensor": true,
-    "virtual_memory_master_node_addr": "",
-    "xtensor_master_node_addr": "192.0.2.1:19889"
+    "worker_memory_master_node_addr": ""
   })json");
   KVCacheConfig kv_cache_config;
+  kv_cache_config.enable_virtual_memory(true);
   DistributedConfig distributed_config;
 
   kv_cache_config.from_json(json);
   distributed_config.from_json(json);
 
   EXPECT_FALSE(kv_cache_config.enable_virtual_memory());
-  EXPECT_TRUE(distributed_config.virtual_memory_master_node_addr().empty());
+  EXPECT_TRUE(distributed_config.worker_memory_master_node_addr().empty());
+  EXPECT_FALSE(FLAGS_enable_virtual_memory);
+  EXPECT_TRUE(FLAGS_worker_memory_master_node_addr.empty());
 }
 
-TEST(VirtualMemoryConfigTest, BothCliSpellingsOverrideJson) {
-  struct FlagNames {
-    const char* enabled;
-    const char* master_address;
-  };
-  const FlagNames flag_names[] = {
-      {"enable_virtual_memory", "virtual_memory_master_node_addr"},
-      {"enable_xtensor", "xtensor_master_node_addr"},
-  };
+TEST(VirtualMemoryConfigTest, CommandLineOptionsOverrideJson) {
+  google::FlagSaver flag_saver;
+  ASSERT_FALSE(
+      google::SetCommandLineOption("enable_virtual_memory", "false").empty());
+  ASSERT_FALSE(google::SetCommandLineOption("worker_memory_master_node_addr",
+                                            "192.0.2.2:19889")
+                   .empty());
   const JsonReader json = config::parse_json_string(R"json({
     "enable_virtual_memory": true,
-    "enable_xtensor": true,
-    "virtual_memory_master_node_addr": "192.0.2.1:19889",
-    "xtensor_master_node_addr": "192.0.2.2:19889"
+    "worker_memory_master_node_addr": "192.0.2.1:19889"
   })json");
-  for (const FlagNames& names : flag_names) {
-    SCOPED_TRACE(names.enabled);
-    google::FlagSaver flag_saver;
-    ASSERT_FALSE(google::SetCommandLineOption(names.enabled, "false").empty());
-    ASSERT_FALSE(
-        google::SetCommandLineOption(names.master_address, "192.0.2.3:19889")
-            .empty());
-    KVCacheConfig kv_cache_config;
-    DistributedConfig distributed_config;
-
-    kv_cache_config.from_flags();
-    distributed_config.from_flags();
-    kv_cache_config.from_json(json);
-    distributed_config.from_json(json);
-
-    EXPECT_FALSE(kv_cache_config.enable_virtual_memory());
-    EXPECT_EQ(distributed_config.virtual_memory_master_node_addr(),
-              "192.0.2.3:19889");
-  }
-}
-
-TEST(VirtualMemoryConfigTest, CanonicalCliFlagsOverrideLegacyFlags) {
-  google::FlagSaver flag_saver;
-  google::SetCommandLineOption("enable_xtensor", "true");
-  google::SetCommandLineOption("enable_virtual_memory", "false");
-  google::SetCommandLineOption("xtensor_master_node_addr", "192.0.2.1:19889");
-  google::SetCommandLineOption("virtual_memory_master_node_addr",
-                               "192.0.2.2:19889");
   KVCacheConfig kv_cache_config;
   DistributedConfig distributed_config;
 
   kv_cache_config.from_flags();
   distributed_config.from_flags();
+  kv_cache_config.from_json(json);
+  distributed_config.from_json(json);
 
   EXPECT_FALSE(kv_cache_config.enable_virtual_memory());
-  EXPECT_EQ(distributed_config.virtual_memory_master_node_addr(),
+  EXPECT_EQ(distributed_config.worker_memory_master_node_addr(),
             "192.0.2.2:19889");
-  EXPECT_FALSE(FLAGS_enable_xtensor);
-  EXPECT_EQ(FLAGS_xtensor_master_node_addr, "192.0.2.2:19889");
+  EXPECT_FALSE(FLAGS_enable_virtual_memory);
+  EXPECT_EQ(FLAGS_worker_memory_master_node_addr, "192.0.2.2:19889");
 }
 
-TEST(VirtualMemoryConfigTest, RegistersCanonicalAndLegacyOptions) {
+TEST(VirtualMemoryConfigTest, RegistersMemoryOptionsWithoutLegacyAliases) {
   google::CommandLineFlagInfo flag_info;
-  EXPECT_TRUE(
+  ASSERT_TRUE(
       google::GetCommandLineFlagInfo("enable_virtual_memory", &flag_info));
   EXPECT_EQ(flag_info.default_value, "false");
-  EXPECT_TRUE(google::GetCommandLineFlagInfo("enable_xtensor", &flag_info));
-  EXPECT_TRUE(google::GetCommandLineFlagInfo("virtual_memory_master_node_addr",
+  ASSERT_TRUE(google::GetCommandLineFlagInfo("worker_memory_master_node_addr",
                                              &flag_info));
   EXPECT_EQ(flag_info.default_value, "127.0.0.1:19889");
-  EXPECT_TRUE(
+  EXPECT_FALSE(google::GetCommandLineFlagInfo("enable_xtensor", &flag_info));
+  EXPECT_FALSE(
       google::GetCommandLineFlagInfo("xtensor_master_node_addr", &flag_info));
+  EXPECT_FALSE(google::GetCommandLineFlagInfo("virtual_memory_master_node_addr",
+                                              &flag_info));
   const std::vector<std::string>& kv_options =
       KVCacheConfig::option_category().option_names;
   EXPECT_NE(
       std::find(kv_options.begin(), kv_options.end(), "enable_virtual_memory"),
       kv_options.end());
-  EXPECT_NE(std::find(kv_options.begin(), kv_options.end(), "enable_xtensor"),
+  EXPECT_EQ(std::find(kv_options.begin(), kv_options.end(), "enable_xtensor"),
             kv_options.end());
   const std::vector<std::string>& distributed_options =
       DistributedConfig::option_category().option_names;
   EXPECT_NE(std::find(distributed_options.begin(),
                       distributed_options.end(),
-                      "virtual_memory_master_node_addr"),
+                      "worker_memory_master_node_addr"),
             distributed_options.end());
-  EXPECT_NE(std::find(distributed_options.begin(),
+  EXPECT_EQ(std::find(distributed_options.begin(),
                       distributed_options.end(),
                       "xtensor_master_node_addr"),
+            distributed_options.end());
+  EXPECT_EQ(std::find(distributed_options.begin(),
+                      distributed_options.end(),
+                      "virtual_memory_master_node_addr"),
             distributed_options.end());
 }
 

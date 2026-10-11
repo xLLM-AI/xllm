@@ -779,7 +779,7 @@ void MooncakeKVCacheTransferVirtualMemory::register_kv_cache(
   std::optional<CacheRegistrationContext> registration_context;
   if (pending_registration_context_.has_value()) {
     registration_context = *pending_registration_context_;
-    registration_context->layout_family.append("_xtensor");
+    registration_context->layout_family.append("_virtual_memory");
     const KVCacheTransferMemoryRegion memory_region =
         memory_provider_->memory_region();
     tensor_manifests.reserve(kv_caches.size() * 2);

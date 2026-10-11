@@ -15,8 +15,6 @@ limitations under the License.
 
 #include "core/framework/config/distributed_config.h"
 
-#include <vector>
-
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -26,16 +24,10 @@ DEFINE_string(master_node_addr,
               "10.18.1.1:9999).");
 
 DEFINE_string(
-    virtual_memory_master_node_addr,
+    worker_memory_master_node_addr,
     "127.0.0.1:19889",
-    "The master address for the virtual memory distributed service (e.g. "
-    "10.18.1.1:9999).");
-
-DEFINE_string(
-    xtensor_master_node_addr,
-    "127.0.0.1:19889",
-    "Legacy alias for virtual_memory_master_node_addr. The canonical flag "
-    "takes precedence when both are explicitly supplied.");
+    "The rank 0 registration address for worker memory RPC services when "
+    "virtual memory is enabled and nnodes > 1 (e.g. 10.18.1.1:19889).");
 
 DEFINE_int32(nnodes, 1, "The number of multi-nodes.");
 
@@ -59,14 +51,7 @@ namespace xllm {
 
 void DistributedConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(master_node_addr);
-  const bool use_legacy_flag =
-      config::is_flag_specified("xtensor_master_node_addr") &&
-      !config::is_flag_specified("virtual_memory_master_node_addr");
-  virtual_memory_master_node_addr(use_legacy_flag
-                                      ? FLAGS_xtensor_master_node_addr
-                                      : FLAGS_virtual_memory_master_node_addr);
-  FLAGS_virtual_memory_master_node_addr = virtual_memory_master_node_addr();
-  FLAGS_xtensor_master_node_addr = virtual_memory_master_node_addr();
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(worker_memory_master_node_addr);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(nnodes);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(node_rank);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(etcd_addr);
@@ -78,17 +63,7 @@ void DistributedConfig::from_flags() {
 
 void DistributedConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(master_node_addr);
-  // Explicit command-line aliases override JSON; otherwise the canonical
-  // JSON key takes precedence over its legacy alias.
-  if (!config::is_flag_specified("virtual_memory_master_node_addr") &&
-      !config::is_flag_specified("xtensor_master_node_addr")) {
-    virtual_memory_master_node_addr(json.value_or<std::string>(
-        std::vector<std::string>{"virtual_memory_master_node_addr",
-                                 "xtensor_master_node_addr"},
-        virtual_memory_master_node_addr()));
-    FLAGS_virtual_memory_master_node_addr = virtual_memory_master_node_addr();
-    FLAGS_xtensor_master_node_addr = virtual_memory_master_node_addr();
-  }
+  XLLM_CONFIG_ASSIGN_FROM_JSON(worker_memory_master_node_addr);
   XLLM_CONFIG_ASSIGN_FROM_JSON(nnodes);
   // don't read rank-related config
   // XLLM_CONFIG_ASSIGN_FROM_JSON(node_rank);
@@ -105,7 +80,7 @@ void DistributedConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, master_node_addr);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, virtual_memory_master_node_addr);
+      config_json, default_config, worker_memory_master_node_addr);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, nnodes);
   // don't dump rank-related config
   //   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
