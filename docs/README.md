@@ -73,6 +73,10 @@ npm run preview
 
 ## Editing Documentation
 
+The English and Chinese `index.md` files are relative symlinks to the repository's
+`README.md` and `README_zh.md`. Edit those READMEs to update the homepages. The docs
+loader supplies homepage metadata, and a Markdown plugin adapts links and images.
+
 - Put user-facing content under `src/content/docs/en` and
   `src/content/docs/zh`.
 - Keep English and Chinese files aligned by path when a page exists in both

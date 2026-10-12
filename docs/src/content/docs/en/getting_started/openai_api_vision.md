@@ -6,7 +6,7 @@ Use `/v1/chat/completions` with a vision-language model to ask questions about i
 
 ## Launch a VLM server
 
-Prepare xLLM and Qwen3-VL-8B-Instruct. This example uses the Python/PyTorch implementation with ACL Graph decoding on one Ascend NPU; adjust the device configuration and model size following the [launch guide](/en/getting_started/launch_xllm/). The VLM example disables prefix caching and chunked prefill, as described in [Multimodal Support](/en/features/multimodal/).
+Prepare xLLM and Qwen3-VL-8B-Instruct. This example uses the Python/PyTorch implementation with ACL Graph decoding on one Ascend NPU; adjust the device configuration and model size following the [launch guide](/en/getting_started/launch_xllm/). The VLM example disables prefix caching and chunked prefill.
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh

@@ -3,10 +3,12 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightThemeRapide from 'starlight-theme-rapide';
 import rehypeSimpleIcons from './src/plugins/rehypeSimpleIcons.mjs';
+import remarkReadmeHomepage from './src/plugins/remarkReadmeHomepage.mjs';
 
 // https://astro.build/config
 export default defineConfig({
 	markdown: {
+		remarkPlugins: [remarkReadmeHomepage],
 		rehypePlugins: [rehypeSimpleIcons],
 	},
 	integrations: [

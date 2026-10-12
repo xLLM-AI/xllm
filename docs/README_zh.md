@@ -71,6 +71,9 @@ npm run preview
 
 ## 编辑文档
 
+中英文 `index.md` 是指向仓库根目录 `README.md` 和 `README_zh.md` 的相对软链接。
+修改对应 README 即可更新首页。文档加载器补充首页元数据，Markdown 插件适配链接和图片。
+
 - 面向用户的文档内容放在 `src/content/docs/en` 和 `src/content/docs/zh`。
 - 同一个页面同时存在中英文版本时，尽量保持两个文件的相对路径一致。
 - 共享的文档图片放在 `src/content/docs/assets`。

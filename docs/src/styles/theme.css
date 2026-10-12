@@ -43,6 +43,26 @@
 	padding-inline-start: 1.5rem;
 }
 
+.sl-markdown-content .readme-badges {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	justify-content: center;
+}
+
+.sl-markdown-content .readme-badges > a {
+	display: inline-flex;
+	flex: 0 0 auto;
+	margin: 0;
+}
+
+.sl-markdown-content .readme-badges img {
+	height: 20px;
+	margin: 0;
+	width: auto;
+}
+
 .sidebar-pane a > span:first-child,
 .sidebar-pane summary .group-label {
 	display: inline-block;

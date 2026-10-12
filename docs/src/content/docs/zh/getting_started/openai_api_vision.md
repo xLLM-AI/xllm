@@ -6,7 +6,7 @@ title: "OpenAI 接口：视觉输入"
 
 ## 启动 VLM 服务
 
-准备 xLLM 和 Qwen3-VL-8B-Instruct。以下示例在一张昇腾 NPU 上使用 Python/PyTorch 实现，并通过 ACL Graph 执行解码，请按[启动文档](/zh/getting_started/launch_xllm/)调整设备配置和模型大小。根据[多模态支持说明](/zh/features/multimodal/)，本例关闭前缀缓存和分块预填充。
+准备 xLLM 和 Qwen3-VL-8B-Instruct。以下示例在一张昇腾 NPU 上使用 Python/PyTorch 实现，并通过 ACL Graph 执行解码，请按[启动文档](/zh/getting_started/launch_xllm/)调整设备配置和模型大小。本例关闭前缀缓存和分块预填充。
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh

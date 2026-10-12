@@ -24,7 +24,7 @@ limitations under the License. -->
 ---------------------
 
 
-### 📢 News
+## News
 <!-- only keep the latest 3 news, others should be folded -->
 - 2026-08-27: 🎉  We day-0 support the [GLM-5.3-Flash](https://modelscope.cn/models/ZhipuAI/GLM-5.3-Flash) model, please refer to the [Deployment  Document](https://github.com/xLLM-AI/xllm/blob/preview/glm-5.3-flash/testspace/run_glm_53_flash.sh) for deployment.
 - 2026-07-06: 🎉 xLLM is officially donated to the OpenAtom Foundation!

@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     paths:
+      - 'README.md'
+      - 'README_zh.md'
+      - 'assets/**'
       - 'docs/**'
       - '.github/workflows/deploy_docs.yaml'
   workflow_dispatch:

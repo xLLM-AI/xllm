@@ -24,7 +24,7 @@ limitations under the License. -->
 ---------------------
 
 
-### 📢 新闻
+## 新闻
 <!-- only keep the latest 3 news, others should be folded -->
 - 2026-08-27: 🎉  我们 day-0 支持了[GLM-5.3-Flash](https://modelscope.cn/models/ZhipuAI/GLM-5.3-Flash)模型的推理服务，部署请参考[部署文档](https://github.com/xLLM-AI/xllm/blob/preview/glm-5.3-flash/testspace/run_glm_53_flash.sh)。
 - 2026-07-06: 🎉 xLLM 正式捐赠给开放原子开源基金会！

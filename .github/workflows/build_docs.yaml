@@ -5,12 +5,18 @@ on:
     branches:
       - main
     paths:
+      - 'README.md'
+      - 'README_zh.md'
+      - 'assets/**'
       - 'docs/**'
       - '.github/workflows/build_docs.yaml'
   push:
     branches:
       - main
     paths:
+      - 'README.md'
+      - 'README_zh.md'
+      - 'assets/**'
       - 'docs/**'
       - '.github/workflows/build_docs.yaml'
 
