@@ -28,7 +28,7 @@ namespace xllm {
 
 std::vector<torch::Tensor> KVCacheMemoryRegions::create_k_tensors(
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers,
     const torch::Device& device,
     size_t page_size) {
@@ -38,7 +38,7 @@ std::vector<torch::Tensor> KVCacheMemoryRegions::create_k_tensors(
 
 std::vector<torch::Tensor> KVCacheMemoryRegions::create_v_tensors(
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers,
     const torch::Device& device,
     size_t page_size) {
@@ -48,7 +48,7 @@ std::vector<torch::Tensor> KVCacheMemoryRegions::create_v_tensors(
 
 std::vector<torch::Tensor> KVCacheMemoryRegions::create_tensors(
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers,
     const torch::Device& device,
     size_t page_size,

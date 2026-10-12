@@ -63,7 +63,9 @@ bool MooncakeWeightTransfer::register_global_memory_region() {
 }
 
 bool MooncakeWeightTransfer::link_p2p(const std::string& remote_addr) {
-  return mooncake_te_->open_session(remote_addr, remote_addr);
+  // remote_addr is the Mooncake data endpoint, not the BRPC control endpoint.
+  // Weight reads and writes only need a local segment session.
+  return mooncake_te_->open_session(/*control_endpoint=*/"", remote_addr);
 }
 
 bool MooncakeWeightTransfer::link_p2p(
@@ -77,7 +79,8 @@ bool MooncakeWeightTransfer::link_p2p(
 }
 
 bool MooncakeWeightTransfer::unlink_p2p(const std::string& remote_addr) {
-  return mooncake_te_->close_session(remote_addr, remote_addr);
+  // Match link_p2p by releasing only the local segment session.
+  return mooncake_te_->close_session(/*control_endpoint=*/"", remote_addr);
 }
 
 bool MooncakeWeightTransfer::unlink_p2p(

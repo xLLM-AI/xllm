@@ -27,7 +27,7 @@ namespace xllm {
 
 torch::Tensor create_mapped_memory_tensor_view(
     const MappedMemoryRegion& region,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     size_t offset,
     const std::vector<int64_t>& dims) {
   CHECK_LE(offset, region.size()) << "Tensor byte offset is out of bounds";

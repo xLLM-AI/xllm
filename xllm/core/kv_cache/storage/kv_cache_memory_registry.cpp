@@ -36,7 +36,7 @@ void KVCacheMemoryRegistry::init(const torch::Device& device,
 std::vector<torch::Tensor> KVCacheMemoryRegistry::create_k_tensors(
     const std::string& model_id,
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK(initialized_) << "KV cache registry is not initialized";
@@ -48,7 +48,7 @@ std::vector<torch::Tensor> KVCacheMemoryRegistry::create_k_tensors(
 std::vector<torch::Tensor> KVCacheMemoryRegistry::create_v_tensors(
     const std::string& model_id,
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK(initialized_) << "KV cache registry is not initialized";

@@ -30,7 +30,7 @@ class MappedMemoryRegion;
 // unmap the region. offset is measured in bytes.
 torch::Tensor create_mapped_memory_tensor_view(
     const MappedMemoryRegion& region,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     size_t offset,
     const std::vector<int64_t>& dims);
 

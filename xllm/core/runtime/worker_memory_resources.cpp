@@ -89,7 +89,7 @@ WorkerMemoryResources::get_weight_allocation_info(
 std::vector<torch::Tensor> WorkerMemoryResources::create_k_tensors(
     const std::string& model_id,
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers) {
   std::lock_guard<std::mutex> lock(mutex_);
   return kv_cache_memory_.create_k_tensors(model_id, dims, dtype, num_layers);
@@ -98,7 +98,7 @@ std::vector<torch::Tensor> WorkerMemoryResources::create_k_tensors(
 std::vector<torch::Tensor> WorkerMemoryResources::create_v_tensors(
     const std::string& model_id,
     const std::vector<int64_t>& dims,
-    torch::Dtype dtype,
+    torch::ScalarType dtype,
     int64_t num_layers) {
   std::lock_guard<std::mutex> lock(mutex_);
   return kv_cache_memory_.create_v_tensors(model_id, dims, dtype, num_layers);

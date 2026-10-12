@@ -49,11 +49,11 @@ class WorkerMemoryResources final {
 
   std::vector<torch::Tensor> create_k_tensors(const std::string& model_id,
                                               const std::vector<int64_t>& dims,
-                                              torch::Dtype dtype,
+                                              torch::ScalarType dtype,
                                               int64_t num_layers);
   std::vector<torch::Tensor> create_v_tensors(const std::string& model_id,
                                               const std::vector<int64_t>& dims,
-                                              torch::Dtype dtype,
+                                              torch::ScalarType dtype,
                                               int64_t num_layers);
   bool map_to_kv_tensors(const std::string& model_id,
                          const std::vector<offset_t>& offsets);

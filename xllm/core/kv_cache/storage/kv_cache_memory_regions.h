@@ -40,12 +40,12 @@ class KVCacheMemoryRegions final {
   KVCacheMemoryRegions& operator=(KVCacheMemoryRegions&&) noexcept = default;
 
   std::vector<torch::Tensor> create_k_tensors(const std::vector<int64_t>& dims,
-                                              torch::Dtype dtype,
+                                              torch::ScalarType dtype,
                                               int64_t num_layers,
                                               const torch::Device& device,
                                               size_t page_size);
   std::vector<torch::Tensor> create_v_tensors(const std::vector<int64_t>& dims,
-                                              torch::Dtype dtype,
+                                              torch::ScalarType dtype,
                                               int64_t num_layers,
                                               const torch::Device& device,
                                               size_t page_size);
@@ -64,7 +64,7 @@ class KVCacheMemoryRegions final {
  private:
   std::vector<torch::Tensor> create_tensors(
       const std::vector<int64_t>& dims,
-      torch::Dtype dtype,
+      torch::ScalarType dtype,
       int64_t num_layers,
       const torch::Device& device,
       size_t page_size,
