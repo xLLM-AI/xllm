@@ -537,18 +537,15 @@ void ProfileManager::train_speculative_validate_time_predictor(
 }
 
 bool ProfileManager::should_profile_speculative_validate() const {
-  // The validate-time predictor is only consumed by the adaptive speculative
-  // controller: it needs adaptive explicitly enabled, more than one
-  // speculative token to prune, and a supported algorithm
-  // (MTP / DFlash / DSpark). Otherwise the prefix/query/batch sweep is wasted
-  // startup time.
+  // The predictor feeds only the adaptive controller; the sweep is wasted
+  // startup time without it.
   const SpeculativeConfig& speculative_config =
       ::xllm::SpeculativeConfig::get_instance();
   const std::string& speculative_algorithm =
       speculative_config.speculative_algorithm();
   const bool is_supported_algo =
-      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) ||
-      SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
+      SpeculativeConfig::supports_adaptive_speculative_decode(
+          speculative_algorithm);
   return speculative_config.enable_adaptive_speculative_decode() &&
          speculative_config.num_speculative_tokens() > 1 && is_supported_algo;
 }

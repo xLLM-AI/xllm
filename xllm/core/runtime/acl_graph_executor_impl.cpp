@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/speculative_config.h"
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/framework/OpCommand.h>
 #else
@@ -322,7 +323,8 @@ bool is_mla_graph_eagle3_target(const CausalLM* model,
                                 const runtime::Options& options) {
   return model->supports_mla_graph_kv_bucketing() &&
          options.enable_speculative_decode() && !options.is_draft_engine() &&
-         options.speculative_algorithm() == "Eagle3";
+         SpeculativeConfig::is_eagle3_algorithm(
+             options.speculative_algorithm());
 }
 
 void hash_graph_key_value(uint64_t& hash, uint64_t value) {

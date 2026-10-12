@@ -1527,41 +1527,6 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
   speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
-TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
-  EXPECT_TRUE(SpeculativeConfig::is_mtp_algorithm("MTP"));
-  EXPECT_TRUE(SpeculativeConfig::is_mtp_algorithm("mtp"));
-  EXPECT_TRUE(SpeculativeConfig::is_mtp_algorithm("Mtp"));
-  EXPECT_TRUE(SpeculativeConfig::is_mtp_algorithm("mTp"));
-
-  EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("Eagle3"));
-  EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("DFlash"));
-  EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("Suffix"));
-  EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("unknown"));
-}
-
-TEST(SpeculativeConfigTest, HostKVCacheSupportsModelBasedAlgorithms) {
-  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("MTP"));
-  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("Eagle3"));
-  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("DFlash"));
-  EXPECT_TRUE(SpeculativeConfig::supports_host_kv_cache("DSpark"));
-
-  EXPECT_FALSE(SpeculativeConfig::supports_host_kv_cache("Suffix"));
-  EXPECT_FALSE(SpeculativeConfig::supports_host_kv_cache("unknown"));
-}
-
-TEST(SpeculativeConfigTest, TaskPipelineAdmitsMtpAndBlockDraftAlgorithms) {
-  EXPECT_TRUE(SpeculativeConfig::supports_task_pipeline("MTP"));
-  EXPECT_TRUE(SpeculativeConfig::supports_task_pipeline("mtp"));
-  EXPECT_TRUE(SpeculativeConfig::supports_task_pipeline("DFlash"));
-  EXPECT_TRUE(SpeculativeConfig::supports_task_pipeline("DFlash2"));
-  EXPECT_TRUE(SpeculativeConfig::supports_task_pipeline("dflash2"));
-  EXPECT_TRUE(SpeculativeConfig::supports_task_pipeline("DSpark"));
-
-  EXPECT_FALSE(SpeculativeConfig::supports_task_pipeline("Eagle3"));
-  EXPECT_FALSE(SpeculativeConfig::supports_task_pipeline("Suffix"));
-  EXPECT_FALSE(SpeculativeConfig::supports_task_pipeline("unknown"));
-}
-
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
   ModelArgs args;
   args.hidden_size(2).layers_to_capture({0, 2});

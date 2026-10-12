@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
+#include "core/framework/sampling/draft_sampling_mode.h"
 
 DEFINE_string(draft_model, "", "draft hf model path to the model file.");
 

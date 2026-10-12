@@ -23,7 +23,6 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
-#include "core/framework/sampling/draft_sampling_mode.h"
 
 namespace xllm {
 
@@ -31,68 +30,69 @@ class JsonReader;
 
 class SpeculativeConfig final {
  public:
-  inline static constexpr std::string_view kDFlash2Algorithm = "DFlash2";
-
   SpeculativeConfig() = default;
   ~SpeculativeConfig() = default;
 
   static SpeculativeConfig& get_instance();
 
-  // Whether a speculative algorithm requires the target model to capture
-  // intermediate-layer aux hidden states to drive the draft (Eagle3 and
-  // DFlash). Centralizes the algorithm-string classification in one place. The
-  // worker consults it to decide whether to populate the target's
-  // layers_to_capture; the model then keys off that list alone, never the
-  // algorithm string. Takes the algorithm explicitly so a spawned worker
-  // process, which reads its own Options rather than this global config, can
-  // classify without an initialized singleton.
-  static bool requires_aux_hidden_capture(std::string_view algorithm) {
-    return algorithm == "Eagle3" || algorithm == "DFlash" ||
-           is_dflash2_algorithm(algorithm) || algorithm == "DSpark";
+  static bool is_eagle3_algorithm(std::string_view algorithm) {
+    return boost::iequals(algorithm, "Eagle3");
+  }
+
+  static bool is_dflash_algorithm(std::string_view algorithm) {
+    return boost::iequals(algorithm, "DFlash");
   }
 
   static bool is_dflash2_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, kDFlash2Algorithm);
+    return boost::iequals(algorithm, "DFlash2");
+  }
+
+  static bool is_dspark_algorithm(std::string_view algorithm) {
+    return boost::iequals(algorithm, "DSpark");
+  }
+
+  static bool is_suffix_algorithm(std::string_view algorithm) {
+    return boost::iequals(algorithm, "Suffix");
   }
 
   static bool is_mtp_algorithm(std::string_view algorithm) {
     return boost::iequals(algorithm, "MTP");
   }
 
-  // Algorithm-level admission only. The worker validates fixed-width model
-  // geometry and parallel capacity before creating its task pipeline.
-  static bool supports_task_pipeline(std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) || algorithm == "DFlash" ||
-           is_dflash2_algorithm(algorithm) || algorithm == "DSpark";
-  }
-
-  // True for the block-diffusion draft algorithms (DFlash, DSpark) that record
-  // validate metrics inline per-seq and drive the adaptive per-seq varlen
-  // prune. Case-insensitive so it matches however the flag was cased. MTP is
-  // classified separately via is_mtp_algorithm; callers that also accept MTP
-  // must OR the two.
+  // DFlash-style drafts that record per-seq validate metrics inline.
   static bool is_block_diffusion_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, "dflash") ||
-           is_dflash2_algorithm(algorithm) ||
-           boost::iequals(algorithm, "dspark");
+    return is_dflash_algorithm(algorithm) || is_dflash2_algorithm(algorithm) ||
+           is_dspark_algorithm(algorithm);
   }
 
-  static bool supports_host_kv_cache(std::string_view algorithm) {
+  // Algorithm-level admission only; callers validate runtime geometry.
+  static bool supports_task_pipeline(std::string_view algorithm) {
     return is_mtp_algorithm(algorithm) ||
-           is_block_diffusion_algorithm(algorithm) ||
-           boost::iequals(algorithm, "Eagle3");
+           is_block_diffusion_algorithm(algorithm);
   }
 
-  // True for the algorithms whose draft path can emit dense per-token
-  // probabilities for probabilistic rejection sampling; greedy acceptance is
-  // always available, so DFlash/Suffix are gated out here. DFlash2 samples
-  // selector paths from a temperature-softmax distribution and carries the
-  // dense proposal only when probabilistic rejection requires it.
+  static bool supports_adaptive_speculative_decode(std::string_view algorithm) {
+    return is_mtp_algorithm(algorithm) ||
+           is_block_diffusion_algorithm(algorithm);
+  }
+
+  static bool requires_aux_hidden_capture(std::string_view algorithm) {
+    return is_eagle3_algorithm(algorithm) ||
+           is_block_diffusion_algorithm(algorithm);
+  }
+
+  // Aux-capture drafts share the target's KV layout, so they are included.
+  static bool supports_host_kv_cache(std::string_view algorithm) {
+    return is_mtp_algorithm(algorithm) || is_eagle3_algorithm(algorithm) ||
+           is_block_diffusion_algorithm(algorithm);
+  }
+
+  // DFlash2 carries the dense proposal only when probabilistic rejection
+  // requires it; greedy-only DFlash and Suffix stay out.
   static bool is_probabilistic_draft_sampling_supported(
       std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) || boost::iequals(algorithm, "DSpark") ||
-           is_dflash2_algorithm(algorithm) ||
-           boost::iequals(algorithm, "Eagle3");
+    return is_mtp_algorithm(algorithm) || is_dspark_algorithm(algorithm) ||
+           is_dflash2_algorithm(algorithm) || is_eagle3_algorithm(algorithm);
   }
 
   void from_flags();

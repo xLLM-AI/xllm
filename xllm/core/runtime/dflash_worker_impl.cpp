@@ -90,18 +90,17 @@ runtime::Options target_options(const runtime::Options& options) {
 runtime::Options draft_options(const runtime::Options& options) {
   // DSpark sizes its attention window from num_speculative_tokens; other
   // DFlash-style drafts still run one step at a time.
+  const bool is_dspark =
+      SpeculativeConfig::is_dspark_algorithm(options.speculative_algorithm());
   const int32_t draft_num_speculative_tokens =
-      options.speculative_algorithm() == "DSpark"
-          ? options.num_speculative_tokens()
-          : 0;
+      is_dspark ? options.num_speculative_tokens() : 0;
   runtime::Options opts = options;
   opts.enable_schedule_overlap(false)
       .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(draft_num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
-  if (options.enable_task_pipeline() &&
-      options.speculative_algorithm() != "DSpark") {
+  if (options.enable_task_pipeline() && !is_dspark) {
     opts.enable_graph(false);
   }
   return opts;
@@ -397,12 +396,13 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                           "Block task model hidden/vocabulary or captured "
                           "context geometry mismatch.");
   }
-  capacity.kind = options_.speculative_algorithm() == "DSpark"
-                      ? SpeculativeTaskKind::DSPARK
-                  : SpeculativeConfig::is_dflash2_algorithm(
-                        options_.speculative_algorithm())
-                      ? SpeculativeTaskKind::DFLASH2
-                      : SpeculativeTaskKind::DFLASH;
+  capacity.kind =
+      SpeculativeConfig::is_dspark_algorithm(options_.speculative_algorithm())
+          ? SpeculativeTaskKind::DSPARK
+      : SpeculativeConfig::is_dflash2_algorithm(
+            options_.speculative_algorithm())
+          ? SpeculativeTaskKind::DFLASH2
+          : SpeculativeTaskKind::DFLASH;
   capacity.num_speculative_tokens = options_.num_speculative_tokens();
   capacity.context_hidden_size =
       static_cast<uint32_t>(expected_context_hidden_size_);

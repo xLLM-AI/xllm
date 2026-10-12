@@ -28,13 +28,6 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// Returns true when the adaptive controller can operate on the given
-// speculative algorithm name. Currently: MTP, DFlash, DSpark.
-bool is_supported_algorithm(const std::string& algorithm) {
-  return SpeculativeConfig::is_mtp_algorithm(algorithm) ||
-         SpeculativeConfig::is_block_diffusion_algorithm(algorithm);
-}
-
 struct PruneCandidate {
   int32_t seq_id = 0;
   int32_t prefix_len = 0;
@@ -54,7 +47,8 @@ AdaptiveSpeculativeController::AdaptiveSpeculativeController(
     const runtime::Options& options)
     : enabled_(options.enable_adaptive_speculative_decode() &&
                options.num_speculative_tokens() > 1 &&
-               is_supported_algorithm(options.speculative_algorithm())),
+               SpeculativeConfig::supports_adaptive_speculative_decode(
+                   options.speculative_algorithm())),
       min_gain_(options.adaptive_speculative_min_gain()) {}
 
 bool AdaptiveSpeculativeController::enabled() const { return enabled_; }

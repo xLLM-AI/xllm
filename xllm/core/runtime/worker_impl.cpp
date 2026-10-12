@@ -2370,7 +2370,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (is_block_diffusion) {
     if (options_.is_draft_engine()) {
       args.layers_to_capture({});
-      const bool is_dspark = speculative_algorithm == "DSpark";
+      const bool is_dspark =
+          SpeculativeConfig::is_dspark_algorithm(speculative_algorithm);
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
       std::string draft_model_type = "DFlashDraftModel";
@@ -2424,7 +2425,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
       args.layers_to_capture().empty()) {
     std::vector<int32_t> capture_layer_ids;
-    if (speculative_algorithm == "Eagle3" &&
+    if (SpeculativeConfig::is_eagle3_algorithm(speculative_algorithm) &&
         options_.draft_model_path().has_value()) {
       // Eagle3.1 drafts pin their aux capture layers in the draft config;
       // legacy eagle3 configs omit them and fall back to the default below.

@@ -865,8 +865,8 @@ bool SchedulerPolicy::should_wait_for_decode_restore(
   }
 
   return state.options.num_speculative_tokens() == 0 ||
-         ::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
-             "MTP";
+         SpeculativeConfig::is_mtp_algorithm(
+             SpeculativeConfig::get_instance().speculative_algorithm());
 }
 
 void SchedulerPolicy::enqueue_decode_restore(

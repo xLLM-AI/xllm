@@ -63,7 +63,7 @@ inline int64_t mtp_hidden_state_width(const ModelArgs& model_args) {
 
 inline bool uses_embedded_eagle3_draft(std::string_view algorithm,
                                        const ModelArgs& target_model_args) {
-  return algorithm == "Eagle3" &&
+  return SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
          target_model_args.enable_embedded_eagle3_draft();
 }
 
