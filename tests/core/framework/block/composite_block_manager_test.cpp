@@ -22,7 +22,7 @@ limitations under the License.
 
 #include "core/framework/block/block_manager_pool.h"
 #include "core/kv_cache/block/block_utils.h"
-#include "core/kv_cache/storage/kv_cache_page_allocator.h"
+#include "core/kv_cache/storage/virtual_kv_cache_page_allocator.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -146,15 +146,16 @@ std::vector<Block> C128Blocks(Sequence& seq) {
 }
 
 // Supplies a small logical page pool without device mappings or RPCs.
-class TestKVCachePageAllocator final : public KVCachePageAllocator {
+class TestVirtualKVCachePageAllocator final
+    : public VirtualKVCachePageAllocator {
  public:
-  explicit TestKVCachePageAllocator(int32_t dp_size)
+  explicit TestVirtualKVCachePageAllocator(int32_t dp_size)
       : allocated_pages_(dp_size), next_page_ids_(dp_size, 0) {}
 
   bool is_initialized() const override { return true; }
   void start_prealloc_thread() override { ++prealloc_starts; }
 
-  std::unique_ptr<KVCachePageState> alloc_kv_cache_page(
+  std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
       const std::string& model_id,
       int32_t dp_rank) override {
     allocation_requests.emplace_back(model_id, dp_rank);
@@ -163,7 +164,7 @@ class TestKVCachePageAllocator final : public KVCachePageAllocator {
     }
     const int64_t page_id = next_page_ids_.at(dp_rank)++;
     allocated_pages_.at(dp_rank).insert(page_id);
-    return std::make_unique<KVCachePageState>(page_id, page_size());
+    return std::make_unique<VirtualKVCachePageState>(page_id, page_size());
   }
 
   void free_kv_cache_pages(
@@ -1152,8 +1153,9 @@ TEST(CompositeBlockManagerTest, DecodeRoleLinearDefaultStrideDoesNotAbort) {
       original_chunk_stride;
 }
 
-TEST(CompositeBlockManagerTest, PagedPoolUsesInjectedAllocatorForEveryDpRank) {
-  TestKVCachePageAllocator allocator(/*dp_size=*/2);
+TEST(CompositeBlockManagerTest,
+     VirtualMemoryPoolUsesInjectedAllocatorForEveryDpRank) {
+  TestVirtualKVCachePageAllocator allocator(/*dp_size=*/2);
   BlockManagerPool::Options options;
   options.num_blocks(8)
       .block_size(4)
@@ -1163,7 +1165,7 @@ TEST(CompositeBlockManagerTest, PagedPoolUsesInjectedAllocatorForEveryDpRank) {
       .model_id("injected-cache");
   {
     BlockManagerPool pool(options, /*dp_size=*/2, &allocator);
-    pool.reserve_padding_blocks();
+    pool.reserve_virtual_memory_padding_blocks();
     ASSERT_EQ(allocator.allocation_requests.size(), 2u);
     EXPECT_EQ(allocator.allocation_requests[0],
               std::make_pair(std::string("injected-cache"), int32_t{0}));
@@ -1186,7 +1188,7 @@ TEST(CompositeBlockManagerTest, PagedPoolUsesInjectedAllocatorForEveryDpRank) {
 }
 
 TEST(CompositeBlockManagerTest, PagedShortageReturnsPagesToInjectedAllocator) {
-  TestKVCachePageAllocator allocator(/*dp_size=*/1);
+  TestVirtualKVCachePageAllocator allocator(/*dp_size=*/1);
   BlockManager::Options options;
   options.num_blocks(8)
       .block_size(4)

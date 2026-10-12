@@ -19,7 +19,7 @@ limitations under the License.
 #include <limits>
 
 #include "core/framework/block/composite_block_manager.h"
-#include "core/framework/block/paged_kv_cache_block_manager.h"
+#include "core/framework/block/virtual_memory_kv_cache_block_manager.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
@@ -29,7 +29,7 @@ namespace xllm {
 
 BlockManagerPool::BlockManagerPool(const Options& options,
                                    int32_t dp_size,
-                                   KVCachePageAllocator* page_allocator)
+                                   VirtualKVCachePageAllocator* page_allocator)
     : page_allocator_(page_allocator), options_(options) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   block_managers_.reserve(dp_size);
@@ -60,7 +60,7 @@ BlockManagerPool::BlockManagerPool(const Options& options,
 
   for (int32_t i = 0; i < dp_size; ++i) {
     // The pool always holds a CompositeBlockManager. Its KV leaf is a flat
-    // BlockManagerImpl, or an PagedKVCacheBlockManager when
+    // BlockManagerImpl, or a VirtualMemoryKVCacheBlockManager when
     // enable_virtual_memory (the builder picks); SWA / C4 / C128 come from
     // manager_types; the LINEAR leaf is added by the builder when
     // enable_linear_state. The per-sequence EMBEDDING resource leaf is appended
@@ -416,7 +416,7 @@ void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
   sequence->reset();
 }
 
-void BlockManagerPool::reserve_padding_blocks() {
+void BlockManagerPool::reserve_virtual_memory_padding_blocks() {
   if (!options_.enable_virtual_memory()) {
     return;
   }
@@ -424,7 +424,7 @@ void BlockManagerPool::reserve_padding_blocks() {
   // padding reservation out through the composite (no dynamic_cast).
   // Non-virtual memory leaves inherit the empty base default and are no-ops.
   for (auto& manager : block_managers_) {
-    manager->reserve_padding_blocks();
+    manager->reserve_virtual_memory_padding_blocks();
   }
   // Start preallocation after every DP manager has reserved its padding.
   CHECK(page_allocator_ != nullptr);

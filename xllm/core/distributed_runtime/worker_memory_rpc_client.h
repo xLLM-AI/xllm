@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
-#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"  // For offset_t type definition
+#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"  // For offset_t type definition
 #include "core/util/threadpool.h"
 #include "model_memory_dist.pb.h"
 
@@ -63,20 +63,19 @@ class WorkerMemoryRpcClient final {
       const std::string& model_id,
       const std::vector<offset_t>& offsets);
 
-  // Allocate weight pages from the worker's GlobalMemoryRegion.
+  // Allocate weight pages from the worker's GlobalVirtualMemoryRegion.
   folly::SemiFuture<bool> alloc_weight_pages_async(const std::string& model_id,
                                                    size_t num_pages);
   folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
 
-  // Get mapped KV cache offsets for KV cache blocks (used in PD disaggregation)
-  // Returns per-layer K/V offsets for each block
-  // Result: layer_offsets[layer_id] = {k_offsets, v_offsets}
-  // Returns empty vector on error
+  // Get virtual-memory KV block byte offsets in the shared physical-page pool
+  // mapping for PD disaggregation. Returns an empty vector on error.
+  // Result: layer_offsets[layer_id] = {k_offsets, v_offsets}.
   folly::SemiFuture<
       std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>>
-  get_kv_cache_offsets_async(const std::string& model_id,
-                             const std::vector<int32_t>& block_ids,
-                             uint64_t block_size_bytes);
+  get_virtual_kv_cache_offsets_async(const std::string& model_id,
+                                     const std::vector<int32_t>& block_ids,
+                                     uint64_t block_size_bytes);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcClient);

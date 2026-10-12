@@ -116,21 +116,23 @@ message DisaggResponse {
   int32 status_code = 2;
   int32 dp_rank = 4;
 
-  // VirtualMemory mode: GlobalMemoryRegion offsets for each block (per-layer)
+  // Virtual-memory-backed KV cache: byte offsets in the D-node's
+  // GlobalVirtualMemoryRegion physical-page pool mapping for each block (per-layer).
   // For each layer, there are K and V offsets for each block.
   // Layout: [layer0_block0_k, layer0_block0_v, layer0_block1_k, layer0_block1_v, ...]
   //         [layer1_block0_k, layer1_block0_v, ...]
-  repeated KVCacheLayerOffsets kv_cache_layer_offsets = 5;
+  repeated VirtualKVCacheLayerGlobalOffsets virtual_kv_cache_layer_global_offsets = 5;
   // Group-aware block allocation. group_id is defined by the cache layout and
   // is opaque to the PD protocol.
   repeated KVTransferGroup groups = 20;
 }
 
-// VirtualMemory mode: offsets for one layer
-message KVCacheLayerOffsets {
-  // K cache offsets for each block in GlobalMemoryRegion
+// KV cache byte offsets in GlobalVirtualMemoryRegion's physical-page pool mapping.
+// Vectors contain one offset per transferred block within this layer.
+message VirtualKVCacheLayerGlobalOffsets {
+  // K cache offsets for each block in GlobalVirtualMemoryRegion
   repeated uint64 k_offsets = 1;
-  // V cache offsets for each block in GlobalMemoryRegion
+  // V cache offsets for each block in GlobalVirtualMemoryRegion
   repeated uint64 v_offsets = 2;
 }
 

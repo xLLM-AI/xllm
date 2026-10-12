@@ -7,9 +7,10 @@ cc_library(
   NAME
     virtual_memory_torch
   HDRS
-    mapped_memory_tensor_view.h
+    mapped_virtual_memory_tensor_view.h
+    mapped_virtual_memory_tensor_view_internal.h
   SRCS
-    mapped_memory_tensor_view.cpp
+    mapped_virtual_memory_tensor_view.cpp
   DEPS
     :virtual_memory
     :platform

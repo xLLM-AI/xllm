@@ -80,13 +80,13 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
-#include "core/framework/allocator/global_memory_region.h"
+#include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/kv_cache/storage/paged_kv_cache_tensor_allocator.h"
-#include "core/kv_cache/transfer/paged_kv_cache_transfer_memory_provider.h"
+#include "core/kv_cache/storage/virtual_kv_cache_tensor_allocator.h"
+#include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider_impl.h"
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
@@ -454,8 +454,8 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     if (!weight_transfer_->initialize()) {
       LOG(ERROR) << "Failed to initialize MooncakeWeightTransfer";
     }
-    if (!weight_transfer_->register_global_memory_region()) {
-      LOG(ERROR) << "Failed to register GlobalMemoryRegion";
+    if (!weight_transfer_->register_global_virtual_memory_region()) {
+      LOG(ERROR) << "Failed to register GlobalVirtualMemoryRegion";
     }
   }
   if (::xllm::LoadConfig::get_instance().enable_rolling_load()) {
@@ -560,7 +560,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
     CHECK(tensor_allocator == nullptr)
         << "Virtual memory KV cache cannot use another tensor allocator.";
-    tensor_allocator = create_paged_kv_cache_tensor_allocator(
+    tensor_allocator = create_virtual_kv_cache_tensor_allocator(
         WorkerMemoryResources::get_instance().kv_cache_memory(),
         options_.model_id(),
         num_layers);
@@ -618,12 +618,12 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
   const ModelArgs& model_args = context_.get_model_args();
-  std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider;
+  std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider;
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
-    memory_provider = create_paged_kv_cache_transfer_memory_provider(
+    memory_provider = create_virtual_kv_cache_transfer_memory_provider(
         WorkerMemoryResources::get_instance().kv_cache_memory(),
-        GlobalMemoryRegion::get_instance());
+        GlobalVirtualMemoryRegion::get_instance());
   }
 #endif
   kv_cache_transfer_ =
@@ -2109,9 +2109,10 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
     return false;
   }
 
-  auto& global_memory_region = GlobalMemoryRegion::get_instance();
-  if (!global_memory_region.is_initialized()) {
-    LOG(ERROR) << "GlobalMemoryRegion not initialized";
+  auto& global_virtual_memory_region =
+      GlobalVirtualMemoryRegion::get_instance();
+  if (!global_virtual_memory_region.is_initialized()) {
+    LOG(ERROR) << "GlobalVirtualMemoryRegion not initialized";
     return false;
   }
   if (!weight_transfer_) {
@@ -2122,7 +2123,7 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   // Destination is always contiguous (local allocation).
   uint64_t dst_base_offset =
       reinterpret_cast<uintptr_t>(weight_allocation->base_ptr) -
-      reinterpret_cast<uintptr_t>(global_memory_region.base_vaddr());
+      reinterpret_cast<uintptr_t>(global_virtual_memory_region.base_vaddr());
   for (size_t i = 0; i < options.remote_addrs.size(); ++i) {
     const auto& segments = options.src_weight_segments[i];
     uint64_t dst_offset = dst_base_offset;

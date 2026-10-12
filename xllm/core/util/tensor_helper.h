@@ -29,6 +29,7 @@ limitations under the License.
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "util/slice.h"
@@ -482,48 +483,58 @@ inline std::optional<torch::ScalarType> try_get_scalar_type_from_string(
   return it->second;
 }
 
+// Borrows external storage on the supplied device, including empty views.
+inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
+                                          const torch::ScalarType dtype,
+                                          const void* dev_addr,
+                                          const torch::Device& device) {
+  const torch::TensorOptions options =
+      torch::TensorOptions().dtype(dtype).device(device).requires_grad(false);
+#if defined(USE_NPU)
+  if (device.type() == torch::kPrivateUse1) {
+    torch::Tensor tensor = torch::empty({0}, options);
+    void* address = const_cast<void*>(dev_addr);
+    torch::DataPtr data_ptr(address, address, [](void*) {}, tensor.device());
+    const size_t tensor_nbytes =
+        std::find(dims.begin(), dims.end(), 0) != dims.end()
+            ? 0
+            : at::detail::computeStorageNbytesContiguous(
+                  dims, tensor.dtype().itemsize());
+    const auto storage_factory = c10::GetStorageImplCreate(device.type());
+    auto* allocator = c10::GetAllocator(device.type());
+    torch::Storage storage =
+        storage_factory(c10::StorageImpl::use_byte_size_t(),
+                        c10::SymInt(tensor_nbytes),
+                        std::move(data_ptr),
+                        allocator,
+                        /*resizable=*/true);
+    tensor.set_(storage, /*storage_offset=*/0, dims);
+    return tensor;
+  }
+#endif
+  return torch::from_blob(const_cast<void*>(dev_addr), dims, options);
+}
+
 inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                                           const torch::ScalarType dtype,
                                           const void* dev_addr) {
 #if defined(USE_NPU)
-  c10::DeviceType device_type = c10::DeviceType::PrivateUse1;
-  torch::TensorOptions option =
-      torch::TensorOptions().dtype(dtype).device(device_type);
-
-  auto tensor = torch::empty({0}, option);
-  auto address = const_cast<void*>(dev_addr);
-  torch::DataPtr c10_data_ptr(address, address, [](void*) {}, tensor.device());
-
-  size_t tensor_nbytes = at::detail::computeStorageNbytesContiguous(
-      dims, tensor.dtype().itemsize());
+  const torch::Device device(torch::kPrivateUse1);
+  const size_t tensor_nbytes = at::detail::computeStorageNbytesContiguous(
+      dims, torch::elementSize(dtype));
   if (tensor_nbytes == 0) {
-    return torch::empty(dims, option);
+    return torch::empty(dims,
+                        torch::TensorOptions().dtype(dtype).device(device));
   }
-
-  torch::Storage storage;
-  auto fptr = c10::GetStorageImplCreate(device_type);
-  auto allocator = c10::GetAllocator(device_type);
-
-  storage = fptr(c10::StorageImpl::use_byte_size_t(),
-                 c10::SymInt(tensor_nbytes),
-                 std::move(c10_data_ptr),
-                 allocator,
-                 /*resizable=*/true);
-
-  tensor.set_(storage, 0, dims);
-  return tensor;
+  return get_tensor_from_blob(dims, dtype, dev_addr, device);
 #elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
     defined(USE_DCU)
-  auto options = torch::TensorOptions()
-                     .dtype(dtype)
 #if defined(USE_CUDA) || defined(USE_DCU)
-                     .device(torch::kCUDA)
+  const torch::Device device(torch::kCUDA);
 #else
-                     .device(torch::kPrivateUse1)
+  const torch::Device device(torch::kPrivateUse1);
 #endif
-                     .requires_grad(
-                         /*requires_grad=*/false);
-  return torch::from_blob(const_cast<void*>(dev_addr), dims, options);
+  return get_tensor_from_blob(dims, dtype, dev_addr, device);
 #else
   LOG(FATAL)
       << "get_tensor_from_blob only supports NPU, CUDA, MUSA, MLU and DCU";

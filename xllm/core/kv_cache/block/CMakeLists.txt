@@ -3,11 +3,11 @@ include(cc_library)
 
 cc_library(
   NAME
-    kv_cache_page_state
+    virtual_kv_cache_page_state
   HDRS
-    kv_cache_page_state.h
+    virtual_kv_cache_page_state.h
   SRCS
-    kv_cache_page_state.cpp
+    virtual_kv_cache_page_state.cpp
   DEPS
     glog::glog
 )

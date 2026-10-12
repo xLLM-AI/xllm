@@ -21,7 +21,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/block/embedding_block_manager.h"
-#include "core/framework/block/paged_kv_cache_block_manager.h"
+#include "core/framework/block/virtual_memory_kv_cache_block_manager.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/request/sequence.h"
 #include "core/kv_cache/block/block_manager_impl.h"
@@ -124,7 +124,7 @@ std::unique_ptr<BlockManager> maybe_concurrent(
 std::unique_ptr<BlockManager> make_kv_leaf(
     const BlockManager::Options& kv_opts,
     int32_t dp_rank,
-    KVCachePageAllocator* page_allocator) {
+    VirtualKVCachePageAllocator* page_allocator) {
   if (!kv_opts.enable_virtual_memory()) {
     return std::make_unique<BlockManagerImpl>(kv_opts);
   }
@@ -139,13 +139,14 @@ std::unique_ptr<BlockManager> make_kv_leaf(
   // K and V share block size; divide by 2.
   const size_t block_mem_size =
       static_cast<size_t>(kv_opts.block_size()) * kv_opts.slot_size() / 2;
-  return std::make_unique<PagedKVCacheBlockManager>(kv_opts,
-                                                    *page_allocator,
-                                                    kv_opts.num_layers(),
-                                                    block_mem_size,
-                                                    page_size,
-                                                    dp_rank,
-                                                    kv_opts.model_id());
+  return std::make_unique<VirtualMemoryKVCacheBlockManager>(
+      kv_opts,
+      *page_allocator,
+      kv_opts.num_layers(),
+      block_mem_size,
+      page_size,
+      dp_rank,
+      kv_opts.model_id());
 }
 
 using ProbeResult = CompositeBlockManager::ProbeResult;
@@ -315,7 +316,7 @@ TrimOutcome trim_swa_compressed(std::vector<ProbeResult> probes,
 CompositeBlockManager::LeafMap build_composite_leaves(
     const BlockManager::Options& options,
     int32_t dp_rank,
-    KVCachePageAllocator* page_allocator) {
+    VirtualKVCachePageAllocator* page_allocator) {
   CompositeBlockManager::LeafMap leaves;
 
   const bool prefix_cache_on = options.enable_prefix_cache();
@@ -996,9 +997,9 @@ size_t CompositeBlockManager::num_total_blocks() const {
   return leaf == nullptr ? 0 : leaf->leaf->num_total_blocks();
 }
 
-void CompositeBlockManager::reserve_padding_blocks() {
+void CompositeBlockManager::reserve_virtual_memory_padding_blocks() {
   for (auto& [type, entry] : leaves_) {
-    entry.leaf->reserve_padding_blocks();
+    entry.leaf->reserve_virtual_memory_padding_blocks();
   }
 }
 

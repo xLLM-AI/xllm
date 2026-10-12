@@ -25,11 +25,11 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/framework/allocator/global_memory_region.h"
-#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
+#include "core/framework/allocator/global_virtual_memory_region.h"
+#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/model_loader/weight/weight_allocation.h"
-#include "core/framework/model_loader/weight/weight_memory_manager.h"
+#include "core/framework/model_loader/weight/weight_virtual_memory_manager.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "tests/core/framework/allocator/virtual_memory_test_utils.h"
 #include "tests/npu_test_environment.h"
@@ -79,9 +79,9 @@ class ModelWeightAllocatorTest : public ::testing::Test {
     auto& pool = PhysicalPagePool::get_instance();
     const size_t page_size = vmm::get_recommended_granularity(device.index());
     pool.init(device, kPoolPages, page_size);
-    GlobalMemoryRegion::get_instance().init(device);
+    GlobalVirtualMemoryRegion::get_instance().init(device);
     resources_initialized_ = true;
-    ASSERT_TRUE(GlobalMemoryRegion::get_instance().is_initialized());
+    ASSERT_TRUE(GlobalVirtualMemoryRegion::get_instance().is_initialized());
     ASSERT_EQ(pool.num_available(), kPoolPages);
   }
 
@@ -113,7 +113,8 @@ TEST_F(ModelWeightAllocatorTest, FragmentedTransferMatchesMappedWeights) {
   auto& allocator = WorkerMemoryResources::get_instance();
   ASSERT_TRUE(allocator.alloc_weight_pages(kModelId, /*num_pages=*/2));
   ASSERT_EQ(pool.num_available(), 0);
-  const size_t page_size = GlobalMemoryRegion::get_instance().page_size();
+  const size_t page_size =
+      GlobalVirtualMemoryRegion::get_instance().page_size();
   void* weight_ptr = nullptr;
   ASSERT_TRUE(allocator.allocate_weight(kModelId, weight_ptr, 2 * page_size));
 
@@ -132,7 +133,7 @@ TEST_F(ModelWeightAllocatorTest, FragmentedTransferMatchesMappedWeights) {
   EXPECT_EQ(segments[1].offset, 7 * page_size);
   std::vector<uint8_t> transferred_weights(logical_weights.size());
   const uintptr_t global_base = reinterpret_cast<uintptr_t>(
-      GlobalMemoryRegion::get_instance().base_vaddr());
+      GlobalVirtualMemoryRegion::get_instance().base_vaddr());
   size_t destination_offset = 0;
   for (const auto& segment : segments) {
     ASSERT_LE(segment.size, transferred_weights.size() - destination_offset);
@@ -151,7 +152,8 @@ TEST_F(ModelWeightAllocatorTest, FragmentedTransferMatchesMappedWeights) {
 TEST_F(ModelWeightAllocatorTest, ContiguousAllocationRejectsOverflow) {
   auto& allocator = WorkerMemoryResources::get_instance();
   ASSERT_TRUE(allocator.alloc_weight_pages(kModelId, /*num_pages=*/1));
-  const size_t page_size = GlobalMemoryRegion::get_instance().page_size();
+  const size_t page_size =
+      GlobalVirtualMemoryRegion::get_instance().page_size();
   void* weight_ptr = nullptr;
   ASSERT_TRUE(allocator.allocate_weight(kModelId, weight_ptr, /*size=*/1));
   void* rejected_ptr = nullptr;
@@ -170,7 +172,7 @@ TEST_F(ModelWeightAllocatorTest,
   const size_t page_size = pool.page_size();
   auto page_ids = pool.allocate_pages_from_right(/*count=*/1);
   ASSERT_EQ(page_ids.size(), 1);
-  auto region = std::make_unique<MappedMemoryRegion>(
+  auto region = std::make_unique<MappedVirtualMemoryRegion>(
       std::move(page_ids), pool.device(), page_size);
   const uintptr_t base_address = vir_ptr_to_uintptr(region->vaddr());
   WeightAllocation allocation;
@@ -224,7 +226,8 @@ TEST_F(ModelWeightAllocatorTest, DuplicateReservationPreservesExistingWeights) {
 
 TEST_F(ModelWeightAllocatorTest, LocalOwnerClearAllowsReservationsAfterReinit) {
   auto& pool = PhysicalPagePool::get_instance();
-  WeightMemoryManager owner(pool, GlobalMemoryRegion::get_instance());
+  WeightVirtualMemoryManager owner(pool,
+                                   GlobalVirtualMemoryRegion::get_instance());
   owner.init(pool.device());
   ASSERT_TRUE(owner.alloc_weight_pages("contiguous", /*num_pages=*/2));
 

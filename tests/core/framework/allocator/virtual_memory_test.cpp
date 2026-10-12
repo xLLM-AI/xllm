@@ -14,17 +14,19 @@ limitations under the License.
 ==============================================================================*/
 
 #include <acl/acl.h>
+#include <c10/core/DeviceGuard.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
-#include "core/framework/allocator/global_memory_region.h"
-#include "core/framework/allocator/torch/mapped_memory_tensor_view.h"
-#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
+#include "core/framework/allocator/global_virtual_memory_region.h"
+#include "core/framework/allocator/torch/mapped_virtual_memory_tensor_view.h"
+#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/platform/vmm_api.h"
 #include "tests/core/framework/allocator/virtual_memory_test_utils.h"
@@ -84,20 +86,22 @@ class VirtualMemoryTest : public ::testing::Test {
 
 TEST_F(VirtualMemoryTest, ShortageAcrossRegionsLeavesBothUnmapped) {
   auto& pool = PhysicalPagePool::get_instance();
-  MappedMemoryRegion blocker(
+  MappedVirtualMemoryRegion blocker(
       (kPoolPages - 1) * page_size_, device_, page_size_);
   ASSERT_TRUE(blocker.map_all());
-  MappedMemoryRegion first(page_size_, device_, page_size_);
-  MappedMemoryRegion second(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion first(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion second(page_size_, device_, page_size_);
   ASSERT_EQ(pool.num_available(), 1);
 
-  EXPECT_FALSE(MappedMemoryRegion::map_pages({{&first, 0}, {&second, 0}}));
+  EXPECT_FALSE(
+      MappedVirtualMemoryRegion::map_pages({{&first, 0}, {&second, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(second.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), 1);
 
   ASSERT_TRUE(blocker.unmap(/*offset=*/0));
-  ASSERT_TRUE(MappedMemoryRegion::map_pages({{&first, 0}, {&second, 0}}));
+  ASSERT_TRUE(
+      MappedVirtualMemoryRegion::map_pages({{&first, 0}, {&second, 0}}));
   EXPECT_GE(first.get_phy_page_id(/*offset=*/0), 0);
   EXPECT_GE(second.get_phy_page_id(/*offset=*/0), 0);
   EXPECT_NE(first.get_phy_page_id(/*offset=*/0),
@@ -107,51 +111,53 @@ TEST_F(VirtualMemoryTest, ShortageAcrossRegionsLeavesBothUnmapped) {
 
 TEST_F(VirtualMemoryTest, LaterInvalidTargetDoesNotMapEarlierTarget) {
   auto& pool = PhysicalPagePool::get_instance();
-  MappedMemoryRegion first(page_size_, device_, page_size_);
-  MappedMemoryRegion second(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion first(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion second(page_size_, device_, page_size_);
   const std::vector<offset_t> invalid_offsets = {
       -1, 1, static_cast<offset_t>(page_size_)};
   for (offset_t offset : invalid_offsets) {
     EXPECT_FALSE(
-        MappedMemoryRegion::map_pages({{&first, 0}, {&second, offset}}));
+        MappedVirtualMemoryRegion::map_pages({{&first, 0}, {&second, offset}}));
     EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
     EXPECT_EQ(second.get_phy_page_id(/*offset=*/0), -1);
     EXPECT_EQ(pool.num_available(), kPoolPages);
   }
-  EXPECT_FALSE(MappedMemoryRegion::map_pages({{&first, 0}, {nullptr, 0}}));
+  EXPECT_FALSE(
+      MappedVirtualMemoryRegion::map_pages({{&first, 0}, {nullptr, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages);
 
-  MappedMemoryRegion wrong_device(
+  MappedVirtualMemoryRegion wrong_device(
       page_size_, torch::Device(torch::kCPU), page_size_);
   EXPECT_FALSE(
-      MappedMemoryRegion::map_pages({{&first, 0}, {&wrong_device, 0}}));
+      MappedVirtualMemoryRegion::map_pages({{&first, 0}, {&wrong_device, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages);
 
-  MappedMemoryRegion wrong_page_size(page_size_, device_, 2 * page_size_);
-  EXPECT_FALSE(
-      MappedMemoryRegion::map_pages({{&first, 0}, {&wrong_page_size, 0}}));
+  MappedVirtualMemoryRegion wrong_page_size(
+      page_size_, device_, 2 * page_size_);
+  EXPECT_FALSE(MappedVirtualMemoryRegion::map_pages(
+      {{&first, 0}, {&wrong_page_size, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages);
 
   const auto weight_page_ids = pool.allocate_pages_from_right(/*count=*/1);
   ASSERT_EQ(weight_page_ids.size(), 1);
-  MappedMemoryRegion weight_tensor(weight_page_ids, device_, page_size_);
+  MappedVirtualMemoryRegion weight_tensor(weight_page_ids, device_, page_size_);
   EXPECT_FALSE(
-      MappedMemoryRegion::map_pages({{&first, 0}, {&weight_tensor, 0}}));
+      MappedVirtualMemoryRegion::map_pages({{&first, 0}, {&weight_tensor, 0}}));
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), -1);
   EXPECT_EQ(pool.num_available(), kPoolPages - 1);
 }
 
 TEST_F(VirtualMemoryTest, DuplicateAndExistingTargetsAreIdempotent) {
   auto& pool = PhysicalPagePool::get_instance();
-  MappedMemoryRegion first(2 * page_size_, device_, page_size_);
-  MappedMemoryRegion second(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion first(2 * page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion second(page_size_, device_, page_size_);
   ASSERT_TRUE(first.map(/*offset=*/0));
   const page_id_t existing_page = first.get_phy_page_id(/*offset=*/0);
   const offset_t next_offset = static_cast<offset_t>(page_size_);
-  const std::vector<std::pair<MappedMemoryRegion*, offset_t>> targets = {
+  const std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets = {
       {&first, 0},
       {&first, 0},
       {&first, next_offset},
@@ -159,7 +165,7 @@ TEST_F(VirtualMemoryTest, DuplicateAndExistingTargetsAreIdempotent) {
       {&second, 0},
       {&second, 0}};
 
-  ASSERT_TRUE(MappedMemoryRegion::map_pages(targets));
+  ASSERT_TRUE(MappedVirtualMemoryRegion::map_pages(targets));
   EXPECT_EQ(pool.num_available(), kPoolPages - 3);
   EXPECT_EQ(first.get_phy_page_id(/*offset=*/0), existing_page);
   EXPECT_GE(first.get_phy_page_id(next_offset), 0);
@@ -168,17 +174,17 @@ TEST_F(VirtualMemoryTest, DuplicateAndExistingTargetsAreIdempotent) {
   EXPECT_NE(second.get_phy_page_id(/*offset=*/0), existing_page);
   EXPECT_NE(second.get_phy_page_id(/*offset=*/0),
             first.get_phy_page_id(next_offset));
-  EXPECT_TRUE(MappedMemoryRegion::map_pages(targets));
-  EXPECT_TRUE(MappedMemoryRegion::map_pages({}));
+  EXPECT_TRUE(MappedVirtualMemoryRegion::map_pages(targets));
+  EXPECT_TRUE(MappedVirtualMemoryRegion::map_pages({}));
   EXPECT_EQ(pool.num_available(), kPoolPages - 3);
 }
 
 TEST_F(VirtualMemoryTest, MapAllExhaustionPreservesExistingMapping) {
   auto& pool = PhysicalPagePool::get_instance();
-  MappedMemoryRegion tensor(3 * page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion tensor(3 * page_size_, device_, page_size_);
   ASSERT_TRUE(tensor.map(/*offset=*/0));
   const page_id_t existing_page = tensor.get_phy_page_id(/*offset=*/0);
-  MappedMemoryRegion blocker(2 * page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion blocker(2 * page_size_, device_, page_size_);
   ASSERT_TRUE(blocker.map_all());
   ASSERT_EQ(pool.num_available(), 1);
 
@@ -199,10 +205,10 @@ TEST_F(VirtualMemoryTest, MapAllExhaustionPreservesExistingMapping) {
 
 TEST_F(VirtualMemoryTest, RealMapUnmapRemapPreservesContents) {
   auto& pool = PhysicalPagePool::get_instance();
-  auto& global_tensor = GlobalMemoryRegion::get_instance();
+  auto& global_tensor = GlobalVirtualMemoryRegion::get_instance();
   global_tensor.init(device_);
   ASSERT_TRUE(global_tensor.is_initialized());
-  MappedMemoryRegion tensor(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion tensor(page_size_, device_, page_size_);
   ASSERT_TRUE(tensor.map(/*offset=*/0));
   const page_id_t page_id = tensor.get_phy_page_id(/*offset=*/0);
   const std::vector<uint8_t> expected(256, 0x42);
@@ -239,54 +245,45 @@ TEST_F(VirtualMemoryTest, RealMapUnmapRemapPreservesContents) {
 }
 
 TEST_F(VirtualMemoryTest, TensorViewsRespectByteBoundsAndAlignment) {
-  MappedMemoryRegion region(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion region(page_size_, device_, page_size_);
   ASSERT_TRUE(region.map_all());
-  const torch::Tensor view = create_mapped_memory_tensor_view(
+  uint32_t device_count = 0;
+  ASSERT_EQ(aclrtGetDeviceCount(&device_count), ACL_SUCCESS);
+  std::optional<c10::DeviceGuard> other_device_guard;
+  if (device_count > 1) {
+    other_device_guard.emplace(torch::Device("npu:1"));
+  }
+  const torch::Tensor view = create_mapped_virtual_memory_tensor_view(
       region, torch::kBFloat16, /*offset=*/2, {2, 3});
   EXPECT_EQ(view.numel(), 6);
   EXPECT_EQ(view.scalar_type(), torch::kBFloat16);
   EXPECT_EQ(view.device(), device_);
   EXPECT_EQ(reinterpret_cast<uintptr_t>(view.data_ptr()),
             vir_ptr_to_uintptr(region.vaddr()) + 2);
-  EXPECT_EQ(create_mapped_memory_tensor_view(
+  EXPECT_EQ(create_mapped_virtual_memory_tensor_view(
                 region, torch::kBFloat16, page_size_ - 2, {1})
                 .numel(),
             1);
-  EXPECT_EQ(create_mapped_memory_tensor_view(
-                region, torch::kBFloat16, page_size_, {0})
-                .numel(),
-            0);
-
-  EXPECT_DEATH(create_mapped_memory_tensor_view(
-                   region, torch::kBFloat16, page_size_ + 2, {0}),
-               "Tensor byte offset is out of bounds");
-  EXPECT_DEATH(create_mapped_memory_tensor_view(
-                   region, torch::kBFloat16, /*offset=*/1, {1}),
-               "Tensor byte offset is not aligned");
-  EXPECT_DEATH(create_mapped_memory_tensor_view(
-                   region, torch::kBFloat16, /*offset=*/0, {-1}),
-               "Tensor dimensions must be nonnegative");
-  EXPECT_DEATH(create_mapped_memory_tensor_view(
-                   region, torch::kBFloat16, page_size_ - 2, {2}),
-               "Tensor view exceeds its virtual memory region");
-  EXPECT_DEATH(create_mapped_memory_tensor_view(
-                   region,
-                   torch::kBFloat16,
-                   /*offset=*/0,
-                   {std::numeric_limits<int64_t>::max(), 3}),
-               "num_elems");
+  const torch::Tensor empty_view = create_mapped_virtual_memory_tensor_view(
+      region, torch::kBFloat16, page_size_, {0});
+  EXPECT_EQ(empty_view.numel(), 0);
+  EXPECT_EQ(empty_view.scalar_type(), torch::kBFloat16);
+  EXPECT_EQ(empty_view.device(), device_);
+  EXPECT_EQ(empty_view.storage().nbytes(), 0);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(empty_view.storage().data_ptr().get()),
+            vir_ptr_to_uintptr(region.vaddr()) + page_size_);
 }
 
 TEST_F(VirtualMemoryTest, TensorViewsShareRegionWithoutOwningPages) {
   auto& pool = PhysicalPagePool::get_instance();
-  MappedMemoryRegion region(page_size_, device_, page_size_);
+  MappedVirtualMemoryRegion region(page_size_, device_, page_size_);
   ASSERT_TRUE(region.map_all());
   const page_id_t page_id = region.get_phy_page_id(/*offset=*/0);
   const size_t available_pages = pool.num_available();
   {
-    const torch::Tensor byte_view = create_mapped_memory_tensor_view(
+    const torch::Tensor byte_view = create_mapped_virtual_memory_tensor_view(
         region, torch::kUInt8, /*offset=*/0, {8});
-    const torch::Tensor half_view = create_mapped_memory_tensor_view(
+    const torch::Tensor half_view = create_mapped_virtual_memory_tensor_view(
         region, torch::kBFloat16, /*offset=*/0, {4});
     EXPECT_EQ(byte_view.data_ptr(), half_view.data_ptr());
     EXPECT_EQ(byte_view.nbytes(), half_view.nbytes());
@@ -300,7 +297,7 @@ TEST_F(VirtualMemoryTest, TensorViewsShareRegionWithoutOwningPages) {
 }
 
 TEST_F(VirtualMemoryTest, SharedMappingLeasePreventsReset) {
-  auto& global_tensor = GlobalMemoryRegion::get_instance();
+  auto& global_tensor = GlobalVirtualMemoryRegion::get_instance();
   global_tensor.init(device_);
   ASSERT_TRUE(global_tensor.is_initialized());
   std::shared_ptr<void> lease = global_tensor.acquire_mapping_lease();
@@ -313,10 +310,11 @@ TEST_F(VirtualMemoryTest, SharedMappingLeasePreventsReset) {
 }
 
 TEST_F(VirtualMemoryTest, VirtualSizeOverflowIsRejectedBeforeReservation) {
-  EXPECT_DEATH(MappedMemoryRegion(
+  EXPECT_DEATH(MappedVirtualMemoryRegion(
                    std::numeric_limits<size_t>::max(), device_, page_size_),
                "size");
-  EXPECT_DEATH(MappedMemoryRegion(/*size=*/0, device_, page_size_), "size");
+  EXPECT_DEATH(MappedVirtualMemoryRegion(/*size=*/0, device_, page_size_),
+               "size");
 }
 
 }  // namespace

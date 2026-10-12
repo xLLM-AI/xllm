@@ -25,7 +25,7 @@ limitations under the License.
 
 namespace xllm {
 
-class MappedMemoryRegion;
+class MappedVirtualMemoryRegion;
 
 // Non-owning snapshot of a model weight region. The allocation owner must
 // remain alive while the base pointer is used.
@@ -49,7 +49,7 @@ class WeightAllocation final {
                       size_t num_pages,
                       void* base_ptr,
                       std::vector<WeightSegment> segments);
-  void set_fragmented(std::unique_ptr<MappedMemoryRegion> region,
+  void set_fragmented(std::unique_ptr<MappedVirtualMemoryRegion> region,
                       size_t num_pages,
                       std::vector<WeightSegment> segments);
 
@@ -61,7 +61,7 @@ class WeightAllocation final {
   void* base_ptr() const { return base_ptr_; }
   size_t current_offset() const { return current_offset_; }
   bool is_fragmented() const { return region_ != nullptr; }
-  MappedMemoryRegion* region() const { return region_.get(); }
+  MappedVirtualMemoryRegion* region() const { return region_.get(); }
   const std::vector<WeightSegment>& segments() const { return segments_; }
 
  private:
@@ -69,7 +69,7 @@ class WeightAllocation final {
   size_t num_pages_ = 0;
   void* base_ptr_ = nullptr;
   size_t current_offset_ = 0;
-  std::unique_ptr<MappedMemoryRegion> region_;
+  std::unique_ptr<MappedVirtualMemoryRegion> region_;
   std::vector<WeightSegment> segments_;
 };
 

@@ -67,7 +67,7 @@ cc_library(
   HDRS
     kv_cache_transfer.h
     kv_cache_transfer_coordinator_base.h
-    kv_cache_transfer_memory_provider.h
+    virtual_kv_cache_transfer_memory_provider.h
     kv_cache_store.h
     mooncake_store_backend.h
     host_transfer/layout.h

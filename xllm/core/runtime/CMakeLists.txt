@@ -112,11 +112,11 @@ cc_library(
     :model
     :parallel_state
     :worker_memory_resources
-    :global_memory_region
+    :global_virtual_memory_region
     :kv_cache
     :kv_cache_estimation
     :virtual_memory_kv_cache_storage
-    :paged_kv_cache_transfer_memory_provider
+    :virtual_kv_cache_transfer_memory_provider_impl
     :kv_cache_transfer
     :mooncake_weight_transfer
     :linear_state_restore
@@ -159,7 +159,7 @@ cc_library(
     :common
     :config
     :platform
-    :global_memory_region
+    :global_virtual_memory_region
     :virtual_memory
     :virtual_memory_kv_cache_storage
     :model_weight_store

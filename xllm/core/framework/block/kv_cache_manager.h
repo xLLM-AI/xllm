@@ -106,7 +106,7 @@ class KVCacheManager {
   virtual int32_t select_dp_rank() const { return 0; }
 
   // Reserve VirtualMemory padding blocks after KV tensors are created.
-  virtual void reserve_padding_blocks() {}
+  virtual void reserve_virtual_memory_padding_blocks() {}
 
  protected:
   KVCacheManager() = default;

@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/framework/allocator/global_memory_region.h"
+#include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 
 namespace xllm {
@@ -27,7 +27,7 @@ class VirtualMemoryTestPeer final {
   // Call after all tensor owners return their pages and before either NPU
   // Environment shuts down the runtime. Singleton destruction runs too late.
   static void release_resources() {
-    auto& global_tensor = GlobalMemoryRegion::get_instance();
+    auto& global_tensor = GlobalVirtualMemoryRegion::get_instance();
     global_tensor.reset();
     CHECK(PhysicalPagePool::get_instance().reset());
   }

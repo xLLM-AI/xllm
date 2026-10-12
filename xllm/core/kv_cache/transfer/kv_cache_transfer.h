@@ -19,7 +19,7 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/kv_cache/transfer/kv_cache_transfer_memory_provider.h"
+#include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider.h"
 #include "framework/model/model_args.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
@@ -66,9 +66,11 @@ class KVCacheTransfer {
     std::string dst_addr;
     std::vector<KVTransferMapping> mappings;
 
-    // VirtualMemory mode: destination offsets from D-node (per-layer)
-    // dst_kv_cache_layer_offsets[layer_id] = {k_offsets, v_offsets}
-    std::vector<KVCacheLayerOffsets> dst_kv_cache_layer_offsets;
+    // Destination byte offsets in the D-node's GlobalVirtualMemoryRegion
+    // (per-layer). dst_virtual_kv_cache_layer_global_offsets[layer_id] =
+    // {k_offsets, v_offsets}
+    std::vector<VirtualKVCacheLayerGlobalOffsets>
+        dst_virtual_kv_cache_layer_global_offsets;
   };
 
   static std::vector<std::string> rotate_dst_rank(
@@ -166,7 +168,8 @@ class KVCacheTransferFactory {
       const Device& device,
       const std::string& model_type = "",
       const std::string& model_id = "",
-      std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider = nullptr);
+      std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider =
+          nullptr);
 };
 
 }  // namespace xllm

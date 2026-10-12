@@ -8,19 +8,19 @@ cc_library(
     model_weight_store
   HDRS
     model_weight_store.h
-    weight_memory_manager.h
+    weight_virtual_memory_manager.h
     weight_allocation.h
     weight_page_coordinator.h
     weight_transfer_segments.h
   SRCS
     model_weight_store.cpp
-    weight_memory_manager.cpp
+    weight_virtual_memory_manager.cpp
     weight_allocation.cpp
     weight_page_coordinator.cpp
   DEPS
     :common
     :virtual_memory
-    :global_memory_region
+    :global_virtual_memory_region
     glog::glog
     torch
 )
@@ -39,7 +39,7 @@ cc_library(
   SRCS
     ${XLLM_WEIGHT_TRANSFER_SRCS}
   DEPS
-    :global_memory_region
+    :global_virtual_memory_region
     :mooncake_transfer_engine
     torch
 )

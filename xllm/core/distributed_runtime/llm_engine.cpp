@@ -504,7 +504,7 @@ bool LLMEngine::allocate_kv_cache(
     }
   }
   // VirtualMemory mode: reserve padding blocks and start prealloc thread.
-  kv_cache_manager_->reserve_padding_blocks();
+  kv_cache_manager_->reserve_virtual_memory_padding_blocks();
 
   return true;
 }

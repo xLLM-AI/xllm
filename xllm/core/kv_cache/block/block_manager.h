@@ -76,7 +76,7 @@ class BlockManager {
     // this is set to make those mutations thread-safe against the scheduler.
     PROPERTY(bool, enable_host_offload) = false;
     // Virtual memory (VMM) KV leaf parameters. When enable_virtual_memory is
-    // set, the KV leaf is a PagedKVCacheBlockManager; these carry the
+    // set, the KV leaf is a VirtualMemoryKVCacheBlockManager; these carry the
     // construction args the spec builder needs.
     PROPERTY(bool, enable_virtual_memory) = false;
     PROPERTY(int64_t, num_layers) = 0;
@@ -207,7 +207,7 @@ class BlockManager {
   // fans it out to every leaf, so non-virtual memory leaves are a no-op. This
   // keeps the out-of-band timing free of any dynamic_cast through the
   // composite.
-  virtual void reserve_padding_blocks() {}
+  virtual void reserve_virtual_memory_padding_blocks() {}
 
  protected:
   // the options for the block manager

@@ -32,7 +32,7 @@ namespace xllm {
  * This is a singleton class that:
  * - Pre-allocates physical pages during initialization
  * - Each page has a unique page_id for tracking
- * - Provides get/put interface for MappedMemoryRegion to acquire/release
+ * - Provides get/put interface for MappedVirtualMemoryRegion to acquire/release
  * physical pages
  * - Avoids runtime allocation overhead during map operations
  */

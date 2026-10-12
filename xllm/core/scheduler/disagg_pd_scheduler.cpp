@@ -30,7 +30,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/macros.h"
-#include "core/distributed_runtime/distributed_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -235,7 +235,8 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
   // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
-    auto& memory_coordinator = DistributedMemoryCoordinator::get_instance();
+    auto& memory_coordinator =
+        DistributedVirtualMemoryCoordinator::get_instance();
     if (memory_coordinator.is_initialized()) {
       instance_info_.total_phy_pages =
           memory_coordinator.get_num_total_phy_pages();
@@ -713,20 +714,22 @@ void DisaggPDScheduler::dispatch_requests() {
           info.remote_instance_info = remote_instances_info_[selected_instance];
 
           // VirtualMemory mode: save destination offsets from D-node
-          if (resp.kv_cache_layer_offsets_size() > 0) {
-            info.dst_kv_cache_layer_offsets.reserve(
-                resp.kv_cache_layer_offsets_size());
-            for (const auto& layer_offsets : resp.kv_cache_layer_offsets()) {
-              KVCacheLayerOffsets layer;
+          if (resp.virtual_kv_cache_layer_global_offsets_size() > 0) {
+            info.dst_virtual_kv_cache_layer_global_offsets.reserve(
+                resp.virtual_kv_cache_layer_global_offsets_size());
+            for (const auto& layer_offsets :
+                 resp.virtual_kv_cache_layer_global_offsets()) {
+              VirtualKVCacheLayerGlobalOffsets layer;
               layer.k_offsets.assign(layer_offsets.k_offsets().begin(),
                                      layer_offsets.k_offsets().end());
               layer.v_offsets.assign(layer_offsets.v_offsets().begin(),
                                      layer_offsets.v_offsets().end());
-              info.dst_kv_cache_layer_offsets.emplace_back(std::move(layer));
+              info.dst_virtual_kv_cache_layer_global_offsets.emplace_back(
+                  std::move(layer));
             }
             VLOG(5) << "Received VirtualMemory offsets from D-node for request "
                     << requests[i]->request_id() << ", num_layers="
-                    << info.dst_kv_cache_layer_offsets.size();
+                    << info.dst_virtual_kv_cache_layer_global_offsets.size();
           }
 
           sequence->kv_state().set_transfer_kv_info(std::move(info));

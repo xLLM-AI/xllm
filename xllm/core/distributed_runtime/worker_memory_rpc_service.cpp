@@ -94,12 +94,14 @@ void WorkerMemoryRpcService::InitPhysicalPagePool(
 
     try {
       WorkerMemoryResources::get_instance().init_physical_page_pool(num_pages);
-      LOG(INFO) << "GlobalMemoryRegion initialized on worker " << global_rank_;
+      LOG(INFO) << "GlobalVirtualMemoryRegion initialized on worker "
+                << global_rank_;
 
       response->set_ok(true);
     } catch (const std::exception& e) {
-      LOG(ERROR) << "Failed to init PhysicalPagePool/GlobalMemoryRegion: "
-                 << e.what();
+      LOG(ERROR)
+          << "Failed to init PhysicalPagePool/GlobalVirtualMemoryRegion: "
+          << e.what();
       response->set_ok(false);
     }
   });
@@ -193,10 +195,10 @@ void WorkerMemoryRpcService::FreeWeightPages(
   });
 }
 
-void WorkerMemoryRpcService::GetKVCacheOffsets(
+void WorkerMemoryRpcService::GetVirtualKVCacheOffsets(
     ::google::protobuf::RpcController* controller,
-    const proto::GetKVCacheOffsetsRequest* request,
-    proto::GetKVCacheOffsetsResponse* response,
+    const proto::GetVirtualKVCacheOffsetsRequest* request,
+    proto::GetVirtualKVCacheOffsetsResponse* response,
     ::google::protobuf::Closure* done) {
   threadpool_.schedule([this, request, response, done]() mutable {
     brpc::ClosureGuard done_guard(done);
@@ -247,7 +249,7 @@ void WorkerMemoryRpcService::GetKVCacheOffsets(
       }
     }
 
-    VLOG(1) << "GetKVCacheOffsets: model_id=" << model_id
+    VLOG(1) << "GetVirtualKVCacheOffsets: model_id=" << model_id
             << ", num_blocks=" << block_ids.size()
             << ", num_layers=" << num_layers;
   });

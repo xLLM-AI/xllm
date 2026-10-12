@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "disagg_pd_service.h"
+#include "core/distributed_runtime/disagg_pd_service.h"
 
 #include <brpc/closure_guard.h>
 
@@ -21,9 +21,9 @@ namespace xllm {
 
 DisaggPDService::DisaggPDService(DisaggPDScheduler* scheduler,
                                  Engine* engine,
-                                 int32_t cache_block_size) {
+                                 int32_t kv_cache_block_tokens) {
   disagg_pd_service_impl_ = std::make_unique<DisaggPDServiceImpl>(
-      scheduler, engine, cache_block_size);
+      scheduler, engine, kv_cache_block_tokens);
 }
 
 void DisaggPDService::ReleaseReservation(

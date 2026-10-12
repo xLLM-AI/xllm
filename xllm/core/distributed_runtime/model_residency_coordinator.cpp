@@ -21,13 +21,13 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/distributed_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/kv_cache/storage/paged_kv_cache_page_allocator.h"
+#include "core/kv_cache/storage/virtual_kv_cache_page_allocator_impl.h"
 #include "core/runtime/worker_memory_resources.h"
 
 namespace xllm {
@@ -115,7 +115,7 @@ bool ModelResidencyCoordinator::initialize_model(
   CHECK_GT(num_layers, 0);
   CHECK_GT(dp_size, 0);
   CHECK_GT(tp_size, 0);
-  auto& coordinator = DistributedMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
   if (!coordinator.is_initialized()) {
     auto& phy_pool = PhysicalPagePool::get_instance();
     CHECK(phy_pool.is_initialized())
@@ -132,7 +132,8 @@ bool ModelResidencyCoordinator::initialize_model(
 
   const std::string& model_id = options_.model_id;
   coordinator.set_model_parallel_strategy(model_id, dp_size, tp_size);
-  coordinator.kv_cache_page_allocator().register_model(model_id, num_layers);
+  coordinator.virtual_kv_cache_page_allocator().register_model(model_id,
+                                                               num_layers);
 
   const int64_t total_weight_size =
       get_effective_weight_size(model_loader, num_layers);
@@ -196,7 +197,7 @@ void ModelResidencyCoordinator::get_virtual_memory_info(
     return;
   }
 
-  auto& coordinator = DistributedMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
   if (coordinator.is_initialized()) {
     worker_free_phy_pages = coordinator.get_worker_free_page_counts();
   }
@@ -259,8 +260,8 @@ bool ModelResidencyCoordinator::wakeup(const WakeupOptions& options) {
             << ". Worker clients count: " << worker_clients.size();
 
   // Restore weight and KV cache pages before workers load or transfer weights.
-  auto& coordinator = DistributedMemoryCoordinator::get_instance();
-  auto& pages = coordinator.kv_cache_page_allocator();
+  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& pages = coordinator.virtual_kv_cache_page_allocator();
   const auto plan = pages.begin_resume(options_.model_id);
   if (!plan.has_value()) {
     return false;
@@ -311,8 +312,8 @@ bool ModelResidencyCoordinator::wakeup(const WakeupOptions& options) {
 }
 
 bool ModelResidencyCoordinator::suspend_memory(bool skip_weight_release) {
-  auto& coordinator = DistributedMemoryCoordinator::get_instance();
-  auto& pages = coordinator.kv_cache_page_allocator();
+  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& pages = coordinator.virtual_kv_cache_page_allocator();
   const auto plan = pages.begin_suspend(options_.model_id);
   if (!plan.has_value()) {
     return false;

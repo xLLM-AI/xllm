@@ -8,11 +8,11 @@ add_subdirectory(torch)
 
 cc_library(
   NAME
-    worker_page_budget
+    worker_physical_page_budget
   HDRS
-    worker_page_budget.h
+    worker_physical_page_budget.h
   SRCS
-    worker_page_budget.cpp
+    worker_physical_page_budget.cpp
   DEPS
     glog::glog
 )
@@ -21,11 +21,11 @@ cc_library(
 # and has no transport or cache responsibilities.
 cc_library(
   NAME
-    global_memory_region
+    global_virtual_memory_region
   HDRS
-    global_memory_region.h
+    global_virtual_memory_region.h
   SRCS
-    global_memory_region.cpp
+    global_virtual_memory_region.cpp
   DEPS
     :virtual_memory
     glog::glog

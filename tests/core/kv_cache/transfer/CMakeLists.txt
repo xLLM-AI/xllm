@@ -116,4 +116,12 @@ cc_test(
     :xllm_server
     GTest::gtest_main
 )
+if(USE_NPU)
+  # The controller and peer must inherit port isolation before runtime startup.
+  set_tests_properties(
+    MooncakeKVCacheTransferDefaultTest.NpuLinearIndexerScalePushAndPullRoundTrip
+    PROPERTIES RUN_SERIAL TRUE
+               ENVIRONMENT "HCCL_NPU_SOCKET_PORT_RANGE=auto"
+  )
+endif()
 endif()

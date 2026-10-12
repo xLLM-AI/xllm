@@ -19,7 +19,7 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
-#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
+#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
 
 namespace xllm {
 
@@ -45,7 +45,7 @@ void WeightAllocation::set_contiguous(page_id_t start_page_id,
 }
 
 void WeightAllocation::set_fragmented(
-    std::unique_ptr<MappedMemoryRegion> region,
+    std::unique_ptr<MappedVirtualMemoryRegion> region,
     size_t num_pages,
     std::vector<WeightSegment> segments) {
   start_page_id_ = -1;

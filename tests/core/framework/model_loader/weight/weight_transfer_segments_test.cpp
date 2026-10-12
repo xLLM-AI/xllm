@@ -80,6 +80,8 @@ TEST(WeightTransferSegmentsTest, AcceptsLargestRepresentablePageEnd) {
 }
 
 TEST(WeightTransferSegmentsDeathTest, RejectsInvalidPageGeometry) {
+  // Linked libraries can start threads before main; exec a clean child.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
   EXPECT_DEATH(make_weight_transfer_segments({-1}, /*page_size=*/4), "page_id");
   EXPECT_DEATH(make_weight_transfer_segments({0}, /*page_size=*/0),
                "page_size");

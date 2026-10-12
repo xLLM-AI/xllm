@@ -9,13 +9,13 @@ cc_library(
   HDRS
     physical_page.h
     physical_page_pool.h
-    mapped_memory_region.h
-    shared_page_mapping.h
+    mapped_virtual_memory_region.h
+    shared_physical_page_mapping.h
   SRCS
     physical_page.cpp
     physical_page_pool.cpp
-    mapped_memory_region.cpp
-    shared_page_mapping.cpp
+    mapped_virtual_memory_region.cpp
+    shared_physical_page_mapping.cpp
   DEPS
     :platform
     torch

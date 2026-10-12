@@ -27,8 +27,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/framework/model_loader/weight/weight_memory_manager.h"
-#include "core/kv_cache/storage/kv_cache_memory_registry.h"
+#include "core/framework/model_loader/weight/weight_virtual_memory_manager.h"
+#include "core/kv_cache/storage/virtual_kv_cache_memory_registry.h"
 
 namespace xllm {
 
@@ -45,7 +45,7 @@ class WorkerMemoryResources final {
   void init_physical_page_pool(int64_t num_pages);
   bool is_initialized() const { return initialized_; }
   const torch::Device& device() const { return device_; }
-  KVCacheMemoryRegistry& kv_cache_memory() { return kv_cache_memory_; }
+  VirtualKVCacheMemoryRegistry& kv_cache_memory() { return kv_cache_memory_; }
 
   std::vector<torch::Tensor> create_k_tensors(const std::string& model_id,
                                               const std::vector<int64_t>& dims,
@@ -80,7 +80,7 @@ class WorkerMemoryResources final {
   get_all_model_weight_segments() const;
 
  private:
-  friend class DistributedMemoryCoordinator;
+  friend class DistributedVirtualMemoryCoordinator;
   friend class WorkerMemoryResourcesTestPeer;
 
   WorkerMemoryResources();
@@ -88,14 +88,14 @@ class WorkerMemoryResources final {
   WorkerMemoryResources(const WorkerMemoryResources&) = delete;
   WorkerMemoryResources& operator=(const WorkerMemoryResources&) = delete;
 
-  void init_device_();
+  void init_device();
   void destroy();
 
   bool initialized_ = false;
   torch::Device device_{torch::kCPU};
   mutable std::mutex mutex_;
-  KVCacheMemoryRegistry kv_cache_memory_;
-  WeightMemoryManager weight_memory_;
+  VirtualKVCacheMemoryRegistry kv_cache_memory_;
+  WeightVirtualMemoryManager weight_memory_;
 };
 
 }  // namespace xllm

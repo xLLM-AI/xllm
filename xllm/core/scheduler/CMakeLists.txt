@@ -34,7 +34,7 @@ cc_library(
   DEPS
     :batch
     :distributed_runtime
-    :distributed_memory_coordinator
+    :distributed_virtual_memory_coordinator
     :request
     :runtime
     :profile

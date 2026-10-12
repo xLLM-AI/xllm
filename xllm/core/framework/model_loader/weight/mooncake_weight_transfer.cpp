@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/framework/allocator/global_memory_region.h"
+#include "core/framework/allocator/global_virtual_memory_region.h"
 
 namespace xllm {
 
@@ -36,29 +36,31 @@ bool MooncakeWeightTransfer::initialize() {
   return initialized_;
 }
 
-bool MooncakeWeightTransfer::register_global_memory_region() {
-  auto& global_memory_region = GlobalMemoryRegion::get_instance();
-  if (!global_memory_region.is_initialized()) {
-    LOG(ERROR) << "GlobalMemoryRegion not initialized";
+bool MooncakeWeightTransfer::register_global_virtual_memory_region() {
+  auto& global_virtual_memory_region =
+      GlobalVirtualMemoryRegion::get_instance();
+  if (!global_virtual_memory_region.is_initialized()) {
+    LOG(ERROR) << "GlobalVirtualMemoryRegion not initialized";
     return false;
   }
 
-  std::vector<void*> addrs = {global_memory_region.base_vaddr()};
-  std::vector<size_t> lens = {global_memory_region.total_size()};
+  std::vector<void*> addrs = {global_virtual_memory_region.base_vaddr()};
+  std::vector<size_t> lens = {global_virtual_memory_region.total_size()};
   std::vector<uint64_t> buf_bytes = {
-      static_cast<uint64_t>(global_memory_region.page_size())};
+      static_cast<uint64_t>(global_virtual_memory_region.page_size())};
   if (!mooncake_te_->register_memory(
           addrs,
           lens,
           buf_bytes,
-          global_memory_region.acquire_mapping_lease())) {
-    LOG(ERROR) << "register GlobalMemoryRegion failed";
+          global_virtual_memory_region.acquire_mapping_lease())) {
+    LOG(ERROR) << "register GlobalVirtualMemoryRegion failed";
     return false;
   }
 
-  LOG(INFO) << "MooncakeWeightTransfer: register GlobalMemoryRegion success, "
-            << "total_size=" << global_memory_region.total_size()
-            << ", num_pages=" << global_memory_region.num_total_pages();
+  LOG(INFO)
+      << "MooncakeWeightTransfer: register GlobalVirtualMemoryRegion success, "
+      << "total_size=" << global_virtual_memory_region.total_size()
+      << ", num_pages=" << global_virtual_memory_region.num_total_pages();
   return true;
 }
 

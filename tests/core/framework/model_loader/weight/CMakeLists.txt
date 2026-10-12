@@ -31,3 +31,17 @@ endif()
 
 get_property(weight_tests DIRECTORY PROPERTY TESTS)
 set_tests_properties(${weight_tests} PROPERTIES TIMEOUT 60)
+
+# Fatal checks run in child processes; isolate them from runtime startup load.
+set_tests_properties(
+  WeightTransferSegmentsDeathTest.RejectsInvalidPageGeometry
+  PROPERTIES RUN_SERIAL TRUE
+)
+
+if(USE_NPU)
+  # These cases initialize the NPU runtime and own the device-0 page pool.
+  set(model_weight_allocator_tests ${weight_tests})
+  list(FILTER model_weight_allocator_tests INCLUDE
+    REGEX "^ModelWeightAllocatorTest\\.")
+  set_tests_properties(${model_weight_allocator_tests} PROPERTIES RUN_SERIAL TRUE)
+endif()

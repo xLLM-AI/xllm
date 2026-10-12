@@ -220,7 +220,7 @@ struct RecItemInfo {
 // Weight segment info for P2P transfer (supports non-contiguous allocation)
 // Forward declaration needed by InstanceInfo
 struct WeightSegment {
-  uint64_t offset;  // Offset from GlobalMemoryRegion base address
+  uint64_t offset;  // Offset from GlobalVirtualMemoryRegion base address
   uint64_t size;    // Segment size in bytes
 };
 
@@ -248,8 +248,8 @@ struct InstanceInfo {
   // VirtualMemory mode: total physical pages per worker (all workers have the
   // same total)
   size_t total_phy_pages = 0;
-  // VirtualMemory mode: model weight segments in GlobalMemoryRegion (dp group 0
-  // only) key: model_id, value: list of {offset, size} segments
+  // VirtualMemory mode: model weight segments in GlobalVirtualMemoryRegion (dp
+  // group 0 only) key: model_id, value: list of {offset, size} segments
   std::unordered_map<std::string, std::vector<WeightSegment>>
       model_weight_segments;
 
@@ -295,10 +295,14 @@ struct InstanceInfo {
   }
 };
 
-// VirtualMemory mode: per-layer offsets for KV cache transfer
-struct KVCacheLayerOffsets {
-  std::vector<uint64_t> k_offsets;  // K cache offsets in GlobalMemoryRegion
-  std::vector<uint64_t> v_offsets;  // V cache offsets in GlobalMemoryRegion
+// Per-layer KV cache byte offsets in GlobalVirtualMemoryRegion's physical-page
+// pool mapping. Each vector is indexed by transferred block, not physical page
+// ID.
+struct VirtualKVCacheLayerGlobalOffsets {
+  std::vector<uint64_t>
+      k_offsets;  // K cache offsets in GlobalVirtualMemoryRegion
+  std::vector<uint64_t>
+      v_offsets;  // V cache offsets in GlobalVirtualMemoryRegion
 };
 
 // Transfer mapping for one cache group. group_id is an opaque, stable
@@ -323,9 +327,10 @@ struct TransferKVInfo {
   int32_t dp_rank = 0;
   InstanceInfo remote_instance_info;
 
-  // VirtualMemory mode: destination offsets from D-node (per-layer)
-  // Only populated when KVCacheConfig::enable_virtual_memory is true.
-  std::vector<KVCacheLayerOffsets> dst_kv_cache_layer_offsets;
+  // Destination byte offsets in the D-node's GlobalVirtualMemoryRegion
+  // (per-layer). Populated for KV caches backed by virtual memory.
+  std::vector<VirtualKVCacheLayerGlobalOffsets>
+      dst_virtual_kv_cache_layer_global_offsets;
 
   // One entry per cache id space. group_id is unique within one request.
   std::vector<KVTransferMapping> mappings;

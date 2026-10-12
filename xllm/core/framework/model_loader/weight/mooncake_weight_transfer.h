@@ -35,7 +35,7 @@ class MooncakeWeightTransfer final {
 
   bool initialize();
 
-  bool register_global_memory_region();
+  bool register_global_virtual_memory_region();
 
   bool link_p2p(const std::string& remote_addr);
   bool link_p2p(const std::vector<std::string>& remote_addrs);

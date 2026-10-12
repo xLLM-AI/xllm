@@ -24,7 +24,7 @@ limitations under the License.
 #include <optional>
 
 #include "common/types.h"
-#include "core/framework/allocator/virtual_memory/mapped_memory_region.h"
+#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"

@@ -71,14 +71,14 @@ message LatencyMetrics {
 message VirtualMemoryHeartbeatInfo {
   // Per-worker free physical pages (index = worker rank)
   repeated uint64 worker_free_phy_pages = 1;
-  // Model weight segments in GlobalMemoryRegion (key: model_id)
+  // Model weight segments in GlobalVirtualMemoryRegion (key: model_id)
   // Ordered segments that concatenate to form the full model weights
   map<string, WeightSegmentList> model_weight_segments = 3;
 }
 
-// A single weight segment in GlobalMemoryRegion
+// A single weight segment in GlobalVirtualMemoryRegion
 message WeightSegmentInfo {
-  uint64 offset = 1;  // Byte offset from GlobalMemoryRegion base
+  uint64 offset = 1;  // Byte offset from GlobalVirtualMemoryRegion base
   uint64 size = 2;    // Segment size in bytes
 }
 

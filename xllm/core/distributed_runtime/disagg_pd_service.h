@@ -19,8 +19,8 @@ limitations under the License.
 #include <memory>
 
 #include "common/macros.h"
+#include "core/distributed_runtime/disagg_pd_service_impl.h"
 #include "disagg_pd.pb.h"
-#include "disagg_pd_service_impl.h"
 
 namespace xllm {
 
@@ -28,7 +28,7 @@ class DisaggPDService : public proto::DisaggPDService {
  public:
   explicit DisaggPDService(DisaggPDScheduler* scheduler,
                            Engine* engine,
-                           int32_t cache_block_size);
+                           int32_t kv_cache_block_tokens);
   explicit DisaggPDService() {}
   virtual ~DisaggPDService() = default;
 

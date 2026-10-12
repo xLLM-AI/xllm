@@ -211,7 +211,7 @@ folly::SemiFuture<bool> WorkerMemoryRpcClient::free_weight_pages_async(
 
 folly::SemiFuture<
     std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>>
-WorkerMemoryRpcClient::get_kv_cache_offsets_async(
+WorkerMemoryRpcClient::get_virtual_kv_cache_offsets_async(
     const std::string& model_id,
     const std::vector<int32_t>& block_ids,
     uint64_t block_size_bytes) {
@@ -225,19 +225,19 @@ WorkerMemoryRpcClient::get_kv_cache_offsets_async(
                         block_ids = block_ids,
                         block_size_bytes,
                         promise = std::move(promise)]() mutable {
-    proto::GetKVCacheOffsetsRequest req;
+    proto::GetVirtualKVCacheOffsetsRequest req;
     req.set_model_id(model_id);
     for (int32_t block_id : block_ids) {
       req.add_block_ids(block_id);
     }
     req.set_block_size_bytes(block_size_bytes);
 
-    proto::GetKVCacheOffsetsResponse resp;
+    proto::GetVirtualKVCacheOffsetsResponse resp;
     brpc::Controller cntl;
-    stub_->GetKVCacheOffsets(&cntl, &req, &resp, nullptr);
+    stub_->GetVirtualKVCacheOffsets(&cntl, &req, &resp, nullptr);
 
     if (cntl.Failed()) {
-      LOG(ERROR) << "GetKVCacheOffsets failed: " << cntl.ErrorText();
+      LOG(ERROR) << "GetVirtualKVCacheOffsets failed: " << cntl.ErrorText();
       promise.setValue(ResultType{});
       return;
     }

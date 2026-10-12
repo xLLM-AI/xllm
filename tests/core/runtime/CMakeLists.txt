@@ -31,9 +31,10 @@ if(USE_NPU)
       GTest::gtest_main
       glog::glog
   )
+  # Isolate runtime initialization and the device-0 page pool from other cases.
   set_tests_properties(
     WorkerMemoryResourcesTest.KvShortageLeavesEveryLayerUnmapped
-    PROPERTIES TIMEOUT 60
+    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
   )
 
   cc_test(

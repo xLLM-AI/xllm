@@ -66,7 +66,7 @@ class WorkerMemoryRpcService final : public proto::ModelMemoryDist {
                           proto::Status* response,
                           ::google::protobuf::Closure* done) override;
 
-  // Weight pages allocation from GlobalMemoryRegion
+  // Weight pages allocation from GlobalVirtualMemoryRegion
   void AllocWeightPages(::google::protobuf::RpcController* controller,
                         const proto::AllocWeightPagesRequest* request,
                         proto::Status* response,
@@ -77,11 +77,13 @@ class WorkerMemoryRpcService final : public proto::ModelMemoryDist {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
-  // Get mapped KV cache offsets for KV cache blocks (used in PD disaggregation)
-  void GetKVCacheOffsets(::google::protobuf::RpcController* controller,
-                         const proto::GetKVCacheOffsetsRequest* request,
-                         proto::GetKVCacheOffsetsResponse* response,
-                         ::google::protobuf::Closure* done) override;
+  // Get virtual-memory KV block byte offsets in the shared physical-page pool
+  // mapping for PD disaggregation.
+  void GetVirtualKVCacheOffsets(
+      ::google::protobuf::RpcController* controller,
+      const proto::GetVirtualKVCacheOffsetsRequest* request,
+      proto::GetVirtualKVCacheOffsetsResponse* response,
+      ::google::protobuf::Closure* done) override;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcService);

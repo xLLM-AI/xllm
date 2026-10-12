@@ -494,7 +494,7 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const BlockManagerPool::Options& options,
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
-    KVCachePageAllocator* page_allocator)
+    VirtualKVCachePageAllocator* page_allocator)
     : BlockManagerPool(options, dp_size, page_allocator),
       transfer_coordinator_(std::move(transfer_coordinator)) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";

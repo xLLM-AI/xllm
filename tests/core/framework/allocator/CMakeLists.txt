@@ -5,12 +5,26 @@ include(cc_test)
 
 cc_test(
   NAME
-    worker_page_budget_test
+    worker_physical_page_budget_test
+  NO_NPU_RUNTIME
   SRCS
-    worker_page_budget_test.cpp
+    worker_physical_page_budget_test.cpp
   DEPS
-    :worker_page_budget
+    :worker_physical_page_budget
     GTest::gtest_main
+)
+
+# Byte-range rejection needs no device storage. Keep death-test children free
+# of Python and NPU runtime initialization.
+cc_test(
+  NAME
+    mapped_virtual_memory_tensor_view_test
+  NO_NPU_RUNTIME
+  SRCS
+    mapped_virtual_memory_tensor_view_test.cpp
+  DEPS
+    GTest::gtest_main
+    glog::glog
 )
 
 if(USE_NPU)
@@ -22,7 +36,7 @@ if(USE_NPU)
     DEPS
       :virtual_memory
       :virtual_memory_torch
-      :global_memory_region
+      :global_virtual_memory_region
       GTest::gtest_main
       glog::glog
   )
@@ -34,9 +48,8 @@ get_property(allocator_tests DIRECTORY PROPERTY TESTS)
 set_tests_properties(${allocator_tests} PROPERTIES TIMEOUT 60)
 
 if(USE_NPU)
-  # Threadsafe death tests restart the NPU runtime for each assertion.
-  set_tests_properties(
-    VirtualMemoryTest.TensorViewsRespectByteBoundsAndAlignment
-    PROPERTIES TIMEOUT 120
-  )
+  # Each case owns the device-0 page pool; isolate it from other CTest processes.
+  set(virtual_memory_tests ${allocator_tests})
+  list(FILTER virtual_memory_tests INCLUDE REGEX "^VirtualMemoryTest\\.")
+  set_tests_properties(${virtual_memory_tests} PROPERTIES RUN_SERIAL TRUE)
 endif()

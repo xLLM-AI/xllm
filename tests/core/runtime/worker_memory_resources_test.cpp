@@ -24,7 +24,7 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
-#include "core/framework/allocator/global_memory_region.h"
+#include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "tests/core/framework/allocator/virtual_memory_test_utils.h"
 #include "tests/npu_test_environment.h"
@@ -74,9 +74,9 @@ class WorkerMemoryResourcesTest : public ::testing::Test {
     auto& pool = PhysicalPagePool::get_instance();
     const size_t page_size = vmm::get_recommended_granularity(device.index());
     pool.init(device, kPoolPages, page_size);
-    GlobalMemoryRegion::get_instance().init(device);
+    GlobalVirtualMemoryRegion::get_instance().init(device);
     resources_initialized_ = true;
-    ASSERT_TRUE(GlobalMemoryRegion::get_instance().is_initialized());
+    ASSERT_TRUE(GlobalVirtualMemoryRegion::get_instance().is_initialized());
     ASSERT_EQ(pool.num_available(), kPoolPages);
   }
 
@@ -97,7 +97,8 @@ class WorkerMemoryResourcesTest : public ::testing::Test {
 TEST_F(WorkerMemoryResourcesTest, KvShortageLeavesEveryLayerUnmapped) {
   auto& pool = PhysicalPagePool::get_instance();
   auto& allocator = WorkerMemoryResources::get_instance();
-  const size_t page_size = GlobalMemoryRegion::get_instance().page_size();
+  const size_t page_size =
+      GlobalVirtualMemoryRegion::get_instance().page_size();
   const std::vector<int64_t> dims = {static_cast<int64_t>(page_size)};
   const auto k_tensors = allocator.create_k_tensors(
       kModelId, dims, torch::kUInt8, /*num_layers=*/2);

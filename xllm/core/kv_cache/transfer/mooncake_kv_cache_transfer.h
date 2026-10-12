@@ -155,14 +155,14 @@ class MooncakeKVCacheTransferDefault final
   BufLayout spec_layout_;
 };
 
-class MooncakeKVCacheTransferVirtualMemory final
+class MooncakeVirtualKVCacheTransfer final
     : public MooncakeKVCacheTransferBase {
  public:
-  MooncakeKVCacheTransferVirtualMemory(
+  MooncakeVirtualKVCacheTransfer(
       const int32_t device_id,
       const uint16_t listen_port,
       const torch::Device& device,
-      std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider);
+      std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider);
 
   void set_model_id(const std::string& model_id) { model_id_ = model_id; }
 
@@ -196,7 +196,7 @@ class MooncakeKVCacheTransferVirtualMemory final
       int32_t kv_split_size);
 
   std::string model_id_;
-  std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider_;
+  std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider_;
 };
 
 }  // namespace xllm

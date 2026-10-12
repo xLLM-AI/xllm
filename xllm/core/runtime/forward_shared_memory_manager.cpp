@@ -277,8 +277,8 @@ inline size_t get_instance_info_size(const InstanceInfo& info) {
   return size;
 }
 
-inline size_t get_kv_cache_layer_offsets_size(
-    const std::vector<KVCacheLayerOffsets>& offsets) {
+inline size_t get_virtual_kv_cache_layer_global_offsets_size(
+    const std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
   size_t total = type_size<uint64_t>;  // num_layers
   for (const auto& layer : offsets) {
     total +=
@@ -302,7 +302,8 @@ inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
          type_size<bool> +     // rank_local_mapping
          type_size<int32_t> +  // dp_rank
          get_instance_info_size(info.remote_instance_info) +
-         get_kv_cache_layer_offsets_size(info.dst_kv_cache_layer_offsets) +
+         get_virtual_kv_cache_layer_global_offsets_size(
+             info.dst_virtual_kv_cache_layer_global_offsets) +
          get_kv_transfer_mappings_size(info.mappings);
 }
 
@@ -860,9 +861,9 @@ inline void write_instance_info(RawInputSerializeContext& context,
   }
 }
 
-inline void write_kv_cache_layer_offsets(
+inline void write_virtual_kv_cache_layer_global_offsets(
     char*& buffer,
-    const std::vector<KVCacheLayerOffsets>& offsets) {
+    const std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
   write_data(buffer, (uint64_t)offsets.size());
   for (const auto& layer : offsets) {
     write_vector(buffer, layer.k_offsets);
@@ -892,9 +893,9 @@ inline void write_kv_transfer_mappings(
   }
 }
 
-inline void write_kv_cache_layer_offsets(
+inline void write_virtual_kv_cache_layer_global_offsets(
     RawInputSerializeContext& context,
-    const std::vector<KVCacheLayerOffsets>& offsets) {
+    const std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
   write_data(context.descriptor, static_cast<uint64_t>(offsets.size()));
   for (const auto& layer : offsets) {
     write_vector(context.descriptor, layer.k_offsets);
@@ -907,7 +908,8 @@ inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
   write_data(buffer, info.rank_local_mapping);
   write_data(buffer, info.dp_rank);
   write_instance_info(buffer, info.remote_instance_info);
-  write_kv_cache_layer_offsets(buffer, info.dst_kv_cache_layer_offsets);
+  write_virtual_kv_cache_layer_global_offsets(
+      buffer, info.dst_virtual_kv_cache_layer_global_offsets);
   write_kv_transfer_mappings(buffer, info.mappings);
 }
 
@@ -917,7 +919,8 @@ inline void write_transfer_kv_info(RawInputSerializeContext& context,
   write_data(context.descriptor, info.rank_local_mapping);
   write_data(context.descriptor, info.dp_rank);
   write_instance_info(context, info.remote_instance_info);
-  write_kv_cache_layer_offsets(context, info.dst_kv_cache_layer_offsets);
+  write_virtual_kv_cache_layer_global_offsets(
+      context, info.dst_virtual_kv_cache_layer_global_offsets);
   write_kv_transfer_mappings(context, info.mappings);
 }
 
@@ -1805,9 +1808,9 @@ inline void read_instance_info(ReadContext& context, InstanceInfo& info) {
   }
 }
 
-inline void read_kv_cache_layer_offsets(
+inline void read_virtual_kv_cache_layer_global_offsets(
     const char*& buffer,
-    std::vector<KVCacheLayerOffsets>& offsets) {
+    std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
   uint64_t num_layers;
   read_data(buffer, num_layers);
   offsets.resize(num_layers);
@@ -1843,9 +1846,9 @@ inline void read_kv_transfer_mappings(
   }
 }
 
-inline void read_kv_cache_layer_offsets(
+inline void read_virtual_kv_cache_layer_global_offsets(
     ReadContext& context,
-    std::vector<KVCacheLayerOffsets>& offsets) {
+    std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
   uint64_t num_layers;
   read_data(context, num_layers);
   offsets.resize(num_layers);
@@ -1860,7 +1863,8 @@ inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
   read_data(buffer, info.rank_local_mapping);
   read_data(buffer, info.dp_rank);
   read_instance_info(buffer, info.remote_instance_info);
-  read_kv_cache_layer_offsets(buffer, info.dst_kv_cache_layer_offsets);
+  read_virtual_kv_cache_layer_global_offsets(
+      buffer, info.dst_virtual_kv_cache_layer_global_offsets);
   read_kv_transfer_mappings(buffer, info.mappings);
 }
 
@@ -1869,7 +1873,8 @@ inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
   read_data(context, info.rank_local_mapping);
   read_data(context, info.dp_rank);
   read_instance_info(context, info.remote_instance_info);
-  read_kv_cache_layer_offsets(context, info.dst_kv_cache_layer_offsets);
+  read_virtual_kv_cache_layer_global_offsets(
+      context, info.dst_virtual_kv_cache_layer_global_offsets);
   read_kv_transfer_mappings(context, info.mappings);
 }
 

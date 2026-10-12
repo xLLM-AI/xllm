@@ -727,6 +727,9 @@ TEST_F(SlotBufferTest, NarrowAndFullBlockTablesReuseStrideWithoutStalePages) {
   }
 }
 
+// Frequency, presence, repetition, temperature, top_p, and min_p.
+constexpr uint64_t kFloatingSamplingFieldCount = 6;
+
 constexpr std::array<torch::Tensor SamplingParameters::*, 13> kInputs = {
     &SamplingParameters::selected_token_idxes,
     &SamplingParameters::frequency_penalties,
@@ -1033,9 +1036,10 @@ TEST_P(SlotSamplingInputTest, EmptyClearsBindingAndTransfersNothing) {
 
 TEST_P(SlotSamplingInputTest,
        CapacityRejectsBeforeReplacingOwnerAndAccountsBytes) {
-  const uint64_t float_bytes = GetParam() == torch::kFloat32 ? 4 : 2;
+  const uint64_t float_bytes = torch::elementSize(GetParam());
   const uint64_t sampling_bytes =
-      8 * (16 + 5 * float_bytes) + 8 * 16 * 12 + 8 * 5;
+      8 * (16 + kFloatingSamplingFieldCount * float_bytes) + 8 * 16 * 12 +
+      8 * 5;
   // Seven model regions occupy 256 bytes; mapping uses 2x8 int64 indices
   // plus int64/int32 gather temporaries on device. These feed KV budgeting.
   const uint64_t result_bytes =
@@ -1384,7 +1388,9 @@ TEST(SlotBufferModelOnlyTest,
   capacity.max_sample_rows = 2;
   capacity.max_result_width = 0;
   ASSERT_TRUE(buffer->configure_sampling(capacity).ok());
-  EXPECT_EQ(buffer->pinned_bytes(), 160U + 4 * 36 + 4 * 8 * 12 + 2 * 5);
+  EXPECT_EQ(buffer->pinned_bytes(),
+            160U + 4 * (16 + kFloatingSamplingFieldCount * sizeof(float)) +
+                4 * 8 * 12 + 2 * 5);
   EXPECT_EQ(buffer->device_bytes(), buffer->pinned_bytes());
   SamplingParameters parameters;
   parameters.selected_token_idxes = torch::tensor({0, 1, 2, 3}, torch::kInt32);

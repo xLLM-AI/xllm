@@ -23,13 +23,13 @@ limitations under the License.
 
 #include "core/common/device_monitor.h"
 #include "core/common/metrics.h"
-#include "core/distributed_runtime/distributed_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
-#include "core/kv_cache/storage/paged_kv_cache_page_allocator.h"
+#include "core/kv_cache/storage/virtual_kv_cache_page_allocator_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_client.h"
 #include "models/model_registry.h"
@@ -131,10 +131,10 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     }
   }
 
-  KVCachePageAllocator* page_allocator =
+  VirtualKVCachePageAllocator* page_allocator =
       options.enable_virtual_memory()
-          ? &DistributedMemoryCoordinator::get_instance()
-                 .kv_cache_page_allocator()
+          ? &DistributedVirtualMemoryCoordinator::get_instance()
+                 .virtual_kv_cache_page_allocator()
           : nullptr;
   std::unique_ptr<KVCacheManager> manager;
   if (options.enable_host_offload()) {

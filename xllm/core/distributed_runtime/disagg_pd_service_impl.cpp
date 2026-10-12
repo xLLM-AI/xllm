@@ -21,7 +21,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/types.h"
-#include "core/distributed_runtime/distributed_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -34,10 +34,10 @@ namespace xllm {
 
 DisaggPDServiceImpl::DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
                                          Engine* engine,
-                                         int32_t cache_block_size)
+                                         int32_t kv_cache_block_tokens)
     : scheduler_(scheduler),
       engine_(engine),
-      cache_block_size_(cache_block_size) {
+      kv_cache_block_tokens_(kv_cache_block_tokens) {
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
@@ -321,7 +321,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         group->set_group_id(cache_group_id(BlockType::LINEAR));
         group->add_ids(static_cast<uint64_t>(linear_state_id));
       }
-      // Only paged KV managers have pool-relative memory offsets.
+      // Only virtual-memory KV managers have pool-relative memory offsets.
       auto* block_manager = engine_->block_manager_pool();
       if (block_manager != nullptr &&
           block_manager->options().enable_virtual_memory() &&
@@ -329,23 +329,24 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
             layer_offsets;
         const auto& block_options = block_manager->options();
-        CHECK_GT(cache_block_size_, 0);
+        CHECK_GT(kv_cache_block_tokens_, 0);
         // KV split enlarges the manager's logical block length; offsets use
         // the physical cache block length configured by the engine.
         const uint64_t block_size_bytes =
             static_cast<uint64_t>(block_options.slot_size()) *
-            static_cast<uint64_t>(cache_block_size_) / 2;
+            static_cast<uint64_t>(kv_cache_block_tokens_) / 2;
         const bool offsets_available =
-            DistributedMemoryCoordinator::get_instance().get_kv_cache_offsets(
-                dp_rank,
-                block_options.model_id(),
-                block_ids,
-                block_size_bytes,
-                layer_offsets);
+            DistributedVirtualMemoryCoordinator::get_instance()
+                .get_virtual_kv_cache_offsets(dp_rank,
+                                              block_options.model_id(),
+                                              block_ids,
+                                              block_size_bytes,
+                                              layer_offsets);
         if (offsets_available) {
           // Fill proto with per-layer offsets
           for (const auto& [k_offsets, v_offsets] : layer_offsets) {
-            auto* layer_proto = resp->add_kv_cache_layer_offsets();
+            auto* layer_proto =
+                resp->add_virtual_kv_cache_layer_global_offsets();
             for (const auto& k_off : k_offsets) {
               layer_proto->add_k_offsets(k_off);
             }

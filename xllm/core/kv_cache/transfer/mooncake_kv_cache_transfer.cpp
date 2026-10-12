@@ -40,9 +40,9 @@ std::string get_merge_key(const uint64_t dst_cluster_id,
   return std::to_string(dst_cluster_id) + "_" + dst_addr;
 }
 
-void merge_kv_cache_offsets(
-    std::vector<KVCacheLayerOffsets>& merged_layer_offsets,
-    const std::vector<KVCacheLayerOffsets>& layer_offsets) {
+void merge_virtual_kv_cache_global_offsets(
+    std::vector<VirtualKVCacheLayerGlobalOffsets>& merged_layer_offsets,
+    const std::vector<VirtualKVCacheLayerGlobalOffsets>& layer_offsets) {
   if (layer_offsets.empty()) {
     return;
   }
@@ -112,15 +112,17 @@ void merge_kv_info(
     kv_info.dst_cluster_id = dst_cluster_id;
     kv_info.dst_addr = dst_addr;
     append_mappings(kv_info.mappings, info.mappings);
-    merge_kv_cache_offsets(kv_info.dst_kv_cache_layer_offsets,
-                           info.dst_kv_cache_layer_offsets);
+    merge_virtual_kv_cache_global_offsets(
+        kv_info.dst_virtual_kv_cache_layer_global_offsets,
+        info.dst_virtual_kv_cache_layer_global_offsets);
     merged_kv_infos.emplace(key, std::move(kv_info));
     return;
   }
 
   append_mappings(it->second.mappings, info.mappings);
-  merge_kv_cache_offsets(it->second.dst_kv_cache_layer_offsets,
-                         info.dst_kv_cache_layer_offsets);
+  merge_virtual_kv_cache_global_offsets(
+      it->second.dst_virtual_kv_cache_layer_global_offsets,
+      info.dst_virtual_kv_cache_layer_global_offsets);
 }
 
 }  // namespace
@@ -737,14 +739,14 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
 }
 
 // ============================================================================
-// MooncakeKVCacheTransferVirtualMemory
+// MooncakeVirtualKVCacheTransfer
 // ============================================================================
 
-MooncakeKVCacheTransferVirtualMemory::MooncakeKVCacheTransferVirtualMemory(
+MooncakeVirtualKVCacheTransfer::MooncakeVirtualKVCacheTransfer(
     const int32_t device_id,
     const uint16_t listen_port,
     const torch::Device& device,
-    std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider)
+    std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider)
     : MooncakeKVCacheTransferBase(
           device_id,
           listen_port,
@@ -754,7 +756,7 @@ MooncakeKVCacheTransferVirtualMemory::MooncakeKVCacheTransferVirtualMemory(
   CHECK(memory_provider_ != nullptr);
 }
 
-void MooncakeKVCacheTransferVirtualMemory::register_kv_cache(
+void MooncakeVirtualKVCacheTransfer::register_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
     const KVCacheShape& kv_cache_shape,
     torch::ScalarType dtype) {
@@ -780,7 +782,7 @@ void MooncakeKVCacheTransferVirtualMemory::register_kv_cache(
   if (pending_registration_context_.has_value()) {
     registration_context = *pending_registration_context_;
     registration_context->layout_family.append("_virtual_memory");
-    const KVCacheTransferMemoryRegion memory_region =
+    const VirtualKVCacheTransferMemoryRegion memory_region =
         memory_provider_->memory_region();
     tensor_manifests.reserve(kv_caches.size() * 2);
     for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
@@ -846,8 +848,8 @@ void MooncakeKVCacheTransferVirtualMemory::register_kv_cache(
   }
 }
 
-void MooncakeKVCacheTransferVirtualMemory::register_kv_cache_impl() {
-  const KVCacheTransferMemoryRegion memory_region =
+void MooncakeVirtualKVCacheTransfer::register_kv_cache_impl() {
+  const VirtualKVCacheTransferMemoryRegion memory_region =
       memory_provider_->memory_region();
   CHECK(memory_region.base_address != nullptr);
   CHECK_GT(memory_region.size_bytes, 0);
@@ -860,7 +862,7 @@ void MooncakeKVCacheTransferVirtualMemory::register_kv_cache_impl() {
                                      std::move(lens),
                                      std::move(buf_bytes),
                                      memory_region.lifetime)) {
-    LOG(FATAL) << "register GlobalMemoryRegion failed";
+    LOG(FATAL) << "register GlobalVirtualMemoryRegion failed";
   }
 
   LOG(INFO) << "register_kv_cache_impl success, total_size="
@@ -868,7 +870,7 @@ void MooncakeKVCacheTransferVirtualMemory::register_kv_cache_impl() {
             << ", size_per_block=" << size_per_block_;
 }
 
-bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks(
+bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
@@ -894,7 +896,7 @@ bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks(
   return true;
 }
 
-bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks(
+bool MooncakeVirtualKVCacheTransfer::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     bool is_spec_draft,
@@ -905,7 +907,7 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks(
       merged_kv_infos, layer_synchronizer, kv_split_rank, kv_split_size);
 }
 
-bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
+bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks_impl(
     const std::string& src_addr,
     const std::vector<uint64_t>& src_blocks,
     const std::vector<uint64_t>& dst_blocks) {
@@ -914,7 +916,7 @@ bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
     return false;
   }
 
-  // For each layer, convert block_ids to GlobalMemoryRegion offsets and
+  // For each layer, convert block_ids to GlobalVirtualMemoryRegion offsets and
   // transfer
   for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
     std::vector<uint64_t> src_offsets;
@@ -923,7 +925,7 @@ bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
     dst_offsets.reserve(dst_blocks.size() * 2);
 
     for (size_t i = 0; i < src_blocks.size(); ++i) {
-      // Source block -> GlobalMemoryRegion offsets
+      // Source block -> GlobalVirtualMemoryRegion offsets
       auto [src_k_off, src_v_off] =
           memory_provider_->get_global_offsets_for_block(
               model_id_, layer_id, src_blocks[i], size_per_block_);
@@ -933,7 +935,7 @@ bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
         return false;
       }
 
-      // Destination block -> GlobalMemoryRegion offsets
+      // Destination block -> GlobalVirtualMemoryRegion offsets
       auto [dst_k_off, dst_v_off] =
           memory_provider_->get_global_offsets_for_block(
               model_id_, layer_id, dst_blocks[i], size_per_block_);
@@ -968,7 +970,7 @@ bool MooncakeKVCacheTransferVirtualMemory::pull_kv_blocks_impl(
   return true;
 }
 
-bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
+bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     int32_t kv_split_rank,
@@ -1020,9 +1022,10 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
       }
 
       // Check if we have VirtualMemory offsets from D-node
-      bool has_dst_offsets = !kv_info.dst_kv_cache_layer_offsets.empty() &&
-                             static_cast<size_t>(layer_index) <
-                                 kv_info.dst_kv_cache_layer_offsets.size();
+      bool has_dst_offsets =
+          !kv_info.dst_virtual_kv_cache_layer_global_offsets.empty() &&
+          static_cast<size_t>(layer_index) <
+              kv_info.dst_virtual_kv_cache_layer_global_offsets.size();
 
       std::vector<uint64_t> src_offsets;
       std::vector<uint64_t> dst_offsets;
@@ -1030,8 +1033,8 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
       dst_offsets.reserve(src_blocks.size() * 2);
 
       for (size_t i = 0; i < src_blocks.size(); ++i) {
-        // Source block -> GlobalMemoryRegion offsets (calculate locally on
-        // P-node)
+        // Source block -> GlobalVirtualMemoryRegion offsets (calculate locally
+        // on P-node)
         auto [src_k_off, src_v_off] =
             memory_provider_->get_global_offsets_for_block(
                 model_id_, layer_index, src_blocks[i], size_per_block_);
@@ -1045,7 +1048,7 @@ bool MooncakeKVCacheTransferVirtualMemory::push_kv_blocks_impl(
         uint64_t dst_k_off, dst_v_off;
         if (has_dst_offsets) {
           const auto& layer_offsets =
-              kv_info.dst_kv_cache_layer_offsets[layer_index];
+              kv_info.dst_virtual_kv_cache_layer_global_offsets[layer_index];
           if (i < layer_offsets.k_offsets.size() &&
               i < layer_offsets.v_offsets.size()) {
             dst_k_off = layer_offsets.k_offsets[i];

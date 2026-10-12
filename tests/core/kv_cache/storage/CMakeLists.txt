@@ -21,19 +21,20 @@ if(USE_NPU)
   # Exercise the concrete KV storage without distributed runtime initialization.
   cc_test(
     NAME
-      kv_cache_memory_registry_test
+      virtual_kv_cache_memory_registry_test
     SRCS
-      kv_cache_memory_registry_test.cpp
+      virtual_kv_cache_memory_registry_test.cpp
     DEPS
       :virtual_memory_kv_cache_storage
       GTest::gtest_main
       glog::glog
   )
+  # Each process initializes the NPU runtime and owns the device-0 page pool.
   set_tests_properties(
-    KVCacheMemoryRegistryTest.ModelsKeepIndependentMappingsAndMetadata
-    KVCacheMemoryRegistryTest.ShortageDoesNotPartiallyMapAnotherModel
-    KVCacheMemoryRegistryTest.TensorAllocatorUsesItsInjectedRegistry
-    PROPERTIES TIMEOUT 60
+    VirtualKVCacheMemoryRegistryTest.ModelsKeepIndependentMappingsAndMetadata
+    VirtualKVCacheMemoryRegistryTest.ShortageDoesNotPartiallyMapAnotherModel
+    VirtualKVCacheMemoryRegistryTest.TensorAllocatorUsesItsInjectedRegistry
+    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
   )
 endif()
 
@@ -41,11 +42,11 @@ endif()
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    paged_kv_cache_page_allocator_test
+    virtual_kv_cache_page_allocator_impl_test
   SRCS
-    paged_kv_cache_page_allocator_test.cpp
+    virtual_kv_cache_page_allocator_impl_test.cpp
   DEPS
-    :paged_kv_cache_page_allocator
+    :virtual_kv_cache_page_allocator_impl
     GTest::gtest_main
     glog::glog
 )

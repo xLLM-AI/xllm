@@ -129,23 +129,23 @@ flowchart TB
 
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>model initialization, sleep and wakeup"]
-    coordination["DistributedMemoryCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
+    coordination["DistributedVirtualMemoryCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
     rpc["WorkerMemoryRpc<br/>client, service and server"]
   end
 
   subgraph cache["core/kv_cache"]
     policy["layout, block and prefix<br/>KV policy and state"]
-    pages["storage / PagedKVCachePageAllocator<br/>page queues, preallocation and block-to-page conversion"]
+    pages["storage / VirtualKVCachePageAllocatorImpl<br/>page queues, preallocation and block-to-page conversion"]
     backend["storage / KVCachePageBackend<br/>capacity reservation and mapping interface"]
     ports["storage and transfer interfaces<br/>page allocator, tensor allocator, memory provider"]
-    storage["storage / KVCacheMemoryRegistry<br/>local KV mappings and paged tensor allocation"]
+    storage["storage / VirtualKVCacheMemoryRegistry<br/>local KV mappings and paged tensor allocation"]
     kvtransfer["transfer<br/>memory provider, KV peer/layout state<br/>resharding and cache transfer"]
   end
 
   subgraph framework["framework"]
-    weight["model_loader/weight<br/>WeightMemoryManager, store<br/>allocation policy and weight transfer"]
+    weight["model_loader/weight<br/>WeightVirtualMemoryManager, store<br/>allocation policy and weight transfer"]
     tensor["allocator/torch<br/>mapped-memory tensor views"]
-    shared["allocator<br/>WorkerPageBudget / GlobalMemoryRegion"]
+    shared["allocator<br/>WorkerPhysicalPageBudget / GlobalVirtualMemoryRegion"]
     memory["allocator/virtual_memory<br/>physical pages and byte mappings"]
     transport["transfer<br/>Mooncake byte transport<br/>sessions and memory registration"]
   end
@@ -185,24 +185,24 @@ flowchart TB
 ```
 
 `framework/allocator/virtual_memory` provides `PhysicalPage`, `PhysicalPagePool`,
-`MappedMemoryRegion` and `SharedPageMapping`. A mapped region manages bytes,
-physical pages and virtual addresses. Tensor shape, dtype and view creation
-live in `framework/allocator/torch`; the returned tensor view does not own the
+`MappedVirtualMemoryRegion` and `SharedPhysicalPageMapping`. A mapped region
+manages bytes, physical pages and virtual addresses. Tensor shape, dtype and view
+creation live in `framework/allocator/torch`; the returned tensor view does not own the
 region. Generic memory code has no KV layout, weight policy or model lifecycle
-responsibilities. `GlobalMemoryRegion` is a shared mapping facade with lifetime
+responsibilities. `GlobalVirtualMemoryRegion` is a shared mapping facade with lifetime
 leases. Transport registration and its retained mapping lease belong to
 `framework/transfer`, which has no KV or distributed-runtime target dependency.
 
-`core/kv_cache/storage` owns `KVCacheMemoryRegions` and
-`KVCacheMemoryRegistry`, including model-local cache mappings and physical
-offset lookup. `PagedKVCacheTensorAllocator` uses an injected registry to
+`core/kv_cache/storage` owns `VirtualKVCacheMemoryRegions` and
+`VirtualKVCacheMemoryRegistry`, including model-local cache mappings and physical
+offset lookup. `VirtualKVCacheTensorAllocator` uses an injected registry to
 implement `KVCacheTensorAllocator`. In `core/kv_cache/transfer`,
-`PagedKVCacheTransferMemoryProvider` uses that registry and an injected
-`GlobalMemoryRegion` to implement `KVCacheTransferMemoryProvider`.
+`VirtualKVCacheTransferMemoryProviderImpl` uses that registry and an injected
+`GlobalVirtualMemoryRegion` to implement `VirtualKVCacheTransferMemoryProvider`.
 `WorkerImpl` supplies these dependencies. Concrete cache backends consume
 generic allocation facilities without depending on distributed coordination.
 
-`framework/model_loader/weight` owns `WeightMemoryManager`, `ModelWeightStore`,
+`framework/model_loader/weight` owns `WeightVirtualMemoryManager`, `ModelWeightStore`,
 `WeightAllocation` and the weight transfer adapter. It manages weight
 reservation ownership, contiguous or fragmented mappings, suballocation
 and cleanup using a physical-page pool and shared mapping supplied at
@@ -211,25 +211,25 @@ byte transport. KV manifests, peer state and resharding plans remain in
 `core/kv_cache/transfer`, including `MooncakeKVCacheTransferEngine`.
 
 `runtime/WorkerMemoryResources` owns the local KV registry and
-`WeightMemoryManager`, managing device initialization, the physical page pool,
+`WeightVirtualMemoryManager`, managing device initialization, the physical page pool,
 and local resource creation and cleanup. Its separate build target does not
 depend on the `runtime` aggregate, RPC or distributed-runtime targets.
 `distributed_runtime/WorkerMemoryRpcClient`, `WorkerMemoryRpcService` and
 `WorkerMemoryRpcServer` handle requests between workers. The service invokes
 local resources without calling back into distributed coordination.
 
-`core/kv_cache/storage/PagedKVCachePageAllocator` owns KV page queues,
+`core/kv_cache/storage/VirtualKVCachePageAllocatorImpl` owns KV page queues,
 preallocation and block-to-virtual-page conversion, implementing
-`KVCachePageAllocator`. An injected `KVCachePageBackend` supplies capacity
+`VirtualKVCachePageAllocator`. An injected `KVCachePageBackend` supplies capacity
 reservation and map/unmap operations; the allocator has no weight policy or
 RPC code. Map/unmap receive byte offsets within each layer's K/V region,
 computed by the allocator as virtual page ID times page size.
 `KVCacheManagerFactory` injects the page allocator interface through
-pools and composite managers into `PagedKVCacheBlockManager`, whose block
+pools and composite managers into `VirtualMemoryKVCacheBlockManager`, whose block
 adapter does not access a distributed singleton.
 
-`DistributedMemoryCoordinator` implements that backend, owns the paged
-allocator, accounts for capacity through generic `WorkerPageBudget`, and
+`DistributedVirtualMemoryCoordinator` implements that backend, owns the paged
+allocator, accounts for capacity through generic `WorkerPhysicalPageBudget`, and
 selects workers to dispatch local or RPC operations. `ModelResidencyCoordinator`
 organizes model initialization, sleep and wakeup. Distributed coordination
 atomically reserves the combined KV and weight budget in one transaction
@@ -266,9 +266,11 @@ execution worker registration service configured by `master_node_addr`.
 Explicit CLI settings override JSON configuration.
 
 Splitting the local resource, distributed coordinator and RPC C++ classes
-does not change the wire schema. `proto/model_memory_dist.proto` retains the
-`ModelMemoryDist` service and `GetKVCacheOffsets` method. The current protocol
-preserves field numbers, and the heartbeat JSON field is `virtual_memory_info`.
+preserves protobuf field numbers. `proto/model_memory_dist.proto` uses the
+`ModelMemoryDist` service and `GetVirtualKVCacheOffsets` method. The method serves
+the virtual-memory KV backend and returns byte offsets in the shared physical-page
+pool mapping, rather than offsets in model-local tensor views. The heartbeat JSON
+field is `virtual_memory_info`.
 These protocol names differ from the former xtensor version. Upgrade masters,
 workers and external heartbeat consumers together; RPC routes from before
 and after that rename cannot be mixed.

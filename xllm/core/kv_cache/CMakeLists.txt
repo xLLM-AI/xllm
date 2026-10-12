@@ -9,27 +9,27 @@ cc_library(
   NAME
     kv_cache_memory_interfaces
   HDRS
-    storage/kv_cache_page_allocator.h
+    storage/virtual_kv_cache_page_allocator.h
     storage/kv_cache_page_backend.h
     storage/kv_cache_tensor_allocator.h
     layout/kv_cache_tensor_role.h
-    transfer/kv_cache_transfer_memory_provider.h
+    transfer/virtual_kv_cache_transfer_memory_provider.h
   DEPS
-    :kv_cache_page_state
+    :virtual_kv_cache_page_state
     torch
 )
 
 # KV page queues and preallocation policy use an injected mapping backend.
 cc_library(
   NAME
-    paged_kv_cache_page_allocator
+    virtual_kv_cache_page_allocator_impl
   HDRS
-    storage/paged_kv_cache_page_allocator.h
+    storage/virtual_kv_cache_page_allocator_impl.h
   SRCS
-    storage/paged_kv_cache_page_allocator.cpp
+    storage/virtual_kv_cache_page_allocator_impl.cpp
   DEPS
     :kv_cache_memory_interfaces
-    :kv_cache_page_state
+    :virtual_kv_cache_page_state
     glog::glog
 )
 
@@ -48,13 +48,13 @@ cc_library(
   NAME
     virtual_memory_kv_cache_storage
   HDRS
-    storage/kv_cache_memory_regions.h
-    storage/kv_cache_memory_registry.h
-    storage/paged_kv_cache_tensor_allocator.h
+    storage/virtual_kv_cache_memory_regions.h
+    storage/virtual_kv_cache_memory_registry.h
+    storage/virtual_kv_cache_tensor_allocator.h
   SRCS
-    storage/kv_cache_memory_regions.cpp
-    storage/kv_cache_memory_registry.cpp
-    storage/paged_kv_cache_tensor_allocator.cpp
+    storage/virtual_kv_cache_memory_regions.cpp
+    storage/virtual_kv_cache_memory_registry.cpp
+    storage/virtual_kv_cache_tensor_allocator.cpp
   DEPS
     :kv_cache_memory_interfaces
     :virtual_memory_torch
@@ -64,14 +64,14 @@ cc_library(
 
 cc_library(
   NAME
-    paged_kv_cache_transfer_memory_provider
+    virtual_kv_cache_transfer_memory_provider_impl
   HDRS
-    transfer/paged_kv_cache_transfer_memory_provider.h
+    transfer/virtual_kv_cache_transfer_memory_provider_impl.h
   SRCS
-    transfer/paged_kv_cache_transfer_memory_provider.cpp
+    transfer/virtual_kv_cache_transfer_memory_provider_impl.cpp
   DEPS
     :virtual_memory_kv_cache_storage
-    :global_memory_region
+    :global_virtual_memory_region
     :kv_cache_memory_interfaces
     glog::glog
 )

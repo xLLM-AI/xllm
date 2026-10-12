@@ -42,7 +42,7 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
-#include "core/kv_cache/transfer/kv_cache_transfer_memory_provider.h"
+#include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "util/net.h"
@@ -256,14 +256,14 @@ struct SharedTransferMemoryState {
   std::vector<MemoryProviderOffsetQuery> offset_queries;
 };
 
-class RecordingKVCacheTransferMemoryProvider final
-    : public KVCacheTransferMemoryProvider {
+class RecordingVirtualKVCacheTransferMemoryProvider final
+    : public VirtualKVCacheTransferMemoryProvider {
  public:
-  explicit RecordingKVCacheTransferMemoryProvider(
+  explicit RecordingVirtualKVCacheTransferMemoryProvider(
       std::shared_ptr<SharedTransferMemoryState> state)
       : state_(std::move(state)) {}
 
-  KVCacheTransferMemoryRegion memory_region() const override {
+  VirtualKVCacheTransferMemoryRegion memory_region() const override {
     return {state_->backing.data(), state_->backing.size(), state_};
   }
 
@@ -287,7 +287,7 @@ class RecordingKVCacheTransferMemoryProvider final
 };
 
 void register_virtual_memory_transfer_cache(
-    MooncakeKVCacheTransferVirtualMemory& transfer) {
+    MooncakeVirtualKVCacheTransfer& transfer) {
   proto::KVCacheShape proto_shape;
   proto_shape.add_key_cache_shape(4);
   proto_shape.add_key_cache_shape(2);
@@ -302,14 +302,15 @@ void register_virtual_memory_transfer_cache(
   transfer.register_kv_cache(caches, shape, torch::kFloat32);
 }
 
-TEST(MooncakeKVCacheTransferVirtualMemoryTest,
+TEST(MooncakeVirtualKVCacheTransferTest,
      EachAdapterReceivesBufferMetadataAndLease) {
   auto shared_state = std::make_shared<SharedTransferMemoryState>();
-  MooncakeKVCacheTransferVirtualMemory first_transfer(
+  MooncakeVirtualKVCacheTransfer first_transfer(
       /*device_id=*/0,
       /*listen_port=*/0,
       torch::Device(torch::kCPU),
-      std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+      std::make_unique<RecordingVirtualKVCacheTransferMemoryProvider>(
+          shared_state));
   auto first_engine = std::make_unique<RecordingMooncakeTransferEngine>(
       /*listen_port=*/0, torch::Device(torch::kCPU));
   RecordingMooncakeTransferEngine* first_engine_ptr = first_engine.get();
@@ -329,11 +330,12 @@ TEST(MooncakeKVCacheTransferVirtualMemoryTest,
   ASSERT_EQ(first_engine_ptr->registered_lifetimes.size(), 1U);
   EXPECT_EQ(first_engine_ptr->registered_lifetimes[0], shared_state);
 
-  MooncakeKVCacheTransferVirtualMemory second_transfer(
+  MooncakeVirtualKVCacheTransfer second_transfer(
       /*device_id=*/0,
       /*listen_port=*/0,
       torch::Device(torch::kCPU),
-      std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+      std::make_unique<RecordingVirtualKVCacheTransferMemoryProvider>(
+          shared_state));
   auto second_engine = std::make_unique<RecordingMooncakeTransferEngine>(
       /*listen_port=*/0, torch::Device(torch::kCPU));
   RecordingMooncakeTransferEngine* second_engine_ptr = second_engine.get();
@@ -351,15 +353,16 @@ TEST(MooncakeKVCacheTransferVirtualMemoryTest,
   EXPECT_EQ(second_engine_ptr->registered_lifetimes[0], shared_state);
 }
 
-TEST(MooncakeKVCacheTransferVirtualMemoryTest, PullUsesProviderBlockOffsets) {
+TEST(MooncakeVirtualKVCacheTransferTest, PullUsesProviderBlockOffsets) {
   auto shared_state = std::make_shared<SharedTransferMemoryState>();
   shared_state->block_offsets = {{2, {16, 48}}, {3, {80, 112}}};
   shared_state->offset_queries.reserve(2);
-  MooncakeKVCacheTransferVirtualMemory transfer(
+  MooncakeVirtualKVCacheTransfer transfer(
       /*device_id=*/0,
       /*listen_port=*/0,
       torch::Device(torch::kCPU),
-      std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+      std::make_unique<RecordingVirtualKVCacheTransferMemoryProvider>(
+          shared_state));
   auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
       /*listen_port=*/0, torch::Device(torch::kCPU));
   RecordingMooncakeTransferEngine* engine_ptr = engine.get();
@@ -399,7 +402,7 @@ TEST(MooncakeKVCacheTransferVirtualMemoryTest, PullUsesProviderBlockOffsets) {
   }
 }
 
-TEST(MooncakeKVCacheTransferVirtualMemoryTest,
+TEST(MooncakeVirtualKVCacheTransferTest,
      PullRejectsInvalidProviderOffsetsBeforeTransfer) {
   struct InvalidBlockOffsetCase {
     uint64_t block_id;
@@ -420,11 +423,12 @@ TEST(MooncakeKVCacheTransferVirtualMemoryTest,
     shared_state->block_offsets = {{2, {16, 48}}, {3, {80, 112}}};
     shared_state->block_offsets[invalid_case.block_id] = invalid_case.offsets;
     shared_state->offset_queries.reserve(2);
-    MooncakeKVCacheTransferVirtualMemory transfer(
+    MooncakeVirtualKVCacheTransfer transfer(
         /*device_id=*/0,
         /*listen_port=*/0,
         torch::Device(torch::kCPU),
-        std::make_unique<RecordingKVCacheTransferMemoryProvider>(shared_state));
+        std::make_unique<RecordingVirtualKVCacheTransferMemoryProvider>(
+            shared_state));
     auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
         /*listen_port=*/0, torch::Device(torch::kCPU));
     RecordingMooncakeTransferEngine* engine_ptr = engine.get();

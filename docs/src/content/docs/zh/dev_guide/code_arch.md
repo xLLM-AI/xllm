@@ -124,23 +124,23 @@ flowchart TB
 
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>模型初始化、休眠与唤醒"]
-    coordination["DistributedMemoryCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
+    coordination["DistributedVirtualMemoryCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
     rpc["WorkerMemoryRpc<br/>client、service、server"]
   end
 
   subgraph cache["core/kv_cache"]
     policy["layout、block 与 prefix<br/>KV 策略与状态"]
-    pages["storage / PagedKVCachePageAllocator<br/>页队列、预分配与 block 到页换算"]
+    pages["storage / VirtualKVCachePageAllocatorImpl<br/>页队列、预分配与 block 到页换算"]
     backend["storage / KVCachePageBackend<br/>容量预留与映射接口"]
     ports["storage 与 transfer 接口<br/>页分配、tensor 分配、内存 provider"]
-    storage["storage / KVCacheMemoryRegistry<br/>本地 KV 映射与分页 tensor 分配"]
+    storage["storage / VirtualKVCacheMemoryRegistry<br/>本地 KV 映射与分页 tensor 分配"]
     kvtransfer["transfer<br/>内存 provider、KV peer/layout 状态<br/>重分片与缓存传输"]
   end
 
   subgraph framework["framework"]
-    weight["model_loader/weight<br/>WeightMemoryManager、store<br/>分配策略与权重传输"]
+    weight["model_loader/weight<br/>WeightVirtualMemoryManager、store<br/>分配策略与权重传输"]
     tensor["allocator/torch<br/>映射内存上的 tensor 视图"]
-    shared["allocator<br/>WorkerPageBudget / GlobalMemoryRegion"]
+    shared["allocator<br/>WorkerPhysicalPageBudget / GlobalVirtualMemoryRegion"]
     memory["allocator/virtual_memory<br/>物理页与字节映射"]
     transport["transfer<br/>Mooncake 字节传输<br/>会话与内存注册"]
   end
@@ -180,42 +180,42 @@ flowchart TB
 ```
 
 `framework/allocator/virtual_memory` 提供 `PhysicalPage`、`PhysicalPagePool`、
-`MappedMemoryRegion` 和 `SharedPageMapping`。映射区域管理字节、物理页与虚拟地址，
+`MappedVirtualMemoryRegion` 和 `SharedPhysicalPageMapping`。映射区域管理字节、物理页与虚拟地址，
 tensor 的 shape、dtype 和视图构造放在 `framework/allocator/torch`；返回的 tensor
 视图不拥有底层区域。通用内存代码不负责 KV 布局、权重策略或模型生命周期。
-`GlobalMemoryRegion` 是带生命周期 lease 的共享映射 facade。传输注册及注册期间
+`GlobalVirtualMemoryRegion` 是带生命周期 lease 的共享映射 facade。传输注册及注册期间
 持有的映射 lease 属于 `framework/transfer`，该模块没有 KV 或 distributed-runtime
 目标依赖。
 
-`core/kv_cache/storage` 保存 `KVCacheMemoryRegions` 和 `KVCacheMemoryRegistry`，
-负责各模型本地的缓存映射及物理偏移查询。`PagedKVCacheTensorAllocator` 使用注入的
+`core/kv_cache/storage` 保存 `VirtualKVCacheMemoryRegions` 和 `VirtualKVCacheMemoryRegistry`，
+负责各模型本地的缓存映射及物理偏移查询。`VirtualKVCacheTensorAllocator` 使用注入的
 registry 实现 `KVCacheTensorAllocator`。`core/kv_cache/transfer` 中的
-`PagedKVCacheTransferMemoryProvider` 使用该 registry 和注入的 `GlobalMemoryRegion`
-实现 `KVCacheTransferMemoryProvider`。`WorkerImpl` 提供这些依赖，具体缓存后端使用
+`VirtualKVCacheTransferMemoryProviderImpl` 使用该 registry 和注入的 `GlobalVirtualMemoryRegion`
+实现 `VirtualKVCacheTransferMemoryProvider`。`WorkerImpl` 提供这些依赖，具体缓存后端使用
 通用分配能力，不依赖分布式协调器。
 
-`framework/model_loader/weight` 管理 `WeightMemoryManager`、`ModelWeightStore`、
+`framework/model_loader/weight` 管理 `WeightVirtualMemoryManager`、`ModelWeightStore`、
 `WeightAllocation` 和权重传输适配器，使用构造时传入的物理页池和共享映射，负责
 权重预留的所有权、连续或分散映射、区域内分配及清理。权重传输与 KV 传输共同使用
 Mooncake 字节传输。KV manifest、peer 状态和重分片 plan 仍属于
 `core/kv_cache/transfer`，由 `MooncakeKVCacheTransferEngine` 等类管理。
 
-`runtime/WorkerMemoryResources` 持有本地 KV registry 和 `WeightMemoryManager`，
+`runtime/WorkerMemoryResources` 持有本地 KV registry 和 `WeightVirtualMemoryManager`，
 管理设备初始化、物理页池以及本地资源的创建与清理。它是独立的构建目标，
 不依赖 `runtime` 聚合目标、RPC 或 distributed-runtime。
 `distributed_runtime/WorkerMemoryRpcClient`、`WorkerMemoryRpcService` 和
 `WorkerMemoryRpcServer` 负责跨 worker 请求；service 只调用本地资源，
 不反向进入分布式协调器。
 
-`core/kv_cache/storage/PagedKVCachePageAllocator` 管理 KV 页队列、预分配和
-block 到虚拟页的换算，实现 `KVCachePageAllocator`。它通过注入的
+`core/kv_cache/storage/VirtualKVCachePageAllocatorImpl` 管理 KV 页队列、预分配和
+block 到虚拟页的换算，实现 `VirtualKVCachePageAllocator`。它通过注入的
 `KVCachePageBackend` 请求容量预留及 map/unmap，不包含权重策略或 RPC。
 map/unmap 接收每层 K/V 区域内的字节偏移，由 allocator 将虚拟页 ID 乘以页大小得到。
 `KVCacheManagerFactory` 将页分配接口经 pool 和组合 manager 注入
-`PagedKVCacheBlockManager`，block 适配器不访问分布式单例。
+`VirtualMemoryKVCacheBlockManager`，block 适配器不访问分布式单例。
 
-`DistributedMemoryCoordinator` 实现该 backend，持有分页 allocator，使用通用的
-`WorkerPageBudget` 记账，并选择目标 worker、派发本地或 RPC 操作。
+`DistributedVirtualMemoryCoordinator` 实现该 backend，持有分页 allocator，使用通用的
+`WorkerPhysicalPageBudget` 记账，并选择目标 worker、派发本地或 RPC 操作。
 模型初始化、休眠与唤醒由 `ModelResidencyCoordinator` 组织；KV 和权重的共同预算
 在唤醒时由分布式协调器以一个预算事务原子预留。初次以唤醒状态初始化时，先预留
 权重容量，后续 KV 页分配再从同一共享预算扣账。休眠先冻结 KV 分配和回收，等待预分配及执行中的
@@ -239,9 +239,10 @@ KV 扩展 service，不解释其消息。schema 仍包含 KV 消息，因此当�
 rank 0 再连接这些地址，派发内存操作。这套注册服务独立于 `master_node_addr`
 配置的执行 worker 注册服务。显式 CLI 参数优先于 JSON 配置。
 
-本次本地资源、分布式协调器与 RPC C++ 类的拆分不修改 wire schema：
-`proto/model_memory_dist.proto` 仍使用 `ModelMemoryDist` 服务和
-`GetKVCacheOffsets` 方法。当前协议保持字段编号，heartbeat 的 JSON 字段为
+本次本地资源、分布式协调器与 RPC C++ 类的拆分保持 protobuf 字段编号：
+`proto/model_memory_dist.proto` 使用 `ModelMemoryDist` 服务和
+`GetVirtualKVCacheOffsets` 方法。该方法服务于虚拟内存 KV 后端，返回共享物理页池
+映射中的字节偏移，而非模型本地 tensor 视图内的偏移。heartbeat 的 JSON 字段为
 `virtual_memory_info`。这些协议名称与旧 xtensor 版本不同，master、worker 和外部
 heartbeat 消费方需要一起升级，不能混用重命名前后的 RPC 路由。
 

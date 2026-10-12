@@ -336,33 +336,40 @@ void KVCacheTransfer::merge_kv_blocks(
         append_mappings(kv_info.mappings, info.mappings);
 
         // VirtualMemory mode: copy destination offsets
-        if (!info.dst_kv_cache_layer_offsets.empty()) {
-          kv_info.dst_kv_cache_layer_offsets = info.dst_kv_cache_layer_offsets;
+        if (!info.dst_virtual_kv_cache_layer_global_offsets.empty()) {
+          kv_info.dst_virtual_kv_cache_layer_global_offsets =
+              info.dst_virtual_kv_cache_layer_global_offsets;
         }
         merged_kv_infos[key] = std::move(kv_info);
       } else {
         append_mappings(merged_kv_infos[key].mappings, info.mappings);
 
         // VirtualMemory mode: merge destination offsets (append to each layer)
-        if (!info.dst_kv_cache_layer_offsets.empty()) {
-          auto& existing = merged_kv_infos[key].dst_kv_cache_layer_offsets;
+        if (!info.dst_virtual_kv_cache_layer_global_offsets.empty()) {
+          auto& existing =
+              merged_kv_infos[key].dst_virtual_kv_cache_layer_global_offsets;
           // Initialize if not already done
           if (existing.empty()) {
-            existing = info.dst_kv_cache_layer_offsets;
+            existing = info.dst_virtual_kv_cache_layer_global_offsets;
           } else {
             // Append offsets for each layer
             for (size_t layer = 0;
-                 layer < info.dst_kv_cache_layer_offsets.size() &&
+                 layer <
+                     info.dst_virtual_kv_cache_layer_global_offsets.size() &&
                  layer < existing.size();
                  ++layer) {
               existing[layer].k_offsets.insert(
                   existing[layer].k_offsets.end(),
-                  info.dst_kv_cache_layer_offsets[layer].k_offsets.begin(),
-                  info.dst_kv_cache_layer_offsets[layer].k_offsets.end());
+                  info.dst_virtual_kv_cache_layer_global_offsets[layer]
+                      .k_offsets.begin(),
+                  info.dst_virtual_kv_cache_layer_global_offsets[layer]
+                      .k_offsets.end());
               existing[layer].v_offsets.insert(
                   existing[layer].v_offsets.end(),
-                  info.dst_kv_cache_layer_offsets[layer].v_offsets.begin(),
-                  info.dst_kv_cache_layer_offsets[layer].v_offsets.end());
+                  info.dst_virtual_kv_cache_layer_global_offsets[layer]
+                      .v_offsets.begin(),
+                  info.dst_virtual_kv_cache_layer_global_offsets[layer]
+                      .v_offsets.end());
             }
           }
         }
@@ -376,7 +383,7 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     const Device& device,
     const std::string& model_type,
     const std::string& model_id,
-    std::unique_ptr<KVCacheTransferMemoryProvider> memory_provider) {
+    std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider) {
   std::shared_ptr<KVCacheTransfer> transfer;
 
   int32_t device_id = device.index();
@@ -387,7 +394,7 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
 #if defined(USE_NPU)
   if (memory_provider != nullptr) {
     auto virtual_memory_transfer =
-        std::make_shared<MooncakeKVCacheTransferVirtualMemory>(
+        std::make_shared<MooncakeVirtualKVCacheTransfer>(
             device_id,
             transfer_listen_port,
             device,

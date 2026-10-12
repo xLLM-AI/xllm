@@ -63,7 +63,8 @@ struct CacheTensorManifest {
   uint64_t buffer_bytes = 0;
   uint64_t block_token_capacity = 0;
   // VirtualMemory resources are page-mapped at runtime and therefore bind an
-  // explicit GlobalMemoryRegion byte offset instead of resource_id * stride.
+  // explicit GlobalVirtualMemoryRegion byte offset instead of resource_id *
+  // stride.
   bool explicit_resource_offsets = false;
   LogicalShardDescriptor shard;
 };
