@@ -2,7 +2,6 @@
 import { dirname, relative, resolve } from 'node:path';
 
 const readmeLinks = { './README.md': '/en/', './README_zh.md': '/zh/' };
-const deepWikiBadge = 'https://img.shields.io/badge/Ask-DeepWiki-4b72f3';
 
 export default function remarkReadmeHomepage() {
 	return function transform(tree, file) {
@@ -28,9 +27,6 @@ function rewriteNodes(parent, pageDirectory, repositoryRoot) {
 		}
 		if (node.type === 'image' && node.url.startsWith('assets/')) {
 			node.url = relative(pageDirectory, resolve(repositoryRoot, node.url)).replaceAll('\\', '/');
-		}
-		if (node.type === 'image' && node.url === 'https://deepwiki.com/badge.svg') {
-			node.url = deepWikiBadge;
 		}
 		rewriteNodes(node, pageDirectory, repositoryRoot);
 		if (node.type !== 'html') return [node];
@@ -66,6 +62,6 @@ function rewriteNodes(parent, pageDirectory, repositoryRoot) {
 function isBadgeLink(node) {
 	return node.type === 'link' && node.children.some((child) =>
 		child.type === 'image' &&
-		(child.url.startsWith('https://img.shields.io/') || child.url === 'https://deepwiki.com/badge.svg')
+		child.url.startsWith('https://img.shields.io/')
 	);
 }
