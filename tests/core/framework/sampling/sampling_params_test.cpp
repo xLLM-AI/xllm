@@ -139,4 +139,99 @@ TEST(SamplingParamsTest, ConcatPadsUnconstrainedRows) {
   EXPECT_EQ(constrained.filter_mask.index({1, 1}).item<float>(), 0.0F);
 }
 
+namespace {
+
+// Build SamplingParameters from per-request params and return the resulting
+// do_sample / all_greedy_sample / all_random_sample classification.
+struct SampleClassification {
+  torch::Tensor do_sample;
+  bool all_greedy_sample;
+  bool all_random_sample;
+};
+
+SampleClassification classify(
+    const std::vector<RequestSamplingParam>& requests) {
+  std::vector<const RequestSamplingParam*> req_ptrs;
+  req_ptrs.reserve(requests.size());
+  for (const auto& req : requests) {
+    req_ptrs.push_back(&req);
+  }
+  std::vector<int32_t> selected_token_idxes;
+  std::vector<int32_t> sample_idxes;
+  selected_token_idxes.reserve(requests.size());
+  sample_idxes.reserve(requests.size());
+  for (int32_t i = 0; i < static_cast<int32_t>(requests.size()); ++i) {
+    selected_token_idxes.push_back(i);
+    sample_idxes.push_back(i);
+  }
+  std::vector<std::vector<int64_t>> unique_token_ids_vec;
+  std::vector<std::vector<int32_t>> unique_token_counts_vec;
+  std::vector<int32_t> unique_token_lens_vec;
+
+  SamplingParameters params;
+  params.init(req_ptrs,
+              selected_token_idxes,
+              sample_idxes,
+              unique_token_ids_vec,
+              unique_token_counts_vec,
+              unique_token_lens_vec);
+  return SampleClassification{
+      params.do_sample, params.all_greedy_sample, params.all_random_sample};
+}
+
+}  // namespace
+
+TEST(SamplingParamsTest, GreedyWhenTemperatureZeroEvenWithTopKTopP) {
+  // temperature == 0 must stay greedy even when top_k / top_p are set:
+  // they are argmax-invariant filters and must not route the request into
+  // multinomial sampling.
+  RequestSamplingParam request;
+  request.temperature = 0.0;
+  request.top_k = 40;
+  request.top_p = 0.9;
+
+  auto result = classify({request});
+
+  EXPECT_TRUE(torch::equal(
+      result.do_sample,
+      torch::zeros({1}, torch::TensorOptions().dtype(torch::kBool))));
+  EXPECT_TRUE(result.all_greedy_sample);
+  EXPECT_FALSE(result.all_random_sample);
+}
+
+TEST(SamplingParamsTest, RandomWhenTemperatureNonZero) {
+  // temperature > 0 still routes into random sampling.
+  RequestSamplingParam request;
+  request.temperature = 0.7;
+
+  auto result = classify({request});
+
+  EXPECT_TRUE(torch::equal(
+      result.do_sample,
+      torch::ones({1}, torch::TensorOptions().dtype(torch::kBool))));
+  EXPECT_FALSE(result.all_greedy_sample);
+  EXPECT_TRUE(result.all_random_sample);
+}
+
+TEST(SamplingParamsTest, MixedGreedyAndRandomClassification) {
+  // A temperature==0 request keeps do_sample=false even when batched with a
+  // temperature>0 request; the batch is mixed and per-request routing in
+  // Sampler::forward handles the split.
+  RequestSamplingParam greedy_request;
+  greedy_request.temperature = 0.0;
+  greedy_request.top_k = 40;
+
+  RequestSamplingParam random_request;
+  random_request.temperature = 1.0;
+
+  auto result = classify({greedy_request, random_request});
+
+  EXPECT_TRUE(
+      torch::equal(result.do_sample,
+                   torch::tensor({false, true},
+                                 torch::TensorOptions().dtype(torch::kBool))));
+  EXPECT_FALSE(result.all_greedy_sample);
+  EXPECT_FALSE(result.all_random_sample);
+}
+
 }  // namespace xllm
