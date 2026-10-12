@@ -28,11 +28,13 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
@@ -56,35 +58,9 @@ namespace xllm {
 namespace {
 
 bool should_use_vlm_speculative_engine(const Options& options) {
-  return options.speculative_algorithm() != "Suffix" &&
+  return !SpeculativeConfig::is_suffix_algorithm(
+             options.speculative_algorithm()) &&
          !options.draft_model_path().value_or("").empty();
-}
-
-template <typename Function>
-bool dispatch_engine(VLMEngine* vlm_engine,
-                     SpeculativeEngineBase<VLMEngine>* speculative_engine,
-                     Function&& function) {
-  if (vlm_engine != nullptr) {
-    return function(*vlm_engine);
-  }
-  if (speculative_engine != nullptr) {
-    return function(*speculative_engine);
-  }
-  return false;
-}
-
-void configure_disaggregated_pd_options(Options* options) {
-  CHECK(options != nullptr);
-  if (!options->enable_disagg_pd()) {
-    return;
-  }
-
-  options->enable_service_routing(true);
-  if (options->instance_role() == InstanceRole::PREFILL) {
-    options->enable_schedule_overlap(false);
-    LOG(WARNING) << "Force to disable schedule overlap for prefill instance "
-                    "in disagg pd mode.";
-  }
 }
 
 std::vector<Message> build_user_messages_from_image_urls(
@@ -164,7 +140,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
          "control plane.";
   resolve_npu_kernel_backend(&options_);
 #endif
-  configure_disaggregated_pd_options(&options_);
   CHECK(!options_.enable_disagg_pd() ||
         options_.kv_cache_transfer_mode() != "PULL")
       << "VLM disaggregated PD does not support KV cache PULL.";
@@ -304,9 +279,10 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       KVCacheTransferCoordinator::Options{
           .dp_size = options_.dp_size(),
           .prefetch_timeout_ms = options_.prefetch_timeout()},
-      use_speculative_engine
-          ? speculative_engine_->get_distributed_worker_manager()
-          : vlm_engine_->get_distributed_worker_manager());
+      dispatch_engine(
+          [](auto* engine) { return engine->get_distributed_worker_manager(); },
+          vlm_engine_.get(),
+          speculative_engine_.get()));
 
   auto finish_engine_initialization = [this](auto* engine) {
     model_args_ = engine->model_args();
@@ -355,42 +331,36 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .disable_ttft_profiling(options_.disable_ttft_profiling())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .server_idx(options_.server_idx());
-  if (use_speculative_engine) {
-    scheduler_ = create_continuous_scheduler(
-        speculative_engine_.get(),
-        scheduler_options,
-        speculative_engine_->get_distributed_worker_manager(),
-        /*model_residency_coordinator=*/nullptr,
-        kv_transfer_coordinator_);
-  } else {
-    scheduler_ = create_continuous_scheduler(
-        vlm_engine_.get(),
-        scheduler_options,
-        vlm_engine_->get_distributed_worker_manager(),
-        /*model_residency_coordinator=*/nullptr,
-        kv_transfer_coordinator_);
-  }
+  dispatch_engine(
+      [&](auto* engine) {
+        scheduler_ = create_continuous_scheduler(
+            engine,
+            scheduler_options,
+            engine->get_distributed_worker_manager(),
+            /*model_residency_coordinator=*/nullptr,
+            kv_transfer_coordinator_);
+      },
+      vlm_engine_.get(),
+      speculative_engine_.get());
 
   if (options_.enable_service_routing()) {
     auto& instance_info = scheduler_->get_instance_info();
     XServiceClient::get_instance()->register_instance(instance_info);
   }
 
-  auto initialize_processor = [this](auto* engine) {
-    chat_template_ =
-        std::make_unique<JinjaChatTemplate>(engine->tokenizer_args());
-    tokenizer_ = engine->tokenizer()->clone();
-    processor_ =
-        create_multimodal_processor(model_args_,
-                                    tokenizer_,
-                                    options_.max_processor_cache_items(),
-                                    engine->tokenizer_args());
-  };
-  if (use_speculative_engine) {
-    initialize_processor(speculative_engine_.get());
-  } else {
-    initialize_processor(vlm_engine_.get());
-  }
+  dispatch_engine(
+      [this](auto* engine) {
+        chat_template_ =
+            std::make_unique<JinjaChatTemplate>(engine->tokenizer_args());
+        tokenizer_ = engine->tokenizer()->clone();
+        processor_ =
+            create_multimodal_processor(model_args_,
+                                        tokenizer_,
+                                        options_.max_processor_cache_items(),
+                                        engine->tokenizer_args());
+      },
+      vlm_engine_.get(),
+      speculative_engine_.get());
 
   request_factory_ = std::make_unique<VLMRequestFactory>(processor_.get(),
                                                          chat_template_.get(),
@@ -646,15 +616,15 @@ void VLMMaster::generate() {
 }
 
 bool VLMMaster::start_profile() {
-  return dispatch_engine(vlm_engine_.get(),
-                         speculative_engine_.get(),
-                         [](auto& engine) { return engine.start_profile(); });
+  return dispatch_engine([](auto* engine) { return engine->start_profile(); },
+                         vlm_engine_.get(),
+                         speculative_engine_.get());
 }
 
 bool VLMMaster::stop_profile() {
-  return dispatch_engine(vlm_engine_.get(),
-                         speculative_engine_.get(),
-                         [](auto& engine) { return engine.stop_profile(); });
+  return dispatch_engine([](auto* engine) { return engine->stop_profile(); },
+                         vlm_engine_.get(),
+                         speculative_engine_.get());
 }
 
 }  // namespace xllm

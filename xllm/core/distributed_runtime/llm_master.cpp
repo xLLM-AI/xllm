@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -53,41 +54,10 @@ namespace {
 
 bool should_use_ssm_engine(const Options& options) {
   return !options.draft_model_path().value_or("").empty() ||
-         (options.speculative_algorithm() == "Suffix" &&
+         (SpeculativeConfig::is_suffix_algorithm(
+              options.speculative_algorithm()) &&
           options.num_speculative_tokens() > 0);
 }
-
-template <typename Function>
-bool dispatch_engine(LLMEngine* llm_engine,
-                     SuffixSpeculativeEngine* suffix_engine,
-                     SpeculativeEngineBase<LLMEngine>* speculative_engine,
-                     Function&& function) {
-  if (llm_engine != nullptr) {
-    return function(*llm_engine);
-  }
-  if (suffix_engine != nullptr) {
-    return function(*suffix_engine);
-  }
-  if (speculative_engine != nullptr) {
-    return function(*speculative_engine);
-  }
-  return false;
-}
-
-void configure_disaggregated_pd_options(Options* options) {
-  CHECK(options != nullptr);
-  if (!options->enable_disagg_pd()) {
-    return;
-  }
-
-  options->enable_service_routing(true);
-  if (options->instance_role() == InstanceRole::PREFILL) {
-    options->enable_schedule_overlap(false);
-    LOG(WARNING) << "Force to disable schedule overlap for prefill instance "
-                    "in disagg pd mode.";
-  }
-}
-
 }  // namespace
 
 LLMMaster::LLMMaster(const Options& options)
@@ -97,7 +67,6 @@ LLMMaster::LLMMaster(const Options& options)
 #if defined(USE_NPU)
   resolve_npu_kernel_backend(&options_);
 #endif
-  configure_disaggregated_pd_options(&options_);
   const bool use_ssm_engine = should_use_ssm_engine(options_);
   const EngineType engine_type =
       use_ssm_engine ? EngineType::SSM : EngineType::LLM;
@@ -117,9 +86,9 @@ LLMMaster::LLMMaster(const Options& options)
       options_, model_type, options_.nnodes());
 
   if (options_.enable_task_pipeline()) {
-    const std::string& algorithm = options_.speculative_algorithm();
     const bool supported_speculation =
-        SpeculativeConfig::supports_task_pipeline(algorithm);
+        SpeculativeConfig::supports_task_pipeline(
+            options_.speculative_algorithm());
     CHECK((engine_type == EngineType::LLM ||
            (engine_type == EngineType::SSM && supported_speculation)) &&
           options_.task_type() == "generate" &&
@@ -208,11 +177,11 @@ LLMMaster::LLMMaster(const Options& options)
 
   if (!use_ssm_engine) {
     llm_engine_ = std::make_unique<LLMEngine>(engine_options);
-    distributed_worker_manager_ = llm_engine_->get_distributed_worker_manager();
   } else {
     const std::string draft_model_path =
         options_.draft_model_path().value_or("");
-    const bool use_suffix_spec = options_.speculative_algorithm() == "Suffix";
+    const bool use_suffix_spec = SpeculativeConfig::is_suffix_algorithm(
+        options_.speculative_algorithm());
     CHECK(use_suffix_spec || !draft_model_path.empty())
         << "draft model path is required unless --speculative_algorithm=Suffix";
     engine_options.draft_model_path(draft_model_path)
@@ -239,15 +208,16 @@ LLMMaster::LLMMaster(const Options& options)
     if (use_suffix_spec) {
       suffix_engine_ =
           std::make_unique<SuffixSpeculativeEngine>(engine_options);
-      distributed_worker_manager_ =
-          suffix_engine_->get_distributed_worker_manager();
     } else {
       speculative_engine_ =
           std::make_unique<SpeculativeEngineBase<LLMEngine>>(engine_options);
-      distributed_worker_manager_ =
-          speculative_engine_->get_distributed_worker_manager();
     }
   }
+  distributed_worker_manager_ = dispatch_engine(
+      [](auto* engine) { return engine->get_distributed_worker_manager(); },
+      llm_engine_.get(),
+      suffix_engine_.get(),
+      speculative_engine_.get());
   model_residency_coordinator_ = std::make_shared<ModelResidencyCoordinator>(
       ModelResidencyCoordinator::Options{
           .enabled = KVCacheConfig::get_instance().enable_virtual_memory(),
@@ -288,13 +258,10 @@ LLMMaster::LLMMaster(const Options& options)
           << "XServiceClient init fail!";
     }
   };
-  if (!use_ssm_engine) {
-    initialize_engine(llm_engine_.get());
-  } else if (options_.speculative_algorithm() == "Suffix") {
-    initialize_engine(suffix_engine_.get());
-  } else {
-    initialize_engine(speculative_engine_.get());
-  }
+  dispatch_engine(initialize_engine,
+                  llm_engine_.get(),
+                  suffix_engine_.get(),
+                  speculative_engine_.get());
   task_type_ = options_.task_type();
 
   SchedulerOptions scheduler_options;
@@ -330,20 +297,17 @@ LLMMaster::LLMMaster(const Options& options)
   auto create_scheduler = [this, &scheduler_options](auto* engine) {
     scheduler_options.decode_graph_execution_shape(
         build_decode_graph_execution_shape(engine->options()));
-    return create_continuous_scheduler(
+    scheduler_ = create_continuous_scheduler(
         engine,
         scheduler_options,
         distributed_worker_manager_,
         llm_engine_ != nullptr ? model_residency_coordinator_ : nullptr,
         kv_transfer_coordinator_);
   };
-  if (!use_ssm_engine) {
-    scheduler_ = create_scheduler(llm_engine_.get());
-  } else if (options_.speculative_algorithm() == "Suffix") {
-    scheduler_ = create_scheduler(suffix_engine_.get());
-  } else {
-    scheduler_ = create_scheduler(speculative_engine_.get());
-  }
+  dispatch_engine(create_scheduler,
+                  llm_engine_.get(),
+                  suffix_engine_.get(),
+                  speculative_engine_.get());
 
   if (options_.enable_service_routing()) {
     auto& instance_info = scheduler_->get_instance_info();
@@ -355,13 +319,10 @@ LLMMaster::LLMMaster(const Options& options)
                                           model_args_.model_type());
     tokenizer_ = engine->tokenizer()->clone();
   };
-  if (!use_ssm_engine) {
-    initialize_tokenizer(llm_engine_.get());
-  } else if (options_.speculative_algorithm() == "Suffix") {
-    initialize_tokenizer(suffix_engine_.get());
-  } else {
-    initialize_tokenizer(speculative_engine_.get());
-  }
+  dispatch_engine(initialize_tokenizer,
+                  llm_engine_.get(),
+                  suffix_engine_.get(),
+                  speculative_engine_.get());
   Tokenizer* request_tokenizer = tokenizer_.get();
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
@@ -649,17 +610,17 @@ bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
 }
 
 bool LLMMaster::start_profile() {
-  return dispatch_engine(llm_engine_.get(),
+  return dispatch_engine([](auto* engine) { return engine->start_profile(); },
+                         llm_engine_.get(),
                          suffix_engine_.get(),
-                         speculative_engine_.get(),
-                         [](auto& engine) { return engine.start_profile(); });
+                         speculative_engine_.get());
 }
 
 bool LLMMaster::stop_profile() {
-  return dispatch_engine(llm_engine_.get(),
+  return dispatch_engine([](auto* engine) { return engine->stop_profile(); },
+                         llm_engine_.get(),
                          suffix_engine_.get(),
-                         speculative_engine_.get(),
-                         [](auto& engine) { return engine.stop_profile(); });
+                         speculative_engine_.get());
 }
 
 }  // namespace xllm

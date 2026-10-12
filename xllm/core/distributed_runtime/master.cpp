@@ -49,6 +49,20 @@ DECLARE_bool(graceful_quit_on_sighup);
 namespace xllm {
 namespace {
 
+void configure_disaggregated_pd_options(Options* options) {
+  CHECK(options != nullptr);
+  if (!options->enable_disagg_pd()) {
+    return;
+  }
+
+  options->enable_service_routing(true);
+  if (options->instance_role() == InstanceRole::PREFILL) {
+    options->enable_schedule_overlap(false);
+    LOG(WARNING) << "Force to disable schedule overlap for prefill instance "
+                    "in disagg pd mode.";
+  }
+}
+
 void print_startup_banner(const std::filesystem::path& model_path,
                           const std::string& backend,
                           int32_t node_rank) {
@@ -113,6 +127,7 @@ Master::Master(const Options& options) : options_(options) {
       std::filesystem::path(options_.model_path()).lexically_normal(),
       options_.backend(),
       options_.node_rank());
+  configure_disaggregated_pd_options(&options_);
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
   // cp_size <= 1 -> "disabled", otherwise "model" (model-side CP).

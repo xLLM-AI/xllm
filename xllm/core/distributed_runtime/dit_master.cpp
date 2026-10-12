@@ -42,6 +42,8 @@ DiTMaster::DiTMaster(const Options& options) : Master(options) {
       options_, /*model_type=*/"", options_.nnodes());
   CHECK(!options_.enable_task_pipeline())
       << "Task pipeline is only supported by the LLM master.";
+  CHECK(!options_.enable_disagg_pd())
+      << "Disaggregated PD is not supported by the DiT engine.";
   CHECK(options_.host_blocks_factor() <= 1.0)
       << "Basic host KV cache offload is not supported by the DiT engine.";
 
