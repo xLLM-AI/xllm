@@ -23,6 +23,7 @@ export const collections = {
 								...props.data,
 								title: 'xLLM',
 								description,
+								lastUpdated: false,
 								head: [{ tag: 'title', content: 'xLLM Documentation' }],
 							},
 						} : props);
